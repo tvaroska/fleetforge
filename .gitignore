@@ -1,0 +1,15 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Node / dashboard
+node_modules/
+dist/
+
+# System
+.DS_Store
