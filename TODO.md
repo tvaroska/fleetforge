@@ -96,10 +96,11 @@ audience), and **agent images are built off-box** (the ESP-IDF builder is 2–3 
 
 ### Backend
 
-- [ ] **R0-db-1**: Schema (P0, 0.5d)
+- [x] **R0-db-1**: Schema (P0, 0.5d) ✅ 2026-09-08
       devices (+ `link_type`, `power_class`, `parent_device_id`, `partition_layout`,
       `ota_slot_size`), groups, enrolment tokens, admin tokens, and **`deploy_events`**
       (KPI-ready from R1 — R5 needs the history, not just the table).
+      _(done 2026-09-08; reviewed; see docs/features/*)_
 
 - [ ] **R0-be-1**: API scaffold + admin auth (P0, 2d)
       Public, versioned (`/v1`). Opaque bearer tokens hashed at rest (argon2id);

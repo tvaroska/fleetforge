@@ -6,7 +6,8 @@ grow to Raspberry Pi and eventually FPGAs.
 **Safe remote firmware updates**, where "safe" means a bad build is caught before the
 fleet, and any device that does get a bad update recovers itself.
 
-> **Status: pre-code.** Specification and planning only. R0 has not started.
+> **Status:** R0 in progress. The registry schema and the Python project exist; the API,
+> ingestor, agent and dashboard do not yet. See [`TODO.md`](TODO.md).
 
 ## Why
 
@@ -31,6 +32,8 @@ MQTT is the control plane; HTTPS carries artifact bytes.
 | Path | Holds |
 |---|---|
 | [`TODO.md`](TODO.md) | **Live status — the only place task state lives** |
+| [`src/fleetforge/`](src/fleetforge/) | The Python package — one image, two entrypoints (api, ingestor) |
+| [`alembic/`](alembic/) | Migrations. `alembic/versions/` is a protected path |
 | [`spec/prd.md`](spec/prd.md) | Requirements, targets, scope, risks |
 | [`spec/device-protocol.md`](spec/device-protocol.md) | The wire contract — near-frozen |
 | [`spec/flows.md`](spec/flows.md) | The two core user flows |
@@ -41,6 +44,15 @@ MQTT is the control plane; HTTPS carries artifact bytes.
 | [`docs/features/`](docs/features/) | Per-capability detail and task history |
 | [`DECISIONS.md`](DECISIONS.md) | Append-only decision log |
 | [`CRITICAL.md`](CRITICAL.md) | Protected paths — including the ones no OTA can fix |
+
+## Development
+
+```bash
+just db-up          # dev Postgres on 127.0.0.1:5433 (5432 is taken on this host)
+uv sync             # create .venv from uv.lock
+just migrate        # alembic upgrade head
+just test           # ruff + mypy + pytest against the real database
+```
 
 ## Releases
 

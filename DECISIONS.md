@@ -6,6 +6,44 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-08 — Schema, and the conventions the codebase inherits (R0-db-1)
+
+The first code in the repo, so these are settled for everything after it.
+
+- **Spelling is `enrollment` / `enroll` (US), everywhere.** `spec/device-protocol.md` is
+  the near-frozen wire contract and it says `POST /v1/enroll`; `TODO.md` and
+  `design/architecture.md` say `/v1/enrol`. The spec wins. **Proposed correction:** fix
+  those two documents to `/v1/enroll` as part of R0-be-4, which owns the endpoint.
+- **No PostgreSQL ENUM types.** The server must tolerate agents it cannot update
+  (`spec/device-protocol.md` → *Evolution rules*), and a PG enum needs a migration before
+  it can store a value a future agent invents — an ingest that raises on an unknown
+  `link_type` or `state` is a silent fleet-visibility outage. Vocabulary lives in Python
+  `StrEnum`s; the columns are `TEXT`. **Sole exception:** `devices.power_class` has a
+  CHECK, because derived presence is only *defined* for `always_on` / `sleepy`.
+- **Token wire format is `{prefix}_{uuid-hex}.{secret-b64url}`** (`ffa_` admin, `ffe_`
+  enrollment). Argon2id hashes are salted and therefore not searchable, so the row's UUID
+  must ride in the token as the indexed lookup key; only the secret half is verified
+  against `secret_hash`. Plaintext is never stored.
+- **The enrollment burn is one conditional `UPDATE … RETURNING`**, correct under
+  PostgreSQL's default READ COMMITTED; zero rows back means already burned/revoked/expired.
+  Never SELECT → check → UPDATE. Statement is in the `EnrollmentToken` docstring and
+  proven by a two-connection race test.
+- **Devices soft-delete (`decommissioned_at`) and `deploy_events.device_id` is
+  ON DELETE RESTRICT.** `deploy_events` is kept forever ("the metric history is the
+  product's evidence") while every device must stay removable; RESTRICT makes destroying
+  KPI history impossible rather than merely discouraged.
+- **`devices.device_id` (eFuse MAC, `^[0-9a-f]{12}$`) is the natural PK**, because it is
+  also the MQTT username the two `%u` pattern ACLs depend on. The format CHECK is a
+  security control, not tidiness.
+- **Layout: `src/fleetforge/`, uv, SQLAlchemy 2.0 async + asyncpg, Alembic revisions
+  `NNNN_slug`, ruff + mypy, pytest against a real Postgres migrated by Alembic.** One
+  package because one image ships two entrypoints (`api`, `ingestor`). Dev Postgres
+  publishes **5433** — 5432 on this host belongs to an unrelated container.
+- **`deploy_events` is deliberately not a Timescale hypertable:** forever retention, tiny
+  volume, and an outgoing FK. R3's telemetry table is the hypertable case.
+
+---
+
 ## 2026-09-08 — Bingo retirement completed (R0-infra-0)
 
 - **Decision:** Bingo deployment fully retired from production. Containers stopped and

@@ -1,0 +1,27 @@
+# Dev stack seed — R0-db-1 needs a database to migrate against.
+#
+# R0-infra-1 owns the full standalone stack (Traefik + Postgres + MinIO + Mosquitto +
+# api + ingestor + frontend). This file is deliberately shaped so that task only ever
+# ADDS services to it: the `postgres` service and its 5433 host mapping are already
+# correct for this host and must not be renumbered.
+services:
+  postgres:
+    image: postgres:16
+    container_name: fleetforge-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: fleetforge
+      POSTGRES_PASSWORD: fleetforge      # dev only; prod creds live in services/prod/.env
+      POSTGRES_DB: fleetforge
+    ports:
+      - "5433:5432"                       # 5432 is taken on this host by bridge-postgres
+    volumes:
+      - fleetforge_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fleetforge"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  fleetforge_pg:
