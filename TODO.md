@@ -58,11 +58,23 @@ audience), and **agent images are built off-box** (the ESP-IDF builder is 2–3 
 
 ### Infrastructure
 
-- [ ] **R0-infra-0**: Retire bingo (P0, 0.5d)
+- [x] **R0-infra-0**: Retire bingo (P0, 0.5d) ✅ 2026-09-08
       `services` repo: drop `bingo` + `bingo-frontend` and the route, remove `bingo.env`
       and `BINGO_PASSWORD`, drop from the deploy registry in `scripts/deploy.sh`.
       **Back up the bingo database before dropping the role** — the one irreversible step.
       Frees 384 M of declared limits and `bingo.tvaroska.sk`.
+      Done: both containers stopped and removed (prod 12 → 10 containers); `bingo_db`
+      dumped to `gs://btvaroska/retired/bingo/` (verified `pg_restore -l`, 95 TOC
+      entries) then `bingo_db` + `bingo_user` dropped; compose blocks, Traefik router,
+      `prod/bingo.env`, postgres init lines, deploy/validate registry entries and the
+      bingo smoke endpoint all removed; prod memory 1913 → 1742 MB used, swap 1038 →
+      783 MB (baseline for R0-infra-4); `bingo.tvaroska.sk` now returns 404 from
+      Traefik's default backend and is free for R0-infra-3. Follow-ups: boris dashboard
+      tile edited locally but image not rebuilt (Phase 4 deferred); `BINGO_PASSWORD`
+      left in `services/prod/.env` (dead credential, owner's call).
+      _(done 2026-09-08; reviewed; see docs/features/* — record lives in
+      [design/production.md](design/production.md) → *Retiring bingo* and
+      `services/DECISIONS.md` 2026-09-08)_
 
 - [ ] **R0-infra-1**: Standalone Compose stack (P0, 2d)
       Dev loop *and* the V2 self-host promise: Traefik + Postgres + MinIO + Mosquitto +
