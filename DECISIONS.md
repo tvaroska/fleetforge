@@ -6,6 +6,30 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-08 — Bingo retirement completed (R0-infra-0)
+
+- **Decision:** Bingo deployment fully retired from production. Containers stopped and
+  removed, database backed up to `gs://btvaroska/retired/bingo/` then dropped, all
+  deployment scripts and runbooks updated. Domain `bingo.tvaroska.sk` now free for
+  fleetforge. Repository and Artifact Registry images intentionally kept as historical
+  artifacts.
+- **Why:** Freed 384 MB of declared container limits on a host swapping ~1 GB. Fleetforge
+  needs ~512 MB, so net addition is ~128 MB. Also freed the domain with existing Let's
+  Encrypt cert (kept to avoid fresh ACME challenge).
+- **Gotchas learned:** (1) Removing services from docker-compose.yml does not stop running
+  containers - must explicitly stop before deploy. (2) Smoke tests must be updated in same
+  commit that removes services to avoid deploy auto-rollback. (3) Init scripts are inert
+  on existing volumes - database drop requires explicit `DROP` commands. (4) Found
+  `prod/bingo.env` tracked in git despite being in `.gitignore` (gitignore doesn't apply
+  to already-tracked files) - filed as separate security task for other tracked env files.
+- **Verification:** Post-retirement checks confirmed container count 12→10, memory freed,
+  Traefik route 404, database/role dropped with backup verified restorable, full deploy
+  pipeline green, other services unaffected.
+- **Task:** R0-infra-0 completed 2026-09-08. Details in
+  [docs/features/infrastructure.md](docs/features/infrastructure.md).
+
+---
+
 ## 2026-09-08 — Adopted gen-3 planning layout
 
 - **Decision:** Migrated from `PLAN.md` + `docs/` to the gen-3 layout used by every
