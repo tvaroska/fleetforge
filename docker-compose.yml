@@ -1,10 +1,87 @@
-# Dev stack seed — R0-db-1 needs a database to migrate against.
+# =============================================================================
+# The standalone Fleetforge stack.
+# =============================================================================
+# Traefik + Postgres + MinIO + Mosquitto + api + ingestor + frontend.
 #
-# R0-infra-1 owns the full standalone stack (Traefik + Postgres + MinIO + Mosquitto +
-# api + ingestor + frontend). This file is deliberately shaped so that task only ever
-# ADDS services to it: the `postgres` service and its 5433 host mapping are already
-# correct for this host and must not be renumbered.
+# This file is BOTH:
+#   1. the dev loop — `just up`, used every day, which is exactly why it cannot
+#      rot (design/production.md -> "Two deployment artifacts, deliberately"); and
+#   2. the V2 self-host artifact — spec/prd.md promises "ships as one Docker
+#      Compose stack", so turnkey self-hosting must be a *configuration* change on
+#      top of this file, never a rewrite.
+#
+# Production runs a *fragment* of this in the `services` repo (api, ingestor,
+# frontend, mosquitto only — Traefik, Postgres and object storage are shared).
+# That fragment is R0-infra-3 and does not live here.
+#
+# `just up` also applies docker-compose.override.yml (hot reload, Vite dev server).
+# `just up-prod` uses this file alone: nginx + the built image, no bind mounts.
+# Run `just up-prod` before committing — it is what keeps the self-host artifact
+# honest.
+#
+# NOTE, and this is the one that costs an hour: NO SERVICE USES `env_file: .env`.
+# `.env` holds the HOST database URL (localhost:5433) for alembic/pytest/just;
+# containers get `postgres:5432` set explicitly below. Compose still reads `.env`
+# for ${VAR} interpolation in this file, which is fine — it is `env_file:` that
+# would inject the host URL into a container, where pydantic-settings gives real
+# environment variables precedence over .env values.
+# =============================================================================
+
 services:
+  # ---------------------------------------------------------------------------
+  # Ingress. Two entrypoints: HTTP for the dashboard, TCP for MQTT.
+  # ---------------------------------------------------------------------------
+  traefik:
+    image: traefik:v3.6                      # same major/minor as services/prod
+    container_name: fleetforge-traefik
+    restart: unless-stopped
+    command:
+      - --providers.docker=true
+      - --providers.docker.exposedbydefault=false
+      - --entrypoints.web.address=:80
+      # MQTT gets its own entrypoint and never shares one with `web`: a non-TLS
+      # TCP router takes the whole entrypoint (see the mosquitto labels below).
+      - --entrypoints.mqtt.address=:8883
+      - --api.dashboard=true
+      - --api.insecure=true                  # dev only — prod uses socket-proxy and no insecure API
+      - --ping=true                          # backs the healthcheck below
+      - --log.level=INFO
+      - --accesslog=true
+      # --- V2 / TLS, deliberately not enabled -------------------------------
+      # spec/prd.md -> Deployment model: "Deferred to V2: turnkey self-hosting
+      # (the hard part is TLS without public DNS)". http://localhost is already a
+      # secure context, so Web Serial (R0-fe-3) and `Secure` cookies (R0-be-1)
+      # both work without it. The prod form lives in services/prod (R0-infra-3):
+      # - --entrypoints.websecure.address=:443
+      # - --certificatesresolvers.myresolver.acme.email=${FF_ACME_EMAIL}
+      # - --certificatesresolvers.myresolver.acme.httpchallenge=true
+      # - --certificatesresolvers.myresolver.acme.httpchallenge.entrypoint=web
+      # - --certificatesresolvers.myresolver.acme.storage=/letsencrypt/acme.json
+    ports:
+      - "${FF_HTTP_PORT:-8080}:80"
+      - "${FF_MQTT_PORT:-8883}:8883"
+      - "${FF_TRAEFIK_DASHBOARD_PORT:-8081}:8080"
+    volumes:
+      # Read-only socket is the dev shape. Production fronts the socket with a
+      # `socket-proxy` container (see services/prod/docker-compose.yml); that is
+      # four more services' worth of yaml for a single-user dev box.
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      # `backend` as well as `frontend`: Traefik must reach mosquitto for the TCP
+      # router, and mosquitto is backend-only. R0-infra-3 must add the shared
+      # Traefik to the backend network too — today it is on frontend +
+      # socket-proxy only.
+      - frontend
+      - backend
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck", "--ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  # ---------------------------------------------------------------------------
+  # Database. Seeded by R0-db-1; unchanged except for joining `backend`.
+  # ---------------------------------------------------------------------------
   postgres:
     image: postgres:16
     container_name: fleetforge-postgres
@@ -17,11 +94,224 @@ services:
       - "5433:5432"                       # 5432 is taken on this host by bridge-postgres
     volumes:
       - fleetforge_pg:/var/lib/postgresql/data
+    networks:
+      - backend
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U fleetforge"]
       interval: 5s
       timeout: 3s
       retries: 10
 
+  # ---------------------------------------------------------------------------
+  # Broker. Reachable ONLY through Traefik's `mqtt` entrypoint — no host port.
+  # That is deliberate: it makes the dev path and the prod path the same path.
+  # ---------------------------------------------------------------------------
+  mosquitto:
+    image: eclipse-mosquitto:2.0.22
+    container_name: fleetforge-mosquitto
+    restart: unless-stopped
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+      - ./mosquitto/conf.d:/mosquitto/config/conf.d:ro
+      - fleetforge_mosquitto:/mosquitto/data
+    networks:
+      - backend
+    labels:
+      traefik.enable: "true"
+      traefik.tcp.routers.ff-mqtt.entrypoints: mqtt
+      # A non-TLS TCP router must match HostSNI(`*`) and then owns the whole
+      # entrypoint. Production (R0-infra-3, services repo) uses
+      #   rule=HostSNI(`bingo.tvaroska.sk`)  +  tls.certresolver=myresolver
+      # so Traefik TERMINATES TLS and forwards plaintext to mosquitto:1883 —
+      # not passthrough. design/production.md -> "Port 8883".
+      traefik.tcp.routers.ff-mqtt.rule: "HostSNI(`*`)"
+      traefik.tcp.services.ff-mqtt.loadbalancer.server.port: "1883"
+      traefik.docker.network: fleetforge_backend
+    healthcheck:
+      # R0-sec-1 MUST update this to use the dynsec admin credential in the same
+      # commit that removes conf.d/10-dev-anonymous.conf, or the container goes
+      # unhealthy and everything that depends_on it refuses to start.
+      test: ["CMD-SHELL", "mosquitto_sub -h 127.0.0.1 -p 1883 -t '$$SYS/broker/uptime' -C 1 -W 3 >/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          memory: 64M      # design/production.md -> Capacity; R0-infra-4 measures it
+
+  # ---------------------------------------------------------------------------
+  # Object storage. The self-hosted sibling of GCS behind the R0-be-6 adapter.
+  # ---------------------------------------------------------------------------
+  minio:
+    image: minio/minio:RELEASE.2025-04-22T22-12-26Z    # pinned: MinIO tags churn, and newer releases dropped the console
+    container_name: fleetforge-minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-fleetforge}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-fleetforge-dev-only}
+    ports:
+      - "${FF_MINIO_PORT:-9000}:9000"
+      - "${FF_MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - fleetforge_minio:/data
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/minio/health/live || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # One-shot, idempotent bucket creation: `just up` twice must be safe.
+  minio-init:
+    image: minio/mc:RELEASE.2025-08-13T08-35-41Z
+    container_name: fleetforge-minio-init
+    restart: "no"
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-fleetforge}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-fleetforge-dev-only}
+      S3_BUCKET: ${S3_BUCKET:-fleetforge}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >
+        mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD" &&
+        mc mb --ignore-existing "local/$$S3_BUCKET" &&
+        mc ls local/
+    networks:
+      - backend
+
+  # ---------------------------------------------------------------------------
+  # The HTTP control plane. NOT routed by Traefik and NOT on the frontend
+  # network: nginx in the `frontend` container owns /v1 on the dashboard's own
+  # origin. That is what makes "no CORS" structural rather than configured
+  # (design/production.md -> "Same origin, two backends").
+  # ---------------------------------------------------------------------------
+  api:
+    build:
+      context: .
+      target: production
+    image: fleetforge:dev
+    container_name: fleetforge-api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mosquitto:
+        condition: service_healthy
+    environment:
+      # Container URL, not the host URL from .env — see the header note.
+      DATABASE_URL: postgresql+asyncpg://fleetforge:fleetforge@postgres:5432/fleetforge
+      RUN_MIGRATIONS: "true"          # the api migrates; the ingestor must not
+      MQTT_HOST: mosquitto
+      MQTT_PORT: "1883"
+      # Pre-wired for R0-be-6 so the object-store adapter is pure code.
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_BUCKET: ${S3_BUCKET:-fleetforge}
+      S3_ACCESS_KEY: ${MINIO_ROOT_USER:-fleetforge}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-fleetforge-dev-only}
+    # No published host port: the only way in is the frontend's nginx.
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:8000/v1/healthz || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+
+  # ---------------------------------------------------------------------------
+  ingestor:
+    # EXACTLY ONE INSTANCE. The ingestor is the sole MQTT subscriber
+    # (design/production.md -> "The single-subscriber rule"): N subscribers would
+    # ingest every message N times and split the SSE audience. Never scale this
+    # service, and never subscribe from the api.
+    build:
+      context: .
+      target: production
+    image: fleetforge:dev
+    container_name: fleetforge-ingestor
+    restart: unless-stopped
+    command: ["python", "-m", "fleetforge.ingestor.main"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mosquitto:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://fleetforge:fleetforge@postgres:5432/fleetforge
+      MQTT_HOST: mosquitto
+      MQTT_PORT: "1883"
+      # RUN_MIGRATIONS deliberately unset: two processes racing `alembic upgrade
+      # head` on restart is a deadlock waiting for a slow migration.
+    networks:
+      - backend
+    healthcheck:
+      # No HTTP server to probe, so liveness is the heartbeat file the ingestor
+      # touches on connect and after every message. R0-be-3 inherits this.
+      test: ["CMD-SHELL", "test $$(( $$(date +%s) - $$(stat -c %Y /tmp/ingestor-alive) )) -lt 120"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+
+  # ---------------------------------------------------------------------------
+  # The dashboard, and the only thing Traefik routes over HTTP. nginx serves the
+  # SPA and proxies /v1/* to api:8000 on the same origin.
+  # ---------------------------------------------------------------------------
+  frontend:
+    build:
+      context: ./frontend
+      target: production
+    image: fleetforge-frontend:dev
+    container_name: fleetforge-frontend
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    labels:
+      traefik.enable: "true"
+      traefik.http.routers.ff-frontend.rule: "Host(`${FF_DOMAIN:-localhost}`)"
+      traefik.http.routers.ff-frontend.entrypoints: web
+      traefik.http.services.ff-frontend.loadbalancer.server.port: "8080"
+      # Must match the real compose-prefixed network name (`docker network ls`).
+      # A wrong value is a 502 through Traefik while `docker compose exec` into
+      # the container works fine — a genuinely confusing twenty minutes.
+      traefik.docker.network: fleetforge_frontend
+    networks:
+      - frontend        # Traefik reaches nginx here
+      - backend         # nginx reaches api:8000 here
+    healthcheck:
+      # 127.0.0.1, not `localhost`: nginx listens on IPv4 only, busybox wget tries
+      # ::1 first and does not fall back, and Traefik silently skips a container
+      # that is not healthy — which shows up as a 404 from the `web` entrypoint.
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:8080/nginx-health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+
+networks:
+  frontend:
+  backend:
+
 volumes:
-  fleetforge_pg:
+  fleetforge_pg:          # the dev database — do not rename, `just nuke` is the only wipe
+  fleetforge_mosquitto:   # /mosquitto/data — persistent sessions must survive a restart
+  fleetforge_minio:

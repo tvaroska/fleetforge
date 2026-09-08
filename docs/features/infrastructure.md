@@ -112,3 +112,97 @@ Post-retirement checks confirmed:
 - Other services (boris, content, download) unaffected
 
 The Let's Encrypt certificate for `bingo.tvaroska.sk` was intentionally kept in Traefik's `acme.json` to avoid a fresh ACME challenge when fleetforge reuses the domain.
+
+## Standalone Compose Stack (R0-infra-1)
+
+Turned the single-service `docker-compose.yml` seed from R0-db-1 into the complete
+seven-service stack: Traefik, Postgres, MinIO (+ a one-shot `minio-init`), Mosquitto,
+api, ingestor and frontend. The stack is simultaneously the everyday dev loop and the
+V2 self-hosting artifact the PRD promises; making it the dev environment is the
+anti-rot mechanism named in `design/production.md`.
+
+### The two properties the rest of R0 is built on
+
+**One origin, no CORS.** Traefik routes only the frontend. nginx inside the frontend
+container serves the SPA and proxies `/v1/*` to `api:8000`; the api publishes no host
+port, joins no frontend network and carries no Traefik labels. "No CORS" is therefore
+a topology property, not a configuration setting, and a unit test asserts that no
+`access-control-allow-*` header can appear.
+
+**MQTT only through Traefik.** Mosquitto publishes no host port. A TCP router on a
+dedicated `mqtt` entrypoint (`:8883`) with ``HostSNI(`*`)`` is the only way in, which
+is the same shape production will use with `HostSNI(bingo.tvaroska.sk)` plus a cert
+resolver. A publish to `ff/v1/d/{id}/up/announce` on host port 8883 arrives at the
+ingestor's `ff/v1/d/+/up/#` subscription, exercising entrypoint, router, broker and
+subscription in one command.
+
+### The skeletons this task had to ship
+
+The build order puts infra-1 before the API, ingestor and dashboard exist, and a
+compose file referencing three services that cannot start is unverifiable. So the
+task also shipped the thinnest runnable version of each, with the seams documented in
+code:
+
+- **api** — `create_app()`, `GET /v1/healthz` (liveness, no I/O) and `GET /v1/readyz`
+  (`SELECT 1`, 503 with a reason rather than a bare 500). Everything under `/v1`,
+  including the OpenAPI schema. R0-be-1 adds routers and auth.
+- **ingestor** — connect, subscribe to `ff/v1/d/+/up/#` at QoS 1 with a stable client
+  id and `clean_session=False`, log topic and payload length (never the body),
+  reconnect with capped exponential backoff, clean SIGTERM shutdown, and a heartbeat
+  file that serves as the container healthcheck for a process with no HTTP server.
+  R0-be-3 replaces the handler.
+- **frontend** — Vite + React + TS, one page that fetches `/v1/healthz` on its own
+  origin and reports whether `navigator.serial` exists (the R0-fe-3 precondition).
+
+### Infrastructure decisions
+
+**One image, two commands.** A single root Dockerfile with `base` → `development` →
+`production` stages. `api` and `ingestor` are the same image with different
+`command:` values. The production stage runs as a non-root user that does *not* own
+`/app`, so the running process cannot rewrite its own source.
+
+**Migrations run from the api entrypoint** behind `RUN_MIGRATIONS=true`, bingo's
+pattern, so the production fragment reuses the identical image and switch. The
+ingestor never migrates.
+
+**Broker authz is a directory listing.** `mosquitto.conf` contains no ACL of any
+kind; the only line granting unauthenticated access lives alone in
+`conf.d/10-dev-anonymous.conf` under a delete-me banner. R0-sec-1 deletes one file
+rather than auditing a config, and must update the broker healthcheck in the same
+commit.
+
+**Object storage is pre-wired.** The `fleetforge` bucket is created idempotently, and
+`S3_ENDPOINT_URL`, `S3_BUCKET`, `S3_ACCESS_KEY` and `S3_SECRET_KEY` are already in the
+api's environment, so R0-be-6 is pure code.
+
+### Gotchas learned
+
+**The mosquitto CLI forces TLS on port 8883.** `mosquitto_pub -p 8883` never sends a
+plaintext byte — it attempts a TLS handshake, and the broker logs "disconnected due
+to protocol error" while the client reports `Error: Protocol error`. Against a
+plaintext dev broker on the prod-parity port this looks exactly like a broken TCP
+router. Verified by capturing the wire bytes: port 8884 sends a normal MQTT CONNECT,
+port 8883 sends nothing. `just mqtt-pub` / `just mqtt-sub` use paho instead.
+
+**Traefik silently skips containers that are not healthy.** A failing healthcheck
+presents as a 404 from the entrypoint, with no router in `/api/http/routers` and no
+error in Traefik's log. Two probes hit this: `node:22-slim` ships neither `wget` nor
+`curl`, and nginx listens on IPv4 only so a probe against `localhost` resolves to
+`::1` and is refused. Container healthchecks use `127.0.0.1`.
+
+**`env_file: .env` would break every container.** `.env` holds the host database URL
+(`localhost:5433`) that alembic, pytest and `just` need; pydantic-settings gives real
+environment variables precedence over `.env` values, so injecting it would point the
+API at its own network namespace. Containers get `postgres:5432` explicitly, and the
+rule is written into both `.env.example` and the compose header.
+
+### Verification
+
+Clean bring-up from wiped volumes; migrations observed running inside the api
+container with all six tables present; `/v1/healthz` and `/v1/readyz` served through
+nginx with no CORS header and no Traefik router for the api; the SPA rendering
+"Fleetforge — API: ok" in Chrome with zero console errors, `isSecureContext` true and
+`navigator.serial` defined; an MQTT publish through Traefik landing in the ingestor's
+log; `mosquitto.db` present and the ingestor reconnecting by itself after
+`docker compose restart mosquitto` without exiting; the MinIO bucket idempotent; and
+the production-shaped stack (`just up-prod`, no override file) reproducing all of it.

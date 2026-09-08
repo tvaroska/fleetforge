@@ -6,6 +6,55 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-08 — The standalone Compose stack is the dev environment (R0-infra-1)
+
+- **The stack is both the dev loop and the V2 self-host artifact, and it is the
+  default dev environment specifically so it cannot rot.** `spec/prd.md` promises
+  "ships as one Docker Compose stack" while production is a *fragment* of a shared
+  stack; the only way both stay true is to use the whole thing every day.
+  `just up-prod` (base compose only: built images, nginx, no bind mounts, no
+  `--reload`) is the guard that the production-shaped path still builds, and it is
+  meant to be run before every commit.
+- **One image, two commands.** A single root `Dockerfile`; `api` and `ingestor` are
+  the same image with a different `command:`. Confirms `design/production.md` →
+  *Open decisions*.
+- **MQTT reaches the broker only through Traefik's `mqtt` entrypoint, even in dev.**
+  Mosquitto publishes no host port, so the dev path and the prod path are the same
+  path. Dev uses ``HostSNI(`*`)`` with no TLS; prod (`R0-infra-3`) uses
+  ``HostSNI(`bingo.tvaroska.sk`)`` + `tls.certresolver` and forwards plaintext
+  internally. Traefik therefore joins the `backend` network here, which the shared
+  Traefik in `services/prod` does not yet do.
+- **The API is not routed by Traefik at all.** nginx in the frontend container owns
+  `/v1` on the dashboard's origin, which makes "no CORS" structural rather than
+  configured. `tests/test_api_health.py::test_no_cors_headers` exists so that a
+  future "quick CORS fix" fails loudly; a browser CORS error against this app means
+  the nginx proxy is wrong.
+- **Dev-only anonymous broker access is quarantined** in
+  `mosquitto/conf.d/10-dev-anonymous.conf`, the single file `R0-sec-1` deletes.
+  Nothing in `mosquitto.conf` grants or restricts topic access, so the broker's
+  security posture is a directory listing rather than a config audit.
+- **`.env` is the HOST configuration and is never `env_file:`d into a container.**
+  It holds `localhost:5433` for alembic/pytest/just; containers get
+  `postgres:5432` set explicitly. Compose still reads `.env` for `${VAR}`
+  interpolation. pydantic-settings gives real environment variables precedence over
+  `.env`, so an `env_file:` here would silently point the API at its own namespace.
+- **TLS is deliberately absent.** `http://localhost` is a secure context, so Web
+  Serial (`R0-fe-3`) and `Secure` cookies (`R0-be-1`) both work; V2's TLS problem is
+  left unsolved but unobstructed (a commented ACME block in the Traefik command and
+  an `FF_ACME_EMAIL` placeholder).
+- **Gotchas learned, all of which cost time:** (1) the mosquitto CLI clients force
+  TLS whenever the port is 8883 and cannot be talked out of it, so the plaintext dev
+  broker on the prod-parity port must be exercised with paho — `just mqtt-pub` /
+  `just mqtt-sub` exist for exactly this, and the failure mode (`Protocol error`)
+  looks like a broken TCP router. (2) **Traefik silently skips containers that are
+  not `healthy`**, so a broken healthcheck presents as a 404 from the entrypoint,
+  not as an unhealthy badge; `node:22-slim` has neither `wget` nor `curl`, and nginx
+  listens on IPv4 only, so container probes must use `127.0.0.1`, never `localhost`.
+  (3) The production image does not chown `/app` to the runtime user — the code is
+  root-owned and read-only to `appuser`.
+
+---
+
 ## 2026-09-08 — Schema, and the conventions the codebase inherits (R0-db-1)
 
 The first code in the repo, so these are settled for everything after it.

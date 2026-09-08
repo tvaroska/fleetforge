@@ -76,10 +76,21 @@ audience), and **agent images are built off-box** (the ESP-IDF builder is 2–3 
       [design/production.md](design/production.md) → *Retiring bingo* and
       `services/DECISIONS.md` 2026-09-08)_
 
-- [ ] **R0-infra-1**: Standalone Compose stack (P0, 2d)
+- [x] **R0-infra-1**: Standalone Compose stack (P0, 2d) ✅ 2026-09-08
       Dev loop *and* the V2 self-host promise: Traefik + Postgres + MinIO + Mosquitto +
       api + ingestor + frontend. API and dashboard on **one origin** (no CORS).
       This is the dev environment by design, so it cannot rot.
+      Done: seven services up from wiped volumes; migrations run from the api
+      entrypoint (`RUN_MIGRATIONS=true`); `/v1/healthz` + `/v1/readyz` served through
+      nginx with no CORS header, no host port and no Traefik router for the api; MQTT
+      publish through Traefik's `mqtt` entrypoint reaching the ingestor's
+      `ff/v1/d/+/up/#` subscription; broker persistence and ingestor reconnect verified
+      across a broker restart; MinIO bucket idempotent; `just up-prod` (production
+      shape, non-root image) reproduces all of it. Dev-only anonymous broker access is
+      quarantined in `mosquitto/conf.d/10-dev-anonymous.conf` for `R0-sec-1` to delete.
+      Note: the mosquitto CLI clients force TLS on port 8883, so use `just mqtt-pub` /
+      `just mqtt-sub` (paho) against the dev broker.
+      _(done 2026-09-08; reviewed; see docs/features/infrastructure.md)_
 
 - [ ] **R0-infra-2**: Agent firmware build pipeline (P0, 1d)
       Pinned ESP-IDF, per-target images, built **off-box** and pushed to Artifact

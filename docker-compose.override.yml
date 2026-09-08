@@ -1,0 +1,67 @@
+# =============================================================================
+# Dev conveniences. Loaded automatically by `docker compose up` (`just up`).
+# =============================================================================
+# `just up-prod` runs `docker compose -f docker-compose.yml` and therefore SKIPS
+# this file, exercising the production-shaped path: built images, nginx, no bind
+# mounts, no --reload. Run `just up-prod` before committing — that is the check
+# that keeps the V2 self-host artifact honest (design/production.md -> "Two
+# deployment artifacts, deliberately").
+#
+# Note what is NOT here: `env_file: .env`. See the header of docker-compose.yml.
+# =============================================================================
+
+services:
+  api:
+    build:
+      target: development
+    command:
+      ["uvicorn", "fleetforge.api.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+    image: fleetforge:dev-local
+    volumes:
+      - ./src:/app/src:ro
+      - ./alembic:/app/alembic:ro
+      - ./alembic.ini:/app/alembic.ini:ro
+
+  ingestor:
+    build:
+      target: development
+    image: fleetforge:dev-local
+    volumes:
+      - ./src:/app/src:ro
+
+  frontend:
+    build:
+      target: development
+    image: fleetforge-frontend:dev-local
+    environment:
+      # Vite >= 6 rejects unknown Host headers; keep this in step with the
+      # Traefik Host() rule in docker-compose.yml.
+      FF_DOMAIN: ${FF_DOMAIN:-localhost}
+      # The dev server proxies /v1 to the same backend nginx does in production,
+      # so the SPA is same-origin in both modes.
+      VITE_API_PROXY: http://api:8000
+    volumes:
+      - ./frontend:/app
+      # Named volume, seeded from the image's `npm ci`: without it the bind mount
+      # above would hide node_modules. Run `just rebuild frontend` after changing
+      # package.json — the volume does not re-seed on its own.
+      - ff_node_modules:/app/node_modules
+    healthcheck:
+      # The Vite dev server has no /nginx-health, and node:22-slim ships neither
+      # wget nor curl — so probe the SPA entrypoint with node's own fetch.
+      # Traefik skips containers that are not healthy, so a broken probe here
+      # shows up as a 404 from the `web` entrypoint, not as an unhealthy badge.
+      test:
+        [
+          "CMD",
+          "node",
+          "-e",
+          "fetch('http://127.0.0.1:8080/').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+volumes:
+  ff_node_modules:

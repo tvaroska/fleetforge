@@ -1,0 +1,32 @@
+# Keep the build context small — and keep secrets out of images.
+.git
+.gitignore
+.github
+
+# Never bake an env file into a layer.
+.env
+.env.*
+!.env.example
+
+# Host virtualenv and caches; the image builds its own .venv.
+.venv
+venv
+__pycache__
+*.pyc
+.pytest_cache
+.mypy_cache
+.ruff_cache
+htmlcov
+.coverage
+
+# The frontend has its own build context (./frontend).
+frontend/node_modules
+frontend/dist
+
+# Docs and planning never affect the image.
+docs
+spec
+design
+.claude
+*.md
+!README.md

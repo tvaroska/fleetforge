@@ -6,8 +6,9 @@ grow to Raspberry Pi and eventually FPGAs.
 **Safe remote firmware updates**, where "safe" means a bad build is caught before the
 fleet, and any device that does get a bad update recovers itself.
 
-> **Status:** R0 in progress. The registry schema and the Python project exist; the API,
-> ingestor, agent and dashboard do not yet. See [`TODO.md`](TODO.md).
+> **Status:** R0 in progress. The registry schema, the Compose stack and skeletons for
+> the API, ingestor and dashboard exist; the agent, enrollment, flashing and OTA do
+> not yet. See [`TODO.md`](TODO.md).
 
 ## Why
 
@@ -34,6 +35,11 @@ MQTT is the control plane; HTTPS carries artifact bytes.
 | [`TODO.md`](TODO.md) | **Live status — the only place task state lives** |
 | [`src/fleetforge/`](src/fleetforge/) | The Python package — one image, two entrypoints (api, ingestor) |
 | [`alembic/`](alembic/) | Migrations. `alembic/versions/` is a protected path |
+| [`Dockerfile`](Dockerfile) | One image, two commands — `api` and `ingestor` differ only in `command:` |
+| [`docker-compose.yml`](docker-compose.yml) | The standalone stack: the dev loop *and* the V2 self-host artifact |
+| [`frontend/`](frontend/) | Vite + React + TS dashboard; its nginx serves the SPA and `/v1` on one origin |
+| [`mosquitto/`](mosquitto/) | Broker config. All authz lives in `conf.d/` — `R0-sec-1` owns it |
+| [`docs/runbooks/`](docs/runbooks/) | Operational procedures, starting with the dev stack |
 | [`spec/prd.md`](spec/prd.md) | Requirements, targets, scope, risks |
 | [`spec/device-protocol.md`](spec/device-protocol.md) | The wire contract — near-frozen |
 | [`spec/flows.md`](spec/flows.md) | The two core user flows |
@@ -46,6 +52,19 @@ MQTT is the control plane; HTTPS carries artifact bytes.
 | [`CRITICAL.md`](CRITICAL.md) | Protected paths — including the ones no OTA can fix |
 
 ## Development
+
+The primary loop is the whole stack — same file that self-hosting will ship
+([runbook](docs/runbooks/dev-stack.md)):
+
+```bash
+cp -n .env.example .env
+just up             # Traefik + Postgres + MinIO + Mosquitto + api + ingestor + frontend
+                    # dashboard AND API on http://localhost:8080 (one origin, no CORS)
+just up-prod        # the production-shaped stack — run before committing
+just nuke           # stop and wipe every volume
+```
+
+Python alone, without the stack:
 
 ```bash
 just db-up          # dev Postgres on 127.0.0.1:5433 (5432 is taken on this host)

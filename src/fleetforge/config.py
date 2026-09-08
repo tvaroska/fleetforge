@@ -23,6 +23,13 @@ class Settings(BaseSettings):
 
     database_url: str
 
+    # Broker coordinates. The defaults are the Compose service name, so the
+    # containerised ingestor needs no configuration; on the host, export
+    # MQTT_HOST=localhost only if you have published the broker port (the
+    # standalone stack deliberately does not — see docs/runbooks/dev-stack.md).
+    mqtt_host: str = "mosquitto"
+    mqtt_port: int = 1883
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
