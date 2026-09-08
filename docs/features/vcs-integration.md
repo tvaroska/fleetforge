@@ -2,20 +2,20 @@
 
 **Status:** Planned
 **Priority:** P2
-**Target:** R8–R10 (v2)
-**Depends on:** v1 complete (R7)
-**Flow:** [FLOWS.md](../FLOWS.md) → Flow 2 (V2)
+**Target:** R6, R7, R10 (V2)
+**Depends on:** v1 complete (R5)
+**Flow:** [flows.md](../../spec/flows.md) → Flow 2 (V2)
 
 ## Overview
 
 An **automated artifact producer** feeding the same deploy pipeline — CI builds a `.bin`
 and **pushes** it to Fleetforge with provenance (repo + commit SHA + tag + build URL).
-The capability-check / sim / pull / confirm / rollback pipeline (R1–R7) is unchanged.
+The capability-check / sim / pull / confirm / rollback pipeline (R1–R5) is unchanged.
 
 Payoff = **traceability**: every device's firmware links to a commit — "what's running
 on device X?" and "roll back to tag v1.3" become first-class.
 
-## Decisions (from FLOWS.md)
+## Decisions (from flows.md)
 
 - **Ingestion = push first.** CI POSTs the artifact (ship a GitHub Action; templates for
   GitLab/Gitea/Forgejo). Provider-agnostic, holds no repo secrets, air-gap-friendly.
@@ -26,22 +26,25 @@ on device X?" and "roll back to tag v1.3" become first-class.
   - *Sequencing:* enable auto-deploy-per-group with confidence only once canary/staged
     rollout lands — auto-deploy is only as safe as its rollback.
 
-## Phase 1: R8 — Artifact API + provenance
+## Phase 1: R6 — Artifact API + provenance
 
 | ID | Task | Priority | Effort |
 |----|------|----------|--------|
-| R8-BE-1 | Upload API accepts `.bin` + provenance (repo/commit/tag/build URL) | P0 | 1.5d |
-| R8-DB-1 | Provenance schema; link version → commit | P0 | 0.5d |
-| R8-FE-1 | Dashboard shows provenance per version | P1 | 1d |
+| R6-BE-1 | Upload API accepts `.bin` + provenance (repo/commit/tag/build URL) | P0 | 1.5d |
+| R6-DB-1 | Provenance schema; link version → commit | P0 | 0.5d |
+| R6-FE-1 | Dashboard shows provenance per version | P1 | 1d |
 
-## Phase 2: R9 — GitHub Action (push ingestion)
+## Phase 2: R7 — Push ingestion (GitHub Action + templates)
 
 | ID | Task | Priority | Effort |
 |----|------|----------|--------|
-| R9-INFRA-1 | Reusable GitHub Action: build & push on tag | P0 | 2d |
-| R9-INFRA-2 | GitLab / Gitea / Forgejo templates | P1 | 1d |
+| R7-INFRA-1 | Reusable GitHub Action: build & push on tag | P0 | 2d |
+| R7-INFRA-2 | GitLab / Gitea / Forgejo templates | P1 | 1d |
 
-## Phase 3: R10 — Per-group deploy policy (→ v2 complete)
+## Phase 3: R10 — Deploy policy
+
+> Per-device granularity at R10. **Group** granularity depends on group deploy from
+> [V3 — the swarm track](groups-deploy.md), which left v1.
 
 | ID | Task | Priority | Effort |
 |----|------|----------|--------|

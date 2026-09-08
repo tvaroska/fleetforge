@@ -1,10 +1,10 @@
 # Simulation Backend (advisory gate)
 
-**Status:** Planned
+**Status:** Planned — **V2, not v1**
 **Priority:** P1
-**Target:** R6
-**Depends on:** Self-Test (self-test.md) — R5
-**Design:** [DESIGN.md](../DESIGN.md) → Simulation backend
+**Target:** R8 (V2)
+**Depends on:** Self-Test (self-test.md) — R4 (v1)
+**Design:** [design/architecture.md](../../design/architecture.md) → Simulation backend
 
 ## Overview
 
@@ -15,10 +15,10 @@ artifact in an emulator and run the user's self-test → **warn + override** in 
 Simulation is **pluggable behind a `sim-runner` contract** (`boot artifact + run
 self-test → pass/fail`) so no single engine locks us in across the platform ladder.
 
-## Decisions (from DESIGN.md)
+## Decisions (from design/architecture.md)
 
 - **Harness:** `pytest-embedded` — same self-test runs on host, in sim, and on real
-  hardware (the R5 self-test is reused verbatim).
+  hardware (the R4 self-test is reused verbatim).
 - **v1 backend (ESP32):** Espressif's QEMU fork via `pytest-embedded-qemu` —
   first-party, self-hostable, mature, multi-DUT.
 - **Growth backend:** Renode (MIT) — widest arch reach; spike ESP32 completeness
@@ -26,15 +26,15 @@ self-test → pass/fail`) so no single engine locks us in across the platform la
 - **Rejected:** Wokwi (SaaS, no real self-host) · Velxio (AGPL + license-gated QEMU,
   ESP32-only OSS path).
 
-## Phase 1: R6 — Advisory simulation gate
+## Phase 1: R8 — Advisory simulation gate
 
 | ID | Task | Priority | Effort |
 |----|------|----------|--------|
-| R6-INFRA-1 | `pytest-embedded` + Espressif QEMU in the Compose stack / runner | P0 | 1.5d |
-| R6-BE-1 | `sim-runner` contract + ESP32/QEMU implementation | P0 | 2d |
-| R6-BE-2 | Wire sim gate into deploy pipeline (pre-flight, advisory) | P0 | 1d |
-| R6-FE-1 | Deploy UI: sim result + warn/override control | P0 | 1d |
-| R6-TEST-1 | E2E: upload a boot-crashing build → sim warns before deploy | P0 | 1d |
+| R8-INFRA-1 | `pytest-embedded` + Espressif QEMU in the Compose stack / runner | P0 | 1.5d |
+| R8-BE-1 | `sim-runner` contract + ESP32/QEMU implementation | P0 | 2d |
+| R8-BE-2 | Wire sim gate into deploy pipeline (pre-flight, advisory) | P0 | 1d |
+| R8-FE-1 | Deploy UI: sim result + warn/override control | P0 | 1d |
+| R8-TEST-1 | E2E: upload a boot-crashing build → sim warns before deploy | P0 | 1d |
 
 **Done when:** you can catch bad builds before any device is touched.
 
