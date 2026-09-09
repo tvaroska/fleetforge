@@ -97,10 +97,10 @@ audience), and **agent images are built off-box** (the ESP-IDF builder is 2–3 
       Pinned ESP-IDF, per-target images, built **off-box** and pushed to Artifact
       Registry; binaries served by the API for the Web Serial flasher.
 
-- [ ] **R0-infra-3**: Prod ingress — `services` repo (P0, 1d)
+- [!] **R0-infra-3**: Prod ingress — `services` repo (P0, 1d)
       Traefik `mqtt` entrypoint on 8883 + TCP router (``HostSNI(`bingo.tvaroska.sk`)`` →
       `mosquitto:1883`), GCP firewall rule, and the prod service fragment.
-      First non-HTTP port in this stack; touches shared ingress.
+      First non-HTTP port in this stack; touches shared ingress. _(⚠ failed 2026-09-09; blocker: agent returned no result (after 2 attempts))_
 
 - [ ] **R0-infra-4**: Capacity check on `prod` before E2E (P0, 0.5d)
       The box is already swapping ~1 G with 12 containers. Measure with fleetforge
