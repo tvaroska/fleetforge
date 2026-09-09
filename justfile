@@ -35,8 +35,12 @@ rebuild service="":
 # so `mosquitto_pub -p 8883` fails with "A TLS error occurred" and looks like a
 # broken router. These two recipes use paho — already installed, via aiomqtt.
 
-mqtt-pub topic message='{}':
-    uv run python -c "import os, paho.mqtt.publish as publish; publish.single('{{topic}}', '''{{message}}''', qos=1, hostname='127.0.0.1', port=int(os.environ.get('FF_MQTT_PORT', '8883'))); print('published to {{topic}}')"
+# The payload travels in the environment, not in the python source: a JSON body is
+# full of double quotes, and inside a double-quoted shell word the shell eats them —
+# the broker then receives `{proto:1,…}` and the ingestor logs a JSONDecodeError that
+# looks like an ingest bug. `retain=1` publishes retained state (announce/presence).
+mqtt-pub topic message='{}' retain='0':
+    FF_PUB_TOPIC='{{topic}}' FF_PUB_MESSAGE='{{message}}' FF_PUB_RETAIN='{{retain}}' uv run python -c 'import os, paho.mqtt.publish as publish; t = os.environ["FF_PUB_TOPIC"]; publish.single(t, os.environ["FF_PUB_MESSAGE"], qos=1, retain=os.environ["FF_PUB_RETAIN"] == "1", hostname="127.0.0.1", port=int(os.environ.get("FF_MQTT_PORT", "8883"))); print("published to " + t)'
 
 mqtt-sub topic='ff/v1/d/+/up/#':
     uv run python -c "import os, paho.mqtt.subscribe as subscribe; subscribe.callback(lambda c, u, m: print(m.topic, m.payload.decode('utf-8', 'replace')), '{{topic}}', qos=1, hostname='127.0.0.1', port=int(os.environ.get('FF_MQTT_PORT', '8883')))"

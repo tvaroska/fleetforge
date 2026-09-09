@@ -117,8 +117,8 @@ async def create_enrollment_token(
 
     `expires_at` is passed in rather than computed here. The 24 h number lives in
     `config.enrollment_token_ttl_hours` and is applied by the caller, which keeps this
-    package free of both the settings object and `api.deps.now_utc` — `auth/` must not
-    import `api/`. It also lets a test build an already-expired token directly.
+    package free of both the settings object and the clock (`fleetforge.clock.now_utc`,
+    applied by the router). It also lets a test build an already-expired token directly.
 
     The row is flushed but **not committed**; the caller owns the transaction.
     """

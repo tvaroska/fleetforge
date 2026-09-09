@@ -20,3 +20,6 @@ dist/
 
 # System
 .DS_Store
+
+# Agent plan files — local scratch, never shared
+.claude/plans/

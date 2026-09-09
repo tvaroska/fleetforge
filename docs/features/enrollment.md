@@ -76,6 +76,38 @@ enrollment provenance for the fleet. Group CRUD deliberately does not exist in R
 can be group-scoped but nothing creates groups yet—so all R0 tokens are ungrouped in
 practice. This is acceptable because bulk deployment is a V3 feature.
 
+### Ingest & derived presence (R0-be-3)
+
+The ingestor (`src/fleetforge/ingestor/`) is the fleet's **single MQTT subscriber**. It
+consumes `ff/v1/d/+/up/#`, updates the device row, and emits one `ff_events`
+notification per ingested message, which R0-be-5 fans out over SSE. It **never
+inserts a device**: every statement is `UPDATE devices … WHERE device_id = :id AND
+decommissioned_at IS NULL`, so publishing to the broker cannot join the fleet — only a
+burned enrollment token can. Zero rows back is logged and dropped.
+
+**Presence is derived, never stored** (`fleetforge/presence.py`, one implementation
+shared with the API's device list): an `always_on` device is online iff the retained
+`up/presence` value says so; a `sleepy` device is online iff `now - last_seen <
+presence_tolerance × expected_wake_interval_s` (2.5, from `spec/prd.md` → *Timing*),
+and its LWT is ignored entirely because it fires on every normal sleep.
+
+The counterpart rule is when `last_seen` may move: **only on a live (`retain=False`)
+message that is not `presence{"online":false"}`**. Retained `announce`/`presence` are
+replayed to the ingestor on every reconnect, and the LWT is published by the broker
+rather than the board; treating either as evidence of life would mark a dead fleet
+alive. It is written as `GREATEST(last_seen, :at)` so an at-least-once QoS 1
+re-delivery cannot move a device backwards.
+
+An announce is applied field by field — anything the payload omits means "no change" —
+and a `power_class` / `expected_wake_interval_s` pair that would violate a DB CHECK is
+dropped from the update rather than allowed to lose the whole announce (the
+`fw_version` in it is what tells the operator an OTA landed). A payload `device_id`
+that disagrees with the topic is an impersonation attempt and is dropped: the topic is
+what the `%u` pattern ACL binds to the broker username.
+
+`up/status`, `up/telemetry` and `up/log` are accepted and only move `last_seen`;
+persisting them is R1 (`deploy_events`) and R3 (telemetry) respectively.
+
 ## Post-v1
 
 - CLI flasher for batch/CI enrollment.

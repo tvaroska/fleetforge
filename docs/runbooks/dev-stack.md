@@ -40,6 +40,7 @@ entrypoint, so the dev path and the prod path are the same path.
 
 ```bash
 just mqtt-pub 'ff/v1/d/a4cf12b3de90/up/announce' '{"proto":1,"device_id":"a4cf12b3de90"}'
+just mqtt-pub 'ff/v1/d/a4cf12b3de90/up/presence' '{"online":true}' 1   # 1 = retained
 just mqtt-sub                      # defaults to ff/v1/d/+/up/#
 docker compose logs -f ingestor    # the ingestor is the only subscriber
 ```
@@ -51,6 +52,50 @@ the plaintext dev broker they fail with `Error: Protocol error` /
 The `just mqtt-*` recipes use paho (already installed as an `aiomqtt` dependency).
 If you must use the mosquitto CLI, set `FF_MQTT_PORT` to something other than 8883
 and recreate the stack.
+
+## Watching a device come online
+
+The ingestor only ever **updates** device rows — it never creates one, because the
+only way into the registry is a burned enrollment token (`POST /v1/enroll`, R0-be-4).
+Until that endpoint exists, seed a row by hand:
+
+```bash
+DEV=aabbccddeeff
+psql() { docker compose exec -T postgres psql -U fleetforge -d fleetforge -Aqt "$@"; }
+psql -c "INSERT INTO devices (device_id, platform_type, link_type, power_class)
+         VALUES ('$DEV','esp32c6','wifi','always_on');"
+
+just mqtt-pub "ff/v1/d/$DEV/up/announce" '{"proto":1,"platform_type":"esp32c6","fw_version":"1.4.2","link_type":"wifi","power_class":"always_on"}'
+psql -c "SELECT fw_version, last_seen, presence_reported FROM devices WHERE device_id='$DEV';"
+#  => 1.4.2 | a timestamp | (empty — announce says nothing about presence)
+
+just mqtt-pub "ff/v1/d/$DEV/up/presence" '{"online":true}' 1   # retained, as a board would
+psql -c "SELECT presence_reported FROM devices WHERE device_id='$DEV';"     # => t
+```
+
+Watch the `ff_events` notification the dashboard's SSE stream will carry (R0-be-5) —
+psql prints notifications when the command it is running returns, so give it a sleep
+to publish into:
+
+```bash
+# terminal 1
+docker compose exec -T postgres psql -U fleetforge -d fleetforge \
+  -c "LISTEN ff_events" -c "SELECT pg_sleep(20)"
+# terminal 2, while that sleeps
+just mqtt-pub "ff/v1/d/$DEV/up/hb" '{"fw_version":"1.4.2"}'
+# terminal 1 prints:
+#   Asynchronous notification "ff_events" with payload
+#   {"v":1,"type":"device.heartbeat","device_id":"aabbccddeeff","at":"…","online":true,"fw_version":"1.4.2"}
+```
+
+Two results that look like bugs and are not: publishing for a device that is not in
+`devices` logs *"ignoring message from unregistered or decommissioned device"* and
+creates nothing (that is the enrollment boundary), and a `docker compose restart
+ingestor` replays every **retained** `announce`/`presence` without moving `last_seen`
+— a replay is not evidence that a board is alive.
+
+The dev container has no `--reload`: after editing `src/`, run
+`docker compose restart ingestor`.
 
 ## Failures you will actually hit
 

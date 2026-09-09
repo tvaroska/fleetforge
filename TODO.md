@@ -125,9 +125,10 @@ audience), and **agent images are built off-box** (the ESP-IDF builder is 2–3 
       single importable `auth.enrollment.BURN_SQL` that R0-be-4 will call.
       _(done 2026-09-08; reviewed; see docs/features/*)_
 
-- [ ] **R0-be-3**: Ingestor process (P0, 1.5d)
+- [x] **R0-be-3**: Ingestor process (P0, 1.5d)
       Single instance, **sole MQTT subscriber**. announce / presence / heartbeat →
       derived presence (LWT for always_on, `last_seen` for sleepy) → Postgres + `NOTIFY`.
+      _(done 2026-09-08; see docs/features/*)_
 
 - [ ] **R0-be-4**: `POST /v1/enrol` over HTTPS, not MQTT (P0, 1.5d)
       Validate token → registry entry → provision broker credential (dynsec) → burn

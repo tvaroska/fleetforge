@@ -70,6 +70,16 @@ class Settings(BaseSettings):
     # (see db/models.py::EnrollmentToken).
     enrollment_token_ttl_hours: int = 24
 
+    # --- Ingestor / derived presence (R0-be-3) --------------------------------
+    # A sleepy device is offline once `now - last_seen > tolerance *
+    # expected_wake_interval_s`. 2.5 comes from spec/prd.md → Requirements &
+    # targets → Timing ("Offline shows in dashboard — sleepy: 2.5 ×
+    # expected_wake_interval_s since last_seen"). One number, one place: the API's
+    # device list (R0-be-5/R0-fe-2) reads the same setting through
+    # `fleetforge.presence.is_online`, never its own literal. `always_on` presence
+    # needs no number — it is the retained LWT value.
+    presence_tolerance: float = 2.5
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

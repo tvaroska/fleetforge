@@ -26,6 +26,7 @@ from fleetforge.auth.cache import VerifiedSecretCache
 from fleetforge.auth.hashing import averify_secret, dummy_verify
 from fleetforge.auth.ratelimit import FixedWindowLimiter
 from fleetforge.auth.tokens import ADMIN_TOKEN_PREFIX, parse_token
+from fleetforge.clock import now_utc
 from fleetforge.config import Settings, get_settings
 from fleetforge.db.base import get_sessionmaker
 from fleetforge.db.models import AdminToken
@@ -61,11 +62,6 @@ TOUCH_LAST_USED_SQL = text(
     "WHERE id = :token_id "
     "AND (last_used_at IS NULL OR last_used_at < now() - make_interval(secs => :throttle))"
 )
-
-
-def now_utc() -> dt.datetime:
-    """Timezone-aware UTC. Every timestamp column is TIMESTAMPTZ; naive comparison raises."""
-    return dt.datetime.now(dt.UTC)
 
 
 @dataclass(frozen=True, slots=True)

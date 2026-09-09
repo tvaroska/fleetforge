@@ -8,9 +8,12 @@ fleet, and any device that does get a bad update recovers itself.
 
 > **Status:** R0 in progress. The registry schema, the Compose stack, admin auth
 > (`/v1/auth/*`), enrollment **token** issuance (`/v1/enrollment-tokens` — issue, list,
-> revoke) and skeletons for the ingestor and dashboard exist. The agent, the flasher,
-> `POST /v1/enroll` (the endpoint that redeems a token) and OTA do not yet — so a token
-> can be issued but nothing can spend it. See [`TODO.md`](TODO.md).
+> revoke) and a dashboard skeleton exist, and the ingestor now really ingests: it is
+> the sole MQTT subscriber, derives presence, writes the device row and emits
+> `ff_events` notifications. The agent, the flasher, `POST /v1/enroll` (the endpoint
+> that redeems a token) and OTA do not yet — so a token can be issued but nothing can
+> spend it, and a device row has to be seeded by hand
+> ([runbook](docs/runbooks/dev-stack.md)). See [`TODO.md`](TODO.md).
 
 ## Why
 

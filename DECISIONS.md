@@ -6,6 +6,62 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-08 — Ingest: derived presence, and the retained-replay trap (R0-be-3)
+
+- **`last_seen` advances only on a live message that is not `presence{online:false}`.**
+  Retained `announce`/`presence` replay on every ingestor reconnect (the process
+  re-`subscribe`s, so the broker re-sends the whole retained set), and the LWT is
+  published by the *broker*, not the device. Either one, treated as evidence of life,
+  marks a dead fleet alive — and for `sleepy` boards, where "the LWT fires on every
+  normal sleep and means nothing", it never self-corrects. MQTT's `retain` flag on
+  delivery is the discriminator: set only for a retained replay. Verified live —
+  `docker compose restart ingestor` replays `up/presence` with `retain=True` and
+  `last_seen` does not move.
+- **`last_seen = GREATEST(last_seen, :at)`.** QoS 1 is at-least-once; monotonicity is
+  one SQL function, not a comparison in Python.
+- **The ingestor `UPDATE`s and never `INSERT`s.** The only way into the registry is a
+  burned enrollment token (R0-be-4). An `INSERT … ON CONFLICT` here would make anyone
+  who can publish to the broker a fleet member — the dev broker is anonymous today, so
+  `ingestor/store.py` is the file that stops it. A decommissioned device is dropped by
+  the same `WHERE`, with a log line, rather than resurrecting its row.
+- **`pg_notify` runs in the write's transaction, via `SELECT pg_notify(:channel, :payload)`.**
+  `NOTIFY` takes no bind parameters, so the string form is an injection with a
+  device-controlled payload; and transactional delivery means SSE can never announce a
+  row the database does not have. Payload capped at 7500 B against PostgreSQL's 8000 B
+  limit, and an oversized event is skipped rather than allowed to fail the write.
+  `fleetforge.events` ships `EVENTS_CHANNEL` and `DeviceEvent`; R0-be-5 imports both
+  rather than restating either — a channel name spelled twice is a silently empty SSE
+  stream with nothing failing loudly.
+- **`presence.is_online()` is the single rule, and presence stays uncomputed in the
+  database.** The event's `online` is a snapshot for the SSE consumer; the API
+  recomputes on read, because a sleepy device goes offline with no message arriving at
+  all. The 2.5 tolerance lives once, in `config.presence_tolerance`.
+- **An announce whose `power_class` would violate a CHECK loses that field, not the
+  whole message.** `fw_version` is what tells the operator the OTA landed; dropping the
+  announce over a barely-used field would be the wrong trade. The pair is validated in
+  Python, the CHECK stays the backstop.
+- **A payload `device_id` that disagrees with the topic is dropped.** The topic is
+  authoritative — it is what the `%u` pattern ACL binds to the broker username.
+- **One message never kills the process.** Specific exception families
+  (`SQLAlchemyError`, `OSError`, `ValueError`) around the per-message write, and the
+  heartbeat file touched even on failure: liveness is broker-connectedness, and
+  restarting the container does not fix Postgres. Verified by stopping Postgres under
+  load — one ERROR line per message, container still healthy, full recovery on restart.
+- **`now_utc()` moved to `fleetforge/clock.py`.** It lived in `api/deps.py`, and the
+  ingestor must not import `fleetforge.api` — pulling FastAPI's app factory into a
+  process with no HTTP server would drag its settings validation along with it.
+- **Gotcha fixed in passing:** `just mqtt-pub` wrapped the payload in a double-quoted
+  shell word, so the shell ate every `"` in a JSON body and the broker received
+  `{proto:1,…}`. It presents as a `JSONDecodeError` from the ingestor and looks like an
+  ingest bug. The payload now travels in the environment; the recipe also takes a
+  `retain` argument, since retained state is most of what this task had to be tested
+  against.
+- **PROPOSED for `spec/` (protected, so not written there):** `spec/device-protocol.md`
+  → *Open items for R0* asks whether `up/log` ships in R0 — the answer this task
+  implements is "accepted and dropped: it only moves `last_seen`, storage is R3".
+
+---
+
 ## 2026-09-08 — Enrollment token issuance: one predicate, two readers (R0-be-2)
 
 - **`BURN_SQL` ships as an importable constant** in `fleetforge.auth.enrollment`, not
