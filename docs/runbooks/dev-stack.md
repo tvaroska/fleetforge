@@ -90,3 +90,57 @@ fleetforge_ff_node_modules` after `just down`.
 
 `just db-up` starts Postgres alone, which is all `just migrate` and `just test`
 need. Keep it that way: no test may shell out to `docker compose`.
+
+### Setting the admin password
+
+`.env.example` ships a working dev value: the argon2id hash of the obviously-fake
+password **`fleetforge-dev-only`**. `cp -n .env.example .env` and login works out of
+the box. To use your own:
+
+```bash
+just admin-password        # prompts twice, echoes nothing, prints the PHC string
+```
+
+Paste the printed line into `.env` **exactly as printed — single-quoted**:
+
+```
+ADMIN_PASSWORD_HASH='$argon2id$v=19$m=19456,t=2,p=1$...'
+```
+
+Then `just up` and verify the container actually received it:
+
+```bash
+docker compose config | grep -i ADMIN_PASSWORD_HASH
+#  correct:  ADMIN_PASSWORD_HASH: $$argon2id$$v=19$$m=19456,t=2,p=1$$...
+#  broken:   ADMIN_PASSWORD_HASH: =19=19456...
+```
+
+**Why the quotes matter.** A PHC string is full of `$`, and docker compose
+interpolates `$argon2id` / `$v` / `$m` as (empty) variables. Unquoted, the container
+receives a truncated string, `argon2` rejects it as an invalid hash, and **every
+login returns 401 with nothing in the logs to explain it**. `python-dotenv` strips
+the surrounding single quotes, so the one quoted line serves both the host process
+and compose interpolation.
+
+The value is a *hash*, never a password, and the API cannot recover the plaintext
+from it — losing the password means minting a new hash. Production sets its own in
+`services/prod/.env` (ask before changing that file). Without the variable, the
+`api` service refuses to start (`${ADMIN_PASSWORD_HASH:?…}`) — deliberately, since a
+default admin credential is worse than a stack that will not boot.
+
+**Logging in:**
+
+```bash
+curl -i -c /tmp/ff.jar -X POST http://localhost:8080/v1/auth/login \
+  -H 'content-type: application/json' -d '{"password":"fleetforge-dev-only"}'
+curl -b /tmp/ff.jar http://localhost:8080/v1/auth/me
+```
+
+The cookie value *is* an ordinary admin token: the same string works as
+`Authorization: Bearer …`. Revoke a session with `POST /v1/auth/logout`, or directly:
+`UPDATE admin_tokens SET revoked_at = now() WHERE id = '<uuid>'` — the next request
+is a 401, with no restart and no waiting.
+
+Five failed logins in 60 s from one client IP (or 30 across all of them) return 429
+until the window passes; the counter is per API process, so `docker compose restart
+api` clears it.

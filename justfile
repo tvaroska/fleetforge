@@ -59,6 +59,14 @@ db-down:
 migrate:
     uv run alembic upgrade head
 
+# Hash an admin password for ADMIN_PASSWORD_HASH (prompts twice, never echoes).
+# Paste the printed SINGLE-QUOTED line into .env: compose eats the `$` segments
+# of an unquoted argon2 PHC string, and the login then can never succeed.
+# PYTHONPATH=src because the project is deliberately not installed as a package
+# (see the Dockerfile header) — same reason pytest sets `pythonpath`.
+admin-password:
+    PYTHONPATH=src uv run python -m fleetforge.auth hash-password
+
 lint:
     uv run ruff check src/ tests/ alembic/
     uv run ruff format --check src/ tests/ alembic/

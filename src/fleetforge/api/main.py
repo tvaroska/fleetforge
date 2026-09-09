@@ -1,9 +1,8 @@
 """FastAPI application.
 
-R0-infra-1 ships only what the Compose stack needs to prove itself alive:
-the app factory, `GET /v1/healthz` (liveness) and `GET /v1/readyz` (readiness).
-R0-be-1 adds admin auth, `/v1/auth/login` and the real routers; R0-be-5 adds SSE.
-Keep the app factory — the tests and R0-be-1 both build on it.
+R0-infra-1 shipped the app factory plus `GET /v1/healthz` (liveness) and
+`GET /v1/readyz` (readiness). R0-be-1 added admin auth (`/v1/auth/*`) and the
+router/dependency layout every later endpoint copies; R0-be-5 adds SSE.
 
 **There is no CORS middleware here, and there must never be one.** The dashboard
 and the API are served from a single origin: nginx in the `frontend` container
@@ -12,6 +11,8 @@ serves the SPA and proxies `/v1/*` to `api:8000` (`design/architecture.md` →
 topology is in `design/production.md` → *Same origin, two backends*). A CORS error
 in a browser therefore means the nginx proxy is misconfigured, **not** that CORS
 middleware is missing. `tests/test_api_health.py::test_no_cors_headers` guards this.
+The login cookie is same-origin by construction, which is also why
+`SameSite=Strict` alone is sufficient against CSRF and no CSRF token exists.
 """
 
 import logging
@@ -19,11 +20,16 @@ from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI
 from fastapi.responses import JSONResponse
+from pydantic import ValidationError
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from fleetforge import __version__
+from fleetforge.api.routers import auth
+from fleetforge.auth.cache import VerifiedSecretCache
+from fleetforge.auth.ratelimit import FixedWindowLimiter
+from fleetforge.config import Settings, get_settings
 from fleetforge.db.base import get_sessionmaker
 
 logger = logging.getLogger(__name__)
@@ -46,6 +52,20 @@ def configure_logging(level: int = logging.INFO) -> None:
     )
 
 
+def _settings_or_none() -> Settings | None:
+    """Settings if the environment provides them, else `None`.
+
+    `create_app()` must stay constructible with no environment at all — the health
+    tests build the app without a database, and a factory that raises on import is
+    a container that cannot even serve `/v1/healthz` to say why.
+    """
+    try:
+        return get_settings()
+    except ValidationError as exc:
+        logger.warning("settings unavailable (%s); falling back to defaults", exc.error_count())
+        return None
+
+
 def create_app() -> FastAPI:
     """Build the ASGI application.
 
@@ -63,6 +83,24 @@ def create_app() -> FastAPI:
         redoc_url=None,
         openapi_url="/v1/openapi.json",
     )
+
+    # Per-app, never module-level: each test app gets a fresh cache and a fresh
+    # limiter, so no auth state leaks between tests (and `dependency_overrides` on
+    # `get_settings` cannot be undermined by a shared singleton).
+    settings = _settings_or_none()
+    app.state.token_cache = VerifiedSecretCache()
+    app.state.login_limiter = FixedWindowLimiter(
+        per_key=settings.login_rate_limit_per_ip if settings else 5,
+        per_global=settings.login_rate_limit_global if settings else 30,
+        window_s=settings.login_rate_limit_window_s if settings else 60,
+    )
+    if settings is not None and settings.admin_password_hash is None:
+        logger.warning(
+            "ADMIN_PASSWORD_HASH is not set: /v1/auth/login will answer 503. "
+            "Mint one with `just admin-password` and put the SINGLE-QUOTED line in .env."
+        )
+
+    app.include_router(auth.router)
 
     @app.get("/v1/healthz", tags=["health"])
     async def healthz() -> dict[str, str]:

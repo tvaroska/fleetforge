@@ -4,9 +4,16 @@ Importing this module must never open a connection or require `DATABASE_URL` to 
 set: `alembic/env.py`, mypy and the unit tests all import the models, and only some
 of them have a database. Hence `get_engine()` / `get_sessionmaker()` rather than
 module-level singletons.
+
+**`get_sessionmaker()` is the only door into the database from the API.** R0-db-1
+also shipped a `get_session()` FastAPI dependency; R0-be-1 deleted it. It called the
+`lru_cache`d `get_sessionmaker()` *directly*, so a
+`app.dependency_overrides[get_sessionmaker]` did not affect it and a test would have
+quietly talked to the developer's real dev database. Everything therefore depends on
+`get_sessionmaker` and opens its own `async with sessionmaker() as session:` — which
+is the one override point the test fixtures use.
 """
 
-from collections.abc import AsyncIterator
 from functools import lru_cache
 
 from sqlalchemy import MetaData
@@ -49,13 +56,3 @@ def get_engine() -> AsyncEngine:
 def get_sessionmaker() -> async_sessionmaker[AsyncSession]:
     """Return the process-wide session factory, created on first use."""
     return async_sessionmaker(get_engine(), expire_on_commit=False)
-
-
-async def get_session() -> AsyncIterator[AsyncSession]:
-    """Yield a session, rolling back on error. FastAPI dependency for R0-be-1."""
-    async with get_sessionmaker()() as session:
-        try:
-            yield session
-        except Exception:
-            await session.rollback()
-            raise

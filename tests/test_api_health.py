@@ -1,27 +1,20 @@
 """The API's two probes, and the one-origin invariant.
 
 These run against the ASGI app in-process (`httpx.ASGITransport`) — no uvicorn, no
-network. `test_healthz_ok` deliberately does **not** request the `engine` fixture:
+network; the app fixtures live in `tests/conftest.py`. `test_healthz_ok`
+deliberately does **not** request the `engine` fixture:
 liveness must answer with the database stopped, and depending on the fixture here
 would hide a `/v1/healthz` that had quietly grown an I/O call.
 """
 
 from typing import Any
 
-import httpx
-import pytest
 from fastapi import FastAPI
 from sqlalchemy.exc import OperationalError
-from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from fleetforge import __version__
-from fleetforge.api.main import create_app
 from fleetforge.db.base import get_sessionmaker
-
-
-def client_for(app: FastAPI) -> httpx.AsyncClient:
-    """An httpx client bound straight to the ASGI app."""
-    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://testserver")
+from tests.conftest import client_for
 
 
 class FailingSession:
@@ -35,26 +28,6 @@ class FailingSession:
 
     async def execute(self, *args: Any, **kwargs: Any) -> None:
         raise OperationalError("SELECT 1", {}, OSError("connection refused"))
-
-
-@pytest.fixture
-def app_no_db() -> FastAPI:
-    """The app with nothing overridden — usable without a database."""
-    return create_app()
-
-
-@pytest.fixture
-def app_with_db(engine: AsyncEngine) -> FastAPI:
-    """The app bound to the migrated test database.
-
-    A dependency override, not an environment mutation: `get_settings` and
-    `get_engine` are both `lru_cache`d, so poking `DATABASE_URL` into `os.environ`
-    would either do nothing or poison every later test in the session.
-    """
-    app = create_app()
-    sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
-    app.dependency_overrides[get_sessionmaker] = lambda: sessionmaker
-    return app
 
 
 async def test_healthz_ok(app_no_db: FastAPI) -> None:

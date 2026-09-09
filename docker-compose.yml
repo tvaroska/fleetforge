@@ -210,6 +210,17 @@ services:
       RUN_MIGRATIONS: "true"          # the api migrates; the ingestor must not
       MQTT_HOST: mosquitto
       MQTT_PORT: "1883"
+      # The argon2id HASH of the admin password, never the password. Mandatory
+      # here (`:?`) even though Settings treats it as optional: create_app() must
+      # stay constructible with no environment, but a deployed stack must refuse
+      # to start unconfigured rather than serve a login that can never succeed.
+      #
+      # NO DEFAULT ON PURPOSE — a shipped default admin credential is exactly the
+      # wrong thing to have. And the value in .env must be SINGLE-QUOTED: compose
+      # interpolates the `$argon2id`/`$v`/`$m` segments of an unquoted PHC string
+      # away, leaving "=19=19456". Check with:
+      #     docker compose config | grep -i ADMIN_PASSWORD_HASH
+      ADMIN_PASSWORD_HASH: ${ADMIN_PASSWORD_HASH:?set ADMIN_PASSWORD_HASH in .env — see `just admin-password`}
       # Pre-wired for R0-be-6 so the object-store adapter is pure code.
       S3_ENDPOINT_URL: http://minio:9000
       S3_BUCKET: ${S3_BUCKET:-fleetforge}

@@ -7,6 +7,12 @@ Two deliberate choices:
   it cannot catch a migration that does not match the models.
 * Everything goes through asyncpg — no psycopg dependency just to issue
   `CREATE DATABASE`. An AUTOCOMMIT engine on the maintenance database does that job.
+
+It also owns the app fixtures (`app_no_db`, `app_with_db`, `admin_app`) shared by
+`test_api_health.py` and `test_api_auth.py`. Both configure the app with
+**dependency overrides, never environment mutation**: `get_settings`, `get_engine`
+and `get_sessionmaker` are all `lru_cache`d, so poking `os.environ` would either do
+nothing or poison every later test in the session.
 """
 
 import asyncio
@@ -14,16 +20,33 @@ import os
 from collections.abc import AsyncIterator
 from pathlib import Path
 
+import httpx
 import pytest
 from alembic import command
 from alembic.config import Config
+from fastapi import FastAPI
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
+
+from fleetforge.api.main import create_app
+from fleetforge.auth.hashing import hash_secret
+from fleetforge.config import Settings, get_settings
+from fleetforge.db.base import get_sessionmaker
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TEST_DB_NAME = "fleetforge_test"
 DEFAULT_DEV_URL = "postgresql+asyncpg://fleetforge:fleetforge@localhost:5433/fleetforge"
+
+# The admin password the `admin_app` fixture is configured with. Hashed once at
+# import: argon2 is ~40 ms a call and every auth test would otherwise pay it twice.
+TEST_PASSWORD = "correct-horse-battery-staple"
+TEST_PASSWORD_HASH = hash_secret(TEST_PASSWORD)
 
 
 def database_url_for(db_name: str) -> str:
@@ -142,3 +165,62 @@ async def session(engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
             await async_session.close()
             if transaction.is_active:
                 await transaction.rollback()
+
+
+# ---------------------------------------------------------------------------
+# App fixtures. In-process against the ASGI app — no uvicorn, no network.
+# ---------------------------------------------------------------------------
+
+
+def client_for(app: FastAPI, base_url: str = "http://testserver") -> httpx.AsyncClient:
+    """An httpx client bound straight to the ASGI app.
+
+    Pass `base_url="https://testserver"` for anything that must keep a cookie:
+    `http.cookiejar` (which httpx uses) drops a `Secure` cookie on a plain-http
+    origin. It does not model `localhost` as a secure context the way browsers do,
+    so the fix is the test's URL scheme — never a weaker cookie.
+    """
+    return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=base_url)
+
+
+def settings_for_tests(**overrides: object) -> Settings:
+    """A `Settings` built explicitly, not from the environment.
+
+    The database URL is deliberately unusable: every app fixture overrides
+    `get_sessionmaker`, so anything that reaches for this URL is a bug worth a loud
+    connection error rather than a silent write to the developer's dev database.
+    """
+    values: dict[str, object] = {
+        "database_url": "postgresql+asyncpg://unused:unused@127.0.0.1:1/unused",
+        "admin_password_hash": TEST_PASSWORD_HASH,
+    }
+    values.update(overrides)
+    return Settings(**values)  # type: ignore[arg-type]
+
+
+@pytest.fixture
+def app_no_db() -> FastAPI:
+    """The app with nothing overridden — usable without a database."""
+    return create_app()
+
+
+@pytest.fixture
+def app_with_db(engine: AsyncEngine) -> FastAPI:
+    """The app bound to the migrated test database.
+
+    A dependency override, not an environment mutation: `get_settings` and
+    `get_engine` are both `lru_cache`d, so poking `DATABASE_URL` into `os.environ`
+    would either do nothing or poison every later test in the session.
+    """
+    app = create_app()
+    sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
+    app.dependency_overrides[get_sessionmaker] = lambda: sessionmaker
+    return app
+
+
+@pytest.fixture
+def admin_app(app_with_db: FastAPI) -> FastAPI:
+    """`app_with_db` plus a known admin password (`TEST_PASSWORD`)."""
+    settings = settings_for_tests()
+    app_with_db.dependency_overrides[get_settings] = lambda: settings
+    return app_with_db

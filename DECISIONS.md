@@ -6,6 +6,55 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-08 — Admin auth: one credential, two transports (R0-be-1)
+
+- **One credential type.** The login cookie carries *the same* `ffa_` token a CLI
+  would send in `Authorization: Bearer`, verified by one code path
+  (`api/deps.py::require_admin`). There is no session table and no second credential
+  kind, so revoking a dashboard session is the same single `UPDATE` as revoking a
+  CLI token. Confirms `design/architecture.md` → *v1 admin auth*.
+- **Argon2id pinned to `t=2, m=19 MiB, p=1` behind an `anyio.CapacityLimiter(2)`.**
+  The library defaults (64 MiB, and Starlette's 40-thread threadpool) would peak
+  around 760 MiB inside a 256 M container — an OOM kill under concurrent logins.
+  Verification reads the parameters out of the stored PHC string, so the profile can
+  change later without invalidating existing hashes.
+- **The verification cache memoizes the hash comparison only.** The row is read and
+  `revoked_at` / `expires_at` re-checked on **every** request; only the ~40 ms argon2
+  comparison is skipped, keyed by `(token_id, sha256(secret))` for 60 s. Caching an
+  `AuthContext` instead would silently break instant revocation — which is the entire
+  reason JWT was rejected. Checks run parse → row → revoked/expired → verify, so a
+  revoked token also cannot burn CPU.
+- **`ADMIN_PASSWORD_HASH` holds the hash, never the password, and must be
+  SINGLE-QUOTED in `.env`.** Verified empirically: unquoted, docker compose
+  interpolates the `$argon2id` / `$v` / `$m` segments away and the container receives
+  `=19=19456`; the failure mode is a login that can never succeed and a log line that
+  does not say why. `python-dotenv` strips the quotes, so one quoted line serves both
+  the host process and compose interpolation. `docker-compose.yml` uses
+  `${ADMIN_PASSWORD_HASH:?…}` with **no default** — a shipped default admin
+  credential is worse than a stack that refuses to boot.
+- **`Secure` is unconditional.** `http://localhost` is a secure context, so there is
+  no dev/prod cookie switch for anyone to flip in production. Cookie attributes are
+  `HttpOnly; Secure; SameSite=Strict; Path=/`, set and cleared identically. No CSRF
+  token: the dashboard is same-origin by construction, which is also why CORS
+  middleware must never appear. Rejected `__Host-`: no subdomains, `Path=/` and
+  `Secure` already fixed, and inconsistent browser behaviour over `http://localhost`.
+- **Login rate limiting is per-process** (one uvicorn worker per container), keyed on
+  the leftmost `X-Forwarded-For` entry with a **global backstop bucket**, because
+  Traefik appends to that header rather than replacing it and the key is therefore
+  client-spoofable. Only failures are counted, and both buckets are checked before
+  any argon2 work.
+- **`db/base.get_session()` deleted.** It called the `lru_cache`d
+  `get_sessionmaker()` directly, so `dependency_overrides[get_sessionmaker]` did not
+  affect it and a test would have quietly used the developer's dev database. **All**
+  API database access goes through `Depends(get_sessionmaker)`. Supersedes the
+  hand-off note in `.claude/plans/R0-db-1-schema.md` §12.
+- **PROPOSED for `spec/prd.md` → *Requirements & targets*** (spec is protected, so
+  these are not written there): session/cookie lifetime **7 days**; login rate limit
+  **5 failures / 60 s per client IP, 30 / 60 s global**; argon2id profile
+  **t=2, m=19 MiB, p=1**.
+
+---
+
 ## 2026-09-08 — The standalone Compose stack is the dev environment (R0-infra-1)
 
 - **The stack is both the dev loop and the V2 self-host artifact, and it is the

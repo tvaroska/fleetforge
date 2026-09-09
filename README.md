@@ -6,9 +6,9 @@ grow to Raspberry Pi and eventually FPGAs.
 **Safe remote firmware updates**, where "safe" means a bad build is caught before the
 fleet, and any device that does get a bad update recovers itself.
 
-> **Status:** R0 in progress. The registry schema, the Compose stack and skeletons for
-> the API, ingestor and dashboard exist; the agent, enrollment, flashing and OTA do
-> not yet. See [`TODO.md`](TODO.md).
+> **Status:** R0 in progress. The registry schema, the Compose stack, admin auth
+> (`/v1/auth/*`) and skeletons for the ingestor and dashboard exist; the agent,
+> enrollment, flashing and OTA do not yet. See [`TODO.md`](TODO.md).
 
 ## Why
 
@@ -34,6 +34,7 @@ MQTT is the control plane; HTTPS carries artifact bytes.
 |---|---|
 | [`TODO.md`](TODO.md) | **Live status — the only place task state lives** |
 | [`src/fleetforge/`](src/fleetforge/) | The Python package — one image, two entrypoints (api, ingestor) |
+| [`src/fleetforge/auth/`](src/fleetforge/auth/) | Credential primitives: argon2id hashing, opaque tokens, verification cache, login rate limiting. A protected path |
 | [`alembic/`](alembic/) | Migrations. `alembic/versions/` is a protected path |
 | [`Dockerfile`](Dockerfile) | One image, two commands — `api` and `ingestor` differ only in `command:` |
 | [`docker-compose.yml`](docker-compose.yml) | The standalone stack: the dev loop *and* the V2 self-host artifact |
