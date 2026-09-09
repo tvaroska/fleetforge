@@ -26,7 +26,7 @@ the first client of a headless core, not privileged over future clients (HA/CLI/
 - **`device_id` = eFuse MAC** (stable, factory-unique) — satisfies the identity contract.
 - **Provisioning = USB config flash (v1):** broker URL + Wi-Fi creds + enrollment
   token baked in at flash time. SoftAP captive portal is post-v1 (Wi-Fi change = re-flash).
-- **Trust = auto-enroll via token, exchanged over HTTPS** (`POST /v1/enrol`), not over
+- **Trust = auto-enroll via token, exchanged over HTTPS** (`POST /v1/enroll`), not over
   MQTT — so the broker never authenticates a client it has never heard of. Tokens are
   short-lived, group-scoped, revocable and **single-use**: the device trades its token
   once for a per-device broker credential kept in NVS. Every enrolled device is visible
@@ -108,8 +108,75 @@ what the `%u` pattern ACL binds to the broker username.
 `up/status`, `up/telemetry` and `up/log` are accepted and only move `last_seen`;
 persisting them is R1 (`deploy_events`) and R3 (telemetry) respectively.
 
+### Device enrollment (R0-be-4)
+
+`POST /v1/enroll` is the device-facing half of the credential and the **only
+unauthenticated write endpoint in the API** — the `ffe_` token in the body *is* the
+credential. It is also the codebase's only `INSERT` into `devices`
+(`fleetforge/registry.py`). The body is **flat** (`{token, device_id, platform_type,
+link_type, power_class, …}`, `extra="ignore"`) and the response is exactly
+`{device_id, mqtt_username, mqtt_password}`, with `mqtt_username == device_id`
+unnormalised — the two `%u` pattern ACLs are the entire fleet authz, so the eFuse-MAC
+format check rejects a non-canonical id rather than lowercasing it.
+
+**The order is the design**, and each step prevents one specific failure:
+
+1. **Rate-limit, then parse, then look the row up, then verify the secret — and only
+   then burn.** `BURN_SQL` keys on `id` alone and an `ffe_` token's id is not a secret
+   (it is in the issuance response and in the api log), so burning before
+   `averify_secret` would let anyone who has read one log line destroy every
+   outstanding token.
+2. **Validate the identity before the burn** (`api/schemas.py::EnrollRequest`). A burn
+   followed by a DB CHECK violation is a token destroyed by a firmware typo, and the
+   board then needs a re-flash to get another one. The DB CHECKs stay the backstop.
+3. **INSERT the device before the burn, in the same transaction.**
+   `enrollment_tokens.used_by_device_id` is a real FK, so burning first fails on the
+   happy path — and a refused burn rolls the device row back, or a rejected enrollment
+   leaves a fleet member behind.
+4. **Commit, then provision the broker.** Holding a row lock and a pooled connection
+   across an MQTT round-trip turns a broker outage into `idle in transaction`. The
+   inverse failure (a broker credential for a device that is not enrolled) is prevented
+   by the order, not by a transaction.
+
+**The grace window.** A burned token may be re-presented by the **same** `device_id`
+for `config.enroll_retry_window_s` (600 s) and gets a freshly provisioned password.
+The agent writes NVS only after it reads the response body, so a dropped packet on a
+first boot otherwise leaves a board that is enrolled, has no credential, and holds a
+token that can never burn again — a re-flash, in the field. Single use is intact: the
+lookup (`RETRY_LOOKUP_SQL`) matches on `used_by_device_id`, so one token still enrolls
+exactly one board forever, and its `FOR UPDATE` keeps a concurrent revoke from racing
+it. A different `device_id` on a burned token is a `409`, with the device row rolled
+back.
+
+**`broker_provisioned_at`.** Stamped only once the broker really holds the credential.
+The provisioner is a seam (`fleetforge/broker/`): `DynsecProvisioner` talks Mosquitto
+dynamic-security over MQTT, and `NullProvisioner` — selected when
+`MQTT_DYNSEC_USERNAME`/`_PASSWORD` are unset, with a startup WARNING — provisions
+nothing, because the dev broker is anonymous until `R0-sec-1`. It returns `False`, so
+the column stays NULL and `WHERE decommissioned_at IS NULL AND broker_provisioned_at IS
+NULL` is the honest reconcile list for `R0-sec-1` rather than a column that lies. A
+provisioning failure is a `503` with `Retry-After`; the enrollment is already committed
+and the grace window is what makes the retry work.
+
+Re-enrollment is an upsert: a re-flashed board legitimately enrolls again with a *new*
+token. The announced identity is overwritten, `decommissioned_at` and
+`presence_reported` are cleared (a retired board that re-enrolls is revived, and the old
+retained presence describes a session that no longer exists), and `name` and `last_seen`
+— operator-set and historical — are untouched. An ungrouped token never un-groups a
+device an operator already placed (`COALESCE`).
+
+The broker password exists in the response body and nowhere else: not in Postgres, not
+in a log line, not in the dynsec store (which keeps a hash). Losing it means using the
+grace window, or re-enrolling.
+
 ## Post-v1
 
+- **Device decommissioning** — `POST /v1/devices/{device_id}/decommission` setting
+  `decommissioned_at`, calling a new `BrokerProvisioner.delete_client`, and publishing
+  empty retained payloads to each of the device's retained topics
+  (`spec/device-protocol.md` → *Decommissioning*: "or the registry resurrects ghosts").
+  Filed here rather than in R0: enrollment does not depend on it, but nothing else
+  removes a board.
 - CLI flasher for batch/CI enrollment.
 - SoftAP captive-portal provisioning (Wi-Fi change without re-flash).
 - Per-device mTLS certs (replace token-only trust).

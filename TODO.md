@@ -109,7 +109,7 @@ audience), and **agent images are built off-box** (the ESP-IDF builder is 2–3 
 
 - [x] **R0-db-1**: Schema (P0, 0.5d) ✅ 2026-09-08
       devices (+ `link_type`, `power_class`, `parent_device_id`, `partition_layout`,
-      `ota_slot_size`), groups, enrolment tokens, admin tokens, and **`deploy_events`**
+      `ota_slot_size`), groups, enrollment tokens, admin tokens, and **`deploy_events`**
       (KPI-ready from R1 — R5 needs the history, not just the table).
       _(done 2026-09-08; reviewed; see docs/features/*)_
 
@@ -130,9 +130,10 @@ audience), and **agent images are built off-box** (the ESP-IDF builder is 2–3 
       derived presence (LWT for always_on, `last_seen` for sleepy) → Postgres + `NOTIFY`.
       _(done 2026-09-08; see docs/features/*)_
 
-- [ ] **R0-be-4**: `POST /v1/enrol` over HTTPS, not MQTT (P0, 1.5d)
+- [x] **R0-be-4**: `POST /v1/enroll` over HTTPS, not MQTT (P0, 1.5d)
       Validate token → registry entry → provision broker credential (dynsec) → burn
       token. Keeps the broker from ever authenticating a client it has not heard of.
+      _(done 2026-09-08; reviewed; see docs/features/*)_
 
 - [ ] **R0-be-5**: SSE event stream (P0, 0.5d)
       Fanned out from Postgres `LISTEN`, so it works with N API workers.
@@ -153,7 +154,7 @@ audience), and **agent images are built off-box** (the ESP-IDF builder is 2–3 
 - [ ] **R0-fw-1**: ESP32 agent, connect-only (P0, 3d)
       Ships the **flash-time immutables**: A/B partition table, rollback-enabled
       bootloader, eFuse posture — none of which can be fixed by OTA later. Network via
-      `esp_netif`; **SNTP before the first TLS handshake**; HTTPS enrol; announce /
+      `esp_netif`; **SNTP before the first TLS handshake**; HTTPS enroll; announce /
       presence / heartbeat.
 
 ### Frontend
@@ -173,7 +174,7 @@ audience), and **agent images are built off-box** (the ESP-IDF builder is 2–3 
       sleepy and slow-link modes. Build this early.
 
 - [ ] **R0-test-2**: E2E on real hardware (P0, 1d)
-      Flash → enrol → appears online in the dashboard.
+      Flash → enroll → appears online in the dashboard.
 
 ---
 

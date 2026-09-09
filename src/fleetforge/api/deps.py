@@ -26,6 +26,7 @@ from fleetforge.auth.cache import VerifiedSecretCache
 from fleetforge.auth.hashing import averify_secret, dummy_verify
 from fleetforge.auth.ratelimit import FixedWindowLimiter
 from fleetforge.auth.tokens import ADMIN_TOKEN_PREFIX, parse_token
+from fleetforge.broker import BrokerProvisioner, NullProvisioner
 from fleetforge.clock import now_utc
 from fleetforge.config import Settings, get_settings
 from fleetforge.db.base import get_sessionmaker
@@ -117,6 +118,54 @@ def login_limiter(request: Request) -> FixedWindowLimiter:
     """The per-app login rate limiter, created in `create_app()`."""
     limiter: FixedWindowLimiter = request.app.state.login_limiter
     return limiter
+
+
+def enroll_limiter(request: Request) -> FixedWindowLimiter:
+    """The per-app `/v1/enroll` rate limiter, created in `create_app()`.
+
+    A **second, distinct** instance rather than a shared one: `/v1/enroll` is
+    unauthenticated and public and does one argon2 verification per request, and a
+    fleet of boards behind one NAT rebooting together must not be able to lock the
+    operator out of `/v1/auth/login` (or the reverse).
+    """
+    limiter: FixedWindowLimiter = request.app.state.enroll_limiter
+    return limiter
+
+
+def dynsec_configured(settings: Settings) -> bool:
+    """Is a Mosquitto dynamic-security control credential configured?
+
+    Empty strings count as unset: compose interpolation of an unset variable yields
+    `""`, not absence, so `if settings.mqtt_dynsec_username` is the check and
+    `is not None` is the bug.
+    """
+    return bool(settings.mqtt_dynsec_username) and bool(settings.mqtt_dynsec_password)
+
+
+def get_broker_provisioner(settings: SettingsDep) -> BrokerProvisioner:
+    """`DynsecProvisioner` when a control credential is configured, `NullProvisioner` otherwise.
+
+    A dependency rather than a module singleton, so tests override it with
+    `app.dependency_overrides[get_broker_provisioner]` exactly as they override
+    `get_sessionmaker`. `create_app()` logs one WARNING at startup when the Null path
+    is selected — the same shape as the `ADMIN_PASSWORD_HASH` warning.
+
+    `broker.dynsec` is imported here rather than at module scope so the (common) Null
+    path does not pay for `aiomqtt`.
+    """
+    if not dynsec_configured(settings):
+        return NullProvisioner()
+
+    from fleetforge.broker.dynsec import DynsecProvisioner, mqtt_dynsec_session
+
+    return DynsecProvisioner(
+        lambda: mqtt_dynsec_session(settings),
+        role=settings.mqtt_dynsec_role,
+        timeout_s=settings.broker_command_timeout_s,
+    )
+
+
+BrokerDep = Annotated[BrokerProvisioner, Depends(get_broker_provisioner)]
 
 
 async def _touch_last_used(

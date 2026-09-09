@@ -3,7 +3,9 @@
 R0-infra-1 shipped the app factory plus `GET /v1/healthz` (liveness) and
 `GET /v1/readyz` (readiness). R0-be-1 added admin auth (`/v1/auth/*`) and the
 router/dependency layout every later endpoint copies; R0-be-2 added enrollment token
-issuance (`/v1/enrollment-tokens`); R0-be-5 adds SSE.
+issuance (`/v1/enrollment-tokens`); R0-be-4 added the device-facing `POST /v1/enroll`
+— the one **unauthenticated write** endpoint, whose credential is the token in its
+body; R0-be-5 adds SSE.
 
 **There is no CORS middleware here, and there must never be one.** The dashboard
 and the API are served from a single origin: nginx in the `frontend` container
@@ -27,7 +29,8 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from fleetforge import __version__
-from fleetforge.api.routers import auth, enrollment
+from fleetforge.api.deps import dynsec_configured
+from fleetforge.api.routers import auth, enroll, enrollment
 from fleetforge.auth.cache import VerifiedSecretCache
 from fleetforge.auth.ratelimit import FixedWindowLimiter
 from fleetforge.config import Settings, get_settings
@@ -95,14 +98,30 @@ def create_app() -> FastAPI:
         per_global=settings.login_rate_limit_global if settings else 30,
         window_s=settings.login_rate_limit_window_s if settings else 60,
     )
+    # `/v1/enroll` is unauthenticated, public and does one argon2 verification per
+    # request, so it gets its OWN bucket: a fleet behind one NAT rebooting together
+    # must not be able to lock the operator out of /v1/auth/login, or the reverse.
+    app.state.enroll_limiter = FixedWindowLimiter(
+        per_key=settings.enroll_rate_limit_per_ip if settings else 10,
+        per_global=settings.enroll_rate_limit_global if settings else 60,
+        window_s=settings.login_rate_limit_window_s if settings else 60,
+    )
     if settings is not None and settings.admin_password_hash is None:
         logger.warning(
             "ADMIN_PASSWORD_HASH is not set: /v1/auth/login will answer 503. "
             "Mint one with `just admin-password` and put the SINGLE-QUOTED line in .env."
         )
+    if settings is not None and not dynsec_configured(settings):
+        logger.warning(
+            "MQTT_DYNSEC_USERNAME/_PASSWORD are not set: enrolled devices get a broker "
+            "password nothing has been told about, and broker_provisioned_at stays NULL. "
+            "Correct until R0-sec-1 secures the broker; reconcile afterwards with "
+            "SELECT device_id FROM devices WHERE broker_provisioned_at IS NULL."
+        )
 
     app.include_router(auth.router)
     app.include_router(enrollment.router)
+    app.include_router(enroll.router)
 
     @app.get("/v1/healthz", tags=["health"])
     async def healthz() -> dict[str, str]:

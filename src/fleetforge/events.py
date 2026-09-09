@@ -42,6 +42,9 @@ NOTIFY_PAYLOAD_LIMIT = 7_500
 class EventType(StrEnum):
     """What changed. Additive only — an SSE client must ignore types it does not know."""
 
+    # Emitted by `POST /v1/enroll` (R0-be-4) before the board has ever connected, so
+    # its `online` is always false. R0-be-5 forwards it like any other.
+    DEVICE_ENROLLED = "device.enrolled"
     DEVICE_ANNOUNCE = "device.announce"
     DEVICE_PRESENCE = "device.presence"
     DEVICE_HEARTBEAT = "device.heartbeat"

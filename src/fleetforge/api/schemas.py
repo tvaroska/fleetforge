@@ -6,10 +6,14 @@ schema section inside each router.
 
 import datetime as dt
 import uuid
+from typing import Self
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from fleetforge.auth.enrollment import EnrollmentTokenStatus
+from fleetforge.auth.tokens import MAX_TOKEN_LENGTH
+from fleetforge.db.models import PowerClass
+from fleetforge.identity import is_valid_device_id
 
 
 class LoginRequest(BaseModel):
@@ -93,3 +97,98 @@ class EnrollmentTokenList(BaseModel):
     """An envelope, not a bare array, so a cursor can be added without a break."""
 
     tokens: list[EnrollmentTokenSummary]
+
+
+# ---------------------------------------------------------------------------
+# Device enrollment (R0-be-4)
+# ---------------------------------------------------------------------------
+
+
+class EnrollRequest(BaseModel):
+    """The device-facing enrollment body. **Flat, and it stays flat forever.**
+
+    `spec/device-protocol.md` → *Enrolment happens over HTTPS, not MQTT*, step 2:
+    `POST https://…/v1/enroll { token, <the announce identity payload> }` — so
+    `{"token": "ffe_…", "device_id": "…", "platform_type": "…", …}`, **not**
+    `{"token": …, "identity": {…}}`. The R0 agent is flash-baked and speaks this
+    until someone physically retrieves the board; a nested body is a recall.
+
+    `extra="ignore"` and **no field added later may ever be required**
+    (*Evolution rules*: additive changes only, both sides ignore what they do not
+    know).
+
+    Every check here runs *before* anything touches the database, which is the point:
+    `db/models.py::PowerClass` — "R0-be-4 rejects an unknown `power_class` with 400
+    before burning the enrollment token." A burn followed by a CHECK violation is a
+    token destroyed by a firmware typo, and the board then needs a re-flash to get a
+    new one. The DB CHECKs stay the backstop, never the gate.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    token: str = Field(min_length=1, max_length=MAX_TOKEN_LENGTH)
+
+    device_id: str
+    platform_type: str = Field(min_length=1, max_length=64)
+    # TEXT column, no PG enum: a board on a link nobody has invented yet still enrolls.
+    link_type: str = Field(min_length=1, max_length=32)
+    power_class: str
+    # Stored, never rejected — "the server must tolerate agents it cannot update".
+    proto: int = 1
+    fw_version: str | None = Field(default=None, max_length=64)
+    agent_version: str | None = Field(default=None, max_length=64)
+    expected_wake_interval_s: int | None = Field(default=None, gt=0)
+    parent_device_id: str | None = None
+    partition_layout: str | None = Field(default=None, max_length=64)
+    ota_slot_size: int | None = Field(default=None, gt=0)
+    capabilities: list[str] = Field(default_factory=list, max_length=32)
+
+    @field_validator("device_id", "parent_device_id")
+    @classmethod
+    def _canonical_device_id(cls, value: str | None) -> str | None:
+        """Reject a non-canonical id; never normalise one.
+
+        `mqtt_username` **is** `device_id`, and the two `%u` pattern ACLs are the
+        entire fleet authz. Lowercasing here would mean the string the caller sent and
+        the string the ACL binds to are not obviously the same string.
+        """
+        if value is None or is_valid_device_id(value):
+            return value
+        raise ValueError("device_id must be 12 lowercase hex digits (the eFuse MAC)")
+
+    @field_validator("power_class")
+    @classmethod
+    def _known_power_class(cls, value: str) -> str:
+        """Derived presence is only *defined* for `always_on` / `sleepy` (DB CHECK)."""
+        if value not in set(PowerClass):
+            raise ValueError(f"power_class must be one of {sorted(PowerClass)}")
+        return value
+
+    @model_validator(mode="after")
+    def _sleepy_needs_an_interval(self) -> Self:
+        """The `sleepy_wake_interval` CHECK, applied before the burn rather than after.
+
+        A sleepy board with no wake interval makes `2.5 × expected_wake_interval_s`
+        undefined, so it would never appear offline in the dashboard.
+        """
+        if self.power_class == PowerClass.SLEEPY and self.expected_wake_interval_s is None:
+            raise ValueError("power_class=sleepy requires a positive expected_wake_interval_s")
+        return self
+
+
+class EnrollResponse(BaseModel):
+    """Exactly the three fields `spec/device-protocol.md` step 4 promises.
+
+    `mqtt_password` exists in this object and nowhere else: not in Postgres, not in a
+    log line, not in the dynsec store (which keeps a hash). Losing it means
+    re-enrolling — see `config.enroll_retry_window_s`.
+
+    Broker host and port are deliberately absent: they are baked at flash time
+    (`spec/flows.md` Flow 1 step 4). Adding them later would be additive.
+    """
+
+    device_id: str
+    # == device_id. The `%u` pattern ACLs bind to the MQTT username, so this is a
+    # security control and not a convenience — see `broker/provisioner.py`.
+    mqtt_username: str
+    mqtt_password: str

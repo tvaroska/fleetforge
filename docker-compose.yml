@@ -221,6 +221,15 @@ services:
       # away, leaving "=19=19456". Check with:
       #     docker compose config | grep -i ADMIN_PASSWORD_HASH
       ADMIN_PASSWORD_HASH: ${ADMIN_PASSWORD_HASH:?set ADMIN_PASSWORD_HASH in .env — see `just admin-password`}
+      # NOT wired yet, on purpose: R0-sec-1 adds MQTT_DYNSEC_USERNAME /
+      # MQTT_DYNSEC_PASSWORD here (mandatory `${VAR:?}`, no default) once the
+      # dynamic-security plugin exists and there is an admin-role control client
+      # to authenticate as. Until then the broker is anonymous
+      # (mosquitto/conf.d/10-dev-anonymous.conf), the API selects
+      # `NullProvisioner`, warns once at startup, and leaves
+      # `devices.broker_provisioned_at` NULL — which is R0-sec-1's reconcile list.
+      # See the commented placeholders in .env.example.
+      #
       # Pre-wired for R0-be-6 so the object-store adapter is pure code.
       S3_ENDPOINT_URL: http://minio:9000
       S3_BUCKET: ${S3_BUCKET:-fleetforge}

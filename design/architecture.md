@@ -72,7 +72,7 @@ Three credentials, two zones, and nothing else. Devices never hold an admin cred
 | Zone | Endpoints | Credential |
 |---|---|---|
 | **Admin** | everything else | **opaque bearer token** |
-| **Device** | `POST /v1/enrol` | single-use **enrolment token** in the body |
+| **Device** | `POST /v1/enroll` | single-use **enrollment token** in the body |
 | **Device** | `GET /v1/artifact/…` | **short-lived signed URL** (signature *is* the authorization) |
 
 ### v1 admin auth — one credential type, two transports
@@ -101,7 +101,7 @@ endpoint on the public internet.
 
 - **`scopes`** — always `admin` in v1. *Frontend design* above already promises MCP a *"read-rich,
   guarded writes … scoped token"*, so the column has to exist before that is buildable.
-  Later: `read`, `deploy`, `enrol`.
+  Later: `read`, `deploy`, `enroll`.
 - **`subject`** — always `"admin"` in v1. There is no users table and no rows to manage;
   when multi-tenant arrives, subjects gain an org and nothing else changes shape.
 - **Versioned path** (`/v1/…`) so a breaking API revision can run alongside the old one,

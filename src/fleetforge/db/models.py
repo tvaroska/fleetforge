@@ -18,8 +18,8 @@ obvious from the code:
 
 2. **Spelling is `enrollment` / `enroll` (US), everywhere.** `spec/device-protocol.md`
    is the near-frozen wire contract and it says `POST /v1/enroll`. `TODO.md` and
-   `design/architecture.md` say `/v1/enrol`; that is a typo to be corrected by
-   R0-be-4, not a second spelling to support.
+   `design/architecture.md` used to say `/v1/enrol`; R0-be-4 corrected both when it
+   built the endpoint. There is one spelling, not two.
 
 3. **`enrolled_at`, `last_seen`, `at`, … are server receipt times.** Never a device's
    own `ts` (`spec/device-protocol.md` → *Clock*: a board may boot with a 1970 clock
@@ -162,7 +162,10 @@ class Device(Base):
     forever (`spec/prd.md` → *Retention*) while every enrolled device must be
     removable (`docs/features/enrollment.md`); soft delete is what satisfies both.
     Decommissioning also has to clear the device's retained MQTT topics, or the
-    registry resurrects ghosts on the next broker restart — that is R0-be-4's job.
+    registry resurrects ghosts on the next broker restart. That is **not** R0-be-4 —
+    that task only enrolls; it belongs to the decommissioning task filed in
+    `docs/features/enrollment.md` → *Post-v1*, together with
+    `BrokerProvisioner.delete_client`.
 
     There is deliberately no `devices.enrollment_token_id`: provenance is
     `enrollment_tokens.used_by_device_id`, one direction only, so the two tables are

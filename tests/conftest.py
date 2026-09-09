@@ -16,8 +16,10 @@ nothing or poison every later test in the session.
 """
 
 import asyncio
+import contextlib
+import logging
 import os
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 
 import httpx
@@ -166,6 +168,64 @@ async def session(engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
             await async_session.close()
             if transaction.is_active:
                 await transaction.rollback()
+
+
+class _RecordCollector(logging.Handler):
+    """Keeps every record it is handed. Levels are decided by the logger, not here."""
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.NOTSET)
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+
+@contextlib.contextmanager
+def capture_logs(name: str = "fleetforge") -> Iterator[list[logging.LogRecord]]:
+    """Collect records emitted under `name`. **Use this instead of `caplog`.**
+
+    Two things in this suite silently break `caplog`, and both of them turn an
+    assertion like "the broker password is never logged" into a **vacuous pass**, which
+    is worse than having no test:
+
+    * `api/main.py::configure_logging` calls `logging.basicConfig(force=True)`, which
+      removes every handler on the **root** logger — `caplog`'s included.
+    * `alembic/env.py` calls `fileConfig(...)`, whose default is
+      `disable_existing_loggers=True`. Running the migrations (the `engine` fixture
+      does, once per session) therefore sets `disabled = True` on every `fleetforge.*`
+      logger that has been imported by then, and they emit nothing for the rest of the
+      run. Production is unaffected: the container migrates in a **separate**
+      `alembic upgrade` process (`docker/entrypoint.sh`), not in-process.
+
+    So this attaches to the package logger, lowers its level, and un-disables the
+    subtree for the duration — restoring all three afterwards. Every assertion using it
+    should also assert that *something* was captured.
+    """
+    logger = logging.getLogger(name)
+    handler = _RecordCollector()
+    previous_level = logger.level
+
+    prefix = f"{name}."
+    silenced = [
+        existing
+        for logger_name, existing in logging.Logger.manager.loggerDict.items()
+        if isinstance(existing, logging.Logger)
+        and (logger_name == name or logger_name.startswith(prefix))
+        and existing.disabled
+    ]
+
+    logger.addHandler(handler)
+    logger.setLevel(logging.DEBUG)
+    for existing in silenced:
+        existing.disabled = False
+    try:
+        yield handler.records
+    finally:
+        for existing in silenced:
+            existing.disabled = True
+        logger.setLevel(previous_level)
+        logger.removeHandler(handler)
 
 
 # ---------------------------------------------------------------------------

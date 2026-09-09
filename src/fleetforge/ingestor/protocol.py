@@ -13,19 +13,18 @@ fleet-visibility outage caused by one board's firmware bug.
 
 import json
 import logging
-import re
 from dataclasses import dataclass
 from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from fleetforge.identity import DEVICE_ID_RE
+
 logger = logging.getLogger(__name__)
 
-# The same rule as the `devices.device_id` CHECK — the eFuse MAC, lowercase hex, no
-# separators. `db/models.py::Device`: "The format CHECK is therefore a security
-# control, not tidiness"; it is also the MQTT username the two `%u` pattern ACLs
-# depend on, so a malformed one must never reach the write path.
-DEVICE_ID_RE = re.compile(r"^[0-9a-f]{12}$")
+# `DEVICE_ID_RE` — the eFuse MAC rule, and why it is a security control — now lives
+# in `fleetforge.identity`: `POST /v1/enroll` (R0-be-4) must apply the same rule and
+# the API may not import from `fleetforge.ingestor`.
 
 TOPIC_PREFIX = ("ff", "v1", "d")
 

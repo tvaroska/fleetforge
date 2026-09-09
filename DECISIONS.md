@@ -6,6 +6,57 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-08 — Enrollment: commit, then provision; and the grace window (R0-be-4)
+
+- **Verify the token secret before calling `BURN_SQL`.** The statement keys on `id`
+  alone, and an `ffe_` token's id is not a secret — it is in the issuance response and
+  in the api log. Burning before `averify_secret` would let anyone who has read a log
+  line destroy every outstanding token: a bench full of boards that will not enroll,
+  with the dashboard reporting them `used` and nothing failing loudly. Order is
+  `require_admin`'s: parse → row → `dummy_verify` on a miss → verify → burn.
+- **The device row is INSERTed before the burn, in the same transaction**, because
+  `enrollment_tokens.used_by_device_id` is a real FK. A refused burn rolls both back.
+- **The transaction commits BEFORE the broker is provisioned.** `db/models.py::Device`
+  put `broker_provisioned_at` in the schema "so provisioning can be reconciled and
+  retried idempotently after a partial enrollment" — the schema already chose this.
+  Holding a row lock and a pooled connection across an MQTT round-trip turns a broker
+  outage into `idle in transaction` on a 256 M container. The inverse failure —
+  a broker credential for a device that is not enrolled — is prevented by the order,
+  not by a transaction.
+- **A burned token may be re-presented by the SAME `device_id` for 600 s**
+  (`config.enroll_retry_window_s`) and gets a freshly provisioned password. The device
+  writes NVS only after it reads the response body, so a dropped packet on first boot
+  otherwise leaves a board that is enrolled and has no credential, holding a token that
+  can never burn again — a re-flash, in the field. Single use is intact: the lookup
+  matches on `used_by_device_id`, so one token still enrolls exactly one board forever,
+  and `FOR UPDATE` keeps a concurrent revoke from racing it. **PROPOSED for
+  `spec/prd.md` → *Security & data posture*** (protected, so not written there): state
+  the grace window next to "cannot be replayed from a recovered board".
+- **`mqtt_username` is `device_id`, unnormalised.** The `%u` pattern ACLs are the entire
+  fleet authz, so the eFuse-MAC format check runs before any credential exists and a
+  non-canonical `device_id` is rejected rather than lowercased. `DEVICE_ID_RE` moved to
+  `fleetforge/identity.py` — the API must not import from `fleetforge.ingestor`, same
+  precedent as `clock.py` leaving `api/deps.py`.
+- **`NullProvisioner` leaves `broker_provisioned_at` NULL on purpose.** The dev broker
+  is anonymous until `R0-sec-1`, and `WHERE broker_provisioned_at IS NULL` is then the
+  honest reconcile list rather than a column that lies. Selection is by the presence of
+  `MQTT_DYNSEC_USERNAME`/`_PASSWORD`, with a startup WARNING — the same shape as
+  `ADMIN_PASSWORD_HASH`.
+- **Dynsec gotchas, all verified against Mosquitto 2.0.22's protocol:** responses come
+  back only to the issuing client on `$CONTROL/dynamic-security/v1/response`, so
+  subscribe before publishing; an error is a *key in the response body*, not a transport
+  failure; `correlationData` is echoed and must be matched, or a stale reply from a
+  timed-out command is read as this one's success; the dynsec client id carries a random
+  suffix, because two API workers sharing one kick each other off mid-command and the
+  symptom is an intermittent 503. `clientid` is deliberately not bound to the credential:
+  `spec/device-protocol.md` does not specify the agent's client id and `R0-fw-1` is
+  unwritten. **PROPOSED for `spec/device-protocol.md`**: state that the agent connects
+  with `client_id = device_id`, which would make that binding free hardening later.
+- **`ingestor/store.py` finally has rows to update.** Until this task, nothing in the
+  codebase inserted a device, so every published message was dropped by design.
+
+---
+
 ## 2026-09-08 — Ingest: derived presence, and the retained-replay trap (R0-be-3)
 
 - **`last_seen` advances only on a live message that is not `presence{online:false}`.**

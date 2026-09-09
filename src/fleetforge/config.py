@@ -80,6 +80,36 @@ class Settings(BaseSettings):
     # needs no number — it is the retained LWT value.
     presence_tolerance: float = 2.5
 
+    # --- Device enrollment (R0-be-4) -----------------------------------------
+    # How long after a burn the SAME device_id may re-present the SAME token and get
+    # a freshly provisioned credential. Recovers a lost enrollment response (the
+    # device writes NVS only after it reads the body); it can never enroll a second
+    # board, because the lookup matches on `used_by_device_id`.
+    # See DECISIONS.md 2026-09-08 -> "Enrollment: commit, then provision".
+    enroll_retry_window_s: int = 600
+
+    # `/v1/enroll` is unauthenticated, public, and does one argon2 verification per
+    # request. Same two-bucket shape and the same reason as the login limiter
+    # (auth/ratelimit.py); the per-IP bucket is generous because a fleet behind one
+    # NAT may reboot together, and only FAILURES are counted. The window is shared
+    # with login (`login_rate_limit_window_s`) — one window, one place.
+    enroll_rate_limit_per_ip: int = 10
+    enroll_rate_limit_global: int = 60
+
+    # --- Broker credential provisioning (R0-be-4 / R0-sec-1) ------------------
+    # The Mosquitto dynamic-security admin credential. BOTH unset (the default, and
+    # the dev stack) selects `broker.NullProvisioner`: the dev broker is anonymous
+    # until R0-sec-1 loads the plugin. Never a real value in `.env.example`, and
+    # never logged.
+    mqtt_dynsec_username: str | None = None
+    mqtt_dynsec_password: str | None = None
+    # The dynsec role carrying the two `%u` pattern ACLs. R0-sec-1 creates a role
+    # with THIS EXACT NAME in `dynamic-security.json`; if the two disagree,
+    # `createClient` fails and every enrollment answers 503.
+    mqtt_dynsec_role: str = "device"
+    # One dynsec round-trip must not hold an API worker forever.
+    broker_command_timeout_s: float = 5.0
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

@@ -52,6 +52,36 @@ BURN_SQL = text(
     """
 )
 
+# The grace-window lookup that recovers a LOST ENROLLMENT RESPONSE (R0-be-4 §2.4).
+#
+# NOT a second burn, and NOT a weakening of single use: it can only ever match the
+# device the token was ALREADY burned for (`used_by_device_id = :device_id`), so a
+# token still enrolls exactly one board, forever. What it buys is the case the wire
+# cannot avoid — the agent writes its broker credential to NVS only *after* it reads
+# the response body, so a dropped packet on a first boot over flaky Wi-Fi otherwise
+# leaves a board that is enrolled server-side, has no credential, and holds a token
+# that can never burn again. That is a re-flash, in the field.
+#
+# `FOR UPDATE` matters: it takes the same row lock the burn would, so a concurrent
+# `POST …/revoke` either lands before this and disqualifies the row (`revoked_at IS
+# NULL` fails), or blocks until the enrollment commits. Without it this is a TOCTOU
+# against revocation.
+#
+# The window is `config.enroll_retry_window_s` (600 s), passed in — one number, one
+# place, and the database clock stays the authority for both statements.
+RETRY_LOOKUP_SQL = text(
+    """
+    SELECT id
+      FROM enrollment_tokens
+     WHERE id = :token_id
+       AND used_by_device_id = :device_id
+       AND revoked_at IS NULL
+       AND expires_at > now()
+       AND used_at > now() - make_interval(secs => :window_s)
+       FOR UPDATE
+    """
+)
+
 # Conditional for the same reason `admin_tokens`' revoke is (`api/routers/auth.py`):
 # a second revoke must be a no-op, not a moved timestamp. `RETURNING id` lets the
 # caller tell "already revoked" (zero rows) from "unknown id" without a pre-read.
