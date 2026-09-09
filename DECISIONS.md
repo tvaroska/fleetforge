@@ -6,6 +6,51 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-08 — Object store: one Protocol, two adapters, and the prefix is a security boundary (R0-be-6)
+
+- **One `ObjectStore` Protocol, two real adapters, selected by configuration** — the same
+  shape as `fleetforge.broker` (`BrokerProvisioner` / Null / Dynsec). MinIO (S3) in dev
+  and for V2 self-hosting, GCS in production. Both SDKs are imported **lazily inside the
+  factory**, so neither is on the API's import path and an unconfigured deployment pays
+  nothing. Four verbs only — `put`, `get`, `signed_url`, `delete`. **No `list`**: nothing
+  in R1 needs it, and it is the one verb an IAM prefix condition cannot constrain (see
+  below), so adding it would silently widen the grant.
+- **`GCS_PREFIX` is a security boundary, not tidiness.** `gs://btvaroska` is *shared* —
+  it holds this estate's `.env` backups under `secrets/`, plus the boris podcast audio.
+  Object keys arrive from an HTTP request body (R1's upload), so the prefix is confined
+  **twice and independently**: `resolve_key()` in-process, and an IAM condition on the
+  service account (`resource.name.startsWith(".../objects/fleetforge/")`). Either alone
+  is one bug away from writing into `secrets/`.
+- **`resolve_key()` rejects, never normalises** — the rule `identity.py` already
+  established for device IDs. `..`, a leading `/`, `//`, backslashes, control or
+  non-ASCII bytes, `?`/`#`, over 512 chars: all `ObjectKeyError`, which is a `ValueError`
+  and deliberately **not** an `ObjectStoreError`, because a bad key is a 400 (the caller
+  is wrong) while everything else is a 404 or a 503 (we are). Path normalisation is how
+  traversal bugs get written: `a/../../b` has an obvious "sane" reading, and acting on it
+  is exactly the mistake.
+- **Two S3 endpoints, because a presigned URL signs the `Host` header.**
+  `S3_ENDPOINT_URL` (`minio:9000`) is what the API talks to; `S3_PUBLIC_ENDPOINT_URL`
+  (`localhost:9000`) is what URLs are *signed against*, because the device is not on the
+  compose network. Rewriting the host after signing invalidates the signature — there is
+  no post-hoc fix, so the split has to exist at signing time. The container selftest
+  therefore cannot fetch the URL it prints, and says so instead of failing.
+- **Both backends configured is an error, not a precedence rule.** "Which bucket did my
+  firmware go to?" must not be answered by reading a factory. Unset one or set
+  `OBJECT_STORE_BACKEND`. Likewise **no ADC fallback for GCS**: ADC on a GCE VM carries
+  no private key (so no V4 signing) and resolves to the project-wide compute default SA —
+  the exact credential the prefix condition exists to avoid. Missing credentials fail
+  loudly at construction.
+- **Unconfigured is a WARNING plus a 503, never a startup crash.** `create_app()` stays
+  constructible with no environment at all (the R0-be-1/R0-be-4 precedent); artifact
+  routes will answer 503 until storage is configured.
+- **GCS has never been round-tripped against the real service.** `btvaroska` inherits
+  `constraints/iam.disableServiceAccountKeyCreation`, so the key the adapter requires
+  cannot be minted, and the keyless alternative needs an IAM grant this task was not
+  authorised to make. The SA and its conditional binding exist; the credential does not.
+  **Do not read a green dev stack as evidence that production storage works** — the
+  options (impersonation + `signBlob`, or a policy exemption) are written up in
+  `docs/runbooks/artifact-storage.md`, and one of them is a prerequisite for R1.
+
 ## 2026-09-08 — SSE: one listener per worker, and a reconnect ends every stream (R0-be-5)
 
 - **One dedicated asyncpg connection per API process, never a pooled one.** `LISTEN`

@@ -2,6 +2,10 @@
 .env
 .env.*
 !.env.example
+# Service-account keys and anything else with a private key in it. A committed
+# GCS key is a full compromise of gs://btvaroska, which also holds this estate's
+# .env backups. See docs/runbooks/artifact-storage.md.
+secrets/
 
 # Python
 __pycache__/

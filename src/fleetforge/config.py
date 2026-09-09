@@ -15,6 +15,7 @@ Environment names are the field names uppercased and unprefixed (`DATABASE_URL`,
 """
 
 from functools import lru_cache
+from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -132,6 +133,48 @@ class Settings(BaseSettings):
     # silently dead TCP socket fires no termination callback, and the symptom is an
     # SSE stream that is connected and permanently empty.
     events_listener_ping_s: float = 30.0
+
+    # --- Object store (R0-be-6) ----------------------------------------------
+    # None means "infer from what is configured" — see storage/factory.py. Set it
+    # explicitly only to be unambiguous; BOTH groups configured is always an error.
+    object_store_backend: Literal["s3", "gcs"] | None = None
+
+    # S3 / MinIO. THESE FOUR NAMES ARE FIXED by the `api` service block in
+    # docker-compose.yml, which R0-infra-1 pre-wired for this task. Renaming one
+    # silently unconfigures the container.
+    s3_endpoint_url: str | None = None
+    s3_bucket: str | None = None
+    s3_access_key: str | None = None
+    s3_secret_key: str | None = None
+    # The endpoint a DEVICE can reach. A presigned URL signs the Host header, so a URL
+    # generated against the container-internal endpoint (`http://minio:9000`) cannot be
+    # rewritten afterwards — the signature would no longer match. Defaults to
+    # `s3_endpoint_url`, which is right only when the two are the same host.
+    s3_public_endpoint_url: str | None = None
+    # Mandatory for botocore's SigV4 even against MinIO, which accepts any value.
+    s3_region: str = "us-east-1"
+    # The dev MinIO bucket is dedicated to fleetforge; there is nothing to share it
+    # with, so no prefix. GCS is the opposite case — see `gcs_prefix`.
+    s3_prefix: str = ""
+
+    # GCS. gs://btvaroska is SHARED (secrets/, podcasts/, audio/, backup/ …), so the
+    # prefix is a containment boundary and defaults to the right thing.
+    gcs_bucket: str | None = None
+    gcs_prefix: str = "fleetforge/"
+    # Path to the service-account JSON key. REQUIRED for the GCS backend and never
+    # defaulted to ADC: ADC on a GCE VM cannot sign a V4 URL (no private key) and would
+    # silently use the project-wide compute default SA. Never committed — `secrets/` is
+    # gitignored; see docs/runbooks/artifact-storage.md.
+    gcs_credentials_file: str | None = None
+
+    # How long a signed artifact URL lives. 30 min = 2x spec/prd.md's degraded-link
+    # deploy budget (15 min), so a range-resumed download cannot outlive its own URL.
+    # PROPOSED for spec/prd.md -> Requirements & targets.
+    signed_url_ttl_s: int = 1800
+    # `get()` loads the whole object into a 256 M container and spec/prd.md caps an
+    # artifact at 1.9 MB; this is the verification path, not a streaming path.
+    object_get_max_bytes: int = 8 * 1024 * 1024
+    object_store_timeout_s: float = 30.0
 
 
 @lru_cache(maxsize=1)

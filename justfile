@@ -71,6 +71,21 @@ migrate:
 admin-password:
     PYTHONPATH=src uv run python -m fleetforge.auth hash-password
 
+# MinIO on its own. `just up` starts it too; this is the short path for the
+# object-store tests and `just storage-check`, which need nothing else running.
+minio-up:
+    docker compose up -d minio minio-init
+    @until curl -fsS http://localhost:${FF_MINIO_PORT:-9000}/minio/health/live >/dev/null 2>&1; do sleep 1; done
+
+# Round-trip the configured object store: put / get / signed_url / delete.
+# PYTHONPATH=src for the same reason as `admin-password` — the project is
+# deliberately not installed as a package. Prints the bucket, never a credential.
+#     just storage-check                       # the backend the environment selects
+#     just storage-check --backend gcs         # force one
+#     just storage-check --ttl 5 --keep        # a short-lived URL, object left behind
+storage-check *args:
+    PYTHONPATH=src uv run python -m fleetforge.storage selftest {{args}}
+
 lint:
     uv run ruff check src/ tests/ alembic/
     uv run ruff format --check src/ tests/ alembic/

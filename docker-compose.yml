@@ -235,6 +235,23 @@ services:
       S3_BUCKET: ${S3_BUCKET:-fleetforge}
       S3_ACCESS_KEY: ${MINIO_ROOT_USER:-fleetforge}
       S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-fleetforge-dev-only}
+      # A presigned URL SIGNS THE HOST HEADER, so the URL a device is handed must be
+      # generated against an endpoint reachable from OUTSIDE this network — the host's
+      # published MinIO port in dev. Rewriting the host after signing invalidates the
+      # signature, and the failure only shows up on a real board: from inside the
+      # compose network `http://minio:9000` works perfectly.
+      S3_PUBLIC_ENDPOINT_URL: http://localhost:${FF_MINIO_PORT:-9000}
+      # NOT wired: production (R0-infra-3 / R1) selects the GCS backend instead, with
+      #     GCS_BUCKET: btvaroska
+      #     GCS_PREFIX: fleetforge/            # gs://btvaroska is SHARED — see below
+      #     GCS_CREDENTIALS_FILE: /run/secrets/fleetforge-artifacts.json
+      # and the service-account key mounted read-only. Two things to get right there:
+      # the key is granted objectAdmin under an IAM CONDITION limiting it to
+      # `…/objects/fleetforge/…` (the bucket also holds this estate's secrets/ backups
+      # and the boris podcast audio), and THE CONTAINER RUNS AS NON-ROOT `appuser`, so
+      # a 0600 root-owned key mounted in is unreadable — mount it 0644 or chown it.
+      # Recipe and rotation: docs/runbooks/artifact-storage.md. Nothing in this repo's
+      # compose mounts a real key, and none is ever committed.
     # No published host port: the only way in is the frontend's nginx.
     networks:
       - backend

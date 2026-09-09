@@ -20,6 +20,71 @@ Size limits, deploy-duration targets and the confirm-timeout default:
 [prd.md](../../spec/prd.md) → *Requirements & targets*. Channel split and signed URLs:
 [design/architecture.md](../../design/architecture.md) → *Transport*.
 
+**Storage is already in place** (R0-be-6): `fleetforge.storage` is the
+`put`/`get`/`signed_url`/`delete` seam that R1-BE-1 uploads into and R1-BE-2 hands to a
+device as a short-lived signed URL — MinIO in dev, GCS in production, chosen by
+configuration. See *Artifact object store (R0-be-6)* below.
+
+## Phase 0: R0 — where the bytes live
+
+### Artifact object store (R0-be-6)
+
+`fleetforge.storage` is the third adapter seam in the codebase, the same shape as
+`fleetforge.broker`: one `ObjectStore` `Protocol` with four verbs (`put`, `get`,
+`signed_url`, `delete`), an error taxonomy that decides the caller's HTTP status, two
+real adapters in sibling modules (`storage/s3.py` → MinIO and any S3, `storage/gcs.py`
+→ `gs://btvaroska/fleetforge/`), and selection in `storage/factory.py` behind
+`api/deps.get_object_store`. Nothing in R0 calls it; R1-BE-1 (upload), R1-BE-2 (`stage`
+carrying a URL) and R2's pruning all do, and getting artifact-URL authorization wrong is
+cheapest to fix before any of them exist.
+
+Both SDKs are imported **inside** the factory branch that needs them and every network
+call runs in `asyncio.to_thread` under an `asyncio.timeout` — the SDKs are blocking, and
+neither `aioboto3` nor `gcloud-aio-storage` earns a dependency for a path that runs a
+handful of times per deploy. `signed_url` is `async def` anyway, even though V4 signing
+is local CPU, so a future IAM-`signBlob` backend is not a Protocol change.
+
+**There are four verbs and no `list`.** `list` is also the one verb an IAM prefix
+condition cannot constrain, so adding it would silently widen the production grant.
+
+**The prefix is confined twice, independently.** `gs://btvaroska` is a *shared* bucket —
+it holds this estate's `.env` backups under `secrets/` and the boris podcast audio — and
+object keys arrive from an HTTP request body. So `storage/objectstore.resolve_key()`
+**rejects and never repairs** (`..`, a leading `/`, `//`, backslashes, control or
+non-ASCII bytes, `?`/`#`, over 512 characters), the rule `identity.py` established for
+device IDs and for the same reason: a normalised key is a string two readers can read
+differently. Independently, the production service account holds `objectAdmin` under an
+IAM condition on `…/objects/fleetforge/…`. Either alone is one bug away from writing
+next to `secrets/`; the condition is also what makes a signed URL for an out-of-prefix
+object worthless, since GCS evaluates the *signer's* permissions at redemption. A bad
+key raises `ObjectKeyError`, which is a `ValueError` and deliberately not an
+`ObjectStoreError` — the caller is wrong, so it is a 4xx, and retrying it is pointless.
+
+**A presigned S3 URL signs the `Host` header, so there are two S3 endpoints.**
+`S3_ENDPOINT_URL` (`minio:9000`) is what the API reads and writes through;
+`S3_PUBLIC_ENDPOINT_URL` (`localhost:9000` in dev) is what URLs are *signed against*,
+because the device is not on the compose network and rewriting the host after signing
+invalidates the signature. There is no post-hoc fix, which is why the split exists at
+signing time and why a unit test asserts the generated URL's host — the failure works
+perfectly from inside the network and only shows up on a real board.
+
+**The GCS half has never been round-tripped against the real service.** `btvaroska`
+inherits `constraints/iam.disableServiceAccountKeyCreation`, so the service-account key
+the adapter requires cannot be minted; the service account and its conditional binding
+exist, the credential does not. The adapter deliberately has **no ADC fallback** —
+Application Default Credentials on a GCE VM carry no private key (so no V4 signing) and
+resolve to the project-wide compute default SA, the exact credential the prefix
+condition exists to avoid — so a missing key file fails loudly at construction. Closing
+this is a prerequisite for R1; the two options (impersonation + `signBlob`, or an org
+policy exemption) are in
+[runbooks/artifact-storage.md](../runbooks/artifact-storage.md).
+
+Operationally: `python -m fleetforge.storage selftest` (`just storage-check`) round-trips
+whichever backend the environment selects and prints the bucket and prefix but never a
+credential. Unconfigured storage is one startup WARNING plus a 503 at use time, never a
+crash — `create_app()` stays constructible with no environment at all — and both
+backends configured at once is refused rather than resolved by a precedence rule.
+
 ## The update transaction (4-verb contract, from design/architecture.md)
 
 `stage → apply → confirm → rollback` — server orchestrates, never knows *how* **nor when**.

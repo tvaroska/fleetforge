@@ -250,10 +250,24 @@ def settings_for_tests(**overrides: object) -> Settings:
     The database URL is deliberately unusable: every app fixture overrides
     `get_sessionmaker`, so anything that reaches for this URL is a bug worth a loud
     connection error rather than a silent write to the developer's dev database.
+
+    **Every object-store field is nulled**, because `Settings` still reads `.env` for
+    anything not passed here and `.env.example` ships `S3_ENDPOINT_URL=…`. Without
+    these, "no backend configured → 503" passes on a machine with no `.env` and fails
+    on a developer's box — or, worse, the reverse. Same family of trap as `capture_logs`
+    above.
     """
     values: dict[str, object] = {
         "database_url": "postgresql+asyncpg://unused:unused@127.0.0.1:1/unused",
         "admin_password_hash": TEST_PASSWORD_HASH,
+        "object_store_backend": None,
+        "s3_endpoint_url": None,
+        "s3_bucket": None,
+        "s3_access_key": None,
+        "s3_secret_key": None,
+        "s3_public_endpoint_url": None,
+        "gcs_bucket": None,
+        "gcs_credentials_file": None,
     }
     values.update(overrides)
     return Settings(**values)  # type: ignore[arg-type]

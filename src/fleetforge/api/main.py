@@ -6,7 +6,9 @@ router/dependency layout every later endpoint copies; R0-be-2 added enrollment t
 issuance (`/v1/enrollment-tokens`); R0-be-4 added the device-facing `POST /v1/enroll`
 — the one **unauthenticated write** endpoint, whose credential is the token in its
 body; R0-be-5 added the SSE event stream (`GET /v1/events`) and the fleet read model
-(`GET /v1/devices`) it tells clients to re-read.
+(`GET /v1/devices`) it tells clients to re-read. R0-be-6 added the artifact object-store
+seam (`ObjectStoreDep`): no route uses it yet — R1 does — so its only presence here is
+one startup WARNING when neither backend is configured.
 
 **The lifespan owns one background task**: the `ff_events` `LISTEN` connection
 (`api/eventstream.py::PostgresEventListener`), one per API process, feeding the
@@ -45,6 +47,7 @@ from fleetforge.auth.cache import VerifiedSecretCache
 from fleetforge.auth.ratelimit import FixedWindowLimiter
 from fleetforge.config import Settings, get_settings
 from fleetforge.db.base import asyncpg_dsn, get_sessionmaker
+from fleetforge.storage.factory import object_store_configured
 
 logger = logging.getLogger(__name__)
 
@@ -161,6 +164,12 @@ def create_app() -> FastAPI:
         logger.warning(
             "ADMIN_PASSWORD_HASH is not set: /v1/auth/login will answer 503. "
             "Mint one with `just admin-password` and put the SINGLE-QUOTED line in .env."
+        )
+    if settings is not None and not object_store_configured(settings):
+        logger.warning(
+            "no object store configured (S3_* or GCS_*): artifact upload and deploy (R1) "
+            "will answer 503. The dev stack sets S3_* on the api service; production sets "
+            "GCS_BUCKET + GCS_CREDENTIALS_FILE. Round-trip it with `just storage-check`."
         )
     if settings is not None and not dynsec_configured(settings):
         logger.warning(

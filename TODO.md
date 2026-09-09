@@ -3,7 +3,8 @@
 **Goal:** Self-hosted OTA firmware management for embedded fleets (ESP32 first) — a bad
 build is caught before the fleet, and any device that gets one recovers itself.
 **Updated:** 2026-09-08
-**Focus:** R0 (Enroll a board) active · pre-code, nothing implemented yet.
+**Focus:** R0 (Enroll a board) active · backend landed (schema, compose stack, admin auth,
+enrollment tokens, ingest, `/v1/enroll`, SSE) · frontend, firmware and broker authz next.
 
 <!-- Counters: spec=1 infra=4 db=1 be=6 fe=3 sec=1 fw=1 test=2 -->
 
@@ -153,10 +154,36 @@ audience), and **agent images are built off-box** (the ESP-IDF builder is 2–3 
       Gotcha carried forward: httpx's `ASGITransport` buffers, so SSE tests drive the ASGI
       app directly. See docs/features/*)_
 
-- [ ] **R0-be-6**: Object-store adapter (P0, 1d)
+- [x] **R0-be-6**: Object-store adapter (P0, 1d)
       `put` / `get` / `signed_url` / `delete`. **GCS** backend with a service-account key
       scoped to `gs://btvaroska/fleetforge/`; **MinIO** behind the same interface for the
-      dev stack and V2 self-hosting.
+      dev stack and V2 self-hosting. One `ObjectStore` Protocol, two adapters
+      (`storage/s3.py`, `storage/gcs.py`), selection in `storage/factory.py`,
+      `ObjectStoreDep` in `api/deps.py` (no R0 route uses it — R1 does), and
+      `just storage-check` (`python -m fleetforge.storage selftest`) as both the T2
+      harness and the ops answer to "can this container reach the artifact store?".
+      Nothing in `spec/` touched; two proposals (signed-URL TTL 30 min, `get()` cap
+      8 MiB) recorded in `DECISIONS.md` instead.
+      _(done 2026-09-08; reviewed; verified: 289 tests green with
+      `tests/test_object_store_minio.py` **running**, not skipped, plus ruff/format/mypy
+      and `just stack-check` clean; `just storage-check` on the host → put / get
+      (sha256 match) / signed URL fetched over HTTP / delete / `ObjectNotFound` /
+      idempotent second delete, `SELFTEST OK`; `--ttl 5 --keep` URL → 200 then 403
+      `Request has expired` after 7 s; `../escape.bin`, `/abs.bin`, `a/../../b.bin`,
+      `a//b.bin` all rejected before any backend call and `ls -R /data` inside MinIO
+      showed nothing outside the bucket prefix; inside the api container the selftest
+      prints a URL signed against `localhost:9000` (not `minio:9000`) that returns 200 /
+      4096 bytes when curled from the host. `fleetforge:dev` 320 MB after the two SDKs.
+      Gotchas carried forward: (1) a presigned URL signs the Host header, hence the
+      `S3_ENDPOINT_URL` / `S3_PUBLIC_ENDPOINT_URL` split — the container selftest cannot
+      fetch the URL it prints and says so; (2) `objectAdmin` under a prefix IAM condition
+      cannot `storage.objects.list` (list is bucket-level), so a 403 on
+      `gcloud storage ls` is correct; (3) no ADC fallback — GCS needs a key file or it
+      fails at construction. **GCS was never round-tripped**: `btvaroska` inherits
+      `constraints/iam.disableServiceAccountKeyCreation`, so the key cannot be minted —
+      the SA and its conditional binding exist, the credential does not, T2 AC5/AC6 are
+      unexecuted, and closing this is a prerequisite for R1
+      (`docs/runbooks/artifact-storage.md` → BLOCKED). See docs/features/*)_
 
 ### Security
 

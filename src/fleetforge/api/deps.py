@@ -32,6 +32,7 @@ from fleetforge.clock import now_utc
 from fleetforge.config import Settings, get_settings
 from fleetforge.db.base import get_sessionmaker
 from fleetforge.db.models import AdminToken
+from fleetforge.storage import ObjectStore, ObjectStoreConfigError
 
 logger = logging.getLogger(__name__)
 
@@ -178,6 +179,35 @@ def get_broker_provisioner(settings: SettingsDep) -> BrokerProvisioner:
 
 
 BrokerDep = Annotated[BrokerProvisioner, Depends(get_broker_provisioner)]
+
+
+def get_object_store(settings: SettingsDep) -> ObjectStore:
+    """The configured artifact store, or a 503 that does not say what the credential is.
+
+    A plain dependency rather than something cached on `app.state`, so
+    `dependency_overrides[get_object_store]` works exactly as it does for
+    `get_broker_provisioner`. The cost that matters — building the SDK client — is
+    cached inside the factory closure, not here.
+
+    `storage.factory` is imported lazily so `create_app()` does not pull boto3 and
+    google-cloud-storage into a 256 M container that may never serve an artifact.
+
+    Nothing in R0 depends on this; R1-BE-1/2/3 do.
+    """
+    from fleetforge.storage.factory import create_object_store
+
+    try:
+        return create_object_store(settings)
+    except ObjectStoreConfigError as exc:
+        # The reason names buckets and settings, so it goes to the log, not the body.
+        logger.error("object store unavailable: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="object store not configured",
+        ) from exc
+
+
+ObjectStoreDep = Annotated[ObjectStore, Depends(get_object_store)]
 
 
 async def _touch_last_used(

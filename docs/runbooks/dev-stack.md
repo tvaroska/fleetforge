@@ -222,3 +222,40 @@ is a 401, with no restart and no waiting.
 Five failed logins in 60 s from one client IP (or 30 across all of them) return 429
 until the window passes; the counter is per API process, so `docker compose restart
 api` clears it.
+
+## Object storage
+
+The dev stack runs MinIO with a `fleetforge` bucket created at startup by the
+`minio-init` one-shot. Round-trip it without booting the whole stack:
+
+```bash
+just minio-up && just storage-check     # put → get → signed URL → delete, SELFTEST OK
+```
+
+Full details, the GCS side and the provisioning recipe:
+[artifact-storage.md](artifact-storage.md).
+
+**The signed URL's host is `localhost:9000`, never `minio:9000`.** A presigned S3 URL
+signs the `Host` header, so the URL cannot be rewritten after signing — which is why the
+`api` service sets *two* endpoints: `S3_ENDPOINT_URL=http://minio:9000` for its own I/O
+and `S3_PUBLIC_ENDPOINT_URL=http://localhost:${FF_MINIO_PORT}` for the URLs it hands out.
+Run the selftest inside the container and it says it could not fetch the URL it printed:
+
+```bash
+docker compose exec -T api python -m fleetforge.storage selftest
+```
+
+That is correct — `localhost:9000` inside the api container is that container's own
+loopback. Copy the printed URL and `curl` it from the host; you get 200. A **403 or 404**
+would be a real failure (bad signature, expired, or no permission); a **connection
+refused from inside the container** is the design working.
+
+Two more things worth knowing before you lose an hour:
+
+* **`.env` holds the HOST values** (`S3_ENDPOINT_URL=http://localhost:9000`), used by
+  `just storage-check` and the object-store tests. The containers get their own values
+  from `docker-compose.yml`. Same trap as `DATABASE_URL`: never add `env_file: .env` to
+  the `api` service.
+* **`tests/test_object_store_minio.py` skips itself** when nothing answers on
+  `localhost:9000`. A green `just test` therefore does *not* mean the real backend was
+  exercised — run `just minio-up` first, and check the run does not say `3 skipped`.
