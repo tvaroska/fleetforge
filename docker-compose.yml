@@ -106,14 +106,43 @@ services:
   # Broker. Reachable ONLY through Traefik's `mqtt` entrypoint — no host port.
   # That is deliberate: it makes the dev path and the prod path the same path.
   # ---------------------------------------------------------------------------
+  # One-shot: creates dynamic-security.json + the roles/clients the services
+  # need, before the broker starts. Idempotent; safe on every `up`.
+  # `mosquitto_ctrl dynsec init` is the only subcommand that works on a file, so
+  # the script runs a throwaway broker on 127.0.0.1:1884 to apply the rest.
+  mosquitto-init:
+    image: eclipse-mosquitto:2.0.22
+    container_name: fleetforge-mosquitto-init
+    entrypoint: ["sh", "/bootstrap.sh"]
+    environment:
+      MOSQUITTO_ADMIN_USERNAME: ${MQTT_DYNSEC_USERNAME:?set MQTT_DYNSEC_USERNAME in .env}
+      MOSQUITTO_ADMIN_PASSWORD: ${MQTT_DYNSEC_PASSWORD:?set MQTT_DYNSEC_PASSWORD in .env}
+      MOSQUITTO_INGESTOR_USERNAME: ${MQTT_INGESTOR_USERNAME:?set MQTT_INGESTOR_USERNAME in .env}
+      MOSQUITTO_INGESTOR_PASSWORD: ${MQTT_INGESTOR_PASSWORD:?set MQTT_INGESTOR_PASSWORD in .env}
+    volumes:
+      - ./mosquitto/bootstrap.sh:/bootstrap.sh:ro
+      - fleetforge_mosquitto:/mosquitto/data
+    networks: [backend]        # not strictly needed; keeps `docker compose config` uniform
+    restart: "no"
+
   mosquitto:
     image: eclipse-mosquitto:2.0.22
     container_name: fleetforge-mosquitto
     restart: unless-stopped
+    depends_on:
+      mosquitto-init:
+        condition: service_completed_successfully
     volumes:
       - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
       - ./mosquitto/conf.d:/mosquitto/config/conf.d:ro
+      # NOT inside conf.d/: include_dir only reads *.conf, and a non-config file
+      # in a config directory is a trap for the next reader.
+      - ./mosquitto/acl:/mosquitto/config/acl:ro
       - fleetforge_mosquitto:/mosquitto/data
+    environment:
+      # For the healthcheck only — the broker itself reads no environment.
+      MOSQUITTO_ADMIN_USERNAME: ${MQTT_DYNSEC_USERNAME:?set MQTT_DYNSEC_USERNAME in .env}
+      MOSQUITTO_ADMIN_PASSWORD: ${MQTT_DYNSEC_PASSWORD:?set MQTT_DYNSEC_PASSWORD in .env}
     networks:
       - backend
     labels:
@@ -128,10 +157,13 @@ services:
       traefik.tcp.services.ff-mqtt.loadbalancer.server.port: "1883"
       traefik.docker.network: fleetforge_backend
     healthcheck:
-      # R0-sec-1 MUST update this to use the dynsec admin credential in the same
-      # commit that removes conf.d/10-dev-anonymous.conf, or the container goes
-      # unhealthy and everything that depends_on it refuses to start.
-      test: ["CMD-SHELL", "mosquitto_sub -h 127.0.0.1 -p 1883 -t '$$SYS/broker/uptime' -C 1 -W 3 >/dev/null || exit 1"]
+      # Anonymous access is gone (R0-sec-1), so the probe authenticates as the
+      # dynsec admin — the only client that exists before any device enrolls and
+      # the only one `dynsec init` gives $SYS read. SINGLE-quote the topic:
+      # "$SYS/..." inside double quotes expands to "/broker/uptime" and the probe
+      # always times out, which Traefik then shows as a 404 on the mqtt
+      # entrypoint, not as an unhealthy badge.
+      test: ["CMD-SHELL", "mosquitto_sub -h 127.0.0.1 -p 1883 -u \"$$MOSQUITTO_ADMIN_USERNAME\" -P \"$$MOSQUITTO_ADMIN_PASSWORD\" -t '$$SYS/broker/uptime' -C 1 -W 3 >/dev/null || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -221,14 +253,14 @@ services:
       # away, leaving "=19=19456". Check with:
       #     docker compose config | grep -i ADMIN_PASSWORD_HASH
       ADMIN_PASSWORD_HASH: ${ADMIN_PASSWORD_HASH:?set ADMIN_PASSWORD_HASH in .env — see `just admin-password`}
-      # NOT wired yet, on purpose: R0-sec-1 adds MQTT_DYNSEC_USERNAME /
-      # MQTT_DYNSEC_PASSWORD here (mandatory `${VAR:?}`, no default) once the
-      # dynamic-security plugin exists and there is an admin-role control client
-      # to authenticate as. Until then the broker is anonymous
-      # (mosquitto/conf.d/10-dev-anonymous.conf), the API selects
-      # `NullProvisioner`, warns once at startup, and leaves
-      # `devices.broker_provisioned_at` NULL — which is R0-sec-1's reconcile list.
-      # See the commented placeholders in .env.example.
+      # The dynamic-security ADMIN credential — broker-root. It is what
+      # `POST /v1/enroll` uses to create each device's client over
+      # $CONTROL/dynamic-security/v1 (broker/dynsec.py). Mandatory (`${VAR:?}`,
+      # no default): with it unset the API silently falls back to
+      # `NullProvisioner`, every board enrolls with a credential the broker never
+      # stored, and the only symptom is `broker_provisioned_at IS NULL`.
+      MQTT_DYNSEC_USERNAME: ${MQTT_DYNSEC_USERNAME:?set MQTT_DYNSEC_USERNAME in .env}
+      MQTT_DYNSEC_PASSWORD: ${MQTT_DYNSEC_PASSWORD:?set MQTT_DYNSEC_PASSWORD in .env}
       #
       # Pre-wired for R0-be-6 so the object-store adapter is pure code.
       S3_ENDPOINT_URL: http://minio:9000
@@ -288,6 +320,12 @@ services:
       DATABASE_URL: postgresql+asyncpg://fleetforge:fleetforge@postgres:5432/fleetforge
       MQTT_HOST: mosquitto
       MQTT_PORT: "1883"
+      # This process's OWN broker credential (R0-sec-1) — a read-only dynsec role
+      # scoped to `ff/v1/d/+/up/#`, deliberately NOT the API's dynsec admin.
+      # Unset means anonymous, which the broker now refuses: the ingestor would
+      # reconnect-loop with "Not authorized" and go unhealthy after 120 s.
+      MQTT_USERNAME: ${MQTT_INGESTOR_USERNAME:?set MQTT_INGESTOR_USERNAME in .env}
+      MQTT_PASSWORD: ${MQTT_INGESTOR_PASSWORD:?set MQTT_INGESTOR_PASSWORD in .env}
       # RUN_MIGRATIONS deliberately unset: two processes racing `alembic upgrade
       # head` on restart is a deadlock waiting for a slow migration.
     networks:

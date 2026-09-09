@@ -18,7 +18,7 @@ exists to remove. The first two rows below are that class of mistake.
 | `spec/prd.md` → *Requirements & targets* | Downstream docs and code resolve against this table. Changing a number here silently changes behaviour in the agent, the ingestor and the dashboard. |
 | Device-side confirm timer / rollback path (agent firmware) | The whole bricking gamble. A bug here means a board that cannot recover itself — the one failure the product must never have. |
 | A/B slot apply logic (agent firmware) | Writing the wrong slot, or a non-atomic switch, bricks the device. |
-| Mosquitto ACL configuration / dynsec provisioning | Two pattern rules are the entire fleet authz. A wrong pattern lets any device impersonate any other. |
+| Mosquitto ACL configuration (`mosquitto/acl`) / dynsec provisioning (`mosquitto/bootstrap.sh`, `dynamic-security.json`) | Two pattern rules in `mosquitto/acl` are the entire fleet authz — a wrong pattern lets any device impersonate any other. Dynsec is authentication only (it has no `%u`), so the `device` role must stay empty; `just broker-check` is the proof. |
 | Enrolment token issuance & burn (`R0-be-2`, `R0-be-4`) | A token that fails to burn lets anyone with one board enrol arbitrary devices into the fleet. |
 | Admin auth (token table, login, cookie flags) | Single admin credential on a public-facing API. Bypass = full fleet control. |
 | Artifact signing keys & `signed_url` generation | Signature *is* the authorization for artifact download; signing keys are what make R5's verification meaningful. |

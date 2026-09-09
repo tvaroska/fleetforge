@@ -1,5 +1,10 @@
 """Mosquitto dynamic-security over MQTT — the real `BrokerProvisioner`. **CRITICAL.**
 
+Dynsec is **authentication only**: it decides who exists and what their password is.
+What a device may *do* is `mosquitto/acl`'s two `%u` pattern rules, because the plugin
+has no `%u` substitution (DECISIONS.md 2026-09-08, R0-sec-1). Both backends are
+consulted by the broker and allow wins.
+
 Pure command building and response parsing are split from the I/O, the same way
 `ingestor/protocol.py` is split from `ingestor/main.py`: it is what lets
 `tests/test_broker_dynsec.py` cover the wire encoding with **no broker running**.
@@ -79,8 +84,10 @@ def create_client_command(
 ) -> dict[str, Any]:
     """`createClient` for `username` with `password` and exactly one role.
 
-    `username` is the device id, unnormalised: the `%u` pattern ACLs on `role` bind to
-    it (`broker/provisioner.py`). No `clientid` key — see the module docstring.
+    `username` is the device id, unnormalised: the `%u` pattern ACLs in `mosquitto/acl`
+    bind to it (`broker/provisioner.py`). `role` is deliberately empty — it exists only
+    because this command requires a role name. No `clientid` key — see the module
+    docstring.
     """
     return {
         "command": CREATE_CLIENT,

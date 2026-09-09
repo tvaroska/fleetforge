@@ -1,0 +1,19 @@
+# THE ENTIRE FLEET AUTHORISATION MODEL. CRITICAL.md -> "Two pattern rules are
+# the entire fleet authz. A wrong pattern lets any device impersonate any
+# other." %u is the MQTT username, which /v1/enroll guarantees is exactly the
+# validated device_id (^[0-9a-f]{12}$, fleetforge/identity.py).
+#
+# Verbatim from spec/device-protocol.md -> "Why the up/dn split".
+#
+# These rules live HERE and not in a dynamic-security role because Mosquitto
+# 2.0's dynsec plugin has no %u/%c substitution (verified against 2.0.22 — see
+# conf.d/20-dynsec.conf and DECISIONS.md 2026-09-08, R0-sec-1). Both backends
+# are consulted and ALLOW WINS.
+#
+# Do not add a `topic` line here: an unqualified `topic` applies to EVERY
+# authenticated client, including every board.
+#
+# Read authorisation is enforced on DELIVERY, not on SUBSCRIBE: a device may
+# subscribe to `#` and get SUBACK 0, then receive only its own dn/ traffic.
+pattern write ff/v1/d/%u/up/#
+pattern read  ff/v1/d/%u/dn/#

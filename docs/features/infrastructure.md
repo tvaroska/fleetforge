@@ -169,7 +169,7 @@ ingestor never migrates.
 kind; the only line granting unauthenticated access lives alone in
 `conf.d/10-dev-anonymous.conf` under a delete-me banner. R0-sec-1 deletes one file
 rather than auditing a config, and must update the broker healthcheck in the same
-commit.
+commit. (It did — see *Broker authentication and authorisation* below.)
 
 **Object storage is pre-wired.** The `fleetforge` bucket is created idempotently, and
 `S3_ENDPOINT_URL`, `S3_BUCKET`, `S3_ACCESS_KEY` and `S3_SECRET_KEY` are already in the
@@ -206,3 +206,80 @@ nginx with no CORS header and no Traefik router for the api; the SPA rendering
 log; `mosquitto.db` present and the ingestor reconnecting by itself after
 `docker compose restart mosquitto` without exiting; the MinIO bucket idempotent; and
 the production-shaped stack (`just up-prod`, no override file) reproducing all of it.
+
+## Broker authentication and authorisation (R0-sec-1)
+
+`allow_anonymous false`, per-device credentials, and the two pattern ACLs that are the
+whole fleet authorisation model. `conf.d/10-dev-anonymous.conf` is deleted; the R0
+enrollment path (R0-be-4) stopped being a no-op and now really provisions.
+
+### Two mechanisms, not one
+
+Mosquitto 2.0's dynamic-security plugin **has no `%u`/`%c` substitution** — verified
+against 2.0.22, where a role holding `publishClientSend ff/v1/d/%u/up/#` denies the very
+client it names. Every earlier document assumed the pattern rules would live in a dynsec
+role; they cannot. So the shipped design splits the two halves:
+
+| Mechanism | Where | Decides |
+|---|---|---|
+| `dynamic_security` plugin | `dynamic-security.json`, in the `fleetforge_mosquitto` volume | who exists, and their password — written by `POST /v1/enroll` |
+| `acl_file` | `mosquitto/acl` (bind-mounted `:ro` from the repo) | `pattern write ff/v1/d/%u/up/#` and `pattern read ff/v1/d/%u/dn/#` |
+
+Both backends are consulted and **allow wins**. The spec's promise — no per-device ACL
+rows, nothing to provision at enrollment — is intact; only the file changed. The dynsec
+`device` role still exists because `createClient` requires a role name, and it is
+**deliberately empty**: moving the patterns into it does not fail loudly, it silently
+denies the whole fleet.
+
+### What the bootstrap creates
+
+A one-shot `mosquitto-init` container runs `mosquitto/bootstrap.sh`, which is idempotent
+and runs on every `up`; the broker `depends_on` it with
+`service_completed_successfully`. `mosquitto_ctrl dynsec init` is the only file-mode
+subcommand, so the script starts a throwaway broker on `127.0.0.1:1884` for everything
+else. It creates the empty `device` role, a read-only `ingestor` role
+(`subscribePattern` + `publishClientReceive` on `ff/v1/d/+/up/#` — no `$SYS`, no write),
+the `ff-ingestor` client, and sets all three default ACL accesses to `deny`. The API
+gets the dynsec `admin` credential; the broker healthcheck authenticates as the same
+admin against `'$SYS/broker/uptime'`, because an anonymous probe is now a permanently
+unhealthy broker (and, per R0-infra-1, an unhealthy container is a Traefik 404).
+
+### Gotchas learned
+
+**`dynamic-security.json` is mutable state owned by uid 1883.** The plugin rewrites it
+on every enrollment. Root-owned, it logs `not writable`, applies the change **in memory**
+and loses every device credential at the next restart — while the API reports success.
+The bootstrap chowns and chmods it to `0600`; `grep -ci "not writable"` on the broker log
+is an acceptance check.
+
+**Read authorisation is enforced on delivery, not on SUBSCRIBE.** A device may subscribe
+to `#` and gets SUBACK 0, then receives only its own `dn/` traffic. Any test asserting on
+the SUBACK code proves nothing. Same class: a forged LWT is accepted at CONNECT and
+dropped when it fires, so presence cannot be forged for another board.
+
+**A denied publish is invisible below MQTT v5** — paho reports success and the broker
+drops the message — **and the broker log does not help either**: `Denied PUBLISH` is
+`MOSQ_LOG_DEBUG` in 2.0.22, which is not enabled (debug logs every topic). The
+authoritative read is `mosquitto_pub -V 5 -d` inside the container: `RC:135` is the
+denial, `RC:0`/`RC:16` are both "allowed".
+
+**The `:ro` acl bind mount produces expected noise**: `chown:
+/mosquitto/config/acl: Read-only file system` from the entrypoint plus three
+"world readable / owner is not mosquitto" warnings. Harmless, and documented in the
+runbook so nobody chases them.
+
+### Verification
+
+`just broker-check` (`python -m fleetforge.broker selftest`) is the permanent harness: it
+provisions two `ffff…` throwaway devices through the real `DynsecProvisioner` and proves
+the matrix against the live broker — own `up/` delivered, another device's `up/` dropped,
+own `dn/` dropped, `$CONTROL` dropped (proved end-to-end by failing to connect as the
+client the device tried to mint), `#` delivering nothing of another board's, anonymous
+and wrong-password connects refused. It needs a running stack, so it is not part of
+`just test`; `tests/test_broker_config.py` guards the files themselves with no broker.
+
+Beyond the selftest: clean bring-up from wiped volumes in both the dev and the
+production shape, two real boards enrolled through `POST /v1/enroll` with
+`broker_provisioned_at` set and both present in `dynamic-security.json`, the RC:135
+matrix by hand, a device credential surviving `docker compose restart mosquitto`, and the
+bootstrap re-run tolerating "already exists".

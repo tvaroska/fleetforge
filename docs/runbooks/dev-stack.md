@@ -36,41 +36,95 @@ what makes "no CORS" structural rather than configured.
 The broker has **no host port either**: everything goes through Traefik's `mqtt`
 entrypoint, so the dev path and the prod path are the same path.
 
+## Broker authentication (R0-sec-1)
+
+**`allow_anonymous false`. Every client authenticates, including yours.** Two
+mechanisms, both consulted by the broker, and **allow wins**:
+
+| Mechanism | File | Decides |
+|---|---|---|
+| dynamic-security plugin | `/mosquitto/data/dynamic-security.json` (data volume) | *who exists* and what their password is — written by `POST /v1/enroll` |
+| `acl_file` | `mosquitto/acl` | *what anyone may do* — the two `%u` pattern rules |
+
+The ACL rules are **not** in a dynsec role: Mosquitto 2.0's plugin has no `%u`
+substitution (DECISIONS.md 2026-09-08). The `device` role exists and is deliberately
+empty — `createClient` requires a role name and nothing more.
+
+Three credentials exist before any board enrolls, all created by
+`mosquitto/bootstrap.sh` in the `mosquitto-init` one-shot:
+
+| Username (`.env`) | Role | May |
+|---|---|---|
+| `MQTT_DYNSEC_USERNAME` (`ff-admin`) | dynsec `admin` | create clients, read `$SYS` — the API and the healthcheck |
+| `MQTT_INGESTOR_USERNAME` (`ff-ingestor`) | `ingestor` | subscribe/receive `ff/v1/d/+/up/#`, nothing else |
+| a device id | `device` (empty) | write `ff/v1/d/<its own id>/up/#`, read `…/dn/#` |
+
+Prove the whole matrix against the running broker at any time:
+
+```bash
+just broker-check          # provisions two ffff… throwaways, prints SELFTEST OK
+```
+
+It is deliberately not part of `just test` (that must not need a broker).
+
 ## Publishing a test message
 
 ```bash
-just mqtt-pub 'ff/v1/d/a4cf12b3de90/up/announce' '{"proto":1,"device_id":"a4cf12b3de90"}'
-just mqtt-pub 'ff/v1/d/a4cf12b3de90/up/presence' '{"online":true}' 1   # 1 = retained
+# As the dynsec admin (the default): fine for reading, useless for writing up/*.
 just mqtt-sub                      # defaults to ff/v1/d/+/up/#
+
+# As a board — username = device_id, password = the `mqtt_password` that
+# POST /v1/enroll returned for it. That value exists NOWHERE else: not in
+# Postgres, not in a log. Lose it and the board re-enrolls.
+just mqtt-pub 'ff/v1/d/a4cf12b3de90/up/announce' '{"proto":1}' 0 a4cf12b3de90 "$PW_A"
+just mqtt-pub 'ff/v1/d/a4cf12b3de90/up/presence' '{"online":true}' 1 a4cf12b3de90 "$PW_A"
 docker compose logs -f ingestor    # the ingestor is the only subscriber
 ```
+
+**The admin credential cannot publish a device's `up/*`.** The `%u` patterns bind to
+the *username*, and `ff-admin` is not a device id — so `just mqtt-pub` without the
+last two arguments connects fine and is then **silently dropped**. See failure 5.
 
 **Do not reach for `mosquitto_pub`/`mosquitto_sub` here.** The mosquitto CLI clients
 switch to TLS whenever the port is 8883 and offer no flag to turn it off, so against
 the plaintext dev broker they fail with `Error: Protocol error` /
 `A TLS error occurred` — which looks exactly like a broken TCP router and is not.
 The `just mqtt-*` recipes use paho (already installed as an `aiomqtt` dependency).
-If you must use the mosquitto CLI, set `FF_MQTT_PORT` to something other than 8883
-and recreate the stack.
+Inside the broker container the port is 1883, so the CLI works there — which is the
+one place to get a **reason code**:
+
+```bash
+docker compose exec -T mosquitto sh -c "mosquitto_pub -V 5 -h 127.0.0.1 \
+  -u a4cf12b3de90 -P '$PW_A' -q 1 -d -t ff/v1/d/b0b0b0b0b0b0/up/hb -m x | grep PUBACK"
+#  => RC:135  Not authorized     (RC:0 or RC:16 = allowed)
+```
 
 ## Watching a device come online
 
 The ingestor only ever **updates** device rows — it never creates one, because the
 only way into the registry is a burned enrollment token (`POST /v1/enroll`, R0-be-4).
-Enroll properly with that endpoint, or seed a row by hand when you only want the
-ingest path:
+**Since R0-sec-1 that is also the only way to get a broker credential**, so seeding a
+row with `INSERT INTO devices` no longer buys you anything: the fake board has no
+password and its publishes are dropped. Enroll for real (`$TOKEN` is the admin
+session from the next block):
 
 ```bash
+BASE=http://localhost:${FF_HTTP_PORT:-8080}
 DEV=aabbccddeeff
 psql() { docker compose exec -T postgres psql -U fleetforge -d fleetforge -Aqt "$@"; }
-psql -c "INSERT INTO devices (device_id, platform_type, link_type, power_class)
-         VALUES ('$DEV','esp32c6','wifi','always_on');"
 
-just mqtt-pub "ff/v1/d/$DEV/up/announce" '{"proto":1,"platform_type":"esp32c6","fw_version":"1.4.2","link_type":"wifi","power_class":"always_on"}'
+ET=$(curl -sS -X POST "$BASE/v1/enrollment-tokens" -H "Authorization: Bearer $TOKEN" \
+     -H 'content-type: application/json' -d '{}' | jq -r .token)
+PW=$(curl -sS -X POST "$BASE/v1/enroll" -H 'content-type: application/json' \
+     -d "{\"token\":\"$ET\",\"device_id\":\"$DEV\",\"platform_type\":\"esp32c6\",
+          \"link_type\":\"wifi\",\"power_class\":\"always_on\",\"proto\":1}" \
+     | jq -r .mqtt_password)      # the only copy — keep it in the shell, not in a file
+
+just mqtt-pub "ff/v1/d/$DEV/up/announce" '{"proto":1,"platform_type":"esp32c6","fw_version":"1.4.2","link_type":"wifi","power_class":"always_on"}' 0 "$DEV" "$PW"
 psql -c "SELECT fw_version, last_seen, presence_reported FROM devices WHERE device_id='$DEV';"
 #  => 1.4.2 | a timestamp | (empty — announce says nothing about presence)
 
-just mqtt-pub "ff/v1/d/$DEV/up/presence" '{"online":true}' 1   # retained, as a board would
+just mqtt-pub "ff/v1/d/$DEV/up/presence" '{"online":true}' 1 "$DEV" "$PW"  # retained
 psql -c "SELECT presence_reported FROM devices WHERE device_id='$DEV';"     # => t
 ```
 
@@ -89,7 +143,7 @@ curl -N -H "Authorization: Bearer $TOKEN" "$BASE/v1/events"
 #   : connected
 #   retry: 2000
 # terminal 2
-just mqtt-pub "ff/v1/d/$DEV/up/hb" '{"fw_version":"1.4.2"}'
+just mqtt-pub "ff/v1/d/$DEV/up/hb" '{"fw_version":"1.4.2"}' 0 "$DEV" "$PW"
 # terminal 1, within ~2 s:
 #   data: {"v":1,"type":"device.heartbeat","device_id":"aabbccddeeff","at":"…","online":true,"fw_version":"1.4.2"}
 # and a `: keepalive` comment every 15 s while nothing happens.
@@ -142,10 +196,41 @@ Remove the `env_file:`.
 5432 belongs to `bridge-postgres`. Override the `FF_*_PORT` values in `.env`;
 Postgres itself stays on 5433 because alembic, pytest and `just db-up` all assume it.
 
-**5. Mosquitto goes unhealthy right after R0-sec-1.**
-The healthcheck runs `mosquitto_sub` anonymously. R0-sec-1 removes anonymous access
-and must update that healthcheck to use the dynsec admin credential in the same
-commit.
+**5. Something MQTT does not work, and nothing says why.** Three distinct symptoms:
+
+*"Connection Refused: not authorized" / `[code:135]` at connect* — authentication.
+No credential, a wrong password, or a username the broker does not know. The broker
+log says `client … disconnected, not authorised`. For a board this usually means it
+enrolled during the `NullProvisioner` era (see below), or somebody wiped the
+`fleetforge_mosquitto` volume without re-enrolling.
+
+*A publish that "succeeds" and never arrives* — authorization. **In MQTT 3.1.1 there
+is no reason code**: paho reports success and the broker drops the message. Neither
+does the broker log say so at the default log level — `Denied PUBLISH` is
+`MOSQ_LOG_DEBUG` in 2.0.22 and `mosquitto.conf` enables only
+error/warning/notice/information (turning on `log_type debug` logs every topic; not
+worth it). Get the truth with `mosquitto_pub -V 5 -d` from **inside** the container
+(recipe above): `RC:135` is the denial. The usual cause is publishing as the dynsec
+admin instead of as the device, or a topic under another device's id.
+
+*`Error saving Dynamic security plugin config` / `not writable`* — ownership.
+`dynamic-security.json` must be `mosquitto:mosquitto` `0600`; root-owned, the plugin
+applies enrollments **in memory only** and loses every device credential on the next
+restart while the API reports success. `mosquitto/bootstrap.sh` fixes it; verify with
+`docker compose exec -T mosquitto ls -l /mosquitto/data/dynamic-security.json` and
+`docker compose logs mosquitto | grep -ci "not writable"` (must be `0`).
+
+Two lines in the broker log are **expected and harmless**: `chown:
+/mosquitto/config/acl: Read-only file system` from the entrypoint (it is a `:ro` bind
+mount from the repo, on purpose) and the matching "world readable / owner is not
+mosquitto" warnings about that file.
+
+**5b. A device enrolled before R0-sec-1 cannot connect, and cannot be repaired.**
+Those enrollments ran through `NullProvisioner`: the broker never stored a
+credential, and the password only ever existed in the enrollment response, so the
+server cannot re-provision one the board would know. Find them with `SELECT device_id
+FROM devices WHERE broker_provisioned_at IS NULL` — the only fix is re-enrollment
+with a fresh `ffe_` token.
 
 **6. An SSE stream connects and stays empty** — `: connected` and keepalives arrive,
 device events never do. The `LISTEN` connection is down (the fan-out itself is

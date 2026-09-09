@@ -34,6 +34,15 @@ class Settings(BaseSettings):
     mqtt_host: str = "mosquitto"
     mqtt_port: int = 1883
 
+    # This process's OWN broker credential — the ingestor's. The API's control
+    # credential is `mqtt_dynsec_*` below: a different privilege that rotates
+    # separately, so do not reuse one for the other. Both unset means anonymous,
+    # which the broker refuses from R0-sec-1 on (`allow_anonymous false`) — the
+    # ingestor then reconnect-loops with "Not authorized" and its healthcheck goes
+    # stale after 120 s.
+    mqtt_username: str | None = None
+    mqtt_password: str | None = None
+
     # --- Admin auth (R0-be-1) ------------------------------------------------
     # The argon2id PHC string for the admin password — never the password itself.
     # Optional here but MANDATORY in docker-compose.yml (`${ADMIN_PASSWORD_HASH:?}`):
@@ -98,15 +107,19 @@ class Settings(BaseSettings):
     enroll_rate_limit_global: int = 60
 
     # --- Broker credential provisioning (R0-be-4 / R0-sec-1) ------------------
-    # The Mosquitto dynamic-security admin credential. BOTH unset (the default, and
-    # the dev stack) selects `broker.NullProvisioner`: the dev broker is anonymous
-    # until R0-sec-1 loads the plugin. Never a real value in `.env.example`, and
-    # never logged.
+    # The Mosquitto dynamic-security ADMIN credential — broker-root, and a
+    # different privilege from `mqtt_username`/`mqtt_password` above. BOTH unset
+    # selects `broker.NullProvisioner`, which provisions nothing: that is the
+    # tests' and a bare `create_app()`'s path, never the dev stack, where
+    # docker-compose.yml makes both mandatory. Never a real value in a tracked
+    # file, and never logged.
     mqtt_dynsec_username: str | None = None
     mqtt_dynsec_password: str | None = None
-    # The dynsec role carrying the two `%u` pattern ACLs. R0-sec-1 creates a role
-    # with THIS EXACT NAME in `dynamic-security.json`; if the two disagree,
-    # `createClient` fails and every enrollment answers 503.
+    # The dynsec role a device's client is created with. `mosquitto/bootstrap.sh`
+    # creates a role with THIS EXACT NAME; if the two disagree, `createClient`
+    # fails and every enrollment answers 503. The role is deliberately EMPTY — the
+    # two `%u` pattern ACLs live in `mosquitto/acl`, because Mosquitto 2.0's dynsec
+    # plugin has no `%u` substitution (DECISIONS.md 2026-09-08, R0-sec-1).
     mqtt_dynsec_role: str = "device"
     # One dynsec round-trip must not hold an API worker forever.
     broker_command_timeout_s: float = 5.0

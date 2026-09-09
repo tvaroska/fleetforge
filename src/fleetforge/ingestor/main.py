@@ -125,15 +125,32 @@ async def run_once(
     port: int,
     sessionmaker: async_sessionmaker[AsyncSession],
     tolerance: float,
+    username: str | None = None,
+    password: str | None = None,
 ) -> None:
-    """Connect, subscribe and consume until the connection drops."""
+    """Connect, subscribe and consume until the connection drops.
+
+    `username`/`password` are this process's own broker credential (R0-sec-1): a
+    read-only dynsec role scoped to `ff/v1/d/+/up/#`, never the API's dynsec admin.
+    Both `None` connects anonymously, which the broker refuses — the reconnect loop
+    in `run` then repeats "Not authorized" forever, which is the intended loud
+    failure. The username is logged; the password never is.
+    """
     async with aiomqtt.Client(
         hostname=hostname,
         port=port,
         identifier=CLIENT_ID,
         clean_session=False,
+        username=username,
+        password=password,
     ) as client:
-        logger.info("connected to broker %s:%d as %s", hostname, port, CLIENT_ID)
+        logger.info(
+            "connected to broker %s:%d as %s (mqtt user %s)",
+            hostname,
+            port,
+            CLIENT_ID,
+            username or "<anonymous>",
+        )
         await client.subscribe(UP_TOPIC_FILTER, qos=UP_TOPIC_QOS)
         logger.info("subscribed to %s (qos %d)", UP_TOPIC_FILTER, UP_TOPIC_QOS)
         touch_heartbeat()
@@ -146,6 +163,8 @@ async def run(
     port: int,
     sessionmaker: async_sessionmaker[AsyncSession],
     tolerance: float,
+    username: str | None = None,
+    password: str | None = None,
 ) -> None:
     """Consume forever, reconnecting with capped exponential backoff.
 
@@ -156,7 +175,7 @@ async def run(
     delay = RECONNECT_INITIAL_DELAY
     while True:
         try:
-            await run_once(hostname, port, sessionmaker, tolerance)
+            await run_once(hostname, port, sessionmaker, tolerance, username, password)
             logger.warning("broker connection closed; reconnecting")
         except aiomqtt.MqttError as exc:
             logger.warning("broker error (%s); reconnecting in %.0fs", exc, delay)
@@ -181,7 +200,14 @@ async def main() -> None:
 
     loop = asyncio.get_running_loop()
     task = asyncio.create_task(
-        run(settings.mqtt_host, settings.mqtt_port, sessionmaker, settings.presence_tolerance)
+        run(
+            settings.mqtt_host,
+            settings.mqtt_port,
+            sessionmaker,
+            settings.presence_tolerance,
+            settings.mqtt_username,
+            settings.mqtt_password,
+        )
     )
 
     # `docker compose down` sends SIGTERM; cancelling the task lets aiomqtt send a

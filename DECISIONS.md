@@ -6,6 +6,59 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-08 — Broker authz: dynsec authenticates, acl_file authorises (R0-sec-1)
+
+- **Mosquitto 2.0's dynamic-security plugin does not support `%u`/`%c` substitution.**
+  Verified against 2.0.22: a `device` role holding `publishClientSend ff/v1/d/%u/up/#`
+  denies the very client it names (MQTT v5 PUBACK 135), while the same role with a literal
+  topic allows it, and the plugin binary contains no substitution code. `%u` is `acl_file`
+  syntax. Every earlier document that says the two pattern ACLs live in a dynsec role — the
+  R0-be-4 plan, `broker/provisioner.py`, `CRITICAL.md`'s wording — was wrong about the
+  mechanism, not about the model.
+- **So the two mechanisms are split: dynsec = authentication (who exists, what password,
+  written by `/v1/enroll`), `acl_file` = the fleet ACL (the two `%u` pattern rules,
+  verbatim from `spec/device-protocol.md`).** Mosquitto consults both and **allow wins**,
+  proven in both directions. The spec's promise — "no per-device ACL rows, nothing to
+  provision at enrolment" — survives intact; only the file it lives in changed.
+- **The dynsec `device` role exists and is empty.** `createClient` requires a role name
+  (`broker.DEVICE_ROLE`), and a name mismatch answers 503 on every enrolment. Moving the
+  pattern rules into it does not fail loudly — it silently denies the whole fleet.
+- **Read authorisation is enforced on delivery, not on SUBSCRIBE.** With `acl_file` a device
+  may subscribe to `#` and gets SUBACK 0, then receives only its own `dn/` traffic (verified).
+  Any test that asserts on the SUBACK code proves nothing. Same class: a forged LWT is
+  accepted at CONNECT and dropped when it fires, so presence cannot be forged for another
+  board (verified — the ingestor logged nothing for the impersonated device).
+- **A denied publish is invisible below MQTT v5, and the broker log does not help.**
+  aiomqtt/paho surface only the local `rc`, and 3.1.1 has no reason code at all. Mosquitto
+  2.0.22 logs `Denied PUBLISH` at `MOSQ_LOG_DEBUG`, which `mosquitto.conf` does not enable
+  (debug logs every topic — not worth the noise). The authoritative check is
+  `mosquitto_pub -V 5 -d` **inside** the broker container, reading the PUBACK: `RC:135` is
+  the denial, `RC:0`/`RC:16` are both "allowed" (16 only means nobody was subscribed, so an
+  allowed publish reads as `RC:0` whenever the ingestor is up). `just broker-check` asserts
+  on non-delivery instead, which is what the Python client can actually see.
+- **`dynamic-security.json` is mutable state in the data volume, owned by uid 1883.** The
+  plugin rewrites it on every enrolment; a root-owned file logs "not writable", applies the
+  change in memory, and loses every device credential at the next restart — with the API
+  reporting success. The bootstrap chowns and chmods it, and `docker compose logs mosquitto
+  | grep -c "not writable"` is an acceptance check.
+- **Bootstrap runs a throwaway broker inside a one-shot init container.** `mosquitto_ctrl
+  dynsec init` is the only file-mode subcommand; everything else needs a live broker. The
+  script is idempotent (create → "already exists" → `setClientPassword`), so it is safe on
+  every `up`, and the broker `depends_on` it with `service_completed_successfully`.
+- **The healthcheck authenticates as the dynsec admin**, the only client that exists before
+  the bootstrap and the only one `dynsec init` gives `$SYS` read. The topic must be
+  single-quoted (`'$$SYS/broker/uptime'`); a broken broker probe shows up as a Traefik 404,
+  not as an unhealthy badge.
+- **The ingestor gets its own credential and its own read-only role**
+  (`subscribePattern` + `publishClientReceive` on `ff/v1/d/+/up/#`, no `$SYS`, no write).
+  It is a different privilege from the API's dynsec admin and rotates separately.
+- **Devices enrolled during the `NullProvisioner` era cannot be reconciled.** The broker
+  password only ever existed in the enrolment response; the server cannot re-provision one
+  the device would know. They must re-enrol with a fresh token — documented in
+  `docs/runbooks/dev-stack.md` rather than built as a command that cannot work.
+
+---
+
 ## 2026-09-08 — Object store: one Protocol, two adapters, and the prefix is a security boundary (R0-be-6)
 
 - **One `ObjectStore` Protocol, two real adapters, selected by configuration** — the same

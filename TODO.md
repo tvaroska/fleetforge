@@ -187,9 +187,49 @@ audience), and **agent images are built off-box** (the ESP-IDF builder is 2–3 
 
 ### Security
 
-- [ ] **R0-sec-1**: Mosquitto dynamic-security (P0, 1d)
+- [x] **R0-sec-1**: Mosquitto dynamic-security (P0, 1d)
       Per-device credentials + the two pattern ACLs
       (`pattern write ff/v1/d/%u/up/#`, `pattern read ff/v1/d/%u/dn/#`).
+      _(done 2026-09-09; reviewed; see docs/features/* — CRITICAL, so T1 and T2 were
+      re-run independently by the reviewer before the commit. `allow_anonymous false`;
+      `mosquitto/conf.d/10-dev-anonymous.conf` deleted. **The plugin has no `%u`
+      substitution** (verified on 2.0.22), so the design split in two: dynsec =
+      authentication (`dynamic-security.json`, written by `/v1/enroll`), `acl_file` =
+      the two pattern rules in the new `mosquitto/acl`; both are consulted and allow
+      wins, and the dynsec `device` role is deliberately EMPTY. New `mosquitto-init`
+      one-shot runs `mosquitto/bootstrap.sh` (idempotent; throwaway broker on 1884
+      because `dynsec init` is the only file-mode subcommand) creating the empty
+      `device` role, a read-only `ingestor` role + client, deny-by-default, and
+      `chmod 0600` + `chown` on the store; the broker `depends_on` it with
+      `service_completed_successfully` and its healthcheck now authenticates as the
+      dynsec admin. Ingestor got its own credential; `just mqtt-pub`/`mqtt-sub` take
+      user/password. New `just broker-check`
+      (`python -m fleetforge.broker selftest`) is the permanent live harness, plus
+      `tests/test_broker_config.py` (23 file-level tripwires, no broker).
+      Verified: 312 tests + ruff + mypy + `just stack-check` green; wiped-state
+      bring-up in **both** the dev and the production shape; two real boards enrolled
+      through `POST /v1/enroll`, both `broker_provisioned_at` set and present in
+      `dynamic-security.json`; own `up/` PUBACK RC:0, another device's `up/` RC:135,
+      own `dn/` RC:135, `$CONTROL` RC:135, wrong password and anonymous refused; a
+      device subscribed to `#` received nothing of another board's; a forged LWT
+      produced no ingestor event; credential survived `docker compose restart
+      mosquitto`; bootstrap re-run tolerated "already exists"; no password in any log.
+      Vacuity-checked by breaking `%u`→`+` in `mosquitto/acl` and watching the
+      selftest fail. Gotchas carried forward: (1) an allowed publish reads RC:0, not
+      RC:16, whenever the ingestor is subscribed; (2) `Denied PUBLISH` is
+      `MOSQ_LOG_DEBUG` in 2.0.22 and is therefore **absent** from the log — the
+      `-V 5` PUBACK is the only evidence; (3) the `:ro` acl bind mount always logs
+      `chown: … Read-only file system` + permission warnings, expected; (4) devices
+      enrolled during the `NullProvisioner` era cannot be reconciled and must
+      re-enroll. Nothing in `spec/` touched; three proposals in the hand-off.
+      Reviewer note for `R0-infra-3`: the `acl_file` patterns apply to **every**
+      authenticated username, so a `MQTT_DYNSEC_USERNAME`/`MQTT_INGESTOR_USERNAME`
+      that happened to be 12 lowercase hex digits could be re-keyed by enrolling
+      that device_id (`ensure_client` does create → already-exists →
+      `setClientPassword`). Safe today — `ff-admin`/`ff-ingestor` are not valid
+      device ids and `POST /v1/enroll` 422s them — but prod credentials must keep
+      a non-hex username.
+      See docs/features/infrastructure.md, DECISIONS.md 2026-09-08.)_
 
 ### Firmware
 

@@ -152,11 +152,20 @@ back.
 The provisioner is a seam (`fleetforge/broker/`): `DynsecProvisioner` talks Mosquitto
 dynamic-security over MQTT, and `NullProvisioner` — selected when
 `MQTT_DYNSEC_USERNAME`/`_PASSWORD` are unset, with a startup WARNING — provisions
-nothing, because the dev broker is anonymous until `R0-sec-1`. It returns `False`, so
-the column stays NULL and `WHERE decommissioned_at IS NULL AND broker_provisioned_at IS
-NULL` is the honest reconcile list for `R0-sec-1` rather than a column that lies. A
-provisioning failure is a `503` with `Retry-After`; the enrollment is already committed
-and the grace window is what makes the retry work.
+nothing. It returns `False`, so the column stays NULL and `WHERE decommissioned_at IS
+NULL AND broker_provisioned_at IS NULL` is the honest reconcile list rather than a
+column that lies. A provisioning failure is a `503` with `Retry-After`; the enrollment
+is already committed and the grace window is what makes the retry work.
+
+**Since R0-sec-1 this path is live.** `docker-compose.yml` makes both dynsec variables
+mandatory (`${VAR:?}`) precisely so `NullProvisioner` cannot be selected by accident,
+and a real board now gets a real broker client: `createClient` with the device_id as
+the **username**, which is what the two `%u` pattern ACLs in `mosquitto/acl` bind to.
+The dynsec `device` role the client is created with is deliberately empty — dynsec is
+authentication only (DECISIONS.md 2026-09-08). One consequence has no fix: **devices
+enrolled during the Null era cannot be reconciled.** The password only ever existed in
+the enrollment response, so the server cannot re-provision one the board would know;
+they must re-enroll with a fresh token.
 
 Re-enrollment is an upsert: a re-flashed board legitimately enrolls again with a *new*
 token. The announced identity is overwritten, `decommissioned_at` and

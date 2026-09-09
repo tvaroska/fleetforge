@@ -35,15 +35,36 @@ rebuild service="":
 # so `mosquitto_pub -p 8883` fails with "A TLS error occurred" and looks like a
 # broken router. These two recipes use paho — already installed, via aiomqtt.
 
+# EVERY BROKER CLIENT NOW AUTHENTICATES (R0-sec-1) — `allow_anonymous false`.
+# `user`/`password` default to $MQTT_DYNSEC_USERNAME/$MQTT_DYNSEC_PASSWORD from the
+# environment (`.env`), which is the dynsec ADMIN.
+#
+# THE ADMIN CANNOT PUBLISH A DEVICE'S up/* — the admin role carries no publish
+# grant and the `%u` patterns in mosquitto/acl bind to the *username*, which is the
+# device_id. To publish as a board, pass its credential: the username is the
+# device_id and the password is the `mqtt_password` that `POST /v1/enroll` returned
+# for it (it exists nowhere else). A denied publish is INVISIBLE in MQTT 3.1.1 —
+# paho reports success and the broker drops it silently.
+#
 # The payload travels in the environment, not in the python source: a JSON body is
 # full of double quotes, and inside a double-quoted shell word the shell eats them —
 # the broker then receives `{proto:1,…}` and the ingestor logs a JSONDecodeError that
 # looks like an ingest bug. `retain=1` publishes retained state (announce/presence).
-mqtt-pub topic message='{}' retain='0':
-    FF_PUB_TOPIC='{{topic}}' FF_PUB_MESSAGE='{{message}}' FF_PUB_RETAIN='{{retain}}' uv run python -c 'import os, paho.mqtt.publish as publish; t = os.environ["FF_PUB_TOPIC"]; publish.single(t, os.environ["FF_PUB_MESSAGE"], qos=1, retain=os.environ["FF_PUB_RETAIN"] == "1", hostname="127.0.0.1", port=int(os.environ.get("FF_MQTT_PORT", "8883"))); print("published to " + t)'
+#     just mqtt-pub 'ff/v1/d/a4cf12b3de90/up/hb' '{}' 0 a4cf12b3de90 "$PW_A"
+mqtt-pub topic message='{}' retain='0' user='' password='':
+    @FF_PUB_TOPIC='{{topic}}' FF_PUB_MESSAGE='{{message}}' FF_PUB_RETAIN='{{retain}}' FF_PUB_USER='{{user}}' FF_PUB_PASSWORD='{{password}}' uv run python -c 'import os, dotenv, paho.mqtt.publish as publish; dotenv.load_dotenv(); t = os.environ["FF_PUB_TOPIC"]; u = os.environ["FF_PUB_USER"] or os.environ["MQTT_DYNSEC_USERNAME"]; p = os.environ["FF_PUB_PASSWORD"] or os.environ["MQTT_DYNSEC_PASSWORD"]; publish.single(t, os.environ["FF_PUB_MESSAGE"], qos=1, retain=os.environ["FF_PUB_RETAIN"] == "1", hostname="127.0.0.1", port=int(os.environ.get("FF_MQTT_PORT", "8883")), auth={"username": u, "password": p}); print("published to " + t + " as " + u)'
 
-mqtt-sub topic='ff/v1/d/+/up/#':
-    uv run python -c "import os, paho.mqtt.subscribe as subscribe; subscribe.callback(lambda c, u, m: print(m.topic, m.payload.decode('utf-8', 'replace')), '{{topic}}', qos=1, hostname='127.0.0.1', port=int(os.environ.get('FF_MQTT_PORT', '8883')))"
+# Read authorisation is enforced on DELIVERY, not on SUBSCRIBE: subscribing as a
+# device to a filter it may not read still SUBACKs, and simply never delivers.
+mqtt-sub topic='ff/v1/d/+/up/#' user='' password='':
+    @FF_SUB_TOPIC='{{topic}}' FF_SUB_USER='{{user}}' FF_SUB_PASSWORD='{{password}}' uv run python -c 'import os, dotenv, paho.mqtt.subscribe as subscribe; dotenv.load_dotenv(); u = os.environ["FF_SUB_USER"] or os.environ["MQTT_DYNSEC_USERNAME"]; p = os.environ["FF_SUB_PASSWORD"] or os.environ["MQTT_DYNSEC_PASSWORD"]; subscribe.callback(lambda c, u_, m: print(m.topic, m.payload.decode("utf-8", "replace")), os.environ["FF_SUB_TOPIC"], qos=1, hostname="127.0.0.1", port=int(os.environ.get("FF_MQTT_PORT", "8883")), auth={"username": u, "password": p})'
+
+# The live broker ACL matrix: per-device credentials + the two pattern rules.
+# Both the T2 harness for R0-sec-1 and the ops answer to "is broker authz still
+# what we think it is?". Needs the stack up (`just up`); prints no password.
+# PYTHONPATH=src for the same reason as `admin-password`.
+broker-check *args:
+    PYTHONPATH=src uv run python -m fleetforge.broker selftest {{args}}
 
 # Cheap syntax gate for both compose files (dev shape and production shape).
 stack-check:

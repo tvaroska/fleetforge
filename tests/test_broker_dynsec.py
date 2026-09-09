@@ -1,16 +1,17 @@
 """The broker-provisioning seam, with **no broker and no database**.
 
-The dynsec adapter cannot be exercised end-to-end until `R0-sec-1` loads the plugin
-into Mosquitto, so what is provable today is the wire encoding and the state machine —
-which is exactly what the pure/IO split in `broker/dynsec.py` exists for. The live
-check is written down in `.claude/plans/R0-be-4-device-enroll-endpoint.md` §11 and
-handed to `R0-sec-1`.
+What is provable with no broker is the wire encoding and the state machine — which is
+exactly what the pure/IO split in `broker/dynsec.py` exists for. The **live** end-to-end
+check is `python -m fleetforge.broker selftest` (`just broker-check`, R0-sec-1): it
+provisions two throwaway devices against a running broker and proves the ACL matrix.
+It is deliberately not part of `just test`, which must not need a broker.
 
 Two cases here are security properties rather than plumbing:
 
 * `createClient` carries **no `clientid`** (guessing the agent's client id would
   strand boards that enroll and then cannot connect), and its `roles` entry is the
-  role that carries the two `%u` pattern ACLs;
+  (deliberately empty) `device` role — the two `%u` pattern ACLs live in
+  `mosquitto/acl`, since dynsec cannot express `%u`;
 * a reply whose `correlationData` does not match **raises**, because reading a stale
   reply as this command's success hands a device a password the broker never stored.
 """
