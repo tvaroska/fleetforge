@@ -6,6 +6,36 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-09 — TLS for the fleet terminates at Traefik, not at the broker (R0-infra-3)
+
+- **The shared Traefik owns 8883.** A `mqtt` TCP entrypoint with a
+  ``HostSNI(`bingo.tvaroska.sk`)`` router and `tls.certresolver=myresolver`
+  terminates TLS and forwards **plaintext** to `mosquitto:1883` on an internal
+  network. The alternative — TLS passthrough, or certs mounted into the broker —
+  would need DNS-01 or a second renewal path for one service. HTTP-01 over :80
+  already issues the certificate; the TCP router just reuses it. Nothing about
+  ACME changed, and the broker container knows nothing about TLS.
+- **`prod/mosquitto/` in the `services` repo is a copy, and the copy is guarded.**
+  `deploy.sh` only ships `services/prod/`, so the config has to live there. `acl`
+  is the entire fleet authz model, so `validate-config.sh` now diffs the two trees
+  and fails the deploy on drift. A copy nobody checks is how a stale ACL reaches
+  production.
+- **Prod broker usernames must not look like device ids.** `ff-admin` /
+  `ff-ingestor`, not 12 lowercase hex digits — the `acl_file` patterns key on `%u`,
+  and `ensure_client` does create → already-exists → `setClientPassword`, so a
+  hex-shaped service username could be re-keyed by enrolling that `device_id`.
+  This is the R0-sec-1 reviewer note, now honoured in `services/prod/.env`.
+- **The broker is excluded from `docker rollout`.** Rollout runs two copies during
+  the swap; two brokers cannot share the dynsec store or the 1883 bind. New
+  `INFRA_SERVICES` list in `deploy.sh` recreates it in place instead.
+- **Gotcha, cost ~25 min:** with the fleetforge dev stack running on this machine,
+  `just deploy` fails its staging gate with a **504 on every smoke test while all
+  containers report healthy**. The staging Traefik sees the host daemon through
+  socket-proxy and picks up `fleetforge-frontend`'s ``Host(`localhost`)`` rule,
+  which outranks staging's `PathPrefix(/)`, then cannot reach that network. It
+  reads exactly like a content-api regression. `docker compose stop` in fleetforge
+  first. See docs/features/infrastructure.md → *R0-infra-3*.
+
 ## 2026-09-09 — The dashboard trusts the server's token status (R0-fe-1)
 
 - **The frontend never recomputes token state.** `status` comes from the API, which derives it

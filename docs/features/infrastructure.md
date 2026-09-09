@@ -283,3 +283,96 @@ production shape, two real boards enrolled through `POST /v1/enroll` with
 `broker_provisioned_at` set and both present in `dynamic-security.json`, the RC:135
 matrix by hand, a device credential surviving `docker compose restart mosquitto`, and the
 bootstrap re-run tolerating "already exists".
+
+---
+
+## Production MQTT ingress (R0-infra-3)
+
+**Date:** 2026-09-09 · **Repo touched:** `services` (commit `8c5d6f0`), not this one.
+
+Opens the fleet's front door on prod: `mqtts://bingo.tvaroska.sk:8883`, the first
+non-HTTP port in an estate that until now was pure Traefik-over-80/443.
+
+### What shipped
+
+Four things, all in the `services` repo under `prod/`:
+
+1. **A `mqtt` entrypoint on the shared Traefik** (`--entrypoints.mqtt.address=:8883`)
+   plus `8883:8883` on the published ports. Every other app on the box sits behind
+   this same Traefik, which is why the task is CRITICAL in both repos.
+2. **A `mosquitto` service** on the public `eclipse-mosquitto:2.0.22` image, with a
+   `mosquitto-init` one-shot ahead of it, a `mosquitto_data` named volume, and a
+   TCP router: ``HostSNI(`bingo.tvaroska.sk`)`` → `mosquitto:1883`,
+   `tls.certresolver=myresolver`.
+3. **Prod credentials** in `services/prod/.env` (gitignored, backed up to GCS):
+   freshly generated `MQTT_DYNSEC_*`, `MQTT_INGESTOR_*` and an `ADMIN_PASSWORD_HASH`.
+   Usernames are `ff-admin` / `ff-ingestor` — deliberately **not** 12 lowercase hex
+   digits, per the R0-sec-1 reviewer note: the `acl_file` patterns key on `%u`, so a
+   hex-shaped service username could be re-keyed by enrolling that `device_id`.
+4. **A drift guard.** `prod/mosquitto/` is a *copy* of `fleetforge/mosquitto/`,
+   because `deploy.sh` only ships `services/prod/`. `scripts/validate-config.sh`
+   now diffs the two and fails the deploy if they diverge — `acl` is the entire
+   fleet authorisation model, so silent drift there is a security bug, not a nit.
+
+### Why TLS terminates at Traefik, not at the broker
+
+HTTP-01 over :80 already issues the certificate; the TCP router simply reuses it.
+No DNS-01, no new credentials, no cert plumbing inside the broker container, and
+one renewal path for the whole box. Mosquitto listens plaintext on 1883 and is
+reachable only on the internal `backend`/`frontend` networks.
+
+### Gotchas learned
+
+- **`docker rollout` must never touch the broker.** It starts a second copy
+  alongside the first; two brokers cannot share the dynamic-security store or the
+  1883 bind. `mosquitto` therefore went into a new `INFRA_SERVICES` list
+  (recreated in place with traefik/postgres), not `APP_SERVICES`. A scoped
+  `deploy.sh --service X` resets `INFRA_SERVICES` so it never touches the broker.
+- **A running fleetforge dev stack breaks `just deploy` on this machine.** The
+  staging gate's Traefik reaches the *host* Docker daemon through socket-proxy, so
+  it discovers `fleetforge-frontend` — whose ``Host(`localhost`)`` rule outranks
+  staging's `PathPrefix(/)` — and routes `localhost:8090` at a network it cannot
+  reach. Symptom is a **504 on every staging smoke test while every container
+  reports healthy**, which looks like a content-api regression and is not one.
+  `docker compose stop` in fleetforge before deploying; the gate then passes.
+  (The fleetforge dev Postgres also squats host port 5433, which staging wants.)
+- The fleetforge `api`/`ingestor`/`frontend` are **not** in the prod fragment:
+  no images in Artifact Registry, and an unpullable ref in `PULL_SERVICES` fails
+  the pull for every other app on the box. Only the broker is deployed.
+
+### Verification (T2)
+
+Run from prod itself, which bypasses the missing firewall rule:
+
+- `ss -ltn` shows Traefik on `:8883`.
+- `openssl s_client -connect 127.0.0.1:8883 -servername bingo.tvaroska.sk` →
+  TLSv1.3, `CN = bingo.tvaroska.sk`, `Verification: OK`.
+- `mosquitto_sub -h bingo.tvaroska.sk -p 8883 --capath /etc/ssl/certs -u ff-admin
+  -P … -t '$SYS/broker/uptime' -C 1` (from a throwaway container on `prod_frontend`
+  with `--add-host` pointed at Traefik) returned `187 seconds` — the complete path
+  client → TLS → Traefik → broker → authenticated subscribe.
+- The same command without credentials: `Connection Refused: not authorised`.
+- `update.tvaroska.sk`, `download.tvaroska.sk`, `boris.tvaroska.sk` all still 200,
+  before and after.
+
+### Outstanding — the owner must run this
+
+The GCP firewall rule was **not** created: this account has no
+`compute.firewalls.*` on project `sites-470716` (prod is instance `main` there,
+tags `http-server`,`https-server`). Until it exists, 8883 is unreachable from the
+internet and no real board can connect.
+
+```bash
+gcloud compute firewall-rules create btvaroska-allow-mqtt \
+  --project=sites-470716 \
+  --direction=INGRESS --action=ALLOW \
+  --rules=tcp:8883 --source-ranges=0.0.0.0/0 \
+  --target-tags=https-server \
+  --description="fleetforge MQTT over TLS (R0-infra-3)"
+```
+
+Then re-verify from off-box:
+
+```bash
+openssl s_client -connect bingo.tvaroska.sk:8883 -servername bingo.tvaroska.sk -brief </dev/null
+```

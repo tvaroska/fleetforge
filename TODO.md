@@ -100,7 +100,22 @@ audience), and **agent images are built off-box** (the ESP-IDF builder is 2–3 
 - [!] **R0-infra-3**: Prod ingress — `services` repo (P0, 1d)
       Traefik `mqtt` entrypoint on 8883 + TCP router (``HostSNI(`bingo.tvaroska.sk`)`` →
       `mosquitto:1883`), GCP firewall rule, and the prod service fragment.
-      First non-HTTP port in this stack; touches shared ingress. _(⚠ failed 2026-09-09; blocker: agent returned no result (after 2 attempts))_
+      First non-HTTP port in this stack; touches shared ingress.
+      **Built and deployed 2026-09-09; ONE step outstanding.** On prod: Traefik
+      listens on 8883, terminates TLS with the Let's Encrypt cert for
+      `bingo.tvaroska.sk` (`Verification: OK`) and forwards to `mosquitto:1883`;
+      the broker is healthy with its dynsec store bootstrapped; an authenticated
+      `$SYS/broker/uptime` subscribe through the full TLS path returned a value and
+      an anonymous one was refused `not authorised`. All three existing apps still
+      200. Prod credentials use non-hex usernames (`ff-admin`, `ff-ingestor`) per
+      the R0-sec-1 reviewer note above.
+      _(⚠ blocked 2026-09-09: the GCP firewall rule for tcp:8883 is NOT created —
+      this account has no `compute.firewalls.*` on project `sites-470716`, so
+      8883 is still unreachable from the internet and no real board can connect.
+      Owner must run the one command in docs/features/infrastructure.md →
+      *R0-infra-3*, then re-verify externally. Also open: the fleetforge
+      api/ingestor/frontend are absent from the prod fragment — no images in
+      Artifact Registry yet.)_
 
 - [ ] **R0-infra-4**: Capacity check on `prod` before E2E (P0, 0.5d)
       The box is already swapping ~1 G with 12 containers. Measure with fleetforge
