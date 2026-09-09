@@ -220,6 +220,41 @@ validated (`DeviceEvent`) and refused if it contains `\r`/`\n`, since `fw_versio
 comes off the wire from a board and SSE framing is newline-delimited; what is forwarded
 is the **original** string, so a field a newer ingestor adds survives.
 
+### Device simulator (R0-test-1)
+
+`python -m fleetforge.simulator` (`just sim`, `just sim-fleet`) — a fake ESP32 that
+performs the six steps of `spec/device-protocol.md` for real: `POST /v1/enroll`,
+persist the credential, connect, retained `up/announce`, retained
+`up/presence {"online":true}`, `up/hb` on an interval, and a retained goodbye on the
+way out. It is the **client** of everything above: R0-be-2/3/4/5 had no consumer other
+than hand-typed `curl` and `just mqtt-pub` until it existed, and R0-fw-1 (the real
+agent) is not written yet. Operational recipes are in
+`docs/runbooks/dev-stack.md` → *Simulated boards*.
+
+*Not to be confused with a fault-injection harness* — it simulates a **board**, not a
+network. The `--link slow` profile adds seeded latency and never drops a message,
+because QoS 1 over a persistent session does not lose them and pretending otherwise
+would teach something untrue about the protocol.
+
+Four properties are the reason it is code rather than a shell script, and each has a
+test in `tests/test_simulator.py` that fails when it regresses:
+
+- **The QoS/retain matrix.** `announce` and `presence` retained, `hb` never — a
+  retained heartbeat is replayed to the ingestor on every reconnect, which treats a
+  replay as not-live, so `last_seen` would silently stop advancing.
+- **The Last Will is retained, and a clean DISCONNECT does not fire it.** The graceful
+  path therefore publishes its own `{"online":false}`; `--crash-after` (`os._exit(1)`,
+  a TCP FIN with no DISCONNECT) is the only honest way to exercise the real will.
+- **It imports nothing from the server but `fleetforge.identity`** (an AST tripwire
+  enforces it). A simulator that shares the server's parsing agrees with the server by
+  construction and proves nothing; `fleetforge.config` in particular would make
+  `DATABASE_URL` mandatory to run a fake board.
+- **A single-use token is never spent by accident.** Everything checkable is validated
+  before the token is presented, and a credential already on disk means *no*
+  enrollment — never a silent re-enroll. `mqtt_password` reaches exactly one place:
+  `.sim/<device_id>.json`, mode 0600, gitignored. It is in no transcript line and no
+  log record.
+
 ## Post-v1
 
 - **Device decommissioning** — `POST /v1/devices/{device_id}/decommission` setting

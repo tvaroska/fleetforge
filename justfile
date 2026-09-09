@@ -107,6 +107,36 @@ minio-up:
 storage-check *args:
     PYTHONPATH=src uv run python -m fleetforge.storage selftest {{args}}
 
+# ── Simulated boards (R0-test-1) ─────────────────────────────────────────────
+#
+# A fake ESP32 that enrolls, connects, announces, holds presence and heartbeats,
+# so R0-be-2/3/4/5 and the dashboard can be exercised before R0-fw-1 exists.
+# Needs the stack up (`just up`). PYTHONPATH=src for the same reason as
+# `admin-password` — the project is deliberately not installed as a package.
+#
+# THE FIRST RUN NEEDS AN ENROLLMENT TOKEN and burns it; every later run reuses
+# the credential in `.sim/` (gitignored, 0600) and enrolls nothing. That file is
+# the ONLY copy of the board's `mqtt_password`: `POST /v1/enroll` returns it once
+# and it exists nowhere else — not in Postgres, not in a log, not in dynsec.
+# Delete one and that board needs a fresh token (`--forget` does it deliberately).
+#
+#     TOKEN=$(curl -sS -X POST localhost:8080/v1/enrollment-tokens \
+#             -H "Authorization: Bearer $FFA" -H 'content-type: application/json' \
+#             -d '{}' | jq -r .token)
+#     just sim --token "$TOKEN" --name blinker --heartbeat-interval 5
+#     just sim --name blinker --duration 30          # reuses .sim/, no token needed
+#     just sim --name blinker --crash-after 15       # ungraceful: the broker's LWT fires
+#     just sim --token "$TOKEN" --name sleeper --power-class sleepy --wake-interval 20
+sim *args:
+    PYTHONPATH=src uv run python -m fleetforge.simulator run {{args}}
+
+# N boards at once, issuing their own single-use tokens (so needs the admin
+# PASSWORD — --admin-password or $FF_ADMIN_PASSWORD — never the hash). Prints
+# token ids, never token plaintexts. Names are sim-01, sim-02, …
+#     just sim-fleet 5 --heartbeat-interval 5 --duration 120
+sim-fleet count='3' *args='':
+    PYTHONPATH=src uv run python -m fleetforge.simulator fleet --count {{count}} {{args}}
+
 lint:
     uv run ruff check src/ tests/ alembic/
     uv run ruff format --check src/ tests/ alembic/

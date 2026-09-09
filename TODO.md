@@ -251,9 +251,54 @@ audience), and **agent images are built off-box** (the ESP-IDF builder is 2–3 
 
 ### Test
 
-- [ ] **R0-test-1**: Python device simulator (P0, 0.5d)
+- [x] **R0-test-1**: Python device simulator (P0, 0.5d)
       Speaks the R0-spec-1 protocol. Unblocks backend and frontend without hardware;
       sleepy and slow-link modes. Build this early.
+      `src/fleetforge/simulator/` (`just sim`, `just sim-fleet`): enroll over HTTPS →
+      persist the credential → connect → retained `up/announce` + retained
+      `up/presence {"online":true}` → `up/hb` → retained goodbye. `always_on` (with
+      capped-backoff reconnect), `sleepy` (a fresh client per wake, no goodbye between
+      wakes) and a seeded `--link slow` profile; `fleet` issues its own single-use
+      tokens through login + `POST /v1/enrollment-tokens`. **It imports nothing from the
+      server but `fleetforge.identity`** — no `fleetforge.config`, so a fake board needs
+      no `DATABASE_URL` — with an AST tripwire holding the line, and `urllib.request`
+      rather than `httpx` because this package ships in the production image. Nothing in
+      `spec/` touched; three additive `spec/device-protocol.md` proposals (the LWT is
+      published retained; the agent's `client_id = device_id` + `clean_session = false`;
+      a planned shutdown SHOULD publish a retained `{"online":false}`) are recorded in
+      `DECISIONS.md` as proposed, not written.
+      _(done 2026-09-09; reviewed; **CRITICAL** — it writes a live broker password to
+      disk and burns real single-use tokens, so T1 and T2 were re-run independently by
+      the reviewer before the commit. Verified: **364 tests green** (52 of them
+      `tests/test_simulator.py`, up from 312 at R0-sec-1) plus ruff, `ruff format
+      --check`, `mypy src/` and `just stack-check` clean. Live against `just up`: a fresh
+      token enrolled `a604b80498eb` from nothing → announce/presence retained, `hb` every
+      5 s not retained, retained goodbye, `.sim/` `drwx------` with one `-rw-------` file;
+      **zero credential leak** — the `mqtt_password` appears 0 times in the transcript, 0
+      times in any container log and 0 times in a full `pg_dump`, and `.sim/` is
+      gitignored and unstaged. Token discipline: a second run printed `state reusing …
+      (no enrollment)` and made no HTTP call; `--power-class sleepy` with no
+      `--wake-interval` was refused **before** the POST and the token stayed `used_at
+      NULL`; the same token on a different board got a readable 409; a bogus token a
+      readable 401; no state and no token a readable refusal — every failure one
+      `SIMULATOR FAILED:` line, no traceback. `--crash-after` (`os._exit(1)`) made the
+      **broker** publish the will and the board read `online:false` ~0 s later; a sleepy
+      board at `--wake-interval 10` flipped offline ~25 s after its last message with
+      nothing published. Vacuity-checked by breaking three things and watching the right
+      test fail: `hb` retained → the QoS/retain matrix test; the will's `retain=False` →
+      the will tests; `import fleetforge.config` → the purity tripwire; all reverted.
+      Gotchas carried forward: (1) a clean DISCONNECT never fires the LWT, hence the
+      goodbye on every graceful exit and `--crash-after`'s `os._exit(1)`; (2)
+      `aiomqtt.Client` is not re-enterable (`MqttReentrantError`), so a sleepy wake builds
+      a fresh client and the client arrives as a factory; (3) a denied publish is
+      invisible below MQTT v5 — "it published and nothing happened" is an ACL or
+      credential symptom, not a publish bug. Not verified: `just up-prod` (no compose,
+      Dockerfile or dependency change in this task; `just stack-check` covers both compose
+      shapes). Follow-up raised separately: the `ingestor` healthcheck only touches its
+      liveness file when a message arrives, so an idle fleet marks a healthy ingestor
+      unhealthy — pre-existing from R0-be-3, made visible by this task.
+      See docs/features/enrollment.md, docs/runbooks/dev-stack.md, DECISIONS.md
+      2026-09-09.)_
 
 - [ ] **R0-test-2**: E2E on real hardware (P0, 1d)
       Flash → enroll → appears online in the dashboard.

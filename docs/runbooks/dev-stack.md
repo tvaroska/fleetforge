@@ -172,6 +172,76 @@ ingestor` replays every **retained** `announce`/`presence` without moving `last_
 The dev container has no `--reload`: after editing `src/`, run
 `docker compose restart ingestor`.
 
+## Simulated boards (R0-test-1)
+
+Everything above is a board typed out by hand. `just sim` is the same six steps —
+enroll, connect, announce, presence, heartbeat, goodbye — run by a process, which is
+how the fleet view, the SSE stream and the presence rules get exercised before
+R0-fw-1 exists. It needs the stack up and an enrollment token, exactly like a real
+board does.
+
+```bash
+BASE=http://localhost:${FF_HTTP_PORT:-8080}          # $TOKEN: the admin session, above
+newtoken() { curl -sS -X POST "$BASE/v1/enrollment-tokens" -H "Authorization: Bearer $TOKEN" \
+             -H 'content-type: application/json' -d '{}' | jq -r .token; }
+
+just sim --token "$(newtoken)" --name blinker --heartbeat-interval 5 --duration 40
+#  enroll   200 http://localhost:8080/v1/enroll -> device_id 2ea26f5ddc68
+#  state    .sim/2ea26f5ddc68.json (0600)
+#  connect  localhost:8883 as 2ea26f5ddc68 (client_id=…, clean_session=False, will=…)
+#  publish  ff/v1/d/2ea26f5ddc68/up/announce (qos 1, retain)
+#  publish  ff/v1/d/2ea26f5ddc68/up/hb (qos 1, no retain)     … every 5 s
+#  goodbye  ff/v1/d/2ea26f5ddc68/up/presence {"online":false} (qos 1, retain)
+```
+
+The `device_id` is derived from `--name` (stable across runs, and a *locally
+administered* MAC, so it can never collide with real silicon). The board's broker
+password is written to `.sim/<device_id>.json`, mode 0600 — **that file is the only
+copy**, exactly like the NVS on a real board, so the second run needs no token:
+
+```bash
+just sim --name blinker --duration 10       # => state  reusing .sim/… (no enrollment)
+just sim --name blinker --forget …          # deliberately re-enroll (needs a new token,
+                                            #   or the same one inside the 600 s grace window)
+```
+
+`.sim/` is gitignored. It holds live fleet credentials; treat it like a key file, and
+if you delete one, that board needs a fresh single-use token.
+
+Things worth simulating that are awkward by hand:
+
+```bash
+# The Last Will. os._exit(1) with no DISCONNECT is what makes the BROKER publish
+# {"online":false} — a clean shutdown never fires a will, which is why the normal
+# path publishes its own goodbye instead.
+just sim --name blinker --heartbeat-interval 5 --crash-after 15
+sleep 3 && curl -sS "$BASE/v1/devices" -H "Authorization: Bearer $TOKEN" | jq -c '.devices[]|{device_id,online}'
+
+# A sleepy board: wake, publish, disconnect, sleep. Presence is then derived from
+# last_seen (2.5 x the wake interval), so after it stops the board stays online for
+# ~25 s and flips with NO message and NO SSE event — presence is computed on read.
+just sim --token "$(newtoken)" --name frame --power-class sleepy --wake-interval 10 --awake-s 3
+
+# A bad link: seeded latency before every publish, so a run is reproducible.
+just sim --name blinker --link slow --seed 7 --heartbeat-interval 5
+
+# Three boards at once. `fleet` issues its own tokens, so it needs the admin
+# PASSWORD (never the hash); it prints token ids, never token plaintexts.
+FF_ADMIN_PASSWORD=fleetforge-dev-only just sim-fleet 3 --heartbeat-interval 5
+
+# From inside the stack — the only path that reaches mosquitto:1883 directly.
+# --api-base is the api's own listener (nginx lives in the frontend container) and
+# --state-dir must be writable: /app is root-owned and read-only to appuser.
+docker compose exec -T api python -m fleetforge.simulator run --token "$(newtoken)" \
+  --name incontainer --api-base http://127.0.0.1:8000 --host mosquitto --port 1883 \
+  --heartbeat-interval 5 --duration 20 --state-dir /tmp/sim
+```
+
+Every expected failure prints one `SIMULATOR FAILED: <Type>: <message>` line and
+exits non-zero — a rejected token, a used token, an unreachable broker, a `sleepy`
+board with no `--wake-interval` (refused *before* the token is presented, so nothing
+is burned). A traceback is a bug.
+
 ## Failures you will actually hit
 
 **1. Traefik returns 404 for the dashboard, but the container is up.**

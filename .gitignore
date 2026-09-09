@@ -6,6 +6,11 @@
 # GCS key is a full compromise of gs://btvaroska, which also holds this estate's
 # .env backups. See docs/runbooks/artifact-storage.md.
 secrets/
+# The device simulator's NVS analogue (R0-test-1). Every file in here is a LIVE
+# broker credential: `POST /v1/enroll` returns `mqtt_password` once and it exists
+# nowhere else — not in Postgres, not in a log, not in dynsec (which keeps a hash).
+# A committed .sim/ is a committed fleet credential. Files are written 0600.
+.sim/
 
 # Python
 __pycache__/

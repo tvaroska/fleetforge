@@ -6,6 +6,53 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-09 — The simulator is a device, not a test fixture (R0-test-1)
+
+- **`python -m fleetforge.simulator` imports nothing from the server.** No `fleetforge.config`
+  (and therefore no mandatory `DATABASE_URL`), no `fleetforge.db`, no `fleetforge.api` — only
+  `fleetforge.identity` for `DEVICE_ID_RE`. A simulated board that needs the server's database URL
+  to boot is modelling the wrong thing, and the import would drag the ORM into a process
+  pretending to be an ESP32. This is a deliberate deviation from `broker/__main__.py` and
+  `storage/__main__.py`, both of which do `Settings()`; there is an AST tripwire test so the
+  deviation cannot rot back.
+- **Retain flags are the contract, and a wrong one is a silent wrong answer.** `announce` and
+  `presence` retained, `hb` **not** — a retained heartbeat would be replayed on every ingestor
+  reconnect and `handlers.py` treats a retained message as a replay, so `last_seen` would quietly
+  stop advancing. The LWT is retained too, or a server restart never learns a board is dead.
+- **A clean disconnect does not fire the LWT**, so Ctrl-C on an `always_on` board would leave it
+  online forever in the dashboard. The simulator publishes a retained `{"online":false}` goodbye on
+  any clean shutdown (which is what a planned reboot should do anyway), and `--crash-after` uses
+  `os._exit(1)` — a TCP FIN with no DISCONNECT — as the *only* honest way to exercise the will.
+  aiomqtt has no public API for dropping a connection and `client._client` is private.
+- **A sleepy wake is a fresh `aiomqtt.Client`**: entering the same client twice raises
+  `MqttReentrantError` (2.5.1). Sleep is a clean disconnect rather than a simulated brownout; the
+  server-visible state is identical because `is_online` ignores `presence_reported` for sleepy and
+  the ingestor never advances `last_seen` on `presence:false`. Verified live: after the last wake
+  the board stayed `online:true` for ~25 s (2.5 × 10 s) and then flipped with **no** message and
+  **no** SSE event — presence is computed on read.
+- **The device id is a locally-administered pseudo-MAC** — `(sha256(name)[0] & 0xFE) | 0x02` — so a
+  simulated board is stable across runs, can never collide with a real Espressif OUI, and can never
+  reach the `ffff…` ids `broker/__main__.py` reserves. Provable, and proven in a test, rather than
+  unlikely.
+- **The broker password is written to `.sim/<device_id>.json` at 0600, gitignored, never logged.**
+  It is the NVS analogue and it exists nowhere else — same posture `spec/prd.md` already states for
+  a real board. State present means **no enrollment happens**, because tokens are single-use; a
+  corrupt state file is a loud error rather than a silent re-enroll that burns one.
+- **Everything is validated before the token is presented** — the same ordering rule
+  `POST /v1/enroll` follows internally. A `sleepy` board with no wake interval fails before the
+  HTTP call, not after the burn (confirmed against a live stack: the token stayed `active`).
+- **`fleet` issues its own tokens** through `POST /v1/auth/login` → `POST /v1/enrollment-tokens`,
+  because typing three single-use tokens by hand is the friction this task exists to remove. Token
+  **ids** are printed, plaintexts never are.
+- **The agent connects with `client_id = device_id` and `clean_session = false`**, implementing the
+  proposal R0-be-4 recorded: command durability comes from the persistent session, never from a
+  retained `dn/cmd`, and MQTT 3.1.1 requires a non-empty client id for one. Three additive
+  `spec/device-protocol.md` changes follow from this work and are **proposed, not written**: the
+  LWT is published with `retain = true`; the agent's client id and clean-session flag; and a
+  planned shutdown SHOULD publish a retained `{"online":false}` before disconnecting.
+
+---
+
 ## 2026-09-08 — Broker authz: dynsec authenticates, acl_file authorises (R0-sec-1)
 
 - **Mosquitto 2.0's dynamic-security plugin does not support `%u`/`%c` substitution.**
