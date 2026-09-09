@@ -1,65 +1,57 @@
 import { useEffect, useState } from 'react'
+import { api, type Health } from './api'
+import { EnrollBoard } from './EnrollBoard'
+import { SessionGate } from './session'
 
-// R0-infra-1 ships the smallest page that PROVES the one-origin topology: a
-// same-origin fetch of /v1/healthz through nginx (prod) or the Vite proxy (dev).
-// R0-fe-1 replaces this with the token page and the device list.
-
-type Health = { status: string; version: string }
-
-type Probe =
-  | { state: 'loading' }
-  | { state: 'ok'; health: Health }
-  | { state: 'error'; detail: string }
-
-export default function App() {
-  const [probe, setProbe] = useState<Probe>({ state: 'loading' })
+// R0-infra-1's health probe survives as a footer rather than a page: it is the
+// cheapest proof of the one-origin topology, and R0-fe-3 needs the Web Serial
+// capability line to explain itself on a non-Chromium browser.
+function Diagnostics() {
+  const [health, setHealth] = useState<Health | null>(null)
 
   useEffect(() => {
-    const controller = new AbortController()
-    // Relative URL on purpose: the API shares this page's origin, so there is no
-    // base URL to configure and no CORS preflight to satisfy.
-    fetch('/v1/healthz', { signal: controller.signal })
-      .then(async (response) => {
-        if (!response.ok) {
-          throw new Error(`HTTP ${response.status}`)
-        }
-        return (await response.json()) as Health
+    let live = true
+    api
+      .health()
+      .then((value) => {
+        if (live) setHealth(value)
       })
-      .then((health) => setProbe({ state: 'ok', health }))
-      .catch((error: unknown) => {
-        if (error instanceof DOMException && error.name === 'AbortError') return
-        setProbe({ state: 'error', detail: error instanceof Error ? error.message : 'unreachable' })
+      .catch(() => {
+        if (live) setHealth(null)
       })
-    return () => controller.abort()
+    return () => {
+      live = false
+    }
   }, [])
 
   return (
+    <footer className="muted">
+      API {health === null ? 'unreachable' : `ok · ${health.version}`} · Web Serial{' '}
+      {'serial' in navigator ? 'available' : 'unavailable (use Chrome or Edge to flash)'}
+    </footer>
+  )
+}
+
+export default function App() {
+  return (
     <main>
-      <h1>
-        Fleetforge — API:{' '}
-        {probe.state === 'ok' ? (
-          <span className="ok">ok</span>
-        ) : probe.state === 'error' ? (
-          <span className="bad">unreachable</span>
-        ) : (
-          <span>checking…</span>
-        )}
-      </h1>
-      <dl>
-        <dt>API version</dt>
-        <dd>{probe.state === 'ok' ? probe.health.version : '—'}</dd>
-        <dt>Origin</dt>
-        <dd>{window.location.origin}</dd>
-        <dt>Web Serial</dt>
-        {/* R0-fe-3 needs this to be true; http://localhost is a secure context. */}
-        <dd>{'serial' in navigator ? 'available' : 'unavailable'}</dd>
-        {probe.state === 'error' && (
+      <SessionGate>
+        {({ me, expire, signOut }) => (
           <>
-            <dt>Detail</dt>
-            <dd className="bad">{probe.detail}</dd>
+            <header>
+              <h1>Fleetforge</h1>
+              <p className="muted">
+                {me.subject}{' '}
+                <button type="button" onClick={() => void signOut()}>
+                  Sign out
+                </button>
+              </p>
+            </header>
+            <EnrollBoard onSessionExpired={expire} />
           </>
         )}
-      </dl>
+      </SessionGate>
+      <Diagnostics />
     </main>
   )
 }

@@ -6,6 +6,32 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-09 — The dashboard trusts the server's token status (R0-fe-1)
+
+- **The frontend never recomputes token state.** `status` comes from the API, which derives it
+  from the burn predicate itself (`auth/enrollment.token_status`). Recomputing it in the browser
+  from `expires_at`/`used_at`/`revoked_at` looks trivial and is the bug: the two implementations
+  drift, and the dashboard eventually shows "active" for a token that `POST /v1/enroll` will
+  refuse — which reads, in the field, as broken enrollment rather than a stale token.
+- **The issued plaintext lives in React state and nowhere else.** No `localStorage`, no
+  `sessionStorage`, no URL, no error message. The server cannot re-derive it, so persisting it
+  "for convenience" would be storing an un-rotatable fleet-join credential in the most readable
+  place in the browser. Three tests in `EnrollBoard.test.tsx` and one browser-context assertion
+  exist purely to fail if this regresses.
+- **R0-fe-1 had to ship the login gate.** The task line says "generate token", but the token
+  endpoints are admin-authenticated (R0-be-1), so the page was unreachable in a browser without
+  one. Scope grew by a screen; the alternative was a page only `curl` could use.
+- **Session state is not mirrored client-side.** The cookie is HttpOnly, so the page cannot read
+  it; "signed in?" is `GET /v1/auth/me` plus a 401 watch on every later call. A mirrored boolean
+  would only ever disagree with the cookie. A transport error is explicitly not treated as a
+  logout — that distinction stops an operator re-typing the admin password at a dead API.
+- **Gotcha, cost ~15 min: `vite.config.ts` is loaded by the container, so it may not import test
+  deps.** Putting the `test` block there (via `defineConfig` from `vitest/config`) broke the
+  `frontend` service with `ERR_MODULE_NOT_FOUND`, because the image's `node_modules` has no
+  `vitest`. Traefik then dropped the unhealthy backend and every `/v1/*` call returned a bare
+  **404** — a symptom that points at routing, not at a config import. Vitest config now lives in
+  `frontend/vitest.config.ts`, which the container never reads.
+
 ## 2026-09-09 — The simulator is a device, not a test fixture (R0-test-1)
 
 - **`python -m fleetforge.simulator` imports nothing from the server.** No `fleetforge.config`

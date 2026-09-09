@@ -241,7 +241,12 @@ audience), and **agent images are built off-box** (the ESP-IDF builder is 2–3 
 
 ### Frontend
 
-- [ ] **R0-fe-1**: "Enroll a board" page — generate token (P0, 1d)
+- [x] **R0-fe-1**: "Enroll a board" page — generate token (P0, 1d) ✅ 2026-09-09
+      Ships the login gate too — the API is authenticated, so without one the page is
+      unreachable in a browser. Plaintext shown once, held in component state only.
+      T2: token minted through the page in Chromium enrolled a simulated board; the
+      row flipped to `used`, and a replay from a second board was refused 409.
+      _(done 2026-09-09; see docs/features/enrollment.md)_
 
 - [ ] **R0-fe-2**: Live device list via SSE — online/offline, version, last-seen (P0, 1.5d)
 

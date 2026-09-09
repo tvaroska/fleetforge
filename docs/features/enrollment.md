@@ -255,6 +255,50 @@ test in `tests/test_simulator.py` that fails when it regresses:
   `.sim/<device_id>.json`, mode 0600, gitignored. It is in no transcript line and no
   log record.
 
+### "Enroll a board" page (R0-fe-1)
+
+The operator half of Flow 1, and the dashboard's first real screen. It is a client of
+`R0-be-2` and nothing more — the frontend holds no token logic, because the API's
+derived `status` *is* the burn predicate and a second implementation would eventually
+disagree with it about whether a token can still enroll.
+
+**It ships the login gate**, which was not in the task line but is implied by it: the
+token endpoints require admin auth from `R0-be-1`, so without a login screen the page
+is unreachable in a browser and only `curl` can enroll a board. There is no client-side
+session state — the credential is an HttpOnly cookie the page cannot read, so "am I
+signed in?" is `GET /v1/auth/me`, and any later 401 drops back to the form. A transport
+failure is deliberately *not* rendered as "logged out": that would invite an operator to
+re-type the admin password at an API that is simply down.
+
+**The plaintext is component state and nothing else.** The server cannot re-derive it,
+so a token that leaves the screen before the operator copies it is dead. It is never
+written to `localStorage`, `sessionStorage`, a URL or an error message — three of the
+component tests exist only to fail if that changes. Revoking the token currently on
+screen also clears it, so the UI cannot advertise a credential that no longer works.
+
+Every request uses a **relative** path (`/v1/...`) with `credentials: 'same-origin'`.
+The one-origin invariant is what makes the cookie work without CORS; an absolute URL
+here is what eventually gets "fixed" by adding CORS middleware to the API.
+
+Test configuration lives in a separate `frontend/vitest.config.ts`, **not** in
+`vite.config.ts`. The `frontend` container's `node_modules` carries runtime and build
+dependencies only, so a `vitest/config` import in the shared config makes the dev server
+die with `ERR_MODULE_NOT_FOUND` — which reaches the operator as a bare 404 from Traefik,
+because the router drops a backend that is not healthy. That failure was hit and fixed
+during this task; the comment in `vitest.config.ts` is there to stop it recurring.
+
+No group picker: R0 has no group CRUD, so every token is issued ungrouped.
+
+**T2 evidence.** Chromium drove the real page at `http://localhost:8080`: logged in
+through the form, clicked *Generate enrollment token*, and read the `ffe_` plaintext out
+of the live DOM. That token then enrolled a simulated board
+(`python -m fleetforge.simulator run --device-id aa11bb22cc33`) — `POST /v1/enroll` 200,
+broker connect as the provisioned credential, retained announce/presence, heartbeats.
+The token's row flipped `active` → `used` with `used_by_device_id=aa11bb22cc33`, the
+board appeared in `GET /v1/devices`, and replaying the burned token from a second
+`device_id` was refused `409 enrollment token is not usable`. Storage/URL leak checks
+ran against the real browser context, not jsdom.
+
 ## Post-v1
 
 - **Device decommissioning** — `POST /v1/devices/{device_id}/decommission` setting
