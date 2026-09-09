@@ -6,13 +6,14 @@ grow to Raspberry Pi and eventually FPGAs.
 **Safe remote firmware updates**, where "safe" means a bad build is caught before the
 fleet, and any device that does get a bad update recovers itself.
 
-> **Status:** R0 in progress. The registry schema, the Compose stack, admin auth
-> (`/v1/auth/*`), enrollment **token** issuance (`/v1/enrollment-tokens` — issue, list,
-> revoke) and a dashboard skeleton exist, and the ingestor now really ingests: it is
-> the sole MQTT subscriber, derives presence, writes the device row and emits
-> `ff_events` notifications. The agent, the flasher, `POST /v1/enroll` (the endpoint
-> that redeems a token) and OTA do not yet — so a token can be issued but nothing can
-> spend it, and a device row has to be seeded by hand
+> **Status:** R0 in progress. A board can now be enrolled end to end and watched live:
+> the registry schema, the Compose stack, admin auth (`/v1/auth/*`), enrollment token
+> issuance (`/v1/enrollment-tokens`), `POST /v1/enroll` (the device-facing endpoint that
+> redeems a token and returns a broker credential), the ingestor (sole MQTT subscriber —
+> derives presence, writes the device row, emits `ff_events`), and the read side:
+> `GET /v1/events` (SSE, fanned out from Postgres `LISTEN` so it works with N API
+> workers) plus `GET /v1/devices`. The dashboard is still a skeleton, and the agent, the
+> flasher and OTA itself do not exist — nothing runs on a board yet
 > ([runbook](docs/runbooks/dev-stack.md)). See [`TODO.md`](TODO.md).
 
 ## Why

@@ -22,6 +22,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from fleetforge.api.eventstream import EventHub
 from fleetforge.auth.cache import VerifiedSecretCache
 from fleetforge.auth.hashing import averify_secret, dummy_verify
 from fleetforge.auth.ratelimit import FixedWindowLimiter
@@ -130,6 +131,17 @@ def enroll_limiter(request: Request) -> FixedWindowLimiter:
     """
     limiter: FixedWindowLimiter = request.app.state.enroll_limiter
     return limiter
+
+
+def event_hub(request: Request) -> EventHub:
+    """The per-app SSE fan-out hub, created in `create_app()`.
+
+    Per app rather than module-level for the same reason as the caches and limiters
+    above, and because the `LISTEN` connection that feeds it is owned by the app
+    lifespan (`api/main.py`).
+    """
+    hub: EventHub = request.app.state.event_hub
+    return hub
 
 
 def dynsec_configured(settings: Settings) -> bool:

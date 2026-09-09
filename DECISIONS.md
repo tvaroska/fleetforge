@@ -6,6 +6,66 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-08 — SSE: one listener per worker, and a reconnect ends every stream (R0-be-5)
+
+- **One dedicated asyncpg connection per API process, never a pooled one.** `LISTEN`
+  only delivers to a backend that is between transactions, and `pool_pre_ping`/recycle
+  would drop the registration with nothing in the log — the symptom is a stream that
+  connects and stays empty forever. `db/base.asyncpg_dsn()` converts the SQLAlchemy
+  URL; the connection sets `application_name = 'fleetforge-events'` so
+  `pg_stat_activity` answers "is anything listening?" without reading code. This is the
+  one documented exception to "`get_sessionmaker()` is the only door into the database
+  from the API".
+- **A listener reconnect closes every SSE stream.** The hub cannot know what was missed
+  while the connection was down, and a client that keeps reading after a gap silently
+  shows a stale fleet. Ending the stream makes `EventSource` reconnect and re-read
+  `GET /v1/devices`, which is the same self-healing path as the slow-client case. That
+  is also why there is no "resync" event type.
+- **A slow client is disconnected, not buffered.** Bounded per-client queues
+  (`sse_queue_size`); on overflow the queue is drained and a sentinel ends that one
+  stream. Dropping individual events instead would leave a client silently wrong, and
+  unbounded buffering is a memory leak in a 256 M container.
+- **The NOTIFY payload is validated and then forwarded *verbatim*.** `fw_version` comes
+  off the wire from a board, and SSE framing is newline-delimited: a payload containing
+  a raw newline would let a device inject a forged event into the operator's stream. It
+  cannot happen today (`model_dump_json` escapes control characters), which is why it is
+  asserted rather than assumed. Forwarding the original rather than a re-serialization
+  keeps the additive-evolution rule — re-serializing would strip fields a newer ingestor
+  adds.
+- **Auth is checked once, at connect, so a stream is capped at 15 min**
+  (`sse_max_stream_s`). Instant revocation is the reason JWT was rejected (R0-be-1), and
+  an unbounded stream would quietly outlive a revoked token. The cap is deliberately
+  under nginx's `proxy_read_timeout 3600s`. Browser `EventSource` cannot send an
+  `Authorization` header at all — the stream authenticates on the `ff_session` cookie,
+  which is R0-be-1's "one credential, two transports" paying for itself. **A token in
+  the query string was rejected:** nginx's access-log format logs `$request`.
+- **`GET /v1/devices` shipped here, not in R0-fe-2.** `events.py` and `presence.py` both
+  already define the contract as "the event is a hint; re-read `GET /v1/devices`", and
+  no task owned that endpoint — an SSE stream whose documented contract is "go read an
+  endpoint that 404s" is not a finished artifact. Presence is computed on read via
+  `presence.is_online`, with one `now` for the whole response; `presence_reported` is
+  deliberately not exposed, so no client can re-derive the rule.
+- **Gotcha, and it will bite the next streaming endpoint too:** `httpx`'s
+  `ASGITransport` buffers the entire response body before returning, so
+  `client.stream()` against an endless SSE generator hangs the whole suite. The tests
+  drive the ASGI app directly (`tests/test_events_stream.py::drive_sse`); only responses
+  that never stream (401, 503) go through the normal client. Related: Starlette
+  *cancels* the generator on disconnect for ASGI spec_version < 2.4 (uvicorn reports
+  2.3), so the subscription is released in a `finally:` inside the generator, not after
+  it — anywhere else leaks one subscriber per page reload.
+- **`asyncpg.InterfaceError` is caught alongside `PostgresError`/`OSError`** in the
+  listener's reconnect loop. asyncpg raises it for "connection is closed", which the
+  keepalive `SELECT 1` hits when the socket died between two ticks; letting it escape
+  would kill the listener task for the life of the process — the exact silent failure
+  this module exists to prevent, with nothing unhealthy anywhere. asyncpg also ships no
+  `py.typed`, so it gets one `ignore_missing_imports` override in `pyproject.toml`
+  rather than a `# type: ignore` at every call site.
+- **No Redis and no broadcaster abstraction.** One backend, and the "no Redis" decision
+  is already recorded under *The ingestor is the only MQTT subscriber*. There is no
+  second implementation of this boundary and none is planned, so no adapter pair.
+
+---
+
 ## 2026-09-08 — Enrollment: commit, then provision; and the grace window (R0-be-4)
 
 - **Verify the token secret before calling `BURN_SQL`.** The statement keys on `id`

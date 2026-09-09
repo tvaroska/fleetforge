@@ -169,6 +169,48 @@ The broker password exists in the response body and nowhere else: not in Postgre
 in a log line, not in the dynsec store (which keeps a hash). Losing it means using the
 grace window, or re-enrolling.
 
+### Live event stream (R0-be-5)
+
+`GET /v1/events` (SSE) and `GET /v1/devices` — the two halves of "the event is a hint,
+the list is the truth".
+
+The producer side already existed: the ingestor and `POST /v1/enroll` both call
+`events.emit()`, which runs `SELECT pg_notify('ff_events', …)` **inside the writer's
+transaction**. This task added the consumer: **one dedicated asyncpg connection per API
+process** `LISTEN`ing on that channel (`api/eventstream.py::PostgresEventListener`),
+publishing into an in-process `EventHub` that fans out to one bounded
+`asyncio.Queue` per attached client. Postgres delivers a `NOTIFY` to every listening
+backend, so this is correct with N API workers — which is the reason the design routes
+events through the database rather than having the API subscribe to MQTT.
+
+The connection cannot be a pooled one: `LISTEN` only delivers to a backend that is
+between transactions, and `pool_pre_ping`/recycle would drop the registration with
+nothing in the log. It sets `application_name = 'fleetforge-events'`, so
+`pg_stat_activity` answers "is anything listening?" without reading code.
+
+**Every failure ends the stream rather than degrading it.** A client that stops reading
+overflows its queue and is disconnected (not buffered — that is a memory leak in a
+256 M container, and dropping individual events instead would leave it silently
+stale). A listener reconnect closes *every* stream, because the hub cannot know what was
+missed. Both cases are the same self-healing path: `EventSource` reconnects after
+`retry: 2000` and re-reads `GET /v1/devices`. That is also why there is no replay, no
+`Last-Event-ID` (Postgres `NOTIFY` has no backlog) and no "resync" event type.
+
+**`GET /v1/devices` computes presence on read** through `presence.is_online`, with one
+`now` for the whole response. `presence_reported` is deliberately not exposed: `online`
+is the answer, and exposing the ingredient invites a client to re-derive the rule.
+Decommissioned rows are absent. A client must **not** patch its state from event
+payloads — a sleepy board goes offline with no event at all.
+
+Security shape (this route is the API's first long-lived authenticated connection):
+auth is checked once, at connect, so the stream is capped at 15 min
+(`config.sse_max_stream_s`) and a revoked token cannot outlive that; the browser
+authenticates with the `ff_session` cookie because `EventSource` cannot set a header,
+and **a token in the query string was rejected** — nginx logs `$request`. The payload is
+validated (`DeviceEvent`) and refused if it contains `\r`/`\n`, since `fw_version`
+comes off the wire from a board and SSE framing is newline-delimited; what is forwarded
+is the **original** string, so a field a newer ingestor adds survives.
+
 ## Post-v1
 
 - **Device decommissioning** — `POST /v1/devices/{device_id}/decommission` setting

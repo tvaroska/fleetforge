@@ -45,6 +45,14 @@ warn_no_return = true
 strict_equality = true
 no_implicit_optional = true
 
+# asyncpg ships no `py.typed` marker. Everything else reaches it through
+# SQLAlchemy; the one direct user is `api/eventstream.py`'s dedicated `LISTEN`
+# connection (`LISTEN` cannot share the pool — see DECISIONS.md, R0-be-5). One
+# config line beats a `# type: ignore` on every call into it.
+[[tool.mypy.overrides]]
+module = "asyncpg"
+ignore_missing_imports = true
+
 [tool.ruff]
 target-version = "py312"
 line-length = 100

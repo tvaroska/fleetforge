@@ -3,8 +3,9 @@
 `DECISIONS.md` 2026-09-08 → *The ingestor is the only MQTT subscriber*: the ingestor
 writes and `NOTIFY`s, and every API worker `LISTEN`s and fans out over SSE (R0-be-5).
 That seam has exactly two halves, and if the channel name is spelled in two files the
-SSE stream is silently empty with nothing failing loudly — so **R0-be-5 imports
-`EVENTS_CHANNEL` and `DeviceEvent` from here** rather than restating either.
+SSE stream is silently empty with nothing failing loudly — so the consumer,
+`fleetforge.api.eventstream` (R0-be-5), **imports `EVENTS_CHANNEL`, `DeviceEvent` and
+`NOTIFY_PAYLOAD_LIMIT` from here** rather than restating any of them.
 
 Three properties of `NOTIFY` that shape this module:
 

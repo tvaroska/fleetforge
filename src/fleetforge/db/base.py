@@ -46,6 +46,20 @@ class Base(DeclarativeBase):
     metadata = MetaData(naming_convention=NAMING_CONVENTION)
 
 
+def asyncpg_dsn(url: str) -> str:
+    """Convert a SQLAlchemy async URL into one `asyncpg.connect()` accepts.
+
+    `Settings.database_url` is `postgresql+asyncpg://…` because SQLAlchemy resolves
+    its driver from the scheme; asyncpg's own connect refuses that scheme. The one
+    caller that needs a raw connection is `api/eventstream.py`'s `LISTEN` connection
+    — `LISTEN` only delivers to a backend that is between transactions, so it cannot
+    share the pool (see `DECISIONS.md` 2026-09-08, R0-be-5). The conversion lives
+    here rather than inlined at each call site: two spellings of the same URL is how
+    a listener ends up pointed at a different database than the writer.
+    """
+    return url.replace("postgresql+asyncpg://", "postgresql://", 1)
+
+
 @lru_cache(maxsize=1)
 def get_engine() -> AsyncEngine:
     """Return the process-wide async engine, created on first use."""

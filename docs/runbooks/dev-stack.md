@@ -57,7 +57,8 @@ and recreate the stack.
 
 The ingestor only ever **updates** device rows — it never creates one, because the
 only way into the registry is a burned enrollment token (`POST /v1/enroll`, R0-be-4).
-Until that endpoint exists, seed a row by hand:
+Enroll properly with that endpoint, or seed a row by hand when you only want the
+ingest path:
 
 ```bash
 DEV=aabbccddeeff
@@ -73,19 +74,39 @@ just mqtt-pub "ff/v1/d/$DEV/up/presence" '{"online":true}' 1   # retained, as a 
 psql -c "SELECT presence_reported FROM devices WHERE device_id='$DEV';"     # => t
 ```
 
-Watch the `ff_events` notification the dashboard's SSE stream will carry (R0-be-5) —
-psql prints notifications when the command it is running returns, so give it a sleep
-to publish into:
+Watch the same thing the dashboard sees — the SSE stream (R0-be-5). Log in first;
+`curl` will not send the `Secure` session cookie over plain http, so take the token
+out of the `Set-Cookie` and use the bearer transport (same credential, R0-be-1):
 
 ```bash
-# terminal 1
+BASE=http://localhost:${FF_HTTP_PORT:-8080}
+TOKEN=$(curl -sSi -X POST "$BASE/v1/auth/login" -H 'Content-Type: application/json' \
+        -d '{"password":"fleetforge-dev-only"}' \
+        | grep -i '^set-cookie:' | sed -E 's/.*ff_session=([^;]+).*/\1/')
+
+# terminal 1 — `-N` is essential: curl buffers otherwise and you will blame nginx
+curl -N -H "Authorization: Bearer $TOKEN" "$BASE/v1/events"
+#   : connected
+#   retry: 2000
+# terminal 2
+just mqtt-pub "ff/v1/d/$DEV/up/hb" '{"fw_version":"1.4.2"}'
+# terminal 1, within ~2 s:
+#   data: {"v":1,"type":"device.heartbeat","device_id":"aabbccddeeff","at":"…","online":true,"fw_version":"1.4.2"}
+# and a `: keepalive` comment every 15 s while nothing happens.
+```
+
+The event is only a hint — the fleet view is `curl -sS -H "Authorization: Bearer
+$TOKEN" "$BASE/v1/devices"`, which recomputes presence on read (a sleepy board goes
+offline with no event at all).
+
+**Is it the API or the database?** Bisect with psql, which prints notifications when
+the command it is running returns — so give it a sleep to publish into:
+
+```bash
 docker compose exec -T postgres psql -U fleetforge -d fleetforge \
   -c "LISTEN ff_events" -c "SELECT pg_sleep(20)"
-# terminal 2, while that sleeps
-just mqtt-pub "ff/v1/d/$DEV/up/hb" '{"fw_version":"1.4.2"}'
-# terminal 1 prints:
 #   Asynchronous notification "ff_events" with payload
-#   {"v":1,"type":"device.heartbeat","device_id":"aabbccddeeff","at":"…","online":true,"fw_version":"1.4.2"}
+#   {"v":1,"type":"device.heartbeat",…}
 ```
 
 Two results that look like bugs and are not: publishing for a device that is not in
@@ -126,7 +147,19 @@ The healthcheck runs `mosquitto_sub` anonymously. R0-sec-1 removes anonymous acc
 and must update that healthcheck to use the dynsec admin credential in the same
 commit.
 
-**6. The frontend container fails to start after a `package.json` change.**
+**6. An SSE stream connects and stays empty** — `: connected` and keepalives arrive,
+device events never do. The `LISTEN` connection is down (the fan-out itself is
+in-process and cannot half-work). Check that the API has one:
+`docker compose exec -T postgres psql -U fleetforge -d fleetforge -c "SELECT
+application_name, state FROM pg_stat_activity WHERE
+application_name='fleetforge-events';"` — expect one row **per api worker**, `idle`.
+Then `docker compose logs api | grep ff_events`: `listening on ff_events` at startup,
+and a reconnect warning for every blip since. If psql *does* see the notification
+(bisect above) and the stream does not, it is the API; if neither does, it is the
+ingestor or the broker. Note that a reconnect deliberately **ends every open stream** —
+the client is expected to reconnect and re-read `GET /v1/devices`.
+
+**7. The frontend container fails to start after a `package.json` change.**
 The dev `node_modules` lives in the `ff_node_modules` named volume, seeded once from
 the image. Re-seed it with `just rebuild frontend`, or `docker volume rm
 fleetforge_ff_node_modules` after `just down`.

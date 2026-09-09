@@ -38,6 +38,7 @@ from fleetforge.auth.enrollment import EnrollmentTokenStatus, token_status
 from fleetforge.auth.ratelimit import FixedWindowLimiter
 from fleetforge.broker import BrokerProvisioningError
 from fleetforge.clock import now_utc
+from fleetforge.db.base import asyncpg_dsn
 from fleetforge.db.models import Device, DeviceGroup, EnrollmentToken
 from fleetforge.events import EVENTS_CHANNEL, DeviceEvent, EventType
 from tests.conftest import (
@@ -650,7 +651,7 @@ async def test_enroll_is_versioned_and_documented(enroll_app: FastAPI) -> None:
 @pytest.fixture
 async def listener() -> AsyncIterator[asyncpg.Connection]:
     """A raw asyncpg connection LISTENing on `ff_events` (as R0-be-5 will)."""
-    dsn = database_url_for(TEST_DB_NAME).replace("postgresql+asyncpg://", "postgresql://")
+    dsn = asyncpg_dsn(database_url_for(TEST_DB_NAME))
     connection = await asyncpg.connect(dsn)
     try:
         yield connection

@@ -20,6 +20,7 @@ import pytest
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
+from fleetforge.db.base import asyncpg_dsn
 from fleetforge.db.models import DeployEvent, Device
 from fleetforge.events import EVENTS_CHANNEL, DeviceEvent, EventType
 from fleetforge.ingestor.handlers import handle_up_message
@@ -384,7 +385,7 @@ async def listener() -> AsyncIterator[asyncpg.Connection]:
     `LISTEN` cannot share a pooled connection, which is also how R0-be-5 will have to
     do it: one dedicated connection per API worker.
     """
-    dsn = database_url_for(TEST_DB_NAME).replace("postgresql+asyncpg://", "postgresql://")
+    dsn = asyncpg_dsn(database_url_for(TEST_DB_NAME))
     connection = await asyncpg.connect(dsn)
     try:
         yield connection

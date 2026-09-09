@@ -192,3 +192,47 @@ class EnrollResponse(BaseModel):
     # security control and not a convenience — see `broker/provisioner.py`.
     mqtt_username: str
     mqtt_password: str
+
+
+# ---------------------------------------------------------------------------
+# Devices (R0-be-5)
+# ---------------------------------------------------------------------------
+
+
+class DeviceSummary(BaseModel):
+    """One enrolled board, as the fleet view sees it.
+
+    **`online` is computed on read** by `fleetforge.presence.is_online`, never stored
+    and never sent as ingredients: `presence_reported` is deliberately absent, so no
+    client can re-derive the rule and disagree with the server about a sleepy board
+    that has simply stopped waking up.
+
+    Built field by field with `from_attributes` off, same as `EnrollmentTokenSummary`
+    — the guard that stops a future ORM column leaking into a response.
+    """
+
+    device_id: str
+    name: str | None
+    group_id: uuid.UUID | None
+    platform_type: str
+    fw_version: str | None
+    agent_version: str | None
+    link_type: str
+    power_class: str
+    expected_wake_interval_s: int | None
+    parent_device_id: str | None
+    partition_layout: str | None
+    ota_slot_size: int | None
+    capabilities: list[str]
+    last_seen: dt.datetime | None
+    enrolled_at: dt.datetime
+    # NULL until the broker credential exists — the honest reconcile list R0-sec-1
+    # works from (`WHERE broker_provisioned_at IS NULL`).
+    broker_provisioned_at: dt.datetime | None
+    online: bool
+
+
+class DeviceList(BaseModel):
+    """An envelope, not a bare array, so a cursor can be added without a break."""
+
+    devices: list[DeviceSummary]

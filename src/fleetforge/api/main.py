@@ -5,7 +5,13 @@ R0-infra-1 shipped the app factory plus `GET /v1/healthz` (liveness) and
 router/dependency layout every later endpoint copies; R0-be-2 added enrollment token
 issuance (`/v1/enrollment-tokens`); R0-be-4 added the device-facing `POST /v1/enroll`
 — the one **unauthenticated write** endpoint, whose credential is the token in its
-body; R0-be-5 adds SSE.
+body; R0-be-5 added the SSE event stream (`GET /v1/events`) and the fleet read model
+(`GET /v1/devices`) it tells clients to re-read.
+
+**The lifespan owns one background task**: the `ff_events` `LISTEN` connection
+(`api/eventstream.py::PostgresEventListener`), one per API process, feeding the
+per-app `EventHub`. It starts only when settings exist, because `create_app()` must
+stay constructible with no environment at all — see `_settings_or_none()`.
 
 **There is no CORS middleware here, and there must never be one.** The dashboard
 and the API are served from a single origin: nginx in the `frontend` container
@@ -18,7 +24,10 @@ The login cookie is same-origin by construction, which is also why
 `SameSite=Strict` alone is sufficient against CSRF and no CSRF token exists.
 """
 
+import asyncio
+import contextlib
 import logging
+from collections.abc import AsyncIterator
 from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI
@@ -30,11 +39,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from fleetforge import __version__
 from fleetforge.api.deps import dynsec_configured
-from fleetforge.api.routers import auth, enroll, enrollment
+from fleetforge.api.eventstream import EventHub, PostgresEventListener
+from fleetforge.api.routers import auth, devices, enroll, enrollment, events
 from fleetforge.auth.cache import VerifiedSecretCache
 from fleetforge.auth.ratelimit import FixedWindowLimiter
 from fleetforge.config import Settings, get_settings
-from fleetforge.db.base import get_sessionmaker
+from fleetforge.db.base import asyncpg_dsn, get_sessionmaker
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +89,44 @@ def create_app() -> FastAPI:
     """
     configure_logging()
 
+    # Per-app, never module-level: each test app gets a fresh cache and a fresh
+    # limiter, so no auth state leaks between tests (and `dependency_overrides` on
+    # `get_settings` cannot be undermined by a shared singleton).
+    settings = _settings_or_none()
+
+    @contextlib.asynccontextmanager
+    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+        """Own the one `ff_events` LISTEN connection for this process.
+
+        `httpx`'s `ASGITransport` never runs a lifespan, which is deliberate here:
+        test apps get a hub and no listener, so nothing dials
+        `settings_for_tests()`'s intentionally unusable DSN. The listener has its own
+        integration test against the real test database.
+        """
+        hub: EventHub = app.state.event_hub
+        task: asyncio.Task[None] | None = None
+        if settings is not None:
+            listener = PostgresEventListener(
+                asyncpg_dsn(settings.database_url),
+                hub,
+                ping_s=settings.events_listener_ping_s,
+            )
+            app.state.event_listener = listener
+            task = asyncio.create_task(listener.run(), name="ff-events-listener")
+        else:
+            logger.warning(
+                "no settings: the ff_events listener is not running, so /v1/events would "
+                "carry no device events. Same cause as the DATABASE_URL warning above."
+            )
+        try:
+            yield
+        finally:
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+            hub.close_all()
+
     app = FastAPI(
         title="Fleetforge",
         version=__version__,
@@ -86,12 +134,9 @@ def create_app() -> FastAPI:
         docs_url="/v1/docs",
         redoc_url=None,
         openapi_url="/v1/openapi.json",
+        lifespan=lifespan,
     )
 
-    # Per-app, never module-level: each test app gets a fresh cache and a fresh
-    # limiter, so no auth state leaks between tests (and `dependency_overrides` on
-    # `get_settings` cannot be undermined by a shared singleton).
-    settings = _settings_or_none()
     app.state.token_cache = VerifiedSecretCache()
     app.state.login_limiter = FixedWindowLimiter(
         per_key=settings.login_rate_limit_per_ip if settings else 5,
@@ -105,6 +150,12 @@ def create_app() -> FastAPI:
         per_key=settings.enroll_rate_limit_per_ip if settings else 10,
         per_global=settings.enroll_rate_limit_global if settings else 60,
         window_s=settings.login_rate_limit_window_s if settings else 60,
+    )
+    # The SSE fan-out. Created here (not in the lifespan) so a test app that never
+    # runs a lifespan still has one to publish into.
+    app.state.event_hub = EventHub(
+        queue_size=settings.sse_queue_size if settings else 200,
+        max_subscribers=settings.sse_max_clients if settings else 20,
     )
     if settings is not None and settings.admin_password_hash is None:
         logger.warning(
@@ -122,6 +173,8 @@ def create_app() -> FastAPI:
     app.include_router(auth.router)
     app.include_router(enrollment.router)
     app.include_router(enroll.router)
+    app.include_router(events.router)
+    app.include_router(devices.router)
 
     @app.get("/v1/healthz", tags=["health"])
     async def healthz() -> dict[str, str]:

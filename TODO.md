@@ -135,8 +135,23 @@ audience), and **agent images are built off-box** (the ESP-IDF builder is 2–3 
       token. Keeps the broker from ever authenticating a client it has not heard of.
       _(done 2026-09-08; reviewed; see docs/features/*)_
 
-- [ ] **R0-be-5**: SSE event stream (P0, 0.5d)
+- [x] **R0-be-5**: SSE event stream (P0, 0.5d)
       Fanned out from Postgres `LISTEN`, so it works with N API workers.
+      `GET /v1/events` (SSE) + `GET /v1/devices` (the read model the stream tells every
+      client to re-read; presence derived on read, never stored). One dedicated asyncpg
+      `LISTEN` connection per API process (`application_name='fleetforge-events'`) into a
+      per-app `EventHub`; a slow client and a listener reconnect both **end the stream**
+      rather than degrade it, and the client resyncs. Payload validated then forwarded
+      verbatim, `\r`/`\n` refused — a board's `fw_version` must not be able to forge a
+      frame. Auth once at connect, so the stream is capped at 15 min
+      (`sse_max_stream_s`); no token in the query string.
+      _(done 2026-09-08; reviewed; verified through nginx on `just up-prod`: event on the
+      stream ~0.2 s after publish, keepalives every 15 s, fan-out to two clients, both
+      401 paths, `docker compose restart postgres` → every stream ended, listener
+      reconnected and events flowed again with the api never restarting and `/v1/healthz`
+      200 throughout, retained replay still did not move `last_seen`; 209 tests green.
+      Gotcha carried forward: httpx's `ASGITransport` buffers, so SSE tests drive the ASGI
+      app directly. See docs/features/*)_
 
 - [ ] **R0-be-6**: Object-store adapter (P0, 1d)
       `put` / `get` / `signed_url` / `delete`. **GCS** backend with a service-account key

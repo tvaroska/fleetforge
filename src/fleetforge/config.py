@@ -110,6 +110,29 @@ class Settings(BaseSettings):
     # One dynsec round-trip must not hold an API worker forever.
     broker_command_timeout_s: float = 5.0
 
+    # --- SSE event stream (R0-be-5) ------------------------------------------
+    # A comment frame every 15 s. Idle proxies and load balancers close silent
+    # connections, and a client with no traffic cannot tell "quiet fleet" from
+    # "dead socket".
+    sse_keepalive_s: float = 15.0
+    # A stream is closed after 15 min and the client reconnects. Auth is checked
+    # once, at connect (api/deps.py::require_admin), so this is the bound on how
+    # long a REVOKED admin token can keep reading events — instant revocation is the
+    # reason JWT was rejected (DECISIONS.md 2026-09-08, R0-be-1). Deliberately well
+    # under nginx's `proxy_read_timeout 3600s` in frontend/nginx.conf.
+    sse_max_stream_s: float = 900.0
+    # Per-client buffer. A client that falls this far behind is disconnected rather
+    # than buffered — see api/eventstream.py::EventHub.publish.
+    sse_queue_size: int = 200
+    # Concurrent SSE streams per API worker. spec/prd.md → Capacity sizes v1 at 25
+    # devices and one operator; this is a memory guard on a 256 M container, not a
+    # product limit.
+    sse_max_clients: int = 20
+    # How often the LISTEN connection proves it is still alive with `SELECT 1`. A
+    # silently dead TCP socket fires no termination callback, and the symptom is an
+    # SSE stream that is connected and permanently empty.
+    events_listener_ping_s: float = 30.0
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
