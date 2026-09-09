@@ -48,6 +48,34 @@ TODO.md is the single source; this file holds the decisions behind them.
 
 **Done when:** plug in a board, flash & register from the browser, watch it come online.
 
+### Token Issuance (R0-be-2)
+
+The admin API provides enrollment token lifecycle management through three endpoints:
+`POST /v1/enrollment-tokens` (issue), `GET /v1/enrollment-tokens` (list), and
+`POST /v1/enrollment-tokens/{id}/revoke`. Tokens are short-lived (24 h TTL from
+`config.enrollment_token_ttl_hours`), group-scoped (or ungrouped via `group_id: null`),
+and strictly single-use.
+
+The plaintext token (format `ffe_<uuid>.<secret>`) is returned exactly once in the POST
+response body so an operator can copy it into the flasher's baked config. The secret is
+hashed with argon2id and never stored, logged, or re-derivable. The list endpoint shows
+token status (active / used / revoked / expired) but never exposes the plaintext or hash.
+
+Single-use enforcement relies on a conditional UPDATE statement (`BURN_SQL` in
+`fleetforge.auth.enrollment`) that atomically marks a token as used only if it is still
+active (not used, not revoked, not expired). This statement is shipped as an importable
+constant rather than copy-paste prose, so `R0-be-4` (device enrollment) and the invariant
+tests all reference the same implementation. The burn predicate (`used_at IS NULL AND
+revoked_at IS NULL AND expires_at > now()`) defines what "active" means, and the API's
+derived status must match it exactly—a dashboard showing "active" for a token the burn
+would reject causes field enrollment failures.
+
+Revocation uses `POST .../revoke` rather than `DELETE` because revoked tokens are retained
+for 90 days (per `spec/prd.md` retention policy) and `used_by_device_id` provides
+enrollment provenance for the fleet. Group CRUD deliberately does not exist in R0—tokens
+can be group-scoped but nothing creates groups yet—so all R0 tokens are ungrouped in
+practice. This is acceptable because bulk deployment is a V3 feature.
+
 ## Post-v1
 
 - CLI flasher for batch/CI enrollment.
