@@ -6,6 +6,31 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-09 — One app image serves both the api and the ingestor (R0-infra-5)
+
+- **Two images, not three.** `fleetforge` runs the api and the ingestor; they are
+  the same code with a different `command`, exactly as `docker-compose.yml`
+  already builds them from one `fleetforge:dev`. A separate ingestor image would
+  rebuild identical layers and give the pair a way to drift in production.
+  `fleetforge-frontend` stays separate — different base, different build.
+- **`just build` runs the T1 gate before it pushes.** Prod pulls by tag, so a
+  broken build reaching the registry is a production defect, not a local one.
+- **The frontend image cannot be verified with `nginx -t`.** nginx resolves
+  `proxy_pass http://api:8000` at config load, so the syntax check fails with
+  "host not found in upstream" anywhere there is no api container. That is the
+  same real behaviour that forces the prod api service to carry the network alias
+  `api` — but it makes `nginx -t` unusable as a standalone gate. `_verify-images`
+  asserts the built payload instead (non-empty `index.html`, an `assets/*.js`).
+- **The ingestor must never enter `APP_SERVICES`.** `docker rollout` runs two
+  copies during the swap, and the ingestor is the sole MQTT subscriber
+  (design/production.md → *The single-subscriber rule*): two would double every
+  telemetry row and split the SSE audience. Same reason mosquitto is excluded.
+  It goes in `INFRA_SERVICES`, recreated in place.
+- **Gotcha:** never add a name to `PULL_SERVICES` before the compose file defines
+  it. `docker compose pull` fails as a unit, so an unresolvable ref breaks the
+  deploy for every other app on the box.
+- The prod fragment half is not shipped — see docs/features/infrastructure.md.
+
 ## 2026-09-09 — TLS for the fleet terminates at Traefik, not at the broker (R0-infra-3)
 
 - **The shared Traefik owns 8883.** A `mqtt` TCP entrypoint with a

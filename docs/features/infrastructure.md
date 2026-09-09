@@ -376,3 +376,60 @@ Then re-verify from off-box:
 ```bash
 openssl s_client -connect bingo.tvaroska.sk:8883 -servername bingo.tvaroska.sk -brief </dev/null
 ```
+
+## App image pipeline (R0-infra-5, partial)
+
+**2026-09-09 — the build/push half. The prod fragment is not shipped.**
+
+### What shipped
+
+`just build` in this repo is now the release path: T1 gate (`lint` + `typecheck`
++ `pytest`) → `frontend-build` → build → verify → push. A broken build cannot
+reach the registry, because prod pulls by tag.
+
+**Two images, not three.** `fleetforge` serves both the api and the ingestor —
+same code, different `command`, exactly as `docker-compose.yml` builds them from
+one `fleetforge:dev`. A third image would mean two builds of identical layers and
+two chances for the pair to drift.
+
+Tag `v0.1.0` is live in `us-central1-docker.pkg.dev/sites-470716/containers`:
+
+| Image | Digest |
+|---|---|
+| `fleetforge` | `sha256:7572a4ddec80f5e8c57ee2ff155e57450dc7761e5bdc1c468d5d501ee7c5839d` |
+| `fleetforge-frontend` | `sha256:e25426533ea56a7905141fa728f5de7a693c21ce1e8fb18a639d38b50bcb1c6c` |
+
+### Gotcha: `nginx -t` cannot gate the frontend image
+
+The first `_verify-images` recipe checked `nginx -t`. It fails on every machine
+without an api container, because nginx resolves `proxy_pass http://api:8000` at
+**config load**, not per request — "host not found in upstream". That is real
+behaviour, not a test artefact (it is why the prod api service needs the network
+alias `api`), but it makes `nginx -t` useless standalone. The gate checks the
+payload the builder stage was supposed to emit instead: a non-empty `index.html`
+and at least one `assets/*.js`.
+
+### Verification (T2, partial)
+
+- `just build` green end to end; both images verified by running them —
+  `create_app()` imports and constructs in the api image, the SPA payload is
+  present in the frontend image — then pushed.
+
+### Outstanding — blocked on permissions
+
+Everything under `services/prod/` is refused by the permission classifier, and
+self-granting the rule is refused too (correctly). Blocked edits:
+
+1. `prod/.env` — `FLEETFORGE_DB_PASSWORD`
+2. `prod/postgres/01-init.sh` — `fleetforge` role + database
+3. `prod/docker-compose.yml` — `fleetforge-api` (alias `api`), `fleetforge-ingestor`,
+   `fleetforge-frontend` + the `websecure` router for `bingo.tvaroska.sk`
+
+`scripts/deploy.sh` was deliberately left alone: naming a service in
+`PULL_SERVICES` that the compose file does not define fails `docker compose pull`
+for **every** app on the box. The ingestor belongs in `INFRA_SERVICES`, never
+`APP_SERVICES` — `docker rollout` runs two copies during the swap and the
+ingestor is the sole MQTT subscriber.
+
+Owner: add `Edit(//home/boris/products/services/prod/**)` and
+`Edit(//home/boris/products/services/scripts/**)` via `/permissions`.

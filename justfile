@@ -151,3 +151,66 @@ test: lint typecheck
 # The frontend's own type check + production build.
 frontend-build:
     cd frontend && npm ci && npm run build
+
+# ── Release: app images to Artifact Registry (R0-infra-5) ────────────────────
+#
+# TWO images, not three. `fleetforge` runs both the api and the ingestor — they
+# are the same code with a different command, exactly as docker-compose.yml
+# builds them from one `fleetforge:dev`. Splitting them would mean two builds of
+# identical layers and two chances for the pair to drift.
+#
+# The firmware pipeline is a different thing entirely — see R0-infra-2.
+#
+#     just build                  # build, verify, push both images
+#     just build-images           # build only, nothing leaves the machine
+#
+# `latest_tag` follows the estate convention (content/justfile): the newest git
+# tag, or `latest` when there are none yet. Cut a tag before releasing if you
+# want the deploy log to say something more useful than `latest`.
+
+registry := env_var_or_default("REGISTRY", "us-central1-docker.pkg.dev/sites-470716/containers")
+latest_tag := `git describe --tags --abbrev=0 2>/dev/null || echo "latest"`
+
+# Build, verify and push both app images. Runs the T1 gate first — a broken
+# build must not reach the registry, because prod pulls by tag.
+build: test frontend-build _build-images _verify-images _push-images
+    @echo ""
+    @echo "✓ {{ registry }}/fleetforge:{{ latest_tag }}"
+    @echo "✓ {{ registry }}/fleetforge-frontend:{{ latest_tag }}"
+
+_build-images:
+    @echo "Building images for tag: {{ latest_tag }}"
+    DOCKER_BUILDKIT=1 docker build \
+        --target=production \
+        -t {{ registry }}/fleetforge:{{ latest_tag }} \
+        -t {{ registry }}/fleetforge:latest \
+        -f Dockerfile .
+    DOCKER_BUILDKIT=1 docker build \
+        --target=production \
+        -t {{ registry }}/fleetforge-frontend:{{ latest_tag }} \
+        -t {{ registry }}/fleetforge-frontend:latest \
+        frontend
+
+# Prove each image is more than a successful `docker build` before pushing it.
+#
+# NOT `nginx -t` for the frontend: nginx resolves `proxy_pass http://api:8000`
+# at CONFIG LOAD, so the syntax check fails with "host not found in upstream"
+# on any machine without an api — including this one. That is real behaviour,
+# not a test artefact (it is why the frontend image cannot run alone in prod),
+# but it makes `nginx -t` useless as a standalone gate. Check the payload the
+# builder stage was supposed to produce instead.
+_verify-images:
+    @echo ""
+    @echo "Verifying images..."
+    docker run --rm {{ registry }}/fleetforge:{{ latest_tag }} \
+        python -c "from fleetforge.api.main import create_app; create_app(); print('  api image OK')"
+    docker run --rm --entrypoint sh {{ registry }}/fleetforge-frontend:{{ latest_tag }} \
+        -c 'test -s /usr/share/nginx/html/index.html && ls /usr/share/nginx/html/assets/*.js >/dev/null && echo "  frontend image OK"'
+
+_push-images:
+    @echo ""
+    @echo "Pushing images..."
+    docker push {{ registry }}/fleetforge:{{ latest_tag }}
+    docker push {{ registry }}/fleetforge:latest
+    docker push {{ registry }}/fleetforge-frontend:{{ latest_tag }}
+    docker push {{ registry }}/fleetforge-frontend:latest

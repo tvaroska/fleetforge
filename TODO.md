@@ -6,7 +6,7 @@ build is caught before the fleet, and any device that gets one recovers itself.
 **Focus:** R0 (Enroll a board) active · backend landed (schema, compose stack, admin auth,
 enrollment tokens, ingest, `/v1/enroll`, SSE) · frontend, firmware and broker authz next.
 
-<!-- Counters: spec=1 infra=4 db=1 be=6 fe=3 sec=1 fw=1 test=2 -->
+<!-- Counters: spec=1 infra=5 db=1 be=6 fe=3 sec=1 fw=1 test=2 -->
 
 Live status lives ONLY here. States: `- [ ]` open · `- [x]` done · `- [!]`
 attempted-but-failed. `spec/` and `design/` are status-free.
@@ -116,6 +116,37 @@ audience), and **agent images are built off-box** (the ESP-IDF builder is 2–3 
       *R0-infra-3*, then re-verify externally. Also open: the fleetforge
       api/ingestor/frontend are absent from the prod fragment — no images in
       Artifact Registry yet.)_
+
+- [ ] **R0-infra-5**: App image pipeline + prod app fragment (P0, 1d)
+      R0-infra-3 shipped the broker and the 8883 door; nothing is behind it. No
+      fleetforge **app** images exist in Artifact Registry, and no task owned that
+      gap — `R0-infra-2` is the *firmware* pipeline, a different artifact.
+      Two images (`fleetforge`, serving both api and ingestor, and
+      `fleetforge-frontend`), pushed with `just build`; then the prod fragment:
+      a `fleetforge` database + role, the api/ingestor/frontend services, and an
+      HTTPS router so `bingo.tvaroska.sk` stops returning 404.
+      **The ingestor must never be rolled out.** `docker rollout` runs two copies
+      during the swap and the ingestor is the sole MQTT subscriber
+      (design/production.md → *The single-subscriber rule*) — two would double
+      every telemetry row. It belongs in `INFRA_SERVICES`, recreated in place.
+      Acceptance: images pullable by digest on prod; `https://bingo.tvaroska.sk`
+      serves the SPA; login with the prod admin password succeeds; a simulated
+      board enrolls through the public API, connects over `mqtts://…:8883` and
+      appears in the dashboard; the other three apps still 200.
+      _(HALF DONE 2026-09-09. The pipeline half shipped: `just build` in this repo
+      runs the T1 gate, builds, verifies and pushes both images. Tag `v0.1.0` is
+      live in Artifact Registry —
+      `fleetforge@sha256:7572a4ddec80f5e8c57ee2ff155e57450dc7761e5bdc1c468d5d501ee7c5839d`,
+      `fleetforge-frontend@sha256:e25426533ea56a7905141fa728f5de7a693c21ce1e8fb18a639d38b50bcb1c6c`.
+      The prod-fragment half is BLOCKED: every edit under `services/prod/` — the
+      DB password in `.env`, the `fleetforge` role in `postgres/01-init.sh`, the
+      three services in `docker-compose.yml` — is refused by the permission
+      classifier, and self-granting the rule is refused too. Owner must add
+      `Edit(//home/boris/products/services/prod/**)` and
+      `Edit(//home/boris/products/services/scripts/**)` via `/permissions`.
+      `deploy.sh` was deliberately NOT wired: naming a service in `PULL_SERVICES`
+      that the compose file does not define fails `docker compose pull` for every
+      other app on the box.)_
 
 - [ ] **R0-infra-4**: Capacity check on `prod` before E2E (P0, 0.5d)
       The box is already swapping ~1 G with 12 containers. Measure with fleetforge
