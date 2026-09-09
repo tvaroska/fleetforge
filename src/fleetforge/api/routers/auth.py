@@ -16,7 +16,6 @@ import logging
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
-from fastapi.security import APIKeyCookie, HTTPBearer
 from sqlalchemy import text
 
 from fleetforge.api.deps import (
@@ -24,7 +23,9 @@ from fleetforge.api.deps import (
     AdminDep,
     SessionMakerDep,
     SettingsDep,
+    bearer_scheme,
     client_key,
+    cookie_scheme,
     login_limiter,
     now_utc,
     token_cache,
@@ -54,12 +55,6 @@ COOKIE_KWARGS: dict[str, Any] = {
     "samesite": "strict",
     "path": "/",
 }
-
-# Declared only so `/v1/docs` renders an Authorize button for both transports.
-# `auto_error=False` on both is essential: with the default, FastAPI would 403 before
-# `require_admin` ever runs, and the actual extraction must stay in one place.
-_bearer_scheme = HTTPBearer(auto_error=False, description="Admin token, `ffa_…`")
-_cookie_scheme = APIKeyCookie(name=COOKIE_NAME, auto_error=False, description="Login cookie")
 
 router = APIRouter(prefix="/v1/auth", tags=["auth"])
 
@@ -151,7 +146,7 @@ async def login(
     "/logout",
     status_code=status.HTTP_204_NO_CONTENT,
     summary="Revoke the presenting token and clear the cookie",
-    dependencies=[Depends(_bearer_scheme), Depends(_cookie_scheme)],
+    dependencies=[Depends(bearer_scheme), Depends(cookie_scheme)],
 )
 async def logout(
     response: Response,
@@ -173,7 +168,7 @@ async def logout(
     "/me",
     response_model=MeResponse,
     summary="The identity behind the presented credential",
-    dependencies=[Depends(_bearer_scheme), Depends(_cookie_scheme)],
+    dependencies=[Depends(bearer_scheme), Depends(cookie_scheme)],
 )
 async def me(admin: AdminDep) -> MeResponse:
     """Echo the authenticated context.

@@ -7,8 +7,10 @@ grow to Raspberry Pi and eventually FPGAs.
 fleet, and any device that does get a bad update recovers itself.
 
 > **Status:** R0 in progress. The registry schema, the Compose stack, admin auth
-> (`/v1/auth/*`) and skeletons for the ingestor and dashboard exist; the agent,
-> enrollment, flashing and OTA do not yet. See [`TODO.md`](TODO.md).
+> (`/v1/auth/*`), enrollment **token** issuance (`/v1/enrollment-tokens` — issue, list,
+> revoke) and skeletons for the ingestor and dashboard exist. The agent, the flasher,
+> `POST /v1/enroll` (the endpoint that redeems a token) and OTA do not yet — so a token
+> can be issued but nothing can spend it. See [`TODO.md`](TODO.md).
 
 ## Why
 

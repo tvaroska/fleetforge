@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from typing import Annotated
 
 from fastapi import Depends, HTTPException, Request, status
+from fastapi.security import APIKeyCookie, HTTPBearer
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -44,6 +45,14 @@ UNAUTHORIZED = HTTPException(
 
 SettingsDep = Annotated[Settings, Depends(get_settings)]
 SessionMakerDep = Annotated[async_sessionmaker[AsyncSession], Depends(get_sessionmaker)]
+
+# Declared only so `/v1/docs` renders an Authorize button for both transports; every
+# protected router lists them in `dependencies=[...]`. They live here rather than in
+# a router because there is one credential and there must be one declaration of it.
+# `auto_error=False` on both is essential: with the default, FastAPI would 403 before
+# `require_admin` ever runs, and the actual extraction must stay in one place.
+bearer_scheme = HTTPBearer(auto_error=False, description="Admin token, `ffa_…`")
+cookie_scheme = APIKeyCookie(name=COOKIE_NAME, auto_error=False, description="Login cookie")
 
 # One conditional UPDATE, no read-then-write: `last_used_at` is telemetry, and
 # writing it on every request would turn every authenticated read into a write.

@@ -34,6 +34,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+from fleetforge.api.deps import COOKIE_NAME
 from fleetforge.api.main import create_app
 from fleetforge.auth.hashing import hash_secret
 from fleetforge.config import Settings, get_settings
@@ -224,3 +225,18 @@ def admin_app(app_with_db: FastAPI) -> FastAPI:
     settings = settings_for_tests()
     app_with_db.dependency_overrides[get_settings] = lambda: settings
     return app_with_db
+
+
+async def login_admin(app: FastAPI, password: str = TEST_PASSWORD) -> str:
+    """Log in against `app` and return the raw `ffa_` token from the `Set-Cookie`.
+
+    Shared by every HTTP suite that needs a credential, so there is one login helper
+    rather than one per test module. The client uses `https://testserver` because the
+    session cookie is `Secure` — see `client_for`.
+    """
+    async with client_for(app, base_url="https://testserver") as client:
+        response = await client.post("/v1/auth/login", json={"password": password})
+    assert response.status_code == 200, response.text
+    token = response.cookies[COOKIE_NAME]
+    assert isinstance(token, str)
+    return token

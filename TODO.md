@@ -119,8 +119,11 @@ audience), and **agent images are built off-box** (the ESP-IDF builder is 2–3 
       cookie. `scopes`/`subject` columns reserved, always `admin` in v1.
       _(done 2026-09-08; reviewed; see docs/features/*)_
 
-- [ ] **R0-be-2**: Enrolment tokens (P0, 0.5d)
+- [x] **R0-be-2**: Enrolment tokens (P0, 0.5d)
       Short-lived (24 h), group-scoped, revocable, **single-use**.
+      `POST/GET /v1/enrollment-tokens` + `POST …/{id}/revoke`; the burn ships as the
+      single importable `auth.enrollment.BURN_SQL` that R0-be-4 will call.
+      _(done 2026-09-08; reviewed; see docs/features/*)_
 
 - [ ] **R0-be-3**: Ingestor process (P0, 1.5d)
       Single instance, **sole MQTT subscriber**. announce / presence / heartbeat →

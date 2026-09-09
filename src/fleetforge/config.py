@@ -64,6 +64,12 @@ class Settings(BaseSettings):
     # comparison ONLY — see `auth/cache.py`; the row is still read every request.
     verify_cache_ttl_s: int = 60
 
+    # --- Enrollment tokens (R0-be-2) -----------------------------------------
+    # How long an enrollment token stays usable. 24 h, from spec/prd.md → Security &
+    # data posture (PROPOSED). Deliberately NOT a DB default: one number, one place
+    # (see db/models.py::EnrollmentToken).
+    enrollment_token_ttl_hours: int = 24
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

@@ -244,7 +244,9 @@ class EnrollmentToken(Base):
     row costs one argon2 verification per row per request. **The plaintext secret is
     never stored, logged, or returned twice** (issuance shows it once — R0-be-2).
 
-    **The burn is one statement.** R0-be-4 must copy this verbatim:
+    **The burn is one statement, and it is shipped, not copied.** R0-be-2 moved it
+    into `fleetforge.auth.enrollment.BURN_SQL`; R0-be-4 **imports** that constant and
+    never writes its own. For reference only, it is:
 
     ```sql
     UPDATE enrollment_tokens

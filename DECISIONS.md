@@ -6,6 +6,46 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-08 — Enrollment token issuance: one predicate, two readers (R0-be-2)
+
+- **`BURN_SQL` ships as an importable constant** in `fleetforge.auth.enrollment`, not
+  as prose to copy. `R0-be-4` imports it, and `tests/test_invariants.py`'s four burn
+  tests — including the two-connection race — now exercise the shipped statement
+  rather than a duplicate of it. Supersedes the "R0-be-4 must copy this verbatim"
+  instruction in the `EnrollmentToken` docstring and `R0-db-1` §12.
+- **The API's derived `status` is *defined* as the burn predicate** — `active` iff the
+  burn would succeed — and there is a parametrized equivalence test over all four
+  states so the two cannot drift. A dashboard that says "active" about a token the
+  burn rejects sends someone to the bench with a board that will not enroll. The
+  database clock stays the authority: `token_status()` is a display value and never an
+  authorization decision, which is always the conditional UPDATE.
+- **The plaintext is in the `POST` response body on purpose**, unlike the admin login
+  token. A human copies it into the flasher's baked config (`spec/flows.md` Flow 1), so
+  it must be readable exactly once; it is never logged (ids only), never re-derivable,
+  and the list response model has no field that could carry it.
+- **24 h lives in `config.enrollment_token_ttl_hours` and nowhere else** — no DB
+  default, no per-request override. The number's home is `spec/prd.md`; a `ttl_hours`
+  in the request body would be a second place the rule can be violated.
+- **Revoke is `POST …/revoke`, not `DELETE …`.** Revoked rows are retained 90 days
+  (`spec/prd.md` → *Retention*) and `used_by_device_id` is the fleet's enrollment
+  provenance; a `DELETE` verb would invite someone to actually delete it. Revocation is
+  the same conditional-UPDATE idiom as admin-token revocation, so a second call is
+  idempotent rather than a moved timestamp.
+- **Group CRUD deliberately does not exist.** Tokens are group-scoped and the schema
+  supports it, but nothing creates or lists `device_groups`, so R0 tokens are ungrouped
+  in practice. That is correct for R0 (bulk deploy is V3); flagged as a follow-up task
+  rather than smuggled in.
+- **`bearer_scheme` / `cookie_scheme` moved to `api/deps.py`.** They were private to
+  `routers/auth.py`; every protected router needs them, and one credential deserves one
+  declaration. `auto_error=False` on both remains essential — with the default, FastAPI
+  403s before `require_admin` runs.
+- **PROPOSED for `spec/prd.md` → *Requirements & targets*** (spec is protected): promote
+  the enrollment-token TTL from the PROPOSED prose in *Security & data posture* into the
+  *Timing* table as **enrollment token lifetime = 24 h**, so it sits with the other
+  numbers code resolves against.
+
+---
+
 ## 2026-09-08 — Admin auth: one credential, two transports (R0-be-1)
 
 - **One credential type.** The login cookie carries *the same* `ffa_` token a CLI

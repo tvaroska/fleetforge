@@ -2,7 +2,8 @@
 
 R0-infra-1 shipped the app factory plus `GET /v1/healthz` (liveness) and
 `GET /v1/readyz` (readiness). R0-be-1 added admin auth (`/v1/auth/*`) and the
-router/dependency layout every later endpoint copies; R0-be-5 adds SSE.
+router/dependency layout every later endpoint copies; R0-be-2 added enrollment token
+issuance (`/v1/enrollment-tokens`); R0-be-5 adds SSE.
 
 **There is no CORS middleware here, and there must never be one.** The dashboard
 and the API are served from a single origin: nginx in the `frontend` container
@@ -26,7 +27,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from fleetforge import __version__
-from fleetforge.api.routers import auth
+from fleetforge.api.routers import auth, enrollment
 from fleetforge.auth.cache import VerifiedSecretCache
 from fleetforge.auth.ratelimit import FixedWindowLimiter
 from fleetforge.config import Settings, get_settings
@@ -101,6 +102,7 @@ def create_app() -> FastAPI:
         )
 
     app.include_router(auth.router)
+    app.include_router(enrollment.router)
 
     @app.get("/v1/healthz", tags=["health"])
     async def healthz() -> dict[str, str]:

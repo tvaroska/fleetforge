@@ -23,7 +23,7 @@ from fleetforge.auth.ratelimit import FixedWindowLimiter
 from fleetforge.auth.tokens import ADMIN_TOKEN_PREFIX, issue_token
 from fleetforge.config import get_settings
 from fleetforge.db.models import AdminToken
-from tests.conftest import TEST_PASSWORD, client_for, settings_for_tests
+from tests.conftest import TEST_PASSWORD, client_for, login_admin, settings_for_tests
 
 BASE_URL = "https://testserver"
 
@@ -34,12 +34,7 @@ def _client(app: FastAPI) -> httpx.AsyncClient:
 
 async def _login(app: FastAPI, password: str = TEST_PASSWORD) -> str:
     """Log in and return the raw token out of the `Set-Cookie` header."""
-    async with _client(app) as client:
-        response = await client.post("/v1/auth/login", json={"password": password})
-    assert response.status_code == 200, response.text
-    token = response.cookies[COOKIE_NAME]
-    assert isinstance(token, str)
-    return token
+    return await login_admin(app, password)
 
 
 def _sessionmaker(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:

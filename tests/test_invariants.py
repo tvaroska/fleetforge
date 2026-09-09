@@ -14,6 +14,7 @@ from sqlalchemy import inspect, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
+from fleetforge.auth.enrollment import BURN_SQL
 from fleetforge.db.models import (
     AdminToken,
     DeployEvent,
@@ -22,19 +23,10 @@ from fleetforge.db.models import (
     EnrollmentToken,
 )
 
-# The burn, copied verbatim from EnrollmentToken's docstring. R0-be-4 must use this
-# statement and nothing else.
-BURN_SQL = text(
-    """
-    UPDATE enrollment_tokens
-       SET used_at = now(), used_by_device_id = :device_id
-     WHERE id = :token_id
-       AND used_at IS NULL
-       AND revoked_at IS NULL
-       AND expires_at > now()
-    RETURNING id
-    """
-)
+# BURN_SQL is imported, not copied: `fleetforge.auth.enrollment` ships the one
+# statement R0-be-4 executes, so these tests exercise the shipped code path rather
+# than a duplicate that could drift away from it (`DECISIONS.md` 2026-09-08 →
+# *Enrollment token issuance: one predicate, two readers*).
 
 
 def make_device(device_id: str = "a4cf12b3de90", **overrides: object) -> Device:
