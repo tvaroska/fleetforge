@@ -522,8 +522,9 @@ with margin. Declared over-commit is 99.5% on paper, but measured peaks are what
 the net add is negative (bingo used more than fleetforge does), and `MemAvailable` floor
 stays comfortably above the 512 MiB TIGHT threshold.
 
-**Follow-up**: re-run `just capacity-check-prod` after R0-infra-5 lands to confirm this
-projection against live measurements on prod.
+**Follow-up (closed 2026-09-10)**: re-run after R0-infra-5 landed — see *The app on prod*
+→ *Capacity, confirmed against live prod*. The projection held; the verdict flipped to
+`TIGHT` for a reason unrelated to fleetforge.
 
 ### Files created
 
@@ -860,3 +861,28 @@ Against production, all five acceptance criteria:
    `download.tvaroska.sk/health`, `boris.tvaroska.sk`.
 
 T1: 515 tests pass, `ruff check`/`ruff format --check`/`mypy` clean.
+
+### Capacity, confirmed against live prod (R0-infra-4 follow-up, closed 2026-09-10)
+
+`just capacity-check-prod` re-run over a 900 s window with all four fleetforge containers
+serving. R0-infra-4's projection was made on the dev box in production shape; this is the
+first measurement of the real thing.
+
+| | Projected (dev, `just up-prod`) | Measured (prod, live) |
+|---|---|---|
+| fleetforge peak add | 131 MiB app + 20 MiB Postgres = **151 MiB** | api 106.5 + ingestor 68.8 + frontend 18.8 + mosquitto 19.1 = **213 MiB** peak (**173 MiB** current) |
+| `MemAvailable` floor | 2231 MiB | **2141 MiB** |
+| Declared commitment | 99.5% projected | 98% (3840 / 3925 MiB) |
+
+Peak runs ~40% over projection, current ~15% over — the dev box never carries real TLS
+sessions or a live Postgres pool. **The verdict of R0-infra-4 stands: no resize needed.**
+The floor only dropped 90 MiB and sits four times the 512 MiB threshold, and no fleetforge
+container came near its limit (api 41.6%, ingestor 53.8%, frontend 29.4%, mosquitto 29.8%
+of their peaks; `memory.events max = 0` for all four).
+
+**The run reports `VERDICT: TIGHT`, and it is not fleetforge.** `prod-download-1` peaked at
+**100% of its 512 MiB limit with 97 `memory.events max` reclaim events** (0 OOM kills). That
+is the downloader hitting its ceiling and being squeezed, and it is a pre-existing condition
+in another app — it was simply invisible until this harness existed. The paging delta
+(`pswpin +13`, `pswpout +2498` over 900 s) is consistent with that one container. Not in
+scope for R0; raised to the owner as an ops finding against `downloader`.
