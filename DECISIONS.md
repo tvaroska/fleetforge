@@ -6,6 +6,60 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-10 — Flashing from the browser: offsets, ordering and one more `ff_cfg` writer (R0-fe-3)
+
+- **No offset is ever derived, only read.** Every address the flasher writes comes from
+  `GET /v1/agent/manifest` — `builds[].parts[].offset` and `config_partition.offset`. The
+  bootloader is at `0x1000` on ESP32 and `0x0` on the RISC-V parts; a hardcoded offset
+  flashes cleanly and never boots, which is the most expensive failure this feature can
+  have. `planWrite` is the single place a write is constructed.
+- **The enrollment token is minted LAST and revoked on failure.** Validate → manifest →
+  chip and flash-size checks → download and sha256-verify every part → *then* mint. It is
+  a single-use fleet-join credential: minting first spends one on every failed attempt,
+  and a live one baked into a half-flashed board is an orphan nobody is tracking. On any
+  failure after the mint the flasher revokes it and says which id, never the plaintext.
+- **The form re-runs the engine's own validation on every keystroke.** Not redundancy:
+  `power=sleepy` with no wake interval is refused by `POST /v1/enroll` (422), and reaching
+  that refusal costs a token. The Flash button is dead until the config would be accepted.
+- **A third implementation of `ff_cfg` needed a shared golden vector.** `ff_cfg.py`
+  (writer), `ff_cfg.c` (firmware reader) and now `frontend/src/ffcfg.ts` (browser writer)
+  must agree byte for byte. `frontend/src/ffcfg.vector.json` carries fields plus the
+  sha256 the **Python** writer produced for them, and both suites assert it from their own
+  side, so neither writer can move alone. The vector is ASCII-only — `json.dumps` defaults
+  to `ensure_ascii=True` and `JSON.stringify` does not, and that is the only region where
+  the two are guaranteed to produce identical bytes.
+- **`explainFlashError` belongs to the seam, not the adapter.** The commonest failure of
+  all is `requestPort()` rejecting because the operator dismissed the chooser — thrown
+  *before* an adapter object exists, so it is caught by the engine, which must not import
+  esptool-js. Found in T2 against a real Chromium, where the page said `Failed to execute
+  'requestPort' on 'Serial': No port selected by the user.` instead of "No board
+  selected.". Related: `DOMException instanceof Error` is **true** in Chromium and
+  **false** across realms (jsdom's), so the translator reads `name`/`message` off the
+  value rather than testing `instanceof`.
+- **Erase-on-by-default is a correctness setting.** A re-flashed board whose NVS still
+  holds a broker credential reuses it (R0-fw-1: "reusing the stored credential"), so the
+  freshly minted token baked into it is never spent and the board never re-registers.
+- **`flashSize: 'keep'` costs us esptool-js's fit check, so we do it ourselves.** All three
+  of `flashMode`/`flashFreq`/`flashSize` are `'keep'` to stop esptool-js rewriting the
+  bootloader's flash-parameter byte and recomputing the image SHA; the price is that a
+  2 MB board would silently accept the 4 MB A/B layout. `checkFlashable` derives the bound
+  from the manifest — never the string `4MB`, never `ab-4m-v1`.
+- **No MD5 read-back.** esptool-js can verify flash contents with MD5; Web Crypto has no
+  MD5 and pulling in `crypto-js` to get one is the wrong trade. The sha256 of every part is
+  verified against the manifest *before* the first byte is written, which catches the
+  failure that actually happens (a truncated download), and esptool-js checksums every
+  block on the wire.
+- **esptool-js 0.6.1 has no `romBaudrate` option** (the plan assumed one). It is fixed at
+  115200 inside `ESPLoader`; tutorials that pass one target a different major. `baudrate`
+  is what the stub raises the link to after connecting.
+- **The dev container's `node_modules` volume does not re-seed itself.** Adding
+  `esptool-js` to `package.json` is invisible to the running Vite server until the named
+  volume is removed (`docker compose stop frontend && docker compose rm -f frontend &&
+  docker volume rm fleetforge_ff_node_modules && just up`) — otherwise the browser gets
+  "Failed to resolve import", which reads like a code bug.
+
+---
+
 ## 2026-09-10 — The live device list, and why a stream is not a source of truth (R0-fe-2)
 
 - **The dashboard never patches a row from an event payload.** `GET /v1/devices` is the

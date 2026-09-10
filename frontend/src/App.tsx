@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api, type Health } from './api'
 import { EnrollBoard } from './EnrollBoard'
+import { FlashBoard } from './FlashBoard'
 import { FleetView } from './FleetView'
 import { SessionGate } from './session'
 
@@ -51,6 +52,9 @@ export default function App() {
             {/* The fleet first: R0's done-when is "watch it come online", and after the
                 first board this is what the page is opened for. */}
             <FleetView onSessionExpired={expire} />
+            {/* Flashing mints its own token, so it sits above the manual token screen:
+                the common path is "plug a board in", not "copy a string somewhere". */}
+            <FlashBoard onSessionExpired={expire} />
             <EnrollBoard onSessionExpired={expire} />
           </>
         )}

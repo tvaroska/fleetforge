@@ -73,6 +73,36 @@ export type DeviceSummary = {
 
 export type DeviceList = { devices: DeviceSummary[] }
 
+// Mirrors `firmware/manifest.py::ConfigPartition`. Optional in the schema ON PURPOSE:
+// bundles built before R0-fw-1 have nowhere to write a board's config, and the flasher
+// must refuse those rather than silently flash a board that can never enroll.
+export type ConfigPartition = { label: string; offset: number; size: number }
+
+// Mirrors `AgentPartInfo` in api/schemas.py. `offset` is where this part is written —
+// NEVER derive one: the bootloader sits at 0x1000 on ESP32 and 0x0 on the RISC-V parts,
+// and a hardcoded offset flashes cleanly and never boots on half the fleet.
+export type AgentPartInfo = { name: string; offset: number; size: number; sha256: string }
+
+// Mirrors `AgentBuildInfo` in api/schemas.py, field for field and in its order.
+// `chip_family` is exactly `ESPLoader.chip.CHIP_NAME` ('ESP32', 'ESP32-C3', 'ESP32-C6',
+// 'ESP32-S3') — compare it with `===`, never through a translation table.
+export type AgentBuildInfo = {
+  target: string
+  chip_family: string
+  agent_version: string
+  idf_version: string
+  idf_image: string
+  source_commit: string
+  built_at: string
+  partition_layout: string
+  ota_slot_size: number
+  flash_size: string
+  config_partition: ConfigPartition | null
+  parts: AgentPartInfo[]
+}
+
+export type AgentManifest = { agent_version: string; builds: AgentBuildInfo[] }
+
 export class ApiError extends Error {
   readonly status: number
 
@@ -116,6 +146,27 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   }
 
   return JSON.parse(body) as T
+}
+
+/**
+ * `request<T>()`'s byte-returning sibling, for the megabyte-scale agent images.
+ *
+ * Same `credentials: 'same-origin'` and the same `ApiError` mapping, so a session that
+ * dies mid-flash still bounces to the login gate instead of writing a 401 page into a
+ * board's flash. A separate function rather than a flag on `request` because the two
+ * differ in their whole body handling and `T` would be a lie.
+ */
+async function requestBytes(path: string): Promise<Uint8Array> {
+  let response: Response
+  try {
+    response = await fetch(path, { credentials: 'same-origin' })
+  } catch {
+    throw new ApiError(0, 'the API is unreachable')
+  }
+  if (!response.ok) {
+    throw new ApiError(response.status, detailOf(await response.text()) ?? `HTTP ${response.status}`)
+  }
+  return new Uint8Array(await response.arrayBuffer())
 }
 
 /** FastAPI puts the human-readable reason in `detail`; fall back to the raw body. */
@@ -163,4 +214,13 @@ export const api = {
 
   revokeEnrollmentToken: (id: string) =>
     request<void>(`/v1/enrollment-tokens/${encodeURIComponent(id)}/revoke`, { method: 'POST' }),
+
+  // The prebuilt agent images the Web Serial flasher writes (R0-fe-3). Every offset the
+  // flasher uses comes out of this manifest.
+  agentManifest: () => request<AgentManifest>('/v1/agent/manifest'),
+
+  // `target`/`part` are manifest-supplied logical ids, not operator input — but encode
+  // them anyway, the same rule `revokeEnrollmentToken` follows.
+  agentPart: (target: string, part: string) =>
+    requestBytes(`/v1/agent/${encodeURIComponent(target)}/${encodeURIComponent(part)}`),
 }

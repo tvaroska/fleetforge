@@ -1,0 +1,13 @@
+{
+  "note": "Byte-exact ff_cfg contract vector, read by BOTH frontend/src/ffcfg.test.ts and tests/test_ff_cfg.py so the TypeScript and Python writers cannot drift while both suites stay green. ASCII only: Python's json.dumps escapes non-ASCII and JSON.stringify does not, so a non-ASCII field would make the two writers disagree on bytes while agreeing on the decoded object. The token is a syntactically valid FAKE and enrolls nothing.",
+  "fields": {
+    "api_base": "http://10.0.2.2:8080",
+    "mqtt_uri": "mqtt://10.0.2.2:8883",
+    "token": "ffe_00000000-0000-4000-8000-000000000000.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "ssid": "fleetforge-test",
+    "psk": "not-a-real-passphrase",
+    "link": "wifi",
+    "hb_s": 60
+  },
+  "sha256": "c5200fed6dc5ac5ecff49217df454984519b8b55147103c1ed69adcb3c3bc32a"
+}

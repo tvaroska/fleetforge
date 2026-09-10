@@ -80,6 +80,46 @@ code {
   color: #d29922;
 }
 
+/* R0-fe-3. `fieldset` is the flasher's only grouping element; the browser default has a
+   heavy border that fights the rest of the page. */
+fieldset {
+  border: 1px solid #23292f;
+  border-radius: 6px;
+  margin: 1rem 0;
+  padding: 0.5rem 1rem 1rem;
+}
+
+legend {
+  color: #8b98a5;
+  padding: 0 0.4rem;
+}
+
+/* Radios and checkboxes: the label is the hit target, one per line. */
+.choice {
+  display: block;
+  padding: 0.15rem 0;
+}
+
+progress {
+  display: block;
+  width: 100%;
+  margin-top: 0.3rem;
+}
+
+/* The esptool log. Capped at MAX_LOG_LINES in flash.ts; scrolls rather than grows. */
+.log {
+  max-height: 16rem;
+  overflow: auto;
+  margin: 0.5rem 0 0;
+  padding: 0.5rem;
+  background: #0b0e11;
+  border: 1px solid #23292f;
+  border-radius: 6px;
+  font-size: 0.8rem;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
 .issued {
   border: 1px solid #30363d;
   border-radius: 6px;

@@ -347,9 +347,18 @@ audience), and **agent images are built off-box** (the ESP-IDF builder is 2–3 
       nothing but `: keepalive` on the stream.
       _(done 2026-09-10; see docs/features/enrollment.md)_
 
-- [ ] **R0-fe-3**: Web Serial flasher (P0, 2.5d)
+- [x] **R0-fe-3**: Web Serial flasher (P0, 2.5d) ✅ 2026-09-10
       `esptool-js`: port select → chip detect → board-confirm shortlist → flash agent +
-      baked config. Chromium-only; that limit is accepted in the spec.
+      baked config. Chromium-only; that limit is accepted in the spec. Every write
+      address comes from `GET /v1/agent/manifest`; the single-use token is minted last,
+      after chip/flash/sha256 checks, and revoked if the write fails.
+      T2-A: the frontend's own TypeScript encoder (`scripts/emit-ffcfg.ts`) wrote a
+      4096-byte 0600 blob that `agent/tools/ff_cfg.py::decode` accepts and that is
+      byte-identical to the Python writer's; QEMU booted on it — `ff_cfg v1 loaded
+      (crc ok), 209 byte payload from 0x12000`, `device_id 000000000000`, `enroll 200`,
+      `mqtt connected` — and `GET /v1/devices` showed it `"online": true` with its
+      token `used`.
+      _(done 2026-09-10; reviewed; see docs/features/enrollment.md)_
 
 ### Test
 

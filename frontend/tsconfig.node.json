@@ -11,5 +11,8 @@
     "noEmit": true,
     "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.node.tsbuildinfo"
   },
-  "include": ["vite.config.ts"]
+  // `scripts/` holds dev tools run with `vite-node` (emit-ffcfg.ts, R0-fe-3). It imports
+  // `src/ffcfg.ts`, which is why that file must stay DOM-free: this project's `lib` is
+  // ES2023 with node types only, and `TextEncoder`/`DataView`/`Uint8Array` all exist here.
+  "include": ["vite.config.ts", "scripts"]
 }

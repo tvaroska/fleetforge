@@ -399,6 +399,90 @@ invisibly; 12 reloads oscillated the api's open-client count 1↔2 and never cli
 stopping the api showed `Reconnecting…` with the list intact and **no password form**,
 and starting it recovered on its own.
 
+### Web Serial flasher (R0-fe-3)
+
+The last screen of R0's done-when: plug a board into the laptop running the dashboard,
+press two buttons, and watch it appear in the fleet table above. No `esptool.py`, no
+copy-pasted token, no terminal. Chromium-only — Web Serial exists nowhere else, and that
+limit is accepted in `spec/prd.md`.
+
+**Every write address comes from `GET /v1/agent/manifest`.** `builds[].parts[].offset`
+for the images and `config_partition.offset` for the 4 KB `ff_cfg` blob, never a
+constant: the bootloader lives at `0x1000` on ESP32 and `0x0` on the RISC-V parts, and a
+hardcoded offset flashes cleanly and never boots. `planWrite` is the only place a write
+is constructed and `flash.test.tsx` asserts its addresses against the manifest.
+
+**The chip is matched, not guessed.** `chip_family` in the manifest is exactly
+`ESPLoader.chip.CHIP_NAME`, so selection is `===`; there is no translation table to drift.
+The board picker below it is a *label for the operator* and selects nothing on the server
+— detection is chip-level, and an ESP32 DevKitC is indistinguishable from a WROVER over
+serial. Flash size is checked here too, because `flashSize: 'keep'` (see below) makes
+esptool-js skip its own fit check, and a 2 MB board given the 4 MB A/B layout is a
+mystery boot loop rather than a clean refusal.
+
+**The token is minted last and revoked on failure.** Order: validate the form → read the
+manifest → check chip and flash → download every part and verify its sha256 → *then*
+`POST /v1/enrollment-tokens`. Minting first would spend a single-use fleet-join credential
+on every failed attempt; leaving a live one baked into a half-flashed board would leave an
+orphan credential nobody is tracking, so a failed write revokes it and says so (the token
+*id* is shown, never the plaintext). The plaintext lives in one local `const` for the
+length of one call — not React state, not the log panel, not the DOM, and this feature
+touches neither `localStorage` nor `sessionStorage` at all. Same rule as R0-fe-1, extended
+to the Wi-Fi passphrase, and `flash.test.tsx` asserts all four places for both secrets.
+
+**Erase is on by default.** A board that already enrolled keeps its broker credential in
+NVS and reuses it (R0-fw-1 logs "reusing the stored credential"), so a fresh token baked
+into a re-flashed board would simply never be spent and the board would never re-register.
+
+**The form validates as it is typed**, running the same `buildFfCfgFields` +
+`validateFfCfg` pair the engine runs first, and the Flash button is dead until it passes.
+Belt and braces on purpose: `power=sleepy` with no wake interval is refused by
+`POST /v1/enroll` (422), and reaching that refusal costs a token.
+
+**Three implementations of the `ff_cfg` contract now exist** — `agent/tools/ff_cfg.py`
+(the writer), `agent/main/ff_cfg.c` (the firmware reader) and `frontend/src/ffcfg.ts`
+(the browser writer). They are held together by a golden vector,
+`frontend/src/ffcfg.vector.json`: the digest in it was produced by the Python writer, and
+both `frontend/src/ffcfg.test.ts` and `tests/test_ff_cfg.py::TestTypeScriptWriterAgrees`
+assert it from their own side, so neither writer can move a byte alone. The vector is
+ASCII-only, because that is the only region where `json.dumps` (`ensure_ascii=True`) and
+`JSON.stringify` agree.
+
+**esptool-js settings that look arbitrary and are not.** `flashMode`/`flashFreq`/
+`flashSize` are all `'keep'`, or esptool-js rewrites the bootloader's flash-parameter byte
+and recomputes the image SHA — the bundle bytes must reach the chip exactly as ESP-IDF
+produced them. `compress: true`, so progress is reported in *compressed* bytes and must
+not be compared with the manifest's `size`. No MD5 read-back verification: Web Crypto has
+no MD5, and the failure that actually happens (a truncated or corrupted download) is
+caught by the sha256 check before anything is written. esptool-js will log a warning that
+the blob at the config offset "doesn't look like an image file" — that is the `ff_cfg`
+blob, which is not an ESP image.
+
+**Structure.** `flasher.ts` is the seam (types + `explainFlashError`, no esptool import),
+`esptoolFlasher.ts` is the only file in the app that imports esptool-js or touches
+`navigator.serial`, and it is loaded through a dynamic `import()` so a Firefox visitor who
+can never flash anything does not download pako and the ROM stubs (~104 kB / 32 kB gzipped
+in its own chunk). `flash.ts` holds every rule and runs in jsdom against a fake.
+`explainFlashError` lives in the seam and not in the adapter because the commonest failure
+of all — the operator dismissing the port chooser — is thrown by `requestPort()` before an
+adapter object exists; untranslated it reads `Failed to execute 'requestPort' on 'Serial':
+No port selected by the user.`, which sounds like a fault. It is "No board selected."
+
+**T2 evidence.** Hardware-free, end to end: the frontend's own TypeScript encoder
+(`frontend/scripts/emit-ffcfg.ts`, run with `vite-node`) produced `.qemu/ff_cfg.bin` —
+4096 bytes, mode 0600, accepted by `agent/tools/ff_cfg.py::decode` — and `just agent-qemu
+esp32 --fresh` booted on it: `ff_cfg v1 loaded (crc ok), 209 byte payload from 0x12000`,
+the api_base/mqtt_uri/link it was given, `device_id 000000000000`, `enroll 200`, `mqtt
+connected`, and host-side `GET /v1/devices` showed that board `"online": true,
+"fw_version": "0.1.0"` while its token read `used` by it. No `ff_cfg:` error line. In real
+headless Chromium against both the dev stack and the production shape (nginx, real CSP):
+the section renders, `GET /v1/agent/manifest` returns 200 with all four targets listed,
+clicking "Select port and detect" loads the second chunk and Chromium's port chooser,
+dismissing it shows "No board selected." with the page still usable, `power: sleepy` with
+no wake interval shows the validation error and issues **no** `POST
+/v1/enrollment-tokens`, and `localStorage.length === sessionStorage.length === 0` with
+zero console errors after sign-in.
+
 ## Post-v1
 
 - **Device decommissioning** — `POST /v1/devices/{device_id}/decommission` setting

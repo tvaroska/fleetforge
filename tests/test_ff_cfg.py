@@ -2,19 +2,21 @@
 
 Three implementations have to agree about sixteen bytes: `agent/tools/ff_cfg.py` (the
 writer used by the QEMU harness), `agent/main/ff_cfg.c` (the firmware reader, which no
-host test can execute) and, at R0-fe-3, a TypeScript `encode()` in the browser flasher. A
-disagreement is not a test failure on this box — it is a board that boots, finds a header
-it does not recognise, and idles. On a workbench that looks like dead firmware.
+host test can execute) and — since R0-fe-3 — `frontend/src/ffcfg.ts`, the browser
+flasher's `encodeFfCfg()`, which no Python test can execute either. A disagreement is not
+a test failure on this box: it is a board that boots, finds a header it does not
+recognise, and idles. On a workbench that looks like dead firmware.
 
 So this file does two different jobs:
 
 * **behaviour**, on the Python implementation: round-trip, exact size, and every rejection
   branch (the ones that matter are the ones that keep a half-written config from being
   treated as a good one).
-* **tripwires**, on the C source read as *text*. The header's constants are retyped here,
-  never imported, and the field names the firmware parses are grepped out of `ff_cfg.c`.
-  That is the same idiom `test_agent_partitions.py` established for the partition table,
-  and it is the only way a pure-Python test can hold the C side to the contract.
+* **tripwires**, on the C and TypeScript sources read as *text*, plus a shared golden
+  vector for the TypeScript writer. The header's constants are retyped here, never
+  imported, and the field names the other two implementations use are grepped out of
+  them. That is the same idiom `test_agent_partitions.py` established for the partition
+  table, and it is the only way a pure-Python test can hold the other two to the contract.
 
 `agent/tools/ff_cfg.py` is imported by path: `agent/` is not a package and must not
 become one — it ships inside the ESP-IDF builder image, where `fleetforge` does not exist.
@@ -22,6 +24,7 @@ become one — it ships inside the ESP-IDF builder image, where `fleetforge` doe
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import re
@@ -38,6 +41,9 @@ FF_CFG_PY = AGENT_DIR / "tools" / "ff_cfg.py"
 FF_CFG_C = AGENT_DIR / "main" / "ff_cfg.c"
 FF_CFG_H = AGENT_DIR / "main" / "ff_cfg.h"
 FF_IDENTITY_C = AGENT_DIR / "main" / "ff_identity.c"
+# The third implementation and the vector both writers are pinned to (R0-fe-3).
+FF_CFG_TS = REPO_ROOT / "frontend" / "src" / "ffcfg.ts"
+FF_CFG_VECTOR = REPO_ROOT / "frontend" / "src" / "ffcfg.vector.json"
 DEVICE_PROTOCOL = REPO_ROOT / "spec" / "device-protocol.md"
 
 # Retyped from the format's documentation, never imported from the module under test.
@@ -213,6 +219,53 @@ class TestDescribeHidesSecrets:
         assert "ffe_secret" not in rendered
         assert "hunter2" not in rendered
         assert "not shown" in rendered
+
+
+class TestTypeScriptWriterAgrees:
+    """The third implementation: `frontend/src/ffcfg.ts`, the browser flasher's encoder.
+
+    It cannot be executed here (no node in this suite's environment), so the contract is
+    held two ways, exactly as the C reader's is:
+
+    * a **golden vector** — `frontend/src/ffcfg.vector.json` carries the fields and the
+      sha256 of the blob the PYTHON writer makes from them. `frontend/src/ffcfg.test.ts`
+      asserts the same digest from the TypeScript side, so if the two writers ever
+      disagree about a byte exactly one of the two suites goes red.
+    * **text tripwires** over the TypeScript source, in the idiom `TestCSourceAgrees`
+      established: constants retyped here, never imported.
+
+    The vector is ASCII-only on purpose and the file says so: `json.dumps` defaults to
+    `ensure_ascii=True` and `JSON.stringify` does not, so a non-ASCII SSID makes the two
+    writers emit different bytes for the same decoded object. The contract is the decoded
+    object; a byte-exact vector is only possible where the two encodings coincide.
+    """
+
+    def _vector(self) -> dict[str, object]:
+        return json.loads(FF_CFG_VECTOR.read_text())
+
+    def test_the_python_writer_reproduces_the_vector_digest(self) -> None:
+        vector = self._vector()
+        blob = ff_cfg.encode(vector["fields"])  # type: ignore[arg-type]
+        assert hashlib.sha256(blob).hexdigest() == vector["sha256"]
+
+    def test_the_vector_is_ascii_only(self) -> None:
+        """Non-ASCII would make the two writers disagree on bytes while agreeing on fields."""
+        assert json.dumps(self._vector()["fields"]).isascii()
+
+    def test_the_vector_is_a_config_both_sides_would_accept(self) -> None:
+        ff_cfg.validate(self._vector()["fields"])  # type: ignore[arg-type]
+
+    @pytest.mark.parametrize("key", ff_cfg.KNOWN_KEYS)
+    def test_every_field_name_is_written_by_the_browser(self, key: str) -> None:
+        assert f"'{key}'" in FF_CFG_TS.read_text()
+
+    @pytest.mark.parametrize(
+        "constant",
+        ["'FFCF'", "4096", "4080", "16", "0xedb88320"],
+    )
+    def test_the_encoder_retypes_the_format_constants(self, constant: str) -> None:
+        """`0xedb88320` is the reflected CRC-32/IEEE polynomial `zlib.crc32` uses."""
+        assert constant in FF_CFG_TS.read_text()
 
 
 class TestCSourceAgrees:
