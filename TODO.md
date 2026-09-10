@@ -97,7 +97,7 @@ audience), and **agent images are built off-box** (the ESP-IDF builder is 2–3 
       Pinned ESP-IDF, per-target images, built **off-box** and pushed to Artifact
       Registry; binaries served by the API for the Web Serial flasher.
 
-- [!] **R0-infra-3**: Prod ingress — `services` repo (P0, 1d)
+- [x] **R0-infra-3**: Prod ingress — `services` repo (P0, 1d) ✅ 2026-09-09
       Traefik `mqtt` entrypoint on 8883 + TCP router (``HostSNI(`bingo.tvaroska.sk`)`` →
       `mosquitto:1883`), GCP firewall rule, and the prod service fragment.
       First non-HTTP port in this stack; touches shared ingress.
@@ -109,13 +109,17 @@ audience), and **agent images are built off-box** (the ESP-IDF builder is 2–3 
       an anonymous one was refused `not authorised`. All three existing apps still
       200. Prod credentials use non-hex usernames (`ff-admin`, `ff-ingestor`) per
       the R0-sec-1 reviewer note above.
-      _(⚠ blocked 2026-09-09: the GCP firewall rule for tcp:8883 is NOT created —
-      this account has no `compute.firewalls.*` on project `sites-470716`, so
-      8883 is still unreachable from the internet and no real board can connect.
-      Owner must run the one command in docs/features/infrastructure.md →
-      *R0-infra-3*, then re-verify externally. Also open: the fleetforge
-      api/ingestor/frontend are absent from the prod fragment — no images in
-      Artifact Registry yet.)_
+      _(done 2026-09-09. The firewall rule that blocked this — `sites-allow-mqtt`,
+      tcp:8883 → tag `https-server` on network `sites` — was created by the owner
+      from Cloud Shell, since `devserver@btvaroska` has no `compute.firewalls.*` on
+      `sites-470716`. Verified from off-box: TLSv1.3 with `Verification: OK`, an
+      authenticated `$SYS/broker/uptime` subscribe returned a value, anonymous and
+      wrong-password both `Not authorized`; the other three apps unaffected. Gotcha
+      carried forward: the project has no `default` network, so
+      `firewall-rules create` needs `--network=sites`. Still open, but owned by
+      R0-infra-5 rather than this task: the fleetforge api/ingestor/frontend are
+      absent from the prod fragment, so `bingo.tvaroska.sk` still 404s over HTTPS.
+      See docs/features/infrastructure.md → *Production MQTT ingress*.)_
 
 - [ ] **R0-infra-5**: App image pipeline + prod app fragment (P0, 1d)
       R0-infra-3 shipped the broker and the 8883 door; nothing is behind it. No

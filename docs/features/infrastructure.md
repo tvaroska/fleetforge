@@ -355,27 +355,54 @@ Run from prod itself, which bypasses the missing firewall rule:
 - `update.tvaroska.sk`, `download.tvaroska.sk`, `boris.tvaroska.sk` all still 200,
   before and after.
 
-### Outstanding — the owner must run this
+### The GCP firewall rule (closed 2026-09-09)
 
-The GCP firewall rule was **not** created: this account has no
-`compute.firewalls.*` on project `sites-470716` (prod is instance `main` there,
-tags `http-server`,`https-server`). Until it exists, 8883 is unreachable from the
-internet and no real board can connect.
+The rule was the last outstanding step: this dev box runs as
+`devserver@btvaroska.iam.gserviceaccount.com`, which has no `compute.firewalls.*`
+on project `sites-470716` (prod is instance `main` there, us-central1-c, tags
+`http-server`,`https-server`). Until the rule existed, 8883 was unreachable from
+the internet and no real board could connect.
+
+The owner created it from Cloud Shell:
 
 ```bash
-gcloud compute firewall-rules create btvaroska-allow-mqtt \
+gcloud compute firewall-rules create sites-allow-mqtt \
   --project=sites-470716 \
+  --network=sites \
   --direction=INGRESS --action=ALLOW \
   --rules=tcp:8883 --source-ranges=0.0.0.0/0 \
   --target-tags=https-server \
   --description="fleetforge MQTT over TLS (R0-infra-3)"
 ```
 
-Then re-verify from off-box:
+**`--network=sites` is required** — the project has no `default` network, so the
+flag cannot be omitted. The rule mirrors `sites-allow-https` (same target tag,
+same `0.0.0.0/0` source); `0.0.0.0/0` is intended, because boards connect from
+arbitrary networks and the port is guarded by TLS + `allow_anonymous false` +
+per-device dynsec credentials, not by source IP.
+
+### Verification from off-box (2026-09-09)
+
+Run from the dev server (external IP `34.60.54.227` → prod `34.60.87.213`), so
+these traverse the real internet path and the new rule:
 
 ```bash
 openssl s_client -connect bingo.tvaroska.sk:8883 -servername bingo.tvaroska.sk -brief </dev/null
 ```
+
+→ `CONNECTION ESTABLISHED`, TLSv1.3, `CN = bingo.tvaroska.sk`, `Verification: OK`.
+
+A paho subscribe to `$SYS/broker/uptime` over the same path (use paho, **not** the
+mosquitto CLI — see the port-8883 gotcha above):
+
+- as `MQTT_DYNSEC_USERNAME` from `services/prod/.env` → `rc=Success`, `1012 seconds`
+- anonymous → `rc=Not authorized`
+- right username, wrong password → `rc=Not authorized`
+
+Neighbours unaffected: `update` 200, `boris` 200, `download` 401 on `/` and 200 on
+`/health` (that 401 is the app's own auth, not a routing regression).
+`bingo.tvaroska.sk` still 404 over HTTPS — expected until `R0-infra-5` puts the app
+behind the door.
 
 ## App image pipeline (R0-infra-5, partial)
 
