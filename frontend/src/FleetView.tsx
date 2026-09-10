@@ -18,11 +18,18 @@ import { type ArrivalSummary, type DeviceSummary } from './api'
 import { useFleet, type EventSourceFactory } from './fleet'
 import { formatAgo, formatWhen } from './format'
 
+// The glyph differs by state, and that is a requirement rather than a flourish (S0-fe-2).
+// The theme is monochrome — one hue ramp — so green-vs-grey no longer says anything, and
+// this is the only place in the app where presence was carried by colour alone (every
+// other state renders its own word: "active"/"used", "Live", a full sentence). Filled vs
+// stippled block, plus the weight and lightness `.ok`/`.muted` carry, means the online
+// row is still tellable from the offline one in a greyscale screenshot. WCAG 1.4.1.
+// `aria-label` is unchanged: a screen reader always heard the word, never the glyph.
 function StatusCell({ device }: { device: DeviceSummary }) {
   const label = device.online ? 'online' : 'offline'
   return (
     <span className={device.online ? 'ok' : 'muted'} aria-label={label}>
-      <span aria-hidden="true">● </span>
+      <span aria-hidden="true">{device.online ? '█' : '░'} </span>
       {label}
     </span>
   )

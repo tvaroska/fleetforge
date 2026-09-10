@@ -6,6 +6,60 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-10 — the theme is monochrome, so every state encodes twice (S0-fe-2)
+
+- **One hue ramp means colour is no longer available as a carrier of meaning, and that is
+  a functional consequence rather than a stylistic one.** On this palette green and red
+  are the same grey. So `.ok` and `.bad` both go bright + bold and `.bad` additionally
+  underlines; `.warn` goes body-weight + bold; `.muted` stays dim + normal. Every state
+  in the app now differs from its alternative on at least two of {glyph, weight,
+  lightness}. WCAG 1.4.1.
+- **The audit came before the restyle, and it is why this touched one component.** Every
+  `.ok`/`.bad`/`.warn`/`.muted` site was checked for whether colour was its *only*
+  carrier. Nearly all already carried their own text — "active"/"used", "Live", full
+  sentences, the checklist's `✓`/`…`/`·`, and log lines that begin with ESP-IDF's own
+  `E (…)`/`W (…)`/`I (…)`. Exactly one was colour-alone: `FleetView`'s `StatusCell`,
+  which drew the same `●` for online and offline. It is now `█` vs `░`. If a future
+  change introduces a second such site, the audit — not the palette — is what has to be
+  re-run.
+- **`.log .bad` cancels the underline that `.bad` carries everywhere else.** Inside a log
+  panel the level is already in the text, so the underline adds no information and
+  destroys the monospace grid. A rule that exists to be *absent* in one place is worth
+  the two lines of comment it has.
+- **Two font stacks, and the split is load-bearing.** Press Start 2P is confined to short
+  chrome (`h1`/`h2`/`h3`/`th`/`legend`/`button`); device ids, table data, inputs and both
+  log panels stay on a real monospace at full size. The task's constraint was that a
+  pixel font must not cost the legibility of the two things operators actually read, and
+  a scoped display face is how that is *met* rather than hoped for. Do not unify them: a
+  12-hex device id in Press Start 2P is ~2.5x wider and the face has no bold, so the log
+  panel would lose its weight ramp too.
+- **The font is self-hosted, latin subset only.** `@fontsource/press-start-2p`, 12 KB
+  woff2, bundled by Vite and verified present in the production nginx image. A Google
+  Fonts `<link>` would have been fewer characters and would have added a third-party
+  fetch, a CSP consideration and a hard dependency on the box having a route out — for a
+  single-tenant appliance whose V2 promise is self-hosting, that is the wrong trade.
+- **The greyscale check runs as a live CSS filter on the page, not as a post-hoc PNG
+  conversion.** Converting the screenshot only proves the screenshot is grey. Filtering
+  at render time also catches anything that would have reintroduced hue — an accent, an
+  emoji, a form control drawn by the UA. It passes trivially today precisely because the
+  palette is achromatic, and that triviality is the point.
+- **Gotcha, cost twenty minutes: a Docker named volume seeds from the image exactly
+  once.** After adding the font to `frontend/package.json`, `just rebuild frontend` built
+  a correct image that the stale `ff_node_modules` volume then masked, and Vite reported
+  `Failed to resolve import` for a package plainly installed on the host. The volume must
+  be *deleted*. The override file's comment said "rebuild after changing package.json",
+  which is true and insufficient; it now carries the four-line recipe.
+- **The frontend test suite cannot regress on a pure restyle, and it is worth knowing
+  why.** Only `main.tsx` imports `index.css` and vitest never renders styles, so CSS is
+  invisible to the 108 tests. The `StatusCell` glyph was the one change with any reach,
+  and nothing asserts on it — the tests assert roles and labels. A restyle that *does*
+  break a test has changed the markup more than it meant to.
+
+Details: `docs/features/dashboard.md` → S0-fe-2 (new capability area, registered in
+`docs/roadmap.md`). T2 harness: `frontend/scripts/theme-shots.mjs`.
+
+---
+
 ## 2026-09-10 — a boot stage is reported over HTTPS under the enrollment token (S0-fw-1, attempted)
 
 **Status: the server half shipped and is verified; the firmware half is written, compiles

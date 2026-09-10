@@ -59,8 +59,17 @@ services:
     volumes:
       - ./frontend:/app
       # Named volume, seeded from the image's `npm ci`: without it the bind mount
-      # above would hide node_modules. Run `just rebuild frontend` after changing
-      # package.json — the volume does not re-seed on its own.
+      # above would hide node_modules.
+      #
+      # After changing package.json the volume must be DELETED, not rebuilt — Docker
+      # seeds a named volume from the image exactly once, when the volume is created,
+      # so `just rebuild frontend` produces a correct image that the stale volume then
+      # masks. The symptom is a Vite "Failed to resolve import" for a package that is
+      # plainly installed on the host (S0-fe-2 lost twenty minutes to it):
+      #
+      #   docker compose stop frontend && docker compose rm -f frontend
+      #   docker volume rm fleetforge_ff_node_modules
+      #   just rebuild frontend && docker compose up -d frontend
       - ff_node_modules:/app/node_modules
     healthcheck:
       # The Vite dev server has no /nginx-health, and node:22-slim ships neither

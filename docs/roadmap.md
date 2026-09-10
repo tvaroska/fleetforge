@@ -61,6 +61,7 @@ airtime-aware scheduling, delta updates. Full treatment in
 | Area | Feature file | Spans releases |
 |------|--------------|----------------|
 | Enrollment & provisioning | [enrollment.md](features/enrollment.md) | R0 |
+| Dashboard (cross-cutting UI: theme, typography, a11y) | [dashboard.md](features/dashboard.md) | R0 → |
 | OTA deploy & auto-rollback | [ota-deploy.md](features/ota-deploy.md) | R1, R2 |
 | Health & telemetry | [health-telemetry.md](features/health-telemetry.md) | R3 |
 | Self-test (sim gate + device confirm) | [self-test.md](features/self-test.md) | R4 (defined R0) |

@@ -1,8 +1,41 @@
+/* Monochrome pixel-art theme (S0-fe-2).
+ *
+ * Two rules hold this file together; break either and the theme stops being usable
+ * rather than merely different.
+ *
+ * 1. ONE HUE RAMP. Every colour below is achromatic (r == g == b). That is what makes it
+ *    monochrome, and it is also why `.ok` / `.warn` / `.bad` can no longer be carried by
+ *    colour: on this palette green and red are the same grey. Each of them therefore
+ *    encodes on a SECOND axis (weight, and for `.bad` an underline), and the fleet
+ *    table's online/offline pair encodes on a third (a different glyph — see
+ *    `FleetView.tsx`'s StatusCell). WCAG 1.4.1, not decoration.
+ *
+ * 2. TWO FONTS, AND THE SPLIT IS LOAD-BEARING. `--ff-display` (Press Start 2P) is a
+ *    pixel font with a very wide advance, no bold and no lowercase distinction to speak
+ *    of. It is for SHORT CHROME ONLY: h1, th, legend, button. The two things operators
+ *    actually read — 12-hex-digit device ids and the log panels — stay on `--ff-mono` at
+ *    full size. Do not "unify" these; a device id in Press Start 2P is 2.5x wider and a
+ *    log panel in it loses the weight ramp that distinguishes E/W/I lines.
+ */
+
 :root {
   color-scheme: dark;
-  font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
-  background: #101418;
-  color: #e6edf3;
+
+  /* The ramp. Contrast against --ff-bg: dim 5.6:1, fg 14:1, hi 19:1 — all AA or better. */
+  --ff-bg: #0c0c0c;
+  --ff-panel: #141414;
+  --ff-line: #3a3a3a;
+  --ff-line-hi: #6a6a6a;
+  --ff-dim: #8a8a8a;
+  --ff-fg: #d8d8d8;
+  --ff-hi: #ffffff;
+
+  --ff-display: 'Press Start 2P', ui-monospace, monospace;
+  --ff-mono: ui-monospace, 'DejaVu Sans Mono', Menlo, Consolas, monospace;
+
+  font-family: var(--ff-mono);
+  background: var(--ff-bg);
+  color: var(--ff-fg);
 }
 
 body {
@@ -17,10 +50,35 @@ main {
   padding: 4rem 1.5rem;
 }
 
+/* Press Start 2P has no descender room and a large em box, so it needs a smaller
+   font-size and a looser line-height than a normal face at the same visual weight. */
 h1 {
-  font-size: 1.5rem;
-  font-weight: 600;
+  font-family: var(--ff-display);
+  font-size: 1rem;
+  line-height: 1.6;
+  font-weight: 400;
+  color: var(--ff-hi);
   margin: 0 0 1.5rem;
+}
+
+h2 {
+  font-family: var(--ff-display);
+  font-size: 0.8rem;
+  line-height: 1.6;
+  font-weight: 400;
+  color: var(--ff-hi);
+  margin: 2.5rem 0 1rem;
+}
+
+/* The flasher's step headings ("1 · The board" … "4 · Watch the board") and the two
+   panel titles. Dimmer than h2 so the section boundary stays the stronger one. */
+h3 {
+  font-family: var(--ff-display);
+  font-size: 0.65rem;
+  line-height: 1.7;
+  font-weight: 400;
+  color: var(--ff-fg);
+  margin: 1.75rem 0 0.75rem;
 }
 
 dl {
@@ -31,7 +89,7 @@ dl {
 }
 
 dt {
-  color: #8b98a5;
+  color: var(--ff-dim);
 }
 
 dd {
@@ -48,74 +106,200 @@ table {
 th,
 td {
   text-align: left;
-  padding: 0.4rem 0.75rem 0.4rem 0;
-  border-bottom: 1px solid #23292f;
+  padding: 0.5rem 0.75rem 0.5rem 0;
+  border-bottom: 2px solid var(--ff-line);
   vertical-align: top;
 }
 
+/* Chrome, and short: column labels are 1-2 words. */
 th {
-  color: #8b98a5;
-  font-weight: 500;
+  font-family: var(--ff-display);
+  font-size: 0.55rem;
+  line-height: 1.8;
+  color: var(--ff-dim);
+  font-weight: 400;
+  border-bottom-color: var(--ff-line-hi);
 }
 
+/* Data, never chrome. A device id is read character by character — full-size mono, and
+   `break-all` so a 12-hex-digit id wraps rather than widening the column. */
 code {
+  font-family: var(--ff-mono);
   font-size: 0.85em;
   word-break: break-all;
 }
 
+/* ── State, encoded twice ─────────────────────────────────────────────────────
+   Lightness alone is not enough on one hue ramp, so each of these also moves weight.
+   `.bad` additionally underlines: it is the only one that can appear next to `.warn`
+   (an alert paragraph above a console error) where lightness would be the sole cue. */
+
 .ok {
-  color: #3fb950;
+  color: var(--ff-hi);
+  font-weight: 700;
 }
 
 .bad {
-  color: #f85149;
-}
-
-/* Referenced by App.tsx, EnrollBoard.tsx and FleetView.tsx; until now defined nowhere. */
-.muted {
-  color: #8b98a5;
+  color: var(--ff-hi);
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 3px;
 }
 
 .warn {
-  color: #d29922;
+  color: var(--ff-fg);
+  font-weight: 700;
 }
 
-/* R0-fe-3. `fieldset` is the flasher's only grouping element; the browser default has a
-   heavy border that fights the rest of the page. */
+/* Referenced by App.tsx, EnrollBoard.tsx and FleetView.tsx. */
+.muted {
+  color: var(--ff-dim);
+  font-weight: 400;
+}
+
+/* The log panels are the exception: `event.raw` already begins with ESP-IDF's `E (…)` /
+   `W (…)` / `I (…)`, so the level is in the text. Underlining every error line there
+   would shred a monospace grid for no added information. */
+.log .bad {
+  text-decoration: none;
+}
+
+/* ── Hard edges ───────────────────────────────────────────────────────────────
+   No radii anywhere, 2px borders, and offset block shadows instead of blur. */
+
 fieldset {
-  border: 1px solid #23292f;
-  border-radius: 6px;
-  margin: 1rem 0;
+  border: 2px solid var(--ff-line);
+  border-radius: 0;
+  margin: 1.5rem 0;
   padding: 0.5rem 1rem 1rem;
 }
 
 legend {
-  color: #8b98a5;
+  font-family: var(--ff-display);
+  font-size: 0.55rem;
+  line-height: 1.8;
+  color: var(--ff-dim);
   padding: 0 0.4rem;
 }
 
 /* Radios and checkboxes: the label is the hit target, one per line. */
 .choice {
   display: block;
-  padding: 0.15rem 0;
+  padding: 0.2rem 0;
 }
 
+input[type='radio'],
+input[type='checkbox'] {
+  accent-color: var(--ff-line-hi);
+  margin-right: 0.4rem;
+}
+
+input[type='text'],
+input[type='password'],
+input[type='number'],
+input[type='url'],
+select {
+  font-family: var(--ff-mono);
+  font-size: 0.9rem;
+  color: var(--ff-fg);
+  background: var(--ff-panel);
+  border: 2px solid var(--ff-line);
+  border-radius: 0;
+  padding: 0.35rem 0.5rem;
+}
+
+/* The login form is a bare `label` + `input` + `button` with no wrapper and no `{' '}`
+   between them, and JSX drops whitespace-only lines — so without these two rules the
+   three controls render flush against each other. `.choice` is excluded: those labels
+   are the hit target for a radio and are already `display: block`. */
+label:not(.choice) {
+  margin-right: 0.6rem;
+}
+
+input + button {
+  margin-left: 0.5rem;
+}
+
+input:focus-visible,
+select:focus-visible,
+button:focus-visible,
+a:focus-visible {
+  outline: 2px solid var(--ff-hi);
+  outline-offset: 2px;
+}
+
+button {
+  font-family: var(--ff-display);
+  font-size: 0.55rem;
+  line-height: 1.8;
+  color: var(--ff-hi);
+  background: var(--ff-panel);
+  border: 2px solid var(--ff-line-hi);
+  border-radius: 0;
+  padding: 0.5rem 0.8rem;
+  cursor: pointer;
+  box-shadow: 3px 3px 0 var(--ff-line);
+}
+
+button:hover:not(:disabled) {
+  background: var(--ff-line);
+}
+
+/* Travel by exactly the shadow offset, so the button looks pressed into the page. */
+button:active:not(:disabled) {
+  transform: translate(3px, 3px);
+  box-shadow: none;
+}
+
+button:disabled {
+  color: var(--ff-dim);
+  border-color: var(--ff-line);
+  box-shadow: none;
+  cursor: not-allowed;
+}
+
+a {
+  color: var(--ff-hi);
+  text-underline-offset: 3px;
+}
+
+/* A stepped bar rather than a smooth one: no radius, and the value block is flat. */
 progress {
   display: block;
   width: 100%;
-  margin-top: 0.3rem;
+  height: 0.9rem;
+  margin-top: 0.4rem;
+  border: 2px solid var(--ff-line);
+  border-radius: 0;
+  background: var(--ff-panel);
+  appearance: none;
 }
 
-/* The esptool log. Capped at MAX_LOG_LINES in flash.ts; scrolls rather than grows. */
+progress::-webkit-progress-bar {
+  background: var(--ff-panel);
+}
+
+progress::-webkit-progress-value {
+  background: var(--ff-fg);
+}
+
+progress::-moz-progress-bar {
+  background: var(--ff-fg);
+}
+
+/* The esptool log. Capped at MAX_LOG_LINES in flash.ts; scrolls rather than grows.
+   0.8rem in a real monospace — the theme stops at the border of this box. */
 .log {
   max-height: 16rem;
   overflow: auto;
   margin: 0.5rem 0 0;
   padding: 0.5rem;
-  background: #0b0e11;
-  border: 1px solid #23292f;
-  border-radius: 6px;
+  background: var(--ff-panel);
+  border: 2px solid var(--ff-line);
+  border-radius: 0;
+  font-family: var(--ff-mono);
   font-size: 0.8rem;
+  line-height: 1.5;
   white-space: pre-wrap;
   word-break: break-all;
 }
@@ -126,7 +310,8 @@ progress {
   max-height: 24rem;
 }
 
-/* The boot checklist. Plain list semantics, no bullets — the tick IS the bullet. */
+/* The boot checklist. Plain list semantics, no bullets — the tick IS the bullet.
+   Glyph (✓ / … / ·) is set in BoardConsole.tsx; the weight ramp here is the second axis. */
 .milestones {
   list-style: none;
   margin: 0.5rem 0;
@@ -135,21 +320,25 @@ progress {
 }
 
 .milestones li {
-  padding: 0.1rem 0;
-  color: #8b98a5;
+  padding: 0.15rem 0;
+  color: var(--ff-dim);
+  font-weight: 400;
 }
 
 .milestones li.done {
-  color: #3fb950;
+  color: var(--ff-hi);
+  font-weight: 700;
 }
 
 .milestones li.waiting {
-  color: #e6edf3;
+  color: var(--ff-fg);
+  font-weight: 700;
 }
 
 .issued {
-  border: 1px solid #30363d;
-  border-radius: 6px;
+  border: 2px solid var(--ff-line-hi);
+  border-radius: 0;
   padding: 0 1rem 1rem;
-  margin: 1rem 0;
+  margin: 1.5rem 0;
+  box-shadow: 4px 4px 0 var(--ff-line);
 }

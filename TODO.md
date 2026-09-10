@@ -5,8 +5,8 @@ build is caught before the fleet, and any device that gets one recovers itself.
 **Updated:** 2026-09-10
 **Focus:** R0 is deployed and live at `bingo.tvaroska.sk`; only R0-test-2 (E2E on real
 hardware) remains. Sprint 0 now holds the device-visibility gap that first hardware
-attempt exposed, plus the theme restyle — and, since 2026-09-10, a dead QEMU harness that
-leaves *no* way to run agent firmware on this box.
+attempt exposed — and, since 2026-09-10, a dead QEMU harness that leaves *no* way to run
+agent firmware on this box. Everything still open here needs hardware or the emulator.
 
 <!-- Counters: spec=1 infra=5 db=1 be=6 fe=3 sec=1 fw=1 test=2 -->
 <!-- Sprint 0 counters: fe=2 fw=1 infra=1 test=1 -->
@@ -106,22 +106,6 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       Acceptance: a board flashed with a deliberately wrong PSK shows a stalled stage in
       the dashboard rather than nothing at all; a healthy board's stages appear in order
       and it lands `online`; no stage report is accepted without its enrollment token.
-
-- [ ] **S0-fe-2**: Monochrome pixel-art theme (P2, 1.5d)
-      Whole-app restyle. Tractable: `frontend/src/index.css` is 128 lines with mostly
-      element selectors plus seven semantic classes (`ok`, `bad`, `warn`, `muted`, `log`,
-      `choice`, `issued`) — no Tailwind, no CSS-in-JS, so this is one file and no JSX
-      churn beyond new class names.
-      Monochrome means one hue ramp, so **`ok`/`warn`/`bad` can no longer be carried by
-      colour alone** — they need glyph or weight to stay legible, which is a WCAG 1.4.1
-      requirement, not a stylistic nicety. Keep the existing `aria-label`s intact.
-      A pixel font and hard edges must not cost readability of the two things operators
-      actually read: 12-hex-digit device ids and the flash log panel.
-      Acceptance: every page (login, enroll, flash, fleet) renders in the theme; the
-      online/offline distinction survives a greyscale screenshot; device ids and log
-      output stay legible at default zoom; the 71 frontend tests still pass (they assert
-      on roles and labels, so a pure restyle should not touch them — if one breaks, the
-      markup changed more than intended).
 
 ---
 
