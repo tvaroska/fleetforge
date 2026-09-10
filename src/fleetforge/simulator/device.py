@@ -575,17 +575,23 @@ async def _sleep_until(stop: asyncio.Event, seconds: float) -> None:
 
 
 def mqtt_client_factory(
-    host: str, port: int, credential: Credential, device_id: str
+    host: str, port: int, credential: Credential, device_id: str, tls: bool = False
 ) -> ClientFactory:
     """A factory that builds a **fresh** `aiomqtt.Client` per session.
 
     Fresh, because entering the same client twice raises `MqttReentrantError` and the
     sleepy loop connects once per wake (property 5).
 
-    No TLS: the dev broker is plaintext behind Traefik's `mqtt` entrypoint.
-    `spec/device-protocol.md` mandates TLS for real devices and R0-infra-3 is what
-    makes 8883 real TLS in production; when it lands this needs
-    `tls_params=aiomqtt.TLSParameters()` behind a `--tls` flag.
+    `tls` is off by default because the DEV broker is plaintext behind Traefik's
+    `mqtt` entrypoint. Production (R0-infra-3) terminates real TLS on 8883, so
+    `--tls` is mandatory there — without it the handshake never happens and the
+    connection just hangs until it times out, which reads like a firewall problem
+    rather than a missing flag.
+
+    Verification only, never certificate pinning: `TLSParameters()` with no
+    arguments uses the system trust store, which is what validated the Let's
+    Encrypt chain for `bingo.tvaroska.sk`. A real ESP32 agent pins differently
+    (`spec/device-protocol.md`), and this simulator is not the place to model that.
     """
 
     def factory() -> aiomqtt.Client:
@@ -598,6 +604,7 @@ def mqtt_client_factory(
             will=will_for(device_id),
             clean_session=False,
             keepalive=KEEPALIVE_S,
+            tls_params=aiomqtt.TLSParameters() if tls else None,
         )
 
     return factory

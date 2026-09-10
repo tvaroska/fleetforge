@@ -176,7 +176,9 @@ async def _run_board(
     link = LinkProfile(args.link, args.seed)
     credential = await _credential_for(args, identity, token, link, step)
 
-    factory = mqtt_client_factory(args.host, args.port, credential, identity.device_id)
+    factory = mqtt_client_factory(
+        args.host, args.port, credential, identity.device_id, tls=args.tls
+    )
     endpoint = f"{args.host}:{args.port}"
 
     if identity.power_class == "sleepy":
@@ -342,6 +344,16 @@ def _shared(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--host", default=os.environ.get("MQTT_HOST", DEFAULT_MQTT_HOST))
     parser.add_argument(
         "--port", type=int, default=int(os.environ.get("MQTT_PORT", DEFAULT_MQTT_PORT))
+    )
+    parser.add_argument(
+        "--tls",
+        action="store_true",
+        default=os.environ.get("MQTT_TLS", "").lower() in ("1", "true", "yes"),
+        help=(
+            "MQTT over TLS. Required against production (bingo.tvaroska.sk:8883); "
+            "the dev broker is plaintext behind Traefik, so this is off by default. "
+            "Without it a TLS listener just hangs the connect until it times out."
+        ),
     )
     parser.add_argument("--platform-type", default="esp32c6")
     parser.add_argument("--fw-version", default="1.4.2")

@@ -752,3 +752,111 @@ exists.
    to write against rather than inventing one.
 3. `spec/prd.md` should pin the v1 chip target list (`esp32`, `esp32s3`, `esp32c3`,
    `esp32c6`). It is currently implicit in the build pipeline only.
+
+## The app on prod (R0-infra-5)
+
+**Completed 2026-09-10.** R0-infra-3 shipped the broker and opened 8883; nothing was
+behind the door. This task built the two **app** images (`R0-infra-2` is the *firmware*
+pipeline — a different artifact) and put the api, ingestor and frontend on the production
+box. `https://bingo.tvaroska.sk` stopped returning 404 and started serving the SPA.
+
+The task shipped in two halves a day apart, because the second half needed a permission
+grant from the owner.
+
+### Half 1 — the image pipeline (2026-09-09)
+
+`just build` in this repo runs the T1 gate, builds both images, verifies them and pushes
+to `us-central1-docker.pkg.dev/sites-470716/containers/`:
+
+| Image | Serves |
+|---|---|
+| `fleetforge` | api **and** ingestor — same image, different `command` |
+| `fleetforge-frontend` | nginx serving the built SPA |
+
+One image for two processes because they share the whole application package; splitting
+them would double the build and the registry footprint to save nothing.
+
+### Half 2 — the prod fragment (2026-09-10)
+
+Landed in the `services` repo (`prod/docker-compose.yml`, `prod/postgres/01-init.sh`,
+`scripts/deploy.sh`, `scripts/validate-config.sh`) plus the untracked `prod/.env`.
+
+- A `fleetforge` role and database, owned by the app; Alembic applies the schema from the
+  api entrypoint (`RUN_MIGRATIONS=true`).
+- Three services, pinned **by digest** with `pull_policy: always`, matching every other
+  app on the box.
+- A Traefik router for ``Host(`bingo.tvaroska.sk`)`` on `websecure`.
+- The ingestor's own read-only broker credential (`ff-ingestor`), scoped to
+  `ff/v1/d/+/up/#` — deliberately not the API's dynsec admin.
+
+### The `api` DNS collision, and why a whole network was the cheap fix
+
+fleetforge's nginx has `proxy_pass http://api:8000` compiled into `frontend/nginx.conf`,
+and this box already runs a `content-api`. Rather than rebuild the frontend image with a
+renamed upstream, the fragment adds a dedicated `fleetforge` network that only these three
+containers join, and gives `fleetforge-api` the **network alias `api`** on it. The name
+resolves for fleetforge's nginx and for nobody else; `backend` is untouched. No image
+change, no config templating, and the next fleetforge image still works unmodified.
+
+### The ingestor is INFRA, not APP
+
+`docker rollout` starts a second copy alongside the first during the swap. The ingestor is
+the fleet's sole MQTT subscriber (design/production.md → *The single-subscriber rule*), so
+two copies would write **every telemetry row twice**. It sits in `INFRA_SERVICES` in
+`deploy.sh` and is recreated in place — the same reasoning that already keeps `mosquitto`
+out of `APP_SERVICES`.
+
+### Gotchas learned
+
+**`docker-entrypoint-initdb.d` runs only on a fresh volume.** Adding the `fleetforge` role
+to `01-init.sh` created nothing on the running box; the role had to be made by hand with
+`psql`. That file is now the disaster-recovery path and carries a comment saying so — it
+must stay in sync with what was created manually.
+
+**A missing `smoke_endpoint_for_service` case rolls back a good deploy.** The first deploy
+succeeded, every container came up healthy, and then the smoke test curled an empty URL,
+reported HTTP 000 and triggered the auto-rollback. (The rollback itself no-op'd — "Pre-deploy
+state file is empty".) Any service added to `--service` must get a smoke entry; the function
+now says so in a comment.
+
+**argon2id hashes in `.env` must be single-quoted.** Compose otherwise eats the `$argon2id`,
+`$v` and `$m` segments and login can never succeed. Verify with
+`docker compose config | grep -i ADMIN_PASSWORD_HASH` — a literal `$$` in that output is
+correct. The R0-infra-3 hash had this problem *and* its plaintext was unrecoverable, so the
+admin password was reminted as part of this task.
+
+**The simulator could not speak TLS.** R0-test-1 left it as an explicit TODO against
+plaintext dev. Acceptance here required a board over `mqtts://…:8883`, so `--tls` was added
+(`mqtt_client_factory(..., tls=...)` → `aiomqtt.TLSParameters()`, system trust store, no
+pinning). Without the flag the connect does not fail — it *hangs* until timeout, which reads
+like a firewall problem rather than a missing argument.
+
+### Deliberately not shipped: object storage
+
+No GCS credential is wired. `constraints/iam.disableServiceAccountKeyCreation` on the
+`btvaroska` org blocks minting the key, and no R0 route touches the store —
+`select_backend` only raises when something calls it. R1 is blocked until the key exists;
+tracked in docs/runbooks/artifact-storage.md → BLOCKED.
+
+### Verification (T2)
+
+Against production, all five acceptance criteria:
+
+1. **Images pullable by digest on prod** — deploy pulled both and all three containers
+   reached healthy.
+2. **The SPA is served** — `https://bingo.tvaroska.sk/` → 200 `<!doctype html>`;
+   `/v1/healthz` → 200. (It was a 404 before this task.)
+3. **Login with the prod admin password** → 200 `{"expires_at": "2026-09-17T…"}`; a wrong
+   password → 401.
+4. **A simulated board, end to end over the public internet** — `fleet --count 1 --tls`
+   against `https://bingo.tvaroska.sk` + `bingo.tvaroska.sk:8883`: enrolled through the
+   public API (`200`, `device_id 9a43661be9c8`), connected over TLS, subscribed, and
+   published announce/presence/5×heartbeat. `GET /v1/devices` then showed the board with
+   `platform_type esp32c6`, `agent_version 0.1.0-sim`, and a `last_seen` **20 s later than
+   `enrolled_at`** — proof the ingestor consumed the heartbeats, not just that the row
+   exists. `online: false` afterwards is correct: the clean shutdown published the retained
+   `{"online": false}`.
+5. **The other three apps still 200** — `update.tvaroska.sk/health`,
+   `download.tvaroska.sk/health`, `boris.tvaroska.sk`.
+
+T1: 515 tests pass, `ruff check`/`ruff format --check`/`mypy` clean.

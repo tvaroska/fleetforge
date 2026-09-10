@@ -6,6 +6,48 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-10 — fleetforge goes live on prod: an alias network, an infra ingestor, a TLS simulator (R0-infra-5)
+
+- **A dedicated `fleetforge` network exists solely to carry the alias `api`.** The
+  frontend's nginx has `proxy_pass http://api:8000` compiled in, and the production box
+  already runs a `content-api`. The alternatives were rebuilding the image with a renamed
+  upstream (couples every future frontend build to one deployment's naming) or templating
+  the nginx config at start-up (a whole mechanism for one string). A third network that
+  only these three containers join is cheaper than both, keeps `backend` clean, and the
+  next fleetforge image works unmodified.
+- **The ingestor is `INFRA_SERVICES`, never `APP_SERVICES`.** `docker rollout` runs two
+  copies during the swap; the ingestor is the fleet's sole MQTT subscriber, so that
+  duplicates every telemetry row. Same reasoning that already keeps `mosquitto` out. This
+  is a correctness constraint on the deploy script, not a preference — it is commented at
+  both sites in `deploy.sh` and in the compose file.
+- **The api migrates; the ingestor must not.** `RUN_MIGRATIONS=true` on one container
+  only. Two processes racing `alembic upgrade head` deadlock on a slow migration.
+- **Gotcha — `01-init.sh` is disaster recovery, not deployment.** `docker-entrypoint-initdb.d`
+  runs only on an empty data directory. Adding the `fleetforge` role there created nothing
+  on the running box; it had to be made by hand with `psql`. The file must be kept in sync
+  with what was created manually, and now says so.
+- **Gotcha — a missing smoke-test case rolls back a healthy deploy.** `--service fleetforge`
+  had no entry in `smoke_endpoint_for_service`, so the check curled an empty URL, got HTTP
+  000 and fired the auto-rollback while every container was in fact healthy. Adding a
+  service to the filter without adding its endpoint is a trap; commented at the function.
+- **Gotcha — argon2id in `.env` must be single-quoted**, or compose eats the `$argon2id`/
+  `$v`/`$m` segments and login can never succeed. The R0-infra-3 hash had exactly this
+  problem and its plaintext was unrecoverable, so the admin password was reminted here.
+  Verify with `docker compose config | grep -i ADMIN_PASSWORD_HASH`; a literal `$$` there
+  is correct.
+- **The simulator learned TLS (`--tls`), verification only, no pinning.** Acceptance needed
+  a board over `mqtts://…:8883` and R0-test-1 had left TLS as an explicit TODO. Off by
+  default because the dev broker is plaintext behind Traefik. Worth knowing: without the
+  flag against a TLS listener the connect does not error, it *hangs* — which reads like a
+  firewall problem and sent the first attempt down the wrong path.
+- **No object store, on purpose.** `constraints/iam.disableServiceAccountKeyCreation`
+  blocks minting the GCS key and no R0 route touches the store. R1 is blocked on it;
+  tracked in docs/runbooks/artifact-storage.md.
+
+Details: docs/features/infrastructure.md → *The app on prod*.
+
+---
+
 ## 2026-09-10 — Flashing from the browser: offsets, ordering and one more `ff_cfg` writer (R0-fe-3)
 
 - **No offset is ever derived, only read.** Every address the flasher writes comes from

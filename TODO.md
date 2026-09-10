@@ -128,12 +128,11 @@ audience), and **agent images are built off-box** (the ESP-IDF builder is 2–3 
       authenticated `$SYS/broker/uptime` subscribe returned a value, anonymous and
       wrong-password both `Not authorized`; the other three apps unaffected. Gotcha
       carried forward: the project has no `default` network, so
-      `firewall-rules create` needs `--network=sites`. Still open, but owned by
-      R0-infra-5 rather than this task: the fleetforge api/ingestor/frontend are
-      absent from the prod fragment, so `bingo.tvaroska.sk` still 404s over HTTPS.
+      `firewall-rules create` needs `--network=sites`. The door had nothing behind
+      it until R0-infra-5 landed the app fragment on 2026-09-10.
       See docs/features/infrastructure.md → *Production MQTT ingress*.)_
 
-- [ ] **R0-infra-5**: App image pipeline + prod app fragment (P0, 1d)
+- [x] **R0-infra-5**: App image pipeline + prod app fragment (P0, 1d) ✅ 2026-09-10
       R0-infra-3 shipped the broker and the 8883 door; nothing is behind it. No
       fleetforge **app** images exist in Artifact Registry, and no task owned that
       gap — `R0-infra-2` is the *firmware* pipeline, a different artifact.
@@ -149,20 +148,10 @@ audience), and **agent images are built off-box** (the ESP-IDF builder is 2–3 
       serves the SPA; login with the prod admin password succeeds; a simulated
       board enrolls through the public API, connects over `mqtts://…:8883` and
       appears in the dashboard; the other three apps still 200.
-      _(HALF DONE 2026-09-09. The pipeline half shipped: `just build` in this repo
-      runs the T1 gate, builds, verifies and pushes both images. Tag `v0.1.0` is
-      live in Artifact Registry —
-      `fleetforge@sha256:7572a4ddec80f5e8c57ee2ff155e57450dc7761e5bdc1c468d5d501ee7c5839d`,
-      `fleetforge-frontend@sha256:e25426533ea56a7905141fa728f5de7a693c21ce1e8fb18a639d38b50bcb1c6c`.
-      The prod-fragment half is BLOCKED: every edit under `services/prod/` — the
-      DB password in `.env`, the `fleetforge` role in `postgres/01-init.sh`, the
-      three services in `docker-compose.yml` — is refused by the permission
-      classifier, and self-granting the rule is refused too. Owner must add
-      `Edit(//home/boris/products/services/prod/**)` and
-      `Edit(//home/boris/products/services/scripts/**)` via `/permissions`.
-      `deploy.sh` was deliberately NOT wired: naming a service in `PULL_SERVICES`
-      that the compose file does not define fails `docker compose pull` for every
-      other app on the box.)_
+      _(done 2026-09-10. Pipeline half shipped 2026-09-09; the prod fragment
+      landed once the owner granted the `services/prod/**` and `services/scripts/**`
+      edit rules. fleetforge is LIVE at `https://bingo.tvaroska.sk`. See
+      docs/features/infrastructure.md → *The app on prod*, DECISIONS.md 2026-09-10.)_
 
 - [x] **R0-infra-4**: Capacity check on `prod` before E2E (P0, 0.5d) ✅ 2026-09-10
       `scripts/capacity_snapshot.py` — stdlib-only, piped to prod over ssh.
