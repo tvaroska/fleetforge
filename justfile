@@ -107,6 +107,27 @@ minio-up:
 storage-check *args:
     PYTHONPATH=src uv run python -m fleetforge.storage selftest {{args}}
 
+# ── Capacity (R0-infra-4) ────────────────────────────────────────────────────
+#
+# Is this box out of headroom? Reads /proc and cgroup v2 directly — no docker
+# stats, no credentials, no project venv needed, so the SAME script runs here
+# and on prod over ssh. Stdlib only, and it must stay that way (prod has
+# python3 3.11 and nothing else).
+#
+#     just capacity-check                        # one sample, this box
+#     just capacity-check --watch 900 --interval 30
+#     just capacity-check-prod                   # 15 min window on prod
+#
+# MEASURE IN THE PRODUCTION SHAPE (`just up-prod`). `just up` runs the Vite dev
+# server in the frontend container and reads ~48 M against a 64 M limit; prod
+# runs nginx and reads ~6 M.
+capacity-check *args:
+    uv run python scripts/capacity_snapshot.py {{args}}
+
+# Same script, piped to prod — there is no checkout there.
+capacity-check-prod *args:
+    ssh prod 'python3 - --watch 900 --interval 30 {{args}}' < scripts/capacity_snapshot.py
+
 # ── Simulated boards (R0-test-1) ─────────────────────────────────────────────
 #
 # A fake ESP32 that enrolls, connects, announces, holds presence and heartbeats,
@@ -140,12 +161,14 @@ sim-fleet count='3' *args='':
 # `agent/tools/` is linted too: those two scripts decide whether a firmware bundle is
 # flashable, and they run inside the ESP-IDF container where nothing else checks them.
 # They import stdlib only, on purpose — the IDF image has no uv and no project venv.
+# `scripts/` is also linted: capacity_snapshot.py is piped to prod over ssh and must
+# run with Python 3.11+ stdlib only, no project dependencies.
 lint:
-    uv run ruff check src/ tests/ alembic/ agent/tools/
-    uv run ruff format --check src/ tests/ alembic/ agent/tools/
+    uv run ruff check src/ tests/ alembic/ agent/tools/ scripts/
+    uv run ruff format --check src/ tests/ alembic/ agent/tools/ scripts/
 
 typecheck:
-    uv run mypy src/
+    uv run mypy src/ scripts/
 
 # The T1 gate: lint + types + the full suite against a real Postgres.
 test: lint typecheck

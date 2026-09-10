@@ -6,6 +6,45 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-10 — What the prod box can actually hold (R0-infra-4)
+
+- **Swap *used* is a stock, not a flow.** The TODO's "already swapping ~1 G" was a point
+  sample, and it was already wrong (the box rebooted and swap-used dropped to 11 MB by the
+  next measurement). A gigabyte of cold anonymous pages parked in swap and never read back
+  costs nothing; what costs is the *rate* of `pswpin` / `pgmajfault`. A verdict built on
+  "swap used is 1 G, therefore resize" would be wrong. A verdict built on window deltas
+  over 15 minutes is defensible. This is the reusable insight.
+- **`memory.events max` is the real under-provisioning signal.** It counts forced reclaims
+  *at* the limit — which happen long before an OOM kill and are otherwise invisible. A
+  container with `max > 0` is under-provisioned even if it never crashes. `memory.peak`
+  alone is not enough; `docker stats` and `memory.current` both include reclaimable page
+  cache. The harness reads cgroup v2 directly and reports both.
+- **Measuring on dev in the production shape transfers.** Fleetforge's app is not on prod
+  yet (R0-infra-5 is blocked on permissions), so the measurement splits: footprint of api /
+  ingestor / frontend → dev box in the production shape (`just up-prod`: built images,
+  nginx not Vite, same limits); host headroom → `prod` over a sustained window. Container
+  RSS for these workloads is set by the workload, not the host. The projection is then:
+  measured prod headroom − measured fleetforge footprint − margin. It is a projection and
+  must say so; the harness is the acceptance instrument for R0-infra-5 to confirm it.
+- **The shared-Postgres cost must be counted explicitly.** Fleetforge on prod does not
+  bring its own Postgres — it adds a database and connections to the shared `postgres-prod`
+  (1 GiB limit, 199 MiB in use pre-fleetforge). Every backend is ~5–10 MB of private RSS:
+  api pool connections × api processes, plus one dedicated `LISTEN` connection per API
+  process (`application_name='fleetforge-events'`, from R0-be-5), plus the ingestor's pool.
+  This is not in the 512 M declared-limit table and must be measured directly rather than
+  estimated.
+- **Verdict for R0: no resize needed.** The 151 MiB measured footprint (131 MiB app + ~20 MiB
+  marginal Postgres) fits in the 384 MiB headroom bingo freed. Declared over-commit is
+  99.5% (3904 / 3924 MiB MemTotal), but measured peaks are what matter and the net add is
+  negative. Follow-up: re-run `just capacity-check-prod` after R0-infra-5 lands to confirm
+  this projection against live measurements.
+- **Details:** `docs/runbooks/capacity.md` (how to re-run it, what the numbers mean, the
+  resize procedure); `design/production.md` → *Capacity — Measured 2026-09-10* (replaces
+  the stale sample with the as-built measurement + verdict);
+  `.claude/plans/R0-infra-4-prod-capacity-check.md` (the plan).
+
+---
+
 ## 2026-09-09 — The connect-only agent, and how it is proved without hardware (R0-fw-1)
 
 - **`ff_cfg` is a CRC-headered JSON blob, not a struct.** 16-byte little-endian header

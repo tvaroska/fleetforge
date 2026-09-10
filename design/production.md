@@ -123,30 +123,68 @@ Removal steps (in the `services` repo, plus the registry):
 5. Leave the `bingo` git repo and its Artifact Registry images alone; retiring the
    deployment is not deleting the project.
 
-## Capacity — the R0 risk
+## Capacity — Measured 2026-09-10 (R0-infra-4)
 
-The prod VM as measured today:
+**Measurement tool:** `scripts/capacity_snapshot.py` (see `docs/runbooks/capacity.md`).
+
+**Key insight:** Swap *used* is a stock, not a flow. A gigabyte of cold anonymous pages
+parked in swap and never read back costs nothing; what costs is the *rate* of `pswpin` /
+`pgmajfault`. The definitive under-provisioning signal is `memory.events max` — it counts
+forced reclaims at the limit, long before an OOM kill.
+
+### Dev Box (2026-09-10, Production Shape)
+
+`just up-prod` (built images, nginx, no --reload) + idle:
+
+| Service | Peak (MiB) | Limit (MiB) | Peak % | memory.events max |
+|---|---|---|---|---|
+| api | 67.5 | 256 | 26% | 0 |
+| ingestor | 51.5 | 128 | 40% | 0 |
+| frontend (nginx) | 5.0 | 64 | 8% | 0 |
+| mosquitto | 6.8 | 64 | 11% | 0 |
+| **Total declared** | | **512** | | |
+
+**Fleetforge footprint at idle:** ~131 MiB peak across the four services, 512 MiB declared.
+
+**Note:** The frontend figure (5 MiB) is nginx-shaped. `just up` (dev) runs Vite and reads
+~48 MiB — measure in the production shape or the verdict is wrong.
+
+### Prod Host (2026-09-09, Before R0-infra-4)
+
+VM `main`, `e2-medium` (2 vCPU / 4 GB), zone `us-central1-c`, kernel 6.1, Debian 12.
+**Baseline after retiring bingo** (R0-infra-0):
 
 ```
-Mem   3924 MB total · 1913 used · 1038 MB of swap ALREADY IN USE
-Disk  25 G, 5.5 G free (77% used)
-12 containers running
+Mem   3924 MiB total · 1742 MB used · MemAvailable 2274 MiB
+Swap  2047 MiB total · 783 MB used (down from 1038 MB pre-retirement)
+Disk  25 G, 7.0 G free (71%)
+10 containers running (down from 12), 0 restarts, 0 OOM kills
 ```
 
-Fleetforge's declared footprint:
+**Projected fleetforge add:** 131 MiB measured peak + ~20 MiB marginal Postgres (estimated
+for 2 api workers + ingestor connections) = **~151 MiB**. Net addition after retiring bingo
+(384 MiB) is **-233 MiB** — fleetforge is smaller than what it replaced.
 
-| Service | Limit |
-|---|---|
-| api | 256 M |
-| ingestor | 128 M |
-| frontend (nginx) | 64 M |
-| mosquitto | 64 M |
-| **Total** | **512 M** |
+**Declared over-commit:** Adding fleetforge's 512 MiB declared to the current 3392 MiB =
+**3904 MiB / 3924 MiB MemTotal = 99.5% committed**. Normal and acceptable — declared limits
+are not actual usage, and measured peaks are what matter.
 
-Retiring bingo returns 384 M, so the net addition is **~128 MB on a box already swapping
-a gigabyte.** It fits on paper. It should be *measured*, not assumed — a capacity check
-belongs before `R0-TEST-2`, and if the box is genuinely out of headroom the answer is a
-larger VM, not shaving container limits.
+### Verdict (R0-infra-4)
+
+**No resize needed** at R0. The 151 MiB measured footprint fits in the 384 MiB headroom
+bingo freed. Declared over-commit is 99.5%, but the measured add is net-negative and no
+container has `memory.events max > 0` under idle load.
+
+**Follow-up:** Re-run `just capacity-check-prod` after `R0-infra-5` deploys the app to prod,
+to confirm this projection against live measurements. The dev-box measurement is in the
+production *shape* but not at production *scale* — a real 25-board fleet may differ.
+
+**Triggers for resize:**
+- Any container shows `memory.events max > 0` (reclaim at the limit)
+- `MemAvailable` floor < 512 MiB during normal load
+- An OOM kill
+
+See `docs/runbooks/capacity.md` for the resize procedure (requires owner, Cloud Shell).
 
 Disk is helped considerably by artifacts living in GCS; the remaining growth is the
 ESP-IDF builder image, which is large (~2–3 GB). **Build agent images off-box** (locally

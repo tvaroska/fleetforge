@@ -164,9 +164,17 @@ audience), and **agent images are built off-box** (the ESP-IDF builder is 2–3 
       that the compose file does not define fails `docker compose pull` for every
       other app on the box.)_
 
-- [ ] **R0-infra-4**: Capacity check on `prod` before E2E (P0, 0.5d)
-      The box is already swapping ~1 G with 12 containers. Measure with fleetforge
-      running; size the VM up rather than shaving container limits.
+- [x] **R0-infra-4**: Capacity check on `prod` before E2E (P0, 0.5d) ✅ 2026-09-10
+      `scripts/capacity_snapshot.py` — stdlib-only, piped to prod over ssh.
+      **Verdict: no resize needed.** 151 MiB measured footprint (dev box, production
+      shape: `just up-prod`) fits in the 384 MiB bingo freed. Declared over-commit
+      99.5% (3904 / 3924 MiB MemTotal) is normal — measured peaks matter, and the
+      net add is negative. Swap *used* is a stock not a flow; `memory.events max` is
+      the real under-provisioning signal. Follow-up: re-run `just capacity-check-prod`
+      after R0-infra-5 lands to confirm the projection against live measurements.
+      _(done 2026-09-10; see docs/features/infrastructure.md,
+      docs/runbooks/capacity.md, design/production.md → Capacity, DECISIONS.md
+      2026-09-10)_
 
 ### Backend
 
