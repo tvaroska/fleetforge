@@ -8,7 +8,9 @@ issuance (`/v1/enrollment-tokens`); R0-be-4 added the device-facing `POST /v1/en
 body; R0-be-5 added the SSE event stream (`GET /v1/events`) and the fleet read model
 (`GET /v1/devices`) it tells clients to re-read. R0-be-6 added the artifact object-store
 seam (`ObjectStoreDep`): no route uses it yet — R1 does — so its only presence here is
-one startup WARNING when neither backend is configured.
+one startup WARNING when neither backend is configured. R0-infra-2 added the prebuilt
+agent images (`/v1/agent/*`), loaded and sha256-verified once into
+`app.state.firmware_catalog` and served to `R0-fe-3`'s browser flasher.
 
 **The lifespan owns one background task**: the `ff_events` `LISTEN` connection
 (`api/eventstream.py::PostgresEventListener`), one per API process, feeding the
@@ -42,11 +44,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from fleetforge import __version__
 from fleetforge.api.deps import dynsec_configured
 from fleetforge.api.eventstream import EventHub, PostgresEventListener
-from fleetforge.api.routers import auth, devices, enroll, enrollment, events
+from fleetforge.api.routers import agent, auth, devices, enroll, enrollment, events
 from fleetforge.auth.cache import VerifiedSecretCache
 from fleetforge.auth.ratelimit import FixedWindowLimiter
 from fleetforge.config import Settings, get_settings
 from fleetforge.db.base import asyncpg_dsn, get_sessionmaker
+from fleetforge.firmware import FirmwareCatalog
 from fleetforge.storage.factory import object_store_configured
 
 logger = logging.getLogger(__name__)
@@ -160,6 +163,11 @@ def create_app() -> FastAPI:
         queue_size=settings.sse_queue_size if settings else 200,
         max_subscribers=settings.sse_max_clients if settings else 20,
     )
+    # The prebuilt agent images (R0-infra-2), read ONCE: every part is sha256-verified
+    # at load, so this must not happen per request. Per app, like the caches above.
+    app.state.firmware_catalog = FirmwareCatalog.load(
+        settings.agent_images_dir if settings else None
+    )
     if settings is not None and settings.admin_password_hash is None:
         logger.warning(
             "ADMIN_PASSWORD_HASH is not set: /v1/auth/login will answer 503. "
@@ -170,6 +178,14 @@ def create_app() -> FastAPI:
             "no object store configured (S3_* or GCS_*): artifact upload and deploy (R1) "
             "will answer 503. The dev stack sets S3_* on the api service; production sets "
             "GCS_BUCKET + GCS_CREDENTIALS_FILE. Round-trip it with `just storage-check`."
+        )
+    if not app.state.firmware_catalog:
+        logger.warning(
+            "no agent image bundles under AGENT_IMAGES_DIR (%s): /v1/agent/manifest will "
+            "answer 503 and the R0-fe-3 flasher has nothing to flash. Build one with "
+            "`just agent-build esp32` (docs/runbooks/agent-build.md); `just build` "
+            "refuses to ship an app image without them.",
+            settings.agent_images_dir if settings else None,
         )
     if settings is not None and not dynsec_configured(settings):
         logger.warning(
@@ -184,6 +200,7 @@ def create_app() -> FastAPI:
     app.include_router(enroll.router)
     app.include_router(events.router)
     app.include_router(devices.router)
+    app.include_router(agent.router)
 
     @app.get("/v1/healthz", tags=["health"])
     async def healthz() -> dict[str, str]:

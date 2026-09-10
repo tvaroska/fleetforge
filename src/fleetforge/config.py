@@ -180,6 +180,18 @@ class Settings(BaseSettings):
     # gitignored; see docs/runbooks/artifact-storage.md.
     gcs_credentials_file: str | None = None
 
+    # --- Prebuilt agent images (R0-infra-2) -----------------------------------
+    # Where the per-target agent bundles live. Two shapes, both real:
+    #   * production / `up-prod`: baked into the app image at /app/agent by the
+    #     Dockerfile's `COPY agent/dist /app/agent` — the bundles version with the app
+    #     and are digest-pinned by `just build`;
+    #   * dev: docker-compose.override.yml bind-mounts ./agent/dist there instead, so a
+    #     rebuilt bundle appears without an image rebuild (an api restart is still
+    #     needed — the catalog is read once at startup, and uvicorn --reload only
+    #     watches src/).
+    # `None` disables the flasher endpoints (503) rather than guessing at a path.
+    agent_images_dir: str | None = "/app/agent"
+
     # How long a signed artifact URL lives. 30 min = 2x spec/prd.md's degraded-link
     # deploy budget (15 min), so a range-resumed download cannot outlive its own URL.
     # PROPOSED for spec/prd.md -> Requirements & targets.

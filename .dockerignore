@@ -30,3 +30,16 @@ design
 .claude
 *.md
 !README.md
+
+# The agent firmware (R0-infra-2). `agent/dist` is the ONLY part that belongs in the
+# app image — the Dockerfile copies it to /app/agent. The ESP-IDF project itself is
+# built by agent/Dockerfile, in a different context, and would otherwise invalidate
+# the app image's layers on every firmware edit.
+agent/build
+agent/main
+agent/tools
+agent/CMakeLists.txt
+agent/Dockerfile
+agent/partitions.csv
+agent/sdkconfig*
+agent/version.txt

@@ -1,0 +1,11 @@
+# Fleetforge agent — esp32c6 deltas only.
+#
+# Intentionally carries NO safety option. Bootloader rollback, the custom partition
+# table and the flash-size floor are flash-time immutables and live in the common
+# sdkconfig.defaults, so the posture can be read from one file and one test
+# (tests/test_agent_partitions.py) can guard it. Anything added here must be a
+# per-chip *hardware* fact (console peripheral, PSRAM, flash mode) — never a
+# security or OTA option.
+#
+# Nothing is needed for esp32c6 today: the R0 skeleton is console + idle, and the IDF
+# defaults for this target already match the 4 MB devkits we build for.

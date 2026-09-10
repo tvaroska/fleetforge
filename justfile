@@ -137,9 +137,12 @@ sim *args:
 sim-fleet count='3' *args='':
     PYTHONPATH=src uv run python -m fleetforge.simulator fleet --count {{count}} {{args}}
 
+# `agent/tools/` is linted too: those two scripts decide whether a firmware bundle is
+# flashable, and they run inside the ESP-IDF container where nothing else checks them.
+# They import stdlib only, on purpose — the IDF image has no uv and no project venv.
 lint:
-    uv run ruff check src/ tests/ alembic/
-    uv run ruff format --check src/ tests/ alembic/
+    uv run ruff check src/ tests/ alembic/ agent/tools/
+    uv run ruff format --check src/ tests/ alembic/ agent/tools/
 
 typecheck:
     uv run mypy src/
@@ -173,7 +176,12 @@ latest_tag := `git describe --tags --abbrev=0 2>/dev/null || echo "latest"`
 
 # Build, verify and push both app images. Runs the T1 gate first — a broken
 # build must not reach the registry, because prod pulls by tag.
-build: test frontend-build _build-images _verify-images _push-images
+#
+# `_require-agent-dist` runs before anything is built: the app image bakes
+# `agent/dist` in (Dockerfile -> `COPY agent/dist /app/agent`), so an empty
+# `agent/dist` ships an api whose `/v1/agent/manifest` answers 503 — and the
+# failure surfaces in production as a flasher with nothing to flash.
+build: _require-agent-dist test frontend-build _build-images _verify-images _push-images
     @echo ""
     @echo "✓ {{ registry }}/fleetforge:{{ latest_tag }}"
     @echo "✓ {{ registry }}/fleetforge-frontend:{{ latest_tag }}"
@@ -214,3 +222,106 @@ _push-images:
     docker push {{ registry }}/fleetforge:latest
     docker push {{ registry }}/fleetforge-frontend:{{ latest_tag }}
     docker push {{ registry }}/fleetforge-frontend:latest
+
+# ── Agent firmware: per-target bundles to Artifact Registry (R0-infra-2) ─────
+#
+# OFF-BOX ONLY. Never run any of this on `prod`: design/production.md → *Capacity*
+# — the production VM cannot hold a ~9 GB ESP-IDF image, and building there would
+# take the fleet's broker down with it. This is the FIRMWARE pipeline; `just build`
+# above is the APP IMAGE pipeline (R0-infra-5). They ship different artifacts.
+#
+# DISK IS THE #1 FAILURE MODE on this box. `espressif/idf:v5.5.5` unpacks to ~8.9 GB
+# and the pull needs headroom on top of that; a pull that runs out of space fails
+# with "failed to register layer: no space left on device" after ten minutes.
+# Reclaim with exactly these, in this order, and check before pulling:
+#
+#     docker builder prune -af      # build cache only
+#     docker container prune -f     # stopped containers
+#     docker image prune -f         # dangling only
+#     df -h /                       # want >= 12 G before the first pull
+#
+# NEVER `docker image prune -a`, `docker system prune -a` or `docker volume prune`
+# here: this box hosts other projects' images and 31 volumes, and deleting them is
+# not this repo's call.
+#
+# THE IDF PIN IS A DIGEST and the tag beside it is documentation. Bumping it changes
+# firmware behaviour on every board flashed afterwards, so it is a DECISIONS.md
+# entry, not a version bump — docs/runbooks/agent-build.md.
+#
+#     just agent-build esp32        # bundle -> agent/dist/esp32/
+#     just agent-build-all          # every target in `agent_targets`
+#     just agent-verify esp32       # decode the built table, re-hash every part
+#     just agent-push esp32         # same build, pushed as an OCI image
+
+agent_targets := "esp32 esp32s3 esp32c3 esp32c6"
+idf_image := "espressif/idf:v5.5.5@sha256:a9231d0697ab8f7517cc072e93b7c83e04907bfbfba80b6440d7dbbf90665cf2"
+
+# Build one target into agent/dist/<target>/ (bootloader, partition table, otadata,
+# app, the resolved sdkconfig and manifest.json with byte offsets + sha256s).
+#
+# `--output type=local` rather than a bind-mounted `docker run`: BuildKit writes the
+# result as the invoking user, and nothing root-owned lands in the repo.
+agent-build target="esp32":
+    @echo "Building agent firmware for {{ target }} (this takes a few minutes)…"
+    mkdir -p agent/dist/{{ target }}
+    DOCKER_BUILDKIT=1 docker build \
+        --target export \
+        --output type=local,dest=agent/dist/{{ target }} \
+        --build-arg IDF_IMAGE={{ idf_image }} \
+        --build-arg IDF_TARGET={{ target }} \
+        --build-arg SOURCE_COMMIT=$(git rev-parse HEAD) \
+        agent
+    @just agent-verify {{ target }}
+
+agent-build-all:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    for target in {{ agent_targets }}; do
+        just agent-build "$target"
+        # Each target leaves 150–300 MB of BuildKit cache behind; on this box that
+        # is the difference between four targets and two.
+        docker builder prune -f >/dev/null
+    done
+
+# Prove a bundle is what its manifest says: every part re-hashed, the partition
+# table decoded from the BINARY (not read off the CSV), the bootloader posture
+# greped out of the RESOLVED config. This is the T2 gate for a firmware build.
+agent-verify target="esp32":
+    python3 agent/tools/verify_bundle.py agent/dist/{{ target }}
+    # The table the bootloader will actually read, decoded from the BINARY by IDF's
+    # own tool — not read off partitions.csv, which is the input, not the artifact.
+    docker run --rm -v "$PWD/agent/dist/{{ target }}:/d:ro" --entrypoint bash {{ idf_image }} -c \
+        '. $IDF_PATH/export.sh >/dev/null 2>&1 && python $IDF_PATH/components/partition_table/gen_esp32part.py /d/partition-table.bin'
+    @echo "BUNDLE OK: {{ target }}"
+
+# The pushable artifact: a FROM-scratch OCI image whose entire payload is the
+# bundle. Kilobytes in the registry, and a digest to pin in provenance.
+agent-image target="esp32":
+    DOCKER_BUILDKIT=1 docker build \
+        --target export \
+        -t {{ registry }}/fleetforge-agent-{{ target }}:{{ latest_tag }} \
+        -t {{ registry }}/fleetforge-agent-{{ target }}:latest \
+        --build-arg IDF_IMAGE={{ idf_image }} \
+        --build-arg IDF_TARGET={{ target }} \
+        --build-arg SOURCE_COMMIT=$(git rev-parse HEAD) \
+        agent
+
+# NOT a compose service: never add fleetforge-agent-* to PULL_SERVICES or
+# deploy.sh in `services` — `docker compose pull` fails as a unit
+# (DECISIONS.md 2026-09-09, R0-infra-5).
+agent-push target="esp32": (agent-image target)
+    docker push {{ registry }}/fleetforge-agent-{{ target }}:{{ latest_tag }}
+    docker push {{ registry }}/fleetforge-agent-{{ target }}:latest
+
+# Bundles only. The ESP-IDF image is deliberately kept — re-pulling is 2.4 GB.
+agent-clean:
+    find agent/dist -mindepth 1 -not -name .gitkeep -delete
+    docker builder prune -f
+
+# `just build` bakes agent/dist into the app image; an empty one ships a flasher
+# with nothing to flash. Fail here, loudly, rather than in production.
+_require-agent-dist:
+    @ls agent/dist/*/manifest.json >/dev/null 2>&1 || { \
+        echo "agent/dist holds no bundle — the app image would ship an empty flasher."; \
+        echo "Run: just agent-build esp32   (see docs/runbooks/agent-build.md)"; \
+        exit 1; }

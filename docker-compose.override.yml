@@ -21,6 +21,11 @@ services:
       - ./src:/app/src:ro
       - ./alembic:/app/alembic:ro
       - ./alembic.ini:/app/alembic.ini:ro
+      # The agent bundles come from the working tree, not from the image, so
+      # `just agent-build <target>` shows up without an app-image rebuild. It still
+      # needs an api RESTART: the catalog is read (and every part sha256-verified)
+      # once at startup, and uvicorn --reload only watches ./src.
+      - ./agent/dist:/app/agent:ro
 
   ingestor:
     build:

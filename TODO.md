@@ -93,9 +93,21 @@ audience), and **agent images are built off-box** (the ESP-IDF builder is 2–3 
       `just mqtt-sub` (paho) against the dev broker.
       _(done 2026-09-08; reviewed; see docs/features/infrastructure.md)_
 
-- [ ] **R0-infra-2**: Agent firmware build pipeline (P0, 1d)
+- [x] **R0-infra-2**: Agent firmware build pipeline (P0, 1d) ✅ 2026-09-09
       Pinned ESP-IDF, per-target images, built **off-box** and pushed to Artifact
       Registry; binaries served by the API for the Web Serial flasher.
+      `agent/` is now a real ESP-IDF project built inside
+      `espressif/idf:v5.5.5` **pinned by digest**, one flashable bundle per target
+      (`esp32`, `esp32s3`, `esp32c3`, `esp32c6`) via `just agent-build{,-all}`.
+      The flash-time immutables are frozen: `ab-4m-v1` in `agent/partitions.csv`
+      (`ota_0`/`ota_1` = `0x1E0000` = the `ota_slot_size` 1966080 that
+      `spec/device-protocol.md` promises), no `factory`, `ff_cfg` reserved at
+      `0x12000` for the flasher's per-board config, rollback on and every eFuse
+      burn off. Offsets are read from ESP-IDF's `flasher_args.json`, never typed.
+      `src/fleetforge/firmware/` sha256-verifies every bundle once at startup and
+      `GET /v1/agent/manifest` + `/v1/agent/{target}/{part}` serve them behind the
+      admin credential; `COPY agent/dist /app/agent` bakes them into the app image.
+      _(done 2026-09-09; reviewed; see docs/features/infrastructure.md)_
 
 - [x] **R0-infra-3**: Prod ingress — `services` repo (P0, 1d) ✅ 2026-09-09
       Traefik `mqtt` entrypoint on 8883 + TCP router (``HostSNI(`bingo.tvaroska.sk`)`` →

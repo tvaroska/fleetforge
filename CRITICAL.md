@@ -13,7 +13,7 @@ exists to remove. The first two rows below are that class of mistake.
 | Path | Why it's critical |
 |------|-------------------|
 | `spec/device-protocol.md` | **Near-frozen.** An R0 agent speaks this protocol until someone physically retrieves the board. Additive change is cheap; anything else is a recall. Topic tree, QoS/retain semantics and payload schemas are all load-bearing. |
-| Partition table, `sdkconfig` bootloader options, eFuse burns (agent firmware) | **Flash-time immutables** — not changeable by OTA. Wrong at R0 = physical recall of the fleet. See `design/architecture.md` → *Flash-time immutables*. |
+| `agent/partitions.csv`, `agent/sdkconfig.defaults`, `agent/sdkconfig.defaults.<target>` (partition table, bootloader options, eFuse burns) | **Flash-time immutables** — not changeable by OTA. Wrong at R0 = physical recall of the fleet. See `design/architecture.md` → *Flash-time immutables*. `ab-4m-v1` is a three-way contract with `spec/device-protocol.md` (`ota_slot_size` 1966080) and `tests/test_agent_partitions.py`; a new layout is a new id, never an edit to this one. Anti-rollback / secure boot / flash encryption burn eFuses per board — `agent/tools/verify_bundle.py` fails the build if any is ever enabled in the resolved config. |
 | `spec/` | THE WHAT — requirements, targets, contracts. Status-free; changes are proposals, reviewed. |
 | `spec/prd.md` → *Requirements & targets* | Downstream docs and code resolve against this table. Changing a number here silently changes behaviour in the agent, the ingestor and the dashboard. |
 | Device-side confirm timer / rollback path (agent firmware) | The whole bricking gamble. A bug here means a board that cannot recover itself — the one failure the product must never have. |

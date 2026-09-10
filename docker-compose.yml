@@ -284,6 +284,14 @@ services:
       # a 0600 root-owned key mounted in is unreadable — mount it 0644 or chown it.
       # Recipe and rotation: docs/runbooks/artifact-storage.md. Nothing in this repo's
       # compose mounts a real key, and none is ever committed.
+      #
+      # The prebuilt agent images (R0-infra-2), baked into the image by
+      # `COPY agent/dist /app/agent`. NOT the object store: these are build outputs
+      # that version with the app, not user artifacts, and routing them through GCS
+      # would make the flasher depend on a credential that cannot be minted today
+      # (docs/runbooks/artifact-storage.md -> BLOCKED). The dev override bind-mounts
+      # ./agent/dist over this path instead.
+      AGENT_IMAGES_DIR: /app/agent
     # No published host port: the only way in is the frontend's nginx.
     networks:
       - backend

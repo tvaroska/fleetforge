@@ -6,6 +6,66 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-09 — Agent firmware: what is frozen at flash time (R0-infra-2)
+
+- **`ab-4m-v1` is frozen, and it is a three-way contract.** `agent/partitions.csv`
+  (`ota_0`/`ota_1` at `0x1E0000`), `spec/device-protocol.md`
+  (`"ota_slot_size": 1966080`, `"partition_layout": "ab-4m-v1"`) and
+  `tests/test_agent_partitions.py` (which retypes both literally and greps the spec)
+  move together or not at all. A partition table cannot be changed by OTA, so a new
+  layout is a NEW ID plus a server that understands both — never an edit to this one.
+- **No `factory` partition, deliberately.** A factory-only board can never OTA its way
+  to an A/B layout. `make_manifest.py` refuses to emit a bundle whose built table has
+  one, is missing `ota_1`, or whose slots differ in size.
+- **`ff_cfg` (data, subtype `0x40`, 4 KB @ `0x12000`) is reserved now, defined later.**
+  It is where the browser flasher will write the per-board broker URL, Wi-Fi credentials
+  and enrollment token. `R0-fw-1`/`R0-fe-3` own the payload format; reserving the space
+  after boards ship is impossible, so it is reserved before anything ships.
+- **Rollback on, eFuses untouched.** `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y` is safe to
+  enable at R0 because only an OTA'd app enters `PENDING_VERIFY` — a serially flashed one
+  never does, so nothing can brick before `R0-fw-1` exists. Anti-rollback, secure boot and
+  flash encryption stay **off**: they burn eFuses per board, irreversibly, and there is no
+  key-management story yet. `verify_bundle.py` fails the build if any appears enabled in
+  the RESOLVED config.
+- **Offsets are read from ESP-IDF, never typed.** `make_manifest.py` takes them from
+  `build/flasher_args.json` by name. The bootloader really is at `0x1000` on ESP32 and
+  `0x0` on the RISC-V parts; a hardcoded value flashes cleanly and never boots on half
+  the fleet.
+- **The ESP-IDF pin is a digest; bumping it is a decision, not a version bump.** It
+  changes the bootloader and app on every board flashed afterwards while fielded boards
+  keep the old one. Procedure in docs/runbooks/agent-build.md.
+- **Agent bundles are baked into the app image, not routed through `ObjectStore`.** They
+  are build outputs that version with the image, identical for every tenant, ~1.2 MB per
+  target — and the prod GCS credential cannot currently be minted at all
+  (`constraints/iam.disableServiceAccountKeyCreation`, docs/runbooks/artifact-storage.md).
+  Putting them behind the object store would take a working feature and make it
+  unshippable. R1's *user* artifacts still go through `ObjectStore`.
+- **`fleetforge-agent-*` images are NOT compose services.** Never add them to
+  `PULL_SERVICES`/`APP_SERVICES`: `docker compose pull` fails as a unit (see the
+  R0-infra-5 entry below). They exist as a provenance handle; production gets the bytes
+  from the app image.
+- **Gotcha, cost ~40 min:** `espressif/idf:v5.5.5` unpacks to **~8.9 GB**, not the ~5.5 GB
+  estimated. The pull dies with `failed to register layer: no space left on device`.
+  Reclaim with `builder prune -af` / `container prune -f` / `image prune -f` and
+  regenerable caches only — **never** `image prune -a`, `system prune -a` or
+  `volume prune` on this box, which holds other projects' images and 31 volumes.
+- **Gotcha:** matching forbidden sdkconfig options by PREFIX rejects every correct esp32
+  build — `CONFIG_SECURE_BOOT_V1_SUPPORTED=y` is a SoC capability symbol, not an
+  enablement. Exact names only. A safety check that fails on correct input teaches the
+  next person to delete it.
+- **Gotcha:** a project-root `sdkconfig` silently overrides `sdkconfig.defaults` from the
+  first build onward, so a committed one would ship a bootloader whose posture no longer
+  matches the tracked defaults. Gitignored and dockerignored; builds run in a container.
+- **ESP-IDF builds are not byte-reproducible, and that is why provenance is in the
+  manifest.** `esp_app_desc_t` embeds the compile date/time, so rebuilding the same commit
+  with the same pinned toolchain yields a different `app.bin` sha256 (the partition table
+  and otadata are stable). A registry pull of a pushed digest IS byte-identical — verified
+  push → `rmi` → pull by digest → export → `diff -r`. `CONFIG_APP_REPRODUCIBLE_BUILD=y`
+  would fix the rebuild case but changes every binary, so it is a separate decision.
+- **Gotcha:** in IDF 5.x `build/config/` holds only generated `.h`/`.cmake`/`.json`
+  views — the text sdkconfig is at the project root. Resolve it from
+  `project_description.json["config_file"]`; a literal path breaks on the next IDF bump.
+
 ## 2026-09-09 — One app image serves both the api and the ingestor (R0-infra-5)
 
 - **Two images, not three.** `fleetforge` runs the api and the ingestor; they are

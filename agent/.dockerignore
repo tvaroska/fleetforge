@@ -1,0 +1,15 @@
+# The build context for agent/Dockerfile.
+#
+# `build/` and `sdkconfig` must never enter it: idf.py generates `sdkconfig` on the
+# first build and THAT FILE WINS over sdkconfig.defaults from then on, so a stale copy
+# leaking in from the host would silently ship a bootloader whose rollback option no
+# longer matches agent/sdkconfig.defaults. The container starts from no sdkconfig at all.
+build/
+sdkconfig
+sdkconfig.old
+
+# The finished bundles are output, not input.
+dist/
+
+# PROJECT_VER comes from version.txt precisely because .git is not here.
+.git

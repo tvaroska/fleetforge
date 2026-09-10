@@ -58,6 +58,14 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --no-install-project
 
 COPY src /app/src
+# The prebuilt agent images (R0-infra-2): ~1.2 MB per target, produced off-box by
+# `just agent-build` and served to the browser flasher from AGENT_IMAGES_DIR. They are
+# baked in rather than fetched from the object store because they are build outputs
+# that version with this image, not user artifacts — and because the prod GCS
+# credential cannot currently be minted at all (docs/runbooks/artifact-storage.md).
+# `just build` runs `_require-agent-dist` first so this never ships empty by accident;
+# `agent/dist/.gitkeep` keeps the COPY working on a clean clone.
+COPY agent/dist /app/agent
 # Alembic ships in the image: the api container runs `alembic upgrade head` from
 # its entrypoint when RUN_MIGRATIONS=true (design/production.md -> Components).
 COPY alembic.ini /app/alembic.ini

@@ -460,3 +460,132 @@ ingestor is the sole MQTT subscriber.
 
 Owner: add `Edit(//home/boris/products/services/prod/**)` and
 `Edit(//home/boris/products/services/scripts/**)` via `/permissions`.
+
+## Agent firmware build pipeline (R0-infra-2)
+
+**2026-09-09 — the ESP32 agent now builds, reproducibly, into four flashable bundles
+the API serves to the browser flasher.**
+
+Before this there was no `agent/` at all. `R0-fe-3` needs bytes to write to a board and
+`R0-fw-1` needs a project to grow into; this task produced both, plus the flash-time
+decisions that can never be revisited over the air.
+
+### What shipped
+
+An ESP-IDF project (`agent/`) built inside `espressif/idf:v5.5.5` **pinned by digest**,
+one bundle per chip target:
+
+| Target | Chip family (ESP Web Tools spelling) | Bootloader offset | app.bin |
+|---|---|---|---|
+| `esp32` | `ESP32` | `0x1000` | 162 864 B |
+| `esp32s3` | `ESP32-S3` | `0x0` | 191 264 B |
+| `esp32c3` | `ESP32-C3` | `0x0` | 168 960 B |
+| `esp32c6` | `ESP32-C6` | `0x0` | 164 672 B |
+
+Each `agent/dist/<target>/` holds the four flashable binaries, the **resolved** sdkconfig
+and a `manifest.json` of offsets, sizes, sha256s and provenance (`idf_image` digest,
+`source_commit`, `built_at`). `just agent-build` / `agent-build-all` / `agent-verify` /
+`agent-image` / `agent-push` / `agent-clean` drive it;
+[docs/runbooks/agent-build.md](../runbooks/agent-build.md) is the operator's copy.
+
+Server side: `src/fleetforge/firmware/` loads and verifies the bundles once per app into
+`app.state.firmware_catalog`, and `GET /v1/agent/manifest` + `GET /v1/agent/{target}/{part}`
+serve them behind the admin credential. `COPY agent/dist /app/agent` bakes them into the
+app image; the dev override bind-mounts the working tree instead.
+
+### The flash-time immutables
+
+`agent/partitions.csv` — layout id `ab-4m-v1`, frozen at R0 because **a partition table
+cannot be changed by OTA**:
+
+```
+nvs 0x9000 24K · otadata 0xf000 8K · phy_init 0x11000 4K · ff_cfg 0x12000 4K
+ota_0 0x20000 1920K · ota_1 0x200000 1920K
+```
+
+* `1920K == 0x1E0000 == 1966080` is exactly the `ota_slot_size` `spec/device-protocol.md`
+  promises in `up/announce`. The number is retyped literally in
+  `tests/test_agent_partitions.py`, which also greps the spec — so the two cannot drift
+  apart silently.
+* **No `factory` partition, on purpose.** A factory-only board can never OTA its way to
+  an A/B layout; it would be a recall.
+* **`ff_cfg` (data, subtype `0x40`, 4 KB) is reserved now** for the flash-time config the
+  browser flasher writes per board (broker URL, Wi-Fi credentials, enrollment token).
+  `R0-fw-1`/`R0-fe-3` define its payload. Reserving it later is impossible.
+
+`agent/sdkconfig.defaults` enables `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y` and
+deliberately leaves anti-rollback, secure boot and flash encryption **off**. The first is
+safe to turn on at R0 because a serially-flashed app never enters `PENDING_VERIFY` — only
+an OTA'd one does — so nothing bricks before `R0-fw-1` exists. The other three burn
+eFuses: irreversible, per board, and out of scope until there is a key-management story.
+`verify_bundle.py` fails the build if any of them ever appears enabled in the *resolved*
+config.
+
+Per-target `sdkconfig.defaults.<target>` files exist but are comment-only: every safety
+option lives in the one common file, so there is a single place to read the posture.
+
+### Offsets are derived, never typed
+
+`make_manifest.py` reads `build/flasher_args.json` by name and copies whatever ESP-IDF
+computed. This is not pedantry — the bootloader really does live at `0x1000` on ESP32 and
+at `0x0` on the RISC-V parts, and a hardcoded value flashes cleanly and never boots on
+half the fleet. The same script decodes the built partition-table **binary** and refuses
+to emit a bundle whose table has a `factory` partition, is missing `ota_1`, has slots of
+different sizes, or holds an app that does not fit its slot.
+
+### Gotcha: the toolchain image is ~8.9 GB, not ~5.5
+
+The first pull died with `failed to register layer: no space left on device` after ten
+minutes. Reclaiming needs `docker builder prune -af`, `container prune -f` and
+`image prune -f` — **never** `image prune -a`, `system prune -a` or `volume prune`, since
+this box holds other projects' images and 31 volumes. When those are not enough, the safe
+next step is regenerable caches only (`uv`, `npm`, `go`, `apt`, `journalctl --vacuum`).
+The justfile header now says ~8.9 GB and "want ≥ 12 G before the first pull".
+
+### Gotcha: a prefix match on `CONFIG_SECURE_BOOT` fails every ESP32 build
+
+`verify_bundle.py` first matched forbidden options by prefix and rejected a perfectly good
+esp32 bundle: `CONFIG_SECURE_BOOT_V1_SUPPORTED=y` is a SoC **capability** symbol, present
+whether or not secure boot is enabled. The check now matches exact option names. A safety
+check that fails on correct input is worse than none — it teaches the next person to
+delete it.
+
+### Gotcha: a root `sdkconfig` silently wins over `sdkconfig.defaults`
+
+`idf.py` generates one on first build and prefers it from then on, so a committed copy
+would ship a bootloader whose rollback posture no longer matches the tracked defaults. It
+is gitignored **and** dockerignored, and builds happen in a container where no stale copy
+exists.
+
+### Verification (T2)
+
+- All four targets built from the digest-pinned image; each ended in `BUNDLE OK`.
+- The partition table decoded from the **binary** with IDF's `gen_esp32part.py` — the
+  A/B table above, no `factory`, for every target.
+- `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y` in the built config; anti-rollback, secure
+  boot and flash encryption all `is not set`.
+- Every part re-hashed against its manifest; deliberately flipping a byte in `app.bin`
+  fails `agent-verify` and the bundle is refused at load.
+- `just up` and `just up-prod`: `/v1/agent/manifest` is 401 unauthenticated, 200 with the
+  admin credential, and all 16 part downloads are byte-identical to the files on disk
+  with a matching `"sha256-…"` ETag. The production stack has **no bind mounts** — the
+  bytes come from the image.
+- Empty `AGENT_IMAGES_DIR`: one startup WARNING naming the path, then 401 before 503, and
+  `503 {"detail":"no agent images available"}` on both endpoints.
+- Registry round-trip: `just agent-push esp32` → `docker rmi` → pull by digest
+  (`sha256:40d5f263…fbc9`) → export → `diff -r` against `agent/dist/esp32`: no
+  differences. (Rebuilding the same commit is *not* byte-identical — ESP-IDF stamps the
+  compile time into `esp_app_desc_t`; see the runbook.)
+- 435 tests pass (74 new across `test_agent_partitions.py`, `test_firmware_catalog.py`
+  and `test_api_agent.py`), lint and mypy clean.
+
+### Spec proposals (not written — `spec/` is protected)
+
+1. `spec/device-protocol.md` should record that `ab-4m-v1` includes a 4 KB `ff_cfg` data
+   partition (subtype `0x40`) at `0x12000`, and that flash-time configuration lives there.
+   Today the spec pins `ota_slot_size` and the layout id but says nothing about where the
+   flasher writes the broker URL and enrollment token.
+2. `spec/flows.md` Flow 1 step 4 should name that partition, so `R0-fe-3` has a contract
+   to write against rather than inventing one.
+3. `spec/prd.md` should pin the v1 chip target list (`esp32`, `esp32s3`, `esp32c3`,
+   `esp32c6`). It is currently implicit in the build pipeline only.

@@ -1,0 +1,16 @@
+# Fleetforge agent partition table — layout id "ab-4m-v1".
+# FROZEN AT R0. CRITICAL.md: "Partition table ... Wrong at R0 = physical recall of the fleet."
+# Derived from design/architecture.md -> Flash-time immutables and
+# spec/device-protocol.md -> up/announce ("partition_layout":"ab-4m-v1","ota_slot_size":1966080).
+# 0x1E0000 == 1966080 == the ota_slot_size the protocol promises. Do not change either alone.
+# No `factory` partition on purpose: a factory-only board can never OTA its way to A/B.
+# ff_cfg is the flash-time configuration blob the browser flasher writes per board
+# (broker URL + Wi-Fi creds + enrollment token). A partition cannot be added by OTA, so it
+# is reserved now even though R0-fw-1/R0-fe-3 define its payload format.
+# Name,     Type, SubType, Offset,   Size,     Flags
+nvs,        data, nvs,     0x9000,   0x6000,
+otadata,    data, ota,     0xF000,   0x2000,
+phy_init,   data, phy,     0x11000,  0x1000,
+ff_cfg,     data, 0x40,    0x12000,  0x1000,
+ota_0,      app,  ota_0,   0x20000,  0x1E0000,
+ota_1,      app,  ota_1,   0x200000, 0x1E0000,

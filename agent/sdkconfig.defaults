@@ -1,0 +1,38 @@
+# Fleetforge agent — common sdkconfig defaults. **CRITICAL.**
+#
+# CRITICAL.md: "Partition table, `sdkconfig` bootloader options, eFuse burns (agent
+# firmware) — flash-time immutables, not changeable by OTA. Wrong at R0 = physical
+# recall of the fleet." Every line below implements a named decision in
+# design/architecture.md -> Flash-time immutables. Per-target files carry deltas only;
+# every safety option lives HERE so there is one place to read the posture from.
+#
+# What is deliberately ABSENT matters as much as what is present — see the bottom of
+# this file. tests/test_agent_partitions.py asserts both halves.
+
+# The A/B layout is ours, not one of the presets. partitions.csv is the contract.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+
+# 4 MB is the declared minimum (design/architecture.md: "Budget 4 MB flash minimum").
+# A larger chip still boots a 4 MB-configured image; a smaller one cannot hold ab-4m-v1.
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+
+# R2's auto-rollback. A BOOTLOADER build-time option: it cannot be turned on later by
+# OTA, which is why it is decided at R0 (design/architecture.md, item 2). Safe to enable
+# before R0-fw-1 exists: a serially-flashed app never enters PENDING_VERIFY (otadata is
+# invalid on a fresh chip, so the bootloader boots ota_0 UNDEFINED and arms no timer).
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# The app version is PROJECT_VER, read from version.txt by CMakeLists.txt, so it is the
+# same string the announce payload reports as `agent_version`.
+CONFIG_APP_PROJECT_VER_FROM_CONFIG=n
+
+# ── Deliberately NOT enabled (design/architecture.md -> eFuse, one-way burns) ────────
+# CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK  — burns a monotonic counter that blocks R2's
+#                                        rollback-to-previous. Off in v1.
+# CONFIG_SECURE_BOOT / _V2_ENABLED     — burns a key digest to eFuse; new-devices-only,
+#                                        post-v1. R5 ships app-level signature
+#                                        verification instead. Not interchangeable.
+# CONFIG_SECURE_FLASH_ENC_ENABLED      — flash encryption off in v1; spec/prd.md ->
+#                                        Security & data posture already promises this.
