@@ -47,8 +47,24 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       as a clock error), `ff-enroll` (401/409/503 each have a distinct cause) and
       `halted:`. This is the ONLY channel that works in the failure that matters — a board
       that cannot reach the server cannot report that it cannot reach the server.
-      Serial is a single-reader resource: releasing it for an external monitor must be one
-      obvious button, not a page reload.
+      Three constraints, all verified against the firmware and the flasher:
+      * **Reopen at the console baud.** Flashing runs at the selected rate (921600 by
+        default); the console is 115200 — `sdkconfig.defaults` sets no
+        `CONFIG_ESP_CONSOLE_UART_BAUDRATE`, so it is the IDF default. The monitor cannot
+        keep reading the flashing stream.
+      * **Native-USB parts re-enumerate on reset.** `esptoolFlasher.ts:83` already handles
+        this for `hard_reset` on C3/C6/S3 over USB-JTAG-Serial: the old `SerialPort` throws
+        and the object must be re-acquired. The Chromium grant survives (nothing calls
+        `port.forget()`), so this is a re-open, not a second trip through the chooser.
+        Classic esp32 boards use a separate bridge chip and keep the port across a reset —
+        both paths need testing.
+      * **Single reader.** Releasing the port for an external monitor must be one obvious
+        button, not a page reload.
+      **No inactivity timeout.** `agent_main.c:166` retries the link forever at 5 s
+      intervals and never reboots, so a Wi-Fi failure is a permanently-logging state with
+      no window to catch — a timer would only ever drop the slow failure it exists to
+      find. Hold the port until the operator releases it or leaves the page. The one
+      genuinely catchable event is `park()`, which logs its reason once and halts.
       Acceptance: flash a board, and without touching a cable or another tool, read its
       boot log in the browser through to either `enroll 200` or a highlighted failure;
       reproduce today's silent board and have the page name the cause; the release button
