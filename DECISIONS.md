@@ -6,6 +6,51 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-10 — The live device list, and why a stream is not a source of truth (R0-fe-2)
+
+- **The dashboard never patches a row from an event payload.** `GET /v1/devices` is the
+  record; a frame on `/v1/events` only says "go re-read". The payload carries an `online`
+  snapshot and using it is the obvious free optimisation — it is also how the table starts
+  disagreeing with the server about a board. The frame is parsed only far enough to reject
+  garbage, and is never rendered or logged.
+- **The plain 10 s re-read is a correctness requirement, not a fallback.** A sleepy board
+  goes offline with **no event at all** (presence expires on read, `2.5 × wake`, and
+  publishes nothing). A purely event-driven list shows it as online forever and passes
+  every test one would naturally write. `fleet.test.tsx` carries the test that fails if
+  the interval is removed, and T2 proved it end to end: after the will, the event stream
+  showed only `: keepalive`, and the row still flipped 29 s later.
+- **`EventSource` cannot be trusted to notice a dead stream.** Found in T2, not review:
+  behind the Vite dev proxy, `docker compose stop api` leaves the socket open and
+  `onerror` never fires — the page said `Live` at a stream that was gone and did not
+  recover when the api came back. Fix: the read model is the detector. A failed poll marks
+  the stream suspect; the next successful read discards the source and rebuilds it. This
+  is also the only reconnect path that survives a proxy holding a half-open socket.
+- **CLOSED is not CONNECTING.** A network blip leaves `EventSource` CONNECTING and the
+  browser owns the retry (`retry: 2000` from the server). A non-200 — 401, or
+  `sse_max_clients` 503 — leaves it permanently CLOSED and needs a manual reconnect,
+  1 s → 30 s, deliberately mirroring `RECONNECT_INITIAL_DELAY`/`RECONNECT_MAX_DELAY` in
+  `api/eventstream.py`. Treating the two alike either hammers the API or hangs forever.
+- **A dead API is not a dead session.** Only a 401 renders the login form; a transport
+  failure keeps the last list under a banner. Extends the R0-fe-1 rule to a long-lived
+  connection, where the temptation is stronger because the failure is continuous.
+- **`just now` must be narrower than the heartbeat interval.** A 5 s "just now" bucket
+  exactly swallowed the 5 s heartbeat: last-seen never moved, and a frozen column reads
+  exactly like a page that has stopped updating. Single seconds, pinned by
+  `format.test.ts`. Caught by running AC1, not by any unit test written before it.
+- **The test seam is an injectable `EventSourceFactory`, because jsdom has no
+  `EventSource`.** A structural interface a real `EventSource` satisfies without a cast —
+  no polyfill, no new npm dependency, and the fake can drive `readyState` 0 vs 2, which is
+  the distinction above.
+- **`just frontend-test` is separate from `just frontend-build` and both are in `just
+  build`.** Vitest config lives in `frontend/vitest.config.ts` because the frontend
+  container never reads that file (see R0-fe-1); `npm run build` therefore cannot run the
+  tests, so the pipeline runs them itself.
+- **Details:** `docs/features/enrollment.md` → *Live device list (R0-fe-2)*;
+  `frontend/src/fleet.ts` (the refresh engine and the three triggers);
+  `.claude/plans/R0-fe-2-live-device-list-sse.md` (the plan).
+
+---
+
 ## 2026-09-10 — What the prod box can actually hold (R0-infra-4)
 
 - **Swap *used* is a stock, not a flow.** The TODO's "already swapping ~1 G" was a point

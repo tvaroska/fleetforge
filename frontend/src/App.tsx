@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 import { api, type Health } from './api'
 import { EnrollBoard } from './EnrollBoard'
+import { FleetView } from './FleetView'
 import { SessionGate } from './session'
 
 // R0-infra-1's health probe survives as a footer rather than a page: it is the
@@ -47,6 +48,9 @@ export default function App() {
                 </button>
               </p>
             </header>
+            {/* The fleet first: R0's done-when is "watch it come online", and after the
+                first board this is what the page is opened for. */}
+            <FleetView onSessionExpired={expire} />
             <EnrollBoard onSessionExpired={expire} />
           </>
         )}

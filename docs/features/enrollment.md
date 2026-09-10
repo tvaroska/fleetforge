@@ -345,6 +345,60 @@ and an expired server certificate would have been accepted by the whole fleet. I
 enabled, required by `verify_bundle.py`, and asserted in `tests/test_agent_partitions.py`.
 An option like this is compiled in: no OTA adds it to a board already flashed.
 
+### Live device list (R0-fe-2)
+
+The screen R0 is judged on: flash a board, watch it come online without touching the
+page. It is the consumer half of `R0-be-5`, and it holds that contract literally —
+**a frame on `/v1/events` is only a hint that says "go re-read"**, and the re-read
+(`GET /v1/devices`) is the only thing that ever sets a row. Nothing is patched from an
+event payload, so the table cannot disagree with the server about a board.
+
+**Three refresh triggers, and the boring one is load-bearing.** An event (coalesced
+250 ms, so a burst of announce+presence+heartbeat is one read); `onopen`, which is the
+resync after the 15-minute cap or after a listener reconnect closed every stream; and a
+plain 10 s interval. The interval is not a fallback — **a sleepy board goes offline with
+no event at all** (presence expiry publishes nothing), so a purely event-driven list
+shows a dead board as online forever, and passes every test one would naturally write
+for it. `fleet.test.tsx` has the test that fails if the interval is deleted.
+
+**A transport failure is not "logged out"** (the R0-fe-1 rule, now applied to a
+long-lived connection). Only a 401 bounces to the login form; a dead API keeps the last
+list on screen under a banner and a `Reconnecting…` status. Reconnect policy mirrors the
+server's own: the browser owns the retry while `EventSource` is CONNECTING, and only a
+CLOSED source (a non-200 status — 401, or `sse_max_clients`) is re-opened manually,
+1 s → 30 s backed off, matching `api/eventstream.py`.
+
+**The read model is also the liveness detector.** `EventSource` cannot be trusted to
+report a dead stream: behind the Vite dev proxy, stopping the api leaves the socket open
+and `onerror` never fires, so the page reported `Live` at a stream that was gone and
+never recovered when the api returned. A failed poll now marks the stream suspect, and
+the next successful read tears the source down and rebuilds it. This was found in T2,
+not in review.
+
+**Last-seen shows single seconds on purpose.** A "just now" bucket wider than the
+heartbeat interval (5 s) freezes the column, and a frozen column is indistinguishable
+from a page that has stopped updating — which is the one thing this screen must make
+obvious. `format.test.ts` pins it.
+
+The stream authenticates with the same `ff_session` cookie over a **relative** URL and
+no `withCredentials`: one credential, two transports, one origin. jsdom has no
+`EventSource` at all, so the hook takes an injectable `EventSourceFactory` (a structural
+type a real `EventSource` satisfies) — the seam exists for testability and adds no
+dependency.
+
+**T2 evidence.** Chromium against the real stack, dev (Vite) then production shape
+(nginx). A board enrolled at `05:22:02` (api log) had its row in the DOM at
+`05:22:02.673` through nginx — **~0.7 s, no reload, no click** — online, `1.4.2`, with
+last-seen ticking 0→4 s and resetting on every heartbeat. A `--crash-after` board flipped
+to `offline` **~1.4 s** after the LWT. The sleepy case is the one that matters: after the
+will, `curl -N /v1/events` showed nothing but `: keepalive`, and the row still flipped to
+`offline` 29 s after its last message (2.5 × 10 s wake + poll granularity). Also proved:
+`docker compose restart postgres` (every stream closed by design) recovered to `Live` in
+~2 s with the table never blanked; `SSE_MAX_STREAM_S=20` rolled over ~10 times in 115 s
+invisibly; 12 reloads oscillated the api's open-client count 1↔2 and never climbed;
+stopping the api showed `Reconnecting…` with the list intact and **no password form**,
+and starting it recovered on its own.
+
 ## Post-v1
 
 - **Device decommissioning** — `POST /v1/devices/{device_id}/decommission` setting

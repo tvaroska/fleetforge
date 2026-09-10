@@ -178,6 +178,12 @@ test: lint typecheck
 frontend-build:
     cd frontend && npm ci && npm run build
 
+# The frontend's own test suite. SEPARATE from `frontend-build` because the vitest
+# config lives in frontend/vitest.config.ts, which the frontend container never reads
+# (see that file's header) — so `npm run build` cannot and must not run it.
+frontend-test:
+    cd frontend && npm ci && npm test
+
 # ── Release: app images to Artifact Registry (R0-infra-5) ────────────────────
 #
 # TWO images, not three. `fleetforge` runs both the api and the ingestor — they
@@ -204,7 +210,7 @@ latest_tag := `git describe --tags --abbrev=0 2>/dev/null || echo "latest"`
 # `agent/dist` in (Dockerfile -> `COPY agent/dist /app/agent`), so an empty
 # `agent/dist` ships an api whose `/v1/agent/manifest` answers 503 — and the
 # failure surfaces in production as a flasher with nothing to flash.
-build: _require-agent-dist test frontend-build _build-images _verify-images _push-images
+build: _require-agent-dist test frontend-build frontend-test _build-images _verify-images _push-images
     @echo ""
     @echo "✓ {{ registry }}/fleetforge:{{ latest_tag }}"
     @echo "✓ {{ registry }}/fleetforge-frontend:{{ latest_tag }}"

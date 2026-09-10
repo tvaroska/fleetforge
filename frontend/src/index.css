@@ -11,7 +11,8 @@ body {
 }
 
 main {
-  max-width: 40rem;
+  /* Six columns of fleet table do not fit in 40rem. */
+  max-width: 56rem;
   margin: 0 auto;
   padding: 4rem 1.5rem;
 }
@@ -38,10 +39,50 @@ dd {
   font-variant-numeric: tabular-nums;
 }
 
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-variant-numeric: tabular-nums;
+}
+
+th,
+td {
+  text-align: left;
+  padding: 0.4rem 0.75rem 0.4rem 0;
+  border-bottom: 1px solid #23292f;
+  vertical-align: top;
+}
+
+th {
+  color: #8b98a5;
+  font-weight: 500;
+}
+
+code {
+  font-size: 0.85em;
+  word-break: break-all;
+}
+
 .ok {
   color: #3fb950;
 }
 
 .bad {
   color: #f85149;
+}
+
+/* Referenced by App.tsx, EnrollBoard.tsx and FleetView.tsx; until now defined nowhere. */
+.muted {
+  color: #8b98a5;
+}
+
+.warn {
+  color: #d29922;
+}
+
+.issued {
+  border: 1px solid #30363d;
+  border-radius: 6px;
+  padding: 0 1rem 1rem;
+  margin: 1rem 0;
 }

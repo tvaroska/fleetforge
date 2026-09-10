@@ -45,6 +45,34 @@ export type EnrollmentTokenIssued = {
   created_at: string
 }
 
+// Mirrors `DeviceSummary` in api/schemas.py, field for field and in its order.
+//
+// `online` is computed SERVER-SIDE on every read, by `fleetforge.presence.is_online`.
+// It must never be re-derived here from `last_seen`: the 2.5x tolerance lives in one
+// place (`config.presence_tolerance`), and `presence_reported` — the other ingredient
+// — is deliberately not in this payload precisely so that no client can try.
+export type DeviceSummary = {
+  device_id: string
+  name: string | null
+  group_id: string | null
+  platform_type: string
+  fw_version: string | null
+  agent_version: string | null
+  link_type: string
+  power_class: string
+  expected_wake_interval_s: number | null
+  parent_device_id: string | null
+  partition_layout: string | null
+  ota_slot_size: number | null
+  capabilities: string[]
+  last_seen: string | null
+  enrolled_at: string
+  broker_provisioned_at: string | null
+  online: boolean
+}
+
+export type DeviceList = { devices: DeviceSummary[] }
+
 export class ApiError extends Error {
   readonly status: number
 
@@ -118,6 +146,10 @@ export const api = {
     }),
 
   logout: () => request<void>('/v1/auth/logout', { method: 'POST' }),
+
+  // The fleet read model, and the ONLY source of device state in this app. A frame on
+  // `/v1/events` is a hint that says "go re-read"; this is the re-read.
+  listDevices: () => request<DeviceList>('/v1/devices'),
 
   listEnrollmentTokens: () => request<{ tokens: EnrollmentTokenSummary[] }>('/v1/enrollment-tokens'),
 

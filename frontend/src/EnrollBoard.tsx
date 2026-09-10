@@ -13,11 +13,7 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import { ApiError, api, type EnrollmentTokenIssued, type EnrollmentTokenSummary } from './api'
-
-function formatWhen(iso: string): string {
-  const at = new Date(iso)
-  return Number.isNaN(at.getTime()) ? iso : at.toLocaleString()
-}
+import { formatWhen } from './format'
 
 function IssuedToken({ issued, onDismiss }: { issued: EnrollmentTokenIssued; onDismiss: () => void }) {
   const [copied, setCopied] = useState(false)

@@ -339,7 +339,13 @@ audience), and **agent images are built off-box** (the ESP-IDF builder is 2–3 
       row flipped to `used`, and a replay from a second board was refused 409.
       _(done 2026-09-09; see docs/features/enrollment.md)_
 
-- [ ] **R0-fe-2**: Live device list via SSE — online/offline, version, last-seen (P0, 1.5d)
+- [x] **R0-fe-2**: Live device list via SSE — online/offline, version, last-seen (P0, 1.5d) ✅ 2026-09-10
+      The event is only a hint — every row comes from `GET /v1/devices`. Three triggers:
+      a coalesced frame, `onopen` resync, and a plain 10 s re-read (a sleepy board goes
+      offline with no event at all). T2 through nginx: a board's row appeared 0.7 s after
+      the enroll, flipped `offline` 1.4 s after the LWT, and the sleepy case flipped with
+      nothing but `: keepalive` on the stream.
+      _(done 2026-09-10; see docs/features/enrollment.md)_
 
 - [ ] **R0-fe-3**: Web Serial flasher (P0, 2.5d)
       `esptool-js`: port select → chip detect → board-confirm shortlist → flash agent +
