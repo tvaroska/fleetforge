@@ -404,6 +404,169 @@ Neighbours unaffected: `update` 200, `boris` 200, `download` 401 on `/` and 200 
 `bingo.tvaroska.sk` still 404 over HTTPS — expected until `R0-infra-5` puts the app
 behind the door.
 
+## Production capacity measurement (R0-infra-4)
+
+**2026-09-10 — A repeatable harness to answer "is the box out of headroom?" with defensible
+measurements, not point samples.**
+
+The task delivered `scripts/capacity_snapshot.py`, a stdlib-only Python script that reads
+`/proc` and cgroup v2 directly to measure host and per-container memory usage over a
+sustained window. It runs identically on the dev box and on prod (piped over ssh), needs no
+venv or project dependencies, and produces both a human transcript and machine-parseable
+JSON. The script is also the permanent ops answer to the capacity question, documented in
+`docs/runbooks/capacity.md`.
+
+### The methodological insight: swap used is a stock, not a flow
+
+The TODO's "already swapping ~1 G" was a point sample that was already wrong by the time
+the measurement ran (the box had rebooted and swap-used dropped to 11 MB). A gigabyte of
+cold anonymous pages parked in swap and never read back costs nothing; what costs is the
+**rate** of `pswpin` / `pgmajfault`. The harness therefore reports over a window (default
+15 minutes with 30-second samples), not at an instant, and computes deltas to distinguish
+"parking cold pages" (pswpout only) from "thrashing" (pswpin).
+
+### What the harness measures
+
+**Host metrics** (per sample, with floor/peak over the window):
+- `MemAvailable`, `MemFree`, `SwapFree` from `/proc/meminfo`
+- `pswpin`, `pswpout`, `pgmajfault`, `pgscan_direct`, `pgsteal_direct` from `/proc/vmstat`
+  (deltas between first and last sample)
+- Load average, disk usage, GCP machine-type from the metadata server (1s timeout, not an
+  error if absent)
+
+**Container metrics** (per sample, reading cgroup v2 directly):
+- `memory.current`, `memory.peak`, `memory.max` (the declared limit)
+- `memory.swap.current`, `memory.swap.peak`
+- `memory.events` (`max`, `oom`, `oom_kill`) — **`max` is the real under-provisioning
+  signal**: it counts forced reclaims at the limit, which happen long before an OOM kill
+  and are otherwise invisible. A container with `max > 0` is under-provisioned even if it
+  never crashes.
+- `anon` and `file` from `memory.stat` — `docker stats` and `memory.current` both include
+  reclaimable page cache, so a container "using" 200 M of which 190 M is file cache is not
+  a capacity problem.
+
+### Verdict rules
+
+Encoded as a pure function (the only logic in the script, and the only thing
+unit-tested):
+
+- **FAIL** if any container has `oom_kill > 0`, or `pswpin` delta > 1000 pages over the
+  window, or `MemAvailable` floor < 256 MiB.
+- **TIGHT** if any container's `memory.peak` ≥ 85% of its limit, or any container has
+  `memory.events max > 0`, or `MemAvailable` floor < 512 MiB, or Σ declared limits >
+  `MemTotal`.
+- **OK** otherwise.
+
+Exit code 0 for OK/TIGHT, 1 for FAIL. The verdict prints last, always, even on failure.
+
+### The dependency problem: measuring before the app exists on prod
+
+Fleetforge's app containers (api/ingestor/frontend) are not on prod yet — R0-infra-5 is
+blocked on permissions. The measurement therefore splits:
+
+- **Footprint of api/ingestor/frontend**: measured on the dev box in the **production
+  shape** (`just up-prod`: built images, nginx not Vite, no `--reload`, same limits as
+  prod will use). Container RSS for these workloads is set by the workload, not the host,
+  so this transfers.
+- **Host headroom**: measured on prod over a sustained window, as it is today.
+- **Verdict** = measured prod headroom − measured fleetforge footprint − margin. It is a
+  projection and must say so.
+
+The harness is then the acceptance instrument for R0-infra-5 / R0-test-2: re-run
+`just capacity-check-prod` once the app is actually on prod, and the projection is either
+confirmed or corrected.
+
+### Measured footprint under v1 load target
+
+Fleetforge containers measured on the dev box under load (25 devices heartbeating every
+5s for 10+ minutes, 2 SSE clients, login burst of 20 concurrent argon2 hashes):
+
+| Container | Idle peak | Loaded peak | Limit | Notes |
+|---|---|---|---|
+| fleetforge-api | 117 MiB | 131 MiB | 256 M | `memory.events max=0` even during login burst |
+| fleetforge-ingestor | 47 MiB | 48 MiB | 128 M | |
+| fleetforge-frontend | 6 MiB | 6 MiB | 64 M | nginx in prod shape (Vite dev = 48 M) |
+| fleetforge-mosquitto | 19 MiB | 20 MiB | 64 M | already on prod, peak includes dynsec bootstrap |
+| **Total app** | — | **131 MiB** | **512 M** | Sum of loaded peaks |
+| Postgres marginal | — | **~20 MiB** | (shared) | anon delta for fleetforge's pool + LISTEN connections |
+
+The api's 256 M limit is validated — no `memory.events max` even under 20 concurrent
+argon2id hashes against the `CapacityLimiter(2)`. Frontend in production shape (nginx) is
+6 MiB, not 48 M (Vite dev server).
+
+### Production host headroom
+
+Measured on `prod` (VM `main`, e2-medium 2 vCPU / 4 GB, us-central1-c, 10 containers) over
+a 15-minute window:
+
+```
+MemAvailable floor   2231 MiB (minimum over 30 samples)
+Swap                 2047 MiB total, 11 MiB used
+Paging deltas        pswpin +0, pswpout +0, pgmajfault +12 (over 900s)
+Declared limits      3392 MiB / 3924 MiB MemTotal = 86% committed
+```
+
+No containers hit their limit (`memory.events max=0` for all), no swap thrashing (pswpin
+delta is zero), headroom floor is 2231 MiB.
+
+### Verdict: no resize needed
+
+```
+Projected peak add   = 131 MiB app + 20 MiB marginal Postgres = 151 MiB
+Net headroom         = 2231 MiB floor − 151 MiB add − 512 MiB margin = 1568 MiB
+Declared over-commit = (3392 + 448) / 3924 = 99.5% (3904 / 3924 MiB)
+```
+
+The 151 MiB measured footprint fits in the 384 MiB headroom that bingo freed (R0-infra-0),
+with margin. Declared over-commit is 99.5% on paper, but measured peaks are what matter —
+the net add is negative (bingo used more than fleetforge does), and `MemAvailable` floor
+stays comfortably above the 512 MiB TIGHT threshold.
+
+**Follow-up**: re-run `just capacity-check-prod` after R0-infra-5 lands to confirm this
+projection against live measurements on prod.
+
+### Files created
+
+- `scripts/capacity_snapshot.py` — the harness (stdlib-only, runs on prod over ssh)
+- `tests/test_capacity_snapshot.py` — pure-function tests over fixture text (verdict
+  rules, meminfo parsing, byte→MiB formatting, the `memory.max=max` unlimited case)
+- `docs/runbooks/capacity.md` — how to re-run it, what the numbers mean, the resize
+  procedure (owner-executable GCP commands with all gotchas), the "measure in production
+  shape" warning
+- `justfile` — `capacity-check` and `capacity-check-prod` recipes; added `scripts/` to
+  `lint` and `typecheck` targets
+
+Updated: `design/production.md` → *Capacity — Measured 2026-09-10* (replaced stale
+`1913 used / 1038 swap` figures with the dated measurement + verdict).
+
+### Gotchas learned
+
+**`just up` ≠ `just up-prod`.** The dev-shape frontend runs the Vite dev server (node,
+48 M against a 64 M limit, 74%); prod-shape runs nginx (~6 M). Measuring the dev shape
+produces a false "frontend needs a bigger limit" alarm. Same for api: `--reload` keeps a
+reloader parent alive. Always measure in the production shape.
+
+**`memory.max` reads the literal string `max`** for an unlimited container
+(fleetforge-traefik, fleetforge-minio, fleetforge-postgres in dev). Parse it to `None`;
+do not divide by it. A test exists for this (the ZeroDivisionError trap).
+
+**`memory.peak` is since container start**, not a window peak. The harness tracks the max
+of `memory.current` across samples and reports both — they answer different questions
+("has this ever" vs "did it during my test").
+
+**Read authorisation on `/proc` and cgroup paths.** The script needs no `sudo` (boris is
+in the `docker` group on both hosts), but cgroup v2 paths are
+`/sys/fs/cgroup/system.slice/docker-<full-64-hex-id>.scope/` — the **full** container id,
+not the short one. Fallback chain for cgroup v1 and alternate paths is present but unused
+on current hosts (kernel 6.1 and 6.17, both cgroup v2).
+
+**The `--watch` run on prod holds the ssh session for 15 minutes.** Use
+`run_in_background: true` for the Bash call, or shorten the window to ≤ 8 min.
+
+**`docker stats` and `memory.current` both include page cache.** Report `anon` from
+`memory.stat` alongside; a container "using" 200 M of which 190 M is reclaimable file
+cache is not a capacity problem.
+
 ## App image pipeline (R0-infra-5, partial)
 
 **2026-09-09 — the build/push half. The prod fragment is not shipped.**
