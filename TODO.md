@@ -8,7 +8,7 @@ hardware) remains. Sprint 0 now holds the device-visibility gap that first hardw
 attempt exposed, plus the theme restyle.
 
 <!-- Counters: spec=1 infra=5 db=1 be=6 fe=3 sec=1 fw=1 test=2 -->
-<!-- Sprint 0 counters: fe=2 fw=1 -->
+<!-- Sprint 0 counters: fe=2 fw=1 test=1 -->
 
 Live status lives ONLY here. States: `- [ ]` open · `- [x]` done · `- [!]`
 attempted-but-failed. `spec/` and `design/` are status-free.
@@ -34,50 +34,29 @@ the retired bingo app), single-tenant, **not a public product until V3**.
 
 Bricking risks, broker auth and security issues get filed here as they surface.
 
-- [ ] **S0-fe-1**: Keep the serial port after flashing and show the boot log (P1, 1.5d)
-      Filed 2026-09-10 after a real board was flashed successfully and then went silent:
-      the token was minted (so every part wrote and verified), no `POST /v1/enroll` ever
-      arrived, and finding out why needed `screen` on a second machine. **The page already
-      holds the port** — `esptoolFlasher.ts` calls `transport.disconnect()` on close and
-      never `port.forget()`, so the grant survives. Hold it instead, reset the board, and
-      stream `agent_main`'s output into the log panel that already exists.
-      Highlight the four lines that decide the diagnosis: `ff-net` (`no network yet;
-      waiting for the link` — repeating means wrong PSK or a 5 GHz-only SSID), `ff-time`
-      (no NTP ⇒ clock at epoch 0 ⇒ TLS to `bingo.tvaroska.sk` fails as *unreachable*, not
-      as a clock error), `ff-enroll` (401/409/503 each have a distinct cause) and
-      `halted:`. This is the ONLY channel that works in the failure that matters — a board
-      that cannot reach the server cannot report that it cannot reach the server.
-      Three constraints, all verified against the firmware and the flasher:
-      * **Reopen at the console baud.** Flashing runs at the selected rate (921600 by
-        default); the console is 115200 — `sdkconfig.defaults` sets no
-        `CONFIG_ESP_CONSOLE_UART_BAUDRATE`, so it is the IDF default. The monitor cannot
-        keep reading the flashing stream.
-      * **Native-USB parts re-enumerate on reset.** `esptoolFlasher.ts:83` already handles
-        this for `hard_reset` on C3/C6/S3 over USB-JTAG-Serial: the old `SerialPort` throws
-        and the object must be re-acquired. The Chromium grant survives (nothing calls
-        `port.forget()`), so this is a re-open, not a second trip through the chooser.
-        Classic esp32 boards use a separate bridge chip and keep the port across a reset —
-        both paths need testing.
-      * **Single reader.** Releasing the port for an external monitor must be one obvious
-        button, not a page reload.
-      **No inactivity timeout.** `agent_main.c:166` retries the link forever at 5 s
-      intervals and never reboots, so a Wi-Fi failure is a permanently-logging state with
-      no window to catch — a timer would only ever drop the slow failure it exists to
-      find. Hold the port until the operator releases it or leaves the page. The one
-      genuinely catchable event is `park()`, which logs its reason once and halts.
-      Acceptance: flash a board, and without touching a cable or another tool, read its
-      boot log in the browser through to either `enroll 200` or a highlighted failure;
-      reproduce today's silent board and have the page name the cause; the release button
-      hands the port to `screen` on the next try.
-      **Built and shipped 2026-09-10; awaiting bench confirmation before this closes.**
-      `boardConsole.ts` (classifier + hook), `serialConsole.ts` (Web Serial adapter),
-      `BoardConsole.tsx` (panel 4 · Watch the board). T1 green — 32 new tests, 103 total.
-      The software half of acceptance is proven in jsdom against replays of real
-      `agent/main/*.c` output, including today's silent board. What is NOT proven, because
-      it needs a board on the Mac: that `getPorts()` re-acquires the port after
-      `hard_reset` on real hardware, that 115200 decodes cleanly, that the EN pulse on
-      DTR/RTS reboots without dropping into the ROM bootloader, and that `screen` gets the
-      device after Release. Flash a board and check those four.
+- [ ] **S0-test-1**: Bench-verify the serial console on real hardware (P1, 0.5d)
+      Filed 2026-09-10, when S0-fe-1 shipped. Its software half is proven in jsdom against
+      replays of real `agent/main/*.c` output; these four cannot be, because they are
+      properties of a USB bridge chip and an OS, not of the classifier. The bench is the
+      Mac — the Linux dev box does not enumerate boards over WebSerial.
+      * **Re-acquire after `hard_reset`.** `serialConsole.ts` re-reads
+        `navigator.serial.getPorts()` every 250 ms for 8 s, because the native-USB parts
+        (C3/C6/S3) come back as a *different* `SerialPort`. Test both paths: a classic
+        esp32 with a bridge chip (port survives the reset) and a C3/C6/S3 (it does not).
+        If 8 s is short, the panel says "No board is available to watch" on a board that
+        is merely rebooting — the exact false negative this feature exists to remove.
+      * **115200 decodes cleanly.** `sdkconfig.defaults` sets no
+        `CONFIG_ESP_CONSOLE_UART_BAUDRATE` so this should be right, but a wrong baud
+        yields plausible-looking mojibake rather than an error, and the classifier would
+        then silently match nothing.
+      * **The EN pulse boots the app, not the ROM loader.** `SerialConsole.reboot()`
+        drives RTS high with DTR low. If the wiring inverts, the board lands in download
+        mode and prints `waiting for download` forever.
+      * **Release really releases.** After the button, `screen /dev/tty.usbserial-… 115200`
+        must open. If it reports "Resource busy", `port.close()` is not being reached.
+      Acceptance: all four confirmed on the Mac, with the classic and native-USB paths
+      both exercised. Anything that fails comes back as a new S0 task with the observed
+      behaviour.
 
 - [ ] **S0-fw-1**: Agent reports boot and enrol progress to the server (P2, 2d)
       Depends on S0-fe-1 (serial first — it covers the bench; this covers the fleet).

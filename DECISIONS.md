@@ -6,6 +6,44 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-10 — the board's console belongs in the browser, as a second session (S0-fe-1)
+
+- **`flash.ts`'s Rule 4 stays: the port is always released in a `finally`.** The task was
+  filed as "keep the serial port after flashing", and that framing is wrong. esptool-js's
+  `Transport` owns the port at the *flash* baud, which is not the console baud, so a held
+  flasher would have to be reconfigured anyway — and unwinding the `finally` would leak a
+  port on every error path in a file whose whole discipline is that it never does. The
+  console is instead a **separate session against the same physical port**, opened after
+  the flasher lets go.
+- **It works with no user gesture because nothing ever calls `port.forget()`.** That rule
+  was written into `esptoolFlasher.ts` for a different reason (not making the operator
+  re-pick the chooser for each board), and it is what now lets an effect call
+  `navigator.serial.getPorts()` after a flash and get the port back. Two features rest on
+  that one line; do not "tidy" it away.
+- **The classifier ranks hints by specificity, not recency.** First cut showed the most
+  recent explained line. On a stranded board that is always `agent_main.c:167`'s "no
+  network yet; waiting for the link", reprinted every 5 s, which buried the `reason 201`
+  above it. Hints carry `hintKind: 'generic' | 'specific'`; generic fills an empty slot and
+  never displaces a named cause. Caught by a test written from the real 2026-09-10 log —
+  the value of using a genuine failure as a fixture rather than an invented one.
+- **A milestone clears the fault.** Wi-Fi retries are normal on a busy AP; leaving "the PSK
+  is wrong" on screen after the link came up would be a lie the operator would act on.
+- **No inactivity timeout, and this is load-bearing.** `agent_main.c:166` retries forever
+  at 5 s, so the failure mode has no window — any timeout would drop precisely the slow
+  failure the panel exists to find. Documented in the interface, not just the code.
+- **Hardware properties are a separate task, not a hand-wave.** Four things (port
+  re-acquisition after `hard_reset` on native-USB parts, 115200 decoding, the EN pulse
+  landing in the app rather than the ROM loader, `screen` getting the device after Release)
+  are properties of a bridge chip and an OS and cannot be proven in jsdom. Filed as
+  **S0-test-1** with the specific failure signature to look for in each, rather than left
+  as an implied "should work". The bench is the Mac.
+- **Every log string the classifier matches is quoted in `boardConsole.test.ts`.** It is a
+  contract with `agent/main/*.c` that nothing else enforces: reword an `ESP_LOGW` and the
+  panel would silently stop diagnosing. The tests fail instead.
+
+Details: [docs/features/enrollment.md](docs/features/enrollment.md) →
+*Serial console after flashing (S0-fe-1)*.
+
 ## 2026-09-10 — fleetforge goes live on prod: an alias network, an infra ingestor, a TLS simulator (R0-infra-5)
 
 - **A dedicated `fleetforge` network exists solely to carry the alias `api`.** The

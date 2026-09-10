@@ -483,6 +483,87 @@ no wake interval shows the validation error and issues **no** `POST
 /v1/enrollment-tokens`, and `localStorage.length === sessionStorage.length === 0` with
 zero console errors after sign-in.
 
+### Serial console after flashing (S0-fe-1)
+
+**2026-09-10.** Filed and shipped the same day the flasher's dead end was hit for real: a
+board flashed cleanly — the token was minted, so every part wrote and verified — and then
+went silent. No `POST /v1/enroll` ever arrived. The page said *"it should appear in the
+fleet above within a few seconds"* and had nothing else to offer. Finding out why needed
+`screen` on a second machine, and the cause was never isolated.
+
+**What was built.** A fourth section on the flash page, *4 · Watch the board*. After a
+flash it opens the port with no click and no user gesture, reopens at 115200, and streams
+`agent_main`'s output under a five-step checklist: Agent running → Network up → Clock set
+→ Enrolled → On the fleet. Plus a **Reboot the board** button and a **Release the port**
+button.
+
+**Key approach — the console is a second session, not a held flasher.** The obvious
+implementation is to keep the `BoardFlasher` alive past `flash.ts`'s `finally`. That was
+rejected: esptool-js's `Transport` owns the port at the *flash* baud (921600 by default),
+which is not the console baud, and unwinding Rule 4 — *the port is always released* —
+would leak a port on every error path in the flasher. So `flash.ts` is untouched, and the
+console opens the same physical port afresh. It can, because nothing ever calls
+`port.forget()`: the Chromium grant from the flash is still live, so
+`navigator.serial.getPorts()` returns the port without a chooser. That single existing
+invariant is what makes the whole feature gesture-free.
+
+Three files, split the way `flash.ts`/`esptoolFlasher.ts` already are:
+
+| file | role |
+|---|---|
+| `frontend/src/boardConsole.ts` | pure classifier + the `useBoardConsole` hook. No `navigator.serial`. |
+| `frontend/src/serialConsole.ts` | the Web Serial adapter. The only file that opens a port for the console. |
+| `frontend/src/BoardConsole.tsx` | the panel. |
+
+**Naming the cause.** `classifyConsoleLine` strips the ANSI colours and the
+`I (1234) ff-wifi: ` preamble, tags each line with a milestone and, where it can, a plain
+English hint. Every string it matches exists in `agent/main/*.c`, which is what
+`boardConsole.test.ts` pins. The hints that matter: `esp_wifi` disconnect reason codes
+(201 → *no AP with that SSID; check the network has a 2.4 GHz band, the ESP32 radio cannot
+see 5 GHz at all*; 2/15/202/204 → wrong PSK), `sntp: no answer` → the clock is unset so
+TLS cannot verify, `cannot reach https://…` → *if the clock milestone is still open this
+is a TLS failure caused by the unset clock, not a routing problem*, every `enroll
+401/409/429/503`, `broker refused the connection`, and `halted:`.
+
+**Design flaw the tests caught.** "Most recent explained line wins" is wrong. On a
+stranded board the last line is always `agent_main.c:167`'s *"no network yet; waiting for
+the link"*, reprinted every 5 s — true, useless, and it buried the reason code above it.
+Hints now carry a `hintKind` of `'generic'` or `'specific'`; a generic note fills an empty
+slot but never displaces a named cause. A milestone clears the fault outright, so a board
+that recovers after three bad handshakes does not keep "the PSK is wrong" on screen.
+
+**No inactivity timeout, deliberately.** `agent_main.c:166` retries the link forever at 5 s
+intervals, so a Wi-Fi failure is a permanently-logging state with no window to catch — a
+timer would only ever drop the slow failure it exists to find. The session ends when the
+operator releases it, when the page unmounts, or when the device disappears.
+
+**Reboot pulses EN, not IO0.** `SerialConsole.reboot()` drives RTS high with DTR held low,
+which asserts EN through the standard auto-reset circuit while leaving IO0 high — the
+operator wants a boot log from the first line, not a ROM download prompt.
+
+**Release means release.** `close()` cancels the pending `read()` first (otherwise
+`port.close()` is rejected for a locked stream), then closes the port, and never calls
+`forget()`. Unmount does the same. Without that the device stays owned until the tab
+closes and the operator's next `screen` fails with "Resource busy" for no visible reason.
+
+**T1.** 103 frontend tests pass, 32 of them new; `tsc -b` and the vite build clean.
+
+**T2 evidence — software half proven, hardware half deferred to S0-test-1.** Against a
+fake port replaying real `agent/main/*.c` output: `autoWatch` opens exactly one session
+with `acquire: 'granted'` at 115200 with no click; a full happy-path log drives all five
+milestones to done and shows the "on the fleet" panel; **the 2026-09-10 silent board's own
+log** (`disconnected (reason 201)` + the retry heartbeat) produces `waitingFor: 'link'` and
+the 5 GHz diagnosis, which is the acceptance criterion "reproduce today's silent board and
+have the page name the cause"; Release closes the port and returns the panel to "Watch a
+board"; watching again never holds two ports; unmount closes; a `NotFoundError` from the
+chooser renders "No board selected." rather than an empty panel.
+
+Four properties cannot be proven in jsdom because they are properties of a USB bridge chip
+and an OS: `getPorts()` re-acquisition after `hard_reset` on the native-USB parts, clean
+decoding at 115200, the EN pulse landing in the app rather than the ROM loader, and
+`screen` actually getting the device back. Tracked as **S0-test-1**, to be run on the Mac
+(the Linux dev box does not enumerate boards over WebSerial).
+
 ## Post-v1
 
 - **Device decommissioning** — `POST /v1/devices/{device_id}/decommission` setting
