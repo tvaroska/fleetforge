@@ -2,11 +2,13 @@
 
 **Goal:** Self-hosted OTA firmware management for embedded fleets (ESP32 first) — a bad
 build is caught before the fleet, and any device that gets one recovers itself.
-**Updated:** 2026-09-08
-**Focus:** R0 (Enroll a board) active · backend landed (schema, compose stack, admin auth,
-enrollment tokens, ingest, `/v1/enroll`, SSE) · frontend, firmware and broker authz next.
+**Updated:** 2026-09-10
+**Focus:** R0 is deployed and live at `bingo.tvaroska.sk`; only R0-test-2 (E2E on real
+hardware) remains. Sprint 0 now holds the device-visibility gap that first hardware
+attempt exposed, plus the theme restyle.
 
 <!-- Counters: spec=1 infra=5 db=1 be=6 fe=3 sec=1 fw=1 test=2 -->
+<!-- Sprint 0 counters: fe=2 fw=1 -->
 
 Live status lives ONLY here. States: `- [ ]` open · `- [x]` done · `- [!]`
 attempted-but-failed. `spec/` and `design/` are status-free.
@@ -30,8 +32,60 @@ the retired bingo app), single-tenant, **not a public product until V3**.
 
 ## Sprint 0: Critical Issues
 
-Nothing here yet — the project is pre-R0. Bricking risks, broker auth and security
-issues get filed here as they surface.
+Bricking risks, broker auth and security issues get filed here as they surface.
+
+- [ ] **S0-fe-1**: Keep the serial port after flashing and show the boot log (P1, 1.5d)
+      Filed 2026-09-10 after a real board was flashed successfully and then went silent:
+      the token was minted (so every part wrote and verified), no `POST /v1/enroll` ever
+      arrived, and finding out why needed `screen` on a second machine. **The page already
+      holds the port** — `esptoolFlasher.ts` calls `transport.disconnect()` on close and
+      never `port.forget()`, so the grant survives. Hold it instead, reset the board, and
+      stream `agent_main`'s output into the log panel that already exists.
+      Highlight the four lines that decide the diagnosis: `ff-net` (`no network yet;
+      waiting for the link` — repeating means wrong PSK or a 5 GHz-only SSID), `ff-time`
+      (no NTP ⇒ clock at epoch 0 ⇒ TLS to `bingo.tvaroska.sk` fails as *unreachable*, not
+      as a clock error), `ff-enroll` (401/409/503 each have a distinct cause) and
+      `halted:`. This is the ONLY channel that works in the failure that matters — a board
+      that cannot reach the server cannot report that it cannot reach the server.
+      Serial is a single-reader resource: releasing it for an external monitor must be one
+      obvious button, not a page reload.
+      Acceptance: flash a board, and without touching a cable or another tool, read its
+      boot log in the browser through to either `enroll 200` or a highlighted failure;
+      reproduce today's silent board and have the page name the cause; the release button
+      hands the port to `screen` on the next try.
+
+- [ ] **S0-fw-1**: Agent reports boot and enrol progress to the server (P2, 2d)
+      Depends on S0-fe-1 (serial first — it covers the bench; this covers the fleet).
+      Today a board is invisible until it is fully enrolled and beating: the dashboard
+      shows nothing between "flashed" and "online", which is exactly the window that
+      fails. Report the stage transitions `agent_main.c` already walks — link up, time
+      synced, enrolling, enrolled, mqtt connected — so the fleet view can show a board
+      *arriving* rather than a gap.
+      Note the honest limit, and do not design as if it were not there: this cannot help
+      when the board has no route to the server. It earns its keep for boards that get
+      partway, for sleepy boards, and for re-enrolment after a credential is rotated.
+      Spans firmware, `spec/device-protocol.md` (PROPOSE — a pre-enrolment device has no
+      MQTT credential, so the channel is unauthenticated or token-bearing HTTP, and that
+      is a protocol decision, not an implementation one), the API and the fleet view.
+      Acceptance: a board flashed with a deliberately wrong PSK shows a stalled stage in
+      the dashboard rather than nothing at all; a healthy board's stages appear in order
+      and it lands `online`; no stage report is accepted without its enrollment token.
+
+- [ ] **S0-fe-2**: Monochrome pixel-art theme (P2, 1.5d)
+      Whole-app restyle. Tractable: `frontend/src/index.css` is 128 lines with mostly
+      element selectors plus seven semantic classes (`ok`, `bad`, `warn`, `muted`, `log`,
+      `choice`, `issued`) — no Tailwind, no CSS-in-JS, so this is one file and no JSX
+      churn beyond new class names.
+      Monochrome means one hue ramp, so **`ok`/`warn`/`bad` can no longer be carried by
+      colour alone** — they need glyph or weight to stay legible, which is a WCAG 1.4.1
+      requirement, not a stylistic nicety. Keep the existing `aria-label`s intact.
+      A pixel font and hard edges must not cost readability of the two things operators
+      actually read: 12-hex-digit device ids and the flash log panel.
+      Acceptance: every page (login, enroll, flash, fleet) renders in the theme; the
+      online/offline distinction survives a greyscale screenshot; device ids and log
+      output stay legible at default zoom; the 71 frontend tests still pass (they assert
+      on roles and labels, so a pure restyle should not touch them — if one breaks, the
+      markup changed more than intended).
 
 ---
 
