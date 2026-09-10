@@ -120,6 +120,33 @@ progress {
   word-break: break-all;
 }
 
+/* S0-fe-1. The board's own console. Taller than the esptool log: it is read while you
+   wait, not skimmed afterwards, and the interesting line is usually the last one. */
+.console {
+  max-height: 24rem;
+}
+
+/* The boot checklist. Plain list semantics, no bullets — the tick IS the bullet. */
+.milestones {
+  list-style: none;
+  margin: 0.5rem 0;
+  padding: 0;
+  font-size: 0.9rem;
+}
+
+.milestones li {
+  padding: 0.1rem 0;
+  color: #8b98a5;
+}
+
+.milestones li.done {
+  color: #3fb950;
+}
+
+.milestones li.waiting {
+  color: #e6edf3;
+}
+
 .issued {
   border: 1px solid #30363d;
   border-radius: 6px;

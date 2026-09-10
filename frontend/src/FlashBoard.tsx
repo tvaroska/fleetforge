@@ -13,6 +13,8 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import { ApiError, api, type AgentManifest } from './api'
+import { BoardConsolePanel } from './BoardConsole'
+import { type ConsoleFactory } from './boardConsole'
 import { OTHER_BOARD_ID, shortlist } from './boards'
 import { buildFfCfgFields, validateFfCfg, type FlashConfigInput } from './ffcfg'
 import { formatBytes, predictDeviceId, useFlashBoard } from './flash'
@@ -114,10 +116,12 @@ function Unavailable({ reason }: { reason: 'no-web-serial' | 'insecure' }) {
 export function FlashBoard({
   onSessionExpired,
   createFlasher,
+  createConsole,
 }: {
   onSessionExpired: () => void
   // Injected by the tests only: jsdom has no `navigator.serial` (see `flasher.ts`).
   createFlasher?: FlasherFactory
+  createConsole?: ConsoleFactory
 }) {
   const [form, setForm] = useState<FormState>(INITIAL_FORM)
   const [board, setBoard] = useState<string>(OTHER_BOARD_ID)
@@ -444,7 +448,7 @@ export function FlashBoard({
         <section className="issued" aria-labelledby="flashed-heading">
           <h3 id="flashed-heading">Flashed</h3>
           <p>
-            The board is rebooting. It should appear in the fleet above within a few seconds
+            The board is rebooting
             {state.flashedDeviceId === null ? (
               '.'
             ) : (
@@ -452,7 +456,9 @@ export function FlashBoard({
                 {' '}
                 as <code>{state.flashedDeviceId}</code>.
               </>
-            )}
+            )}{' '}
+            Watch it come up below — the console opens by itself, and names the cause if it
+            stops short of the fleet.
           </p>
           <p>
             <button type="button" onClick={state.reset}>
@@ -468,6 +474,11 @@ export function FlashBoard({
           <pre className="log">{state.log.join('\n')}</pre>
         </details>
       )}
+
+      {/* Below the flash log, and outside it: the console is useful on a board that was
+          flashed last week, not only on one flashed in this tab. `autoWatch` is what makes
+          the just-flashed case need no click at all. */}
+      <BoardConsolePanel autoWatch={state.phase === 'done'} createConsole={createConsole} />
     </section>
   )
 }

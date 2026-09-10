@@ -69,6 +69,15 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       boot log in the browser through to either `enroll 200` or a highlighted failure;
       reproduce today's silent board and have the page name the cause; the release button
       hands the port to `screen` on the next try.
+      **Built and shipped 2026-09-10; awaiting bench confirmation before this closes.**
+      `boardConsole.ts` (classifier + hook), `serialConsole.ts` (Web Serial adapter),
+      `BoardConsole.tsx` (panel 4 · Watch the board). T1 green — 32 new tests, 103 total.
+      The software half of acceptance is proven in jsdom against replays of real
+      `agent/main/*.c` output, including today's silent board. What is NOT proven, because
+      it needs a board on the Mac: that `getPorts()` re-acquires the port after
+      `hard_reset` on real hardware, that 115200 decodes cleanly, that the EN pulse on
+      DTR/RTS reboots without dropping into the ROM bootloader, and that `screen` gets the
+      device after Release. Flash a board and check those four.
 
 - [ ] **S0-fw-1**: Agent reports boot and enrol progress to the server (P2, 2d)
       Depends on S0-fe-1 (serial first — it covers the bench; this covers the fleet).

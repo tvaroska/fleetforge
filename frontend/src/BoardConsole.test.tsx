@@ -1,0 +1,193 @@
+// What this defends:
+//
+// 1. **The operator never has to reach for `screen`.** The panel opens the port, shows the
+//    boot, and drives a checklist to "On the fleet".
+// 2. **A board that stops short is diagnosed by name**, not left as silence.
+// 3. **Release really releases.** If this regresses, the next `screen` gets "Resource
+//    busy" and the operator blames their cable.
+// 4. **One port at a time**, and the port goes back on unmount.
+
+import { render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { describe, expect, it, vi } from 'vitest'
+import { BoardConsolePanel } from './BoardConsole'
+import { CONSOLE_BAUD_RATE, type BoardConsole, type ConsoleFactory } from './boardConsole'
+
+const HAPPY = [
+  'rst:0x1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)',
+  'I (100) ff-agent: fleetforge agent 0.1.0 (idf v5.5.5), built Sep 10 2026 00:00:00',
+  'I (120) ff-id: device_id a4cf12b3de90',
+  'I (800) ff-wifi: associated; waiting for DHCP',
+  'I (900) ff-net: wifi link up, ip 192.168.1.40 gw 192.168.1.1 mask 255.255.255.0',
+  'I (1500) ff-time: sntp: 1970-01-01T00:00:02Z -> 2026-09-10T21:00:00Z (via pool.ntp.org)',
+  'I (2600) ff-enroll: enroll 200 https://bingo.tvaroska.sk/v1/enroll',
+  'I (3100) ff-mqtt: mqtt connected as a4cf12b3de90 (mqtts://bingo.tvaroska.sk:8883)',
+]
+
+const SILENT_BOARD = [
+  'I (100) ff-agent: fleetforge agent 0.1.0 (idf v5.5.5), built Sep 10 2026 00:00:00',
+  'I (120) ff-id: device_id a4cf12b3de90',
+  'I (300) ff-wifi: wifi sta starting, ssid home-5g',
+  'W (5300) ff-wifi: disconnected (reason 201); reconnecting in 1000 ms',
+  'W (6300) ff-agent: no network yet; waiting for the link',
+]
+
+/**
+ * A board on a bench, minus the bench.
+ *
+ * `lines()` yields the script and then BLOCKS — it does not return. That is the real
+ * behaviour and it is the point: `agent_main.c:166` retries forever, so a console that
+ * ended its stream after the last line would have to invent an inactivity timeout, which
+ * is exactly what this task forbids. The block is released by `close()`.
+ */
+function fakeConsole(script: string[]) {
+  const state = {
+    opened: 0,
+    closed: 0,
+    reboots: 0,
+    acquires: [] as string[],
+    baudRates: [] as number[],
+  }
+  let release: (() => void) | null = null
+
+  const factory: ConsoleFactory = async ({ baudRate, acquire }) => {
+    state.opened += 1
+    state.acquires.push(acquire)
+    state.baudRates.push(baudRate)
+    let closed = false
+    const board: BoardConsole = {
+      async *lines() {
+        for (const line of script) yield line
+        if (closed) return
+        await new Promise<void>((resolve) => {
+          release = resolve
+        })
+      },
+      async reboot() {
+        state.reboots += 1
+      },
+      async close() {
+        if (closed) return
+        closed = true
+        state.closed += 1
+        release?.()
+      },
+    }
+    return board
+  }
+
+  return { factory, state }
+}
+
+describe('BoardConsolePanel', () => {
+  it('opens the port by itself after a flash and drives the boot to the fleet', async () => {
+    const { factory, state } = fakeConsole(HAPPY)
+    render(<BoardConsolePanel autoWatch createConsole={factory} />)
+
+    // No click: `autoWatch` means the operator's hands never leave the flash page.
+    await waitFor(() => expect(state.opened).toBe(1))
+    // 'granted', because the flasher never called `port.forget()`. A 'prompt' here would
+    // need a user gesture the effect does not have, and would fail in a real browser.
+    expect(state.acquires).toEqual(['granted'])
+    expect(state.baudRates).toEqual([CONSOLE_BAUD_RATE])
+
+    const console_ = await screen.findByTestId('board-console')
+    await waitFor(() => {
+      expect(console_).toHaveTextContent('enroll 200')
+    })
+    // Boot-ROM chatter is kept verbatim; it is how you tell a brownout from a bad image.
+    expect(console_).toHaveTextContent('POWERON_RESET')
+
+    const milestones = screen.getByTestId('boot-milestones')
+    await waitFor(() => {
+      expect(milestones.querySelectorAll('[data-state="done"]')).toHaveLength(5)
+    })
+    expect(await screen.findByTestId('console-online')).toBeInTheDocument()
+    expect(screen.queryByTestId('console-fault')).not.toBeInTheDocument()
+  })
+
+  it('names the cause when the board goes silent', async () => {
+    const { factory } = fakeConsole(SILENT_BOARD)
+    render(<BoardConsolePanel autoWatch createConsole={factory} />)
+
+    const fault = await screen.findByTestId('console-fault')
+    // The whole reason this task exists: "reason 201" is not a diagnosis, this is.
+    expect(fault).toHaveTextContent(/2\.4 GHz/)
+    expect(fault).toHaveTextContent('disconnected (reason 201)')
+
+    // And the checklist says how far it got, so the fault has somewhere to attach.
+    const milestones = screen.getByTestId('boot-milestones')
+    expect(milestones.querySelectorAll('[data-state="done"]')).toHaveLength(1)
+    expect(milestones.querySelector('[data-state="waiting"]')).toHaveTextContent('Network up')
+    expect(screen.queryByTestId('console-online')).not.toBeInTheDocument()
+  })
+
+  it('hands the port back when released, and says so', async () => {
+    const user = userEvent.setup()
+    const { factory, state } = fakeConsole(HAPPY)
+    render(<BoardConsolePanel autoWatch createConsole={factory} />)
+    await screen.findByTestId('board-console')
+
+    await user.click(screen.getByRole('button', { name: /release the port/i }))
+
+    await waitFor(() => expect(state.closed).toBe(1))
+    expect(await screen.findByRole('button', { name: /watch a board/i })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /release the port/i })).not.toBeInTheDocument()
+  })
+
+  it('never holds two ports: watching again releases the first', async () => {
+    const user = userEvent.setup()
+    const { factory, state } = fakeConsole(HAPPY)
+    render(<BoardConsolePanel autoWatch createConsole={factory} />)
+    await waitFor(() => expect(state.opened).toBe(1))
+
+    await user.click(screen.getByRole('button', { name: /release the port/i }))
+    await user.click(screen.getByRole('button', { name: /watch a board/i }))
+
+    await waitFor(() => expect(state.opened).toBe(2))
+    // Manual watch shows the chooser; the automatic one after a flash must not.
+    expect(state.acquires).toEqual(['granted', 'prompt'])
+    expect(state.closed).toBe(1)
+  })
+
+  it('gives the port back on unmount', async () => {
+    const { factory, state } = fakeConsole(HAPPY)
+    const view = render(<BoardConsolePanel autoWatch createConsole={factory} />)
+    await waitFor(() => expect(state.opened).toBe(1))
+
+    view.unmount()
+
+    // Otherwise the device stays ours until the tab closes, and the operator's next
+    // `screen` fails with "Resource busy" for no visible reason.
+    await waitFor(() => expect(state.closed).toBe(1))
+  })
+
+  it('pulses EN on demand, so a boot log can be read from its first line', async () => {
+    const user = userEvent.setup()
+    const { factory, state } = fakeConsole(HAPPY)
+    render(<BoardConsolePanel autoWatch createConsole={factory} />)
+    await screen.findByTestId('board-console')
+
+    await user.click(screen.getByRole('button', { name: /reboot the board/i }))
+    expect(state.reboots).toBe(1)
+  })
+
+  it('does not touch the port until asked, when there was no flash', async () => {
+    const factory = vi.fn<ConsoleFactory>()
+    render(<BoardConsolePanel autoWatch={false} createConsole={factory} />)
+
+    expect(factory).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: /watch a board/i })).toBeInTheDocument()
+    expect(screen.getByText(/the port is free/i)).toBeInTheDocument()
+  })
+
+  it('explains a refused port instead of showing an empty panel', async () => {
+    const factory: ConsoleFactory = async () => {
+      throw Object.assign(new Error('No port selected by the user.'), { name: 'NotFoundError' })
+    }
+    render(<BoardConsolePanel autoWatch createConsole={factory} />)
+
+    // `explainFlashError` turns Chromium's NotFoundError into something readable.
+    expect(await screen.findByText('No board selected.')).toBeInTheDocument()
+  })
+})
