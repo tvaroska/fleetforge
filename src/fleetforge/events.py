@@ -51,6 +51,11 @@ class EventType(StrEnum):
     DEVICE_HEARTBEAT = "device.heartbeat"
     # Any other `up/` channel, which at R0 only moves `last_seen`.
     DEVICE_SEEN = "device.seen"
+    # A boot/enrol stage posted to `POST /v1/device-progress` (S0-fw-1). The only
+    # event type whose `device_id` may name a board that is not in `devices` at all —
+    # that is the point of it. The stage itself is NOT in the envelope: it is
+    # device-controlled text, and the consumer re-reads like every other type.
+    DEVICE_PROGRESS = "device.progress"
 
 
 class DeviceEvent(BaseModel):

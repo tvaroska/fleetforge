@@ -39,6 +39,7 @@
 #include "ff_identity.h"
 #include "ff_mqtt.h"
 #include "ff_net.h"
+#include "ff_progress.h"
 #include "ff_store.h"
 #include "ff_time.h"
 #include "freertos/FreeRTOS.h"
@@ -65,6 +66,12 @@ static const char *TAG = "ff-agent";
 static void park(const char *reason) __attribute__((noreturn));
 static void park(const char *reason)
 {
+    /* Before the loop, once: this is the single most valuable report the board makes,
+     * because a parked board says nothing else for the rest of its life and the
+     * dashboard would otherwise show the last stage it reached with no explanation.
+     * Best effort by construction — ff_progress never fails and never blocks long. */
+    ff_progress_report(FF_PROGRESS_HALTED, reason);
+
     while (true) {
         ESP_LOGE(TAG, "halted: %s", reason);
         vTaskDelay(pdMS_TO_TICKS(300000));
@@ -120,6 +127,8 @@ static void enroll_until_credentialed(const ff_cfg_t *cfg, ff_cred_t *cred)
 {
     uint32_t backoff_ms = ENROLL_RETRY_MIN_MS;
     while (true) {
+        ff_progress_report(FF_PROGRESS_ENROLLING, NULL);
+
         esp_err_t err = ff_enroll(cfg, cred);
         if (err == ESP_OK) {
             /* Persist BEFORE connecting: the password exists exactly once, in the response
@@ -128,6 +137,9 @@ static void enroll_until_credentialed(const ff_cfg_t *cfg, ff_cred_t *cred)
             if (ff_store_save(cred) != ESP_OK) {
                 park("the credential could not be written to NVS");
             }
+            /* After the save, not before: the stage the dashboard shows should be one
+             * the board can actually come back from after a reset. */
+            ff_progress_report(FF_PROGRESS_ENROLLED, NULL);
             return;
         }
         if (err == ESP_ERR_INVALID_RESPONSE || err == ESP_ERR_INVALID_ARG) {
@@ -155,6 +167,10 @@ void app_main(void)
     }
     ff_cfg_log(&cfg);
 
+    /* Armed as early as the config allows — but it stays silent until there is both a
+     * device_id and a link, so the first report it can ever send is `link_up`. */
+    ff_progress_init(&cfg);
+
     if (ff_identity_init() != ESP_OK) {
         park("no eFuse MAC, therefore no device_id");
     }
@@ -168,10 +184,18 @@ void app_main(void)
         vTaskDelay(pdMS_TO_TICKS(5000));
     }
 
+    /* The first thing this board is able to tell the server, and the report that turns
+     * "nothing at all" into "arriving" on the dashboard. */
+    ff_progress_report(FF_PROGRESS_LINK_UP, ff_cfg_link_name(cfg.link));
+
     /* Before the first TLS handshake, on BOTH channels. A failure here is not fatal: a
      * plaintext lab (http:// + mqtt://) works fine at epoch 0, and ff_time_sync has
      * already said what an unsynced clock costs. */
     (void)ff_time_sync(cfg.ntp, SNTP_TIMEOUT_MS);
+    /* Reported unconditionally, including after a failed sync: the interesting case is
+     * a board that reaches `time_synced` and then stalls at `enrolling` because every
+     * TLS handshake says "not yet valid". Hiding the stage would hide the clue. */
+    ff_progress_report(FF_PROGRESS_TIME_SYNCED, NULL);
 
     ff_cred_t cred;
     esp_err_t stored = ff_store_load(&cred);

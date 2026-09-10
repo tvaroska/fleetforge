@@ -22,6 +22,13 @@ Deliberately absent, each with a reason:
   decommission endpoint (`docs/features/enrollment.md` → *Post-v1*).
 * `GET /v1/devices/{device_id}` and pagination — `spec/prd.md` → *Capacity* is 25
   devices; the list is the read model. Same reasoning as `LIST_LIMIT`.
+
+`arrivals` (S0-fw-1) rides on this response rather than getting an endpoint of its
+own, for the same reason: the dashboard already re-reads this on every `ff_events`
+hint, so boards *arriving* need no second fetch and no poll. They are the boards that
+have reported a boot stage recently and are **not currently online** — so a board
+drops out of the arriving list at the exact moment it is really in the fleet, decided
+by the same `is_online` call that fills in the rows above it.
 """
 
 import logging
@@ -36,10 +43,11 @@ from fleetforge.api.deps import (
     bearer_scheme,
     cookie_scheme,
 )
-from fleetforge.api.schemas import DeviceList, DeviceSummary
+from fleetforge.api.schemas import ArrivalSummary, DeviceList, DeviceSummary
 from fleetforge.clock import now_utc
 from fleetforge.db.models import Device
 from fleetforge.presence import is_online
+from fleetforge.progress import latest_progress
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +79,18 @@ async def list_devices(
                 .limit(LIST_LIMIT)
             )
         ).all()
+        arrivals = await latest_progress(
+            session,
+            now=now,
+            window_s=settings.progress_window_s,
+            stall_s=settings.progress_stall_s,
+        )
+
+    online_now = {
+        row.device_id
+        for row in rows
+        if is_online(row, now=now, tolerance=settings.presence_tolerance)
+    }
 
     return DeviceList(
         devices=[
@@ -91,8 +111,22 @@ async def list_devices(
                 last_seen=row.last_seen,
                 enrolled_at=row.enrolled_at,
                 broker_provisioned_at=row.broker_provisioned_at,
-                online=is_online(row, now=now, tolerance=settings.presence_tolerance),
+                online=row.device_id in online_now,
             )
             for row in rows
-        ]
+        ],
+        # A board still arriving is one that has reported a stage and has not made it
+        # into the fleet yet. Not filtered by `decommissioned_at`: a retired board
+        # being re-flashed reports stages again, and hiding that is the gap all over.
+        arrivals=[
+            ArrivalSummary(
+                device_id=arrival.device_id,
+                stage=arrival.stage,
+                detail=arrival.detail,
+                at=arrival.at,
+                stalled=arrival.stalled,
+            )
+            for arrival in arrivals
+            if arrival.device_id not in online_now
+        ],
     )

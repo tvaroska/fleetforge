@@ -5,6 +5,7 @@ schema section inside each router.
 """
 
 import datetime as dt
+import re
 import uuid
 from typing import Self
 
@@ -232,7 +233,95 @@ class DeviceSummary(BaseModel):
     online: bool
 
 
+class ArrivalSummary(BaseModel):
+    """A board that is *arriving* — it has reported a boot stage but is not in the fleet yet.
+
+    `device_id` here may name a board that has no `devices` row at all, which is the
+    whole point: this is what the dashboard shows instead of a gap between "flashed"
+    and "online" (S0-fw-1).
+
+    `stalled` is derived on read by `fleetforge.progress.latest_progress` from the age
+    of `at`, exactly as `DeviceSummary.online` is derived by `presence.is_online` — and
+    for the same reason, `progress_stall_s` is not sent so no client can re-derive it.
+
+    `stage` and `detail` are **device-controlled strings**, bounded in length by
+    `ProgressReport` and by nothing else. A renderer must treat them as text.
+    """
+
+    device_id: str
+    stage: str
+    detail: str | None
+    at: dt.datetime
+    stalled: bool
+
+
 class DeviceList(BaseModel):
     """An envelope, not a bare array, so a cursor can be added without a break."""
 
     devices: list[DeviceSummary]
+    # Rides on the fleet read rather than getting its own endpoint: the dashboard's
+    # hint→re-read engine already re-reads this on every `ff_events` frame, so
+    # arrivals need no second fetch and no poll of their own. Defaulted, because a
+    # client built against R0 must not break on the added field (*Evolution rules*).
+    arrivals: list[ArrivalSummary] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Device boot/enrol progress (S0-fw-1)
+# ---------------------------------------------------------------------------
+
+# Device-controlled free text. Long enough for a real reason ("esp-tls handshake
+# failed: 0x8010"), short enough that 20 rows per board is not a storage question.
+MAX_PROGRESS_DETAIL = 200
+
+# The shape of a stage, and deliberately NOT its vocabulary: `ProgressStage` is
+# advisory and the column has no CHECK, because a flash-baked agent the server can
+# never update must still be able to say something the server has not heard of.
+STAGE_PATTERN = re.compile(r"\A[a-z][a-z0-9_]{0,31}\Z")
+
+
+class ProgressReport(BaseModel):
+    """The body of `POST /v1/device-progress`. Flat, and it stays flat, like `EnrollRequest`.
+
+    The credential is the `ffe_` enrollment token the board already holds — a
+    pre-enrolment board has no MQTT credential and nothing else to prove itself with.
+    The endpoint **verifies it and never burns it** (`routers/progress.py`).
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    token: str = Field(min_length=1, max_length=MAX_TOKEN_LENGTH)
+    device_id: str
+    stage: str = Field(min_length=1, max_length=32)
+    detail: str | None = Field(default=None, max_length=MAX_PROGRESS_DETAIL)
+
+    @field_validator("device_id")
+    @classmethod
+    def _canonical_device_id(cls, value: str) -> str:
+        """Same rule as `EnrollRequest`: reject, never normalise."""
+        if is_valid_device_id(value):
+            return value
+        raise ValueError("device_id must be 12 lowercase hex digits (the eFuse MAC)")
+
+    @field_validator("stage")
+    @classmethod
+    def _stage_shape(cls, value: str) -> str:
+        """Bound the shape so an unknown stage is storable but a hostile one is not."""
+        if STAGE_PATTERN.match(value):
+            return value
+        raise ValueError("stage must match [a-z][a-z0-9_]{0,31}")
+
+    @field_validator("detail")
+    @classmethod
+    def _printable_detail(cls, value: str | None) -> str | None:
+        """No control characters.
+
+        This string is written to the API log and rendered in the dashboard. A device
+        that can inject a newline can forge a log line, and this is the one field on
+        the endpoint that an unauthenticated-until-verified caller fully controls.
+        """
+        if value is None:
+            return value
+        if any(ch < " " or ch == "\x7f" for ch in value):
+            raise ValueError("detail must not contain control characters")
+        return value

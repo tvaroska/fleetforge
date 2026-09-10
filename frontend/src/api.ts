@@ -71,7 +71,26 @@ export type DeviceSummary = {
   online: boolean
 }
 
-export type DeviceList = { devices: DeviceSummary[] }
+// Mirrors `ArrivalSummary` in api/schemas.py. A board that has reported a boot stage and
+// is NOT yet in the fleet — so `device_id` here may name a board with no row in `devices`
+// at all. That is the point: it is what fills the gap between "flashed" and "online".
+//
+// `stalled` is computed SERVER-SIDE from the age of `at`, the same rule and the same
+// reason as `DeviceSummary.online`: the threshold lives once, in `config.progress_stall_s`,
+// and is deliberately not in this payload so that no client can try to re-derive it.
+//
+// `stage` and `detail` are DEVICE-CONTROLLED strings, bounded only in length and charset.
+// Render them as text, and never switch on `stage` in a way that breaks on a value this
+// file has not heard of — the server does not whitelist the vocabulary either.
+export type ArrivalSummary = {
+  device_id: string
+  stage: string
+  detail: string | null
+  at: string
+  stalled: boolean
+}
+
+export type DeviceList = { devices: DeviceSummary[]; arrivals: ArrivalSummary[] }
 
 // Mirrors `firmware/manifest.py::ConfigPartition`. Optional in the schema ON PURPOSE:
 // bundles built before R0-fw-1 have nowhere to write a board's config, and the flasher

@@ -142,7 +142,7 @@ describe('useFleet', () => {
   })
 
   it('subscribes to the RELATIVE /v1/events, carrying the same-origin cookie', async () => {
-    fetchMock.mockImplementation(responds({ devices: [] }))
+    fetchMock.mockImplementation(responds({ devices: [], arrivals: [] }))
 
     render(<FleetView onSessionExpired={vi.fn()} createEventSource={factory} />)
     await settle()

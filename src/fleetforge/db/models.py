@@ -1,8 +1,8 @@
-"""The fleetforge registry schema — R0-db-1.
+"""The fleetforge registry schema — R0-db-1, plus `device_progress` (S0-fw-1).
 
-Five tables: `device_groups`, `devices`, `enrollment_tokens`, `admin_tokens`,
-`deploy_events`. Two of them (`enrollment_tokens`, `admin_tokens`) are CRITICAL.md
-paths; read their docstrings before changing anything.
+Six tables: `device_groups`, `devices`, `enrollment_tokens`, `admin_tokens`,
+`deploy_events`, `device_progress`. Two of them (`enrollment_tokens`, `admin_tokens`)
+are CRITICAL.md paths; read their docstrings before changing anything.
 
 Three conventions that hold across the whole file, each with a reason that is not
 obvious from the code:
@@ -104,6 +104,31 @@ class DeployState(StrEnum):
     ROLLING_BACK = "rolling_back"
     ROLLED_BACK = "rolled_back"
     FAILED = "failed"
+
+
+class ProgressStage(StrEnum):
+    """The boot/enrolment stages an agent reports over HTTPS (S0-fw-1).
+
+    **Advisory** — `device_progress.stage` is TEXT with no CHECK, for the same reason
+    as `LinkType`: the R0 agent is flash-baked and the server must tolerate an agent
+    it can never update, including one that invents a stage. The API bounds the
+    *shape* of the string (`^[a-z_]{1,32}$`), never its membership here.
+
+    The order below is the order a healthy board walks. There is deliberately no
+    stage before `link_up`: a board with no link cannot report anything at all, which
+    is this feature's honest limit (`docs/features/enrollment.md`).
+    """
+
+    LINK_UP = "link_up"
+    TIME_SYNCED = "time_synced"
+    ENROLLING = "enrolling"
+    ENROLLED = "enrolled"
+    MQTT_CONNECTED = "mqtt_connected"
+    # The broker refused the stored credential — the board is up and talking to the
+    # API but will never appear in the fleet until it re-enrolls.
+    MQTT_REFUSED = "mqtt_refused"
+    # `agent_main.c::park()`: a failure no retry can fix. `detail` carries the reason.
+    HALTED = "halted"
 
 
 TERMINAL_DEPLOY_STATES = frozenset(
@@ -397,3 +422,45 @@ class DeployEvent(Base):
     # The *intended* new version: "delivery success" means the device is running it.
     artifact_version: Mapped[str | None] = mapped_column(Text, nullable=True)
     detail: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
+
+class DeviceProgress(Base):
+    """Append-only boot/enrolment stage reports from an agent — S0-fw-1.
+
+    A board is invisible between "flashed" and "online": the dashboard has nothing
+    to show until the first retained `up/announce` reaches the ingestor, which is
+    exactly the window where a first-hardware attempt fails. These rows are what the
+    fleet view shows instead of that gap.
+
+    Three deliberate shapes:
+
+    * **No FK to `devices`.** The interesting rows are the ones written *before* the
+      device exists — `link_up` and `enrolling` from a board that never enrols. An FK
+      would make the failure case unrecordable, which is the whole feature.
+    * **Not KPI history.** Unlike `DeployEvent` this is a debugging aid with a short
+      useful life, so `fleetforge.progress` caps it at `progress_max_rows_per_device`
+      rows per device on insert: a board retrying enrolment every 60 s must not grow
+      the table without bound. Nothing outside that module may rely on a row's
+      survival.
+    * **`stage` is TEXT with no CHECK** (see `ProgressStage`), and `detail` is
+      device-controlled free text — bounded by the API, never trusted by a reader.
+
+    There is no `stalled` stage. Staleness is derived on read from the age of the
+    newest row, in one place, exactly as `online` is derived by `presence.is_online`.
+    """
+
+    __tablename__ = "device_progress"
+    __table_args__ = (Index("ix_device_progress_device_id_at", "device_id", text("at DESC")),)
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(always=False), primary_key=True)
+    # Server receipt time. The reporting board may not have run SNTP yet — before
+    # `time_synced` its own clock is worthless, so it never sends one.
+    at: Mapped[dt.datetime] = mapped_column(
+        TimestampTZ, nullable=False, server_default=text("now()")
+    )
+    device_id: Mapped[str] = mapped_column(Text, nullable=False)
+    # The enrollment token this was reported under. Not a FK either: the token row
+    # may be deleted by a future retention sweep long before these rows age out.
+    token_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
+    stage: Mapped[str] = mapped_column(Text, nullable=False)
+    detail: Mapped[str | None] = mapped_column(Text, nullable=True)

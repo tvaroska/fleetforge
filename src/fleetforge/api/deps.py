@@ -134,6 +134,34 @@ def enroll_limiter(request: Request) -> FixedWindowLimiter:
     return limiter
 
 
+def progress_limiter(request: Request) -> FixedWindowLimiter:
+    """The per-app `POST /v1/device-progress` rate limiter, created in `create_app()`.
+
+    A **third** distinct instance, for the reason `enroll_limiter` is a second one and
+    then some: progress is the chattiest unauthenticated endpoint (five-plus reports
+    per boot, and a whole fleet may reboot at once), and it must not be able to spend
+    the enroll budget — a board that cannot enrol because it was busy *reporting* that
+    it was enrolling would be a self-inflicted outage.
+    """
+    limiter: FixedWindowLimiter = request.app.state.progress_limiter
+    return limiter
+
+
+def progress_cache(request: Request) -> VerifiedSecretCache:
+    """The per-app progress verification cache, created in `create_app()`.
+
+    Separate from `token_cache` because it holds a different credential type: this one
+    memoizes `ffe_` enrollment secrets, that one `ffa_` admin secrets. Sharing would
+    let a token id collision across the two tables (astronomically unlikely, but the
+    cache is keyed on the id alone) verify the wrong credential.
+
+    What it buys: one boot is five-plus reports on the same token, and without it each
+    would pay ~40 ms of CPU and 19 MiB (`auth/hashing.py`) on a 256 M container.
+    """
+    cache: VerifiedSecretCache = request.app.state.progress_cache
+    return cache
+
+
 def event_hub(request: Request) -> EventHub:
     """The per-app SSE fan-out hub, created in `create_app()`.
 

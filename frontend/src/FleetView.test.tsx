@@ -55,9 +55,23 @@ const inertSource = (): EventSourceLike => ({
   onerror: null,
 })
 
-async function renderFleet(devices: unknown[] | (() => Promise<Response>)) {
+function arrival(overrides: Partial<Record<string, unknown>> = {}) {
+  return {
+    device_id: 'c0ffee000001',
+    stage: 'enrolling',
+    detail: null,
+    at: '2026-09-10T11:59:50Z',
+    stalled: false,
+    ...overrides,
+  }
+}
+
+async function renderFleet(
+  devices: unknown[] | (() => Promise<Response>),
+  arrivals: unknown[] = [],
+) {
   vi.spyOn(globalThis, 'fetch').mockImplementation(
-    typeof devices === 'function' ? devices : responds({ devices }),
+    typeof devices === 'function' ? devices : responds({ devices, arrivals }),
   )
   const onSessionExpired = vi.fn()
   render(<FleetView onSessionExpired={onSessionExpired} createEventSource={inertSource} />)
@@ -136,6 +150,44 @@ describe('FleetView', () => {
     await renderFleet([])
     expect(screen.getByText(/no boards yet/i)).toBeInTheDocument()
     expect(screen.queryAllByTestId('device-row')).toHaveLength(0)
+  })
+
+  // S0-fw-1. What these defend: a board between "flashed" and "online" used to render
+  // as nothing at all, and "nothing at all" is what a board that was never flashed
+  // looks like too.
+  it('shows a board that has reported a stage but is not in the fleet yet', async () => {
+    await renderFleet([], [arrival({ device_id: 'c0ffee000001', stage: 'enrolling' })])
+
+    const rows = screen.getAllByTestId('arrival-row')
+    expect(rows).toHaveLength(1)
+    expect(rows[0]).toHaveAttribute('data-device-id', 'c0ffee000001')
+    expect(rows[0]).toHaveTextContent('enrolling')
+    expect(rows[0]).toHaveTextContent('10 s ago')
+  })
+
+  it('marks a stalled arrival with a WORD, not only a colour', async () => {
+    await renderFleet([], [arrival({ stalled: true, detail: 'attempt 3' })])
+
+    const row = screen.getAllByTestId('arrival-row')[0]
+    // `getByText` reads the accessible text: a class name alone would not satisfy it.
+    expect(within(row).getByText('stalled')).toBeInTheDocument()
+    expect(row).toHaveTextContent('attempt 3')
+  })
+
+  it('renders a stage this dashboard has never heard of as itself', async () => {
+    await renderFleet([], [arrival({ stage: 'calibrating_radio' })])
+    expect(screen.getAllByTestId('arrival-row')[0]).toHaveTextContent('calibrating_radio')
+  })
+
+  it('shows no arrivals section at all when nothing is arriving', async () => {
+    await renderFleet([device()])
+    expect(screen.queryByTestId('arrivals')).toBeNull()
+  })
+
+  it('does not tell the operator to flash a board while one is mid-arrival', async () => {
+    await renderFleet([], [arrival()])
+    expect(screen.queryByText(/no boards yet/i)).toBeNull()
+    expect(screen.getByText(/no boards have finished enrolling/i)).toBeInTheDocument()
   })
 
   it('bounces a dead session to the login screen instead of showing a page error', async () => {

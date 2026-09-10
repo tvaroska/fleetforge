@@ -33,6 +33,7 @@
 #include "esp_ota_ops.h"
 #include "esp_timer.h"
 #include "ff_identity.h"
+#include "ff_progress.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "mqtt_client.h"
@@ -175,6 +176,13 @@ static void on_connected(ff_mqtt_ctx_t *ctx)
 {
     ESP_LOGI(TAG, "mqtt connected as %s (%s)", ff_device_id(), ctx->cfg->mqtt_uri);
 
+    /* The last stage of an arrival, and the one that ends it: the retained announce
+     * published a few lines below is what puts this board in the fleet proper, after
+     * which the dashboard stops listing it as arriving at all. Reported anyway, because
+     * the gap between this and the announce landing is where a broker ACL problem
+     * lives. A no-op on a board that had a stored credential and never enrolled. */
+    ff_progress_report(FF_PROGRESS_MQTT_CONNECTED, NULL);
+
     /* FIRST, before any publish: a command queued in the persistent session must be
      * drained before this board tells the fleet it is here. */
     int id = esp_mqtt_client_subscribe(ctx->client, ctx->topic_dn, QOS);
@@ -290,6 +298,13 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base, int32_t event_i
             ESP_LOGE(TAG, "broker refused the connection (return code %d). The stored "
                           "credential is not accepted; this board needs a new enrollment.",
                      event->error_handle->connect_return_code);
+            /* The one stage a board can reach where everything except the fleet works:
+             * it has a link, a clock, a credential and an API it can reach, and the
+             * dashboard would otherwise show it as simply never having arrived. */
+            char reason[64];
+            snprintf(reason, sizeof(reason), "broker connack %d",
+                     event->error_handle->connect_return_code);
+            ff_progress_report(FF_PROGRESS_MQTT_REFUSED, reason);
         } else {
             ESP_LOGE(TAG, "mqtt transport error");
         }

@@ -6,6 +6,65 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-10 — a boot stage is reported over HTTPS under the enrollment token (S0-fw-1, attempted)
+
+**Status: the server half shipped and is verified; the firmware half is written, compiles
+and has never run.** S0-fw-1 stays `- [!]` in TODO.md for that reason. Read the last bullet
+before trusting `agent/main/ff_progress.c`.
+
+- **PROPOSED protocol addition, deliberately NOT written into `spec/`.** A board between
+  "flashed" and "online" holds no MQTT credential — that is the thing it is trying to
+  obtain — so a stage report cannot travel on MQTT. The only credential it has is the
+  `ffe_` enrollment token it was flashed with, and the only channel is the HTTPS one
+  `/v1/enroll` already uses. Hence `POST /v1/device-progress`, token in the body, `202`.
+  `spec/device-protocol.md` is the frozen v1 wire contract and stays frozen until this is
+  accepted; the endpoint's module docstring says so at the top so the two cannot silently
+  diverge in the reader's head.
+- **The token is verified and never burned, and that distinction is the whole security
+  argument.** `auth.enrollment.BURN_SQL` is not imported by the progress router and must
+  never be: a board reports `enrolling` several times before it succeeds, and a reporting
+  path that spent tokens would turn a debugging aid into a way to strand boards.
+- **An already-burned token is still accepted, but only from `used_by_device_id` and only
+  before `expires_at`.** Without that exception the two most valuable stages — `enrolled`
+  and `mqtt_connected`, which by definition happen *after* the burn — could never be
+  reported at all. It widens nothing: the predicate names one device, and the endpoint
+  issues no credential, provisions nothing and writes no `devices` row.
+- **`stalled` is derived on read, never stored** (`progress_stall_s`, 60 s), in one
+  function, exactly as `online` is derived by `presence.is_online`. A stored `stalled`
+  would need a sweeper and would be wrong between sweeps.
+- **`arrivals` rides on `GET /v1/devices` instead of getting an endpoint.** The dashboard
+  already re-reads that on every `ff_events` hint, so arriving boards cost no second fetch
+  and no poll. Arrivals are boards with a recent stage that are **not currently online**,
+  decided by the same `is_online` call that fills the rows above them — so a board leaves
+  the arriving list at the exact moment it really joins the fleet.
+- **The table is bounded on write, not by a sweeper**: 20 rows per device, trimmed in the
+  same transaction as the insert. A board retrying enrolment every 60 s reports forever,
+  and a debugging table must not be able to outgrow the fleet it describes. Known bound,
+  accepted: an unspent valid token can name any `device_id`, so it can seed rows for
+  arbitrary ids at the rate limiter's ceiling — small rows, 24 h token TTL, single-tenant.
+- **No PG enum and no CHECK on `stage`.** The R0 agent is flash-baked; the server must
+  tolerate an agent it can never update, including one that invents a stage. The API
+  bounds the string's *shape* (`^[a-z][a-z0-9_]{0,31}$`, no control characters in
+  `detail`), never its vocabulary. `ProgressStage` in `db/models.py` is advisory, and
+  `FF_PROGRESS_*` in `ff_progress.h` are plain strings for the same reason. Verified: an
+  unknown stage (`teleported`) is stored and rendered as itself.
+- **The SSE frame carries no `detail`.** `detail` is device-controlled free text; the
+  event is a hint and the client re-reads, as for every other event type.
+- **The honest limit is designed for, not around: a board with no route to the server
+  reports nothing.** Stated in `ff_progress.h`'s header so nobody builds on a promise it
+  cannot keep. This is for boards that get *partway*, and never a substitute for the
+  serial console ([[S0-fe-1]]).
+- **The firmware could not be run, and the harness is why.** `just agent-qemu esp32`
+  boot-loops on a `LoadProhibited` panic inside `esp_task_wdt_init` before `app_main` —
+  **reproduced at unmodified HEAD**, so it is not this change. The Mac is the flashing
+  bench, so there is currently no way to execute agent firmware on this box at all. Filed
+  as **S0-infra-1** with the decoded backtrace. Until it is fixed, `ff_progress.c` has
+  exactly one guarantee: it compiles under `-Wall -Wextra -Werror`.
+
+Details: TODO.md → S0-fw-1 (`- [!]`) and S0-infra-1.
+
+---
+
 ## 2026-09-10 — the board's console belongs in the browser, as a second session (S0-fe-1)
 
 - **`flash.ts`'s Rule 4 stays: the port is always released in a `finally`.** The task was

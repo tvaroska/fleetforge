@@ -106,6 +106,28 @@ class Settings(BaseSettings):
     enroll_rate_limit_per_ip: int = 10
     enroll_rate_limit_global: int = 60
 
+    # --- Boot/enrol progress reports (S0-fw-1) --------------------------------
+    # How far back `GET /v1/devices` looks for a board that is *arriving*. 15 min is
+    # comfortably longer than the worst plausible boot (link retries + SNTP + enroll)
+    # and short enough that yesterday's failed board is not still on the dashboard.
+    progress_window_s: int = 900
+    # A board's arrival is shown as STALLED once its newest stage is this old. Derived
+    # on read, never stored — the same discipline as `presence_tolerance` above. 60 s
+    # is longer than every step the agent takes between two reports.
+    progress_stall_s: int = 60
+    # Rows kept per device; `fleetforge.progress` trims on insert. A board stuck in an
+    # enroll retry loop reports forever, and this is debugging history, not KPI
+    # history — 20 rows is more than enough to read the shape of a failure.
+    progress_max_rows_per_device: int = 20
+    # Progress is chattier than enrolment (five-plus reports per boot, and every board
+    # in a fleet may reboot at once), so it gets its OWN two buckets rather than
+    # sharing the enroll ones: a reporting fleet must never be able to lock a board
+    # out of `/v1/enroll` or the operator out of `/v1/auth/login`. Unlike those two,
+    # ALL requests count here, not just failures — the cost being bounded is the
+    # request itself. Window shared with login (`login_rate_limit_window_s`).
+    progress_rate_limit_per_ip: int = 60
+    progress_rate_limit_global: int = 300
+
     # --- Broker credential provisioning (R0-be-4 / R0-sec-1) ------------------
     # The Mosquitto dynamic-security ADMIN credential — broker-root, and a
     # different privilege from `mqtt_username`/`mqtt_password` above. BOTH unset

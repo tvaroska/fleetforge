@@ -17,6 +17,7 @@ EXPECTED_TABLES = {
     "alembic_version",
     "deploy_events",
     "device_groups",
+    "device_progress",
     "devices",
     "enrollment_tokens",
 }

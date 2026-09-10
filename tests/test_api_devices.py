@@ -11,6 +11,7 @@ uncommitted rows. So rows are committed and cleaned up by the `fleet` fixture.
 """
 
 import datetime as dt
+import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
@@ -20,8 +21,8 @@ from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from fleetforge.clock import now_utc
-from fleetforge.db.models import Device
-from tests.conftest import client_for, login_admin
+from fleetforge.db.models import Device, DeviceProgress
+from tests.conftest import client_for, login_admin, settings_for_tests
 
 DEVICE_ID = "a4cf12b3de91"
 
@@ -34,6 +35,7 @@ async def fleet(engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
             yield session
         finally:
             await session.rollback()
+            await session.execute(delete(DeviceProgress))
             await session.execute(delete(Device))
             await session.commit()
 
@@ -68,7 +70,10 @@ async def test_unauthenticated_is_401(admin_app: FastAPI) -> None:
 async def test_an_empty_fleet_is_an_envelope_not_an_error(
     admin_app: FastAPI, fleet: AsyncSession
 ) -> None:
-    assert await list_devices(admin_app, await login_admin(admin_app)) == {"devices": []}
+    assert await list_devices(admin_app, await login_admin(admin_app)) == {
+        "devices": [],
+        "arrivals": [],
+    }
 
 
 @pytest.mark.parametrize(
@@ -172,3 +177,141 @@ async def test_the_summary_carries_the_fleet_view_and_no_presence_ingredients(
     # NULL until the broker credential exists — R0-sec-1's reconcile list.
     assert row["broker_provisioned_at"] is None
     assert row["online"] is True
+
+
+# ---------------------------------------------------------------------------
+# Arrivals (S0-fw-1) — boards between "flashed" and "online"
+# ---------------------------------------------------------------------------
+#
+# `stalled` is the point of these: it is derived on read from the age of the newest
+# stage, in `fleetforge.progress`, exactly as `online` is derived by `presence`. If a
+# `stalled` column ever appears in `device_progress`, these tests are why it must not.
+
+
+async def add_progress(
+    session: AsyncSession,
+    device_id: str,
+    stage: str,
+    *,
+    age_s: float = 0.0,
+    detail: str | None = None,
+) -> None:
+    session.add(
+        DeviceProgress(
+            device_id=device_id,
+            token_id=uuid.uuid4(),
+            stage=stage,
+            detail=detail,
+            at=now_utc() - dt.timedelta(seconds=age_s),
+        )
+    )
+    await session.commit()
+
+
+async def test_a_board_that_is_only_arriving_has_no_device_row(
+    admin_app: FastAPI, fleet: AsyncSession
+) -> None:
+    """The whole feature in one assertion: something is shown where nothing was."""
+    await add_progress(fleet, "a4cf12b3de10", "enrolling", detail="attempt 3")
+
+    body = await list_devices(admin_app, await login_admin(admin_app))
+
+    assert body["devices"] == []
+    assert body["arrivals"] == [
+        {
+            "device_id": "a4cf12b3de10",
+            "stage": "enrolling",
+            "detail": "attempt 3",
+            "at": body["arrivals"][0]["at"],
+            "stalled": False,
+        }
+    ]
+
+
+async def test_only_the_newest_stage_of_a_board_is_shown(
+    admin_app: FastAPI, fleet: AsyncSession
+) -> None:
+    """An arrival is a position, not a history: the dashboard shows where it got to."""
+    await add_progress(fleet, "a4cf12b3de11", "link_up", age_s=30)
+    await add_progress(fleet, "a4cf12b3de11", "time_synced", age_s=20)
+    await add_progress(fleet, "a4cf12b3de11", "enrolling", age_s=10)
+
+    body = await list_devices(admin_app, await login_admin(admin_app))
+
+    assert [(row["device_id"], row["stage"]) for row in body["arrivals"]] == [
+        ("a4cf12b3de11", "enrolling")
+    ]
+
+
+async def test_a_board_whose_stage_has_gone_quiet_reads_stalled(
+    admin_app: FastAPI, fleet: AsyncSession
+) -> None:
+    """The acceptance criterion: a board that stops mid-arrival must LOOK stopped."""
+    stall_s = settings_for_tests().progress_stall_s
+    await add_progress(fleet, "a4cf12b3de12", "enrolling", age_s=stall_s + 30)
+    await add_progress(fleet, "a4cf12b3de13", "enrolling", age_s=1)
+
+    body = await list_devices(admin_app, await login_admin(admin_app))
+
+    stalled = {row["device_id"]: row["stalled"] for row in body["arrivals"]}
+    assert stalled == {"a4cf12b3de12": True, "a4cf12b3de13": False}
+
+
+async def test_an_old_arrival_falls_out_of_the_window(
+    admin_app: FastAPI, fleet: AsyncSession
+) -> None:
+    """Yesterday's failed board is not still on today's dashboard."""
+    window_s = settings_for_tests().progress_window_s
+    await add_progress(fleet, "a4cf12b3de14", "halted", age_s=window_s + 60)
+
+    body = await list_devices(admin_app, await login_admin(admin_app))
+
+    assert body["arrivals"] == []
+
+
+async def test_an_online_board_is_in_the_fleet_and_not_arriving(
+    admin_app: FastAPI, fleet: AsyncSession
+) -> None:
+    """A board stops *arriving* the moment it has really arrived — one truth, not two."""
+    await add_device(fleet, "a4cf12b3de15", presence_reported=True)
+    await add_progress(fleet, "a4cf12b3de15", "mqtt_connected")
+
+    body = await list_devices(admin_app, await login_admin(admin_app))
+
+    assert [row["device_id"] for row in body["devices"]] == ["a4cf12b3de15"]
+    assert body["devices"][0]["online"] is True
+    assert body["arrivals"] == []
+
+
+async def test_an_enrolled_but_offline_board_is_still_arriving(
+    admin_app: FastAPI, fleet: AsyncSession
+) -> None:
+    """The case that earns the feature: the row exists, the board never came up.
+
+    Without this, a board that enrolled and then failed at the broker reads exactly
+    like one that has merely gone to sleep, and the stage is the only thing that says
+    which.
+    """
+    await add_device(fleet, "a4cf12b3de16", presence_reported=False)
+    await add_progress(fleet, "a4cf12b3de16", "mqtt_refused", detail="broker connack 5")
+
+    body = await list_devices(admin_app, await login_admin(admin_app))
+
+    assert body["devices"][0]["online"] is False
+    assert [(row["device_id"], row["stage"]) for row in body["arrivals"]] == [
+        ("a4cf12b3de16", "mqtt_refused")
+    ]
+
+
+async def test_arrivals_are_newest_first(admin_app: FastAPI, fleet: AsyncSession) -> None:
+    await add_progress(fleet, "a4cf12b3de17", "enrolling", age_s=90)
+    await add_progress(fleet, "a4cf12b3de18", "link_up", age_s=5)
+    await add_progress(fleet, "a4cf12b3de19", "time_synced", age_s=45)
+
+    body = await list_devices(admin_app, await login_admin(admin_app))
+
+    assert [row["device_id"] for row in body["arrivals"]] == [
+        "a4cf12b3de18",
+        "a4cf12b3de19",
+        "a4cf12b3de17",
+    ]

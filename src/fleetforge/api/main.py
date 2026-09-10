@@ -44,7 +44,15 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from fleetforge import __version__
 from fleetforge.api.deps import dynsec_configured
 from fleetforge.api.eventstream import EventHub, PostgresEventListener
-from fleetforge.api.routers import agent, auth, devices, enroll, enrollment, events
+from fleetforge.api.routers import (
+    agent,
+    auth,
+    devices,
+    enroll,
+    enrollment,
+    events,
+    progress,
+)
 from fleetforge.auth.cache import VerifiedSecretCache
 from fleetforge.auth.ratelimit import FixedWindowLimiter
 from fleetforge.config import Settings, get_settings
@@ -157,6 +165,15 @@ def create_app() -> FastAPI:
         per_global=settings.enroll_rate_limit_global if settings else 60,
         window_s=settings.login_rate_limit_window_s if settings else 60,
     )
+    # Progress reports (S0-fw-1) are chattier still — five-plus per boot — and get a
+    # third bucket plus their own verification cache, so a reporting fleet can spend
+    # neither the enroll budget nor the login one. See `deps.progress_limiter`.
+    app.state.progress_limiter = FixedWindowLimiter(
+        per_key=settings.progress_rate_limit_per_ip if settings else 60,
+        per_global=settings.progress_rate_limit_global if settings else 300,
+        window_s=settings.login_rate_limit_window_s if settings else 60,
+    )
+    app.state.progress_cache = VerifiedSecretCache()
     # The SSE fan-out. Created here (not in the lifespan) so a test app that never
     # runs a lifespan still has one to publish into.
     app.state.event_hub = EventHub(
@@ -201,6 +218,7 @@ def create_app() -> FastAPI:
     app.include_router(events.router)
     app.include_router(devices.router)
     app.include_router(agent.router)
+    app.include_router(progress.router)
 
     @app.get("/v1/healthz", tags=["health"])
     async def healthz() -> dict[str, str]:

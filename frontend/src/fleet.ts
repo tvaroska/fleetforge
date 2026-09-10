@@ -25,7 +25,7 @@
 //    against a 401.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ApiError, api, type DeviceSummary } from './api'
+import { ApiError, api, type ArrivalSummary, type DeviceSummary } from './api'
 
 // jsdom has no `EventSource`, so the hook takes a factory rather than reaching for the
 // global — the same seam/adapter idiom the Python side uses for the broker provisioner
@@ -76,6 +76,14 @@ export type StreamState = 'connecting' | 'live' | 'reconnecting' | 'offline'
 export type Fleet = {
   /** `null` until the first read lands — "loading", as distinct from "no boards". */
   devices: DeviceSummary[] | null
+  /**
+   * Boards that have reported a boot stage and are not in the fleet yet (S0-fw-1).
+   *
+   * Rides on the SAME `GET /v1/devices` read as `devices` — no extra fetch and no second
+   * poll, because rule 1 above already re-reads the whole envelope on every hint. A
+   * dedicated fetch here would double the request rate to buy nothing.
+   */
+  arrivals: ArrivalSummary[]
   /** A transport/5xx problem. The last good list stays on screen underneath it. */
   error: string | null
   stream: StreamState
@@ -94,6 +102,7 @@ const defaultFactory: EventSourceFactory = (url) => new EventSource(url)
 
 export function useFleet({ onSessionExpired, createEventSource }: UseFleetOptions): Fleet {
   const [devices, setDevices] = useState<DeviceSummary[] | null>(null)
+  const [arrivals, setArrivals] = useState<ArrivalSummary[]>([])
   const [error, setError] = useState<string | null>(null)
   const [stream, setStream] = useState<StreamState>('connecting')
   const [lastSyncedAt, setLastSyncedAt] = useState<number | null>(null)
@@ -157,6 +166,9 @@ export function useFleet({ onSessionExpired, createEventSource }: UseFleetOption
       // backwards. Same reason the server stamps one `now` per response.
       if (!state.live || seq !== state.seq) return
       setDevices(result.devices)
+      // `?? []` so a dashboard served against an API older than S0-fw-1 renders the fleet
+      // instead of throwing on `.map` of undefined.
+      setArrivals(result.arrivals ?? [])
       setError(null)
       setLastSyncedAt(Date.now())
       if (streamRef.current.suspect) {
@@ -317,5 +329,5 @@ export function useFleet({ onSessionExpired, createEventSource }: UseFleetOption
     }
   }, [refresh])
 
-  return { devices, error, stream, lastSyncedAt, now }
+  return { devices, arrivals, error, stream, lastSyncedAt, now }
 }
