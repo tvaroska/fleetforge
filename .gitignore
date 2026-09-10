@@ -11,6 +11,12 @@ secrets/
 # nowhere else — not in Postgres, not in a log, not in dynsec (which keeps a hash).
 # A committed .sim/ is a committed fleet credential. Files are written 0600.
 .sim/
+# The QEMU harness's working directory (R0-fw-1). Same posture as `.sim/`, and for
+# a stronger reason: `.qemu/ff_cfg.bin` holds a LIVE single-use enrollment token, and
+# `.qemu/flash-<target>.bin` holds the NVS the emulated board wrote its `mqtt_password`
+# into after enrolling. A committed .qemu/ is a committed fleet credential inside a
+# 4 MB binary nobody would think to grep. Created 0700 by `just agent-qemu`.
+.qemu/
 
 # Python
 __pycache__/

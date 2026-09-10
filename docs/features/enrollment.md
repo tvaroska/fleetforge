@@ -299,6 +299,52 @@ board appeared in `GET /v1/devices`, and replaying the burned token from a secon
 `device_id` was refused `409 enrollment token is not usable`. Storage/URL leak checks
 ran against the real browser context, not jsdom.
 
+### The board half of Flow 1 — the connect-only agent (R0-fw-1)
+
+The other end of everything above: real ESP-IDF firmware that reads its config from the
+`ff_cfg` partition, sets its clock, spends the `ffe_` token exactly once, stores the
+broker password in NVS and comes online. It applies no firmware — `capabilities` is `[]`
+and a `dn/cmd` is logged rather than executed, because a board that claims a capability
+it does not have gets offered a deployment it cannot perform. OTA is R2.
+
+**Two rules the boot sequence exists to keep.** A credential in NVS means *never enroll
+again* — so `ff_store_load()` distinguishes *absent* (enroll) from *corrupt* (park), and
+a torn write can never cost a second token. And the credential is written to NVS
+**before** the broker is contacted: the password exists exactly once, in the HTTP
+response body that was just parsed, and a crash between parse and connect would cost a
+token for nothing.
+
+**Nothing reboots on failure.** A board that reboot-loops on a revoked token is
+indistinguishable from a hardware fault, and every reset throws away the serial log that
+says which one it is. Every failure path either backs off (60 s → 15 min, sized so the
+server's 600 s enrollment grace window contains several attempts) or parks with one line
+naming what to re-flash.
+
+**Nothing secret is ever logged.** The config dump prints `token 80 chars, passphrase 0
+chars (never printed)`; the enroll response is memset before it is freed. The build-time
+tripwire (`test_agent_holds_no_credential`) is what keeps it that way, and it is why the
+config keys are `ssid`/`psk`/`mqtt_pass` and why one string literal in `ff_enroll.c` is
+deliberately split.
+
+**T2 evidence — a board with no board.** `docs/runbooks/agent-qemu.md` boots the *shipped*
+`agent/dist/esp32` bundle in the QEMU that comes inside the pinned ESP-IDF image, on the
+emulated OpenCores NIC, against the local stack. First boot: `ff_cfg v1 loaded (crc ok)`
+→ `device_id` → `eth link up, ip 10.0.2.15` → `sntp: 1970-01-01T00:00:02Z → 2026-09-10…`
+→ `enroll 200` → `credential stored in NVS` → MQTT connect, `subscribe …/dn/#`, retained
+`announce` + `presence`, `hb` every 10 s (not retained). Server side: `"online": true`
+with `partition_layout "ab-4m-v1"` and `ota_slot_size 1966080`, the token flipped to
+`used` with `used_by_device_id`, exactly one `enrolled device` line in the api log. A
+second boot on the same flash image logged `reusing the stored credential (no
+enrollment)` and made no HTTP request at all; killing QEMU ungracefully flipped the fleet
+view to `"online": false` within ~45 s off the retained LWT.
+
+**What that run found.** `CONFIG_MBEDTLS_HAVE_TIME_DATE` is **off** in ESP-IDF by default,
+so a board at epoch 0 completed a real TLS handshake instead of failing it — the protocol
+spec's *Clock — SNTP before TLS* section was describing a failure that could not happen,
+and an expired server certificate would have been accepted by the whole fleet. It is now
+enabled, required by `verify_bundle.py`, and asserted in `tests/test_agent_partitions.py`.
+An option like this is compiled in: no OTA adds it to a board already flashed.
+
 ## Post-v1
 
 - **Device decommissioning** — `POST /v1/devices/{device_id}/decommission` setting

@@ -6,6 +6,80 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-09 — The connect-only agent, and how it is proved without hardware (R0-fw-1)
+
+- **`ff_cfg` is a CRC-headered JSON blob, not a struct.** 16-byte little-endian header
+  (`FFCF`, version, reserved, payload length, CRC32) followed by compact UTF-8 JSON,
+  0xFF-filled to the 4 KB partition reserved by R0-infra-2. A packed C struct would be a
+  second wire format to version, and the flasher that writes it is a **browser**
+  (R0-fe-3) — JSON is the one encoding both ends already have. The CRC is what turns a
+  half-written partition into one refusal line instead of a board that connects
+  somewhere unexpected. `agent/tools/ff_cfg.py` and `agent/main/ff_cfg.c` are the two
+  ends of that contract and `tests/test_ff_cfg.py` holds them together (it greps the C
+  source for every key the Python writer emits).
+- **The config keys are `ssid`/`psk`/`mqtt_pass`, and the spelling is not cosmetic.**
+  `tests/test_agent_partitions.py::test_agent_holds_no_credential` fails the build if
+  anything under `agent/` puts `wifi_password`, `mqtt_password` or an `ffe_…` literal
+  next to a quoted value. That tripwire is worth more than pretty names, so the names
+  moved. Where a long name was unavoidable (`ff_enroll.c` parsing the enroll response)
+  the literal is split — `"mqtt_" "password"` — with a comment saying why it must not
+  be "tidied".
+- **`ff_net` is a seam with two adapters, and that is what makes a hardware-free T2
+  possible.** `ff_net_wifi.c` is what ships on a board; `ff_net_openeth.c` drives QEMU's
+  OpenCores NIC and compiles to a refusal stub wherever `CONFIG_ETH_USE_OPENETH` is off.
+  `link` in `ff_cfg` picks one at runtime. Same idiom as the local/GCP seams in the
+  Python side.
+- **`CONFIG_ETH_USE_OPENETH=y` lives in `sdkconfig.defaults.esp32` only.** The emulated
+  NIC exists on no real board and on no other target; the common defaults file stays the
+  one place the safety posture is read from.
+- **`CONFIG_MBEDTLS_HAVE_TIME_DATE=y` — the one that was silently missing.** ESP-IDF
+  defaults it **off**, and with it off mbedTLS never looks at `notBefore`/`notAfter`: an
+  expired certificate validates, and `spec/device-protocol.md` → *Clock — SNTP before
+  TLS* describes a failure that cannot happen. Found by AC5 doing the opposite of what
+  the plan predicted — a board with a 1970 clock completed a real TLS handshake against
+  `bingo.tvaroska.sk`. Enabling it makes the spec's rule true, and costs a board whose
+  SNTP never answers its TLS channels (accepted; the SNTP client keeps retrying in the
+  background while the enroll ladder backs off). `verify_bundle.py` and
+  `test_agent_partitions.py` both require it now, in the **resolved** config.
+- **`CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y`, no pinned CA.** Both channels terminate at
+  Traefik with a Let's Encrypt certificate (R0-infra-3), so the Mozilla root bundle is
+  the trust store. Proved in QEMU against the real production hostname.
+- **The confirm call is guarded by `ESP_OTA_IMG_PENDING_VERIFY`, and R0 must not "fix"
+  that.** `esp_ota_mark_app_valid_cancel_rollback()` runs only for an image the
+  bootloader is actually watching; a serially flashed board never enters that state, so
+  the timer is inert today. Calling it unconditionally at boot would compile, look
+  correct, pass every R0 test — and disable R2's auto-rollback on the entire fleet.
+- **No goodbye publish.** A board that is dying cannot send one. Presence-off is the
+  broker's job via a retained LWT, which is what `/v1/devices` and the dashboard already
+  key off (R0-test-1 established the same posture for the simulator; the simulator sends
+  a goodbye because it is a process, not a board).
+- **The token stays in `ff_cfg` after it is spent.** Erasing it would mean writing to a
+  partition the firmware otherwise only reads, on every first boot, to remove a string
+  that is already dead server-side. The credential in NVS is what stops a second
+  enrollment, and `ff_store_load()` distinguishes *absent* from *corrupt* so a torn write
+  parks the board instead of burning another token.
+- **QEMU's eFuse MAC is all zeros, so every emulated board is `000000000000`.** The agent
+  warns once per boot and does not paper over it: `device_id` is the eFuse MAC on real
+  silicon and there is no special case anywhere in the code. Two emulators are one device
+  as far as the fleet is concerned.
+- **`.qemu/` is a credential directory, not a cache.** 0700, gitignored: `ff_cfg.bin`
+  holds a live single-use token and `flash-esp32.bin` holds, inside NVS, the broker
+  password that board was issued. QEMU writes the image back (`if=mtd`), which is exactly
+  what makes "a reboot burns no second token" testable — and what makes `--fresh` a
+  credential deletion.
+- **Gotcha, ~30 min:** the dev stack routes by `Host`, and the emulated board addresses
+  this box as slirp's `10.0.2.2` — so every enroll came back **404 from Traefik**, having
+  never reached the API, which reads exactly like a firmware bug. Fixed with a dev-only
+  `ff-qemu` router in `docker-compose.override.yml` (and `10.0.2.2` added to Vite's
+  `allowedHosts`, which rejects unknown Hosts for the same reason).
+- **Gotcha:** `just` drops empty arguments when it splices `*args` into a recipe, so
+  `--ntp ''` cannot be expressed through `just agent-cfg`. "No NTP" is therefore a flag
+  (`--no-ntp`) — a test knob for the clock rule, not a setting.
+- Details: `docs/runbooks/agent-qemu.md` (worked transcript), `docs/features/enrollment.md`,
+  `.claude/plans/R0-fw-1-esp32-agent-connect-only.md`.
+
+---
+
 ## 2026-09-09 — Agent firmware: what is frozen at flash time (R0-infra-2)
 
 - **`ab-4m-v1` is frozen, and it is a three-way contract.** `agent/partitions.csv`

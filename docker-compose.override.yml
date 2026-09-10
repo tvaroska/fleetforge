@@ -38,10 +38,21 @@ services:
     build:
       target: development
     image: fleetforge-frontend:dev-local
+    labels:
+      # R0-fw-1. The emulated board reaches this box through QEMU's slirp gateway,
+      # so its Host header is `10.0.2.2:8080` and the `Host(localhost)` router in
+      # docker-compose.yml does not match it: every `POST /v1/enroll` comes back 404
+      # from Traefik, having never reached the api, which reads exactly like a
+      # firmware bug. Same backend, second name. DEV ONLY — this file is skipped by
+      # `just up-prod` and never deployed (10.0.2.2 is unroutable off this host
+      # anyway; it only means anything inside QEMU's NAT).
+      traefik.http.routers.ff-qemu.rule: "Host(`10.0.2.2`)"
+      traefik.http.routers.ff-qemu.entrypoints: web
+      traefik.http.routers.ff-qemu.service: ff-frontend
     environment:
       # Vite >= 6 rejects unknown Host headers; keep this in step with the
-      # Traefik Host() rule in docker-compose.yml.
-      FF_DOMAIN: ${FF_DOMAIN:-localhost}
+      # Traefik Host() rules — the base file's, and ff-qemu's above.
+      FF_DOMAIN: ${FF_DOMAIN:-localhost},10.0.2.2
       # The dev server proxies /v1 to the same backend nginx does in production,
       # so the SPA is same-origin in both modes.
       VITE_API_PROXY: http://api:8000

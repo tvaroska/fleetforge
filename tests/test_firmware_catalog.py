@@ -80,6 +80,9 @@ def write_bundle(
         "partition_layout": EXPECTED_PARTITION_LAYOUT,
         "ota_slot_size": EXPECTED_OTA_SLOT_SIZE,
         "flash_size": "4MB",
+        # R0-fw-1: where the flasher writes per-board config. Optional in the model
+        # because bundles built before it exist on disk — see the test below.
+        "config_partition": {"label": "ff_cfg", "offset": 0x12000, "size": 0x1000},
         "parts": parts,
     }
     manifest.update(manifest_overrides or {})
@@ -90,6 +93,41 @@ def write_bundle(
 
 def dropped_targets(records: list[logging.LogRecord]) -> list[str]:
     return [record.getMessage() for record in records if record.levelno >= logging.WARNING]
+
+
+class TestConfigPartition:
+    """`config_partition` is what stops `R0-fe-3` typing `0x12000`, and it is additive."""
+
+    def test_is_carried_through_to_the_bundle(self, tmp_path: Path) -> None:
+        write_bundle(tmp_path, "esp32")
+        bundle = FirmwareCatalog.load(tmp_path).bundle("esp32")
+        assert bundle is not None
+        assert bundle.config_partition is not None
+        assert bundle.config_partition.label == "ff_cfg"
+        assert bundle.config_partition.offset == 0x12000
+        assert bundle.config_partition.size == 0x1000
+
+    def test_a_bundle_without_one_still_loads(self, tmp_path: Path) -> None:
+        """A bundle built before R0-fw-1 is on disk and in the registry. Refusing it would
+        take the flasher offline for a field only the new flow needs."""
+        bundle_dir = write_bundle(tmp_path, "esp32")
+        manifest = json.loads((bundle_dir / "manifest.json").read_text())
+        del manifest["config_partition"]
+        (bundle_dir / "manifest.json").write_text(json.dumps(manifest))
+
+        bundle = FirmwareCatalog.load(tmp_path).bundle("esp32")
+        assert bundle is not None
+        assert bundle.config_partition is None
+
+    def test_a_malformed_one_drops_the_bundle(self, tmp_path: Path) -> None:
+        """Present but wrong is not the same as absent: an offset of `null` reaching the
+        flasher would write a config blob over whatever sits at address 0."""
+        bundle_dir = write_bundle(tmp_path, "esp32")
+        manifest = json.loads((bundle_dir / "manifest.json").read_text())
+        manifest["config_partition"] = {"label": "ff_cfg", "offset": None, "size": 4096}
+        (bundle_dir / "manifest.json").write_text(json.dumps(manifest))
+
+        assert FirmwareCatalog.load(tmp_path).bundle("esp32") is None
 
 
 class TestHappyPath:

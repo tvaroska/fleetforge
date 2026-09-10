@@ -313,6 +313,75 @@ agent-push target="esp32": (agent-image target)
     docker push {{ registry }}/fleetforge-agent-{{ target }}:{{ latest_tag }}
     docker push {{ registry }}/fleetforge-agent-{{ target }}:latest
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Agent firmware in QEMU — a board with no board (R0-fw-1)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+#     just agent-cfg --api-base http://10.0.2.2:8080 --mqtt-uri mqtt://10.0.2.2:8883 \
+#         --link ethernet --hb 10 --token "$FFE"
+#     just agent-qemu esp32            # boot it; Ctrl-A x to quit
+#     just agent-qemu esp32 --fresh    # rebuild the image = wipe NVS = forget the credential
+#     just agent-qemu-clean            # delete .qemu/ — it holds a live credential
+#
+# Everything lands in `.qemu/` (0700, gitignored): the ff_cfg blob with a live
+# single-use enrollment token, and a 4 MB flash image whose NVS holds the broker
+# password the emulated board was issued. docs/runbooks/agent-qemu.md.
+
+# Write .qemu/ff_cfg.bin — the 4 KB blob the flasher would write per board.
+# Runs in the IDF image so it needs no host Python: the tool is stdlib-only and
+# `.qemu` is bind-mounted, so the file lands here owned by the invoking user.
+#
+# `@` on the docker line is NOT cosmetic: `{{ args }}` carries `--token ffe_…`, and
+# an echoed recipe line puts a live single-use token in the terminal scrollback (and
+# in whatever CI captured it). The tool itself never prints the token back.
+agent-cfg *args:
+    @mkdir -p .qemu && chmod 700 .qemu
+    @docker run --rm -u $(id -u):$(id -g) \
+        -v "$PWD/.qemu:/q" -v "$PWD/agent/tools:/t:ro" \
+        --entrypoint python3 {{ idf_image }} /t/ff_cfg.py --out /q/ff_cfg.bin {{ args }}
+
+# Boot agent/dist/<target> in QEMU with that config.
+#
+# `--network host` is load-bearing: it is what makes slirp's 10.0.2.2 this dev box,
+# so `--api-base http://10.0.2.2:8080` reaches `just up`. The flash image is created
+# once and then WRITTEN BACK by QEMU — NVS, and therefore the enrolled credential,
+# lives inside it between runs. Pass `--fresh` to rebuild it, which is the same thing
+# as handing the board an eraser.
+agent-qemu target="esp32" fresh="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    test -f "agent/dist/{{ target }}/manifest.json" || {
+        echo "no bundle for {{ target }} — run: just agent-build {{ target }}"; exit 1; }
+    test -f .qemu/ff_cfg.bin || {
+        echo "no .qemu/ff_cfg.bin — run: just agent-cfg --api-base … --mqtt-uri … --token …"
+        exit 1; }
+    case "{{ fresh }}" in
+        "") ;;
+        --fresh) rm -f ".qemu/flash-{{ target }}.bin" ;;
+        *) echo "unknown argument '{{ fresh }}' (the only one is --fresh)"; exit 2 ;;
+    esac
+    echo "QEMU: Ctrl-A x quits. NVS persists in .qemu/flash-{{ target }}.bin (--fresh wipes it)."
+    docker run --rm -it --network host -u $(id -u):$(id -g) \
+        -v "$PWD/.qemu:/q" -v "$PWD/agent/dist/{{ target }}:/d:ro" -v "$PWD/agent/tools:/t:ro" \
+        --entrypoint bash {{ idf_image }} -c '
+            set -e
+            . $IDF_PATH/export.sh >/dev/null 2>&1
+            test -f /q/efuse.bin || python3 /t/qemu_image.py efuse --target {{ target }} --out /q/efuse.bin
+            test -f /q/flash-{{ target }}.bin || python3 /t/qemu_image.py flash \
+                --bundle /d --config /q/ff_cfg.bin --out /q/flash-{{ target }}.bin
+            exec qemu-system-xtensa -M esp32 -m 4M \
+                -drive file=/q/flash-{{ target }}.bin,if=mtd,format=raw \
+                -drive file=/q/efuse.bin,if=none,format=raw,id=efuse \
+                -global driver=nvram.esp32.efuse,property=drive,value=efuse \
+                -global driver=timer.esp32.timg,property=wdt_disable,value=true \
+                -nic user,model=open_eth -nographic -serial mon:stdio'
+
+# Delete the QEMU working directory. It holds a LIVE enrollment token (ff_cfg.bin)
+# and, inside the flash image's NVS, the broker password that board was issued —
+# so this is a credential deletion, not a cache clean.
+agent-qemu-clean:
+    rm -rf .qemu
+
 # Bundles only. The ESP-IDF image is deliberately kept — re-pulling is 2.4 GB.
 agent-clean:
     find agent/dist -mindepth 1 -not -name .gitkeep -delete

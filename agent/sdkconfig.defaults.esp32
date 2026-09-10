@@ -9,3 +9,11 @@
 #
 # Nothing is needed for esp32 today: the R0 skeleton is console + idle, and the IDF
 # defaults for this target already match the 4 MB devkits we build for.
+
+# The OpenCores NIC QEMU emulates (`-nic user,model=open_eth`). A hardware fact of the
+# emulated machine, which is why it belongs in a per-target delta and not in the common
+# file: it selects the `ff_net_openeth` adapter behind the ff_net seam, and it is what
+# makes this agent's acceptance test runnable with no board and no serial port
+# (docs/runbooks/agent-qemu.md). Harmless on real silicon — no ESP32 devkit has an
+# OpenCores MAC, so the adapter is simply never selected by a `link=wifi` config.
+CONFIG_ETH_USE_OPENETH=y

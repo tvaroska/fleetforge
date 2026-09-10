@@ -36,3 +36,30 @@ CONFIG_APP_PROJECT_VER_FROM_CONFIG=n
 #                                        verification instead. Not interchangeable.
 # CONFIG_SECURE_FLASH_ENC_ENABLED      — flash encryption off in v1; spec/prd.md ->
 #                                        Security & data posture already promises this.
+
+# ── Added by R0-fw-1 (the connect-only agent) ───────────────────────────────────────
+# The Mozilla root CA bundle, compiled in. Both of the agent's outbound channels are
+# TLS in production — HTTPS to the API and mqtts:// to the broker — and both terminate
+# at Traefik with a Let's Encrypt certificate (DECISIONS.md, R0-infra-3), so there is
+# no private CA to pin at v1. Without this, esp_crt_bundle_attach does not link and
+# every handshake fails at the point where it is hardest to read: inside mbedTLS.
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+
+# Check certificate VALIDITY DATES. IDF leaves this off by default, and off it is
+# not a nuance: mbedTLS then accepts an expired certificate, and a revoked-then-expired
+# server key stays a working MITM against the whole fleet forever. It is also what makes
+# `spec/device-protocol.md` -> *Clock — SNTP before TLS* true rather than aspirational —
+# with the default config a board at epoch 0 completes the handshake happily, and the one
+# protocol rule with its own section is unenforced. Verified both ways in QEMU (R0-fw-1
+# AC5): `--no-ntp` must fail the handshake, and a synced clock must complete it.
+#
+# The cost is real and accepted: a board whose SNTP never answers cannot reach an https://
+# or mqtts:// endpoint. ff_time leaves the SNTP client running after a timeout, so the
+# clock still arrives late while the enroll ladder backs off.
+CONFIG_MBEDTLS_HAVE_TIME_DATE=y
+
+# app_main runs the whole boot sequence — cJSON payload building, an HTTPS request with
+# a TLS handshake on this stack, NVS. The 3584-byte default overflows during the enroll
+# handshake, and a stack overflow on a board is a reboot loop with a backtrace nobody is
+# there to read.
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192

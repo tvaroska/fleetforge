@@ -32,6 +32,12 @@ user, so nothing root-owned lands in the working tree (a bind-mounted `docker ru
 `just agent-build` ends in `just agent-verify`, which is the gate. A build that prints
 anything other than `BUNDLE OK: <target>` did not produce a flashable bundle.
 
+A bundle that verifies is not yet a bundle that boots. **`docs/runbooks/agent-qemu.md`
+runs this exact output in an emulator** — enroll, MQTT, announce, presence, heartbeat,
+against the local stack and with no hardware. It is the cheapest way to find out that a
+firmware change broke the first ten seconds, which is the part no unit test covers and no
+OTA can repair.
+
 ## Disk is the number-one failure mode
 
 `espressif/idf:v5.5.5` unpacks to **~8.9 GB**, and the pull needs headroom on top of
@@ -90,7 +96,10 @@ records HEAD, not what was compiled. Commit before building anything you intend 
 1. Every part re-hashed and re-sized against the manifest.
 2. Every manifest `path` is a bare filename inside the bundle.
 3. `app.bin` fits `ota_slot_size` (1 966 080 bytes).
-4. `sdkconfig.resolved` has `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`.
+4. `sdkconfig.resolved` has `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`,
+   `CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y` and `CONFIG_MBEDTLS_HAVE_TIME_DATE=y` — a
+   compiled-in trust store, and certificate *dates* actually checked (IDF's default is
+   not to check them, which silently accepts an expired server certificate forever).
 5. `sdkconfig.resolved` has **none** of the irreversible options enabled —
    anti-rollback, secure boot, flash encryption. These burn eFuses; a board that
    ships with one enabled by accident cannot be un-shipped.

@@ -64,6 +64,16 @@ REQUIRED_SDKCONFIG = [
     'CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"',
     "CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y",
     "CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y",
+    # R0-fw-1. Not an eFuse burn and not strictly a flash-time immutable, but it is the
+    # difference between an agent that can validate a certificate and one whose every
+    # HTTPS/mqtts handshake fails inside mbedTLS — and it is compiled in, so no OTA-free
+    # fix exists for a board flashed without it either.
+    "CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y",
+    # R0-fw-1, and the reason `spec/device-protocol.md` -> *Clock — SNTP before TLS* is
+    # enforceable at all: IDF defaults this OFF, and with it off mbedTLS never looks at
+    # notBefore/notAfter. An expired server certificate is then accepted by every board
+    # in the fleet, and no OTA can add the check back to an image already flashed.
+    "CONFIG_MBEDTLS_HAVE_TIME_DATE=y",
 ]
 
 # Absent, and each one an irreversible eFuse burn. `=n` and "not set" both count as
@@ -200,6 +210,17 @@ class TestBootloaderPosture:
         """`agent/Dockerfile` names `sdkconfig.defaults.$IDF_TARGET` unconditionally."""
         present = {path.suffix.lstrip(".") for path in AGENT_DIR.glob("sdkconfig.defaults.*")}
         assert {"esp32", "esp32s3", "esp32c3", "esp32c6"} <= present
+
+    def test_esp32_delta_is_only_the_emulated_nic(self) -> None:
+        """`sdkconfig.defaults.esp32` carries exactly one option, and it is a hardware fact.
+
+        `CONFIG_ETH_USE_OPENETH=y` selects the OpenCores MAC QEMU emulates, which is what
+        makes the agent's acceptance run possible with no board. If anything else appears
+        here, the esp32 build has a posture the other three targets do not — and the
+        common file has stopped being the one place to read the posture from.
+        """
+        lines = _config_lines(AGENT_DIR / "sdkconfig.defaults.esp32")
+        assert lines == ["CONFIG_ETH_USE_OPENETH=y"]
 
     def test_agent_holds_no_credential(self) -> None:
         """Credentials arrive at flash time, per board, in `ff_cfg` — never in the source.

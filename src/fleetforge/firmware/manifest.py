@@ -54,6 +54,26 @@ class PartManifest(BaseModel):
     sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
 
 
+class ConfigPartition(BaseModel):
+    """Where per-board configuration is written at flash time (`ff_cfg`).
+
+    Not a `PartManifest`: it has no file in the bundle. One build serves the whole fleet,
+    and the 4 KB blob that makes a board *this* board — API URL, broker URI, link, a
+    single-use enrollment token — is generated per device by the flasher and written to
+    this offset. Carried in the manifest so `R0-fe-3` and the QEMU harness read `0x12000`
+    from the built partition table rather than typing it.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    # An ESP-IDF partition label: up to 16 characters, and underscores are legal (which
+    # is why this is not a `SafeSegment` — `ff_cfg` would fail that pattern). It is never
+    # joined onto a path; it exists so a mislabelled partition is visible.
+    label: str = Field(pattern=r"^[a-z0-9][a-z0-9_-]{0,15}$")
+    offset: int = Field(ge=0)
+    size: int = Field(ge=1)
+
+
 class BundleManifest(BaseModel):
     """`agent/dist/<target>/manifest.json`, as written by the builder."""
 
@@ -70,6 +90,10 @@ class BundleManifest(BaseModel):
     partition_layout: str
     ota_slot_size: int = Field(ge=1)
     flash_size: str = ""
+    # Optional, and it has to stay optional: bundles built before R0-fw-1 are on disk and
+    # in the registry, and refusing to load one would take the flasher offline for a field
+    # that only the *new* flow needs.
+    config_partition: ConfigPartition | None = None
     parts: list[PartManifest] = Field(min_length=1)
 
 
@@ -99,6 +123,9 @@ class AgentBuildInfo(BaseModel):
     partition_layout: str
     ota_slot_size: int
     flash_size: str
+    # `None` for a bundle built before R0-fw-1; the flasher then has no offset to write a
+    # config blob to and must say so rather than guess one.
+    config_partition: ConfigPartition | None = None
     parts: list[AgentPartInfo]
 
 

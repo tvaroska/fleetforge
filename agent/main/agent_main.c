@@ -1,41 +1,77 @@
 /*
- * Fleetforge agent — R0 skeleton.
+ * Fleetforge agent — R0: connect-only.
  *
- * DELIBERATELY DOES NO NETWORKING. Wi-Fi, SNTP, HTTPS enroll, MQTT, announce and
- * heartbeat are R0-fw-1; a half-implemented network stack in the skeleton is worse
- * than none, because it would be flashed onto boards to prove the *build pipeline*
- * and then behave like an agent that is failing.
+ * netif -> SNTP -> HTTPS enroll -> MQTT announce/presence/heartbeat, and nothing else.
+ * It does not apply firmware: `capabilities` is an empty array and a `dn/cmd` is logged
+ * rather than executed, because a board that claims a capability it does not have gets
+ * offered a deployment it cannot perform. OTA is R2.
  *
- * What it exists for: to be a real, bootable, A/B-capable image, so R0-infra-2's
- * bundle (bootloader + partition table + otadata + app) is something that can be
- * flashed and observed rather than an artefact that merely compiles. What it prints is
- * therefore exactly the set of facts the build pipeline claims to have got right.
+ * Two rules the boot sequence below exists to keep, both of which cost real money to get
+ * wrong:
  *
- * It does NOT call esp_ota_mark_app_valid_cancel_rollback(). With
- * CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y and no `factory` partition, a serially
- * flashed board's otadata (written from ota_data_initial.bin) is invalid, so the
- * bootloader boots ota_0 in state UNDEFINED and arms no rollback timer. Only an image
- * written BY OTA enters PENDING_VERIFY. R0-fw-1 owns the confirm call, together with
- * the thing worth confirming.
+ *  - **A credential in NVS means never enroll again.** Enrollment tokens are single-use;
+ *    a board that re-enrolls on every boot burns the operator's token pool and, after the
+ *    first burn, cannot come back. `ff_store_load()` therefore distinguishes "absent" from
+ *    "corrupt", and only "absent" enrolls (`simulator/state.py` states the same rule for
+ *    the simulator).
+ *  - **The clock is set before the first TLS handshake.** An ESP32 boots at epoch 0, and
+ *    every certificate on earth is then "not yet valid" — an error that reads like a
+ *    broken server (`spec/device-protocol.md` -> Clock).
+ *
+ * Nothing here reboots on failure. A board that reboot-loops on a bad access point, a
+ * revoked token or a wrong password is indistinguishable from a hardware fault, and each
+ * reset throws away the serial log that says which one it is. Every failure path either
+ * retries on a capped backoff or parks with one line saying what to fix.
  */
 
 #include <inttypes.h>
 
 #include "esp_app_desc.h"
 #include "esp_chip_info.h"
+#include "esp_event.h"
 #include "esp_idf_version.h"
 #include "esp_log.h"
+#include "esp_netif.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
+#include "ff_cfg.h"
+#include "ff_enroll.h"
+#include "ff_identity.h"
+#include "ff_mqtt.h"
+#include "ff_net.h"
+#include "ff_store.h"
+#include "ff_time.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "nvs_flash.h"
 
 static const char *TAG = "ff-agent";
 
-/* Slow: nothing is waiting on this and a chatty skeleton is a confusing skeleton. */
-#define HEARTBEAT_LOG_INTERVAL_MS 30000
+/* Long enough for a slow AP and a slow DHCP server; short enough that the log says
+ * "still no address" while someone is still watching. */
+#define NET_TIMEOUT_MS 30000
+#define SNTP_TIMEOUT_MS 15000
 
-void app_main(void)
+/* The enroll ladder: 60 s -> 15 min, doubling. The first number is not a guess — the
+ * server's 600 s enroll_retry_window_s means a 503 (enrollment committed, broker
+ * provisioning down) has ten minutes of retries that can still succeed, and a 60 s start
+ * fits several of them inside it. */
+#define ENROLL_RETRY_MIN_MS 60000
+#define ENROLL_RETRY_MAX_MS 900000
+
+/* Park. Used for the failures no retry can fix: a config partition that does not parse, a
+ * token the server has permanently refused. The board stays up, logs its reason every
+ * five minutes and waits for someone to re-flash it. */
+static void park(const char *reason) __attribute__((noreturn));
+static void park(const char *reason)
+{
+    while (true) {
+        ESP_LOGE(TAG, "halted: %s", reason);
+        vTaskDelay(pdMS_TO_TICKS(300000));
+    }
+}
+
+static void log_boot_facts(void)
 {
     const esp_app_desc_t *app = esp_app_get_description();
     esp_chip_info_t chip;
@@ -46,9 +82,9 @@ void app_main(void)
     ESP_LOGI(TAG, "chip: model=%d cores=%d revision=%d", (int)chip.model, chip.cores,
              chip.revision);
 
-    /* The running slot proves the A/B layout is real: on a freshly flashed board this
-     * is ota_0, and after R2's first update it is ota_1. A board reporting `factory`
-     * here was flashed with the wrong partition table and can never OTA. */
+    /* The running slot proves the A/B layout is real: on a freshly flashed board this is
+     * ota_0, and after R2's first update it is ota_1. A board reporting `factory` here was
+     * flashed with the wrong partition table and can never OTA. */
     const esp_partition_t *running = esp_ota_get_running_partition();
     if (running != NULL) {
         ESP_LOGI(TAG, "running partition: %s type=%d subtype=%d offset=0x%" PRIx32
@@ -58,22 +94,102 @@ void app_main(void)
     } else {
         ESP_LOGE(TAG, "no running partition: this image was not flashed into an OTA slot");
     }
+}
 
-    /* R0-fe-3's flasher writes per-board configuration here. Its absence means the
-     * board carries a superseded partition layout, which no OTA can repair. */
-    const esp_partition_t *cfg = esp_partition_find_first(
-        ESP_PARTITION_TYPE_DATA, (esp_partition_subtype_t)0x40, "ff_cfg");
-    if (cfg != NULL) {
-        ESP_LOGI(TAG, "config partition ff_cfg at 0x%" PRIx32 " (%" PRIu32 " bytes); R0-fw-1 reads it",
-                 cfg->address, cfg->size);
-    } else {
-        ESP_LOGW(TAG, "no ff_cfg partition: this board cannot be configured at flash time");
+/* NVS holds the broker credential, so a board that cannot mount it cannot remember an
+ * enrollment. Erase-and-retry is the standard IDF recipe for the two recoverable causes
+ * (a full page table, a format from a different IDF major); it costs this board its
+ * credential and therefore a token, which is why it is logged as loudly as it is. */
+static esp_err_t nvs_ready(void)
+{
+    esp_err_t err = nvs_flash_init();
+    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_LOGW(TAG, "nvs is unusable (%s) — erasing it. ANY STORED CREDENTIAL IS NOW "
+                      "GONE and this board will need a fresh enrollment token.",
+                 esp_err_to_name(err));
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        err = nvs_flash_init();
     }
+    return err;
+}
 
-    ESP_LOGI(TAG, "no networking in the R0 skeleton — that is R0-fw-1. Idling.");
-
+/* Enroll, retrying on the failures that can change (network down, broker provisioning
+ * unavailable inside the grace window) and parking on the ones that cannot (a token the
+ * server has refused outright — retrying that only fills a log). */
+static void enroll_until_credentialed(const ff_cfg_t *cfg, ff_cred_t *cred)
+{
+    uint32_t backoff_ms = ENROLL_RETRY_MIN_MS;
     while (true) {
-        vTaskDelay(pdMS_TO_TICKS(HEARTBEAT_LOG_INTERVAL_MS));
-        ESP_LOGI(TAG, "alive: %s on %s", app->version, running ? running->label : "?");
+        esp_err_t err = ff_enroll(cfg, cred);
+        if (err == ESP_OK) {
+            /* Persist BEFORE connecting: the password exists exactly once, in the response
+             * body that was just parsed. A crash between here and the broker would lose it
+             * and cost another token (spec/flows.md Flow 1). */
+            if (ff_store_save(cred) != ESP_OK) {
+                park("the credential could not be written to NVS");
+            }
+            return;
+        }
+        if (err == ESP_ERR_INVALID_RESPONSE || err == ESP_ERR_INVALID_ARG) {
+            park("this board's enrollment token was refused for good — re-flash ff_cfg "
+                 "with a fresh ffe_ token (POST /v1/enrollment-tokens)");
+        }
+        ESP_LOGW(TAG, "retrying enrollment in %" PRIu32 " s", backoff_ms / 1000);
+        vTaskDelay(pdMS_TO_TICKS(backoff_ms));
+        backoff_ms = backoff_ms * 2 > ENROLL_RETRY_MAX_MS ? ENROLL_RETRY_MAX_MS : backoff_ms * 2;
     }
+}
+
+void app_main(void)
+{
+    log_boot_facts();
+
+    ESP_ERROR_CHECK(nvs_ready());
+
+    /* Flash-time configuration. No compiled-in fallback exists on purpose: a board that
+     * boots with a bad config and silently does nothing is far easier to diagnose than one
+     * that connects somewhere unexpected. */
+    ff_cfg_t cfg;
+    if (ff_cfg_load(&cfg) != ESP_OK) {
+        park("no usable ff_cfg partition — re-flash it (agent/tools/ff_cfg.py)");
+    }
+    ff_cfg_log(&cfg);
+
+    if (ff_identity_init() != ESP_OK) {
+        park("no eFuse MAC, therefore no device_id");
+    }
+
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+    /* Retry forever rather than reboot: see the file header. */
+    while (ff_net_bring_up(&cfg, pdMS_TO_TICKS(NET_TIMEOUT_MS)) != ESP_OK) {
+        ESP_LOGW(TAG, "no network yet; waiting for the link");
+        vTaskDelay(pdMS_TO_TICKS(5000));
+    }
+
+    /* Before the first TLS handshake, on BOTH channels. A failure here is not fatal: a
+     * plaintext lab (http:// + mqtt://) works fine at epoch 0, and ff_time_sync has
+     * already said what an unsynced clock costs. */
+    (void)ff_time_sync(cfg.ntp, SNTP_TIMEOUT_MS);
+
+    ff_cred_t cred;
+    esp_err_t stored = ff_store_load(&cred);
+    if (stored == ESP_ERR_NVS_NOT_FOUND) {
+        enroll_until_credentialed(&cfg, &cred);
+    } else if (stored != ESP_OK) {
+        /* Deliberately NOT falling through to enrollment: that would burn a second
+         * single-use token and still leave this board unable to connect. */
+        park("the stored credential is present but unusable; erase NVS to re-enroll");
+    } else if (!ff_store_matches_api_base(&cred, cfg.api_base)) {
+        ESP_LOGW(TAG, "this board holds a credential issued by %s but ff_cfg now points at "
+                      "%s. Keeping the credential — a hostname change is not a reason to "
+                      "throw away a working one — but the broker may refuse it.",
+                 cred.api_base, cfg.api_base);
+    }
+
+    /* Never returns. */
+    esp_err_t err = ff_mqtt_run(&cfg, &cred);
+    ESP_LOGE(TAG, "the mqtt session could not be started: %s", esp_err_to_name(err));
+    park("no mqtt session");
 }

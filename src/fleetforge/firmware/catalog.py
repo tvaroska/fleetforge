@@ -37,6 +37,7 @@ from fleetforge.firmware.manifest import (
     PART_NAMES,
     SAFE_SEGMENT,
     BundleManifest,
+    ConfigPartition,
 )
 
 logger = logging.getLogger(__name__)
@@ -92,6 +93,9 @@ class AgentBundle:
     partition_layout: str
     ota_slot_size: int
     flash_size: str
+    # Absent in bundles built before R0-fw-1. Not verified against a file, because there
+    # is none: the blob is written per board at flash time.
+    config_partition: ConfigPartition | None
     parts: tuple[AgentPart, ...]
 
     def part(self, name: str) -> AgentPart | None:
@@ -239,6 +243,7 @@ def _load_bundle(bundle_dir: Path) -> AgentBundle:
         partition_layout=manifest.partition_layout,
         ota_slot_size=manifest.ota_slot_size,
         flash_size=manifest.flash_size,
+        config_partition=manifest.config_partition,
         parts=tuple(sorted(parts, key=lambda part: part.offset)),
     )
 

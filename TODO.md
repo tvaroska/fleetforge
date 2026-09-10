@@ -295,11 +295,32 @@ audience), and **agent images are built off-box** (the ESP-IDF builder is 2–3 
 
 ### Firmware
 
-- [ ] **R0-fw-1**: ESP32 agent, connect-only (P0, 3d)
+- [x] **R0-fw-1**: ESP32 agent, connect-only (P0, 3d)
       Ships the **flash-time immutables**: A/B partition table, rollback-enabled
       bootloader, eFuse posture — none of which can be fixed by OTA later. Network via
       `esp_netif`; **SNTP before the first TLS handshake**; HTTPS enroll; announce /
       presence / heartbeat.
+      _(done 2026-09-10; reviewed; see docs/features/enrollment.md,
+      docs/runbooks/agent-qemu.md, DECISIONS.md 2026-09-09.
+      T1: lint + mypy clean, 488 tests green, `BUNDLE OK` on all four targets.
+      T2 re-run independently in QEMU on the shipped `agent/dist/esp32` bundle:
+      first boot loaded `ff_cfg v1 (crc ok)` → `device_id 000000000000` →
+      `eth link up, ip 10.0.2.15` → `sntp: 1970 → 2026` → `enroll 200` →
+      `credential stored in NVS` → MQTT connect, `subscribe …/dn/#`, retained
+      announce + presence, `hb` every 10 s unretained; no token, password or
+      `ffe_` string anywhere in the transcript. Second boot on the same flash
+      image logged `reusing the stored credential (no enrollment)` and burned no
+      second token (token count and the api log's `enrolled device` lines both
+      unchanged). An ungraceful kill flipped `/v1/devices` to `online: false`
+      inside ~45 s off the retained LWT. A one-byte corruption of the blob
+      produced exactly one `ff_cfg: crc32 mismatch` line and a halted board.
+      Found on the way: `CONFIG_MBEDTLS_HAVE_TIME_DATE` is off by ESP-IDF
+      default, so certificate validity dates went unchecked — now enabled and
+      required by `verify_bundle.py` and `tests/test_agent_partitions.py`.
+      CRITICAL: the confirm/rollback pair is guarded by
+      `ESP_OTA_IMG_PENDING_VERIFY` on both branches and confirms only after the
+      retained announce is acknowledged; no OTA write path exists; no `spec/`
+      edits — proposals recorded in DECISIONS.md.)_
 
 ### Frontend
 

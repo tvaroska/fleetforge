@@ -43,6 +43,7 @@ from fleetforge.firmware.manifest import (
     AgentManifest,
     AgentPartInfo,
     BundleManifest,
+    ConfigPartition,
     PartManifest,
 )
 
@@ -58,6 +59,7 @@ __all__ = [
     "AgentPart",
     "AgentPartInfo",
     "BundleManifest",
+    "ConfigPartition",
     "FirmwareCatalog",
     "PartManifest",
     "load_bundles",

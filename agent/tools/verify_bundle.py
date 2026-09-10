@@ -26,7 +26,17 @@ from typing import Any
 
 # design/architecture.md → Flash-time immutables, item 2. A BOOTLOADER option: absent
 # here means R2 auto-rollback is impossible on every board flashed with this bundle.
-REQUIRED_RESOLVED = ["CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y"]
+REQUIRED_RESOLVED = [
+    "CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y",
+    # R0-fw-1: both outbound channels are TLS in production and both validate against
+    # the compiled-in Mozilla bundle. Without it the agent links but every handshake
+    # fails inside mbedTLS, which is the least readable place for it to happen.
+    "CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y",
+    # R0-fw-1: without it mbedTLS ignores notBefore/notAfter, so an expired certificate
+    # validates and the protocol's SNTP-before-TLS rule enforces nothing. IDF's default
+    # is off, which is why this is checked in the BUILT config and not just the defaults.
+    "CONFIG_MBEDTLS_HAVE_TIME_DATE=y",
+]
 
 # Item 3 — one-way eFuse burns, all off in v1. Only `=y` is a failure.
 #
@@ -79,6 +89,19 @@ def verify(bundle_dir: Path) -> dict[str, Any]:
             f"app.bin is {app['size']} B but an OTA slot is {manifest['ota_slot_size']} B; "
             "this image could never be updated over the air"
         )
+
+    # Where the flasher writes per-board config. Absent means a board flashed from this
+    # bundle can never be told which server it belongs to.
+    config = manifest.get("config_partition")
+    if not isinstance(config, dict) or "offset" not in config:
+        raise BundleError(
+            "the manifest has no config_partition; a board flashed with this bundle "
+            "would have nowhere to put its ff_cfg blob"
+        )
+    print(
+        f"  0x{int(config['offset']):06x}  {str(config['label']):<22} "
+        f"{int(config['size']):>8} B  config partition (written per board)"
+    )
 
     resolved = (bundle_dir / "sdkconfig.resolved").read_text()
     for option in REQUIRED_RESOLVED:

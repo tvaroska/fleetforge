@@ -76,9 +76,17 @@ PARTITION_ENTRY = struct.Struct("<2sBBLL16sL")
 PARTITION_MAGIC = b"\xaa\x50"
 PARTITION_MD5_MAGIC = b"\xeb\xeb"
 PARTITION_TYPE_APP = 0x00
+PARTITION_TYPE_DATA = 0x01
 PARTITION_SUBTYPE_FACTORY = 0x00
 PARTITION_SUBTYPE_OTA_0 = 0x10
 PARTITION_SUBTYPE_OTA_1 = 0x11
+
+# The flash-time config partition (`agent/main/ff_cfg.h`, `agent/tools/ff_cfg.py`): a
+# custom data subtype, so IDF gives it no name of its own. Its offset is decoded here and
+# carried through the manifest so the flasher (R0-fe-3) and the QEMU harness never type
+# `0x12000` — the same rule the bootloader offset already follows.
+PARTITION_SUBTYPE_FF_CFG = 0x40
+CONFIG_PARTITION_LABEL = "ff_cfg"
 
 # The layout id lives in the CSV header, next to the layout it names, so there is one
 # place to change and `tests/test_agent_partitions.py` guards the format.
@@ -189,6 +197,31 @@ def ota_slot_size(rows: list[dict[str, Any]]) -> int:
     return size
 
 
+def config_partition(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """Where per-board configuration goes, decoded from the built table.
+
+    Refused when missing, for the same reason a `factory` partition is refused: a bundle
+    that reaches `agent/dist/` gets flashed onto a board, and a board with nowhere to put
+    its `ff_cfg` blob can never be given an API URL, a link or an enrollment token — and a
+    partition cannot be added later by OTA.
+
+    Deliberately NOT added to `parts`: the catalog re-hashes every part against a file in
+    the bundle, and this one has no file. The blob is written per board at flash time.
+    """
+    for row in rows:
+        if row["type"] == PARTITION_TYPE_DATA and row["subtype"] == PARTITION_SUBTYPE_FF_CFG:
+            if row["label"] != CONFIG_PARTITION_LABEL:
+                raise BuildError(
+                    f"the config partition (data/0x40) is labelled {row['label']!r}, "
+                    f"not {CONFIG_PARTITION_LABEL!r}; the firmware looks it up by label"
+                )
+            return {"label": row["label"], "offset": row["offset"], "size": row["size"]}
+    raise BuildError(
+        "the built partition table has no `ff_cfg` (data, 0x40) partition; a board flashed "
+        "with this bundle could never be configured, and a partition cannot be added by OTA"
+    )
+
+
 def partition_layout_id(csv_path: Path) -> str:
     """The layout id declared in `partitions.csv`'s header (`layout id "ab-4m-v1"`)."""
     match = LAYOUT_ID_RE.search(csv_path.read_text())
@@ -283,6 +316,7 @@ def build_manifest(args: argparse.Namespace) -> dict[str, Any]:
         .replace("+00:00", "Z"),
         "partition_layout": partition_layout_id(args.partitions),
         "ota_slot_size": slot_size,
+        "config_partition": config_partition(rows),
         "flash_size": flash_size,
         "parts": parts,
     }
