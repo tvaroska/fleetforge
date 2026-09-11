@@ -7,14 +7,16 @@
 //
 // All the judgement is in `boardConsole.ts`. This file renders it.
 
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import {
   MILESTONES,
   MILESTONE_LABELS,
+  REMEDY_LABELS,
   useBoardConsole,
   type ConsoleFactory,
   type ConsoleLevel,
   type Milestone,
+  type Remedy,
 } from './boardConsole'
 import { explainFlashError } from './flasher'
 
@@ -47,13 +49,85 @@ export function BoardConsolePanel({
   /** Set once a flash has finished: the panel opens the port by itself, no second click. */
   autoWatch,
   createConsole,
+  onReflash,
+  reflashBlockedReason = null,
 }: {
   autoWatch: boolean
   // Injected by the tests only: jsdom has no `navigator.serial` (see `boardConsole.ts`).
   createConsole?: ConsoleFactory
+  /**
+   * S0-fe-6. Runs a full re-flash: re-acquire the port with esptool, mint a fresh
+   * single-use token, write ff_cfg + the agent, erase NVS. Absent when the page cannot
+   * flash right now — and then NO button is rendered, because a button that cannot work
+   * is the thing this task forbids. Optional: the panel is also used with no flasher
+   * behind it at all.
+   */
+  onReflash?: () => Promise<void>
+  /** Why `onReflash` is absent, in plain language. Rendered as muted text, never as a
+   *  disabled button — a disabled button explains nothing. */
+  reflashBlockedReason?: string | null
 }) {
   const state = useBoardConsole({ createConsole, explainError: explainFlashError })
   const { watch } = state
+  const [recovering, setRecovering] = useState(false)
+
+  async function runReflash() {
+    if (onReflash === undefined) return
+    setRecovering(true)
+    try {
+      // esptool needs the port and this panel is holding it. Release FIRST: the flasher
+      // opens the same physical device and would otherwise get "already open".
+      await state.release()
+      await onReflash()
+    } finally {
+      setRecovering(false)
+    }
+  }
+
+  // Deliberately NOT clearing the log. The old fault stays visible until the re-flashed
+  // board prints its first `ff-agent` line — which is a `boot` milestone and therefore
+  // clears the fault by the existing S0-fe-4 rule — and if the recovery flash fails, the
+  // evidence is still on screen.
+  //
+  // Called as a plain function rather than rendered as `<RemedyAction/>`: a component
+  // declared inside another is a new type on every render, so React would unmount and
+  // remount the button mid-interaction.
+  function remedyAction(remedy: Remedy) {
+    if (remedy === 'reboot') {
+      // An EN pulse needs an open port, so this one exists only while we hold it.
+      if (!state.watching) return null
+      return (
+        <button
+          type="button"
+          className="remedy"
+          data-testid="console-remedy"
+          onClick={() => void state.reboot()}
+        >
+          {REMEDY_LABELS.reboot}
+        </button>
+      )
+    }
+    if (onReflash === undefined) {
+      if (reflashBlockedReason === null) return null
+      return (
+        <span className="muted" data-testid="console-remedy-blocked">
+          {reflashBlockedReason}
+        </span>
+      )
+    }
+    return (
+      <button
+        type="button"
+        className="remedy"
+        data-testid="console-remedy"
+        onClick={() => void runReflash()}
+        // Disabled while it runs: a double-click would mint two single-use tokens.
+        disabled={recovering}
+      >
+        {recovering ? 'Re-flashing…' : REMEDY_LABELS.reflash}
+      </button>
+    )
+  }
 
   // One auto-open per flash. `autoWatch` goes true when the flash completes and false again
   // on "Flash another board", so the ref resets with it; without the ref, any re-render
@@ -121,6 +195,16 @@ export function BoardConsolePanel({
           <strong>{fault.text}</strong>
           <br />
           {fault.hint}
+          {/* At most ONE action on screen. Two identical buttons would be confusing and
+              an ambiguous `getByRole` in every future test, so the fault gets first
+              claim and the overdue banner below only renders one when the fault has
+              none. A `<button>` is phrasing content, so this `<p>` stays a `<p>`. */}
+          {fault.remedy !== null && (
+            <>
+              <br />
+              {remedyAction(fault.remedy)}
+            </>
+          )}
         </p>
       )}
 
@@ -147,6 +231,13 @@ export function BoardConsolePanel({
           </strong>
           <br />
           {overdue.hint}
+          {/* Only when the fault above did not already claim the one action. */}
+          {fault?.remedy == null && overdue.remedy !== null && (
+            <>
+              <br />
+              {remedyAction(overdue.remedy)}
+            </>
+          )}
         </p>
       )}
 

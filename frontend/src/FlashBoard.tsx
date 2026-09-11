@@ -176,6 +176,16 @@ export function FlashBoard({
   }
   const configError = validationMessage(config)
 
+  // S0-fe-6. `eraseAll: true` is deliberately NOT the form's checkbox: every fault a
+  // re-flash fixes is either a spent token or a stale NVS credential, and leaving NVS in
+  // place makes the freshly minted token dead on arrival (`flasher.ts` → WriteOptions).
+  //
+  // Not memoised on purpose: it is only ever used from an `onClick`, and `config` is a
+  // fresh literal on every render, so a `useCallback` would churn and buy nothing — and
+  // one with an honest dependency list would be rebuilt every render anyway.
+  const recoverByReflash = () =>
+    state.reflash({ config, eraseAll: true, baudRate: form.baudRate })
+
   return (
     <section aria-labelledby="flash-heading">
       <h2 id="flash-heading">Flash a board</h2>
@@ -478,7 +488,18 @@ export function FlashBoard({
       {/* Below the flash log, and outside it: the console is useful on a board that was
           flashed last week, not only on one flashed in this tab. `autoWatch` is what makes
           the just-flashed case need no click at all. */}
-      <BoardConsolePanel autoWatch={state.phase === 'done'} createConsole={createConsole} />
+      <BoardConsolePanel
+        autoWatch={state.phase === 'done'}
+        createConsole={createConsole}
+        // No button when the form could not produce a valid blob — re-flashing the same
+        // invalid config is a button that cannot work.
+        onReflash={configError === null ? recoverByReflash : undefined}
+        reflashBlockedReason={
+          configError === null
+            ? null
+            : 'Fill in the network details in step 2 to re-flash from here.'
+        }
+      />
     </section>
   )
 }

@@ -30,7 +30,10 @@ S0-fe-4 → S0-fe-5 → S0-fe-6 → S0-fe-7, closed by S0-test-3. Do them in tha
 nothing can be acted on before it is named, and nothing can be judged before a person
 who has not seen the code tries it. **S0-fe-4 landed 2026-09-11** — the panel now names
 tagless faults (brownout, panic, ROM reset reasons), keeps its milestone claims per-boot,
-surfaces a reset loop, and puts a deadline on every milestone. S0-fe-5 is next.
+surfaces a reset loop, and puts a deadline on every milestone. **S0-fe-5 and S0-fe-6
+landed the same day** — the console now resets the board itself so the boot is never
+missed, and where a fault's remedy is software the panel offers it as one button
+(a spent token is re-flashed in a click) rather than as an instruction. S0-fe-7 is next.
 
 <!-- Counters: spec=1 infra=5 db=1 be=6 fe=7 sec=1 fw=2 test=3 -->
 <!-- Sprint 0 counters: fe=7 fw=2 infra=2 test=3 -->
@@ -73,7 +76,7 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       anything. Empty state is visibly an empty log, not an absent one.
       _(done 2026-09-11; see docs/features/enrollment.md)_
 
-- [ ] **S0-fe-6**: Recover in place — the fix is a button, not a instruction (P1, 1d)
+- [x] **S0-fe-6**: Recover in place — the fix is a button, not a instruction (P1, 1d)
       Part of *Unaided onboarding* (`docs/features/enrollment.md`, `spec/standards.md`).
       Depends on S0-fe-4: a fault must be named before it can be acted on. Where a
       fault's remedy is software rather than physical, the panel offers it directly —
@@ -85,6 +88,7 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       matching action and the action resolves the fault on a real board. Faults with no
       software remedy — brownout, wrong PSK — must render *no* button rather than a
       button that cannot work.
+      _(done 2026-09-11; see docs/features/enrollment.md)_
 
 - [ ] **S0-fe-7**: One click produces a diagnostic bundle (P1, 0.5d)
       Part of *Unaided onboarding*. The escalation path that did not exist on

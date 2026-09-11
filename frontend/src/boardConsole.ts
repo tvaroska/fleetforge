@@ -25,6 +25,29 @@ export const CONSOLE_BAUD_RATE = 115200
 export type ConsoleLevel = 'error' | 'warn' | 'info' | 'plain'
 
 /**
+ * A fix the panel can perform itself. There are only two, because the panel's only
+ * channel to the board is the serial port: pulse EN, or take the port back and write
+ * a new ff_cfg. "Retry enrol" and "mint a fresh token" are not separate actions —
+ * the agent has no command surface, and a token that is not written changes nothing.
+ */
+export type Remedy = 'reboot' | 'reflash'
+
+/**
+ * Button copy for a remedy. Exported because the panel and the tests must agree on it.
+ *
+ * Short on purpose: `button` is set in Press Start 2P (see index.css rule 2), which is
+ * ~2.5x wide. Both strings are also deliberately distinct from every existing button
+ * name — "Reboot the board", "Flash this board", "Watch a board" — because Testing
+ * Library matches accessible names by substring and a collision turns every existing
+ * `getByRole('button', …)` into "found multiple elements". In particular
+ * `'Re-flash this board'` is forbidden: it contains `flash this board`.
+ */
+export const REMEDY_LABELS: Record<Remedy, string> = {
+  reboot: 'Reboot and retry',
+  reflash: 'Re-flash the board',
+}
+
+/**
  * The boot the operator is waiting on, in order. Each one is a thing that can be true or
  * not true about a board, and the first one that never becomes true IS the diagnosis.
  */
@@ -71,6 +94,13 @@ export type ConsoleEvent = {
    * and exactly the silence this panel exists to break.
    */
   hintKind: 'generic' | 'specific'
+  /**
+   * A fix the panel can perform for this line, or null when the board will fix itself or
+   * only a human with a cable can. Rides on the event for the same reason `commandedReset`
+   * does: `summarizeConsole` is pure over `events` alone, so anything the summary must
+   * know has to travel in-band rather than as a second argument.
+   */
+  remedy: Remedy | null
   /** Who printed this line: the board over UART, or this panel narrating what it did. */
   source: 'board' | 'panel'
   /**
@@ -100,7 +130,7 @@ export type ConsoleSummary = {
    * something that happened; the reset it caused does not make it untrue, and a panic's
    * cause is printed immediately *before* the reset that hides it.
    */
-  fault: { text: string; hint: string } | null
+  fault: { text: string; hint: string; remedy: Remedy | null } | null
   /** Boots seen since this panel started watching. */
   boots: number
   /**
@@ -120,6 +150,8 @@ export type MilestoneStall = {
   waitedMs: number
   /** What should have happened, what usually prevents it, and what to try. */
   hint: string
+  /** The fix the panel can perform for this stall, or null. See `MILESTONE_REMEDY`. */
+  remedy: Remedy | null
 }
 
 /**
@@ -163,6 +195,22 @@ export const MILESTONE_STALL: Record<Milestone, string> = {
 }
 
 /**
+ * Which stalls the panel can act on itself. `null` where the fix is the network or the
+ * cable — see `Remedy`, and S0-fe-6's rule: no button that cannot work.
+ *
+ * `boot` and `enroll` are the two whose prose above already issues the instruction
+ * ("Flash the board again", "flash it again to mint a fresh enrolment token"), which is
+ * precisely the three manual steps this task replaces with one press.
+ */
+export const MILESTONE_REMEDY: Record<Milestone, Remedy | null> = {
+  boot: 'reflash',
+  link: null,
+  clock: null,
+  enroll: 'reflash',
+  fleet: null,
+}
+
+/**
  * `esp_wifi`'s `wifi_err_reason_t`, for the handful that actually reach a bench.
  *
  * These are the numbers behind "the board just doesn't connect". The agent logs the code
@@ -189,8 +237,20 @@ const LOG_LINE = /^([IWED])\s+\((\d+)\)\s+([A-Za-z0-9_.-]+):\s?(.*)$/
 
 const LEVELS: Record<string, ConsoleLevel> = { E: 'error', W: 'warn', I: 'info', D: 'info' }
 
-type Hint = { text: string; kind: 'generic' | 'specific' }
-const specific = (text: string): Hint => ({ text, kind: 'specific' })
+type Hint = { text: string; kind: 'generic' | 'specific'; remedy: Remedy | null }
+/**
+ * A named diagnosis, optionally with a fix the panel can perform.
+ *
+ * The remedy defaults to `null` — S0-fe-6's rule is that a remedy is offered only when
+ * the board will NOT fix itself *and* the panel's action changes the outcome. The agent
+ * retries the link forever and backs off 60 s → 15 min on a 503, so a button that only
+ * restarts a retry already in progress is a button that cannot work.
+ */
+const specific = (text: string, remedy: Remedy | null = null): Hint => ({
+  text,
+  kind: 'specific',
+  remedy,
+})
 
 /** The boot-ROM reset banner: `rst:0xf (RTCWDT_BROWN_OUT_RESET),boot:0x13 (SPI_FAST…)`. */
 const RESET_BANNER = /^rst:0x[0-9a-f]+\s*\(([A-Z0-9_]+)\)/i
@@ -227,15 +287,21 @@ const BARE_RULES: { match: RegExp; level: ConsoleLevel; hint: Hint }[] = [
     hint: specific(
       'The firmware crashed. Flash the board again; if it crashes in the same place a second ' +
         'time, this is a bug in the firmware rather than anything the cable can fix.',
+      // The hint already says "flash the board again" — S0-fe-6 makes that a button.
+      'reflash',
     ),
   },
   {
     // Follows the panic line, so it must not displace it: generic never overwrites specific.
     match: /^Backtrace:/,
     level: 'error',
+    // Generic hints never carry a remedy: a generic hint can be displaced by a specific
+    // one, and an action chosen from a line that merely FOLLOWS the cause is an action
+    // chosen from the wrong evidence.
     hint: {
       text: 'The board printed a crash backtrace. The line above names what it crashed on.',
       kind: 'generic',
+      remedy: null,
     },
   },
   {
@@ -245,6 +311,8 @@ const BARE_RULES: { match: RegExp; level: ConsoleLevel; hint: Hint }[] = [
     hint: specific(
       'The board came up in its flashing bootloader instead of running the agent. Unplug it, ' +
         'plug it back in, and press "Reboot the board".',
+      // An EN pulse with DTR low is exactly the fix the prose already asks for.
+      'reboot',
     ),
   },
   {
@@ -252,6 +320,7 @@ const BARE_RULES: { match: RegExp; level: ConsoleLevel; hint: Hint }[] = [
     level: 'error',
     hint: specific(
       'There is no usable firmware in the slot the board tried to boot. Flash the board again.',
+      'reflash',
     ),
   },
 ]
@@ -273,16 +342,19 @@ function resetBannerRule(reason: string): { level: ConsoleLevel; hint: Hint | nu
       hint: specific(
         'The board stopped responding and a watchdog reset it. If it keeps happening, flash ' +
           'the board again.',
+        'reflash',
       ),
     }
   }
   if (/SW_(CPU_)?RESET/.test(reason)) {
     return {
       level: 'warn',
-      // Generic: a panic prints its cause immediately before the reset it causes.
+      // Generic: a panic prints its cause immediately before the reset it causes. And a
+      // generic hint never carries a remedy — see `Backtrace:` above.
       hint: {
         text: 'The firmware restarted itself. Anything printed just above this says why.',
         kind: 'generic',
+        remedy: null,
       },
     }
   }
@@ -322,12 +394,14 @@ export function classifyConsoleLine(raw: string, seq: number, at = Date.now()): 
     bootMarker: banner !== null ? 'rom' : milestone === 'boot' ? 'agent' : null,
     hint: hint?.text ?? null,
     hintKind: hint?.kind ?? 'specific',
+    remedy: hint?.remedy ?? null,
     source: 'board',
     commandedReset: false,
   }
 }
 
-/** A line this panel printed about itself. Never a milestone, never a fault. */
+/** A line this panel printed about itself. Never a milestone, never a fault, never a
+ *  remedy — the panel does not diagnose its own narration. */
 export function panelNotice(
   raw: string,
   seq: number,
@@ -345,6 +419,7 @@ export function panelNotice(
     bootMarker: null,
     hint: null,
     hintKind: 'specific',
+    remedy: null,
     source: 'panel',
     commandedReset: options.commandedReset ?? false,
   }
@@ -364,9 +439,23 @@ function milestoneFor(tag: string | null, text: string): Milestone | null {
 
 function hintFor(tag: string | null, text: string): Hint | null {
   if (tag === 'ff-agent' && text.startsWith('halted:')) {
-    return specific(
-      'The agent gave up on purpose. It will not retry until the board is re-flashed.',
-    )
+    return {
+      text: 'The agent gave up on purpose. It will not retry until the board is re-flashed.',
+      // GENERIC, and this is a correction to S0-fe-6's original table. `park()`
+      // (`agent_main.c:67`) logs its reason strictly AFTER the failure it reports, so on
+      // the flagship case — `enroll 409` then `halted:` — a specific classification would
+      // replace "this token is single-use, flash the board again to mint a fresh one"
+      // with the engineer-facing "re-flash ff_cfg with a fresh ffe_ token (POST
+      // /v1/enrollment-tokens)". Same shape as `Backtrace:` and `SW_CPU_RESET`: real, but
+      // derivative of the line above it.
+      kind: 'generic',
+      // It DOES carry the remedy, unlike the other generic lines. The ban on those exists
+      // because their fix belongs to the specific line above (a crash's re-flash, a
+      // retry's nothing); here the action is the same one whatever evidence you read it
+      // from, and a board that parks with nothing named above it — `no usable ff_cfg
+      // partition`, `no eFuse MAC` — is fixed by exactly this button and nothing else.
+      remedy: 'reflash',
+    }
   }
 
   if (tag === 'ff-wifi') {
@@ -411,12 +500,16 @@ function hintFor(tag: string | null, text: string): Hint | null {
     if (/^enroll 401\b/.test(text)) {
       return specific(
         'The server does not know this ffe_ token. Flash the board again to mint a new one.',
+        'reflash',
       )
     }
     if (/^enroll 409\b/.test(text)) {
       return specific(
         'This token was already spent, revoked or has expired. Tokens are single-use: ' +
           'flash the board again to mint a fresh one.',
+        // S0-fe-6's flagship case: the three manual steps this sentence describes are
+        // exactly what `useFlashBoard.reflash` does in one click.
+        'reflash',
       )
     }
     if (/^enroll 429\b/.test(text)) {
@@ -438,6 +531,7 @@ function hintFor(tag: string | null, text: string): Hint | null {
     if (text.includes('carries no enrollment')) {
       return specific(
         'This board holds no credential and no ffe_ token. It can never join; re-flash it.',
+        'reflash',
       )
     }
   }
@@ -446,6 +540,10 @@ function hintFor(tag: string | null, text: string): Hint | null {
     return specific(
       'The stored credential is no longer valid — the device was probably deleted or ' +
         'reset on the server. Re-flash the board to enrol it again.',
+      // Only an erase clears it: `ff_store_load()` short-circuits enrolment while a
+      // credential is in NVS, so a fresh token written beside it is dead on arrival.
+      // The recovery path always erases — see `FlashBoard.tsx`.
+      'reflash',
     )
   }
 
@@ -455,6 +553,9 @@ function hintFor(tag: string | null, text: string): Hint | null {
     return {
       text: 'The link has not come up yet. The agent retries every 5 s and never gives up.',
       kind: 'generic',
+      // Generic hints never carry a remedy, and this one names its own reason why: the
+      // agent is already retrying, so no button of ours changes the outcome.
+      remedy: null,
     }
   }
 
@@ -464,7 +565,7 @@ function hintFor(tag: string | null, text: string): Hint | null {
 /** Fold the events into the checklist and the current fault. Pure; the UI renders this. */
 export function summarizeConsole(events: ConsoleEvent[], now = Date.now()): ConsoleSummary {
   let reached = new Set<Milestone>()
-  let fault: { text: string; hint: string } | null = null
+  let fault: { text: string; hint: string; remedy: Remedy | null } | null = null
   let faultKind: 'generic' | 'specific' = 'generic'
   let boots = 0
   let rebootLoop: { boots: number } | null = null
@@ -508,7 +609,7 @@ export function summarizeConsole(events: ConsoleEvent[], now = Date.now()): Cons
     // A generic note fills an empty slot but never overwrites a named cause. See
     // `ConsoleEvent.hintKind` — the retry heartbeat is always the newest line.
     if (event.hintKind === 'generic' && faultKind === 'specific') continue
-    fault = { text: event.text, hint: event.hint }
+    fault = { text: event.text, hint: event.hint, remedy: event.remedy }
     faultKind = event.hintKind
   }
 
@@ -520,7 +621,12 @@ export function summarizeConsole(events: ConsoleEvent[], now = Date.now()): Cons
   const waitedMs = now - since
   const overdue: MilestoneStall | null =
     events.length > 0 && waitingFor !== null && waitedMs >= MILESTONE_DEADLINE_MS[waitingFor]
-      ? { milestone: waitingFor, waitedMs, hint: MILESTONE_STALL[waitingFor] }
+      ? {
+          milestone: waitingFor,
+          waitedMs,
+          hint: MILESTONE_STALL[waitingFor],
+          remedy: MILESTONE_REMEDY[waitingFor],
+        }
       : null
 
   return { reached: ordered, waitingFor, fault, boots, rebootLoop, overdue }

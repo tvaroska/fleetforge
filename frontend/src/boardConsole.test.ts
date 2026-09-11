@@ -427,3 +427,146 @@ describe('summarizeConsole', () => {
     })
   })
 })
+
+// ── S0-fe-6: which faults the panel can fix itself ──────────────────────────────────────
+//
+// The rule the table encodes: a remedy is offered only when the board will NOT fix itself
+// AND the panel's action changes the outcome. `agent_main.c` is what decides that — it
+// parks forever on a 401/409 (`halted:`) and retries by itself on everything else
+// (60 s → 15 min for a 503, forever for the link). A button that only restarts a retry
+// already in progress is a button that cannot work, which is what the task forbids.
+describe('the remedy a line carries', () => {
+  it.each([
+    // Parked or credential-dead: only a fresh `ff_cfg` restarts these.
+    ['E (2900) ff-agent: halted: this board\'s enrollment token was refused for good', 'reflash'],
+    ['E (2600) ff-enroll: enroll 401: unknown token', 'reflash'],
+    ['E (2600) ff-enroll: enroll 409: this token is already used, revoked or expired.', 'reflash'],
+    ['E (2600) ff-enroll: ff_cfg carries no enrollment token', 'reflash'],
+    ['E (3100) ff-mqtt: broker refused the connection (rc=5)', 'reflash'],
+    ['invalid header: 0xffffffff', 'reflash'],
+    ['Guru Meditation Error: Core 0 panic\'ed (LoadProhibited)', 'reflash'],
+    ['rst:0x8 (TG1WDT_SYS_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)', 'reflash'],
+    // An EN pulse with DTR low is exactly the fix for the ROM download loop.
+    ['waiting for download', 'reboot'],
+    // Physical: the acceptance names both of these as "no button".
+    ['E BOD: Brownout detector was triggered', null],
+    ['rst:0xf (RTCWDT_BROWN_OUT_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)', null],
+    ['W (5300) ff-wifi: disconnected (reason 15); reconnecting in 1000 ms', null],
+    ['W (5300) ff-wifi: disconnected (reason 201); reconnecting in 1000 ms', null],
+    // The agent's own retry ladders. Re-flashing changes nothing about a server 503.
+    ['E (2600) ff-enroll: enroll 503: broker unavailable', null],
+    ['E (2600) ff-enroll: enroll 429: slow down', null],
+    ['E (2600) ff-enroll: cannot reach https://bingo.tvaroska.sk/v1/enroll', null],
+    ['E (900) ff-net: no IP address after 30000 ms', null],
+    ['W (1500) ff-time: sntp: no answer after 15000 ms', null],
+    // The fix needs DIFFERENT config; re-flashing the same form writes the same blob.
+    ['W (300) ff-wifi: ff_cfg carries no ssid', null],
+  ])('%s → %s', (line, remedy) => {
+    expect(classifyConsoleLine(line, 0).remedy).toBe(remedy)
+  })
+
+  it('a derivative generic hint carries no remedy', () => {
+    // A generic hint can be displaced by a specific one, and every generic line here is
+    // DERIVATIVE — it follows the line that names the cause, and the fix belongs to that
+    // line (a crash's re-flash) or is nothing at all (a retry already in progress). An
+    // action chosen from one of these is an action chosen from the wrong evidence.
+    //
+    // `halted:` is the deliberate exception and has its own test below: it is generic for
+    // the same reason, but its remedy is the same one whatever evidence names it, and a
+    // board that parks with nothing diagnosed above it has no other line to carry it.
+    for (const line of [
+      'Backtrace: 0x400d1234:0x3ffb1234 0x400d5678:0x3ffb5678',
+      'rst:0xc (SW_CPU_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)',
+      'W (6300) ff-agent: no network yet; waiting for the link',
+    ]) {
+      const event = classifyConsoleLine(line, 0)
+      expect(event.hintKind).toBe('generic')
+      expect(event.remedy).toBeNull()
+    }
+  })
+
+  it('a panel notice carries no remedy — the panel does not diagnose its own narration', () => {
+    expect(panelNotice('— resetting the board', 0, T0).remedy).toBeNull()
+  })
+})
+
+describe('summarizeConsole carries the remedy to the fault', () => {
+  it('a spent token surfaces as a fault the panel can re-flash away', () => {
+    const events = classify([
+      'rst:0x1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)',
+      'I (100) ff-agent: fleetforge agent 0.3.0 (idf v5.5.5), built Sep 11 2026 08:14:02',
+      'I (900) ff-net: wifi link up, ip 192.168.1.40 gw 192.168.1.1 mask 255.255.255.0',
+      'E (2600) ff-enroll: enroll 409: this token is already used, revoked or expired.',
+    ])
+    const summary = summarizeConsole(events, at(events))
+    expect(summary.fault?.hint).toMatch(/single-use/)
+    expect(summary.fault?.remedy).toBe('reflash')
+  })
+
+  it('the halted line that follows keeps the 409 diagnosis, and keeps the button', () => {
+    // `park()` logs strictly AFTER the failure it reports, so the halted line must not
+    // overwrite the sentence a non-engineer can act on. Both carry `reflash`, so the
+    // button is there either way — what is defended here is WHICH text is on screen.
+    const events = classify([
+      'E (2600) ff-enroll: enroll 409: this token is already used, revoked or expired.',
+      'E (2900) ff-agent: halted: this board\'s enrollment token was refused for good — ' +
+        're-flash ff_cfg with a fresh ffe_ token (POST /v1/enrollment-tokens)',
+    ])
+    const summary = summarizeConsole(events, at(events))
+    expect(summary.fault?.hint).toMatch(/single-use/)
+    expect(summary.fault?.remedy).toBe('reflash')
+  })
+
+  it('a board that parks with nothing named above it still gets its button', () => {
+    // The other `park()` reasons — `ff_cfg.c` unparseable, no eFuse MAC. Generic fills an
+    // empty fault slot, so this is the only line the operator has, and re-flash is the
+    // only thing that fixes it.
+    const events = classify([
+      'I (100) ff-agent: fleetforge agent 0.3.0 (idf v5.5.5), built Sep 11 2026 08:14:02',
+      'E (140) ff-agent: halted: no usable ff_cfg partition — re-flash it (agent/tools/ff_cfg.py)',
+    ])
+    const summary = summarizeConsole(events, at(events))
+    expect(summary.fault?.hint).toMatch(/gave up on purpose/)
+    expect(summary.fault?.remedy).toBe('reflash')
+  })
+
+  it('drops the remedy with the fault when a later milestone clears it', () => {
+    // A fault is cleared by progress (S0-fe-1's rule), and the button must go with it —
+    // this is exactly what happens after the recovery re-flash succeeds.
+    const events = classify([
+      'E (2600) ff-enroll: enroll 409: this token is already used, revoked or expired.',
+      'I (2900) ff-enroll: enroll 200 https://bingo.tvaroska.sk/v1/enroll',
+    ])
+    const summary = summarizeConsole(events, at(events))
+    expect(summary.fault).toBeNull()
+  })
+
+  it('a brownout fault offers nothing, because nothing in software fixes a cable', () => {
+    const events = classify(BENCH_2026_09_11)
+    const summary = summarizeConsole(events, at(events))
+    expect(summary.fault?.hint).toMatch(/browning out/)
+    expect(summary.fault?.remedy).toBeNull()
+  })
+})
+
+describe('an overdue milestone carries MILESTONE_REMEDY', () => {
+  it('a stalled enrolment can be re-flashed from the banner', () => {
+    const events = classify([
+      'I (100) ff-agent: fleetforge agent 0.3.0 (idf v5.5.5), built Sep 11 2026 08:14:02',
+      'I (900) ff-net: wifi link up, ip 192.168.1.40 gw 192.168.1.1 mask 255.255.255.0',
+      'I (1500) ff-time: sntp: 1970-01-01T00:00:02Z -> 2026-09-11T08:14:05Z (via pool.ntp.org)',
+    ])
+    const summary = summarizeConsole(events, at(events) + MILESTONE_DEADLINE_MS.enroll + 1000)
+    expect(summary.overdue?.milestone).toBe('enroll')
+    expect(summary.overdue?.remedy).toBe('reflash')
+  })
+
+  it('a stalled link offers nothing — the agent is already retrying it forever', () => {
+    const events = classify([
+      'I (100) ff-agent: fleetforge agent 0.3.0 (idf v5.5.5), built Sep 11 2026 08:14:02',
+    ])
+    const summary = summarizeConsole(events, at(events) + MILESTONE_DEADLINE_MS.link + 1000)
+    expect(summary.overdue?.milestone).toBe('link')
+    expect(summary.overdue?.remedy).toBeNull()
+  })
+})

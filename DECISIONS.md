@@ -6,6 +6,72 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-11 — the panel performs the fix it names (S0-fe-6)
+
+Layer 3 of *Unaided onboarding*. The panel already named the fault (S0-fe-4) and always saw
+the boot (S0-fe-5); it still answered a spent token with three manual steps written as prose.
+
+- **There are exactly two mechanisms, because the panel's only channel to the board is the
+  serial port:** `reboot` (pulse EN through the console session) and `reflash` (release the
+  port, re-acquire with esptool, mint, write, erase). "Retry enrol" and "mint a fresh token"
+  from the task text are **not** separate actions and collapse into `reflash` — the agent
+  exposes no serial command surface, and a token that is not written into `ff_cfg` changes
+  nothing. Anyone who later wants a third remedy needs a new channel first.
+- **The rule that decides who gets a button: the board will not fix itself AND the action
+  changes the outcome.** `agent_main.c` is what fills the table in, not taste.
+  `enroll_until_credentialed()` parks forever on 401/409, so only a re-flash moves that
+  board. Everything else retries by itself — 60 s → 15 min for a 503, `while
+  (ff_net_bring_up(...) != ESP_OK)` forever for the link, DHCP forever — and **the agent's
+  own retry ladders are precisely what disqualify 503, DHCP and link from having a button**.
+  A button that restarts a retry already in progress is the thing the task forbids.
+  Brownout and wrong PSK render no button because no software fixes a cable or a PSK.
+- **The recovery re-flash always erases, and it is deliberately NOT the form's checkbox.**
+  Every fault a re-flash fixes is a spent token or a stale NVS credential, and
+  `ff_store_load()` short-circuits enrolment while a credential is present — so a freshly
+  minted token written beside it is dead on arrival and the operator sees the *same* fault
+  after pressing the button. That is the worst possible outcome for a feature whose entire
+  point is that the button works.
+- **The log is deliberately not cleared on recovery.** The re-flashed board's first
+  `ff-agent` line is a `boot` milestone, which clears the fault by S0-fe-4's existing rule —
+  so clearing the log would be redundant on success and destructive on failure, where the
+  evidence is the only thing S0-fe-7 will have to bundle.
+- **`halted:` is a GENERIC hint, which corrects the remedy table the plan shipped with.**
+  `park()` logs its reason strictly *after* the failure it reports, so a specific
+  classification replaced "this token is single-use, flash the board again to mint a fresh
+  one" with the engineer-facing "re-flash ff_cfg with a fresh ffe_ token (POST
+  /v1/enrollment-tokens)" on the flagship case. Same derivative shape as `Backtrace:` and
+  `SW_CPU_RESET` — the third time that pattern has been the right answer. It is, however,
+  the one generic hint that **does** carry a remedy: the ban on the others exists because
+  their fix belongs to the specific line above them, whereas re-flash is the same action
+  whatever evidence names it, and a board that parks with nothing diagnosed above it (`no
+  usable ff_cfg partition`, `no eFuse MAC`) has no other line to carry the button.
+- **Gotcha that would have cost an afternoon: Testing Library matches accessible names by
+  substring.** `Re-flash this board` contains `flash this board` and turns every existing
+  `getByRole('button', { name: /flash this board/i })` into "found multiple elements"; a
+  second `Reboot the board` breaks the EN-pulse test the same way. The labels are therefore
+  `Re-flash the board` and `Reboot and retry`, pinned in `REMEDY_LABELS` so the panel and
+  the tests cannot drift.
+- **`flash()` stopped reading the `chip` state and reads `chipRef` instead.** `reflash`
+  calls `connect()` and `flash()` in the same tick, and the state has not re-rendered — the
+  engine would have selected the bundle for whichever board was on the desk last time, and
+  an S3 bundle flashed to a C3 erases cleanly and never boots. `setChip` stays; the view
+  renders from it. This is the one change in the task with a real cost when wrong.
+- **At most one action on screen**, fault first and the overdue banner only when the fault
+  has none. Two identical buttons are confusing to the operator and an ambiguous
+  `getByRole` for every future test.
+- **A missing user gesture now says something true.** `requestPort()` needs transient user
+  activation and the recovery click awaits `release()` first; Chromium's `SecurityError`
+  for a closed activation window used to map to "the page must be on HTTPS or localhost",
+  which is wrong and sends the operator nowhere. Do not "fix" the underlying race by
+  calling `onReflash()` without awaiting the release — the flasher would then open a port
+  the console still holds and get `InvalidStateError` most of the time.
+- **The loop closes itself and no code makes it happen.** The recovery flash drives `phase`
+  through `flashing` → `done`, so `autoWatch` toggles, the panel's `armed` ref resets, and
+  `watch('granted')` re-opens the port and pulses EN (S0-fe-5). Nothing was added for it;
+  do not add anything.
+
+Details: `docs/features/enrollment.md` → *Recovery is a button (S0-fe-6)*.
+
 ## 2026-09-11 — the console resets the board itself so the boot is never missed (S0-fe-5)
 
 The panel's automatic reset is not a fix for a dropped session — it is the *designed

@@ -15,10 +15,14 @@ import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { FlashBoard } from './FlashBoard'
 import type { AgentManifest } from './api'
+import type { BoardConsole, ConsoleFactory } from './boardConsole'
 import type { BoardFlasher, ChipInfo, FlashPart, WriteOptions } from './flasher'
 
 const TOKEN_ID = '11111111-1111-4111-8111-111111111111'
 const PLAINTEXT = `ffe_${TOKEN_ID}.s3cr3tflashersecretvalue`
+/** The token the SECOND mint returns, so the recovery blob can be told from the first. */
+const TOKEN_ID_2 = '22222222-2222-4222-8222-222222222222'
+const PLAINTEXT_2 = `ffe_${TOKEN_ID_2}.s3cr3trecoverysecretvalue`
 const PASSPHRASE = 'correct-horse-battery-staple'
 const SSID = 'fleetforge-test'
 
@@ -173,6 +177,65 @@ async function flashWith(flasher: FakeFlasher, onSessionExpired = vi.fn()) {
   await userEvent.click(screen.getByRole('button', { name: /flash this board/i }))
   return { onSessionExpired }
 }
+
+/**
+ * A console that scripts a DIFFERENT boot per session. Lifted from `BoardConsole.test.tsx`
+ * — same contract, including the part that matters most: `lines()` yields the script and
+ * then BLOCKS rather than returning, because `agent_main.c:166` retries forever and a
+ * stream that ended would let the panel invent an inactivity timeout.
+ */
+function fakeConsoleSessions(scripts: string[][]) {
+  const state = { opened: 0, closed: 0, reboots: 0, acquires: [] as string[] }
+  const factory: ConsoleFactory = async ({ acquire }) => {
+    const script = scripts[state.opened] ?? []
+    state.opened += 1
+    state.acquires.push(acquire)
+    let closed = false
+    let release: (() => void) | null = null
+
+    const board: BoardConsole = {
+      async *lines() {
+        for (const line of script) yield line
+        if (closed) return
+        await new Promise<void>((resolve) => {
+          release = resolve
+        })
+      },
+      async reboot() {
+        state.reboots += 1
+      },
+      async close() {
+        if (closed) return
+        closed = true
+        state.closed += 1
+        release?.()
+      },
+    }
+    return board
+  }
+  return { factory, state }
+}
+
+/** The board came up, joined, set its clock — and its token had already been spent. */
+const SPENT_TOKEN_BOOT = [
+  'rst:0x1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)',
+  'I (100) ff-agent: fleetforge agent 0.3.0 (idf v5.5.5), built Sep 11 2026 08:14:02',
+  'I (900) ff-net: wifi link up, ip 192.168.1.40 gw 192.168.1.1 mask 255.255.255.0',
+  'I (1500) ff-time: sntp: 1970-01-01T00:00:02Z -> 2026-09-11T08:14:05Z (via pool.ntp.org)',
+  'E (2600) ff-enroll: enroll 409: this token is already used, revoked or expired.',
+  'E (2900) ff-agent: halted: this board\'s enrollment token was refused for good — re-flash ' +
+    'ff_cfg with a fresh ffe_ token (POST /v1/enrollment-tokens)',
+]
+
+/** The same board after the button: a fresh single-use token, all the way to the fleet. */
+const RECOVERED_BOOT = [
+  'rst:0x1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)',
+  'I (100) ff-agent: fleetforge agent 0.3.0 (idf v5.5.5), built Sep 11 2026 08:14:02',
+  'I (900) ff-net: wifi link up, ip 192.168.1.40 gw 192.168.1.1 mask 255.255.255.0',
+  'I (1500) ff-time: sntp: 1970-01-01T00:00:02Z -> 2026-09-11T08:15:10Z (via pool.ntp.org)',
+  'I (2600) ff-enroll: enroll 200 https://bingo.tvaroska.sk/v1/enroll',
+  'I (3100) ff-mqtt: mqtt connected as a4cf12b3de90 (mqtts://bingo.tvaroska.sk:8883)',
+]
 
 beforeEach(() => {
   // jsdom has neither of these. `flasher.ts` exists so the ENGINE needs no DOM; the view
@@ -377,6 +440,133 @@ describe('FlashBoard — failure handling', () => {
     await waitFor(() => expect(onSessionExpired).toHaveBeenCalled())
     expect(screen.queryByRole('alert')).toBeNull()
     expect(flasher.writes).toHaveLength(0)
+  })
+})
+
+// ── S0-fe-6 ─────────────────────────────────────────────────────────────────────────────
+//
+// The task line, end to end through the real `FlashBoard` with both seams faked: the
+// operator presses ONE button instead of performing three manual steps (walk back up the
+// page, re-select the port, press Flash), and the fault the button was attached to is
+// resolved. Everything below the click is real code — the console panel, the flash engine,
+// the mint-last discipline, the ff_cfg writer.
+describe('FlashBoard — recovery is a button (S0-fe-6)', () => {
+  it('a spent token is fixed by pressing a button, not by following an instruction', async () => {
+    const user = userEvent.setup()
+    let mints = 0
+    const { calls } = mockFetch(
+      await defaultRoutes({
+        'POST /v1/enrollment-tokens': () => {
+          mints += 1
+          // A second, DIFFERENT single-use token, so the recovery blob can be told apart.
+          const [id, token] = mints === 1 ? [TOKEN_ID, PLAINTEXT] : [TOKEN_ID_2, PLAINTEXT_2]
+          return json({
+            id,
+            token,
+            group_id: null,
+            expires_at: '2026-09-12T00:00:00Z',
+            created_at: '2026-09-11T00:00:00Z',
+          })
+        },
+      }),
+    )
+
+    const flashers: FakeFlasher[] = []
+    const createFlasher = async () => {
+      const flasher = new FakeFlasher(chipInfo())
+      flashers.push(flasher)
+      return flasher
+    }
+    const { factory: createConsole, state: console_ } = fakeConsoleSessions([
+      SPENT_TOKEN_BOOT,
+      RECOVERED_BOOT,
+    ])
+
+    render(
+      <FlashBoard
+        onSessionExpired={vi.fn()}
+        createFlasher={createFlasher}
+        createConsole={createConsole}
+      />,
+    )
+    await user.click(screen.getByRole('button', { name: /select port and detect/i }))
+    await screen.findByTestId('chip-info')
+    await user.type(screen.getByLabelText(/ssid/i), SSID)
+    await user.type(screen.getByLabelText(/passphrase/i), PASSPHRASE)
+    await user.click(screen.getByRole('button', { name: /flash this board/i }))
+
+    // 1. The console opens by itself (S0-fe-5) and names the spent token — the sentence a
+    //    non-engineer can act on, not the agent's engineer-facing `halted:` reason.
+    const fault = await screen.findByTestId('console-fault')
+    await waitFor(() => expect(fault).toHaveTextContent(/single-use/))
+
+    // 2. And the remedy is ON SCREEN as an action. This is the whole task: the operator is
+    //    never told to go and do three things.
+    const button = await screen.findByRole('button', { name: /re-flash the board/i })
+
+    // 3. One press. The console lets the port go, and esptool takes it.
+    await user.click(button)
+    await waitFor(() => expect(flashers).toHaveLength(2))
+    expect(console_.closed).toBe(1)
+
+    // 4. A FRESH single-use token was minted, and the recovery write erases — a stale NVS
+    //    credential would make the new token dead on arrival and the operator would see
+    //    the very same fault again.
+    await waitFor(() => expect(flashers[1].writes).toHaveLength(1))
+    expect(calls.filter((c) => c === 'POST /v1/enrollment-tokens')).toHaveLength(2)
+    expect(flashers[1].writeOptions[0].eraseAll).toBe(true)
+
+    // 5. And it is the SECOND token that went into the blob, not a replay of the first.
+    const config = flashers[1].writes[0].find((part) => part.address === CONFIG_OFFSET)!
+    const payload = new TextDecoder().decode(config.data)
+    expect(payload).toContain(PLAINTEXT_2)
+    expect(payload).not.toContain(PLAINTEXT)
+
+    // 6. The loop closes itself: `phase` went done again, so the panel re-opens the port
+    //    with no second click, and the board it now watches reaches the fleet. The fault
+    //    the button was attached to is gone — cleared by progress, not by clearing the log.
+    await waitFor(() => expect(console_.opened).toBe(2))
+    expect(console_.acquires).toEqual(['granted', 'granted'])
+    const milestones = screen.getByTestId('boot-milestones')
+    await waitFor(() => {
+      expect(milestones.querySelectorAll('[data-state="done"]')).toHaveLength(5)
+    })
+    expect(await screen.findByTestId('console-online')).toBeInTheDocument()
+    expect(screen.queryByTestId('console-fault')).not.toBeInTheDocument()
+
+    // 7. R0-fe-1's rule, re-asserted because a new code path now handles both secrets.
+    const body = document.body.textContent ?? ''
+    expect(body).not.toContain(PLAINTEXT)
+    expect(body).not.toContain(PLAINTEXT_2)
+    expect(body).not.toContain(PASSPHRASE)
+  })
+
+  it('says a fresh click is needed when the activation window closed, and works on the next one', async () => {
+    // `requestPort()` needs transient user activation, and the recovery click awaits the
+    // console's `release()` first. Untranslated, Chromium's wording maps to "the page must
+    // be on HTTPS or localhost" — wrong, and it sends the operator nowhere.
+    const user = userEvent.setup()
+    mockFetch(await defaultRoutes())
+    let attempts = 0
+    const createFlasher = async () => {
+      attempts += 1
+      if (attempts === 1) {
+        throw new DOMException(
+          "Failed to execute 'requestPort' on 'Serial': Must be handling a user gesture to " +
+            'show a permission request.',
+          'SecurityError',
+        )
+      }
+      return new FakeFlasher(chipInfo())
+    }
+    render(<FlashBoard onSessionExpired={vi.fn()} createFlasher={createFlasher} />)
+
+    await user.click(screen.getByRole('button', { name: /select port and detect/i }))
+    expect(await screen.findByText(/needs a fresh click/i)).toBeInTheDocument()
+    expect(screen.queryByText(/HTTPS or localhost/i)).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: /select port and detect/i }))
+    await screen.findByTestId('chip-info')
   })
 })
 

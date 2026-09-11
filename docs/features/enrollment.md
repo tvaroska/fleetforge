@@ -697,6 +697,84 @@ advances `last_seen` past that report still reads as arriving. It never complete
 heartbeat, so that is honest rather than wrong; tightening it would need a rule about how
 many messages count as having arrived.
 
+### Recovery is a button (S0-fe-6)
+
+**2026-09-11.** The third layer of *Unaided onboarding*. S0-fe-4 taught the panel to name
+the fault and S0-fe-5 made sure it saw the boot — but every remedy was still prose. On a
+spent token the panel said "Tokens are single-use: flash the board again to mint a fresh
+one", which is three manual steps (scroll back up, re-select the port, press **Flash this
+board**) described to an operator who is not expected to know what a token is.
+
+**What was built.** A fault now carries a `Remedy` alongside its hint, and the panel renders
+it as one button inside the fault box. There are exactly two remedies, because the panel's
+only channel to the board is the serial port: `reboot` (pulse EN through the console
+session) and `reflash` (release the port, re-acquire it with esptool, mint a fresh
+single-use token, write `ff_cfg` + the agent, erase NVS). "Retry enrol" and "mint a fresh
+token" from the task text are not separate mechanisms — the agent exposes no serial command
+surface, and a token that is not written into `ff_cfg` changes nothing — so both collapse
+into `reflash`. `useFlashBoard` grew a `reflash(request)` that chains `connect()` into the
+existing `flash()`, inheriting its mint-last and revoke-on-failure discipline unchanged.
+
+**Key decisions:**
+
+- **A remedy is offered only when the board will not fix itself AND the action changes the
+  outcome.** `agent_main.c` decides the table: `enroll_until_credentialed()` parks forever
+  on a 401/409, so only a re-flash moves that board; everything else retries by itself
+  (60 s → 15 min for a 503, forever for the link), so a button that restarts a retry
+  already in progress is a button that cannot work. Brownout, wrong PSK, blocked NTP and
+  DHCP silence therefore render *no* button — the acceptance's second half.
+- **The recovery re-flash always erases, regardless of the form's checkbox.** A board that
+  already enrolled keeps its broker credential in NVS and reuses it, so a freshly minted
+  token written beside it is dead on arrival — and the operator would press the button and
+  see the identical fault, the worst possible outcome for this feature.
+- **`halted:` became a *generic* hint, correcting the plan's table.** `park()` logs its
+  reason strictly after the failure it reports, so on the flagship case the halted line was
+  replacing "this token is single-use, flash the board again" with the engineer-facing
+  "re-flash ff_cfg with a fresh ffe_ token (POST /v1/enrollment-tokens)". Same derivative
+  shape as `Backtrace:` and `SW_CPU_RESET`. It is the one generic hint that still carries a
+  remedy: the action is the same whatever evidence names it, and a board that parks with
+  nothing diagnosed above it (`no usable ff_cfg partition`, `no eFuse MAC`) has no other
+  line to carry the button.
+- **The log is deliberately not cleared on recovery.** The re-flashed board's first
+  `ff-agent` line is a `boot` milestone, which clears the fault by S0-fe-4's existing rule —
+  and if the recovery flash fails, the evidence is still on screen for S0-fe-7.
+- **At most one action on screen.** The fault claims it; the overdue banner renders one only
+  when the fault has none. Two identical buttons are both confusing and an ambiguous
+  `getByRole` in every future test.
+- **`flash()` stopped reading the `chip` state.** `reflash` calls `connect()` and `flash()`
+  in the same tick, and the state has not re-rendered yet — a stale chip would select the
+  bundle for the previous board, and an S3 bundle on a C3 erases cleanly and never boots.
+  `chipRef` is now the source of truth; `setChip` stays because the view renders from it.
+- **The loop closes itself.** The recovery flash drives `phase` through `flashing` → `done`,
+  so `autoWatch` goes false and true again, the panel's `armed` ref resets, and `watch()`
+  re-opens the port and pulses EN. No new code.
+
+**Files touched:** `boardConsole.ts` (`Remedy`, `REMEDY_LABELS`, `MILESTONE_REMEDY`, the
+remedy on `Hint`/`ConsoleEvent`/`fault`/`MilestoneStall`), `flash.ts` (`chipRef`, `reflash`),
+`flasher.ts` (the missing-gesture message), `BoardConsole.tsx` (`onReflash` /
+`reflashBlockedReason` / `remedyAction`), `FlashBoard.tsx` (wiring, `eraseAll: true`),
+`index.css` (`.remedy`), plus 35 new tests.
+
+**T2 evidence.** The headline proof is *"a spent token is fixed by pressing a button, not by
+following an instruction"* in `flash.test.tsx`, driven through the real `<FlashBoard>` with
+both seams faked. A board is flashed; the fake console emits the `enroll 409` line and the
+agent's `halted:` line; the fault box names the spent token, a **Re-flash the board** button
+appears, and one click closes console session #1, creates a second flasher, mints a second
+token (`POST /v1/enrollment-tokens` twice), writes with `eraseAll: true` and the *second*
+plaintext at `CONFIG_OFFSET`, after which console session #2 opens by itself, all five
+milestones go green, `console-online` renders and the fault is gone — with neither plaintext
+nor the passphrase anywhere in the DOM. Vacuity-checked four ways, each confirmed failing
+and reverted: nulling the 409's remedy (no button), removing the `await state.release()`
+(port still held), forcing `eraseAll` back to the checkbox, and giving the brownout rule a
+`reflash` remedy (the "no button for a brownout" test fails).
+
+**The "on a real board" half is not runnable on this host** — the flashing bench is the Mac,
+and ESP32 boards do not enumerate over WebSerial on the Linux dev box. The bench script is in
+the plan (flash a board twice without erase so the baked token is spent on arrival; press the
+button; expect the port chooser once, the console re-opening by itself and the board reaching
+**On the fleet** without the operator touching the form). S0-test-3 is the unaided version of
+the same run.
+
 ### The boot appears automatically (S0-fe-5)
 
 **2026-09-11.** The second layer of *Unaided onboarding*, filed hours after S0-fe-4 landed.
@@ -847,11 +925,12 @@ from firmware, stays open in `spec/open-questions.md`.
      full log, config summary, chip info, firmware and server versions, the fault — with
      secrets redacted, so a stuck operator can hand it to someone who can help. That
      click is the thing that did not exist on 2026-09-11.
-- **Status:** In progress — layer 1 (S0-fe-4) landed 2026-09-11, see *The console always
-  names a diagnosis* above.
+- **Status:** In progress — layers 1–3 (S0-fe-4, S0-fe-5, S0-fe-6) landed 2026-09-11; see
+  *Recovery is a button* above. Remaining: the escalation click and the unaided run.
 - **Added:** 2026-09-11
-- **Tasks:** ~~S0-fe-4 (diagnosis)~~ done, ~~S0-fe-5 (never miss the boot)~~ done, S0-fe-6
-  (recovery actions), S0-fe-7 (diagnostic bundle), S0-test-3 (unaided acceptance run).
+- **Tasks:** ~~S0-fe-4 (diagnosis)~~ done, ~~S0-fe-5 (never miss the boot)~~ done,
+  ~~S0-fe-6 (recovery actions)~~ done, S0-fe-7 (diagnostic bundle), S0-test-3 (unaided
+  acceptance run).
   S0-fw-2 is adjacent: the first stage a board reports can never reach an HTTPS server.
 
 ## Post-v1

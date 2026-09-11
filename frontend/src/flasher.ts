@@ -81,6 +81,14 @@ export function explainFlashError(error: unknown): string {
   // Chromium throws NotFoundError both when no port matches and when the operator
   // dismisses the chooser, which is by far the common case.
   if (name === 'NotFoundError') return 'No board selected.'
+  // S0-fe-6. Chromium's wording when the transient user activation window has closed —
+  // the recovery click awaits `release()` before `requestPort()`, and a slow release can
+  // outlive it. It is not a security misconfiguration, and telling the operator to check
+  // HTTPS sends them nowhere. Must stay ABOVE the `SecurityError` branch: this is thrown
+  // as a `SecurityError` too.
+  if (/user gesture/i.test(message)) {
+    return 'The browser needs a fresh click to open the port chooser. Press the button again.'
+  }
   if (name === 'SecurityError') {
     return 'The browser blocked serial access; the page must be on HTTPS or localhost.'
   }

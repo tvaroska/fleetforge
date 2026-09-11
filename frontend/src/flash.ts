@@ -182,6 +182,15 @@ export type FlashBoardState = {
   /** Must be called straight from a click handler — it asks for the port. */
   connect: (baudRate: number) => Promise<void>
   flash: (request: FlashRequest) => Promise<void>
+  /**
+   * Re-acquire the port and flash again, in one click. S0-fe-6.
+   *
+   * A spent token, a refused credential and a parked agent are all only fixable by writing
+   * a fresh `ff_cfg`, and the operator should not have to walk back up the page to "Select
+   * port and detect" → "Flash this board". Must be called straight from a click handler,
+   * for the same reason `connect` must.
+   */
+  reflash: (request: FlashRequest) => Promise<void>
   /** Back to "select a port", keeping the form as the operator filled it in. */
   reset: () => void
 }
@@ -213,6 +222,15 @@ export function useFlashBoard({
   const expiredRef = useRef(onSessionExpired)
   expiredRef.current = onSessionExpired
   const flasherRef = useRef<BoardFlasher | null>(null)
+  /**
+   * The detected chip, readable synchronously. S0-fe-6.
+   *
+   * `flash()` used to read the `chip` STATE, which is invisible to a callback that has
+   * just called `connect()` in the same tick — so `reflash` would have selected the bundle
+   * for whatever board was on the desk last time, and flashing an S3 bundle to a C3 is a
+   * board that erases cleanly and never boots. `setChip` stays: the view renders from it.
+   */
+  const chipRef = useRef<ChipInfo | null>(null)
 
   const appendLog = useCallback((line: string) => {
     setLog((lines) => {
@@ -246,6 +264,7 @@ export function useFlashBoard({
     void flasher?.close()
     setPhase('idle')
     setStep('')
+    chipRef.current = null
     setChip(null)
     setBuild(null)
     setError(null)
@@ -270,6 +289,7 @@ export function useFlashBoard({
         flasherRef.current = flasher
         setStep('Detecting the chip…')
         const detected = await flasher.detect()
+        chipRef.current = detected
         setChip(detected)
         setPhase('detected')
         setStep('')
@@ -277,6 +297,8 @@ export function useFlashBoard({
         const flasher = flasherRef.current
         flasherRef.current = null
         await flasher?.close()
+        // A failed acquire leaves no board on the desk, so nothing may be flashed to one.
+        chipRef.current = null
         setPhase('idle')
         setStep('')
         // Cancelling the chooser is not an error state — the page must stay usable and a
@@ -294,7 +316,9 @@ export function useFlashBoard({
   const flash = useCallback(
     async (request: FlashRequest) => {
       const flasher = flasherRef.current
-      const detected = chip
+      // The ref, not the state: `reflash` calls `connect()` and then this in the same
+      // tick, and the state has not re-rendered yet. See `chipRef`.
+      const detected = chipRef.current
       if (flasher === null || detected === null) {
         setError('Select a port and detect the board first.')
         return
@@ -394,7 +418,23 @@ export function useFlashBoard({
         setBusy(false)
       }
     },
-    [chip, handle],
+    [handle],
+  )
+
+  /**
+   * Re-acquire the port and flash again, in one click. S0-fe-6.
+   *
+   * No duplication of the flash body and no new error surface: `connect()` reports its own
+   * failure (including a dismissed chooser), so a failed acquire simply stops here, and
+   * the mint-last / revoke-on-failure discipline in `flash()` is inherited unchanged.
+   */
+  const reflash = useCallback(
+    async (request: FlashRequest) => {
+      await connect(request.baudRate)
+      if (flasherRef.current === null || chipRef.current === null) return
+      await flash(request)
+    },
+    [connect, flash],
   )
 
   return {
@@ -409,6 +449,7 @@ export function useFlashBoard({
     busy,
     connect,
     flash,
+    reflash,
     reset,
   }
 }

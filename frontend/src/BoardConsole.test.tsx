@@ -30,6 +30,21 @@ const HAPPY = [
   'I (3100) ff-mqtt: mqtt connected as a4cf12b3de90 (mqtts://bingo.tvaroska.sk:8883)',
 ]
 
+/**
+ * S0-fe-6's flagship fault: the board came up, joined the network, set its clock — and the
+ * token baked into it had already been spent. `enroll_until_credentialed()` parks forever
+ * on a 409, so nothing but a re-flash will ever move this board.
+ */
+const SPENT_TOKEN = [
+  'rst:0x1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)',
+  'I (100) ff-agent: fleetforge agent 0.3.0 (idf v5.5.5), built Sep 11 2026 08:14:02',
+  'I (900) ff-net: wifi link up, ip 192.168.1.40 gw 192.168.1.1 mask 255.255.255.0',
+  'I (1500) ff-time: sntp: 1970-01-01T00:00:02Z -> 2026-09-11T08:14:05Z (via pool.ntp.org)',
+  'E (2600) ff-enroll: enroll 409: this token is already used, revoked or expired.',
+  'E (2900) ff-agent: halted: this board\'s enrollment token was refused for good — re-flash ' +
+    'ff_cfg with a fresh ffe_ token (POST /v1/enrollment-tokens)',
+]
+
 const SILENT_BOARD = [
   'I (100) ff-agent: fleetforge agent 0.1.0 (idf v5.5.5), built Sep 10 2026 00:00:00',
   'I (120) ff-id: device_id a4cf12b3de90',
@@ -319,6 +334,94 @@ describe('BoardConsolePanel', () => {
       await user.click(screen.getByRole('button', { name: /watch a board/i }))
 
       await waitFor(() => expect(state.reboots).toBe(2))
+    })
+  })
+
+  // ── S0-fe-6: where the remedy is software, the panel offers it ──────────────────────
+  //
+  // The task line: the operator presses one button instead of performing three manual
+  // steps. The negative half matters just as much — a fault with no software remedy must
+  // render NO button rather than one that cannot work.
+  describe('the fix is a button, not an instruction', () => {
+    it('offers a re-flash for a spent token, and releases the port before running it', async () => {
+      const user = userEvent.setup()
+      const { factory, state } = fakeConsole(SPENT_TOKEN)
+      const onReflash = vi.fn(async () => {})
+      render(<BoardConsolePanel autoWatch createConsole={factory} onReflash={onReflash} />)
+
+      const fault = await screen.findByTestId('console-fault')
+      expect(fault).toHaveTextContent(/single-use/)
+
+      const button = await screen.findByRole('button', { name: /re-flash the board/i })
+      await user.click(button)
+
+      // esptool opens the same physical device, so the console must let go FIRST or the
+      // recovery flash dies with "the port is already open".
+      await waitFor(() => expect(state.closed).toBe(1))
+      expect(onReflash).toHaveBeenCalledTimes(1)
+    })
+
+    it('explains why it cannot re-flash rather than showing a dead button', async () => {
+      const { factory } = fakeConsole(SPENT_TOKEN)
+      render(
+        <BoardConsolePanel
+          autoWatch
+          createConsole={factory}
+          reflashBlockedReason="Fill in the network details in step 2 to re-flash from here."
+        />,
+      )
+
+      await screen.findByTestId('console-fault')
+      expect(await screen.findByTestId('console-remedy-blocked')).toHaveTextContent(
+        /network details in step 2/i,
+      )
+      expect(screen.queryByTestId('console-remedy')).not.toBeInTheDocument()
+    })
+
+    // The acceptance's second half, on the log that started this whole feature.
+    it('offers NO button for the 2026-09-11 brownout — no cable is fixed in software', async () => {
+      const { factory } = fakeConsole(BENCH_2026_09_11)
+      const onReflash = vi.fn(async () => {})
+      render(<BoardConsolePanel autoWatch createConsole={factory} onReflash={onReflash} />)
+
+      const fault = await screen.findByTestId('console-fault')
+      expect(fault).toHaveTextContent(/browning out/)
+      expect(screen.queryByTestId('console-remedy')).not.toBeInTheDocument()
+      expect(onReflash).not.toHaveBeenCalled()
+    })
+
+    it('offers a reboot — not a re-flash — for a board stuck in its ROM loader', async () => {
+      const user = userEvent.setup()
+      const { factory, state } = fakeConsole([
+        'rst:0x1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)',
+        'waiting for download',
+      ])
+      const onReflash = vi.fn(async () => {})
+      render(<BoardConsolePanel autoWatch createConsole={factory} onReflash={onReflash} />)
+
+      await screen.findByTestId('console-fault')
+      const rebootsBefore = state.reboots
+      await user.click(await screen.findByRole('button', { name: /reboot and retry/i }))
+
+      expect(state.reboots).toBe(rebootsBefore + 1)
+      expect(onReflash).not.toHaveBeenCalled()
+    })
+
+    it('renders exactly one action when the board is both faulted and overdue', async () => {
+      vi.useFakeTimers()
+      try {
+        const { factory } = fakeConsole(SPENT_TOKEN)
+        const onReflash = vi.fn(async () => {})
+        render(<BoardConsolePanel autoWatch createConsole={factory} onReflash={onReflash} />)
+        await act(() => vi.advanceTimersByTimeAsync(MILESTONE_DEADLINE_MS.enroll + 2_000))
+
+        // Both the fault and the stalled `enroll` milestone want a re-flash. Two identical
+        // buttons would be confusing and an ambiguous `getByRole` in every future test.
+        expect(screen.getByTestId('console-overdue')).toBeInTheDocument()
+        expect(screen.getAllByTestId('console-remedy')).toHaveLength(1)
+      } finally {
+        vi.useRealTimers()
+      }
     })
   })
 })

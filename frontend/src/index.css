@@ -151,6 +151,15 @@ code {
   font-weight: 700;
 }
 
+/* S0-fe-6. The recovery button lives INSIDE a `.bad` / `.warn` paragraph, and
+   `text-decoration` inherits into a nested button — so `.bad`'s underline would run
+   through the button's own label. */
+.remedy {
+  display: inline-block;
+  margin-top: 0.5rem;
+  text-decoration: none;
+}
+
 /* Referenced by App.tsx, EnrollBoard.tsx and FleetView.tsx. */
 .muted {
   color: var(--ff-dim);
