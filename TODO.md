@@ -59,7 +59,7 @@ the retired bingo app), single-tenant, **not a public product until V3**.
 
 Bricking risks, broker auth and security issues get filed here as they surface.
 
-- [ ] **S0-fe-5**: The console misses the boot it exists to show (P1, 0.5d)
+- [x] **S0-fe-5**: The console misses the boot it exists to show (P1, 0.5d)
       Filed 2026-09-11, same session. `flash.ts` ends with `hard_reset` and releases the
       port; the console then attaches as a second session — by which time the entire boot
       log has been printed to nobody. The panel sat with zero events and no log box at
@@ -71,6 +71,7 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       for the first line from the board…"* placeholder rather than nothing.
       Acceptance: flash a board and the boot log appears without the operator touching
       anything. Empty state is visibly an empty log, not an absent one.
+      _(done 2026-09-11; see docs/features/enrollment.md)_
 
 - [ ] **S0-fe-6**: Recover in place — the fix is a button, not a instruction (P1, 1d)
       Part of *Unaided onboarding* (`docs/features/enrollment.md`, `spec/standards.md`).

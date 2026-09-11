@@ -308,6 +308,8 @@ progress::-moz-progress-bar {
    wait, not skimmed afterwards, and the interesting line is usually the last one. */
 .console {
   max-height: 24rem;
+  /* S0-fe-5: an empty log must be a visible box, not a 1-line sliver. */
+  min-height: 6rem;
 }
 
 /* The boot checklist. Plain list semantics, no bullets — the tick IS the bullet.

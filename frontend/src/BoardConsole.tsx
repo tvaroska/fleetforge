@@ -158,15 +158,23 @@ export function BoardConsolePanel({
 
       {state.error !== null && <p className="warn">{state.error}</p>}
 
-      {state.events.length > 0 && (
-        <pre className="log console" ref={tail} data-testid="board-console">
-          {state.events.map((event) => (
-            <span key={event.seq} className={LEVEL_CLASS[event.level]}>
-              {event.raw}
-              {'\n'}
-            </span>
-          ))}
-        </pre>
+      {(state.watching || state.opening || state.events.length > 0) && (
+        <>
+          <h4 id="board-log-heading">Board log</h4>
+          <pre className="log console" ref={tail} data-testid="board-console" aria-labelledby="board-log-heading">
+            {state.events.filter((e) => e.source === 'board').length === 0 ? (
+              <span className="muted" data-testid="board-console-waiting">
+                Waiting for the first line from the board…{'\n'}
+              </span>
+            ) : null}
+            {state.events.map((event) => (
+              <span key={event.seq} className={LEVEL_CLASS[event.level]}>
+                {event.raw}
+                {'\n'}
+              </span>
+            ))}
+          </pre>
+        </>
       )}
 
       {!state.watching && !state.opening && state.events.length === 0 && (

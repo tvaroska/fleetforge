@@ -71,6 +71,13 @@ export type ConsoleEvent = {
    * and exactly the silence this panel exists to break.
    */
   hintKind: 'generic' | 'specific'
+  /** Who printed this line: the board over UART, or this panel narrating what it did. */
+  source: 'board' | 'panel'
+  /**
+   * This panel deliberately reset the board here. The next boot marker is therefore
+   * expected, and must not be counted as evidence of a reset loop.
+   */
+  commandedReset: boolean
 }
 
 export type ConsoleSummary = {
@@ -315,6 +322,31 @@ export function classifyConsoleLine(raw: string, seq: number, at = Date.now()): 
     bootMarker: banner !== null ? 'rom' : milestone === 'boot' ? 'agent' : null,
     hint: hint?.text ?? null,
     hintKind: hint?.kind ?? 'specific',
+    source: 'board',
+    commandedReset: false,
+  }
+}
+
+/** A line this panel printed about itself. Never a milestone, never a fault. */
+export function panelNotice(
+  raw: string,
+  seq: number,
+  at = Date.now(),
+  options: { commandedReset?: boolean } = {},
+): ConsoleEvent {
+  return {
+    seq,
+    at,
+    raw,
+    level: 'plain',
+    tag: null,
+    text: raw,
+    milestone: null,
+    bootMarker: null,
+    hint: null,
+    hintKind: 'specific',
+    source: 'panel',
+    commandedReset: options.commandedReset ?? false,
   }
 }
 
@@ -438,17 +470,21 @@ export function summarizeConsole(events: ConsoleEvent[], now = Date.now()): Cons
   let rebootLoop: { boots: number } | null = null
   /** A ROM banner has started a boot whose agent banner has not arrived yet. */
   let romPending = false
+  /** The panel asked for the next boot. It is not evidence of a loop. */
+  let commanded = false
   /** When the current wait began: the last boot boundary or milestone, whichever is later. */
   let since = events.length > 0 ? events[0].at : now
 
   for (const event of events) {
+    if (event.commandedReset) commanded = true
     if (event.bootMarker !== null) {
       // One boot prints the ROM banner and then the agent's own first line. Counting both
       // would report every board as looping.
       const continuing = event.bootMarker === 'agent' && romPending
       romPending = event.bootMarker === 'rom'
       if (!continuing) {
-        if (boots > 0 && !reached.has('fleet')) rebootLoop = { boots: boots + 1 }
+        if (boots > 0 && !reached.has('fleet') && !commanded) rebootLoop = { boots: boots + 1 }
+        commanded = false
         boots += 1
         // The new boot has proved nothing yet. This is the stale-✓ fix.
         reached = new Set()
@@ -571,6 +607,8 @@ export function useBoardConsole({
   /** Bumped on every `watch()`/`release()`; a stale generator's lines are dropped. */
   const runRef = useRef(0)
   const seqRef = useRef(0)
+  /** When the panel last commanded a reset; used to explain a native-USB disconnect. */
+  const commandedResetAtRef = useRef<number | null>(null)
 
   const factoryRef = useRef(createConsole ?? defaultConsoleFactory)
   factoryRef.current = createConsole ?? defaultConsoleFactory
@@ -583,6 +621,35 @@ export function useBoardConsole({
       return next
     })
   }, [])
+
+  const appendNotice = useCallback(
+    (raw: string, options: { commandedReset?: boolean } = {}) => {
+      const event = panelNotice(raw, seqRef.current++, Date.now(), options)
+      setEvents((current) => {
+        const next = current.length >= MAX_CONSOLE_LINES ? current.slice(1) : current.slice()
+        next.push(event)
+        return next
+      })
+    },
+    [],
+  )
+
+  const requestReboot = useCallback(
+    (session: BoardConsole, why: string) => {
+      appendNotice(`— ${why}`, { commandedReset: true })
+      commandedResetAtRef.current = Date.now()
+      // NOT awaited: the read loop must be attached before the board starts talking again
+      // (Chromium's Serial read buffer defaults to 255 bytes ≈ 22 ms at 115200), and the
+      // notice above is appended synchronously so its position in the stream is
+      // deterministic — step 3 keys the loop suppression off that position.
+      void session.reboot().catch((err: unknown) => {
+        // A failed pulse must not read as a board fault: `setSignals` is unsupported on
+        // some adapters, and the panel is still perfectly usable without it.
+        appendNotice(`— could not reset the board: ${explainError(err)}. Press "Reboot the board".`)
+      })
+    },
+    [appendNotice, explainError],
+  )
 
   const stop = useCallback(async () => {
     runRef.current += 1
@@ -603,7 +670,7 @@ export function useBoardConsole({
         session = await factoryRef.current({
           baudRate: CONSOLE_BAUD_RATE,
           acquire,
-          onLog: append,
+          onLog: appendNotice,
         })
       } catch (err) {
         if (run === runRef.current) {
@@ -620,13 +687,21 @@ export function useBoardConsole({
       sessionRef.current = session
       setOpening(false)
       setWatching(true)
+      // S0-fe-5: whatever this board printed while the flasher held the port went to nobody.
+      // Pulse EN so the log the operator reads starts at the first line of a boot.
+      requestReboot(session, 'resetting the board so the log starts at its first line')
       try {
         for await (const line of session.lines()) {
           if (run !== runRef.current) break
           append(line)
         }
         if (run === runRef.current) {
-          setError('The board disconnected. Plug it back in and watch it again.')
+          const recentReset = commandedResetAtRef.current !== null && Date.now() - commandedResetAtRef.current < 5000
+          setError(
+            recentReset
+              ? 'The board dropped off the USB bus when it was reset — some boards re-enumerate. Press "Watch a board" to pick it up again.'
+              : 'The board disconnected. Plug it back in and watch it again.',
+          )
         }
       } catch (err) {
         if (run === runRef.current) setError(explainError(err))
@@ -638,7 +713,7 @@ export function useBoardConsole({
         }
       }
     },
-    [append, explainError, stop],
+    [append, appendNotice, explainError, requestReboot, stop],
   )
 
   const release = useCallback(async () => {
@@ -650,12 +725,8 @@ export function useBoardConsole({
   const reboot = useCallback(async () => {
     const session = sessionRef.current
     if (session === null) return
-    try {
-      await session.reboot()
-    } catch (err) {
-      setError(explainError(err))
-    }
-  }, [explainError])
+    requestReboot(session, 'reset requested — the board is restarting')
+  }, [requestReboot])
 
   const clear = useCallback(() => setEvents([]), [])
 

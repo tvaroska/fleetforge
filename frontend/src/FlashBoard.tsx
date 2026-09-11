@@ -457,8 +457,8 @@ export function FlashBoard({
                 as <code>{state.flashedDeviceId}</code>.
               </>
             )}{' '}
-            Watch it come up below — the console opens by itself, and names the cause if it
-            stops short of the fleet.
+            Watch it come up below — the console opens by itself, resets the board once so the log
+            starts at the top, and names the cause if it stops short of the fleet.
           </p>
           <p>
             <button type="button" onClick={state.reset}>

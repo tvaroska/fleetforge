@@ -46,7 +46,7 @@ const SILENT_BOARD = [
  * ended its stream after the last line would have to invent an inactivity timeout, which
  * is exactly what this task forbids. The block is released by `close()`.
  */
-function fakeConsole(script: string[]) {
+function fakeConsole(script: string[], options: { silentUntilReset?: boolean; rebootRejects?: boolean } = {}) {
   const state = {
     opened: 0,
     closed: 0,
@@ -61,9 +61,20 @@ function fakeConsole(script: string[]) {
     state.acquires.push(acquire)
     state.baudRates.push(baudRate)
     let closed = false
+    let rebootRelease: (() => void) | null = null
+    const rebootPromise = options.silentUntilReset
+      ? new Promise<void>((resolve) => {
+          rebootRelease = resolve
+        })
+      : Promise.resolve()
+
     const board: BoardConsole = {
       async *lines() {
-        for (const line of script) yield line
+        // S0-fe-5: a board that is silent until the panel pulses EN.
+        await rebootPromise
+        for (const line of script) {
+          yield line
+        }
         if (closed) return
         await new Promise<void>((resolve) => {
           release = resolve
@@ -71,6 +82,10 @@ function fakeConsole(script: string[]) {
       },
       async reboot() {
         state.reboots += 1
+        if (options.rebootRejects) {
+          throw new Error('setSignals is unsupported')
+        }
+        rebootRelease?.()
       },
       async close() {
         if (closed) return
@@ -212,8 +227,10 @@ describe('BoardConsolePanel', () => {
     render(<BoardConsolePanel autoWatch createConsole={factory} />)
     await screen.findByTestId('board-console')
 
+    // S0-fe-5: autoWatch now auto-pulses once, so the click makes it 2.
+    const rebootsBefore = state.reboots
     await user.click(screen.getByRole('button', { name: /reboot the board/i }))
-    expect(state.reboots).toBe(1)
+    expect(state.reboots).toBe(rebootsBefore + 1)
   })
 
   it('does not touch the port until asked, when there was no flash', async () => {
@@ -233,5 +250,75 @@ describe('BoardConsolePanel', () => {
 
     // `explainFlashError` turns Chromium's NotFoundError into something readable.
     expect(await screen.findByText('No board selected.')).toBeInTheDocument()
+  })
+
+  // ── S0-fe-5: the boot happens with no operator action ───────────────────────────────
+  describe('automatic reset so the log starts at the top', () => {
+    it('a silent board becomes a boot log with zero clicks', async () => {
+      // The board emits NOTHING until EN is pulsed. The log exists only because the panel
+      // reset it. This is the acceptance: S0-fe-5's task line in one test.
+      const { factory, state } = fakeConsole(HAPPY, { silentUntilReset: true })
+      render(<BoardConsolePanel autoWatch createConsole={factory} />)
+
+      const console_ = await screen.findByTestId('board-console')
+      await waitFor(() => {
+        expect(console_).toHaveTextContent('POWERON_RESET')
+        expect(console_).toHaveTextContent('enroll 200')
+      })
+
+      const milestones = screen.getByTestId('boot-milestones')
+      await waitFor(() => {
+        expect(milestones.querySelectorAll('[data-state="done"]')).toHaveLength(5)
+      })
+      expect(state.reboots).toBe(1)
+    })
+
+    it('an empty log is visibly an empty log, not an absent one', async () => {
+      const { factory } = fakeConsole([], { silentUntilReset: true })
+      render(<BoardConsolePanel autoWatch createConsole={factory} />)
+
+      const console_ = await screen.findByTestId('board-console')
+      expect(console_).toBeInTheDocument()
+      expect(await screen.findByTestId('board-console-waiting')).toHaveTextContent(
+        /waiting for the first line from the board/i,
+      )
+      expect(screen.queryByText(/the port is free/i)).not.toBeInTheDocument()
+    })
+
+    it('does not cry wolf on the happy path', async () => {
+      // The panel just reset the board, which is a second boot — but it is commanded, so
+      // the loop must not fire.
+      const { factory } = fakeConsole(HAPPY, { silentUntilReset: true })
+      render(<BoardConsolePanel autoWatch createConsole={factory} />)
+
+      await waitFor(() => {
+        expect(screen.getByTestId('board-console')).toHaveTextContent('enroll 200')
+      })
+      expect(screen.queryByTestId('console-reboot-loop')).not.toBeInTheDocument()
+    })
+
+    it('a failed pulse does not block the panel, and says so in the log', async () => {
+      const { factory, state } = fakeConsole(HAPPY, { rebootRejects: true })
+      render(<BoardConsolePanel autoWatch createConsole={factory} />)
+
+      const console_ = await screen.findByTestId('board-console')
+      await waitFor(() => {
+        expect(console_).toHaveTextContent('could not reset the board')
+      })
+      expect(state.reboots).toBe(1)
+      expect(screen.queryByTestId('console-fault')).not.toBeInTheDocument()
+    })
+
+    it('the manual watch path pulses too', async () => {
+      const user = userEvent.setup()
+      const { factory, state } = fakeConsole(HAPPY)
+      render(<BoardConsolePanel autoWatch createConsole={factory} />)
+      await screen.findByTestId('board-console')
+
+      await user.click(screen.getByRole('button', { name: /release the port/i }))
+      await user.click(screen.getByRole('button', { name: /watch a board/i }))
+
+      await waitFor(() => expect(state.reboots).toBe(2))
+    })
   })
 })

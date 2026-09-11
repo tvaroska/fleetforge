@@ -8,6 +8,7 @@ import {
   MILESTONE_DEADLINE_MS,
   MILESTONES,
   classifyConsoleLine,
+  panelNotice,
   summarizeConsole,
   type ConsoleEvent,
 } from './boardConsole'
@@ -340,6 +341,89 @@ describe('summarizeConsole', () => {
       expect(summary.reached).not.toContain('link')
       expect(summary.reached).toEqual(['boot'])
       expect(summary.waitingFor).toBe('link')
+    })
+  })
+
+  // ── S0-fe-5: panel notices and commanded resets ─────────────────────────────────────
+  describe('panelNotice', () => {
+    it('is inert: no milestone, no hint, no boot marker, source panel', () => {
+      const event = panelNotice('— resetting the board so the log starts at its first line', 0)
+      expect(event.source).toBe('panel')
+      expect(event.milestone).toBeNull()
+      expect(event.hint).toBeNull()
+      expect(event.bootMarker).toBeNull()
+      expect(event.level).toBe('plain')
+    })
+
+    it('can carry the commandedReset flag', () => {
+      const event = panelNotice('— reset requested', 0, Date.now(), { commandedReset: true })
+      expect(event.commandedReset).toBe(true)
+      expect(event.source).toBe('panel')
+    })
+  })
+
+  describe('commanded reset suppression', () => {
+    it('a commanded reset followed by a boot does not raise rebootLoop', () => {
+      const events: ConsoleEvent[] = [
+        ...classify([
+          'I (100) ff-agent: fleetforge agent 0.3.0 (idf v5.5.5), built Sep 11 2026 08:14:02',
+        ]),
+        panelNotice('— reset requested — the board is restarting', 1, T0 + 1000, {
+          commandedReset: true,
+        }),
+        ...classify([
+          'rst:0x1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)',
+          'I (100) ff-agent: fleetforge agent 0.3.0 (idf v5.5.5), built Sep 11 2026 08:14:02',
+        ]).map((e, i) => ({ ...e, seq: i + 2, at: T0 + (i + 2) * 1000 })),
+      ]
+      const summary = summarizeConsole(events)
+      expect(summary.boots).toBe(2)
+      expect(summary.rebootLoop).toBeNull()
+      // The stale-✓ rule is still active: the reboot clears reached.
+      expect(summary.reached).toEqual(['boot'])
+    })
+
+    it('a second spontaneous boot that never reaches the fleet does raise rebootLoop', () => {
+      const events: ConsoleEvent[] = [
+        ...classify([
+          'I (100) ff-agent: fleetforge agent 0.3.0 (idf v5.5.5), built Sep 11 2026 08:14:02',
+        ]),
+        panelNotice('— reset requested — the board is restarting', 1, T0 + 1000, {
+          commandedReset: true,
+        }),
+        ...classify([
+          'rst:0x1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)',
+          'I (100) ff-agent: fleetforge agent 0.3.0 (idf v5.5.5), built Sep 11 2026 08:14:02',
+          'I (300) ff-wifi: wifi sta starting, ssid bench-2g',
+          'rst:0xf (RTCWDT_BROWN_OUT_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)',
+          'I (100) ff-agent: fleetforge agent 0.3.0 (idf v5.5.5), built Sep 11 2026 08:14:02',
+        ]).map((e, i) => ({ ...e, seq: i + 2, at: T0 + (i + 2) * 1000 })),
+      ]
+      const summary = summarizeConsole(events)
+      expect(summary.boots).toBe(3)
+      expect(summary.rebootLoop).toEqual({ boots: 3 })
+    })
+
+    it('the bench session fixture still reports the same boots and loop', () => {
+      // Regression guard: the suppression must not alter streams with no commanded reset.
+      const events = classify(BENCH_2026_09_11)
+      const summary = summarizeConsole(events)
+      expect(summary.boots).toBe(3)
+      expect(summary.rebootLoop).toEqual({ boots: 3 })
+      expect(summary.reached).toEqual(['boot'])
+    })
+  })
+
+  describe('a stream containing only a panel notice', () => {
+    it('goes overdue on boot after the boot deadline', () => {
+      const events: ConsoleEvent[] = [
+        panelNotice('— resetting the board so the log starts at its first line', 0, T0, {
+          commandedReset: true,
+        }),
+      ]
+      const summary = summarizeConsole(events, T0 + MILESTONE_DEADLINE_MS.boot + 1000)
+      expect(summary.overdue?.milestone).toBe('boot')
+      expect(summary.overdue?.waitedMs).toBeGreaterThanOrEqual(MILESTONE_DEADLINE_MS.boot)
     })
   })
 })
