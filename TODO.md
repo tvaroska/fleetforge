@@ -16,8 +16,15 @@ three stale agent bundles shipped in v0.3.0). The next desk-bound work after the
 is the GCS blocker in `docs/runbooks/artifact-storage.md` — unfiled, and a prerequisite
 for R1.
 
-<!-- Counters: spec=1 infra=5 db=1 be=6 fe=3 sec=1 fw=1 test=2 -->
-<!-- Sprint 0 counters: fe=3 fw=1 infra=2 test=2 -->
+The bench itself found no server-side bug and three onboarding bugs. The board never
+enrolled: it brownouts during Wi-Fi PHY calibration and resets, forever. That is a
+power-supply fault, not ours — but **the product could not say so**, and diagnosing it
+took a serial log pasted by hand into a chat. `S0-fe-4` is the P0 that comes out of
+that, and it now gates R0: a board that cannot be onboarded without an engineer
+reading raw UART is not onboarded.
+
+<!-- Counters: spec=1 infra=5 db=1 be=6 fe=5 sec=1 fw=2 test=2 -->
+<!-- Sprint 0 counters: fe=5 fw=2 infra=2 test=2 -->
 
 Live status lives ONLY here. States: `- [ ]` open · `- [x]` done · `- [!]`
 attempted-but-failed. `spec/` and `design/` are status-free.
@@ -42,6 +49,59 @@ the retired bingo app), single-tenant, **not a public product until V3**.
 ## Sprint 0: Critical Issues
 
 Bricking risks, broker auth and security issues get filed here as they surface.
+
+- [ ] **S0-fe-4**: The console must never leave the operator with no diagnosis (P0, 1d)
+      Filed 2026-09-11 from the first real-hardware session. An ESP32-DevKit v1 sat in a
+      brownout reset loop for the whole session and the panel said nothing useful. The
+      board's own log named the cause on every cycle — `E BOD: Brownout detector was
+      triggered`, right after `phy_init … falling back to full calibration` — and the
+      operator could not have found it, because three defects compound:
+      * **Unparsed lines are structurally invisible.** `LOG_LINE` in `boardConsole.ts`
+        requires `E (1234) tag: msg`. `E BOD: …`, `rst:0x3 (SW_RESET)`, the boot ROM
+        banner and any panic backtrace have no timestamp and no tag, so
+        `classifyConsoleLine` returns `level: 'plain'`, `tag: null` — and `hintFor` is
+        keyed entirely on `tag`, so none of them can ever produce a fault. The most
+        common first-board failure mode yields zero diagnostic output by construction.
+      * **The checklist reports milestones that are no longer true.** `summarizeConsole`
+        (`boardConsole.ts:247`) folds `reached` into a `Set` that nothing resets. One
+        early boot reached `ff-net: link up`, so **Network up** stayed ✓ across every
+        later reboot. The operator was reading a green checkmark on a board that had
+        reset dozens of times since. A stale ✓ is worse than silence: it sends the
+        diagnosis in the wrong direction, and it did.
+      * **No reboot-loop detection.** Seeing the `boot` milestone twice is proof of a
+        reset loop and nothing looks for it.
+      Fix: classify tagless fatal lines (`BOD`, `rst:0x…`, `Guru Meditation`, `assert
+      failed`, `Backtrace:`) into faults with plain-English causes and next actions —
+      brownout must say *"the board is browning out: try a shorter, thicker USB cable,
+      straight into the machine, not a hub"*; reset `reached` when a new `boot` is seen
+      and surface the loop itself as the fault; give every milestone a deadline so a
+      stall names itself instead of spinning forever.
+      Acceptance: replay this session's captured log through the classifier and the panel
+      names brownout as the fault, shows the reboot loop, and does **not** claim Network
+      up. Vacuity-checked by removing the BOD rule and confirming that test alone fails.
+
+- [ ] **S0-fe-5**: The console misses the boot it exists to show (P1, 0.5d)
+      Filed 2026-09-11, same session. `flash.ts` ends with `hard_reset` and releases the
+      port; the console then attaches as a second session — by which time the entire boot
+      log has been printed to nobody. The panel sat with zero events and no log box at
+      all (the `<pre>` only renders when `events.length > 0`), which reads identically to
+      a dead port. Pressing **Reboot the board** produced the log instantly, but nothing
+      on screen suggests that.
+      Fix: after the console acquires the port, pulse EN itself so the operator always
+      sees a boot from the top; and render the log region with a heading and a *"waiting
+      for the first line from the board…"* placeholder rather than nothing.
+      Acceptance: flash a board and the boot log appears without the operator touching
+      anything. Empty state is visibly an empty log, not an absent one.
+
+- [ ] **S0-fw-2**: `link_up` is reported before the clock is set, so it can never arrive (P2, 0.25d)
+      Found 2026-09-11 reading `agent_main.c`: line 189 reports `link_up`, line 194 runs
+      `ff_time_sync`. Against an `https://` api_base the POST happens at epoch 0, so TLS
+      certificate validation rejects it and the stage is lost. Only harmless in a
+      plaintext lab, which is where it was tested. The server-side arrivals list can
+      therefore never show the first stage a board reports.
+      Fix: report it after the clock is set, or buffer pre-clock stages and flush once
+      TLS is usable — the second preserves the ordering the table is for.
+      Acceptance: a board against prod produces a `link_up` row in `device_progress`.
 
 - [ ] **S0-test-1**: Bench-verify the serial console on real hardware (P1, 0.5d)
       Filed 2026-09-10, when S0-fe-1 shipped. Its software half is proven in jsdom against
