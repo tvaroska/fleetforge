@@ -7,14 +7,17 @@ build is caught before the fleet, and any device that gets one recovers itself.
 hardware) remains. Device visibility is now covered from both ends — the serial console
 (S0-fe-1) and boot/enrol stage reports (S0-fw-1, verified on an emulated board
 2026-09-11) — and the arrivals list no longer duplicates offline boards (S0-fe-3).
-**Everything still open needs hardware**: S0-test-1 and R0-test-2 both want a real
-board, and S0-test-1 specifically wants the Mac (the Linux dev box does not enumerate
-boards over WebSerial). Nothing desk-bound is left in Sprint 0 — the next desk-bound
-work is the GCS blocker in `docs/runbooks/artifact-storage.md`, unfiled and a
-prerequisite for R1.
+**Bench session 2026-09-11**: v0.3.0 cut and deployed so the board is flashed with the
+stage-reporting agent against a prod that actually serves `/v1/device-progress`.
+S0-test-1 and R0-test-2 both run on the Mac against an ESP32-DevKit v1 (the Linux dev
+box does not enumerate boards over WebSerial). Two things the board cannot cover are
+split out: S0-test-2 (native-USB re-acquire, needs a C3/C6/S3) and S0-infra-2 (the
+three stale agent bundles shipped in v0.3.0). The next desk-bound work after the bench
+is the GCS blocker in `docs/runbooks/artifact-storage.md` — unfiled, and a prerequisite
+for R1.
 
 <!-- Counters: spec=1 infra=5 db=1 be=6 fe=3 sec=1 fw=1 test=2 -->
-<!-- Sprint 0 counters: fe=3 fw=1 infra=1 test=1 -->
+<!-- Sprint 0 counters: fe=3 fw=1 infra=2 test=2 -->
 
 Live status lives ONLY here. States: `- [ ]` open · `- [x]` done · `- [!]`
 attempted-but-failed. `spec/` and `design/` are status-free.
@@ -45,12 +48,11 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       replays of real `agent/main/*.c` output; these four cannot be, because they are
       properties of a USB bridge chip and an OS, not of the classifier. The bench is the
       Mac — the Linux dev box does not enumerate boards over WebSerial.
-      * **Re-acquire after `hard_reset`.** `serialConsole.ts` re-reads
-        `navigator.serial.getPorts()` every 250 ms for 8 s, because the native-USB parts
-        (C3/C6/S3) come back as a *different* `SerialPort`. Test both paths: a classic
-        esp32 with a bridge chip (port survives the reset) and a C3/C6/S3 (it does not).
-        If 8 s is short, the panel says "No board is available to watch" on a board that
-        is merely rebooting — the exact false negative this feature exists to remove.
+      * **Re-acquire after `hard_reset`, bridge-chip path.** `serialConsole.ts` re-reads
+        `navigator.serial.getPorts()` every 250 ms for 8 s. On a classic esp32 the port
+        *survives* the reset, so this must reconnect without ever showing "No board is
+        available to watch". The native-USB half of this check is **S0-test-2** — no
+        C3/C6/S3 board is on hand (2026-09-11).
       * **115200 decodes cleanly.** `sdkconfig.defaults` sets no
         `CONFIG_ESP_CONSOLE_UART_BAUDRATE` so this should be right, but a wrong baud
         yields plausible-looking mojibake rather than an error, and the classifier would
@@ -60,9 +62,35 @@ Bricking risks, broker auth and security issues get filed here as they surface.
         mode and prints `waiting for download` forever.
       * **Release really releases.** After the button, `screen /dev/tty.usbserial-… 115200`
         must open. If it reports "Resource busy", `port.close()` is not being reached.
-      Acceptance: all four confirmed on the Mac, with the classic and native-USB paths
-      both exercised. Anything that fails comes back as a new S0 task with the observed
-      behaviour.
+      Acceptance: all four confirmed on the Mac against an ESP32-DevKit v1 (bridge chip).
+      Anything that fails comes back as a new S0 task with the observed behaviour.
+
+- [ ] **S0-test-2**: The native-USB re-acquire path, on a C3/C6/S3 (P2, 0.25d)
+      Split from S0-test-1 on 2026-09-11: the only board on hand is an ESP32-DevKit v1,
+      whose bridge chip keeps the port alive across `hard_reset`. That exercises the
+      *easy* half. The 8 s `getPorts()` poll in `serialConsole.ts` exists for the parts
+      that come back as a **different** `SerialPort`, and nothing has ever tested it on
+      metal — a too-short window shows "No board is available to watch" on a board that
+      is merely rebooting, which is the exact false negative the console exists to
+      remove. **Blocked on acquiring a C3, C6 or S3.**
+      Acceptance: on the Mac, `hard_reset` from the console on a native-USB board
+      reconnects inside the window and streams the boot log without operator action.
+
+- [ ] **S0-infra-2**: Rebuild the c3/c6/s3 agent bundles before they ship again (P2, 0.5d)
+      Found 2026-09-11 while preparing the v0.3.0 release. `Dockerfile:68` bakes
+      `agent/dist` into the app image, and only `agent/dist/esp32` contains the S0-fw-1
+      stage reporter — `esp32c3`, `esp32c6` and `esp32s3` predate it. Verified by
+      grepping the built `app.bin` for `/v1/device-progress`, not by mtime.
+      Shipped knowingly in v0.3.0 (owner's call: the only board on hand is an esp32, so
+      nothing can flash the stale ones today), but prod's flasher will silently write a
+      no-stage-reporting agent to any native-USB board until this lands — invisible
+      exactly the way S0-fw-1 exists to prevent.
+      Fix is `just agent-build-all` plus a release-time guard so a stale bundle cannot
+      reach an image again; the guard is the real deliverable, since the rebuild is a
+      one-liner that was simply forgotten.
+      Acceptance: all four bundles contain `/v1/device-progress`; a check in the build
+      path fails when any bundle is older than `agent/main/`, vacuity-checked by
+      reverting one bundle.
 
 ---
 
