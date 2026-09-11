@@ -6,6 +6,46 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-11 — the console resets the board itself so the boot is never missed (S0-fe-5)
+
+The panel's automatic reset is not a fix for a dropped session — it is the *designed
+behaviour*. The flasher and the console are separate sessions at different bauds, and the
+window between `hard_reset` and the console opening at 115200 is long enough (up to 8 s on
+native-USB parts) to lose the entire boot. So every `watch()` pulses EN once, turning "the
+board was silent when we arrived" into "the board prints its first line while we are
+listening".
+
+- **The pulse happens on every path that opens the port, automatic or manual.** A board
+  watched five minutes after flash has the same silence; a purely-automatic pulse would leave
+  the manual case (click **Watch a board** without flashing first) broken. Both paths pulse.
+- **`commandedReset` travels in-band as an event property, not as a second argument.** The
+  reboot-loop suppression depends on knowing which boot the panel asked for.
+  `summarizeConsole` is pure over `events` alone (every test builds summaries from arrays,
+  the hook memoises on `[events, now]`), so the flag rides in the event.
+- **Order is load-bearing in `watch()`: append notice synchronously, attach the reader
+  immediately, let the 150 ms EN pulse run concurrently.** Awaiting `session.reboot()` first
+  would leave the port unread for 150 ms—Chromium's default 255-byte read buffer is ~22 ms
+  at 115200 baud, so the panel can overrun. Appending the notice *after* the pulse makes its
+  position in the stream racy, breaking the one-boot-deep suppression.
+- **A failed pulse degrades to a notice, never to an error.** `setSignals` can be
+  unsupported or wired differently. The operator sees a log region with "could not reset the
+  board. Press 'Reboot the board'", never a red fault panel.
+- **Native-USB re-enumeration is acknowledged but not solved here.** C3/C6/S3 drop off the
+  bus on reset and return as a new `SerialPort`. The disconnect message now says "dropped off
+  the USB bus when reset — some boards re-enumerate. Press 'Watch a board' to pick it up
+  again." Automatic re-acquire is S0-test-2, blocked on hardware.
+- **Deliberate residual: a board mid-OTA-download gets restarted.** The panel has no way to
+  know an OTA is in progress (the agent prints no such line), and waiting to find out would
+  recreate the silence problem. Acceptable at R0 (the console is a bench tool, and an
+  interrupted OTA is discarded rather than committed). Documented so it's not later reported
+  as a mystery.
+- **Gotcha for the next console change: the summary is now a function of the clock.**
+  `useBoardConsole` ticks once a second while watching (not idle). In tests, `vi.useFakeTimers()`
+  + `vi.advanceTimersByTimeAsync()` inside `act()` drives both the tick and `Date.now`, which
+  is the only way to test a deadline with no new line arriving.
+
+Details: `docs/features/enrollment.md` → *The boot appears automatically (S0-fe-5)*.
+
 ## 2026-09-11 — a milestone is a claim about now; a fault is a record of what happened (S0-fe-4)
 
 Implements the first layer of the standard set by the entry below. Three things were

@@ -697,6 +697,48 @@ advances `last_seen` past that report still reads as arriving. It never complete
 heartbeat, so that is honest rather than wrong; tightening it would need a rule about how
 many messages count as having arrived.
 
+### The boot appears automatically (S0-fe-5)
+
+**2026-09-11.** The second layer of *Unaided onboarding*, filed hours after S0-fe-4 landed.
+The console missed the boot it existed to show: `flash.ts` ended with `hard_reset` and
+released the port, and by the time the console re-opened it as a second session, the entire
+boot log had been printed to nobody. The panel sat with zero events and no log region at
+all—indistinguishable from a dead cable.
+
+**What was built.** The console now pulses EN itself whenever it opens the port (both
+automatic and manual), resetting the board so the log always starts from the first line.
+Panel notices (the reset message, disconnect reasons) became first-class events with
+`source: 'panel'` vs `'board'`, allowing the log region to render with a "Waiting for the
+first line from the board…" placeholder even when no board output has arrived yet. A
+commanded reset sets a `commandedReset` flag consumed by the next boot boundary, preventing
+the reboot-loop detector from crying wolf when the panel itself triggered the restart.
+
+**Key decisions:**
+
+- **Every `watch()` pulses, both automatic and manual.** A board watched five minutes after
+  flash has the same silence problem. Deliberate residual: a board mid-OTA-download gets
+  restarted and starts again. Acceptable at R0 (the console is a bench tool); documented in
+  DECISIONS.md so it's not later reported as a mystery.
+- **The notice is appended synchronously, the pulse runs concurrently, the read loop attaches
+  immediately.** Awaiting `session.reboot()` before reading would miss the first ~150 ms at
+  115200 baud; appending the notice after the pulse makes its stream position racy and breaks
+  the loop suppression.
+- **A failed pulse is not a fault.** `setSignals` is unsupported on some adapters. The panel
+  degrades to a log notice, never to a red error that implies a board problem.
+- **Native-USB re-enumeration.** C3/C6/S3 parts drop off the bus on reset and return as a new
+  `SerialPort`. The disconnect message now distinguishes a reset-induced drop from a cable
+  fault, but automatic re-acquire is S0-test-2 (blocked on acquiring that hardware).
+
+**Files touched:** `boardConsole.ts` (panel notices, `requestReboot`, commanded-boot
+suppression, disconnect message), `BoardConsole.tsx` (always-rendered log region + heading +
+placeholder), `index.css` (`.console` min-height), `FlashBoard.tsx` (one sentence of copy),
+plus new tests.
+
+**T2 evidence:** Test 6 in `BoardConsole.test.tsx` is the centrepiece—a fake board that
+emits nothing until EN is pulsed. Without the auto-reset, the test hangs at zero lines,
+reproducing the bench failure. With it, the boot log arrives and the checklist completes.
+Vacuity-checked by removing the `requestReboot()` call and confirming the test fails.
+
 ### The console always names a diagnosis (S0-fe-4)
 
 **2026-09-11.** The first layer of *Unaided onboarding*, and the P0 that gated R0. Filed
@@ -808,8 +850,8 @@ from firmware, stays open in `spec/open-questions.md`.
 - **Status:** In progress — layer 1 (S0-fe-4) landed 2026-09-11, see *The console always
   names a diagnosis* above.
 - **Added:** 2026-09-11
-- **Tasks:** ~~S0-fe-4 (diagnosis)~~ done, S0-fe-5 (never miss the boot), S0-fe-6 (recovery
-  actions), S0-fe-7 (diagnostic bundle), S0-test-3 (unaided acceptance run).
+- **Tasks:** ~~S0-fe-4 (diagnosis)~~ done, ~~S0-fe-5 (never miss the boot)~~ done, S0-fe-6
+  (recovery actions), S0-fe-7 (diagnostic bundle), S0-test-3 (unaided acceptance run).
   S0-fw-2 is adjacent: the first stage a board reports can never reach an HTTPS server.
 
 ## Post-v1
