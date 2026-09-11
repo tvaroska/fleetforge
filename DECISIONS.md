@@ -6,6 +6,50 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-11 — a milestone is a claim about now; a fault is a record of what happened (S0-fe-4)
+
+Implements the first layer of the standard set by the entry below. Three things were
+decided while fixing it that are not obvious from the task text.
+
+- **The parser must match the whole line, not the message.** `hintFor` was keyed on the
+  ESP-IDF tag, which is why `E BOD:` was invisible. The fix could have been "add a rule for
+  tagless lines"; instead every bare rule is matched against the **cleaned whole line**, so
+  the same rule fires whether ESP-IDF prints `E BOD: …` early-boot style or `E (403) BOD: …`
+  through the normal logger. A classifier keyed on a *format* is what broke; keying the
+  content match on the format again would rebuild the same trap one layer down.
+- **`reached` is cleared by a reboot and `fault` is not, and that asymmetry is the point.**
+  A milestone is a positive claim that must be true *now* — a stale ✓ actively misdirects,
+  which is precisely what cost the bench session. A fault is a description of something that
+  happened; the reset it caused does not make it untrue, and a panic prints its cause
+  immediately *before* the reset that would otherwise erase it. So progress clears a fault
+  (unchanged) but a boot boundary does not.
+- **"Twice is proof of a loop" needed a second clause, or the happy path cries wolf.** The
+  filed task said seeing `boot` twice proves a reset loop. Literally true on a stranded
+  board, false the moment the operator presses **Reboot the board** on a healthy one — and
+  S0-fe-5 is about to make the panel reboot boards by itself. `rebootLoop` is therefore
+  raised only when a boot begins while the *previous* boot had not reached the fleet, and is
+  cleared by one that does. Same detection on the failure case, silent on the success case.
+- **A generic hint is the right answer more often than it looks.** `Backtrace:` and
+  `SW_CPU_RESET` both *look* like specific diagnoses and are both consequences printed after
+  the line that actually names the cause. Classifying them `kind: 'generic'` reuses the
+  existing "never overwrite a named cause" rule instead of adding ordering logic. Worth
+  reaching for whenever a line is real but derivative.
+- **Deadlines are grounded in the agent's own constants, not chosen.** `NET_TIMEOUT_MS` 30 s,
+  `SNTP_TIMEOUT_MS` 15 s, `ENROLL_TIMEOUT_MS` 30 s, each plus room for one retry, and each
+  measured from the *previous* milestone. A deadline shorter than the board's own patience
+  would report a fault the board has not had yet. The numbers are not in `spec/prd.md`'s
+  targets table; proposed for it rather than written there.
+- **Gotcha for whoever tests the next layer:** the summary is now a function of the clock, so
+  `useBoardConsole` ticks once a second **while watching only** — an idle panel must not
+  re-render forever. In jsdom, `vi.advanceTimersByTimeAsync` inside `act()` drives both the
+  tick and `Date.now`, which is the only way to test a stall that arrives with no new line.
+- **The bench log is a reconstruction, and the fixture says so in its header.** The real
+  capture was pasted into a chat and never committed. That is not a documentation lapse to
+  be tidied up; it is the exact failure S0-fe-7 exists to remove, so it is recorded rather
+  than glossed.
+
+Details: `docs/features/enrollment.md` → *The console always names a diagnosis (S0-fe-4)*.
+
 ## 2026-09-11 — the console panel is the diagnostic surface of record for onboarding
 
 The first hardware bench found no server bug and three onboarding bugs. A DevKit v1

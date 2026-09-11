@@ -42,6 +42,8 @@ export const MILESTONE_LABELS: Record<Milestone, string> = {
 export type ConsoleEvent = {
   /** Monotonic within a session; React keys, and nothing else. */
   seq: number
+  /** Wall clock when the line arrived. Milestone deadlines are the only consumer. */
+  at: number
   /** The line as it came off the wire, ANSI stripped. Always shown. */
   raw: string
   level: ConsoleLevel
@@ -51,6 +53,12 @@ export type ConsoleEvent = {
   text: string
   /** Reaching this proves a step of the boot happened. */
   milestone: Milestone | null
+  /**
+   * This line is the start of a boot: `'rom'` for the boot-ROM reset banner, `'agent'` for
+   * the agent's own first line. Both mark a boundary past which nothing an earlier boot
+   * proved is still true — see `summarizeConsole`. One boot prints both, in that order.
+   */
+  bootMarker: 'rom' | 'agent' | null
   /** Plain English for a line that explains a stall. This is the "name the cause" bit. */
   hint: string | null
   /**
@@ -66,6 +74,13 @@ export type ConsoleEvent = {
 }
 
 export type ConsoleSummary = {
+  /**
+   * What **this boot** has proved, not what the session has ever seen. A board that resets
+   * retracts everything the previous boot showed: on 2026-09-11 a single early boot reached
+   * `link up` and the panel then displayed ✓ **Network up** for the rest of a session in
+   * which the board reset dozens of times. A stale ✓ is worse than silence — it sends the
+   * diagnosis in the wrong direction, and it did.
+   */
   reached: Milestone[]
   /** The next thing that has not happened yet, or null once the board is on the fleet. */
   waitingFor: Milestone | null
@@ -73,8 +88,71 @@ export type ConsoleSummary = {
    * The most recent explained failure that no later milestone has invalidated. A board
    * that recovers on its own clears its own fault, which is why this is folded over the
    * whole event list rather than latched on the first error.
+   *
+   * Deliberately NOT cleared by a reboot, unlike `reached`. A fault is a description of
+   * something that happened; the reset it caused does not make it untrue, and a panic's
+   * cause is printed immediately *before* the reset that hides it.
    */
   fault: { text: string; hint: string } | null
+  /** Boots seen since this panel started watching. */
+  boots: number
+  /**
+   * Set when a boot began while the previous boot had not reached the fleet — which is what
+   * a reset loop looks like from outside, and is proof on its own even when no line explains
+   * why. Cleared by a boot that does reach the fleet, so a deliberate reboot of a working
+   * board never raises it.
+   */
+  rebootLoop: { boots: number } | null
+  /** The milestone being waited on has blown its deadline. Nothing here spins forever. */
+  overdue: MilestoneStall | null
+}
+
+export type MilestoneStall = {
+  milestone: Milestone
+  /** How long this milestone has been waited on, in ms. */
+  waitedMs: number
+  /** What should have happened, what usually prevents it, and what to try. */
+  hint: string
+}
+
+/**
+ * How long each milestone may take before the panel says something, measured from the point
+ * the one before it was reached (or from the start of the boot, for `boot` itself).
+ *
+ * Grounded in the agent's own constants so a deadline cannot fire before the board has even
+ * given up: `agent_main.c` waits `NET_TIMEOUT_MS` 30 s for a link and `SNTP_TIMEOUT_MS` 15 s
+ * for the clock, and `ff_enroll.c` allows `ENROLL_TIMEOUT_MS` 30 s per attempt. Each deadline
+ * here is that budget plus room for one retry.
+ */
+export const MILESTONE_DEADLINE_MS: Record<Milestone, number> = {
+  boot: 5_000,
+  link: 45_000,
+  clock: 30_000,
+  enroll: 60_000,
+  fleet: 30_000,
+}
+
+/** Plain English for a milestone that never arrived. The operator is not an engineer. */
+export const MILESTONE_STALL: Record<Milestone, string> = {
+  boot:
+    'Nothing on this port looks like the fleetforge agent. Either the flash did not take, ' +
+    'or the board is sitting in its ROM bootloader instead of running the app. Flash the ' +
+    'board again, then press "Reboot the board".',
+  link:
+    'The agent is running but has not joined the network. The usual causes are a mistyped ' +
+    'network name or password, or a 5 GHz-only network — this board\'s radio cannot see ' +
+    '5 GHz at all. Re-flash it with the right network, or move it closer to the router.',
+  clock:
+    'The network is up but the board could not get the time, and without a clock it cannot ' +
+    'check the server\'s certificate — so enrolment will fail no matter how many times it ' +
+    'retries. Guest and corporate networks often block NTP (UDP port 123).',
+  enroll:
+    'The board has a network and a clock but the server has not accepted it. Check that ' +
+    'this network can reach the fleetforge server, and if the board was flashed a while ago, ' +
+    'flash it again to mint a fresh enrolment token.',
+  fleet:
+    'The board enrolled but never reached the message broker. Outbound port 8883 is usually ' +
+    'the culprit on a locked-down network.',
 }
 
 /**
@@ -104,32 +182,141 @@ const LOG_LINE = /^([IWED])\s+\((\d+)\)\s+([A-Za-z0-9_.-]+):\s?(.*)$/
 
 const LEVELS: Record<string, ConsoleLevel> = { E: 'error', W: 'warn', I: 'info', D: 'info' }
 
+type Hint = { text: string; kind: 'generic' | 'specific' }
+const specific = (text: string): Hint => ({ text, kind: 'specific' })
+
+/** The boot-ROM reset banner: `rst:0xf (RTCWDT_BROWN_OUT_RESET),boot:0x13 (SPI_FAST…)`. */
+const RESET_BANNER = /^rst:0x[0-9a-f]+\s*\(([A-Z0-9_]+)\)/i
+
+/**
+ * Lines that carry no ESP-IDF preamble, and the most important ones on a bench.
+ *
+ * These are the reason this table exists. `LOG_LINE` needs `E (1234) tag: msg`; a brownout
+ * prints `E BOD: Brownout detector was triggered`, the ROM prints `rst:0x…`, and a panic
+ * prints `Guru Meditation Error:` — none of which have a timestamp or a tag. Before
+ * 2026-09-11 every one of them classified as `level: 'plain', tag: null` and `hintFor`,
+ * keyed entirely on the tag, could not see them. The most common first-board failure mode
+ * in existence produced zero diagnostic output by construction.
+ *
+ * Matched against the whole cleaned line rather than the split-off message, so a build that
+ * *does* route one of these through the normal logger (`E (403) BOD: …`) is still caught.
+ * The level is raised too: `summarizeConsole` only accepts a fault from a warn or an error.
+ */
+const BARE_RULES: { match: RegExp; level: ConsoleLevel; hint: Hint }[] = [
+  {
+    // `esp_brownout` fires when the 3.3 V rail sags below the detector's trip point — on a
+    // DevKit that is nearly always the USB cable, not the board.
+    match: /Brownout detector was triggered/i,
+    level: 'error',
+    hint: specific(
+      'The board is browning out: the USB port cannot hold 3.3 V while the Wi-Fi radio ' +
+        'draws current, so the board resets before it can join. Try a shorter, thicker USB ' +
+        'cable, straight into the machine, not a hub — and not a keyboard or monitor port.',
+    ),
+  },
+  {
+    match: /Guru Meditation Error|assert failed:/,
+    level: 'error',
+    hint: specific(
+      'The firmware crashed. Flash the board again; if it crashes in the same place a second ' +
+        'time, this is a bug in the firmware rather than anything the cable can fix.',
+    ),
+  },
+  {
+    // Follows the panic line, so it must not displace it: generic never overwrites specific.
+    match: /^Backtrace:/,
+    level: 'error',
+    hint: {
+      text: 'The board printed a crash backtrace. The line above names what it crashed on.',
+      kind: 'generic',
+    },
+  },
+  {
+    // `SerialConsole.reboot()` drives RTS with DTR low; inverted wiring lands here instead.
+    match: /waiting for download/,
+    level: 'error',
+    hint: specific(
+      'The board came up in its flashing bootloader instead of running the agent. Unplug it, ' +
+        'plug it back in, and press "Reboot the board".',
+    ),
+  },
+  {
+    match: /invalid header: 0x|flash read err/,
+    level: 'error',
+    hint: specific(
+      'There is no usable firmware in the slot the board tried to boot. Flash the board again.',
+    ),
+  },
+]
+
+/** A reset banner is normal at the top of a boot; only some reasons are a diagnosis. */
+function resetBannerRule(reason: string): { level: ConsoleLevel; hint: Hint | null } {
+  if (/BROWN_OUT/.test(reason)) {
+    return {
+      level: 'error',
+      hint: specific(
+        'This board reset because its power browned out. Try a shorter, thicker USB cable, ' +
+          'straight into the machine, not a hub.',
+      ),
+    }
+  }
+  if (/WDT/.test(reason)) {
+    return {
+      level: 'warn',
+      hint: specific(
+        'The board stopped responding and a watchdog reset it. If it keeps happening, flash ' +
+          'the board again.',
+      ),
+    }
+  }
+  if (/SW_(CPU_)?RESET/.test(reason)) {
+    return {
+      level: 'warn',
+      // Generic: a panic prints its cause immediately before the reset it causes.
+      hint: {
+        text: 'The firmware restarted itself. Anything printed just above this says why.',
+        kind: 'generic',
+      },
+    }
+  }
+  // POWERON_RESET, DEEPSLEEP_RESET, EXT_CPU_RESET: the ordinary start of a boot.
+  return { level: 'plain', hint: null }
+}
+
 /**
  * One line in, one classified event out. Pure, and the only place that knows what the
- * agent's log lines look like — every string matched here exists in `agent/main/*.c`.
+ * agent's log lines look like — every string matched here exists in `agent/main/*.c`, in
+ * ESP-IDF's own early-boot output, or in the boot ROM.
  */
-export function classifyConsoleLine(raw: string, seq: number): ConsoleEvent {
+export function classifyConsoleLine(raw: string, seq: number, at = Date.now()): ConsoleEvent {
   const clean = raw.replace(ANSI, '').replace(/\r/g, '')
   const match = LOG_LINE.exec(clean)
-  const level = match === null ? 'plain' : (LEVELS[match[1]] ?? 'info')
   const tag = match === null ? null : match[3]
   const text = match === null ? clean : match[4]
 
-  const hint = hintFor(tag, text)
+  const banner = RESET_BANNER.exec(clean)
+  const bare =
+    banner !== null
+      ? resetBannerRule(banner[1])
+      : (BARE_RULES.find((rule) => rule.match.test(clean)) ?? null)
+
+  const milestone = milestoneFor(tag, text)
+  const hint = hintFor(tag, text) ?? bare?.hint ?? null
   return {
     seq,
+    at,
     raw: clean,
-    level,
+    // A rule that names a fault outranks the preamble's own letter, and is the only way a
+    // tagless line can become anything but 'plain'.
+    level: bare?.hint != null ? bare.level : match === null ? 'plain' : (LEVELS[match[1]] ?? 'info'),
     tag,
     text,
-    milestone: milestoneFor(tag, text),
+    milestone,
+    bootMarker: banner !== null ? 'rom' : milestone === 'boot' ? 'agent' : null,
     hint: hint?.text ?? null,
     hintKind: hint?.kind ?? 'specific',
   }
 }
-
-type Hint = { text: string; kind: 'generic' | 'specific' }
-const specific = (text: string): Hint => ({ text, kind: 'specific' })
 
 function milestoneFor(tag: string | null, text: string): Milestone | null {
   if (tag === 'ff-agent' && text.startsWith('fleetforge agent ')) return 'boot'
@@ -243,14 +430,37 @@ function hintFor(tag: string | null, text: string): Hint | null {
 }
 
 /** Fold the events into the checklist and the current fault. Pure; the UI renders this. */
-export function summarizeConsole(events: ConsoleEvent[]): ConsoleSummary {
-  const reached = new Set<Milestone>()
+export function summarizeConsole(events: ConsoleEvent[], now = Date.now()): ConsoleSummary {
+  let reached = new Set<Milestone>()
   let fault: { text: string; hint: string } | null = null
   let faultKind: 'generic' | 'specific' = 'generic'
+  let boots = 0
+  let rebootLoop: { boots: number } | null = null
+  /** A ROM banner has started a boot whose agent banner has not arrived yet. */
+  let romPending = false
+  /** When the current wait began: the last boot boundary or milestone, whichever is later. */
+  let since = events.length > 0 ? events[0].at : now
 
   for (const event of events) {
+    if (event.bootMarker !== null) {
+      // One boot prints the ROM banner and then the agent's own first line. Counting both
+      // would report every board as looping.
+      const continuing = event.bootMarker === 'agent' && romPending
+      romPending = event.bootMarker === 'rom'
+      if (!continuing) {
+        if (boots > 0 && !reached.has('fleet')) rebootLoop = { boots: boots + 1 }
+        boots += 1
+        // The new boot has proved nothing yet. This is the stale-✓ fix.
+        reached = new Set()
+        since = event.at
+      }
+    }
+
     if (event.milestone !== null) {
       reached.add(event.milestone)
+      since = event.at
+      // A board that got all the way up is not looping, whatever it did on the way.
+      if (event.milestone === 'fleet') rebootLoop = null
       // Progress clears the previous complaint: a board that reconnects after three bad
       // handshakes is fine, and leaving "the PSK is wrong" on screen would be a lie.
       fault = null
@@ -268,7 +478,16 @@ export function summarizeConsole(events: ConsoleEvent[]): ConsoleSummary {
 
   const ordered = MILESTONES.filter((m) => reached.has(m))
   const waitingFor = MILESTONES.find((m) => !reached.has(m)) ?? null
-  return { reached: ordered, waitingFor, fault }
+
+  // Nothing may spin forever: a milestone that has outlived its budget says so itself, even
+  // when the board has gone completely quiet and no line will ever arrive to explain it.
+  const waitedMs = now - since
+  const overdue: MilestoneStall | null =
+    events.length > 0 && waitingFor !== null && waitedMs >= MILESTONE_DEADLINE_MS[waitingFor]
+      ? { milestone: waitingFor, waitedMs, hint: MILESTONE_STALL[waitingFor] }
+      : null
+
+  return { reached: ordered, waitingFor, fault, boots, rebootLoop, overdue }
 }
 
 /** How the console gets hold of a port. See `serialConsole.ts` for what each one costs. */
@@ -333,8 +552,18 @@ export function useBoardConsole({
   explainError: (error: unknown) => string
 }): BoardConsoleState {
   const [events, setEvents] = useState<ConsoleEvent[]>([])
-  const summary = useMemo(() => summarizeConsole(events), [events])
   const [watching, setWatching] = useState(false)
+  // A deadline passes with no new line arriving — that IS the stalled case — so the summary
+  // has to be recomputed against the wall clock rather than only when an event lands. Only
+  // while a port is open: an idle panel must not re-render once a second forever.
+  const [now, setNow] = useState(() => Date.now())
+  useEffect(() => {
+    if (!watching) return
+    setNow(Date.now())
+    const timer = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(timer)
+  }, [watching])
+  const summary = useMemo(() => summarizeConsole(events, now), [events, now])
   const [opening, setOpening] = useState(false)
   const [error, setError] = useState<string | null>(null)
 

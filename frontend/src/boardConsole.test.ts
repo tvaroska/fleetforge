@@ -5,14 +5,23 @@
 
 import { describe, expect, it } from 'vitest'
 import {
+  MILESTONE_DEADLINE_MS,
   MILESTONES,
   classifyConsoleLine,
   summarizeConsole,
   type ConsoleEvent,
 } from './boardConsole'
+import { BENCH_2026_09_11 } from './fixtures/bench-2026-09-11'
 
+/** "Now" for a replay. Anchored to the real clock so the tests that do not care about time
+ *  still see a summary taken moments after the last line, as a bench operator would. */
+const T0 = Date.now()
+
+/** Lines a second apart, so a summary can be asked what it thinks at a given moment. */
 const classify = (lines: string[]): ConsoleEvent[] =>
-  lines.map((line, index) => classifyConsoleLine(line, index))
+  lines.map((line, index) => classifyConsoleLine(line, index, T0 + index * 1000))
+
+const at = (events: ConsoleEvent[]) => T0 + events.length * 1000
 
 describe('classifyConsoleLine', () => {
   it('splits the ESP-IDF preamble off', () => {
@@ -85,6 +94,62 @@ describe('classifyConsoleLine', () => {
   ])('names the cause behind %s', (line, expected) => {
     expect(classifyConsoleLine(line, 0).hint).toMatch(expected)
   })
+
+  // S0-fe-4. None of these carry `E (1234) tag:`, so before this they were `plain`/`null`
+  // and could not become a fault however many times the board printed them.
+  describe('lines with no ESP-IDF preamble at all', () => {
+    it('names a brownout, which is the most common first-board failure there is', () => {
+      const event = classifyConsoleLine('E BOD: Brownout detector was triggered', 0)
+      expect(event.level).toBe('error')
+      expect(event.hint).toMatch(/browning out/)
+      expect(event.hint).toMatch(/not a hub/)
+    })
+
+    it('names it from the reset banner too, which is all a fast loop leaves behind', () => {
+      const event = classifyConsoleLine(
+        'rst:0xf (RTCWDT_BROWN_OUT_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)',
+        0,
+      )
+      expect(event.level).toBe('error')
+      expect(event.hint).toMatch(/browned out/)
+      expect(event.bootMarker).toBe('rom')
+    })
+
+    it('leaves an ordinary power-on banner alone', () => {
+      // It is the normal top of every boot. Calling it a fault would make the panel cry
+      // wolf on every single board, which is how a diagnosis stops being read.
+      const event = classifyConsoleLine(
+        'rst:0x1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)',
+        0,
+      )
+      expect(event.level).toBe('plain')
+      expect(event.hint).toBeNull()
+      expect(event.bootMarker).toBe('rom')
+    })
+
+    it.each([
+      ["Guru Meditation Error: Core  0 panic'ed (LoadProhibited). Exception was unhandled.", /crashed/],
+      ['assert failed: ff_cfg_load ff_cfg.c:88 (crc == expected)', /crashed/],
+      ['waiting for download', /flashing bootloader/],
+      ['invalid header: 0xffffffff', /no usable firmware/],
+    ])('classifies %s as a fault', (line, expected) => {
+      const event = classifyConsoleLine(line, 0)
+      expect(event.level).toBe('error')
+      expect(event.hint).toMatch(expected)
+    })
+
+    it('lets the panic keep the diagnosis, not the backtrace under it', () => {
+      const summary = summarizeConsole(
+        classify([
+          'I (100) ff-agent: fleetforge agent 0.3.0 (idf v5.5.5), built Sep 11 2026 08:14:02',
+          "Guru Meditation Error: Core  0 panic'ed (LoadProhibited). Exception was unhandled.",
+          'Backtrace: 0x400d1a2b:0x3ffb1f30 0x400d1c55:0x3ffb1f50',
+        ]),
+      )
+      expect(summary.fault?.hint).toMatch(/crashed/)
+      expect(summary.fault?.text).toMatch(/Guru Meditation/)
+    })
+  })
 })
 
 describe('summarizeConsole', () => {
@@ -154,5 +219,127 @@ describe('summarizeConsole', () => {
     )
     expect(summary.waitingFor).toBe('clock')
     expect(summary.fault?.hint).toMatch(/clock milestone/)
+  })
+
+  // ── S0-fe-4: what this boot proved, not what the session ever saw ───────────────────
+  describe('a board that reboots', () => {
+    const REBOOTED = [
+      'rst:0x1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)',
+      'I (100) ff-agent: fleetforge agent 0.3.0 (idf v5.5.5), built Sep 11 2026 08:14:02',
+      'I (900) ff-net: wifi link up, ip 192.168.1.57 gw 192.168.1.1 mask 255.255.255.0',
+      'rst:0x1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)',
+      'I (100) ff-agent: fleetforge agent 0.3.0 (idf v5.5.5), built Sep 11 2026 08:14:02',
+      'I (300) ff-wifi: wifi sta starting, ssid bench-2g',
+    ]
+
+    it('retracts what the previous boot proved', () => {
+      const summary = summarizeConsole(classify(REBOOTED))
+      // The 2026-09-11 bug in one assertion: `link` was reached, once, and then was not.
+      expect(summary.reached).toEqual(['boot'])
+      expect(summary.waitingFor).toBe('link')
+    })
+
+    it('counts the boot pair as one boot, not two', () => {
+      // The ROM banner and the agent's banner belong to the same boot. Counting both would
+      // report every board in existence as looping.
+      expect(summarizeConsole(classify(REBOOTED)).boots).toBe(2)
+    })
+
+    it('calls a restart that never reached the fleet a loop', () => {
+      const summary = summarizeConsole(classify(REBOOTED))
+      expect(summary.rebootLoop).toEqual({ boots: 2 })
+    })
+
+    it('does not call a deliberate reboot of a working board a loop', () => {
+      // The operator presses "Reboot the board" to read a log from the top. That must not
+      // be reported as a fault, or the panel is crying wolf on the happy path.
+      const summary = summarizeConsole(
+        classify([
+          'I (100) ff-agent: fleetforge agent 0.3.0 (idf v5.5.5), built Sep 11 2026 08:14:02',
+          'I (900) ff-net: wifi link up, ip 192.168.1.57 gw 192.168.1.1 mask 255.255.255.0',
+          'I (1500) ff-time: sntp: 1970-01-01T00:00:02Z -> 2026-09-11T09:00:00Z (via pool.ntp.org)',
+          'I (2600) ff-enroll: enroll 200 https://bingo.tvaroska.sk/v1/enroll',
+          'I (3100) ff-mqtt: mqtt connected as 3c8427b1f0a4 (mqtts://bingo.tvaroska.sk:8883)',
+          'rst:0x1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)',
+          'I (100) ff-agent: fleetforge agent 0.3.0 (idf v5.5.5), built Sep 11 2026 08:14:02',
+        ]),
+      )
+      expect(summary.boots).toBe(2)
+      expect(summary.rebootLoop).toBeNull()
+    })
+
+    it('stops calling it a loop once the board finally gets on the fleet', () => {
+      const summary = summarizeConsole(
+        classify([
+          'I (100) ff-agent: fleetforge agent 0.3.0 (idf v5.5.5), built Sep 11 2026 08:14:02',
+          'rst:0xf (RTCWDT_BROWN_OUT_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)',
+          'I (100) ff-agent: fleetforge agent 0.3.0 (idf v5.5.5), built Sep 11 2026 08:14:02',
+          'I (900) ff-net: wifi link up, ip 192.168.1.57 gw 192.168.1.1 mask 255.255.255.0',
+          'I (1500) ff-time: sntp: 1970-01-01T00:00:02Z -> 2026-09-11T09:00:00Z (via pool.ntp.org)',
+          'I (2600) ff-enroll: enroll 200 https://bingo.tvaroska.sk/v1/enroll',
+          'I (3100) ff-mqtt: mqtt connected as 3c8427b1f0a4 (mqtts://bingo.tvaroska.sk:8883)',
+        ]),
+      )
+      expect(summary.rebootLoop).toBeNull()
+      expect(summary.reached).toEqual([...MILESTONES])
+    })
+  })
+
+  // ── S0-fe-4: no unbounded wait (spec/standards.md) ──────────────────────────────────
+  describe('a milestone that never arrives', () => {
+    const STUCK = classify([
+      'I (100) ff-agent: fleetforge agent 0.3.0 (idf v5.5.5), built Sep 11 2026 08:14:02',
+      'I (300) ff-wifi: wifi sta starting, ssid bench-2g',
+    ])
+
+    it('says nothing while the board is still within its own budget', () => {
+      // `agent_main.c` waits NET_TIMEOUT_MS 30 s for a link. Complaining at 5 s would be
+      // the panel inventing a fault the board has not had yet.
+      expect(summarizeConsole(STUCK, at(STUCK) + 10_000).overdue).toBeNull()
+    })
+
+    it('names the stall once the deadline passes, with no new line to prompt it', () => {
+      const summary = summarizeConsole(STUCK, at(STUCK) + MILESTONE_DEADLINE_MS.link + 1_000)
+      expect(summary.overdue?.milestone).toBe('link')
+      expect(summary.overdue?.hint).toMatch(/5 GHz/)
+      expect(summary.overdue?.waitedMs).toBeGreaterThanOrEqual(MILESTONE_DEADLINE_MS.link)
+    })
+
+    it('measures each milestone from the one before it, not from the boot', () => {
+      const events = classify([
+        'I (100) ff-agent: fleetforge agent 0.3.0 (idf v5.5.5), built Sep 11 2026 08:14:02',
+        'I (900) ff-net: wifi link up, ip 192.168.1.57 gw 192.168.1.1 mask 255.255.255.0',
+      ])
+      // A link that took its full budget must not instantly declare the clock overdue.
+      expect(summarizeConsole(events, at(events) + 10_000).overdue).toBeNull()
+      const late = summarizeConsole(events, at(events) + MILESTONE_DEADLINE_MS.clock + 1_000)
+      expect(late.overdue?.milestone).toBe('clock')
+      expect(late.overdue?.hint).toMatch(/NTP/)
+    })
+  })
+
+  // ── S0-fe-4 acceptance: the session that started all of this ────────────────────────
+  describe('the bench session of 2026-09-11', () => {
+    const events = classify(BENCH_2026_09_11)
+    const summary = summarizeConsole(events, at(events))
+
+    it('names the brownout as the fault', () => {
+      // The operator spent a session unable to learn this from anything but a UART cable.
+      expect(summary.fault?.hint).toMatch(/browning out/)
+      expect(summary.fault?.text).toMatch(/Brownout detector was triggered/)
+    })
+
+    it('shows the reboot loop', () => {
+      expect(summary.boots).toBe(3)
+      expect(summary.rebootLoop).toEqual({ boots: 3 })
+    })
+
+    it('does NOT claim the network is up', () => {
+      // One early cycle did reach `link up`, and the ✓ it left behind is what sent the
+      // diagnosis in the wrong direction for most of the session.
+      expect(summary.reached).not.toContain('link')
+      expect(summary.reached).toEqual(['boot'])
+      expect(summary.waitingFor).toBe('link')
+    })
   })
 })

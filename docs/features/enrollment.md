@@ -697,6 +697,87 @@ advances `last_seen` past that report still reads as arriving. It never complete
 heartbeat, so that is honest rather than wrong; tightening it would need a rule about how
 many messages count as having arrived.
 
+### The console always names a diagnosis (S0-fe-4)
+
+**2026-09-11.** The first layer of *Unaided onboarding*, and the P0 that gated R0. Filed
+from the first hardware bench, where an ESP32-DevKit v1 sat in a brownout reset loop for a
+whole session while the panel said nothing useful and showed a green **Network up**.
+
+**Three defects, all in `frontend/src/boardConsole.ts`, and they compounded.**
+
+1. **Tagless lines were structurally invisible.** `LOG_LINE` requires `E (1234) tag: msg`
+   and `hintFor` was keyed entirely on the tag. `E BOD: Brownout detector was triggered`,
+   `rst:0x…`, the boot-ROM banner and any panic backtrace have neither, so they classified
+   as `level: 'plain', tag: null` and could not become a fault however many times the board
+   printed them. The most common first-board failure mode in existence produced zero
+   diagnostic output *by construction*.
+2. **The checklist reported milestones that were no longer true.** `summarizeConsole` folded
+   `reached` into a `Set` nothing reset, so one early boot's `link up` left ✓ **Network up**
+   on screen across dozens of later resets. That is worse than silence: it sent the
+   diagnosis in the wrong direction, and it did.
+3. **Nothing looked for the reset loop**, and no milestone had a deadline.
+
+**What was built.**
+
+- **`BARE_RULES`** — a table consulted for lines with no ESP-IDF preamble: brownout, panic
+  (`Guru Meditation` / `assert failed:`), `Backtrace:`, `waiting for download` (the inverted
+  EN/DTR case S0-test-1 watches for), `invalid header` / `flash read err`. A rule raises the
+  event's level as well as supplying the hint, because `summarizeConsole` only accepts a
+  fault from a warn or an error. It matches the **whole cleaned line**, not the split-off
+  message, so a build that does route one of these through the normal logger
+  (`E (403) BOD: …`) is still caught.
+- **`resetBannerRule`** — `rst:0x… (REASON)` is parsed for its reason. `BROWN_OUT` is an
+  error with the same physical remedy; `*WDT*` is a warn; `SW_(CPU_)RESET` is a *generic*
+  hint on purpose, because a panic prints its cause immediately before the reset that hides
+  it and a specific hint there would displace the real one. `POWERON_RESET` stays plain and
+  hintless — it is the normal top of every boot, and a panel that cries wolf on every board
+  stops being read.
+- **`reached` is per-boot.** A `bootMarker` (`'rom'` for the ROM banner, `'agent'` for the
+  agent's own first line) clears it. The two markers of one boot are counted once, via a
+  `romPending` flag — counting both would report every board in existence as looping.
+- **`rebootLoop`** is set when a boot begins while the previous boot had not reached the
+  fleet, and cleared by one that does. That is the task's "twice is proof" without crying
+  wolf when the operator deliberately reboots a healthy board. It renders as its **own**
+  banner rather than in the fault slot: on 2026-09-11 the board was both browning out and
+  restarting, and the operator needed to be told both.
+- **Deadlines.** Events carry `at`; `summarizeConsole` takes `now`; `useBoardConsole` ticks
+  once a second **only while watching**, so a deadline can pass with no new line arriving —
+  which is exactly the stalled case. `MILESTONE_DEADLINE_MS` is grounded in the agent's own
+  constants (`NET_TIMEOUT_MS` 30 s, `SNTP_TIMEOUT_MS` 15 s, `ENROLL_TIMEOUT_MS` 30 s) plus
+  room for a retry: boot 5 s · link 45 s · clock 30 s · enroll 60 s · fleet 30 s. Each is
+  measured from the previous milestone, so a slow link does not instantly declare the clock
+  overdue. `MILESTONE_STALL` says what should have happened, what usually prevents it and
+  what to try.
+
+**A fault is not cleared by a reboot, unlike a milestone.** A milestone is a positive claim
+that must be true *now*; a fault is a description of something that happened, and the reset
+it caused does not make it untrue. Progress still clears it, as before.
+
+**T2 — the acceptance, replayed.** `frontend/src/fixtures/bench-2026-09-11.ts` is the bench
+session: three brownout cycles, the first reaching `link up`. Through the classifier and the
+summary it yields fault = *"The board is browning out … not a hub"*, `rebootLoop` =
+`{ boots: 3 }`, and `reached` = `['boot']` with `waitingFor` = `link` — the ✓ is gone.
+Through the rendered panel (`BoardConsolePanel`, jsdom) the fault box names the brownout,
+the reboot-loop banner reads *"keeps restarting — 3 times so far"*, and **Network up** is
+the waiting row, not a done one. Separately, fake timers advance 47 s past a board stuck
+after `wifi sta starting` with no further line, and the overdue banner names the link stall
+including the 5 GHz cause.
+
+**Vacuity-checked three ways**, each reverted: removing the BOD rule failed the brownout
+tests and nothing stood in for it; removing the `reached` reset failed the stale-✓ tests;
+removing the loop assignment failed the loop tests. T1: 129 frontend tests green (up from
+121), `tsc -b --noEmit` and `vite build` clean. Backend untouched.
+
+**The fixture is a reconstruction, and says so in its header.** The session's raw UART log
+was pasted into a chat window and never committed — which is itself what S0-fe-7 exists to
+fix. Every line the session record quotes verbatim is verbatim; the ROM banners around them
+are what a DevKit v1 prints on a brownout reset.
+
+**What this does not do.** It names causes the board *prints*. A board that says nothing at
+all is still only covered by the deadlines, and the remedies are still prose rather than
+buttons — that is S0-fe-6. Whether this belongs in a parser at all, versus structured faults
+from firmware, stays open in `spec/open-questions.md`.
+
 ## Planned Work
 
 ### Unaided onboarding: flash → on the fleet (Priority: P0)
@@ -724,9 +805,10 @@ many messages count as having arrived.
      full log, config summary, chip info, firmware and server versions, the fault — with
      secrets redacted, so a stuck operator can hand it to someone who can help. That
      click is the thing that did not exist on 2026-09-11.
-- **Status:** Planned
+- **Status:** In progress — layer 1 (S0-fe-4) landed 2026-09-11, see *The console always
+  names a diagnosis* above.
 - **Added:** 2026-09-11
-- **Tasks:** S0-fe-4 (diagnosis), S0-fe-5 (never miss the boot), S0-fe-6 (recovery
+- **Tasks:** ~~S0-fe-4 (diagnosis)~~ done, S0-fe-5 (never miss the boot), S0-fe-6 (recovery
   actions), S0-fe-7 (diagnostic bundle), S0-test-3 (unaided acceptance run).
   S0-fw-2 is adjacent: the first stage a board reports can never reach an HTTPS server.
 

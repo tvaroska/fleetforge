@@ -77,7 +77,7 @@ export function BoardConsolePanel({
     if (element !== null) element.scrollTop = element.scrollHeight
   }, [state.events.length])
 
-  const { fault } = state.summary
+  const { fault, rebootLoop, overdue } = state.summary
   const busy = state.opening
 
   return (
@@ -121,6 +121,32 @@ export function BoardConsolePanel({
           <strong>{fault.text}</strong>
           <br />
           {fault.hint}
+        </p>
+      )}
+
+      {/* Its own line, not the fault slot: on 2026-09-11 the board was both browning out AND
+          restarting, and the operator needed to be told both. The loop is proof on its own
+          even when nothing in the log explains it. */}
+      {rebootLoop !== null && (
+        <p className="bad" role="status" data-testid="console-reboot-loop">
+          <strong>This board keeps restarting — {rebootLoop.boots} times so far.</strong>
+          <br />
+          It is not staying up long enough to join the fleet. A board that restarts on its own
+          is almost always short of power — try a shorter, thicker USB cable straight into the
+          machine, not a hub. If a cause is named above, start there.
+        </p>
+      )}
+
+      {/* "No unbounded wait" (spec/standards.md). A spinner that can spin forever is a
+          failed acceptance, so the checklist's `…` grows a deadline. */}
+      {overdue !== null && (
+        <p className="warn" role="status" data-testid="console-overdue">
+          <strong>
+            {MILESTONE_LABELS[overdue.milestone]} has not happened in{' '}
+            {Math.round(overdue.waitedMs / 1000)} s.
+          </strong>
+          <br />
+          {overdue.hint}
         </p>
       )}
 

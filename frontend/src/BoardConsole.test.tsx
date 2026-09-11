@@ -7,11 +7,17 @@
 //    busy" and the operator blames their cable.
 // 4. **One port at a time**, and the port goes back on unmount.
 
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import { BoardConsolePanel } from './BoardConsole'
-import { CONSOLE_BAUD_RATE, type BoardConsole, type ConsoleFactory } from './boardConsole'
+import {
+  CONSOLE_BAUD_RATE,
+  MILESTONE_DEADLINE_MS,
+  type BoardConsole,
+  type ConsoleFactory,
+} from './boardConsole'
+import { BENCH_2026_09_11 } from './fixtures/bench-2026-09-11'
 
 const HAPPY = [
   'rst:0x1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)',
@@ -120,6 +126,44 @@ describe('BoardConsolePanel', () => {
     expect(milestones.querySelectorAll('[data-state="done"]')).toHaveLength(1)
     expect(milestones.querySelector('[data-state="waiting"]')).toHaveTextContent('Network up')
     expect(screen.queryByTestId('console-online')).not.toBeInTheDocument()
+  })
+
+  // S0-fe-4, and the criterion the task is judged on: the same board, the same log, the
+  // panel the operator was actually looking at on 2026-09-11.
+  it('diagnoses the brownout loop of 2026-09-11 without anyone reading the log', async () => {
+    const { factory } = fakeConsole(BENCH_2026_09_11)
+    render(<BoardConsolePanel autoWatch createConsole={factory} />)
+
+    const fault = await screen.findByTestId('console-fault')
+    expect(fault).toHaveTextContent(/browning out/)
+    expect(fault).toHaveTextContent(/not a hub/)
+
+    const loop = await screen.findByTestId('console-reboot-loop')
+    expect(loop).toHaveTextContent(/keeps restarting — 3 times/)
+
+    // The stale ✓ that sent the diagnosis the wrong way for most of that session.
+    const milestones = screen.getByTestId('boot-milestones')
+    await waitFor(() => {
+      expect(milestones.querySelectorAll('[data-state="done"]')).toHaveLength(1)
+    })
+    expect(milestones.querySelector('[data-state="waiting"]')).toHaveTextContent('Network up')
+    expect(screen.queryByTestId('console-online')).not.toBeInTheDocument()
+  })
+
+  it('never spins forever: a milestone past its deadline says so on its own', async () => {
+    vi.useFakeTimers()
+    try {
+      const { factory } = fakeConsole(SILENT_BOARD)
+      render(<BoardConsolePanel autoWatch createConsole={factory} />)
+      // No further lines arrive — that IS the stalled case. Only the clock moves.
+      await act(() => vi.advanceTimersByTimeAsync(MILESTONE_DEADLINE_MS.link + 2_000))
+
+      const overdue = screen.getByTestId('console-overdue')
+      expect(overdue).toHaveTextContent(/Network up has not happened in \d+ s/)
+      expect(overdue).toHaveTextContent(/5 GHz/)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('hands the port back when released, and says so', async () => {

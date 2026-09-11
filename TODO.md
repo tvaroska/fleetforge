@@ -19,16 +19,18 @@ for R1.
 The bench itself found no server-side bug and three onboarding bugs. The board never
 enrolled: it brownouts during Wi-Fi PHY calibration and resets, forever. That is a
 power-supply fault, not ours — but **the product could not say so**, and diagnosing it
-took a serial log pasted by hand into a chat. `S0-fe-4` is the P0 that comes out of
-that, and it now gates R0: a board that cannot be onboarded without an engineer
-reading raw UART is not onboarded.
+took a serial log pasted by hand into a chat. `S0-fe-4` is the P0 that came out of
+that, and it gates R0: a board that cannot be onboarded without an engineer reading raw
+UART is not onboarded.
 
 Designed up on 2026-09-11 as one feature — **Unaided onboarding: flash → on the fleet**
 (`docs/features/enrollment.md`, requirements in `spec/standards.md`, reasoning in
 `design/decisions/enrollment-console-is-the-diagnostic-surface.md`). Its tasks are
 S0-fe-4 → S0-fe-5 → S0-fe-6 → S0-fe-7, closed by S0-test-3. Do them in that order:
 nothing can be acted on before it is named, and nothing can be judged before a person
-who has not seen the code tries it.
+who has not seen the code tries it. **S0-fe-4 landed 2026-09-11** — the panel now names
+tagless faults (brownout, panic, ROM reset reasons), keeps its milestone claims per-boot,
+surfaces a reset loop, and puts a deadline on every milestone. S0-fe-5 is next.
 
 <!-- Counters: spec=1 infra=5 db=1 be=6 fe=7 sec=1 fw=2 test=3 -->
 <!-- Sprint 0 counters: fe=7 fw=2 infra=2 test=3 -->
@@ -56,36 +58,6 @@ the retired bingo app), single-tenant, **not a public product until V3**.
 ## Sprint 0: Critical Issues
 
 Bricking risks, broker auth and security issues get filed here as they surface.
-
-- [ ] **S0-fe-4**: The console must never leave the operator with no diagnosis (P0, 1d)
-      Filed 2026-09-11 from the first real-hardware session. An ESP32-DevKit v1 sat in a
-      brownout reset loop for the whole session and the panel said nothing useful. The
-      board's own log named the cause on every cycle — `E BOD: Brownout detector was
-      triggered`, right after `phy_init … falling back to full calibration` — and the
-      operator could not have found it, because three defects compound:
-      * **Unparsed lines are structurally invisible.** `LOG_LINE` in `boardConsole.ts`
-        requires `E (1234) tag: msg`. `E BOD: …`, `rst:0x3 (SW_RESET)`, the boot ROM
-        banner and any panic backtrace have no timestamp and no tag, so
-        `classifyConsoleLine` returns `level: 'plain'`, `tag: null` — and `hintFor` is
-        keyed entirely on `tag`, so none of them can ever produce a fault. The most
-        common first-board failure mode yields zero diagnostic output by construction.
-      * **The checklist reports milestones that are no longer true.** `summarizeConsole`
-        (`boardConsole.ts:247`) folds `reached` into a `Set` that nothing resets. One
-        early boot reached `ff-net: link up`, so **Network up** stayed ✓ across every
-        later reboot. The operator was reading a green checkmark on a board that had
-        reset dozens of times since. A stale ✓ is worse than silence: it sends the
-        diagnosis in the wrong direction, and it did.
-      * **No reboot-loop detection.** Seeing the `boot` milestone twice is proof of a
-        reset loop and nothing looks for it.
-      Fix: classify tagless fatal lines (`BOD`, `rst:0x…`, `Guru Meditation`, `assert
-      failed`, `Backtrace:`) into faults with plain-English causes and next actions —
-      brownout must say *"the board is browning out: try a shorter, thicker USB cable,
-      straight into the machine, not a hub"*; reset `reached` when a new `boot` is seen
-      and surface the loop itself as the fault; give every milestone a deadline so a
-      stall names itself instead of spinning forever.
-      Acceptance: replay this session's captured log through the classifier and the panel
-      names brownout as the fault, shows the reboot loop, and does **not** claim Network
-      up. Vacuity-checked by removing the BOD rule and confirming that test alone fails.
 
 - [ ] **S0-fe-5**: The console misses the boot it exists to show (P1, 0.5d)
       Filed 2026-09-11, same session. `flash.ts` ends with `hard_reset` and releases the
