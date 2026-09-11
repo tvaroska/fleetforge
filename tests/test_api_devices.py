@@ -303,6 +303,83 @@ async def test_an_enrolled_but_offline_board_is_still_arriving(
     ]
 
 
+async def test_a_board_that_arrived_and_then_died_is_offline_not_arriving(
+    admin_app: FastAPI, fleet: AsyncSession
+) -> None:
+    """S0-fe-3, the criterion: a completed arrival must not come back as a stuck one.
+
+    Before this rule, presence decaying put a board that reached `mqtt_connected`
+    days ago straight back into the arriving list — as "stalled at `mqtt_connected`",
+    duplicating the offline row directly above it — for the rest of the window.
+    """
+    await add_device(
+        fleet,
+        "a4cf12b3de20",
+        presence_reported=False,
+        broker_provisioned_at=now_utc() - dt.timedelta(seconds=600),
+        last_seen=now_utc() - dt.timedelta(seconds=300),
+    )
+    # Its arrival: reported before the heartbeats that later advanced `last_seen`.
+    await add_progress(fleet, "a4cf12b3de20", "mqtt_connected", age_s=590)
+
+    body = await list_devices(admin_app, await login_admin(admin_app))
+
+    assert [row["device_id"] for row in body["devices"]] == ["a4cf12b3de20"]
+    assert body["devices"][0]["online"] is False
+    assert body["arrivals"] == []
+
+
+async def test_a_re_flashed_board_arrives_again(admin_app: FastAPI, fleet: AsyncSession) -> None:
+    """The case the S0-fw-1 rule was written to catch, and which S0-fe-3 must not break.
+
+    Same board as above — provisioned, with a `last_seen` from its previous life — but
+    now reporting a stage *newer* than that `last_seen`. Re-enrolment deliberately
+    leaves `last_seen` alone (`registry.py`), so this is what a re-flash really looks
+    like in the database, not a contrived timestamp.
+    """
+    await add_device(
+        fleet,
+        "a4cf12b3de21",
+        presence_reported=False,
+        broker_provisioned_at=now_utc() - dt.timedelta(seconds=600),
+        last_seen=now_utc() - dt.timedelta(seconds=300),
+    )
+    await add_progress(fleet, "a4cf12b3de21", "mqtt_connected", age_s=590)
+    await add_progress(fleet, "a4cf12b3de21", "link_up", age_s=5)
+
+    body = await list_devices(admin_app, await login_admin(admin_app))
+
+    assert body["devices"][0]["online"] is False
+    assert [(row["device_id"], row["stage"]) for row in body["arrivals"]] == [
+        ("a4cf12b3de21", "link_up")
+    ]
+
+
+async def test_a_board_that_enrolled_but_never_connected_still_arrives(
+    admin_app: FastAPI, fleet: AsyncSession
+) -> None:
+    """Provisioned but never `last_seen` — the S0-fe-3 rule must not swallow this one.
+
+    Distinct from `test_an_enrolled_but_offline_board_is_still_arriving` above, which
+    has no `broker_provisioned_at` either: here the credential exists and only the
+    connection never happened, so `last_seen` is the sole conjunct doing the work.
+    """
+    await add_device(
+        fleet,
+        "a4cf12b3de22",
+        presence_reported=False,
+        broker_provisioned_at=now_utc() - dt.timedelta(seconds=60),
+        last_seen=None,
+    )
+    await add_progress(fleet, "a4cf12b3de22", "mqtt_refused", detail="broker connack 5")
+
+    body = await list_devices(admin_app, await login_admin(admin_app))
+
+    assert [(row["device_id"], row["stage"]) for row in body["arrivals"]] == [
+        ("a4cf12b3de22", "mqtt_refused")
+    ]
+
+
 async def test_arrivals_are_newest_first(admin_app: FastAPI, fleet: AsyncSession) -> None:
     await add_progress(fleet, "a4cf12b3de17", "enrolling", age_s=90)
     await add_progress(fleet, "a4cf12b3de18", "link_up", age_s=5)

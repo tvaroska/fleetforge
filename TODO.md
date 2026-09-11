@@ -6,9 +6,12 @@ build is caught before the fleet, and any device that gets one recovers itself.
 **Focus:** R0 is deployed and live at `bingo.tvaroska.sk`; only R0-test-2 (E2E on real
 hardware) remains. Device visibility is now covered from both ends — the serial console
 (S0-fe-1) and boot/enrol stage reports (S0-fw-1, verified on an emulated board
-2026-09-11). **Everything still open needs hardware**: S0-test-1 and R0-test-2 both want
-a real board, and S0-test-1 specifically wants the Mac (the Linux dev box does not
-enumerate boards over WebSerial). S0-fe-3 is the one desk-bound item left.
+2026-09-11) — and the arrivals list no longer duplicates offline boards (S0-fe-3).
+**Everything still open needs hardware**: S0-test-1 and R0-test-2 both want a real
+board, and S0-test-1 specifically wants the Mac (the Linux dev box does not enumerate
+boards over WebSerial). Nothing desk-bound is left in Sprint 0 — the next desk-bound
+work is the GCS blocker in `docs/runbooks/artifact-storage.md`, unfiled and a
+prerequisite for R1.
 
 <!-- Counters: spec=1 infra=5 db=1 be=6 fe=3 sec=1 fw=1 test=2 -->
 <!-- Sprint 0 counters: fe=3 fw=1 infra=1 test=1 -->
@@ -60,23 +63,6 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       Acceptance: all four confirmed on the Mac, with the classic and native-USB paths
       both exercised. Anything that fails comes back as a new S0 task with the observed
       behaviour.
-
-- [ ] **S0-fe-3**: An offline board should stop re-appearing in `arrivals` (P3, 0.5d)
-      Found while verifying S0-fw-1 on 2026-09-11. A board that got all the way to
-      `mqtt_connected` and then lost power comes back into the arriving list as
-      "stalled at `mqtt_connected`" as soon as presence decays, and stays there for the
-      rest of the 900 s `progress_window_s` — duplicating a row the fleet list above it
-      is already showing as offline.
-      The rule in `api/routers/devices.py` (recent stage **and** not currently online) is
-      doing exactly what it was written to do, and the comment there defends it: a board
-      being re-flashed reports stages again, and hiding that is the original gap. So this
-      is a judgement call about the read model, not a bug fix — hence a task rather than
-      a quiet change. The likely shape is to exclude devices that have ever been
-      `enrolled_at` + `broker_provisioned_at` **and** whose newest stage predates their
-      newest `last_seen`, i.e. a board whose arrival already completed.
-      Acceptance: a board that has been online and then drops shows in the fleet list as
-      offline and **not** in arrivals; a board being re-flashed (fresh stages *after* its
-      last heartbeat) still does appear in arrivals.
 
 ---
 

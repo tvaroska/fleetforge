@@ -6,6 +6,43 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-11 — `arrivals` needed a second clause, not a tweak (S0-fe-3)
+
+Closes the item filed at the end of the S0-fw-1 entry below. The question was whether "not
+currently online" should also exclude boards that have *been* in the fleet, and the answer
+is yes — but the interesting part is what the second clause had to be made of.
+
+- **"Not online" was never the right question; "has this board already arrived?" is.**
+  A board on its way up and a board that came up an hour ago and lost power are both
+  offline with a recent stage. One clause cannot separate them, and the symptom was a
+  completed arrival re-entering the list labelled *stalled at `mqtt_connected`* for the
+  rest of the 900 s window, duplicating an offline row directly above it. The new predicate
+  `progress.has_already_arrived` asks the second question, and it lives in `progress.py`
+  next to `stalled` rather than inline in the router, so there is one place that decides it.
+- **`broker_provisioned_at`, not `enrolled_at`.** The task's suggested shape named both.
+  `enrolled_at` is `NOT NULL` with a default, so testing it decides nothing — a conjunct
+  that is always true reads like a safeguard and is not one. The provisioning timestamp is
+  the real end of the arrival sequence.
+- **The re-flash case works for free because `last_seen` is monotonic and re-enrolment does
+  not touch it.** Two decisions made elsewhere and for other reasons — `registry.py` leaving
+  `last_seen` alone on re-enrol, `ingestor/store.py` advancing it with `GREATEST` — mean a
+  re-flashed board's fresh stages are *necessarily* newer than its stale `last_seen`. So
+  `stage_at <= last_seen` distinguishes "this stage belongs to the arrival that already
+  finished" from "this board is arriving again" without a re-flash flag, a generation
+  counter or a new column. **Worth noticing as a pattern: when a new rule needs to tell two
+  situations apart, check whether an existing monotonic timestamp already does it.**
+- **A deliberate residual, so nobody reports it as a regression.** A board that reports
+  `mqtt_connected` and dies before any live message advances `last_seen` past that report
+  still reads as arriving. It never completed a heartbeat. Fixing it would require deciding
+  how many messages count as "arrived", which is a worse rule than the honest edge.
+- **The live vacuity check found nothing but is why the evidence is trustworthy.** Neutering
+  the clause in the running api reproduced the original duplicate row verbatim against the
+  same database state that had just shown `arrivals: []`. That is a stronger statement than
+  a passing test, because it proves the empty list came from the rule rather than from the
+  progress window having quietly expired.
+
+Details: `docs/features/enrollment.md` → *An arrival that finished stops arriving (S0-fe-3)*.
+
 ## 2026-09-11 — the stage reporter has now run on a board, and one acceptance was wrong (S0-fw-1)
 
 Supersedes the 2026-09-10 S0-fw-1 entry below, which recorded the server half and said

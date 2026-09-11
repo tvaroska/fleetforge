@@ -20,6 +20,7 @@ shares one database, so every assertion filters by the ids the test created.
 """
 
 import asyncio
+import datetime as dt
 import json
 import uuid
 from collections.abc import AsyncIterator
@@ -34,8 +35,9 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from fleetforge.api.deps import get_broker_provisioner
 from fleetforge.db.base import asyncpg_dsn
-from fleetforge.db.models import DeviceProgress, EnrollmentToken, ProgressStage
+from fleetforge.db.models import Device, DeviceProgress, EnrollmentToken, ProgressStage
 from fleetforge.events import EVENTS_CHANNEL, EventType
+from fleetforge.progress import has_already_arrived
 from tests.conftest import (
     TEST_DB_NAME,
     capture_logs,
@@ -448,3 +450,55 @@ async def test_the_token_plaintext_is_never_logged(progress_app: FastAPI) -> Non
     logged = "\n".join(record.getMessage() for record in records)
     assert issued["token"] not in logged
     assert issued["token"].split(".", 1)[1] not in logged
+
+
+# ---------------------------------------------------------------------------
+# `has_already_arrived` — the S0-fe-3 rule, in memory
+# ---------------------------------------------------------------------------
+#
+# No database and no HTTP: this is a pure predicate over four values, and the whole
+# point of putting it in `fleetforge.progress` rather than inline in the router was
+# that each conjunct could be pinned separately. `test_api_devices.py` covers what it
+# means for the response; this covers what it means.
+
+LAST_SEEN = dt.datetime(2026, 9, 11, 12, 0, tzinfo=dt.UTC)
+
+
+def device_with(**overrides: Any) -> Device:
+    """An in-memory `Device` — never added to a session, never committed."""
+    values: dict[str, Any] = {
+        "device_id": "a4cf12b3df20",
+        "platform_type": "esp32c6",
+        "link_type": "wifi",
+        "power_class": "always_on",
+        "broker_provisioned_at": LAST_SEEN - dt.timedelta(seconds=30),
+        "last_seen": LAST_SEEN,
+    }
+    values.update(overrides)
+    return Device(**values)
+
+
+def test_a_board_with_no_row_at_all_has_not_arrived() -> None:
+    """Mid-arrival boards have no `devices` row; that is the feature, not an edge case."""
+    assert has_already_arrived(None, stage_at=LAST_SEEN) is False
+
+
+def test_a_board_with_no_broker_credential_has_not_arrived() -> None:
+    """Enrolled but never provisioned — it never reached the last step of the sequence."""
+    assert has_already_arrived(device_with(broker_provisioned_at=None), stage_at=LAST_SEEN) is False
+
+
+def test_a_board_that_never_spoke_has_not_arrived() -> None:
+    """Credential issued, connection never made — the `mqtt_refused` case must stay visible."""
+    assert has_already_arrived(device_with(last_seen=None), stage_at=LAST_SEEN) is False
+
+
+@pytest.mark.parametrize(
+    ("offset_s", "expected"),
+    # The boundary is `<=`: a stage report landing in the same instant as `last_seen`
+    # belongs to the arrival that produced it, not to a new one.
+    [(-60, True), (0, True), (60, False)],
+)
+def test_the_boundary_is_the_stage_against_last_seen(offset_s: int, expected: bool) -> None:
+    stage_at = LAST_SEEN + dt.timedelta(seconds=offset_s)
+    assert has_already_arrived(device_with(), stage_at=stage_at) is expected

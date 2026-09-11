@@ -635,6 +635,68 @@ its container and refuses to start a second board, and `just agent-qemu-stop` ex
 because six concurrent emulators all claiming `000000000000` silently invalidated the
 first round of this evidence (`docs/runbooks/agent-qemu.md`).
 
+### An arrival that finished stops arriving (S0-fe-3)
+
+**Done 2026-09-11.** Filed by the S0-fw-1 verification above, and it is the second clause
+of the arrivals rule rather than a bug fix.
+
+**The problem.** `arrivals` showed every board with a recent stage that was *not currently
+online*. That one clause cannot tell a board on its way up from one that came up an hour
+ago and has since lost power — both are offline with a recent stage. So the moment presence
+decayed, a board that had reached `mqtt_connected` walked back into the arriving list,
+labelled **"stalled at `mqtt_connected`"**, and stayed for the rest of the 900 s
+`progress_window_s`, duplicating a row the fleet list directly above it was already showing
+as offline, and describing a completed arrival as a stuck one.
+
+**The rule.** `progress.has_already_arrived(device, stage_at=…)` — a new pure predicate
+alongside the two rules that module already owns. An arrival is suppressed when the board
+**has a `devices` row**, **has a `broker_provisioned_at`**, **has a `last_seen`**, and its
+newest stage is **not newer than** that `last_seen`. Each conjunct earns its place:
+
+- *the row* — a board mid-arrival has none, which is the whole feature;
+- *`broker_provisioned_at`* — the last step of the sequence, set by `/v1/enroll` once the
+  dynsec credential lands. `enrolled_at` is in the same family but is `NOT NULL` with a
+  default, so testing it decides nothing;
+- *`last_seen`* — the board actually spoke to the broker once. Without it, a board that
+  enrolled and was then refused by the broker would be hidden — the case that earns the
+  feature;
+- *`stage_at <= last_seen`* — **this is what keeps a re-flashed board visible, for free.**
+  Re-enrolment deliberately leaves `last_seen` untouched (`registry.py`) and the ingestor
+  only ever advances it (`GREATEST`, `ingestor/store.py`), so a board reporting stages again
+  after a re-flash reports them strictly newer than its stale `last_seen`.
+
+Decommissioned rows are absent from the query the router already runs, so they never match
+and keep showing in arrivals — preserving the original comment's intent. No extra query:
+the filter reads the same rows the fleet list is built from. No frontend change — `fleet.ts`
+assigns `result.arrivals` verbatim, so the rule lives only on the server.
+
+**T2, live against `just up` through nginx, on device `a4cf12b3dea0`:**
+
+1. *Arriving.* `link_up` → `time_synced` → `enrolling` posted under one enrollment token →
+   the board is in `arrivals` and has no fleet row at all.
+2. *Arrived.* `enrolled` + `mqtt_connected` posted, then `just sim` enrolled and heartbeated
+   it for 20 s → `online: true`, `arrivals` empty.
+3. **The criterion.** The board then lost power ungracefully (`--crash-after 12`, so the
+   broker's LWT fired, not a clean goodbye) → the fleet row reads `online: false` and
+   `arrivals` is **`[]`**. Confirmed in SQL that all five stage rows sit behind `last_seen`
+   with `broker_provisioned_at` set — i.e. suppressed by the rule, not by falling out of the
+   window.
+4. **Re-flash still arrives.** A fresh `link_up` (`detail='re-flashed'`), now newer than
+   `last_seen`, put the same board straight back into `arrivals` while it stayed `offline`
+   in the fleet list.
+5. *Vacuity, live.* Neutering the clause to `return False` in the running api brought the
+   duplicate row back verbatim; restoring it emptied `arrivals` again. Neutering it to
+   `return True` and dropping the `last_seen` guard each failed exactly the intended test
+   (`test_a_re_flashed_board_arrives_again`, `test_a_board_that_enrolled_but_never_connected_still_arrives`).
+
+T1: 563 tests green (up from 556) plus ruff, `ruff format --check`, mypy; `just frontend-test`
+108 green, unchanged and untouched.
+
+**Accepted limit.** A board that reports `mqtt_connected` and dies *before* any live message
+advances `last_seen` past that report still reads as arriving. It never completed a
+heartbeat, so that is honest rather than wrong; tightening it would need a rule about how
+many messages count as having arrived.
+
 ## Post-v1
 
 - **Device decommissioning** — `POST /v1/devices/{device_id}/decommission` setting
