@@ -23,8 +23,15 @@ took a serial log pasted by hand into a chat. `S0-fe-4` is the P0 that comes out
 that, and it now gates R0: a board that cannot be onboarded without an engineer
 reading raw UART is not onboarded.
 
-<!-- Counters: spec=1 infra=5 db=1 be=6 fe=5 sec=1 fw=2 test=2 -->
-<!-- Sprint 0 counters: fe=5 fw=2 infra=2 test=2 -->
+Designed up on 2026-09-11 as one feature — **Unaided onboarding: flash → on the fleet**
+(`docs/features/enrollment.md`, requirements in `spec/standards.md`, reasoning in
+`design/decisions/enrollment-console-is-the-diagnostic-surface.md`). Its tasks are
+S0-fe-4 → S0-fe-5 → S0-fe-6 → S0-fe-7, closed by S0-test-3. Do them in that order:
+nothing can be acted on before it is named, and nothing can be judged before a person
+who has not seen the code tries it.
+
+<!-- Counters: spec=1 infra=5 db=1 be=6 fe=7 sec=1 fw=2 test=3 -->
+<!-- Sprint 0 counters: fe=7 fw=2 infra=2 test=3 -->
 
 Live status lives ONLY here. States: `- [ ]` open · `- [x]` done · `- [!]`
 attempted-but-failed. `spec/` and `design/` are status-free.
@@ -92,6 +99,45 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       for the first line from the board…"* placeholder rather than nothing.
       Acceptance: flash a board and the boot log appears without the operator touching
       anything. Empty state is visibly an empty log, not an absent one.
+
+- [ ] **S0-fe-6**: Recover in place — the fix is a button, not a instruction (P1, 1d)
+      Part of *Unaided onboarding* (`docs/features/enrollment.md`, `spec/standards.md`).
+      Depends on S0-fe-4: a fault must be named before it can be acted on. Where a
+      fault's remedy is software rather than physical, the panel offers it directly —
+      retry enrol, re-flash, mint a fresh token, reboot — and picks which applies from
+      the fault, because the target operator does not know. `enroll 409` (token spent)
+      is the clearest case: today it tells the operator to "flash the board again to
+      mint a fresh one", which is three manual steps it could take itself.
+      Acceptance: for each software-remediable fault in `hintFor`, the panel renders the
+      matching action and the action resolves the fault on a real board. Faults with no
+      software remedy — brownout, wrong PSK — must render *no* button rather than a
+      button that cannot work.
+
+- [ ] **S0-fe-7**: One click produces a diagnostic bundle (P1, 0.5d)
+      Part of *Unaided onboarding*. The escalation path that did not exist on
+      2026-09-11, when the only way to get the log out of the panel was to select text
+      in an unlabelled `<pre>` — and the operator could not find it. Copies the full
+      console log, the loaded `ff_cfg` summary, chip and flash identification, agent and
+      server versions, and the current fault.
+      **Secrets must be redacted**: the enrolment token, the Wi-Fi passphrase and the
+      MQTT credentials. `ff-cfg` already declines to print the last two (`secrets token
+      80 chars, passphrase 8 chars (never printed)`), but the bundle must not depend on
+      the firmware's discretion for that.
+      Acceptance: the bundle contains the brownout log from the 2026-09-11 session and
+      identifies the fault; a test asserts no `ffe_` token, passphrase or MQTT password
+      appears in the output, vacuity-checked by removing the redaction.
+
+- [ ] **S0-test-3**: Someone who has not seen the code onboards a board unaided (P1, 0.5d)
+      The criterion that actually decides *Unaided onboarding*; everything else is its
+      parts. Not automatable, and deliberately written as a task rather than replaced by
+      the parts a test runner can check.
+      Two runs, no assistance and no access to this repo, using only what is on screen:
+      a board onboarded end-to-end, and a deliberately induced fault diagnosed. Induce
+      at least two of: brownout (a thin USB cable through a hub reproduces it), a wrong
+      Wi-Fi passphrase, a spent enrolment token.
+      Acceptance: both runs succeed without the operator reading a UART log or asking a
+      question. Anything they get stuck on comes back as a new S0 task with the observed
+      behaviour — and the fact that they got stuck is the finding, not their skill.
 
 - [ ] **S0-fw-2**: `link_up` is reported before the clock is set, so it can never arrive (P2, 0.25d)
       Found 2026-09-11 reading `agent_main.c`: line 189 reports `link_up`, line 194 runs

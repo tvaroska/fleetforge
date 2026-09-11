@@ -37,6 +37,13 @@ ordered to retire the biggest risk (bricking) first. Contents in [releases.md](r
 | R4 | Custom self-test confirm | "boots but app logic broken" | 📋 Planned | [self-test](features/self-test.md) |
 | R5 | Signed OTA + resumable hardening → **v1** | Production-grade safety + security | 📋 Planned | [security-hardening](features/security-hardening.md) |
 
+> **R0 priority, 2026-09-11.** The first hardware bench showed every R0 component
+> working and the board still not onboarded — and, worse, the product unable to say why.
+> R0's risk is onboarding, so **unaided onboarding** (P0, `enrollment`) now gates the
+> release: a technician with no ESP32 knowledge takes a board from the flasher page to
+> green in the fleet list, or learns from the product what is wrong and what to do.
+> Requirements in [standards.md](../spec/standards.md).
+
 ### V2 — source to artifact: build & pre-flight verification
 
 | Release | Theme | Status | Feature area |

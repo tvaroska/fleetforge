@@ -6,6 +6,26 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-11 — the console panel is the diagnostic surface of record for onboarding
+
+The first hardware bench found no server bug and three onboarding bugs. A DevKit v1
+brownouts during Wi-Fi PHY calibration and resets forever; it printed `E BOD: Brownout
+detector was triggered` on every cycle, and the panel showed a stale green **Network
+up** instead. The fault was found by pasting a UART log into a chat window.
+
+Nothing server-side could have helped — a board that never associates is invisible to
+`device_progress` by construction, which `progress.py` already says out loud. The
+board's UART is the only witness and the browser is the only listener. So the panel,
+not the server, is held responsible for explaining everything between "flashed" and "on
+the fleet", against a technician who does not know what a brownout is. Anything the
+board says that the panel cannot explain is now a defect.
+
+Gates R0, because R0's stated risk *is* onboarding. Full reasoning and the rejected
+alternative (structured faults from firmware) in
+`design/decisions/enrollment-console-is-the-diagnostic-surface.md`; requirements in
+`spec/standards.md`; the parser-versus-firmware trade and the missing CUJs in
+`spec/open-questions.md`.
+
 ## 2026-09-11 — `arrivals` needed a second clause, not a tweak (S0-fe-3)
 
 Closes the item filed at the end of the S0-fw-1 entry below. The question was whether "not

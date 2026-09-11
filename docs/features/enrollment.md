@@ -697,6 +697,39 @@ advances `last_seen` past that report still reads as arriving. It never complete
 heartbeat, so that is honest rather than wrong; tightening it would need a rule about how
 many messages count as having arrived.
 
+## Planned Work
+
+### Unaided onboarding: flash → on the fleet (Priority: P0)
+
+- **Problem:** A technician with no ESP32 knowledge cannot get a board onto the fleet
+  without an engineer reading raw UART. Proven on 2026-09-11, the first real-hardware
+  session: an ESP32-DevKit v1 brownouts during Wi-Fi PHY calibration and resets forever.
+  The board printed the cause on every cycle — `E BOD: Brownout detector was triggered` —
+  and the panel showed a green **Network up** checkmark and nothing else. The fault was
+  found by pasting a serial log into a chat window. Every individual piece of R0 works;
+  the *experience* of onboarding does not, and R0's stated risk is onboarding.
+- **Scope:** Starts at the flasher page, ends when the board is green in the fleet list.
+  Account setup, token minting and getting to the page are out of scope. The repeat path
+  (board #2..#N) is out of scope for now — see Post-v1.
+- **Target operator:** a technician who can plug in USB and follow instructions, and who
+  does not know what a brownout, a DTR line or a partition table is. That is the bar the
+  work is judged against, not "an embedded engineer can figure it out".
+- **Shape:** three layers, in dependency order.
+  1. **Never be silent.** Every failure the board can express is named in plain language
+     with a concrete physical or software next action — including the failures that carry
+     no ESP-IDF log tag, which today are discarded before they can be classified.
+  2. **Recover in place.** Where the fix is software, it is a button: retry enrol,
+     re-flash, mint a fresh token, reboot. The operator should not have to know which.
+  3. **Escalate cleanly.** When neither works, one click produces a diagnostic bundle —
+     full log, config summary, chip info, firmware and server versions, the fault — with
+     secrets redacted, so a stuck operator can hand it to someone who can help. That
+     click is the thing that did not exist on 2026-09-11.
+- **Status:** Planned
+- **Added:** 2026-09-11
+- **Tasks:** S0-fe-4 (diagnosis), S0-fe-5 (never miss the boot), S0-fe-6 (recovery
+  actions), S0-fe-7 (diagnostic bundle), S0-test-3 (unaided acceptance run).
+  S0-fw-2 is adjacent: the first stage a board reports can never reach an HTTPS server.
+
 ## Post-v1
 
 - **Device decommissioning** — `POST /v1/devices/{device_id}/decommission` setting
