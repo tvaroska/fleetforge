@@ -6,6 +6,62 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-11 — the stage reporter has now run on a board, and one acceptance was wrong (S0-fw-1)
+
+Supersedes the 2026-09-10 S0-fw-1 entry below, which recorded the server half and said
+`ff_progress.c` had exactly one guarantee: that it compiles. It has now been executed.
+The design decisions in that entry all stand; these are what running it added.
+
+- **Acceptance 1 asked for something the feature does not claim, and that is a spec bug,
+  not a test bug.** "A board flashed with a deliberately wrong PSK shows a stalled stage
+  rather than nothing at all" — but a wrong PSK means no link, and `ff_progress.h`'s
+  header already states that a board with no route reports nothing. The criterion and the
+  interface contradicted each other, and the interface is right. Owner-confirmed
+  substitution: the two cases the feature *does* claim, a board stalled at `enrolling`
+  (broker down, so `/v1/enroll` 503s on provisioning) and one stalled at `mqtt_refused`
+  (credential rotated out from under it). Both now pass, driven by `ff_progress.c` rather
+  than by curl. **When an acceptance and an interface disagree, check which one was
+  written after the thing was understood.**
+- **The invisible case is real, measured, and belongs in the operator's head.** A board
+  whose token is refused reports *nothing*: the progress 401 self-disables the reporter,
+  so the `halted` that `park()` tries to send never leaves the board. Verified with a
+  revoked token — zero rows, silent dashboard, and only the `ff-progress` warning on the
+  console. This is the designed behaviour and it is also the feature's ceiling: [[S0-fe-1]]
+  (serial) and this task cover disjoint failures, and neither is a substitute for the other.
+- **`progress_stall_s` (60 s) and `ENROLL_RETRY_MIN_MS` (60 s) are the same number, so a
+  freshly-stalled board flickers.** The row alternates `stalled=false/true` for the first
+  couple of minutes and only settles once the backoff has doubled past the threshold.
+  Observed, not theorised. Left alone rather than tuned: the flicker is honest (the board
+  *is* alternating between reporting and waiting) and changing either constant to fix a
+  cosmetic wobble would trade a real property for a UI one. Worth knowing before someone
+  reports it as a bug.
+- **A trap that cost a full round of acceptance evidence:
+  `docker ps --filter ancestor=espressif/idf:v5.5.5` matches nothing when the image is
+  digest-pinned.** The filter compares the reference you typed, not the image the container
+  runs, so it exits 0 having killed nothing — indistinguishable from "no emulators are
+  running". Killing the `just` process does not help either: without `-it`, `docker run`
+  leaves the container alive. Six emulators accumulated, all claiming `000000000000`, all
+  enrolling and heartbeating over each other, and the first set of results had to be
+  thrown away. Fixed at the source rather than in a doc: `agent-qemu` names its container
+  `ff-qemu-<target>` and **refuses to start a second one**, and `agent-qemu-stop` exists.
+  Vacuity-checked both ways. **Apply the general rule: if a cleanup command can fail
+  silently, the thing it cleans up needs a name.**
+- **A board is visible as `arriving` before it exists in the fleet at all** — the
+  `link_up` arrival lands before any `devices` row does. That is the whole point of the
+  feature and it is worth stating as an observed fact rather than an intent.
+- **Filed, not fixed: an offline board reappears in `arrivals`.** Once presence decays,
+  a board that got all the way to `mqtt_connected` and then died shows up as "arriving,
+  stalled at `mqtt_connected`" for the rest of the 900 s window, duplicating a row the
+  fleet list already shows as offline. The `arrivals` rule (recent stage + not online) is
+  doing exactly what it says; whether "not online" should also exclude boards that have
+  *been* in the fleet is a dashboard decision, so it is **S0-fe-3** rather than a quiet
+  change here.
+
+Details: `docs/features/enrollment.md` → *Boot & enrol stage reports (S0-fw-1)*,
+`docs/runbooks/agent-qemu.md` → *Reproducing a board that gets partway*.
+
+---
+
 ## 2026-09-11 — the QEMU harness was never broken; it was unrunnable and unverifiable (S0-infra-1)
 
 - **The filed root cause was wrong and the named suspect is innocent.** S0-infra-1

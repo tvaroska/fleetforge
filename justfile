@@ -435,6 +435,18 @@ qemu_program := '''
 #
 # `-it` is passed ONLY when stdin is a terminal. Unconditional `-it` is what made this
 # recipe unrunnable from every non-interactive shell (see the section header).
+#
+# `--name ff-qemu-<target>` is not cosmetic, and neither is the refusal below it. Every
+# emulated board has the same all-zero eFuse MAC, so a second one is not a second device
+# — it is the SAME device_id enrolling, heartbeating and reporting stages over the top of
+# the first (see the runbook's *Every emulated board is `000000000000`*). Two of them make
+# every observation on the server ambiguous, and the fleet cannot tell you it is happening.
+#
+# The obvious cleanup — `docker ps --filter ancestor=espressif/idf:v5.5.5` — does NOT
+# match these containers, because `idf_image` is digest-pinned and the ancestor filter
+# compares the reference you typed. It exits 0 having killed nothing, so a stray board
+# survives every attempt to stop it. A name is the thing that can actually be found.
+# S0-fw-1 lost a set of results to exactly this.
 agent-qemu target="esp32" fresh="":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -443,6 +455,13 @@ agent-qemu target="esp32" fresh="":
     test -f .qemu/ff_cfg.bin || {
         echo "no .qemu/ff_cfg.bin — run: just agent-cfg --api-base … --mqtt-uri … --token …"
         exit 1; }
+    if [ -n "$(docker ps -q --filter name='^ff-qemu-{{ target }}$')" ]; then
+        echo "a {{ target }} board is ALREADY RUNNING as container ff-qemu-{{ target }}."
+        echo "Every emulated board claims device_id 000000000000, so a second one would"
+        echo "report stages and heartbeats as the same device and make both runs unreadable."
+        echo "Stop it first:  just agent-qemu-stop {{ target }}"
+        exit 1
+    fi
     case "{{ fresh }}" in
         "") ;;
         --fresh) rm -f ".qemu/flash-{{ target }}.bin" ;;
@@ -453,13 +472,24 @@ agent-qemu target="esp32" fresh="":
         tty_flag=(-it)
         echo "QEMU: Ctrl-A x quits. NVS persists in .qemu/flash-{{ target }}.bin (--fresh wipes it)."
     else
-        echo "QEMU: no terminal, so no Ctrl-A x — stop it with a signal. NVS persists in .qemu/flash-{{ target }}.bin."
+        echo "QEMU: no terminal, so no Ctrl-A x — stop it with 'just agent-qemu-stop {{ target }}'."
     fi
-    docker run --rm "${tty_flag[@]}" --network host -u $(id -u):$(id -g) \
+    docker run --rm "${tty_flag[@]}" --name "ff-qemu-{{ target }}" \
+        --network host -u $(id -u):$(id -g) \
         -e TARGET={{ target }} -e FLASH=/q/flash-{{ target }}.bin -e FFCFG=/q/ff_cfg.bin \
         -e QEMU_SHA256={{ qemu_sha256 }} -e IDF_IMAGE_REF={{ idf_image }} \
         -v "$PWD/.qemu:/q" -v "$PWD/agent/dist/{{ target }}:/d:ro" -v "$PWD/agent/tools:/t:ro" \
         --entrypoint bash {{ idf_image }} -c '{{ qemu_program }}'
+
+# Unplug the emulated board. Killing the `just` process does NOT stop it — `docker run`
+# without `-it` leaves the container running with the emulator inside, which is the other
+# half of how S0-fw-1 ended up with six boards all claiming 000000000000.
+#
+# It is an ungraceful stop on purpose: that is what makes the broker publish the board's
+# LWT, so `/v1/devices` flips `online: false` the way pulling power would.
+agent-qemu-stop target="esp32":
+    @docker kill "ff-qemu-{{ target }}" >/dev/null 2>&1 && echo "stopped ff-qemu-{{ target }}" \
+        || echo "no ff-qemu-{{ target }} running"
 
 # Is the harness alive? One command, no enrollment token, no running stack, no board.
 #

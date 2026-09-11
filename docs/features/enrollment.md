@@ -564,6 +564,77 @@ decoding at 115200, the EN pulse landing in the app rather than the ROM loader, 
 `screen` actually getting the device back. Tracked as **S0-test-1**, to be run on the Mac
 (the Linux dev box does not enumerate boards over WebSerial).
 
+### Boot & enrol stage reports (S0-fw-1)
+
+**2026-09-10 server half, 2026-09-11 firmware half.** The companion to the serial console
+above, for the board that is *not* on your bench: between "flashed" and "online" the
+dashboard showed nothing at all, which is exactly the window that fails.
+
+**What was built.** `POST /v1/device-progress` (`api/routers/progress.py`), a
+`device_progress` table trimmed to 20 rows per device on write, `arrivals` riding on the
+existing `GET /v1/devices` response, the fleet view's arriving list — and on the board,
+`agent/main/ff_progress.c`, called from the stage transitions `agent_main.c` and
+`ff_mqtt.c` already walked: `link_up` → `time_synced` → `enrolling` → `enrolled` →
+`mqtt_connected`, plus `mqtt_refused` and `halted`.
+
+**Key approach.** A pre-enrolment board holds no MQTT credential — that is what it is
+trying to get — so reports travel over the same HTTPS channel and under the same `ffe_`
+enrollment token as `/v1/enroll`, and the server **verifies that token without ever
+burning it**. `stalled` is derived on read (60 s), never stored. The reporter is never
+fatal, never retried, and self-disables after a 401. Full rationale in `DECISIONS.md`
+(2026-09-10, 2026-09-11).
+
+**T2 evidence — driven by `ff_progress.c` on an emulated board, not by curl.** The 2026-09-10
+attempt could only reach the server side (`just sim` + curl) because the QEMU harness was
+believed dead; S0-infra-1 showed it was not, and every acceptance below was re-run against
+`agent/dist/esp32` built at a clean HEAD (`58bf54b`, `BUNDLE OK`).
+
+*The healthy path.* One board, one token: `arrivals` shows it at `link_up` **before it
+exists in the fleet at all** — the gap this feature was filed to close — then `enrolling`;
+all five stages land in `device_progress` in order (15:12:59 → 15:13:01); it goes
+`online: true` and **leaves `arrivals` in the same read**, because arrivals excludes
+whatever `is_online` currently counts as present. The token reads `used` exactly once with
+`used_by_device_id`, so four progress reports cost no enrolment. No `ffe_`, password or
+passphrase string anywhere in the transcript.
+
+*A board that gets partway, stalled at `enrolling`.* With `mosquitto` stopped,
+`POST /v1/enroll` 503s on broker provisioning and the board loops — `enrolling` re-reported
+at 60 s, 120 s, 240 s — showing in the dashboard as **arriving and stalled with its stage**
+rather than as nothing. Restarting the broker recovered it to `enrolled` →
+`mqtt_connected` → `online` on the *same single token*.
+
+*A board that gets partway, stalled at `mqtt_refused`.* Credential rotated out from under
+a board holding one in NVS: `offline` in the fleet and, in arrivals, `mqtt_refused` with
+`detail='broker connack 5'` — the dashboard names the cause, not just the absence.
+
+*Token discipline (acceptance 3), re-confirmed live.* no token → 422; garbage token → 401;
+burned token from the **same** device → 202 (this is what makes `enrolled` and
+`mqtt_connected` reportable at all); burned token from a **different** device → 401; an
+unknown stage (`teleported`) stored verbatim, because the R0 agent is flash-baked and the
+server must tolerate one it can never update; `Link Up; DROP` and a `\n` in `detail` both
+422 — which is why `ff_progress.c::sanitize_detail` strips control characters before they
+are sent.
+
+**Acceptance 1 was re-worded, deliberately.** It asked for "a board flashed with a
+deliberately wrong PSK". A wrong PSK means no link, and the feature's stated limit is that
+a board with no route reports nothing — so the literal test asserts something this feature
+does not claim, and QEMU has no radio to run it on besides. Owner-confirmed substitution:
+the two *partway* cases above, which are what the feature does claim.
+
+**The honest limit, now measured rather than asserted.** A board whose enrollment token is
+refused is **invisible**: the progress 401 disables the reporter for the boot, so the
+`halted` that `park()` reports never leaves the board (verified with a revoked token —
+zero rows in `device_progress`, and the board silent in the dashboard). The only clue is
+the `ff-progress` warning on the console, which is why S0-fe-1 and this task are
+complements and neither replaces the other.
+
+**Filed on the way.** S0-fe-3 — an offline board keeps reappearing in `arrivals` as
+"stalled at `mqtt_connected`" for the 15-minute progress window, which duplicates a row
+the fleet list already shows as offline. Harness fix landed here: `just agent-qemu` names
+its container and refuses to start a second board, and `just agent-qemu-stop` exists,
+because six concurrent emulators all claiming `000000000000` silently invalidated the
+first round of this evidence (`docs/runbooks/agent-qemu.md`).
+
 ## Post-v1
 
 - **Device decommissioning** — `POST /v1/devices/{device_id}/decommission` setting

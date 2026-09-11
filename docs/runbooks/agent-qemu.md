@@ -119,6 +119,25 @@ The agent says so, loudly, once per boot. Consequences worth knowing:
   at it, not that a board is broken.
 * A real ESP32 always has a burned MAC; there is no code path that special-cases this.
 
+`agent-qemu` now refuses to start a second board rather than trusting you to remember:
+the container is named `ff-qemu-<target>`, and a second `just agent-qemu esp32` exits 1
+telling you to stop the first. **Two boards do not produce two sets of results — they
+produce one unreadable set**, because both enroll, heartbeat and report stages as the
+same `device_id`, and nothing on the server can tell them apart. S0-fw-1 threw away a
+full round of acceptance evidence to this.
+
+> **The trap that let it happen, worth knowing on its own:**
+> `docker ps --filter ancestor=espressif/idf:v5.5.5` **matches nothing here.** `idf_image`
+> is pinned by digest, and the `ancestor` filter compares the reference you typed, not the
+> image the container actually runs. The command exits 0 having killed nothing, which
+> reads exactly like "no emulators are running". Use `just agent-qemu-stop`, or match on
+> the image column:
+> ```bash
+> docker ps --format '{{.ID}} {{.Image}}' | awk '$2=="espressif/idf:v5.5.5"{print $1}'
+> ```
+> Killing the `just` process does not help either: without `-it`, `docker run` leaves the
+> container — and the emulator inside it — running.
+
 ## The flash image is the board's memory
 
 `.qemu/flash-esp32.bin` is written once and then **written back** by QEMU (`if=mtd`), so
@@ -163,11 +182,67 @@ recipe, so "no NTP" has to be a flag.
 
 | How | What the fleet sees |
 |---|---|
-| `Ctrl-A x` (or `docker kill`) | an ungraceful death — the broker publishes the **LWT**, retained `{"online":false}` on `up/presence`, and `/v1/devices` flips to `"online": false` within ~1.5 × keepalive (≈45 s) |
+| `Ctrl-A x`, or `just agent-qemu-stop esp32` | an ungraceful death — the broker publishes the **LWT**, retained `{"online":false}` on `up/presence`, and `/v1/devices` flips to `"online": false` within ~1.5 × keepalive (measured ≈18 s at `--hb 10`, S0-fw-1) |
 | nothing (just leave it) | heartbeats every `--hb` seconds, forever |
 
 There is no goodbye publish: a board that is dying has no way to send one, so the agent
 does not pretend it can. The will is the mechanism.
+
+## Reproducing a board that gets partway
+
+The three failures worth being able to summon on demand. All are S0-fw-1's acceptance
+evidence, and all of them are what an operator is actually looking at when they say a
+board "never showed up". Watch `GET /v1/devices` → `arrivals`, not the serial log.
+
+**Stalled at `enrolling` — the server is up but cannot provision a broker credential.**
+
+```bash
+docker compose stop mosquitto
+just agent-cfg --api-base http://10.0.2.2:8080 --mqtt-uri mqtt://10.0.2.2:8883 \
+      --link ethernet --hb 10 --ntp pool.ntp.org --token "$FFE"
+just agent-qemu esp32 --fresh
+#   api:  POST /v1/enroll -> 503, "broker provisioning failed … token is burned"
+#   fleet: ARRIVING stage=enrolling
+```
+
+The agent retries at 60 s, then 120, 240, … (`ENROLL_RETRY_MIN/MAX_MS`), reporting
+`enrolling` each time, and **spends no second token** — the 600 s grace window lets the
+same board re-present the same one. `docker compose start mosquitto` and it recovers to
+`enrolled` → `mqtt_connected` → `online` on its own, with no reflash.
+
+Note the interaction, because it makes the flag flicker: `progress_stall_s` is 60 s and
+the *first* retry interval is also 60 s, so the row alternates `stalled=false/true` for
+the first couple of minutes and only settles once the backoff has doubled past 60 s.
+
+**Stalled at `mqtt_refused` — enrolled, but the broker will not have it.** Rotate the
+credential out from under a board that has one in NVS, then reboot it *without*
+`--fresh`:
+
+```bash
+set -a; source .env; set +a
+docker compose exec -T mosquitto mosquitto_ctrl -h localhost -p 1883 \
+      -u "$MQTT_DYNSEC_USERNAME" -P "$MQTT_DYNSEC_PASSWORD" \
+      dynsec setClientPassword 000000000000 something-else
+just agent-qemu esp32
+#   board: broker refused the connection (return code 5)
+#   fleet: ARRIVING stage=mqtt_refused detail='broker connack 5'
+```
+
+**Invisible — the enrollment token itself is refused.** Mint a token, revoke it, flash
+it. This one is a *negative* result and the reason the serial console exists:
+
+```bash
+curl -sS -X POST "$BASE/v1/enrollment-tokens/$TID/revoke" -H "Authorization: Bearer $TOKEN"
+just agent-qemu esp32 --fresh
+#   W ff-progress: the server refused this board's enrollment token (progress 401);
+#                  stage reporting is off for this boot…
+#   E ff-agent: halted: this board's enrollment token was refused for good…
+#   fleet: nothing. zero rows in device_progress.
+```
+
+The 401 disables the reporter for the boot by design (`ff_progress.c`), so `halted` never
+leaves the board. A board with a bad credential is invisible to the dashboard and visible
+only on the console — see `docs/features/enrollment.md` → *Serial console after flashing*.
 
 ## Is the harness alive?
 

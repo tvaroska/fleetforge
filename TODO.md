@@ -4,14 +4,14 @@
 build is caught before the fleet, and any device that gets one recovers itself.
 **Updated:** 2026-09-11
 **Focus:** R0 is deployed and live at `bingo.tvaroska.sk`; only R0-test-2 (E2E on real
-hardware) remains. Sprint 0 holds the device-visibility gap that the first hardware
-attempt exposed. The QEMU harness is **working again** (S0-infra-1, 2026-09-11 — the
-reported boot loop never reproduced; what was actually wrong is that the recipe could not
-run without a terminal, and the emulator was never verified). So S0-fw-1 is unblocked and
-runnable on this box; the two remaining items after it need real hardware and the Mac.
+hardware) remains. Device visibility is now covered from both ends — the serial console
+(S0-fe-1) and boot/enrol stage reports (S0-fw-1, verified on an emulated board
+2026-09-11). **Everything still open needs hardware**: S0-test-1 and R0-test-2 both want
+a real board, and S0-test-1 specifically wants the Mac (the Linux dev box does not
+enumerate boards over WebSerial). S0-fe-3 is the one desk-bound item left.
 
 <!-- Counters: spec=1 infra=5 db=1 be=6 fe=3 sec=1 fw=1 test=2 -->
-<!-- Sprint 0 counters: fe=2 fw=1 infra=1 test=1 -->
+<!-- Sprint 0 counters: fe=3 fw=1 infra=1 test=1 -->
 
 Live status lives ONLY here. States: `- [ ]` open · `- [x]` done · `- [!]`
 attempted-but-failed. `spec/` and `design/` are status-free.
@@ -61,36 +61,22 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       both exercised. Anything that fails comes back as a new S0 task with the observed
       behaviour.
 
-- [!] **S0-fw-1**: Agent reports boot and enrol progress to the server (P2, 2d)
-      **Attempted 2026-09-10 — server, API and fleet view are built, verified and
-      committed; the firmware half is written and compiles but has never run.**
-      Acceptance 3 (no report accepted without its token) passed in full against the dev
-      stack. Acceptances 1 and 2 passed on the *server* side — a board that only ever
-      reports `enrolling`/`halted` shows up arriving-and-stalled with its reason, and a
-      board that reaches the broker drops out of arrivals and lands `online` — but both
-      were driven by curl + `just sim`, not by `agent/main/ff_progress.c` on a board.
-      **Unblocked 2026-09-11 (S0-infra-1).** The harness was never broken: the boot loop
-      did not reproduce, and the bundle sitting in `agent/dist/esp32` is *this task's own
-      firmware* (`ff_progress` is in `app.bin`) — it boots, enrols and heartbeats in QEMU.
-      So acceptances 1 and 2 can now be driven by `agent/main/ff_progress.c` on an
-      emulated board rather than by curl + `just sim`. Start with `just agent-qemu-smoke`,
-      then `just agent-build esp32` at a clean HEAD before trusting the transcript.
-      Original task follows.
-      Depends on S0-fe-1 (serial first — it covers the bench; this covers the fleet).
-      Today a board is invisible until it is fully enrolled and beating: the dashboard
-      shows nothing between "flashed" and "online", which is exactly the window that
-      fails. Report the stage transitions `agent_main.c` already walks — link up, time
-      synced, enrolling, enrolled, mqtt connected — so the fleet view can show a board
-      *arriving* rather than a gap.
-      Note the honest limit, and do not design as if it were not there: this cannot help
-      when the board has no route to the server. It earns its keep for boards that get
-      partway, for sleepy boards, and for re-enrolment after a credential is rotated.
-      Spans firmware, `spec/device-protocol.md` (PROPOSE — a pre-enrolment device has no
-      MQTT credential, so the channel is unauthenticated or token-bearing HTTP, and that
-      is a protocol decision, not an implementation one), the API and the fleet view.
-      Acceptance: a board flashed with a deliberately wrong PSK shows a stalled stage in
-      the dashboard rather than nothing at all; a healthy board's stages appear in order
-      and it lands `online`; no stage report is accepted without its enrollment token.
+- [ ] **S0-fe-3**: An offline board should stop re-appearing in `arrivals` (P3, 0.5d)
+      Found while verifying S0-fw-1 on 2026-09-11. A board that got all the way to
+      `mqtt_connected` and then lost power comes back into the arriving list as
+      "stalled at `mqtt_connected`" as soon as presence decays, and stays there for the
+      rest of the 900 s `progress_window_s` — duplicating a row the fleet list above it
+      is already showing as offline.
+      The rule in `api/routers/devices.py` (recent stage **and** not currently online) is
+      doing exactly what it was written to do, and the comment there defends it: a board
+      being re-flashed reports stages again, and hiding that is the original gap. So this
+      is a judgement call about the read model, not a bug fix — hence a task rather than
+      a quiet change. The likely shape is to exclude devices that have ever been
+      `enrolled_at` + `broker_provisioned_at` **and** whose newest stage predates their
+      newest `last_seen`, i.e. a board whose arrival already completed.
+      Acceptance: a board that has been online and then drops shows in the fleet list as
+      offline and **not** in arrivals; a board being re-flashed (fresh stages *after* its
+      last heartbeat) still does appear in arrivals.
 
 ---
 
