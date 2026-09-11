@@ -6,6 +6,55 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-11 — the QEMU harness was never broken; it was unrunnable and unverifiable (S0-infra-1)
+
+- **The filed root cause was wrong and the named suspect is innocent.** S0-infra-1
+  reported a `LoadProhibited` boot loop inside `esp_task_wdt_init` and suspected the
+  `-global driver=timer.esp32.timg,property=wdt_disable,value=true` flag. It did not
+  reproduce: a full run from a wiped flash image and a fresh token reached `enroll 200`
+  → `mqtt connected` → heartbeats, and five further boots — three under eight busy-loops
+  on a four-core box — produced zero panics. Every one of those runs carries the flag.
+  **Recorded so nobody re-decodes that backtrace**: `docs/runbooks/agent-qemu.md` →
+  *What we know about the boot-loop panic*.
+- **`docker run -it` in a recipe is a bug, not a convenience.** `agent-qemu` passed it
+  unconditionally, so the recipe died with "cannot attach stdin to a TTY-enabled
+  container" in every agent session, script and CI shell — i.e. it could not be run by
+  the things that most need to run it, including the acceptance criterion of the task
+  filed against it. Whoever hits that hand-rolls a `docker run`, and a hand-rolled
+  emulator invocation is where a wrong `-M`/`-m`/`-global` and an inexplicable watchdog
+  panic come from. This is the most probable origin of the reported backtrace. `-it` is
+  now conditional on `[ -t 0 ]`. **Apply this to any recipe that shells into a
+  container.**
+- **A digest pin does not pin what you run. Docker verifies a digest on `pull`, not on
+  `run`.** A damaged or replaced local layer is used in silence, and
+  `qemu-system-xtensa` lives inside the pinned image — which was in fact *absent* from
+  this box's store when the investigation began and had to be re-pulled, with `/` at
+  85%. Since every other input to a boot is content-addressed (bundle sha256s, IDF's own
+  `default_efuse` bytes, `esptool merge_bin` over manifest offsets), identical declared
+  inputs produced different behaviour, so one input was not what it claimed. New
+  `qemu_sha256` hashes the emulator **binary** inside the container before every boot and
+  prints its version into every transcript. Limit stated rather than papered over: one
+  binary is not the whole image.
+- **The two QEMU recipes splice one `qemu_program` definition.** A smoke check that
+  assembles its own machine guards a lookalike, not the recipe. Everything that varies
+  arrives as an environment variable so the argv cannot drift.
+- **`just agent-qemu-smoke` — the cheap answer to "is the harness alive?"** ~17 s, no
+  token, no stack, no board. Asserts only the first seconds, most-specific first: no
+  panic, exactly one ROM `rst:0x` banner, the `ff-agent` banner, `ff_cfg v1 loaded`. It
+  deliberately proves nothing about enrolment or MQTT. **This task cost a decoded
+  backtrace and a blocked firmware task to answer a question worth seventeen seconds.**
+  Vacuity-checked both ways: a wrong `qemu_sha256` trips the integrity guard, and 256
+  scribbled bytes in `app.bin` produce a real loop — `the board reset 27 times`.
+- **Consequence for [[S0-fw-1]]: it is unblocked, and its firmware has already run.** The
+  bundle in `agent/dist/esp32` is the S0-fw-1 build (`ff_progress` in `app.bin`,
+  `source_commit f81d6f1` + dirty tree) and it boots and enrols. The two firmware
+  acceptances it could not reach are now executable on this box.
+
+Details: `docs/features/infrastructure.md` → *The QEMU harness, re-verified*,
+`docs/runbooks/agent-qemu.md`.
+
+---
+
 ## 2026-09-10 — the theme is monochrome, so every state encodes twice (S0-fe-2)
 
 - **One hue ramp means colour is no longer available as a carrier of meaning, and that is

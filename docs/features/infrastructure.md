@@ -886,3 +886,113 @@ is the downloader hitting its ceiling and being squeezed, and it is a pre-existi
 in another app — it was simply invisible until this harness existed. The paging delta
 (`pswpin +13`, `pswpout +2498` over 900 s) is consistent with that one container. Not in
 scope for R0; raised to the owner as an ops finding against `downloader`.
+
+---
+
+## The QEMU harness, re-verified (S0-infra-1, closed 2026-09-11)
+
+**Filed as:** "`just agent-qemu esp32` boot-loops — no firmware can be run (P1)". The
+ticket carried a decoded `LoadProhibited` backtrace —
+`main_task → esp_task_wdt_init → esp_task_wdt_impl_timer_allocate → esp_intr_alloc →
+task_wdt_isr` — and named the
+`-global driver=timer.esp32.timg,property=wdt_disable,value=true` flag as the suspect.
+It blocked S0-fw-1 and every firmware acceptance after it, because the Mac is the
+flashing bench and QEMU is the only way to run agent firmware on this box.
+
+**Closed as: not reproducible, with two real defects found and fixed.**
+
+### The panic did not come back
+
+Everything below is green, at HEAD, on 2026-09-11:
+
+* a full run from a wiped `flash-esp32.bin` and a freshly minted token: `app_main` →
+  `ff_cfg v1 loaded (crc ok)` → `device_id 000000000000` → `eth link up, ip 10.0.2.15`
+  → `sntp: 1970 → 2026-09-11T14:15:02Z` → `enroll 200` → `credential stored in NVS` →
+  `mqtt connected` → retained announce + presence → `hb` every 10 s for 90 s. Matches
+  `docs/runbooks/agent-qemu.md` line for line;
+* five further boots, three of them under eight busy-loops on a four-core box — the
+  "host starvation fires a spurious watchdog interrupt" theory. Zero panics, zero
+  resets;
+* the `wdt_disable` flag is present in every one of those runs, so **the suspect named
+  on the ticket is innocent**.
+
+Also settled in passing: the bundle in `agent/dist/esp32` is the **S0-fw-1 firmware**
+(`ff_progress` strings are in `app.bin`; manifest `source_commit f81d6f1` plus a dirty
+tree). It boots and enrolls, so S0-fw-1's firmware half is no longer unrun — its two
+outstanding acceptances are now executable.
+
+### Defect 1 — the recipe could not run without a terminal
+
+`agent-qemu` passed `docker run -it` unconditionally, so from any non-interactive shell:
+
+```
+cannot attach stdin to a TTY-enabled container because stdin is not a terminal
+```
+
+Every agent session, script and CI shell is non-interactive. The recipe named in this
+task's own acceptance criterion **could not be executed by the thing that had to execute
+it**, and the way round it is to hand-roll a `docker run` — which is exactly where an
+emulator invocation acquires a wrong `-M`, `-m` or `-global` and starts panicking inside
+the watchdog. This is the most probable origin of the filed backtrace. Fixed: `-it` only
+when `[ -t 0 ]`.
+
+### Defect 2 — the emulator was pinned but never verified
+
+`idf_image` is pinned by sha256 and every bundle manifest records the same digest, which
+reads as a guarantee that the emulator is fixed. It is not: **Docker verifies a digest on
+`pull`, not on `run`**, so a damaged or replaced local layer is used in silence — and
+`qemu-system-xtensa` lives in that image. The pinned image was in fact **absent from this
+box's Docker store** when the investigation began and had to be re-pulled (2.4 GB), with
+`/` at 85%.
+
+Every other input to a boot is content-addressed and deterministic: the bundle (per-part
+sha256 in `manifest.json`), the eFuse blob (IDF's own `default_efuse` bytes), the flash
+merge (`esptool merge_bin` over manifest offsets). Identical inputs cannot yield two
+behaviours, so at failure time one input was not what it claimed, and the local emulator
+image is the only one verifiably in a different state since. Unprovable after the fact;
+closed going forward by `qemu_sha256`.
+
+### What shipped
+
+| Change | Why |
+|---|---|
+| `qemu_sha256` in the justfile, checked inside the container before every boot | the digest pin does not cover `run`; this pins the one binary whose behaviour decides whether a boot means anything |
+| `qemu_program` — the in-container program, defined **once** | `agent-qemu` and `agent-qemu-smoke` must boot an identical machine or the smoke check guards a lookalike |
+| `agent-qemu` passes `-it` only when stdin is a TTY | Defect 1 |
+| `just agent-qemu-smoke [target] [deadline]` | one command, ~17 s, no token, no stack, no board: is the harness alive? |
+| QEMU version printed into every transcript | provenance, so "which emulator produced this log" is never a guess again |
+| `docs/runbooks/agent-qemu.md` → *What we know about the boot-loop panic* + recovery drill | so nobody re-decodes that backtrace |
+
+`agent-qemu-smoke` asserts four things about the first seconds, most-specific first: no
+panic; exactly one ROM `rst:0x` banner (the boot-loop check); the `ff-agent` banner; and
+`ff_cfg v1 loaded`. It proves **nothing** about enrolment or MQTT — those need a token
+and `just up`. It uses a tokenless throwaway config aimed at a closed port and its own
+`flash-<target>-smoke.bin`, so it spends no token and never touches the NVS the real
+emulated board is accumulating.
+
+### Verification (T2)
+
+* **`just agent-qemu esp32 --fresh`, headless** — the recipe itself, from a wiped flash
+  image, reached the full transcript above; `/v1/devices` shows `000000000000` enrolled
+  `2026-09-11T14:15:02Z` (10:15 EDT), `partition_layout ab-4m-v1`, `ota_slot_size
+  1966080`, and the newest enrollment token reads `used` / `used_by 000000000000`.
+* **`just agent-qemu-smoke esp32`** — `HARNESS OK` in 17 s (down from the full deadline
+  once it learned to stop as soon as the answer is knowable).
+* **Vacuity-checked twice, because a check that cannot fail proves nothing:**
+  * `just --set qemu_sha256 000…0 agent-qemu-smoke` → the integrity guard fires, names
+    the expected and actual hashes and the binary, and prints the re-pull command;
+  * 256 bytes of `0xa5` scribbled into `agent/dist/esp32/app.bin` → the bootloader
+    rejects the image and the board really does loop:
+    `SMOKE FAILED: the board reset 27 times — this is the boot loop S0-infra-1
+    described`. Restored afterwards; `just agent-verify esp32` → `BUNDLE OK`.
+* **T1** — `just test` 554 passed (lint + types + the full suite), `just stack-check`
+  clean. No stray containers left behind.
+
+### The honest limit
+
+**The originally-filed panic was never reproduced, so it was never fixed.** What ships is
+a harness that runs where it has to run, verifies the emulator it is about to trust,
+self-checks in one command, and a written record. Hashing one binary is also not a full
+image integrity check — shared libraries and the Python tooling are not covered. If the
+panic returns, `just agent-qemu-smoke` names it in seventeen seconds instead of a
+backtrace decode.

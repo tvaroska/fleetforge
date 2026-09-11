@@ -285,6 +285,16 @@ _push-images:
 agent_targets := "esp32 esp32s3 esp32c3 esp32c6"
 idf_image := "espressif/idf:v5.5.5@sha256:a9231d0697ab8f7517cc072e93b7c83e04907bfbfba80b6440d7dbbf90665cf2"
 
+# sha256 of `qemu-system-xtensa` INSIDE the pinned image (esp_develop_9.2.2_20260417).
+#
+# The image pin above is not enough on its own: **Docker verifies a digest on `pull`,
+# not on `run`**, so a locally damaged or replaced layer is used silently and the pin
+# reads as a guarantee it does not give. The emulator is the one file in that image
+# whose behaviour decides whether a boot means anything, so it is hashed before every
+# run — see docs/runbooks/agent-qemu.md -> *What we know about the boot-loop panic*.
+# Bump this only alongside `idf_image`, and record both in DECISIONS.md.
+qemu_sha256 := "50813d894756c1448b8742e1d8db21e3cce0f4e85b56fe53e36760b941cb7f17"
+
 # Build one target into agent/dist/<target>/ (bootloader, partition table, otadata,
 # app, the resolved sdkconfig and manifest.json with byte offsets + sha256s).
 #
@@ -346,11 +356,18 @@ agent-push target="esp32": (agent-image target)
 # Agent firmware in QEMU — a board with no board (R0-fw-1)
 # ─────────────────────────────────────────────────────────────────────────────
 #
+#     just agent-qemu-smoke            # is the harness alive? no token, no stack, no board
 #     just agent-cfg --api-base http://10.0.2.2:8080 --mqtt-uri mqtt://10.0.2.2:8883 \
 #         --link ethernet --hb 10 --token "$FFE"
 #     just agent-qemu esp32            # boot it; Ctrl-A x to quit
 #     just agent-qemu esp32 --fresh    # rebuild the image = wipe NVS = forget the credential
 #     just agent-qemu-clean            # delete .qemu/ — it holds a live credential
+#
+# `agent-qemu` works with or without a terminal. It used to pass `docker run -it`
+# unconditionally, which meant it died with "cannot attach stdin to a TTY-enabled
+# container" in every agent session, script and CI shell — i.e. it could not be run by
+# the things that most need to run it, and they worked around it by hand-rolling an
+# emulator invocation. S0-infra-1 is what that cost.
 #
 # Everything lands in `.qemu/` (0700, gitignored): the ff_cfg blob with a live
 # single-use enrollment token, and a 4 MB flash image whose NVS holds the broker
@@ -369,6 +386,45 @@ agent-cfg *args:
         -v "$PWD/.qemu:/q" -v "$PWD/agent/tools:/t:ro" \
         --entrypoint python3 {{ idf_image }} /t/ff_cfg.py --out /q/ff_cfg.bin {{ args }}
 
+# The in-container program BOTH QEMU recipes run, defined exactly once.
+#
+# One definition is the point: if `agent-qemu-smoke` booted a machine assembled
+# differently from `agent-qemu`, a green smoke run would prove nothing about the recipe
+# it exists to guard. Everything that varies arrives as an environment variable
+# ($TARGET, $FLASH, $QEMU_SHA256, $IDF_IMAGE_REF), so the argv itself cannot drift.
+#
+# It hashes the emulator before using it — see `qemu_sha256` above for why a digest pin
+# is not sufficient — and prints the QEMU version, so every transcript carries the
+# provenance of the thing that produced it.
+#
+# No single quotes anywhere below: this whole string is spliced into a `bash -c '…'`.
+qemu_program := '''
+    set -e
+    . $IDF_PATH/export.sh >/dev/null 2>&1
+    bin=$(command -v qemu-system-xtensa)
+    got=$(sha256sum "$bin" | cut -d" " -f1)
+    if [ "$got" != "$QEMU_SHA256" ]; then
+        echo "the emulator is not the one this repo pins." >&2
+        echo "  expected  $QEMU_SHA256" >&2
+        echo "  got       $got" >&2
+        echo "  binary    $bin" >&2
+        echo "Docker verifies an image digest on PULL, not on RUN, so a damaged or" >&2
+        echo "replaced local layer is used in silence. Re-pull the pinned image:" >&2
+        echo "  docker rmi $IDF_IMAGE_REF && docker pull $IDF_IMAGE_REF" >&2
+        exit 3
+    fi
+    qemu-system-xtensa --version | head -1
+    test -f /q/efuse.bin || python3 /t/qemu_image.py efuse --target "$TARGET" --out /q/efuse.bin
+    test -f "$FLASH" || python3 /t/qemu_image.py flash \
+        --bundle /d --config "$FFCFG" --out "$FLASH"
+    exec qemu-system-xtensa -M esp32 -m 4M \
+        -drive file=$FLASH,if=mtd,format=raw \
+        -drive file=/q/efuse.bin,if=none,format=raw,id=efuse \
+        -global driver=nvram.esp32.efuse,property=drive,value=efuse \
+        -global driver=timer.esp32.timg,property=wdt_disable,value=true \
+        -nic user,model=open_eth -nographic -serial mon:stdio
+'''
+
 # Boot agent/dist/<target> in QEMU with that config.
 #
 # `--network host` is load-bearing: it is what makes slirp's 10.0.2.2 this dev box,
@@ -376,6 +432,9 @@ agent-cfg *args:
 # once and then WRITTEN BACK by QEMU — NVS, and therefore the enrolled credential,
 # lives inside it between runs. Pass `--fresh` to rebuild it, which is the same thing
 # as handing the board an eraser.
+#
+# `-it` is passed ONLY when stdin is a terminal. Unconditional `-it` is what made this
+# recipe unrunnable from every non-interactive shell (see the section header).
 agent-qemu target="esp32" fresh="":
     #!/usr/bin/env bash
     set -euo pipefail
@@ -389,21 +448,86 @@ agent-qemu target="esp32" fresh="":
         --fresh) rm -f ".qemu/flash-{{ target }}.bin" ;;
         *) echo "unknown argument '{{ fresh }}' (the only one is --fresh)"; exit 2 ;;
     esac
-    echo "QEMU: Ctrl-A x quits. NVS persists in .qemu/flash-{{ target }}.bin (--fresh wipes it)."
-    docker run --rm -it --network host -u $(id -u):$(id -g) \
+    tty_flag=()
+    if [ -t 0 ]; then
+        tty_flag=(-it)
+        echo "QEMU: Ctrl-A x quits. NVS persists in .qemu/flash-{{ target }}.bin (--fresh wipes it)."
+    else
+        echo "QEMU: no terminal, so no Ctrl-A x — stop it with a signal. NVS persists in .qemu/flash-{{ target }}.bin."
+    fi
+    docker run --rm "${tty_flag[@]}" --network host -u $(id -u):$(id -g) \
+        -e TARGET={{ target }} -e FLASH=/q/flash-{{ target }}.bin -e FFCFG=/q/ff_cfg.bin \
+        -e QEMU_SHA256={{ qemu_sha256 }} -e IDF_IMAGE_REF={{ idf_image }} \
         -v "$PWD/.qemu:/q" -v "$PWD/agent/dist/{{ target }}:/d:ro" -v "$PWD/agent/tools:/t:ro" \
-        --entrypoint bash {{ idf_image }} -c '
-            set -e
-            . $IDF_PATH/export.sh >/dev/null 2>&1
-            test -f /q/efuse.bin || python3 /t/qemu_image.py efuse --target {{ target }} --out /q/efuse.bin
-            test -f /q/flash-{{ target }}.bin || python3 /t/qemu_image.py flash \
-                --bundle /d --config /q/ff_cfg.bin --out /q/flash-{{ target }}.bin
-            exec qemu-system-xtensa -M esp32 -m 4M \
-                -drive file=/q/flash-{{ target }}.bin,if=mtd,format=raw \
-                -drive file=/q/efuse.bin,if=none,format=raw,id=efuse \
-                -global driver=nvram.esp32.efuse,property=drive,value=efuse \
-                -global driver=timer.esp32.timg,property=wdt_disable,value=true \
-                -nic user,model=open_eth -nographic -serial mon:stdio'
+        --entrypoint bash {{ idf_image }} -c '{{ qemu_program }}'
+
+# Is the harness alive? One command, no enrollment token, no running stack, no board.
+#
+# This exists because S0-infra-1 — "the emulator boot-loops" — cost a decoded backtrace
+# and a blocked firmware task to investigate, and the answer was reachable in a minute.
+# It boots the same machine `agent-qemu` does (see `qemu_program`) and asserts four
+# things about the FIRST seconds, which is all a harness check can honestly claim.
+# They are checked most-specific first, so the failure you read is a diagnosis:
+#
+#   1. it did not panic              — no `Guru Meditation` / `LoadProhibited` / `abort()`
+#   2. it did not boot-loop          — exactly one ROM `rst:0x` banner
+#   3. the app runs at all           — the `ff-agent` banner appears
+#   4. it reads its config partition — `ff_cfg v1 loaded`
+#
+# It does NOT prove enrolment or MQTT: those need a token and `just up`, and belong to
+# `agent-qemu` and the runbook transcript. A throwaway config pointing at a dead port
+# and its own `flash-<target>-smoke.bin` keep it away from your real board state — it
+# spends no token and never touches the NVS `agent-qemu` is accumulating.
+agent-qemu-smoke target="esp32" deadline="120":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    test -f "agent/dist/{{ target }}/manifest.json" || {
+        echo "no bundle for {{ target }} — run: just agent-build {{ target }}"; exit 1; }
+    mkdir -p .qemu && chmod 700 .qemu
+    # Tokenless and pointed at a closed port on purpose: the board must get as far as
+    # reading its config, and no further for this check to mean what it says.
+    test -f .qemu/ff_cfg-smoke.bin || docker run --rm -u $(id -u):$(id -g) \
+        -v "$PWD/.qemu:/q" -v "$PWD/agent/tools:/t:ro" \
+        --entrypoint python3 {{ idf_image }} /t/ff_cfg.py --out /q/ff_cfg-smoke.bin \
+        --api-base http://127.0.0.1:1 --mqtt-uri mqtt://127.0.0.1:1 --link ethernet
+    rm -f ".qemu/flash-{{ target }}-smoke.bin"
+    log=$(mktemp)
+    name="ff-qemu-smoke-$$"
+    trap 'docker rm -f "$name" >/dev/null 2>&1 || true; rm -f "$log"' EXIT
+    echo "smoke: booting {{ target }} (up to {{ deadline }}s)…"
+    docker run --rm --name "$name" --network host -u $(id -u):$(id -g) \
+        -e TARGET={{ target }} -e FLASH=/q/flash-{{ target }}-smoke.bin -e FFCFG=/q/ff_cfg-smoke.bin \
+        -e QEMU_SHA256={{ qemu_sha256 }} -e IDF_IMAGE_REF={{ idf_image }} \
+        -v "$PWD/.qemu:/q" -v "$PWD/agent/dist/{{ target }}:/d:ro" -v "$PWD/agent/tools:/t:ro" \
+        --entrypoint bash {{ idf_image }} -c '{{ qemu_program }}' > "$log" 2>&1 &
+    runner=$!
+    # Stop as soon as the answer is knowable rather than burning the whole deadline:
+    # wait for the config line, then hold LOOP_WINDOW seconds — long enough for a
+    # panicking board to come round again and print a second ROM banner.
+    LOOP_WINDOW=10
+    for _ in $(seq 1 {{ deadline }}); do
+        grep -q "ff-cfg: ff_cfg v1 loaded" "$log" 2>/dev/null && { sleep "$LOOP_WINDOW"; break; }
+        kill -0 "$runner" 2>/dev/null || break   # the emulator died on its own
+        sleep 1
+    done
+    docker rm -f "$name" >/dev/null 2>&1 || true
+    wait "$runner" 2>/dev/null || true
+    fail() { echo; echo "SMOKE FAILED: $1"; echo "--- last 40 lines ---"; tail -40 "$log"; exit 1; }
+    # Ordered most-specific first: "it reset 6 times" is a diagnosis, "no banner" is
+    # only a symptom, and a looping board satisfies both.
+    grep -Eqi "Guru Meditation|LoadProhibited|StoreProhibited|abort\(\) was called" "$log" \
+        && fail "the app panicked during boot" || true
+    boots=$(grep -c "rst:0x" "$log" || true)
+    [ "$boots" -le 1 ] \
+        || fail "the board reset $boots times — this is the boot loop S0-infra-1 described"
+    grep -q "ff-agent: fleetforge agent" "$log" \
+        || fail "the app never reached app_main — no ff-agent banner in {{ deadline }}s"
+    grep -q "ff-cfg: ff_cfg v1 loaded" "$log" \
+        || fail "the app booted but never read its ff_cfg partition"
+    grep -m1 "QEMU emulator version" "$log"
+    grep -m1 "ff-agent: fleetforge agent" "$log"
+    grep -m1 "ff-cfg: ff_cfg v1 loaded" "$log"
+    echo "HARNESS OK: {{ target }} boots, reads its config, and does not loop."
 
 # Delete the QEMU working directory. It holds a LIVE enrollment token (ff_cfg.bin)
 # and, inside the flash image's NVS, the broker password that board was issued —

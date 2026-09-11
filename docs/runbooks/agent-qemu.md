@@ -10,7 +10,12 @@ the one to reach for before blaming a board.
 | Emulator | `qemu-system-xtensa` 9.2.x, shipped **inside** `espressif/idf:v5.5.5` (digest-pinned) |
 | Target | `esp32` only — it is the one with an emulated NIC (`openeth`) |
 | Working dir | `.qemu/` — gitignored, mode 0700, **holds live credentials** |
-| Recipes | `just agent-cfg`, `just agent-qemu`, `just agent-qemu-clean` |
+| Recipes | `just agent-qemu-smoke`, `just agent-cfg`, `just agent-qemu`, `just agent-qemu-clean` |
+
+**Start with `just agent-qemu-smoke`.** It answers "is the harness alive?" in about
+17 seconds with no enrollment token, no running stack and no board, and it is the first
+thing to run before believing any claim that the emulator is broken — see
+[What we know about the boot-loop panic](#what-we-know-about-the-boot-loop-panic).
 
 `.qemu/` is not a cache. `ff_cfg.bin` contains a live single-use enrollment token, and
 `flash-esp32.bin` contains the NVS the emulated board wrote its **broker password** into.
@@ -164,10 +169,109 @@ recipe, so "no NTP" has to be a flag.
 There is no goodbye publish: a board that is dying has no way to send one, so the agent
 does not pretend it can. The will is the mechanism.
 
+## Is the harness alive?
+
+```bash
+just agent-qemu-smoke                # esp32, ~17 s
+just agent-qemu-smoke esp32 180      # a slower box: raise the deadline
+#   QEMU emulator version 9.2.2 (esp_develop_9.2.2_20260417)
+#   I (3688) ff-agent: fleetforge agent 0.1.0 (idf v5.5.5), built …
+#   I (4808) ff-cfg: ff_cfg v1 loaded (crc ok), 83 byte payload from 0x12000
+#   HARNESS OK: esp32 boots, reads its config, and does not loop.
+```
+
+It boots **the same machine `agent-qemu` does** — both recipes splice the single
+`qemu_program` definition in the justfile, so a green smoke run says something about the
+recipe it guards rather than about a lookalike. It asserts only what the first seconds
+can honestly prove:
+
+1. no panic (`Guru Meditation`, `LoadProhibited`, `abort()`),
+2. exactly one ROM `rst:0x` banner — **the boot-loop check**,
+3. the `ff-agent` banner, so `app_main` ran,
+4. `ff_cfg v1 loaded`, so it read its config partition.
+
+It deliberately proves **nothing** about enrolment or MQTT: those need a live token and
+`just up`, and they belong to `agent-qemu` and the transcript above. It uses a tokenless
+throwaway config aimed at a closed port and its own `flash-<target>-smoke.bin`, so it
+spends no token and never disturbs the NVS your real emulated board is accumulating.
+
+## What we know about the boot-loop panic
+
+**S0-infra-1 filed this harness as dead** (2026-09-10): `just agent-qemu esp32`
+boot-looping on a `LoadProhibited` panic decoded as
+`main_task → esp_task_wdt_init → esp_task_wdt_impl_timer_allocate → esp_intr_alloc →
+task_wdt_isr` — the task watchdog's own interrupt firing inside the allocation that
+installs it. The suspect on the ticket was the
+`-global driver=timer.esp32.timg,property=wdt_disable,value=true` flag.
+
+**It did not reproduce, and the suspect is innocent** (investigated 2026-09-11). What
+was tried, all green:
+
+* a full run from a wiped flash image and a fresh token — `enroll 200` → `credential
+  stored in NVS` → `mqtt connected` → retained announce/presence → `hb` for 100 s,
+  matching the transcript above line for line;
+* five further boots, three of them under eight busy-loops on a four-core box, testing
+  the theory that host starvation fires a spurious watchdog interrupt. Zero panics;
+* every one of those runs carries the `wdt_disable` flag, so the flag is not the cause.
+
+Two real defects turned up while proving that, and the first explains how a working
+harness became an unrunnable one.
+
+**1. The recipe could not run without a terminal.** `agent-qemu` passed `docker run -it`
+unconditionally:
+
+```
+$ just agent-qemu esp32
+cannot attach stdin to a TTY-enabled container because stdin is not a terminal
+```
+
+Every agent session, script and CI shell is non-interactive, so the recipe could not be
+run by the things that most need to run it — and the way round it is to hand-roll a
+`docker run`, which is exactly where an emulator invocation acquires a wrong `-M`, `-m`
+or `-global` and starts panicking in the watchdog. That is the most probable origin of
+the filed backtrace. Fixed: `-it` is now passed only when stdin is a TTY.
+
+**2. The emulator was pinned but never verified.** `idf_image` is pinned by sha256 and
+each bundle manifest records the same digest, which reads as a guarantee that the
+emulator is fixed. It is not — **Docker verifies a digest on `pull`, not on `run`**, so a
+locally damaged or replaced layer is used in silence, and `qemu-system-xtensa` lives in
+that image. The pinned image was in fact **absent from this box's Docker store** when
+the investigation started and had to be re-pulled (2.4 GB), on a disk sitting at 85%.
+
+Every other input to a boot is content-addressed and deterministic: the bundle (per-part
+sha256 in `manifest.json`), the eFuse blob (IDF's own `default_efuse` bytes), the flash
+merge (`esptool merge_bin` over manifest offsets). Identical inputs cannot produce two
+different behaviours — so at failure time one input was not what it claimed, and the
+local emulator image is the only one verifiably in a different state since. Unprovable
+after the fact. Closed going forward: `qemu_sha256` in the justfile pins the hash of the
+emulator **binary**, checked inside the container before every boot, and its version is
+printed into every transcript.
+
+The honest limit: hashing that one binary is not a full integrity check of the image
+(shared libraries and the Python tooling are not covered). It covers the file whose
+behaviour decides whether a boot means anything, which is the part that was in doubt.
+
+### If it boot-loops again
+
+```bash
+just agent-qemu-smoke                # 17 s: names a loop, a panic, or a bad emulator
+docker rmi  $IDF_IMAGE && docker pull $IDF_IMAGE   # the digest from justfile `idf_image`
+just agent-qemu-clean                # .qemu/ holds live credentials — this deletes them
+just agent-cfg … --token "$FFE"      # a fresh token; the old one is spent
+just agent-qemu esp32 --fresh
+```
+
+Do that **before** decoding a backtrace. If the smoke check is green and only your own
+run loops, the difference is in `.qemu/` or your config, not in the emulator. If the
+smoke check is red, it already told you which of the four assertions failed.
+
 ## Troubleshooting
 
 | Symptom | Cause |
 |---|---|
+| `cannot attach stdin to a TTY-enabled container` | an old `agent-qemu` that passes `-it` unconditionally; the recipe now only does so when stdin is a terminal |
+| `the emulator is not the one this repo pins` | the local copy of the ESP-IDF image is damaged or replaced. Re-pull it by digest; Docker does not re-verify on run |
+| `SMOKE FAILED: the board reset N times` | a genuine boot loop — a corrupt `app.bin` does exactly this. `just agent-verify <target>` re-hashes the bundle against its manifest |
 | `enroll 404` and the api log shows nothing | the `ff-qemu` Traefik router is missing or the frontend is unhealthy — the 404 is Traefik's, not the API's |
 | `no .qemu/ff_cfg.bin` | run `just agent-cfg …` first; the recipe refuses to boot a board with no config |
 | `qemu_image: … is missing — run: just agent-build <target>` | no bundle on disk |

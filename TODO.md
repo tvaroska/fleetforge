@@ -2,11 +2,13 @@
 
 **Goal:** Self-hosted OTA firmware management for embedded fleets (ESP32 first) — a bad
 build is caught before the fleet, and any device that gets one recovers itself.
-**Updated:** 2026-09-10
+**Updated:** 2026-09-11
 **Focus:** R0 is deployed and live at `bingo.tvaroska.sk`; only R0-test-2 (E2E on real
-hardware) remains. Sprint 0 now holds the device-visibility gap that first hardware
-attempt exposed — and, since 2026-09-10, a dead QEMU harness that leaves *no* way to run
-agent firmware on this box. Everything still open here needs hardware or the emulator.
+hardware) remains. Sprint 0 holds the device-visibility gap that the first hardware
+attempt exposed. The QEMU harness is **working again** (S0-infra-1, 2026-09-11 — the
+reported boot loop never reproduced; what was actually wrong is that the recipe could not
+run without a terminal, and the emulator was never verified). So S0-fw-1 is unblocked and
+runnable on this box; the two remaining items after it need real hardware and the Mac.
 
 <!-- Counters: spec=1 infra=5 db=1 be=6 fe=3 sec=1 fw=1 test=2 -->
 <!-- Sprint 0 counters: fe=2 fw=1 infra=1 test=1 -->
@@ -34,26 +36,6 @@ the retired bingo app), single-tenant, **not a public product until V3**.
 ## Sprint 0: Critical Issues
 
 Bricking risks, broker auth and security issues get filed here as they surface.
-
-- [ ] **S0-infra-1**: The QEMU agent harness boot-loops — no firmware can be run (P1, 1d)
-      Filed 2026-09-10, when S0-fw-1 could not be verified. `just agent-qemu esp32` never
-      reaches `app_main`: it panics `LoadProhibited` on `main_task`, reboots, and repeats
-      forever. Decoded against the ELF the backtrace is
-      `main_task → esp_task_wdt_init → esp_task_wdt_impl_timer_allocate → esp_intr_alloc
-      → task_wdt_isr` — the task watchdog's own interrupt fires inside the allocation
-      that installs it. **Reproduced at unmodified HEAD**, so it is the harness or the
-      IDF/QEMU pairing, not any agent change.
-      Suspect the `-global driver=timer.esp32.timg,property=wdt_disable,value=true` flag
-      in the `agent-qemu` recipe: it silences the hardware WDT and may be what leaves the
-      timer group in a state the *task* WDT then trips over. `docs/runbooks/agent-qemu.md`
-      documents a working boot, so this is a regression against a state that once held —
-      find out whether the image, the recipe or the emulator moved.
-      This is the only way to run agent firmware on this box (the Mac is the flashing
-      bench), so it blocks S0-fw-1 and every firmware acceptance after it.
-      Acceptance: `just agent-qemu esp32` reaches `ff-agent` log lines and enrolls against
-      `just up`, matching the transcript in `docs/runbooks/agent-qemu.md`; whatever the
-      cause turns out to be is written down there so the next person does not re-decode
-      the same backtrace.
 
 - [ ] **S0-test-1**: Bench-verify the serial console on real hardware (P1, 0.5d)
       Filed 2026-09-10, when S0-fe-1 shipped. Its software half is proven in jsdom against
@@ -87,9 +69,12 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       reports `enrolling`/`halted` shows up arriving-and-stalled with its reason, and a
       board that reaches the broker drops out of arrivals and lands `online` — but both
       were driven by curl + `just sim`, not by `agent/main/ff_progress.c` on a board.
-      Blocked by S0-infra-1: the QEMU harness boot-loops, and it does so at unmodified
-      HEAD too, so there is no way to run the firmware on this box. Retry after
-      S0-infra-1, or fold the two firmware acceptances into R0-test-2 on the Mac bench.
+      **Unblocked 2026-09-11 (S0-infra-1).** The harness was never broken: the boot loop
+      did not reproduce, and the bundle sitting in `agent/dist/esp32` is *this task's own
+      firmware* (`ff_progress` is in `app.bin`) — it boots, enrols and heartbeats in QEMU.
+      So acceptances 1 and 2 can now be driven by `agent/main/ff_progress.c` on an
+      emulated board rather than by curl + `just sim`. Start with `just agent-qemu-smoke`,
+      then `just agent-build esp32` at a clean HEAD before trusting the transcript.
       Original task follows.
       Depends on S0-fe-1 (serial first — it covers the bench; this covers the fleet).
       Today a board is invisible until it is fully enrolled and beating: the dashboard
