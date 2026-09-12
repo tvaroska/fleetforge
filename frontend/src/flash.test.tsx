@@ -25,6 +25,8 @@ const TOKEN_ID_2 = '22222222-2222-4222-8222-222222222222'
 const PLAINTEXT_2 = `ffe_${TOKEN_ID_2}.s3cr3trecoverysecretvalue`
 const PASSPHRASE = 'correct-horse-battery-staple'
 const SSID = 'fleetforge-test'
+/** A broker password in a URI, the way an operator pastes one into the form. */
+const BROKER_URI = 'mqtts://fleet:s3cr3tbrokerpw@bench.local:8883'
 
 // Deliberately NOT in ascending offset order: `planWrite` must sort, and the config blob
 // (0x12000) lands between the partition table and the app.
@@ -150,6 +152,10 @@ async function defaultRoutes(extra: Routes = {}): Promise<Routes> {
   const built = await manifest()
   const routes: Routes = {
     'GET /v1/agent/manifest': () => json(built),
+    // S0-fe-7. Unauthenticated, and its failure is a footnote in a diagnostic bundle
+    // rather than anything on this page — every test that does NOT route it exercises
+    // the silent-failure path through `mockFetch`'s 404 default, on purpose.
+    'GET /v1/healthz': () => json({ status: 'ok', version: '0.3.1' }),
     'POST /v1/enrollment-tokens': () =>
       json({
         id: TOKEN_ID,
@@ -618,5 +624,75 @@ describe('FlashBoard — capability branches', () => {
 
     expect(await screen.findByTestId('agent-targets')).toHaveTextContent('Agent 0.1.0')
     expect(screen.getByTestId('agent-targets')).toHaveTextContent('esp32 (ESP32)')
+  })
+})
+
+/**
+ * S0-fe-7 — the wiring, not the builder.
+ *
+ * `diagnostics.test.ts` proves the format and the redaction over synthetic input. This
+ * proves the thing an operator actually presses: that `FlashBoard` hands the panel the
+ * chip it detected, the config the form holds and the versions it fetched — and that
+ * neither the passphrase typed into that form nor the token minted for that board is in
+ * what lands on the clipboard.
+ */
+describe('FlashBoard — the diagnostic bundle', () => {
+  it('carries the chip, the config and the versions, and neither secret', async () => {
+    const user = userEvent.setup()
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    // `defineProperty`, not `Object.assign`: `userEvent.setup()` installs its own stub.
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    mockFetch(await defaultRoutes())
+
+    // Both secrets are planted where they would REALLY leak from: the firmware printing
+    // them on the console. Without them these `not.toContain` assertions pass over a
+    // bundle with no redaction at all — checked, by deleting the redaction.
+    const { factory: createConsole } = fakeConsoleSessions([
+      [
+        ...SPENT_TOKEN_BOOT,
+        `W (3200) ff-wifi: joining ${SSID} with psk ${PASSPHRASE}`,
+        `W (3300) ff-enroll: token ${PLAINTEXT} was refused`,
+      ],
+    ])
+    render(
+      <FlashBoard
+        onSessionExpired={vi.fn()}
+        createFlasher={async () => new FakeFlasher(chipInfo())}
+        createConsole={createConsole}
+      />,
+    )
+    await user.click(screen.getByRole('button', { name: /select port and detect/i }))
+    await screen.findByTestId('chip-info')
+    await user.type(screen.getByLabelText(/ssid/i), SSID)
+    await user.type(screen.getByLabelText(/passphrase/i), PASSPHRASE)
+    // A broker password typed into the form: it must be scrubbed out of EVERY section,
+    // not only out of the URI that carried it. This is `uriSecrets`, wired up.
+    await user.clear(screen.getByLabelText(/broker uri/i))
+    await user.type(screen.getByLabelText(/broker uri/i), BROKER_URI)
+    await user.click(screen.getByRole('button', { name: /flash this board/i }))
+    await screen.findByTestId('console-fault')
+
+    await user.click(screen.getByRole('button', { name: /copy diagnostic bundle/i }))
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1))
+    const bundle = writeText.mock.calls[0][0] as string
+
+    // What the flasher page knows and the console does not.
+    expect(bundle).toContain('ESP32-D0WD-V3 (revision v3.1)')
+    expect(bundle).toContain(SSID)
+    expect(bundle).toContain('layout ab-4m-v1')
+    expect(bundle).toContain('agent        0.1.0')
+    expect(bundle).toContain('server       0.3.1')
+    // And what the console knows and the flasher page does not.
+    expect(bundle).toContain('enroll 409')
+    expect(bundle).toContain('single-use')
+
+    // The two credentials, from two different rules: the passphrase by literal scrub, the
+    // token by shape — it was never handed to the panel at all.
+    expect(bundle).not.toContain(PASSPHRASE)
+    expect(bundle).not.toContain(PLAINTEXT)
+    expect(bundle).not.toContain('s3cr3tbrokerpw')
+    expect(bundle).toContain('ffe_[REDACTED]')
+    expect(bundle).toContain('mqtts://fleet:[REDACTED]@bench.local:8883')
+    expect(bundle).toContain(`passphrase ${PASSPHRASE.length} chars (never printed)`)
   })
 })

@@ -18,6 +18,7 @@ import {
   type Milestone,
   type Remedy,
 } from './boardConsole'
+import { buildDiagnosticBundle, type DiagnosticContext } from './diagnostics'
 import { explainFlashError } from './flasher'
 
 const LEVEL_CLASS: Record<ConsoleLevel, string> = {
@@ -51,6 +52,7 @@ export function BoardConsolePanel({
   createConsole,
   onReflash,
   reflashBlockedReason = null,
+  diagnostics,
 }: {
   autoWatch: boolean
   // Injected by the tests only: jsdom has no `navigator.serial` (see `boardConsole.ts`).
@@ -66,10 +68,46 @@ export function BoardConsolePanel({
   /** Why `onReflash` is absent, in plain language. Rendered as muted text, never as a
    *  disabled button — a disabled button explains nothing. */
   reflashBlockedReason?: string | null
+  /**
+   * S0-fe-7. What the flasher page knows and this panel does not — the chip, the config it
+   * would write, the versions, and the secrets that must never reach the bundle. Absent
+   * when the panel is used with no flasher behind it, and the bundle is still useful: the
+   * log, the fault and what the board says about itself all come off the events.
+   */
+  diagnostics?: DiagnosticContext
 }) {
   const state = useBoardConsole({ createConsole, explainError: explainFlashError })
   const { watch } = state
   const [recovering, setRecovering] = useState(false)
+  /**
+   * The bundle as it was at the moment of the click, and what the clipboard got.
+   *
+   * A snapshot rather than a derivation: the summary ticks at 1 Hz while watching, so a
+   * textarea that re-derived on every render would drift from the clipboard within a
+   * second and the operator would be pasting a different artifact from the one they can
+   * see.
+   */
+  const [bundle, setBundle] = useState<string | null>(null)
+  const [copied, setCopied] = useState<boolean | null>(null)
+
+  async function copyBundle() {
+    const text = buildDiagnosticBundle({
+      events: state.events,
+      summary: state.summary,
+      context: diagnostics ?? null,
+      page: { origin: window.location.origin, userAgent: navigator.userAgent },
+    })
+    // Snapshot FIRST: whatever happens to the clipboard, what was copied is on screen.
+    setBundle(text)
+    try {
+      await navigator.clipboard.writeText(text)
+      setCopied(true)
+    } catch {
+      // Never an error state. `navigator.clipboard` is undefined in jsdom (a TypeError)
+      // and a real browser can simply refuse — in both cases the text is below.
+      setCopied(false)
+    }
+  }
 
   async function runReflash() {
     if (onReflash === undefined) return
@@ -178,8 +216,23 @@ export function BoardConsolePanel({
           </button>
         )}{' '}
         {state.events.length > 0 && (
-          <button type="button" onClick={state.clear}>
+          <button
+            type="button"
+            onClick={() => {
+              state.clear()
+              setBundle(null)
+              setCopied(null)
+            }}
+          >
             Clear
+          </button>
+        )}{' '}
+        {(state.watching || state.opening || state.events.length > 0) && (
+          // Never shortened to "Copy": Testing Library matches accessible names by
+          // substring, and `EnrollBoard` already renders a bare `Copy`. "Copied — secrets
+          // redacted" is likewise unique on purpose.
+          <button type="button" onClick={() => void copyBundle()}>
+            {copied === true ? 'Copied — secrets redacted' : 'Copy diagnostic bundle'}
           </button>
         )}
       </p>
@@ -265,6 +318,34 @@ export function BoardConsolePanel({
               </span>
             ))}
           </pre>
+        </>
+      )}
+
+      {/* S0-fe-7. A readOnly <textarea>, not a <pre>: on 2026-09-11 the log WAS on screen
+          and the operator could not get it out, because selecting text in an unlabelled
+          <pre> is not an affordance anyone finds. Ctrl-A inside this box selects the
+          bundle and nothing else. */}
+      {bundle !== null && (
+        <>
+          <h4 id="bundle-heading">Diagnostic bundle</h4>
+          <p className="muted">
+            Everything someone helping you needs: the log above, this board&apos;s chip and
+            config, the versions, and the fault. The enrolment token, the Wi-Fi passphrase and
+            any broker password are removed. Paste it wherever you are asking for help.
+          </p>
+          {copied === false && (
+            <p className="warn">
+              The browser would not give this page the clipboard. Select the text below and copy
+              it.
+            </p>
+          )}
+          <textarea
+            className="log console"
+            readOnly
+            value={bundle}
+            data-testid="diagnostic-bundle"
+            aria-labelledby="bundle-heading"
+          />
         </>
       )}
 

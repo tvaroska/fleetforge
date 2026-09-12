@@ -15,6 +15,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { ApiError, api, type AgentManifest } from './api'
 import { BoardConsolePanel } from './BoardConsole'
 import { type ConsoleFactory } from './boardConsole'
+import { uriSecrets, type DiagnosticContext } from './diagnostics'
 import { OTHER_BOARD_ID, shortlist } from './boards'
 import { buildFfCfgFields, validateFfCfg, type FlashConfigInput } from './ffcfg'
 import { formatBytes, predictDeviceId, useFlashBoard } from './flash'
@@ -127,6 +128,8 @@ export function FlashBoard({
   const [board, setBoard] = useState<string>(OTHER_BOARD_ID)
   const [manifest, setManifest] = useState<AgentManifest | null>(null)
   const [manifestError, setManifestError] = useState<string | null>(null)
+  /** S0-fe-7, and a footnote in a bundle rather than anything on this page. */
+  const [serverVersion, setServerVersion] = useState<string | null>(null)
   const state = useFlashBoard({ onSessionExpired, createFlasher })
 
   const supported = webSerialSupported()
@@ -152,6 +155,16 @@ export function FlashBoard({
         }
         setManifestError(err instanceof Error ? err.message : 'could not read the agent manifest')
       })
+    // Independent of the manifest, and SILENT on failure by design: `/v1/healthz` is
+    // unauthenticated and does no I/O server-side, so a failure here says nothing about
+    // this page's session. It must never set `manifestError` and must never call
+    // `onSessionExpired` — the bundle simply reads "unavailable".
+    api
+      .health()
+      .then((value) => {
+        if (live) setServerVersion(value.version)
+      })
+      .catch(() => {})
     return () => {
       live = false
     }
@@ -185,6 +198,31 @@ export function FlashBoard({
   // one with an honest dependency list would be rebuilt every render anyway.
   const recoverByReflash = () =>
     state.reflash({ config, eraseAll: true, baudRate: form.baudRate })
+
+  // S0-fe-7. A plain literal for the same reason `recoverByReflash` is: `config` is a
+  // fresh object on every render, so a memo with an honest dependency list would be
+  // rebuilt every render anyway. The form has no NTP field, so `ntp` is null —
+  // "(firmware default)" — rather than a value this page invented.
+  const diagnostics: DiagnosticContext = {
+    chip,
+    build: state.build,
+    agentVersion: manifest?.agent_version ?? null,
+    serverVersion,
+    config: {
+      apiBase,
+      mqttUri: form.mqttUri,
+      link: form.link,
+      ssid: form.ssid,
+      ntp: null,
+      hbS: form.hbS || null,
+      power: form.power,
+      wakeS: form.wakeS || null,
+      pskLength: form.psk.length,
+    },
+    // Scrub input only. The passphrase, plus any password typed into either URI — a broker
+    // password must be scrubbed out of every section, not only out of the URI that carried it.
+    knownSecrets: [form.psk, ...uriSecrets(form.mqttUri), ...uriSecrets(apiBase)],
+  }
 
   return (
     <section aria-labelledby="flash-heading">
@@ -491,6 +529,7 @@ export function FlashBoard({
       <BoardConsolePanel
         autoWatch={state.phase === 'done'}
         createConsole={createConsole}
+        diagnostics={diagnostics}
         // No button when the form could not produce a valid blob — re-flashing the same
         // invalid config is a button that cannot work.
         onReflash={configError === null ? recoverByReflash : undefined}

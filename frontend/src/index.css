@@ -321,6 +321,15 @@ progress::-moz-progress-bar {
   min-height: 6rem;
 }
 
+/* S0-fe-7. The bundle reuses the log's box so the page keeps one monospace surface; a
+   textarea (not a <pre>) so Ctrl-A selects the bundle and nothing else. */
+textarea.log {
+  width: 100%;
+  min-height: 12rem;
+  resize: vertical;
+  color: var(--ff-fg);
+}
+
 /* The boot checklist. Plain list semantics, no bullets — the tick IS the bullet.
    Glyph (✓ / … / ·) is set in BoardConsole.tsx; the weight ramp here is the second axis. */
 .milestones {

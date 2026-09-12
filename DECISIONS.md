@@ -6,6 +6,52 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-11 — the escalation path is one click, and redaction is not the firmware's job (S0-fe-7)
+
+The fourth layer of *Unaided onboarding*. On 2026-09-11 the diagnosis was already on
+screen and still had to be re-typed into a chat window, because selecting text in an
+unlabelled `<pre>` is not an affordance anyone finds. **Copy diagnostic bundle** now
+assembles the header, the fault, the boot progress, the chip, the config and the whole
+console log into one string, puts it on the clipboard and renders it in a `readOnly`
+`<textarea>`.
+
+- **Redaction happens at one choke point, not per field.** `redactSecrets` is applied
+  once to the fully assembled string, as the last statement of `buildDiagnosticBundle` —
+  a comment marks it as the only `return` that function may have. Per-field redaction
+  fails open: the next section someone adds is unredacted by default, and the section
+  most likely to carry a live credential is the raw board log, which nobody remembers to
+  filter. A bundle is *designed* to be pasted into a chat window, so it is the single
+  most likely way a live secret leaves the machine.
+- **Three rules, because a secret arrives three ways.** (1) A literal scrub of what the
+  page was handed (`split`/`join`, never `new RegExp(secret)` — a passphrase is arbitrary
+  text and `.*` would eat the bundle), with a `MIN_SCRUB_LENGTH = 4` floor so a
+  two-character "secret" cannot shred the log. (2) URI userinfo
+  `scheme://user:pw@host` → `user:[REDACTED]@`, which reaches a broker credential this
+  page was never given because the *firmware* printed it; the username survives, it is
+  diagnostic and not a credential. (3) Token shapes `ff[ae]_…` with a `{6,}` length
+  floor, so the panel's own prose ("re-flash with a fresh `ffe_` token") stays readable.
+  Each rule has a test that fails when only that rule is removed — checked by deleting
+  each in turn.
+- **Two agent versions are printed, not one.** What this page would flash (the manifest)
+  and what the board says it is running (the `ff-agent` banner). They differ exactly when
+  the board is carrying a stale flash, which is invisible from either number alone.
+- **`window.location.origin`, never `href`.** A path or query string can carry a token;
+  the origin is the only part that answers "which deployment is this?".
+- **The `/v1/healthz` fetch for the server version is silent on failure.** It never sets
+  `manifestError` and never triggers `onSessionExpired`: a bundle that cannot name the
+  server version is still worth pasting, and an unreachable server must not colour the
+  flasher page red.
+- **The textarea shows a snapshot taken at the click, not a re-derivation.** The summary
+  ticks at 1 Hz while watching, so a derived box would drift from what the clipboard got
+  within a second. It is set *before* the clipboard write, so a browser that refuses the
+  clipboard still leaves the full bundle on screen with a sentence saying so.
+- **Deviation from the plan.** The plan's format example echoed the offending log line in
+  the fault section; that made `E BOD: Brownout detector was triggered` appear four times
+  while the same plan's acceptance requires exactly three (once per cycle, so "how many
+  times did this board brown out?" is answerable by eye). The fault section therefore
+  prints the plain-English hint plus `named by  line N of the console log below` and
+  never reprints the line. The diagnosis still lands in the first fifteen lines.
+
 ## 2026-09-11 — agent bundles are artifacts, not image contents (planned, infrastructure)
 
 The application image will ship **zero** agent firmware bundles; they move behind

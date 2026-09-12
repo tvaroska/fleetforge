@@ -33,7 +33,9 @@ tagless faults (brownout, panic, ROM reset reasons), keeps its milestone claims 
 surfaces a reset loop, and puts a deadline on every milestone. **S0-fe-5 and S0-fe-6
 landed the same day** — the console now resets the board itself so the boot is never
 missed, and where a fault's remedy is software the panel offers it as one button
-(a spent token is re-flashed in a click) rather than as an instruction. S0-fe-7 is next.
+(a spent token is re-flashed in a click) rather than as an instruction. **S0-fe-7 landed
+the same day** — one click copies a redacted diagnostic bundle, so a stuck operator can
+hand the whole session to someone who can help. S0-test-3, the unaided run, is next.
 
 <!-- Counters: spec=1 infra=5 db=1 be=6 fe=7 sec=1 fw=2 test=3 -->
 <!-- Sprint 0 counters: fe=7 fw=2 infra=2 test=3 -->
@@ -90,7 +92,7 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       button that cannot work.
       _(done 2026-09-11; see docs/features/enrollment.md)_
 
-- [ ] **S0-fe-7**: One click produces a diagnostic bundle (P1, 0.5d)
+- [x] **S0-fe-7**: One click produces a diagnostic bundle (P1, 0.5d)
       Part of *Unaided onboarding*. The escalation path that did not exist on
       2026-09-11, when the only way to get the log out of the panel was to select text
       in an unlabelled `<pre>` — and the operator could not find it. Copies the full
@@ -103,6 +105,7 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       Acceptance: the bundle contains the brownout log from the 2026-09-11 session and
       identifies the fault; a test asserts no `ffe_` token, passphrase or MQTT password
       appears in the output, vacuity-checked by removing the redaction.
+      _(done 2026-09-11; see docs/features/enrollment.md)_
 
 - [ ] **S0-test-3**: Someone who has not seen the code onboards a board unaided (P1, 0.5d)
       The criterion that actually decides *Unaided onboarding*; everything else is its

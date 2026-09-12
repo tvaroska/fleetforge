@@ -697,6 +697,83 @@ advances `last_seen` past that report still reads as arriving. It never complete
 heartbeat, so that is honest rather than wrong; tightening it would need a rule about how
 many messages count as having arrived.
 
+### Escalation is one click (S0-fe-7)
+
+**2026-09-11.** The fourth and last software layer of *Unaided onboarding*. S0-fe-4 named
+the fault, S0-fe-5 made sure the panel saw the boot and S0-fe-6 turned the software remedies
+into buttons — but when none of them helps, the operator is holding a diagnosis they cannot
+get out of the page. On 2026-09-11 the brownout log *was* on screen and the fault was still
+found by re-typing UART output into a chat window, because selecting text in an unlabelled
+`<pre>` is not an affordance anyone finds.
+
+**What was built.** A **Copy diagnostic bundle** button beside **Clear**. It assembles one
+plain-text artifact — a header (when, which page, which browser, which server, which agent,
+what the board says it is running, the device id the board reported), the fault in plain
+English with a pointer to the log line that names it, the boot progress and reboot-loop
+count, the chip and flash identification, the `ff_cfg` this page would write, and the entire
+console log verbatim — writes it to the clipboard and renders it in a `readOnly`
+`<textarea>` below the log. New pure module `frontend/src/diagnostics.ts` holds all of it;
+`frontend/scripts/emit-bundle.ts` prints a bundle from the bench fixture at a shell, the same
+`vite-node` idiom as `emit-ffcfg.ts`.
+
+**Key decisions:**
+
+- **Redaction is one choke point.** `redactSecrets` runs once over the fully assembled
+  string as the last statement of `buildDiagnosticBundle`. Per-field redaction fails open —
+  the next section someone adds is unredacted by default, and the section most likely to
+  carry a live credential is the raw board log, which nobody remembers to filter.
+- **Three rules, because a secret arrives three ways.** A literal scrub of what the page was
+  handed (`split`/`join`, never `new RegExp(secret)`: a passphrase is arbitrary text and
+  `.*` would eat the bundle) with a four-character floor so a short "secret" cannot shred
+  the log; URI userinfo `scheme://user:pw@host` → `user:[REDACTED]@`, which catches a broker
+  password the page was never given because the firmware printed it; and `ff[ae]_` token
+  shapes with a `{6,}` floor so the panel's own prose about a "fresh `ffe_` token" survives.
+  The bundle must not depend on the firmware's discretion — `ff-cfg` happens to print
+  lengths only, but a `401` line elsewhere in the agent prints the token.
+- **Two agent versions.** What this page would flash, and what the board's banner says it is
+  running. They differ exactly when the board carries a stale flash, which neither number
+  reveals alone.
+- **`window.location.origin`, never `href`.** A path or query string can carry a token.
+- **The `/v1/healthz` fetch is silent.** It never sets `manifestError` and never triggers
+  `onSessionExpired`: a bundle that cannot name the server version is still worth pasting.
+- **The textarea is a snapshot, set before the clipboard write.** The summary ticks at 1 Hz,
+  so a derived box would drift from what was copied; and a browser that refuses the
+  clipboard still leaves the full bundle on screen, with a sentence saying to select it.
+- **Deviation from the plan.** The plan's format example echoed the offending log line in
+  the fault section, which made `E BOD: Brownout detector was triggered` appear four times
+  while the same plan's acceptance requires exactly three — once per cycle, so "how many
+  times did this board brown out?" is answerable by eye. The fault section prints the hint
+  plus `named by  line N of the console log below` instead of reprinting the line.
+
+**Files touched:** new `diagnostics.ts`, `diagnostics.test.ts`, `scripts/emit-bundle.ts`;
+`BoardConsole.tsx` (the button, the snapshot state, the textarea), `FlashBoard.tsx` (the
+`DiagnosticContext` and the silent healthz fetch), `index.css` (`textarea.log`), plus
+`BoardConsole.test.tsx` and `flash.test.tsx`.
+
+**T2 evidence.** `npx vite-node scripts/emit-bundle.ts` replays the bench session through the
+real classifier, summariser and builder with fake secrets planted in the log and the config:
+`E BOD: Brownout detector was triggered` appears exactly 3 times, the brownout diagnosis is
+on line 11, the reboot loop and `bench-2g` are present, and neither the passphrase nor the
+broker password survives — what is left is `ffe_[REDACTED]`, `mqtts://fleet:[REDACTED]@` and
+`passphrase 28 chars (never printed)`. Through the rendered panel, one click on **Copy
+diagnostic bundle** calls `navigator.clipboard.writeText` once with the fault text, the same
+string is in the textarea, and a *rejecting* clipboard still leaves the bundle on screen.
+An end-to-end test drives the real `<FlashBoard>` with both seams faked and a
+userinfo-bearing broker URI typed into the form.
+
+**Vacuity-checked six ways**, each confirmed failing and reverted: deleting the redaction
+call (4 tests fail, both secret greps hit), and each of the three rules on its own (3, 3 and
+2 tests); returning an empty bundle (10 tests); and dropping the snapshot `setBundle`
+(2 tests). The URI-userinfo rule initially broke nothing, because the literal scrub already
+covered the only password in play — the tests now include a URI the page never saw. T1: 190
+frontend tests green (up from 175), `tsc -b --noEmit` and `vite build` clean. Backend
+untouched.
+
+**What this does not do.** It redacts what it can recognise. An operator who pastes a
+free-form secret into the SSID field, or firmware that prints a credential in a shape none
+of the three rules matches, is not covered — the defence there is that the config section
+prints lengths, never values.
+
 ### Recovery is a button (S0-fe-6)
 
 **2026-09-11.** The third layer of *Unaided onboarding*. S0-fe-4 taught the panel to name
@@ -925,12 +1002,13 @@ from firmware, stays open in `spec/open-questions.md`.
      full log, config summary, chip info, firmware and server versions, the fault — with
      secrets redacted, so a stuck operator can hand it to someone who can help. That
      click is the thing that did not exist on 2026-09-11.
-- **Status:** In progress — layers 1–3 (S0-fe-4, S0-fe-5, S0-fe-6) landed 2026-09-11; see
-  *Recovery is a button* above. Remaining: the escalation click and the unaided run.
+- **Status:** In progress — all three layers (S0-fe-4, S0-fe-5, S0-fe-6, S0-fe-7) landed
+  2026-09-11; see *Escalation is one click* above. Remaining: the unaided run (S0-test-3),
+  which is what actually decides this feature.
 - **Added:** 2026-09-11
 - **Tasks:** ~~S0-fe-4 (diagnosis)~~ done, ~~S0-fe-5 (never miss the boot)~~ done,
-  ~~S0-fe-6 (recovery actions)~~ done, S0-fe-7 (diagnostic bundle), S0-test-3 (unaided
-  acceptance run).
+  ~~S0-fe-6 (recovery actions)~~ done, ~~S0-fe-7 (diagnostic bundle)~~ done,
+  S0-test-3 (unaided acceptance run).
   S0-fw-2 is adjacent: the first stage a board reports can never reach an HTTPS server.
 
 ## Post-v1

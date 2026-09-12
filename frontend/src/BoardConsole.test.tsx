@@ -425,3 +425,56 @@ describe('BoardConsolePanel', () => {
     })
   })
 })
+
+/**
+ * S0-fe-7 — the escalation path.
+ *
+ * On 2026-09-11 the log WAS on screen and the operator still could not get it out: the
+ * only affordance was selecting text inside an unlabelled `<pre>`. These two cases are
+ * the whole fix — one click copies, and a clipboard the browser refuses still leaves a
+ * labelled, selectable box holding exactly what would have been copied.
+ */
+describe('BoardConsolePanel — the diagnostic bundle', () => {
+  it('copies a diagnostic bundle in one click', async () => {
+    const user = userEvent.setup()
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    // The repo's clipboard idiom (`EnrollBoard.test.tsx`): jsdom has no clipboard, and
+    // there is deliberately no injected seam for one. `defineProperty` rather than
+    // `Object.assign` because `userEvent.setup()` has already installed its own stub
+    // behind a getter.
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+
+    const { factory } = fakeConsole(BENCH_2026_09_11)
+    render(<BoardConsolePanel autoWatch createConsole={factory} />)
+    await screen.findByTestId('console-fault')
+
+    await user.click(screen.getByRole('button', { name: /copy diagnostic bundle/i }))
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1))
+    const copied = writeText.mock.calls[0][0] as string
+    expect(copied).toContain('E BOD:')
+    expect(copied).toContain('browning out')
+    // What was copied is what is on screen — not a re-derivation that drifts with the
+    // 1 Hz summary tick while the operator is still reading it.
+    expect(screen.getByTestId('diagnostic-bundle')).toHaveValue(copied)
+    expect(await screen.findByRole('button', { name: /copied/i })).toBeInTheDocument()
+  })
+
+  it('leaves the bundle on screen when the browser refuses the clipboard', async () => {
+    const user = userEvent.setup()
+    const writeText = vi.fn().mockRejectedValue(new Error('write permission denied'))
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+
+    const { factory } = fakeConsole(BENCH_2026_09_11)
+    render(<BoardConsolePanel autoWatch createConsole={factory} />)
+    await screen.findByTestId('console-fault')
+
+    await user.click(screen.getByRole('button', { name: /copy diagnostic bundle/i }))
+
+    // The 2026-09-11 dead end, and the reason this must never be an error state.
+    const box = await screen.findByTestId('diagnostic-bundle')
+    expect((box as HTMLTextAreaElement).value).toContain('E BOD:')
+    expect(screen.getByText(/would not give this page the clipboard/i)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /copied/i })).not.toBeInTheDocument()
+  })
+})
