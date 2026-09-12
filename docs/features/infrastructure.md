@@ -997,6 +997,96 @@ image integrity check — shared libraries and the Python tooling are not covere
 panic returns, `just agent-qemu-smoke` names it in seventeen seconds instead of a
 backtrace decode.
 
+## Agent bundle staleness guard (S0-infra-2, closed 2026-09-11)
+
+**Filed as:** "Rebuild the c3/c6/s3 agent bundles, and make a stale bundle unshippable."
+Three of the four agent firmware bundles predated S0-fw-1's stage reporter and shipped
+stale in v0.3.0, invisible in exactly the way S0-fw-1 was built to prevent. The task
+delivered a rebuild of all four targets and a git-provenance based staleness guard that
+gates the release path.
+
+### The finding: all four bundles were stale
+
+Initial investigation revealed `esp32c3`, `esp32c6`, and `esp32s3` bundles carried no
+`/v1/device-progress` strings, proving they predated S0-fw-1. The `esp32` bundle appeared
+current by mtime but its manifest recorded `source_commit 81aea08` (S0-fe-7) while the
+newest agent source commit was `43aeb31` (S0-fw-2, "hold pre-clock stage reports"). So
+the shipped esp32 bundle was also missing the S0-fw-2 fix — all four targets required
+rebuilding, not three.
+
+### The staleness rule: git ancestry, not mtime
+
+`agent/tools/check_bundles_fresh.py` uses git provenance to detect stale bundles. A
+bundle whose `manifest.json:source_commit` predates the newest commit touching the agent
+source pathspec (`agent/` excluding `agent/dist/`) is STALE and fails the check. Four
+verdicts:
+
+- **fresh** — built from a commit containing the newest agent source change
+- **STALE** — `git merge-base --is-ancestor` fails; the bundle predates newer sources
+- **UNTRACEABLE** — `source_commit` is absent, `"unknown"`, or not a commit in this repo
+- **NOT BUILT** — no `manifest.json` present
+- **DIRTY SOURCES** — uncommitted changes under the source pathspec; a bundle records
+  HEAD, not what was compiled
+
+The dirty-tree refusal lives in the release path only (`just build`), never in
+`just agent-build`. Dirty-tree builds are the firmware dev loop (edit → build → QEMU →
+commit), and breaking that would get the guard deleted.
+
+### Why git ancestry instead of mtime
+
+The TODO's literal wording was "bundle is older than `agent/main/`" by modification time.
+`git checkout`, `git pull` and branch switches rewrite source mtimes with no content
+change; a clone sets them all to clone time. A check that fires on a correct tree is the
+check people delete — the runbook already carries that lesson verbatim about a
+`CONFIG_SECURE_BOOT_V1_SUPPORTED` prefix match. Git ancestry answers the same question
+("does this bundle contain the newest agent source change?") and cannot be wrong about it.
+This deviation from the TODO's wording is deliberate.
+
+### Where the guard is sited, and why it moves
+
+`just agent-check-fresh` gates `just build` as a dependency, positioned between
+`_require-agent-dist` and `test`. The check is implemented as a standalone script that
+takes bundle directories as arguments, with the justfile recipe as a thin caller. No
+logic lives in the justfile and nothing knows about `Dockerfile` or `agent/dist` as
+hardcoded locations.
+
+This siting is temporary by design. When agent bundles move behind `ObjectStore` (see
+*Agent bundles served from the object store* below), the guard moves to the publish step
+and passes the one bundle directory being uploaded — the script takes bundle dirs as
+arguments for exactly that reason. DECISIONS.md 2026-09-11 explicitly instructs whoever
+lands the object-store move to re-point the guard, not rewrite it.
+
+### No bypass mechanism
+
+v0.3.0 shipped stale bundles knowingly; the harm was that it became invisible afterwards.
+If a stale ship is wanted again, `just agent-build-all` is 20 minutes, and deleting a
+justfile line is a reviewable commit. No bypass environment variable exists.
+
+### Files created
+
+- `agent/tools/check_bundles_fresh.py` — stdlib-only staleness checker using git
+  provenance (linted by ruff, not type-checked; the ESP-IDF image has no uv/venv)
+- `tests/test_agent_bundle_freshness.py` — 8 test cases over a throwaway git repo in
+  `tmp_path` (no docker, no ESP-IDF, no bundle bytes)
+- `justfile` — `agent-check-fresh` recipe and added to `build:` dependencies
+- `docs/runbooks/agent-build.md` — new subsection *Staleness — a bundle can be correct
+  and still be wrong*
+
+### Gotchas learned
+
+**`git status --porcelain -- agent :(exclude)agent/dist`** is the source pathspec — i.e.
+exactly the Docker build context `agent/.dockerignore` defines (`COPY . /project`).
+Rejected narrower variants (per-target `sdkconfig.defaults.<target>`, "only
+`agent/main/`"): they drift from `.dockerignore`, and the whole point is that anything
+that can change a bundle is counted. Over-strict costs a rebuild; under-strict costs a
+fleet.
+
+**ESP-IDF timestamps every build into `esp_app_desc_t`.** Rebuilding the same commit does
+not reproduce bytes (compile date/time are in the binary), so a hash comparison can never
+be the staleness signal. Provenance in the manifest (`source_commit`, `idf_image`,
+`built_at`) is the only durable handle. Documented in the runbook's *Reproducibility*
+section.
+
 ## Agent bundles served from the object store (planned)
 
 **Status:** Planned · **Priority:** P2 · **Added:** 2026-09-11
