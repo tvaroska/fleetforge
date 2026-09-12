@@ -119,7 +119,7 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       question. Anything they get stuck on comes back as a new S0 task with the observed
       behaviour — and the fact that they got stuck is the finding, not their skill.
 
-- [ ] **S0-fw-2**: `link_up` is reported before the clock is set, so it can never arrive (P2, 0.25d)
+- [x] **S0-fw-2**: `link_up` is reported before the clock is set, so it can never arrive (P2, 0.25d)
       Found 2026-09-11 reading `agent_main.c`: line 189 reports `link_up`, line 194 runs
       `ff_time_sync`. Against an `https://` api_base the POST happens at epoch 0, so TLS
       certificate validation rejects it and the stage is lost. Only harmless in a
@@ -128,6 +128,7 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       Fix: report it after the clock is set, or buffer pre-clock stages and flush once
       TLS is usable — the second preserves the ordering the table is for.
       Acceptance: a board against prod produces a `link_up` row in `device_progress`.
+      _(done 2026-09-11; see docs/features/enrollment.md)_
 
 - [ ] **S0-test-1**: Bench-verify the serial console on real hardware (P1, 0.5d)
       Filed 2026-09-10, when S0-fe-1 shipped. Its software half is proven in jsdom against

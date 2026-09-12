@@ -178,6 +178,27 @@ just agent-qemu esp32 --fresh
 `--no-ntp`, not `--ntp ''`: `just` drops empty arguments when it splices them into a
 recipe, so "no NTP" has to be a flag.
 
+There is a third direction, added by S0-fw-2, and it is the one that proves stage reports
+survive the rule above. Against `https://` **with** `--ntp`, `link_up` is in
+`device_progress` and ordered **before** `time_synced` — the agent holds a pre-clock
+report and flushes it, oldest first, on the first report made after the sync, so its `at`
+is a couple of seconds late but its order is exact:
+
+```bash
+just agent-cfg --api-base https://bingo.tvaroska.sk --mqtt-uri mqtts://bingo.tvaroska.sk:8883 \
+      --link ethernet --hb 30 --ntp pool.ntp.org --token "$FFE"
+just agent-qemu esp32 --fresh          # let it reach `mqtt connected`
+ssh prod "cd /opt/boris/prod && docker compose exec -T postgres psql -U fleetforge fleetforge \
+  -At -c \"SELECT at, stage, detail FROM device_progress WHERE device_id='000000000000' \
+  AND at > now() - interval '15 minutes' ORDER BY at, id;\""
+#   … link_up|ethernet      <- first, held over the sync
+#   … time_synced|
+```
+
+`ORDER BY at, id` matters: a held stage and the report that flushed it can land in the
+same clock tick, and `id` is what keeps them in the order the board produced them. Over
+`http://` nothing is ever held — `link_up` goes out at link time even with `--no-ntp`.
+
 ## Killing it the two different ways
 
 | How | What the fleet sees |
@@ -353,6 +374,7 @@ smoke check is red, it already told you which of the four assertions failed.
 | `enroll 409` on a fresh image | that token is spent and outside the grace window — mint another |
 | board sits at `retrying enrollment in 60 s` | read the line above it: 401/409/422 are permanent and say so, anything else retries |
 | `ff_cfg: crc32 mismatch` | the blob was corrupted or truncated; regenerate it, then `--fresh` |
+| no `link_up` row against an `https://` base, but the later stages are there | the firmware predates S0-fw-2: the report went out at epoch 0 and its TLS handshake failed certificate validity. Re-build the bundle (`just agent-build esp32`) |
 | clock stays 1970 | no DNS or no outbound UDP/123 from this box; every `https://`/`mqtts://` endpoint then fails validation |
 | QEMU exits instantly with an efuse error | delete `.qemu/efuse.bin` and let it be regenerated from the IDF pin |
 

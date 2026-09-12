@@ -6,6 +6,68 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-11 — a stage report that predates the clock is held, not lost (S0-fw-2)
+
+`link_up` — the report the entry below calls "a board is visible as `arriving` before it
+exists in the fleet at all" — had never once reached a real server. It is sent the moment
+the link comes up, which is before `ff_time_sync()`, and `CONFIG_MBEDTLS_HAVE_TIME_DATE=y`
+(R0-fw-1, deliberately) makes a TLS handshake at epoch 0 fail certificate validity. The
+POST never opened, the failure logs at DEBUG by design, reports are never retried, and the
+stage was gone. Reproduced against prod with the pre-fix bundle before anything was edited.
+
+- **The gate is the URL scheme AND the clock, and the scheme half is not defensive
+  padding.** `transport_ready() := !tls || ff_time_is_sane()`. A clock-only gate is the
+  obvious reading of the bug and it would have **regressed the one configuration where
+  the feature already worked**: the plaintext lab runs `http://` with `--no-ntp`, the
+  clock never becomes sane, and `link_up` would have been held forever. `tls` is decided
+  once in `ff_progress_init()` from the scheme of the built URL, which is the same
+  property `ff_cfg.h` already documents as selecting TLS. Both directions were run.
+- **Buffer-and-drain, not "move the call below the sync".** The two-line version makes
+  `link_up` a lie about when the link came up, delays the first sign of life by up to
+  `SNTP_TIMEOUT_MS` (15 s), and fixes exactly one call site — the next pre-clock reporter
+  re-introduces the bug. `agent_main.c` is comments-only for that reason.
+- **Drain BEFORE the current report's POST.** The server timestamps at receipt and
+  `progress.py` breaks `at` ties with `id`, so a held `link_up` inserted immediately
+  before `time_synced` still sorts ahead of it. Drain-after would invert the pair in the
+  same clock tick. Measured on prod: `link_up` 00:42:24, `time_synced` 00:42:27.
+- **No `ff_progress_flush()`.** `agent_main.c` already reports `time_synced`
+  unconditionally right after the sync, so the drain point exists for free and cannot be
+  forgotten; a public flush would be an ordering trap for whoever omits it.
+- **One attempt per held stage, and the first failed send abandons the rest.** Property 2
+  (never retried) applies to a held report as much as a live one, and abandoning bounds
+  the added boot-path cost at one `PROGRESS_TIMEOUT_MS` (5 s) instead of depth × 5 s. A
+  failed open means no route; the remaining stale stages are not worth 15 s of the enroll
+  path.
+- **Re-check `armed` after the drain.** A held entry can take the 401 branch, and
+  continuing to POST the current stage afterwards is exactly the "keep talking with a
+  credential the server called dead" behaviour property 3 exists to prevent. This is the
+  one ordering hazard the change introduces and it is invisible in a plaintext lab. A 401
+  clears the queue as well: those stages can never do anything but sit in RAM.
+- **`FF_PROGRESS_MAX_STAGE` is 32, not 24.** The server's stage regex is
+  `^[a-z][a-z0-9_]{0,31}$`, so 32 characters is the widest legal stage a future caller
+  could pass, and a silent `strlcpy` truncation would turn a valid stage into a
+  *different* one. Retyped across the seam with the same comment `PROGRESS_MAX_DETAIL`
+  carries. A held entry stores `stage` + `detail` only — never the token, which stays in
+  `s_state` and is inserted at build time, so the existing wipe-the-body discipline still
+  covers every copy of it.
+- **PROPOSED `spec/device-protocol.md` wording, deliberately not written** (same
+  treatment S0-fw-1 gave `POST /v1/device-progress`). Under *Clock — SNTP before TLS*:
+  "Stage reports (`POST /v1/device-progress`) produced before the clock is set are held by
+  the agent and sent, in order, on the first report after the sync. Their `at` is the
+  server's receipt time, so a held stage reads as slightly late; the ordering is exact."
+- **Real boards do not have this fix yet, and no commit here can give it to them.**
+  `agent/dist/` is gitignored and the flasher serves the bundle baked in by `COPY
+  agent/dist /app/agent` (R0-infra-2), so prod hands out the buggy firmware until the next
+  release build. Precisely the coupling *agent bundles are artifacts* (2026-09-11) exists
+  to remove; out of scope for a 0.25 d firmware fix.
+- **Worth keeping: `-Werror` is the only static gate firmware gets.** There is no host-side
+  C test harness in this repo, and `agent-qemu-smoke` runs a **tokenless** config, so the
+  reporter is unarmed and the smoke check cannot exercise the queue at all. Green smoke
+  means "still boots". The behaviour is proved against prod or not at all.
+
+Details: `docs/features/enrollment.md` → *The first stage survives the clock (S0-fw-2)*,
+`docs/runbooks/agent-qemu.md` → *Proving the clock rule* (third direction).
+
 ## 2026-09-11 — the escalation path is one click, and redaction is not the firmware's job (S0-fe-7)
 
 The fourth layer of *Unaided onboarding*. On 2026-09-11 the diagnosis was already on

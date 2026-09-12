@@ -12,12 +12,14 @@
 
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 
 #include "cJSON.h"
 #include "esp_crt_bundle.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
 #include "ff_identity.h"
+#include "ff_time.h"
 
 static const char *TAG = "ff-progress";
 
@@ -31,10 +33,29 @@ static const char *TAG = "ff-progress";
  * share a constant across this seam — so it is truncated here and never 422'd there. */
 #define PROGRESS_MAX_DETAIL 200
 
+/* api/schemas.py's stage pattern is `^[a-z][a-z0-9_]{0,31}$`, so 32 characters is the
+ * widest stage a future caller could legally pass. Retyped across the same seam as
+ * PROGRESS_MAX_DETAIL: a silent strlcpy truncation here would turn a valid stage into a
+ * different one, which is worse than dropping it. */
+#define FF_PROGRESS_MAX_STAGE 32
+
+/* Stages produced before the transport can carry them (S0-fw-2) wait here. Depth 3:
+ * only `link_up` can realistically queue today, with room for a pre-clock `halted`.
+ * Static, because a report must never be able to fail on a malloc. */
+#define FF_PROGRESS_QUEUE_DEPTH 3
+
 static struct {
     bool armed;
+    /* Decided once, from the scheme of the built URL: ff_cfg.h documents `api_base` as
+     * "the scheme selects TLS", and a plaintext base needs no clock at all. */
+    bool tls;
     char url[FF_CFG_MAX_URI + sizeof(PROGRESS_PATH)];
     char token[FF_CFG_MAX_TOKEN];
+    struct {
+        char stage[FF_PROGRESS_MAX_STAGE + 1];
+        char detail[PROGRESS_MAX_DETAIL + 1];
+    } queue[FF_PROGRESS_QUEUE_DEPTH];
+    size_t queued; /* number of live entries, oldest first */
 } s_state;
 
 void ff_progress_init(const ff_cfg_t *cfg)
@@ -56,6 +77,7 @@ void ff_progress_init(const ff_cfg_t *cfg)
     }
 
     strlcpy(s_state.token, cfg->token, sizeof(s_state.token));
+    s_state.tls = strncasecmp(s_state.url, "https://", 8) == 0;
     s_state.armed = true;
 }
 
@@ -97,20 +119,15 @@ static char *build_body(const char *stage, const char *detail)
     return body;
 }
 
-void ff_progress_report(const char *stage, const char *detail)
+/* Send one report. Returns false when it did not reach the server at all (client init,
+ * open, or a short write) — a status that came back, even a bad one, counts as sent. */
+static bool post_one(const char *stage, const char *detail)
 {
-    if (!s_state.armed) {
-        return;
-    }
-    /* ff_identity_init() may not have run — park() reports `halted` from paths that
-     * precede it — and a body with an empty device_id is a guaranteed 422. */
-    if (ff_device_id()[0] == '\0') {
-        return;
-    }
+    bool sent = false;
 
     char *body = build_body(stage, detail);
     if (body == NULL) {
-        return;
+        return false;
     }
     int body_len = (int)strlen(body);
 
@@ -141,6 +158,7 @@ void ff_progress_report(const char *stage, const char *detail)
     }
     /* The token has left the building; do not leave this copy of it in the heap. */
     memset(body, 0, (size_t)body_len);
+    sent = true;
 
     (void)esp_http_client_fetch_headers(client);
     int status = esp_http_client_get_status_code(client);
@@ -153,6 +171,9 @@ void ff_progress_report(const char *stage, const char *detail)
                       "stage reporting is off for this boot. Enrolment will fail too — "
                       "re-flash ff_cfg with a fresh ffe_ token.");
         s_state.armed = false;
+        /* Nothing a held stage can ever do now but sit in RAM. */
+        memset(s_state.queue, 0, sizeof(s_state.queue));
+        s_state.queued = 0;
     } else if (status != 202) {
         ESP_LOGD(TAG, "progress %d for '%s'", status, stage);
     }
@@ -165,4 +186,86 @@ done:
     /* `body` still holds the token unless the write path already wiped it. */
     memset(body, 0, (size_t)body_len);
     free(body);
+    return sent;
+}
+
+/* Can a report leave this board right now?
+ *
+ * NOT `ff_time_is_sane()` alone. A plaintext lab (`http://` + `--no-ntp`) never sets its
+ * clock, so a clock-only gate would hold `link_up` forever and break the one setup where
+ * the stage has always worked. Only a TLS handshake needs the date. */
+static bool transport_ready(void)
+{
+    return !s_state.tls || ff_time_is_sane();
+}
+
+/* Hold a stage until the transport can carry it. Full queue drops the OLDEST entry: the
+ * dashboard shows the newest stage per device, so the newest is the one worth keeping. */
+static void enqueue(const char *stage, const char *detail)
+{
+    if (s_state.queued == FF_PROGRESS_QUEUE_DEPTH) {
+        memmove(&s_state.queue[0], &s_state.queue[1],
+                sizeof(s_state.queue[0]) * (FF_PROGRESS_QUEUE_DEPTH - 1));
+        s_state.queued--;
+    }
+    /* NULL and "" are the same held entry — build_body() omits an empty detail. */
+    strlcpy(s_state.queue[s_state.queued].stage, stage,
+            sizeof(s_state.queue[s_state.queued].stage));
+    strlcpy(s_state.queue[s_state.queued].detail, detail == NULL ? "" : detail,
+            sizeof(s_state.queue[s_state.queued].detail));
+    s_state.queued++;
+    ESP_LOGD(TAG, "holding '%s' until the clock is set", stage);
+}
+
+/* Send everything held, oldest first, and drop it either way — a held stage gets exactly
+ * one attempt, like every other report (property 2).
+ *
+ * Abandons the rest on the first send that does not reach the server: no route means the
+ * remaining stale stages are not worth another PROGRESS_TIMEOUT_MS each on the boot path. */
+static void drain(void)
+{
+    size_t held = s_state.queued;
+    s_state.queued = 0;
+
+    for (size_t i = 0; i < held; i++) {
+        if (!s_state.armed) {
+            break; /* a held entry took the 401 branch */
+        }
+        if (!post_one(s_state.queue[i].stage, s_state.queue[i].detail)) {
+            ESP_LOGD(TAG, "dropping %u held stage(s): '%s' did not reach the server",
+                     (unsigned)(held - i), s_state.queue[i].stage);
+            break;
+        }
+    }
+    memset(s_state.queue, 0, sizeof(s_state.queue));
+}
+
+void ff_progress_report(const char *stage, const char *detail)
+{
+    if (!s_state.armed) {
+        return;
+    }
+    /* ff_identity_init() may not have run — park() reports `halted` from paths that
+     * precede it — and a body with an empty device_id is a guaranteed 422. */
+    if (ff_device_id()[0] == '\0') {
+        return;
+    }
+
+    if (!transport_ready()) {
+        enqueue(stage, detail);
+        return;
+    }
+
+    /* Drained BEFORE this call's own POST, so the server — which timestamps at receipt
+     * and breaks `at` ties by `id` — sees the held stages ahead of this one. */
+    if (s_state.queued > 0) {
+        drain();
+        /* A held entry can have disarmed the reporter on a 401 mid-drain; carrying on
+         * would be exactly the "keep talking with a dead credential" property 3 forbids. */
+        if (!s_state.armed) {
+            return;
+        }
+    }
+
+    (void)post_one(stage, detail);
 }

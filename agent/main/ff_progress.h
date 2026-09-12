@@ -16,7 +16,7 @@
  * MQTT credential, so there is no other channel and no other credential. The server
  * VERIFIES that token and never burns it, so reporting can never cost an enrolment.
  *
- * Four properties, each of which the boot sequence depends on:
+ * Five properties, each of which the boot sequence depends on:
  *
  *  1. **Never fatal, ever.** Every call returns void and every failure is at most one
  *     log line. A board must not fail to enroll because it could not say it was
@@ -27,6 +27,21 @@
  *     reporter switches itself off for this boot rather than talking to the server
  *     forever with a credential it has been told is dead.
  *  4. **The token is never logged**, in any branch. Same rule as ff_enroll.c.
+ *  5. **Stages produced before the clock is set are HELD, not lost** (S0-fw-2). With
+ *     CONFIG_MBEDTLS_HAVE_TIME_DATE=y a TLS handshake at epoch 0 fails certificate
+ *     validity, so against an `https://` api_base every report made before
+ *     ff_time_sync() — `link_up`, the first sign of life this feature exists for —
+ *     used to vanish. Such a report is now buffered (3 deep, static, oldest dropped
+ *     when full) and sent, oldest first, at the top of the first report made once the
+ *     clock is sane, BEFORE that report's own POST, so the server's receipt order
+ *     matches the board's. The gate is the URL scheme AND the clock: over `http://`
+ *     nothing is ever held, which is what keeps the plaintext lab (`--no-ntp`)
+ *     reporting `link_up` at link time. A held stage gets exactly one attempt, like
+ *     every other report, and its `at` is the (slightly later) receipt time.
+ *
+ * **The honest limit in its new form: a board that never sets its clock against an
+ * `https://` server still reports nothing — and that is the same board that cannot
+ * enrol either**, because /v1/enroll needs the same handshake.
  */
 
 #pragma once

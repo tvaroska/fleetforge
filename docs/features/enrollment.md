@@ -635,6 +635,44 @@ its container and refuses to start a second board, and `just agent-qemu-stop` ex
 because six concurrent emulators all claiming `000000000000` silently invalidated the
 first round of this evidence (`docs/runbooks/agent-qemu.md`).
 
+### The first stage survives the clock (S0-fw-2)
+
+**Done 2026-09-11.** The one stage the feature above exists for — `link_up`, the report
+that makes a board visible *before it exists in the fleet at all* — could never arrive at
+a real server. `agent_main.c` reports it the moment the link comes up, which is before
+`ff_time_sync()`, and with `CONFIG_MBEDTLS_HAVE_TIME_DATE=y` (R0-fw-1) a TLS handshake at
+epoch 0 fails certificate validity. The POST never opened, the failure is logged at DEBUG
+by design, and reports are never retried. It only worked in the plaintext lab it was
+tested in.
+
+**What was built.** `ff_progress.c` now holds a report the transport cannot yet carry
+(3 deep, static, no malloc, oldest dropped when full) and drains it, oldest first, at the
+top of the first report made once the transport is ready — **before** that report's own
+POST, so the server's receipt order matches the board's. The gate is
+`!tls || ff_time_is_sane()`, decided from the scheme of the built URL; a clock-only gate
+would have held `link_up` forever in the `http://` + `--no-ntp` lab, which is the one
+configuration where the stage always worked. A held stage gets exactly one attempt, a
+failed send abandons the rest of the queue (bounding the added boot latency to one 5 s
+timeout, not depth × 5 s), and a 401 clears the queue as it disarms the reporter.
+`agent_main.c` is unchanged apart from comments: `link_up` is still reported at link time,
+which is what makes it true.
+
+**T2 evidence — against prod, vacuity-checked first.** With the *pre-fix* bundle and a
+fresh prod token, an emulated board reached `mqtt connected` and `device_progress` held
+`time_synced` → `enrolling` → `enrolled` → `mqtt_connected` and **no `link_up`**: the bug,
+reproduced on the deployed server. After the fix (rebuild, `BUNDLE OK`, fresh token, same
+commands) the same query returned `link_up|ethernet` **first** at 00:42:24, ahead of
+`time_synced` at 00:42:27 — held over the sync and flushed with it, three seconds late and
+in exact order — followed by the rest of the sequence to `mqtt_connected`, with a `devices`
+row and `broker_provisioned_at` set. The plaintext lab was re-run to prove the trap: over
+`http://` with `--no-ntp` the clock stays at 1970 and `link_up` still lands *immediately*
+(170 ms ahead of `time_synced`), not held.
+
+**Not deployed by this commit.** `agent/dist/` is gitignored, and the flasher serves the
+bundle baked into the app image (`COPY agent/dist /app/agent`, R0-infra-2), so prod keeps
+handing out firmware with this bug until the next release build. That coupling is what the
+*agent bundles are artifacts* decision (DECISIONS.md, 2026-09-11) exists to remove.
+
 ### An arrival that finished stops arriving (S0-fe-3)
 
 **Done 2026-09-11.** Filed by the S0-fw-1 verification above, and it is the second clause

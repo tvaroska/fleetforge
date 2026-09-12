@@ -168,7 +168,10 @@ void app_main(void)
     ff_cfg_log(&cfg);
 
     /* Armed as early as the config allows — but it stays silent until there is both a
-     * device_id and a link, so the first report it can ever send is `link_up`. */
+     * device_id and a link, so the first stage it can ever produce is `link_up`. On an
+     * `https://` base that report is HELD until the clock is set and flushed with
+     * `time_synced` (S0-fw-2, ff_progress.h property 5); over `http://` it goes out at
+     * link time. Either way it is the first stage the server sees. */
     ff_progress_init(&cfg);
 
     if (ff_identity_init() != ESP_OK) {
@@ -185,7 +188,11 @@ void app_main(void)
     }
 
     /* The first thing this board is able to tell the server, and the report that turns
-     * "nothing at all" into "arriving" on the dashboard. */
+     * "nothing at all" into "arriving" on the dashboard. Reported HERE, at the moment
+     * the link comes up, deliberately: against an `https://` base ff_progress holds it
+     * over the sync below and sends it ahead of `time_synced` (S0-fw-2). Do not move
+     * this call — reporting it after the clock would make it a lie about when the link
+     * came up and delay the first sign of life by up to SNTP_TIMEOUT_MS. */
     ff_progress_report(FF_PROGRESS_LINK_UP, ff_cfg_link_name(cfg.link));
 
     /* Before the first TLS handshake, on BOTH channels. A failure here is not fatal: a
