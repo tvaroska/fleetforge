@@ -165,8 +165,11 @@ describe('BoardConsolePanel', () => {
     render(<BoardConsolePanel autoWatch createConsole={factory} />)
 
     const fault = await screen.findByTestId('console-fault')
-    expect(fault).toHaveTextContent(/browning out/)
-    expect(fault).toHaveTextContent(/not a hub/)
+    expect(fault).toHaveTextContent(/rail collapsed during radio calibration/)
+    // Names the stage, not a guess at the cause: this board dies in `phy_init` every
+    // boot and never reaches association, so "before it can join" was the wrong story.
+    expect(fault).toHaveTextContent(/before this board ever tried to join/)
+    expect(fault).toHaveTextContent(/bulk capacitor/)
 
     const loop = await screen.findByTestId('console-reboot-loop')
     expect(loop).toHaveTextContent(/keeps restarting — 3 times/)
@@ -379,13 +382,13 @@ describe('BoardConsolePanel', () => {
     })
 
     // The acceptance's second half, on the log that started this whole feature.
-    it('offers NO button for the 2026-09-11 brownout — no cable is fixed in software', async () => {
+    it('offers NO button for the 2026-09-11 brownout — no power rail is fixed in software', async () => {
       const { factory } = fakeConsole(BENCH_2026_09_11)
       const onReflash = vi.fn(async () => {})
       render(<BoardConsolePanel autoWatch createConsole={factory} onReflash={onReflash} />)
 
       const fault = await screen.findByTestId('console-fault')
-      expect(fault).toHaveTextContent(/browning out/)
+      expect(fault).toHaveTextContent(/rail collapsed during radio calibration/)
       expect(screen.queryByTestId('console-remedy')).not.toBeInTheDocument()
       expect(onReflash).not.toHaveBeenCalled()
     })
@@ -453,7 +456,7 @@ describe('BoardConsolePanel — the diagnostic bundle', () => {
     await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1))
     const copied = writeText.mock.calls[0][0] as string
     expect(copied).toContain('E BOD:')
-    expect(copied).toContain('browning out')
+    expect(copied).toContain('rail collapsed during radio calibration')
     // What was copied is what is on screen — not a re-derivation that drifts with the
     // 1 Hz summary tick while the operator is still reading it.
     expect(screen.getByTestId('diagnostic-bundle')).toHaveValue(copied)

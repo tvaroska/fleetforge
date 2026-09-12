@@ -102,8 +102,12 @@ describe('classifyConsoleLine', () => {
     it('names a brownout, which is the most common first-board failure there is', () => {
       const event = classifyConsoleLine('E BOD: Brownout detector was triggered', 0)
       expect(event.level).toBe('error')
-      expect(event.hint).toMatch(/browning out/)
-      expect(event.hint).toMatch(/not a hub/)
+      expect(event.hint).toMatch(/sagged below about 2\.43 V/)
+      expect(event.hint).toMatch(/a hub, or a keyboard or monitor port/)
+      // A single line knows the rail collapsed and nothing else. It must NOT assert the
+      // cable as the cause — that is what sent an operator chasing a working cable on
+      // 2026-09-12. The stage-specific story is `summarizeConsole`'s job.
+      expect(event.hint).toMatch(/on a good cable too/)
     })
 
     it('names it from the reset banner too, which is all a fast loop leaves behind', () => {
@@ -112,7 +116,7 @@ describe('classifyConsoleLine', () => {
         0,
       )
       expect(event.level).toBe('error')
-      expect(event.hint).toMatch(/browned out/)
+      expect(event.hint).toMatch(/3\.3 V rail collapsed/)
       expect(event.bootMarker).toBe('rom')
     })
 
@@ -326,8 +330,17 @@ describe('summarizeConsole', () => {
 
     it('names the brownout as the fault', () => {
       // The operator spent a session unable to learn this from anything but a UART cable.
-      expect(summary.fault?.hint).toMatch(/browning out/)
+      expect(summary.fault?.hint).toMatch(/rail collapsed during radio calibration/)
       expect(summary.fault?.text).toMatch(/Brownout detector was triggered/)
+    })
+
+    // S0-fe-4 follow-up, 2026-09-12. This session dies at `phy_init … full calibration`,
+    // every boot, before `ff-wifi` ever associates — so a hint about the radio drawing
+    // current "before it can join" described a stage the board never reached, and the
+    // cable it blamed was provably flashing the board fine.
+    it('names the stage, and says why the loop cannot end on its own', () => {
+      expect(summary.fault?.hint).toMatch(/before this board ever tried to join/)
+      expect(summary.fault?.hint).toMatch(/only saved once a boot survives it/)
     })
 
     it('shows the reboot loop', () => {
@@ -541,10 +554,12 @@ describe('summarizeConsole carries the remedy to the fault', () => {
     expect(summary.fault).toBeNull()
   })
 
-  it('a brownout fault offers nothing, because nothing in software fixes a cable', () => {
+  it('a brownout fault offers nothing, because no button reaches a power rail', () => {
     const events = classify(BENCH_2026_09_11)
     const summary = summarizeConsole(events, at(events))
-    expect(summary.fault?.hint).toMatch(/browning out/)
+    expect(summary.fault?.hint).toMatch(/rail collapsed during radio calibration/)
+    // Rebooting is the one action guaranteed not to help: the next boot runs the same
+    // full calibration and dies in the same place.
     expect(summary.fault?.remedy).toBeNull()
   })
 })

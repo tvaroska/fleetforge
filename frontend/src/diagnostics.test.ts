@@ -104,11 +104,13 @@ describe('buildDiagnosticBundle', () => {
     expect(bundle.split('E BOD: Brownout detector was triggered').length - 1).toBe(3)
     expect(bundle).toContain('rst:0xf (RTCWDT_BROWN_OUT_RESET)')
     // The fault is NAMED, not merely logged. This is the task's stated acceptance.
-    expect(bundle).toContain('browning out')
+    expect(bundle).toContain('rail collapsed during radio calibration')
     expect(bundle).toContain('reboot loop')
     expect(bundle).toContain('yes — 3 boots without reaching the fleet')
     // And it is at the top: a recipient must not have to scroll to find the diagnosis.
-    expect(bundle.split('\n').slice(0, 15).join('\n')).toContain('browning out')
+    expect(bundle.split('\n').slice(0, 15).join('\n')).toContain(
+      'rail collapsed during radio calibration',
+    )
   })
 
   it('lets no ffe_ token survive, wherever it came from', () => {
@@ -176,7 +178,7 @@ describe('buildDiagnosticBundle', () => {
     const bundle = bundleOf(BENCH_2026_09_11, null)
 
     expect(bundle).toContain('E BOD: Brownout detector was triggered')
-    expect(bundle).toContain('browning out')
+    expect(bundle).toContain('rail collapsed during radio calibration')
     expect(bundle).toContain('not detected in this tab')
     expect(bundle).toContain('unavailable (this page could not reach /v1/healthz)')
   })

@@ -255,6 +255,39 @@ const specific = (text: string, remedy: Remedy | null = null): Hint => ({
 /** The boot-ROM reset banner: `rst:0xf (RTCWDT_BROWN_OUT_RESET),boot:0x13 (SPI_FAST…)`. */
 const RESET_BANNER = /^rst:0x[0-9a-f]+\s*\(([A-Z0-9_]+)\)/i
 
+/** `E BOD: Brownout detector was triggered`. Named so `summarizeConsole` can refine it. */
+const BROWNOUT_LINE = /Brownout detector was triggered/i
+
+/**
+ * `W (802) phy_init: failed to load RF calibration data (0x1102), falling back to full
+ * calibration`.
+ *
+ * `0x1102` is `ESP_ERR_NVS_NOT_FOUND`: no calibration is stored, so the PHY runs the FULL
+ * calibration, which is the largest current draw in the whole startup — larger than
+ * association and larger than the TLS handshake, and it happens before either. A board
+ * that browns out here never writes the calibration back, so the next boot repeats it.
+ * That is a self-sustaining loop, and it is the single most useful thing the panel can
+ * tell an operator, because it explains why a board that flashes fine still never joins.
+ */
+const PHY_FULL_CALIBRATION = /falling back to full calibration/i
+
+/**
+ * The brownout hint when we know the stage: during RF calibration, before any association.
+ *
+ * No remedy. S0-fe-6's rule is that a button is offered only when it changes the outcome,
+ * and rebooting into the same full calibration is the one action guaranteed not to.
+ */
+const BROWNOUT_DURING_CALIBRATION = specific(
+  'The 3.3 V rail collapsed during radio calibration — before this board ever tried to ' +
+    'join the network, so the network settings are not the problem. This board has no ' +
+    'stored RF calibration, so every boot runs the full calibration, which draws more ' +
+    'current than anything else in startup, and it dies in the same place each time. It ' +
+    'cannot get out of that on its own: the calibration is only saved once a boot survives ' +
+    'it. Give it a steadier 3.3 V — a different USB port or cable, or a bulk capacitor ' +
+    'across 3V3 and GND — and once it survives a single boot it caches the calibration and ' +
+    'stops doing this.',
+)
+
 /**
  * Lines that carry no ESP-IDF preamble, and the most important ones on a bench.
  *
@@ -271,14 +304,26 @@ const RESET_BANNER = /^rst:0x[0-9a-f]+\s*\(([A-Z0-9_]+)\)/i
  */
 const BARE_RULES: { match: RegExp; level: ConsoleLevel; hint: Hint }[] = [
   {
-    // `esp_brownout` fires when the 3.3 V rail sags below the detector's trip point — on a
-    // DevKit that is nearly always the USB cable, not the board.
-    match: /Brownout detector was triggered/i,
+    // `esp_brownout` fires when the 3.3 V rail sags below the detector's trip point. The
+    // trip point is NOT marginal: the agent builds at CONFIG_ESP_BROWNOUT_DET_LVL_SEL_0,
+    // which IDF's esp32 Kconfig defines as 2.43 V — the LOWEST of the eight levels. A trip
+    // means the rail really collapsed by ~0.9 V, so this is never a false positive.
+    //
+    // What it is NOT is a diagnosis of *why*. Until 2026-09-12 this hint asserted the USB
+    // cable as fact, and an operator whose cable demonstrably flashes and runs Wi-Fi
+    // sketches was told to go replace it. The cable is the most common cause, not the only
+    // one: a weak LDO on a clone DevKit, anything drawing off the 3V3 pin, or a port with a
+    // low current limit all land here. Name the observation, list the candidates, and let
+    // the stage (see BROWNOUT_DURING_CALIBRATION) carry the specific story when we have it.
+    match: BROWNOUT_LINE,
     level: 'error',
     hint: specific(
-      'The board is browning out: the USB port cannot hold 3.3 V while the Wi-Fi radio ' +
-        'draws current, so the board resets before it can join. Try a shorter, thicker USB ' +
-        'cable, straight into the machine, not a hub — and not a keyboard or monitor port.',
+      'The board reset because its 3.3 V rail sagged below about 2.43 V, which is where ' +
+        'the brownout detector trips. That is a real collapse, not a marginal reading. The ' +
+        'usual cause is the USB supply — a thin or long cable, a hub, or a keyboard or ' +
+        'monitor port — but a board whose own regulator or wiring cannot meet the radio’s ' +
+        'current peaks does this on a good cable too. The line just above says which stage ' +
+        'it died in.',
     ),
   },
   {
@@ -331,8 +376,9 @@ function resetBannerRule(reason: string): { level: ConsoleLevel; hint: Hint | nu
     return {
       level: 'error',
       hint: specific(
-        'This board reset because its power browned out. Try a shorter, thicker USB cable, ' +
-          'straight into the machine, not a hub.',
+        'This board reset because its 3.3 V rail collapsed. Most often that is the USB ' +
+          'supply — a thin or long cable, a hub, or a keyboard or monitor port — but a ' +
+          'board that cannot meet the radio’s current peaks does it on a good cable too.',
       ),
     }
   }
@@ -573,6 +619,14 @@ export function summarizeConsole(events: ConsoleEvent[], now = Date.now()): Cons
   let romPending = false
   /** The panel asked for the next boot. It is not evidence of a loop. */
   let commanded = false
+  /**
+   * This boot has started a full RF calibration and not yet finished one.
+   *
+   * Per-boot, not per-line: the brownout can land a line or two after the `phy_init`
+   * warning, and cleared at every boot boundary so a calibration seen three boots ago
+   * never explains today's fault.
+   */
+  let calibrating = false
   /** When the current wait began: the last boot boundary or milestone, whichever is later. */
   let since = events.length > 0 ? events[0].at : now
 
@@ -589,9 +643,14 @@ export function summarizeConsole(events: ConsoleEvent[], now = Date.now()): Cons
         boots += 1
         // The new boot has proved nothing yet. This is the stale-✓ fix.
         reached = new Set()
+        calibrating = false
         since = event.at
       }
     }
+
+    // Before the milestone and hint `continue`s below: the `phy_init` warning carries no
+    // hint of its own, so it would otherwise never be seen.
+    if (PHY_FULL_CALIBRATION.test(event.raw)) calibrating = true
 
     if (event.milestone !== null) {
       reached.add(event.milestone)
@@ -609,7 +668,15 @@ export function summarizeConsole(events: ConsoleEvent[], now = Date.now()): Cons
     // A generic note fills an empty slot but never overwrites a named cause. See
     // `ConsoleEvent.hintKind` — the retry heartbeat is always the newest line.
     if (event.hintKind === 'generic' && faultKind === 'specific') continue
-    fault = { text: event.text, hint: event.hint, remedy: event.remedy }
+    // A brownout inside calibration gets the stage-specific story instead of the generic
+    // supply one: it is the difference between "check your cable" and "this board is in a
+    // loop it cannot leave, and one good boot ends it".
+    const staged = calibrating && BROWNOUT_LINE.test(event.raw)
+    fault = {
+      text: event.text,
+      hint: staged ? BROWNOUT_DURING_CALIBRATION.text : event.hint,
+      remedy: staged ? BROWNOUT_DURING_CALIBRATION.remedy : event.remedy,
+    }
     faultKind = event.hintKind
   }
 
