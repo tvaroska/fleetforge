@@ -484,6 +484,22 @@ function milestoneFor(tag: string | null, text: string): Milestone | null {
 }
 
 function hintFor(tag: string | null, text: string): Hint | null {
+  // `agent_main.c::log_power_fault()` (S0-fw-3). The agent read `esp_reset_reason()` and
+  // is stating the cause outright, so this console no longer has to infer it — and this
+  // is the one case where it COULD not: the board rebooted, `BROWNOUT_LINE` and its
+  // reset banner belong to the previous boot, and `summarizeConsole` clears its state at
+  // every boot boundary. Without this line a board that browns out and then recovers
+  // looks flawless here.
+  if (tag === 'ff-agent' && text.includes('the previous boot ended in a BROWNOUT')) {
+    return specific(
+      'This boot is fine, but the one before it died when the 3.3 V rail collapsed — the ' +
+        'agent read that off the reset reason rather than guessing. The supply is marginal ' +
+        'for this board: it will do this again on a cold boot, an OTA, or anything else ' +
+        'that makes the radio work harder. Worth fixing before the board is somewhere you ' +
+        'cannot reach it.',
+    )
+  }
+
   if (tag === 'ff-agent' && text.startsWith('halted:')) {
     return {
       text: 'The agent gave up on purpose. It will not retry until the board is re-flashed.',

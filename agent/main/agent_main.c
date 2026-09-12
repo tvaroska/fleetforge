@@ -34,6 +34,7 @@
 #include "esp_netif.h"
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
+#include "esp_system.h"
 #include "ff_cfg.h"
 #include "ff_enroll.h"
 #include "ff_identity.h"
@@ -76,6 +77,27 @@ static void park(const char *reason)
         ESP_LOGE(TAG, "halted: %s", reason);
         vTaskDelay(pdMS_TO_TICKS(300000));
     }
+}
+
+/* Say, in one unambiguous line, that the LAST boot ended in a power fault.
+ *
+ * Worth its own line because the alternative is inference from someone else's log. The
+ * brownout detector's own output is `E BOD: Brownout detector was triggered` followed by
+ * a reset banner reading `rst:0x3 (SW_RESET)` — CONFIG_ESP_BROWNOUT_USE_INTR=y means the
+ * ISR restarts the chip, so the banner says SOFTWARE reset and the flashing console has
+ * to piece the cause back together from the line above it. The ISR does set the reason
+ * hint, so esp_reset_reason() still returns ESP_RST_BROWNOUT here, and this boot can just
+ * state the fact.
+ *
+ * Says nothing on a healthy board — every other reset reason is left to the banner. */
+static void log_power_fault(void)
+{
+    if (esp_reset_reason() != ESP_RST_BROWNOUT) {
+        return;
+    }
+    ESP_LOGW(TAG, "the previous boot ended in a BROWNOUT: this board's 3.3 V rail fell "
+                  "below the detector's threshold and the chip reset itself. The supply "
+                  "is marginal for this board even if this boot succeeds.");
 }
 
 static void log_boot_facts(void)
@@ -154,6 +176,7 @@ static void enroll_until_credentialed(const ff_cfg_t *cfg, ff_cred_t *cred)
 
 void app_main(void)
 {
+    log_power_fault();
     log_boot_facts();
 
     ESP_ERROR_CHECK(nvs_ready());
@@ -194,6 +217,16 @@ void app_main(void)
      * this call — reporting it after the clock would make it a lie about when the link
      * came up and delay the first sign of life by up to SNTP_TIMEOUT_MS. */
     ff_progress_report(FF_PROGRESS_LINK_UP, ff_cfg_link_name(cfg.link));
+
+    /* Immediately after, and only when it happened: the one chance this board has to
+     * tell the server that its supply is marginal. A board still looping on brownouts
+     * never gets here, so this always arrives from the boot that escaped — which is
+     * exactly the board that would otherwise look perfectly healthy on the dashboard.
+     * Held alongside `link_up` on an https:// base; the queue is deep enough for both. */
+    if (esp_reset_reason() == ESP_RST_BROWNOUT) {
+        ff_progress_report(FF_PROGRESS_BROWNOUT,
+                           "the 3.3 V rail collapsed during the previous boot");
+    }
 
     /* Before the first TLS handshake, on BOTH channels. A failure here is not fatal: a
      * plaintext lab (http:// + mqtt://) works fine at epoch 0, and ff_time_sync has

@@ -64,6 +64,14 @@ extern "C" {
 #define FF_PROGRESS_MQTT_REFUSED "mqtt_refused"
 #define FF_PROGRESS_HALTED "halted"
 
+/* Not a stage in the walk — a report ABOUT THE PREVIOUS BOOT, sent once, just after
+ * `link_up`, when `esp_reset_reason()` says the last reset was a brownout. It is the
+ * only way that fact ever reaches the server: a board still stuck in the loop has no
+ * link and reports nothing, so this arrives from the boot that finally got through, and
+ * says the rail is marginal on a board that now looks healthy. Reported after `link_up`
+ * rather than before it so the "no stage precedes link_up" rule above stays true. */
+#define FF_PROGRESS_BROWNOUT "brownout"
+
 /*
  * Arm the reporter from the flash-time config. Until this is called — and after it is
  * called with a config carrying no token or no api_base — every ff_progress_report()

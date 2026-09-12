@@ -114,7 +114,8 @@ class ProgressStage(StrEnum):
     it can never update, including one that invents a stage. The API bounds the
     *shape* of the string (`^[a-z_]{1,32}$`), never its membership here.
 
-    The order below is the order a healthy board walks. There is deliberately no
+    The order below is the order a healthy board walks, up to `halted`; `brownout`
+    sits outside it and is documented where it is defined. There is deliberately no
     stage before `link_up`: a board with no link cannot report anything at all, which
     is this feature's honest limit (`docs/features/enrollment.md`).
     """
@@ -129,6 +130,11 @@ class ProgressStage(StrEnum):
     MQTT_REFUSED = "mqtt_refused"
     # `agent_main.c::park()`: a failure no retry can fix. `detail` carries the reason.
     HALTED = "halted"
+    # Out of the walk, and retrospective: the agent saw `ESP_RST_BROWNOUT` and is
+    # reporting that the PREVIOUS boot died on a power fault (S0-fw-3). It arrives just
+    # after `link_up` from a board that is, right now, working — which is the point. A
+    # board still stuck in the brownout loop has no link and reports nothing at all.
+    BROWNOUT = "brownout"
 
 
 TERMINAL_DEPLOY_STATES = frozenset(

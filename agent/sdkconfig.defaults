@@ -58,6 +58,32 @@ CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
 # clock still arrives late while the enroll ladder backs off.
 CONFIG_MBEDTLS_HAVE_TIME_DATE=y
 
+# ── Added by S0-fw-3 (boards that brown out during RF calibration) ──────────────────
+# When the previous reset was a brownout, bring the PHY up at its lowest TX power for
+# this boot. IDF defaults this OFF.
+#
+# The failure it breaks is a loop, not a one-off. A board with no cached RF calibration
+# in NVS runs the FULL calibration on every boot (`phy_init: failed to load RF
+# calibration data (0x1102), falling back to full calibration`), which is the largest
+# current draw anywhere in startup. On a rail that cannot hold 3.3 V through it, the
+# brownout detector fires mid-calibration — so the result is never written back, and the
+# next boot does exactly the same thing. The board cannot bootstrap out of it: the
+# calibration is only cached once a boot survives it.
+#
+# With this on, the retry after a brownout draws materially less, which is often enough
+# to get through once. One survived boot caches the calibration, and every boot after it
+# skips the expensive path and runs at normal power. Costs nothing on a healthy board:
+# `esp_reset_reason() == ESP_RST_BROWNOUT` is false there and the option is inert.
+#
+# Fleet-wide TX power is deliberately NOT reduced (CONFIG_ESP_PHY_MAX_WIFI_TX_POWER stays
+# at 20 dBm): that would trade range on every board in the fleet for a fault only some
+# have. This is the targeted version of the same idea.
+#
+# Unlike everything above it, this one is NOT a flash-time immutable — it ships in the
+# app image and an OTA can add or remove it. It lives here because this is the one file
+# the agent's power posture is read from, not because it is unrecoverable.
+CONFIG_ESP_PHY_REDUCE_TX_POWER=y
+
 # app_main runs the whole boot sequence — cJSON payload building, an HTTPS request with
 # a TLS handshake on this stack, NVS. The 3584-byte default overflows during the enroll
 # handshake, and a stack overflow on a board is a reboot loop with a backtrace nobody is

@@ -37,8 +37,8 @@ missed, and where a fault's remedy is software the panel offers it as one button
 the same day** — one click copies a redacted diagnostic bundle, so a stuck operator can
 hand the whole session to someone who can help. S0-test-3, the unaided run, is next.
 
-<!-- Counters: spec=1 infra=5 db=1 be=6 fe=7 sec=1 fw=2 test=3 -->
-<!-- Sprint 0 counters: fe=7 fw=2 infra=2 test=3 -->
+<!-- Counters: spec=1 infra=5 db=1 be=6 fe=7 sec=1 fw=3 test=3 -->
+<!-- Sprint 0 counters: fe=7 fw=3 infra=2 test=3 -->
 
 Live status lives ONLY here. States: `- [ ]` open · `- [x]` done · `- [!]`
 attempted-but-failed. `spec/` and `design/` are status-free.
@@ -129,6 +129,23 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       TLS is usable — the second preserves the ordering the table is for.
       Acceptance: a board against prod produces a `link_up` row in `device_progress`.
       _(done 2026-09-11; see docs/features/enrollment.md)_
+
+- [x] **S0-fw-3**: A board that browns out during RF calibration cannot escape it (P1, 0.5d)
+      Found 2026-09-12 from an operator's diagnostic bundle: six boots, each one
+      `phy_init: failed to load RF calibration data (0x1102), falling back to full
+      calibration` and then `E BOD: Brownout detector was triggered`. Self-sustaining —
+      the full calibration is the biggest current draw in startup, the rail collapses
+      during it, and the result is only cached once a boot survives it, so every boot is
+      identical. The same cable and port flash and run a plain Wi-Fi sketch fine, because
+      that sketch inherits a calibration it never has to re-earn.
+      Fix: `CONFIG_ESP_PHY_REDUCE_TX_POWER=y` — after a brownout reset the PHY comes up
+      at its lowest TX power, which is often enough to get through once; one survived
+      boot caches the calibration and the loop ends. Fleet-wide TX power deliberately
+      left at 20 dBm. Plus `agent_main.c::log_power_fault()` and the `brownout` progress
+      stage, so the boot that escapes SAYS it escaped instead of looking healthy.
+      Acceptance: a board in the loop reaches the fleet, and its recovery is visible on
+      the dashboard and in the flashing console rather than inferred from a UART log.
+      _(done 2026-09-12)_
 
 - [ ] **S0-test-1**: Bench-verify the serial console on real hardware (P1, 0.5d)
       Filed 2026-09-10, when S0-fe-1 shipped. Its software half is proven in jsdom against

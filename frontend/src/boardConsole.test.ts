@@ -96,6 +96,22 @@ describe('classifyConsoleLine', () => {
     expect(classifyConsoleLine(line, 0).hint).toMatch(expected)
   })
 
+  // S0-fw-3. The agent now reads `esp_reset_reason()` and says so, which is the only way
+  // a brownout survives the reboot that hides it: the BOD line and the reset banner both
+  // belong to the previous boot, and every piece of inference here is per-boot.
+  it('carries the brownout across the reboot, on the agent\'s own word', () => {
+    const event = classifyConsoleLine(
+      'W (312) ff-agent: the previous boot ended in a BROWNOUT: this board\'s 3.3 V rail ' +
+        'fell below the detector\'s threshold and the chip reset itself.',
+      0,
+    )
+    expect(event.hintKind).toBe('specific')
+    // Says the board is fine NOW, which is the part an operator would otherwise get
+    // wrong: nothing else on this boot looks abnormal.
+    expect(event.hint).toMatch(/This boot is fine/)
+    expect(event.hint).toMatch(/rather than guessing/)
+  })
+
   // S0-fe-4. None of these carry `E (1234) tag:`, so before this they were `plain`/`null`
   // and could not become a fault however many times the board printed them.
   describe('lines with no ESP-IDF preamble at all', () => {

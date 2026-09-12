@@ -77,6 +77,9 @@ const STAGE_LABELS: Record<string, string> = {
   mqtt_connected: 'connecting to the broker',
   mqtt_refused: 'the broker refused its credential',
   halted: 'stopped',
+  // Phrased in the past tense on purpose: this board is up. It is telling us the boot
+  // before this one died on a power fault, which is a supply to fix, not an outage.
+  brownout: 'recovered from a power fault',
 }
 
 function ArrivalRow({ arrival, now }: { arrival: ArrivalSummary; now: number }) {

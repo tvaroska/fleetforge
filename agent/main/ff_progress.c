@@ -39,9 +39,9 @@ static const char *TAG = "ff-progress";
  * different one, which is worse than dropping it. */
 #define FF_PROGRESS_MAX_STAGE 32
 
-/* Stages produced before the transport can carry them (S0-fw-2) wait here. Depth 3:
- * only `link_up` can realistically queue today, with room for a pre-clock `halted`.
- * Static, because a report must never be able to fail on a malloc. */
+/* Stages produced before the transport can carry them (S0-fw-2) wait here. Depth 3, and
+ * all three are reachable: `link_up`, the `brownout` that may follow it (S0-fw-3), and a
+ * pre-clock `halted`. Static, because a report must never be able to fail on a malloc. */
 #define FF_PROGRESS_QUEUE_DEPTH 3
 
 static struct {

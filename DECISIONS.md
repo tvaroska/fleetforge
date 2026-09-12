@@ -6,6 +6,42 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-12 — brownout recovery is targeted, not a fleet-wide power cut (S0-fw-3)
+
+A board with no cached RF calibration browns out inside `phy_init`'s full calibration and
+cannot escape: the calibration is only written back once a boot survives it, so every boot
+is identical. Reported by an operator whose cable and port demonstrably flash and run a
+plain Wi-Fi sketch — which they do because that sketch inherits a calibration it never has
+to re-earn. The fix is **`CONFIG_ESP_PHY_REDUCE_TX_POWER=y`**: after a brownout reset the
+PHY comes up at its lowest TX power, often enough to get through once, and one survived
+boot ends the loop for good.
+
+- **Fleet-wide TX power stays at 20 dBm.** `CONFIG_ESP_PHY_MAX_WIFI_TX_POWER` was the
+  obvious alternative and is the wrong trade: it costs range on every board in the fleet,
+  permanently, to fix a fault some boards have on their first boot only. The IDF option
+  above is the same idea aimed at the boards that need it — it is gated on
+  `esp_reset_reason() == ESP_RST_BROWNOUT` and is inert on a healthy board.
+- **It lives in `agent/sdkconfig.defaults` but is NOT a flash-time immutable.** Everything
+  else in that file is (partition table, bootloader rollback, the compiled-in CA bundle);
+  this one ships in the app image and an OTA can add or remove it. It is there because
+  that file is the one place the agent's posture is read from, and the comment says so.
+  Deliberately **not** added to `REQUIRED_SDKCONFIG` in `tests/test_agent_partitions.py`:
+  that list's criterion is "no OTA-free fix exists", and an OTA-fixable entry would blur
+  what the guard means.
+- **The escape is reported, not just achieved.** `agent_main.c::log_power_fault()` reads
+  `esp_reset_reason()` and states the previous boot's brownout outright, and the agent
+  sends a `brownout` progress stage just after `link_up`. Both exist because the recovery
+  is otherwise invisible: the board reboots, and the BOD line and the reset banner belong
+  to the boot that died. A board that browns out and then recovers looked flawless on the
+  dashboard and in the flashing console. `brownout` sits outside the stage walk — it is
+  retrospective — which is why it is reported after `link_up` and not before.
+- **Why the banner cannot be trusted here.** `CONFIG_ESP_BROWNOUT_USE_INTR=y` means the
+  BOD ISR restarts the chip, so the next boot prints `rst:0x3 (SW_RESET)` rather than
+  `RTCWDT_BROWN_OUT_RESET`. The ISR does set the reset-reason hint, so `esp_reset_reason()`
+  is right where the banner is misleading.
+
+Details: `agent/sdkconfig.defaults` (the comment block), `TODO.md` → S0-fw-3.
+
 ## 2026-09-11 — a bundle is stale when its provenance predates the agent sources (S0-infra-2)
 
 The staleness rule is **git ancestry over the agent source pathspec, not mtime**. A bundle
