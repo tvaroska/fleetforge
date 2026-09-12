@@ -61,7 +61,13 @@ IAM conditions are only allowed on buckets with uniform bucket-level access;
 **PAP is not a problem and must not be "fixed":** a V4 signed URL is not public access.
 Granting `allUsers` is exactly what PAP exists to block.
 
-## BLOCKED: `btvaroska` forbids service-account keys
+## BLOCKED: the adapter is key-only, and `btvaroska` forbids keys
+
+**Read this section together with *The credential already exists* below.** The blocker is
+two facts, and only one of them is about GCP: the org will not issue a key, **and the
+adapter accepts nothing else**. The second half is ours to fix and is ordinary backend
+work. Do not carry this forward as "GCS is unreachable from prod" — that is not what was
+measured.
 
 `gcloud iam service-accounts keys create` on the SA above fails:
 
@@ -97,6 +103,41 @@ Do not "fix" this by turning the constraint off. Pick one:
 Either way the conditional binding stays exactly as it is — it constrains the SA, not
 how the SA is authenticated.
 
+## The credential already exists — it is just not a key
+
+Measured from `prod` on 2026-09-11:
+
+* The VM's attached identity is **`mainsite@sites-470716.iam.gserviceaccount.com`**,
+  scope `cloud-platform`.
+* It reads `gs://btvaroska` **cross-project** today: `gcloud storage ls gs://btvaroska/`
+  lists every prefix. `gs://btvaroska/fleetforge/` returns *"matched no objects"* — an
+  empty prefix, **not** a 403.
+* **`signBlob` is unverified.** Both probes (a metadata-token `POST …:signBlob` and
+  `gcloud iam service-accounts sign-blob`) were refused by the dev-box sandbox before
+  reaching prod. Treat V4-signing-without-a-key as *expected to work*, not *known to
+  work*, until someone runs it.
+
+So the two consumers are **not** blocked to the same degree, and the difference is worth
+keeping straight:
+
+| Consumer | Needs | Status |
+|---|---|---|
+| Agent bundles from the object store (`docs/features/infrastructure.md`) | authenticated **reads** only — the flasher is a browser on an admin session, the API streams the bytes, no signed URL in the path | **Available today.** Blocked only on adapter support for a non-key credential. |
+| R1 artifact delivery | **V4 signing** — a device holds no GCP identity, so the signature *is* the authorization | Needs the `signBlob` path, and needs it verified. |
+
+### But do not simply switch on ADC
+
+`mainsite` is the **shared** VM service account for the whole estate, and the listing
+above is the proof: it can read `secrets/` (this estate's `.env` backups), `podcasts/`,
+`backup/` — everything. Plain ADC would hand fleetforge read access to every other app's
+secrets and make the prefix condition on `fleetforge-artifacts` decorative.
+
+This is a **stronger** reason to refuse ADC than the signing one `factory.py` cites, and
+it survives even if `signBlob` turns out to work perfectly. Option 1 above
+(impersonation) is therefore the answer for **containment first** and signing second:
+`mainsite` impersonates `fleetforge-artifacts`, which is scoped to `fleetforge/` by the
+condition that already exists.
+
 ## The key file never enters git
 
 `secrets/` is in `.gitignore`. A committed key is a full compromise of `gs://btvaroska`,
@@ -127,6 +168,9 @@ at construction when it is unset or missing. Application Default Credentials on 
 come from the metadata server and carry no private key, so V4 signing would silently
 need an IAM `signBlob` round trip — and ADC would pick up the project-wide compute
 default service account, which is the credential the prefix condition exists to avoid.
+**The second half of that sentence is the load-bearing one**, and it was measured on
+2026-09-11: on `prod` that identity is `mainsite@sites-470716`, and it can read the whole
+of `gs://btvaroska` including `secrets/`. See *The credential already exists* above.
 A related symptom: with no credentials configured at all, the google client dials the
 metadata server and *hangs for seconds* on a non-GCP host.
 

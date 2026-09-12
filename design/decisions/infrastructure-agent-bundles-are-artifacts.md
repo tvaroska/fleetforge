@@ -51,10 +51,32 @@ allowed to be stale is the v0.3.0 bug with an extra branch.
 ## Consequences
 
 **Accepted, with the cost stated.** Onboarding — the core flow — comes to depend on the
-object store being reachable and credentialled. Today it is neither. This makes the GCS
-blocker in `docs/runbooks/artifact-storage.md` a hard prerequisite for this work rather
-than a caveat on it; that blocker already gates R1, so it is not new debt, but this
-feature cannot be started before it closes.
+object store being reachable and credentialled.
+
+**Amended 2026-09-11, after measuring prod.** This ADR was first written saying the GCS
+blocker gates this work exactly as it gates R1. That is too strong, and the two are not
+the same prerequisite:
+
+* **This feature needs authenticated reads only.** The flasher is a browser holding an
+  admin session, not a device, and the API already serves bundle parts through
+  authenticated endpoints (`GET /v1/agent/{target}/{part}`). Keep that shape — the API
+  reads from the store and streams to the browser — and no signed URL, no private key
+  and no `signBlob` appears anywhere in the path. Prod's attached identity can already
+  read the bucket cross-project (verified: `gcloud storage ls gs://btvaroska/`).
+* **R1 needs V4 signing**, because a device holds no GCP identity and the signature *is*
+  the authorization. That is the half that needs `signBlob`, which is expected to work
+  but is **not yet verified**.
+
+So the real prerequisite for this feature is not an org-policy exemption: it is that
+`storage/factory.py` learns to accept a credential that is not a key file. That is
+ordinary backend work.
+
+**The containment requirement is not relaxed by any of this.** The obvious shortcut —
+enable plain ADC — must not be taken. Prod's identity is `mainsite@sites-470716`, the
+shared VM service account for the whole estate, and it can read `secrets/`, `podcasts/`
+and `backup/` in the same bucket. ADC would give fleetforge every other app's secrets and
+reduce the prefix condition on `fleetforge-artifacts` to decoration. Impersonation is
+required for **containment**, independently of signing.
 
 An unreachable store must therefore present as a named fault in the flasher, held to the
 *Unaided onboarding* standard: a board that cannot be flashed says why, in plain

@@ -116,6 +116,42 @@ ESP32 adapter: write OTA1 partition → broker reconnect + self-test → switch 
 
 > ⚠️ Not yet safe — a broken build stays broken until R2.
 
+### R1-BE-0 — a production GCS credential that is not a key file
+
+**P0, ~1d. Gates R1-BE-2 and R1-BE-3, and nothing in R1 can be verified against
+production storage until it lands.** Added 2026-09-11.
+
+`storage/factory.py` requires `GCS_CREDENTIALS_FILE` and never falls back, but
+`btvaroska` inherits `constraints/iam.disableServiceAccountKeyCreation` and will not
+issue a key. GCS has therefore **never been round-tripped against the real service** —
+`R0-be-6`'s T2 AC5/AC6 are unexecuted, and the adapter's GCS path is exercised only by
+unit tests. A green dev stack proves MinIO, not production.
+
+Add `GCS_IMPERSONATE_SERVICE_ACCOUNT` to `storage/factory.py`, mutually exclusive with
+`GCS_CREDENTIALS_FILE` so there is still no silent ADC fallback, and grant prod's
+`mainsite@sites-470716` the role `roles/iam.serviceAccountTokenCreator` on
+`fleetforge-artifacts@btvaroska`. V4 signing then routes through IAM `signBlob`;
+`impersonated_credentials.Credentials` is a `Signer`, so `generate_signed_url` is
+unchanged.
+
+**Impersonation is required for containment, not just for signing.** Prod's attached
+identity is the estate's shared VM service account and can read all of `gs://btvaroska`
+including `secrets/` — so plain ADC would hand fleetforge every other app's secrets.
+Impersonating `fleetforge-artifacts` is what keeps the existing prefix condition real.
+
+Signing stops being local and free: every `signed_url` becomes an IAM API call, so it
+needs a timeout and can rate-limit.
+
+**Acceptance:** `just storage-check` completes against **real GCS** from the prod
+container — put / get / sha256 / signed URL fetched over HTTPS / delete / `ObjectNotFound`
+/ idempotent second delete — with no key file present anywhere; and an out-of-prefix key
+is still refused. Closes `R0-be-6`'s unexecuted AC5/AC6.
+
+**Unverified going in:** that `mainsite` can `signBlob` at all. Both probes were refused
+by the dev-box sandbox on 2026-09-11 — confirm it first, since the whole approach rests
+on it. Details: [docs/runbooks/artifact-storage.md](../runbooks/artifact-storage.md) →
+*The credential already exists*.
+
 ## Phase 2: R2 — Safe deploy: verify + auto-rollback ⭐
 
 | ID | Task | Priority | Effort |

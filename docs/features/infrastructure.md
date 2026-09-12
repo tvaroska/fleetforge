@@ -1003,8 +1003,11 @@ backtrace decode.
 **Requirements:** [spec/standards.md](../../spec/standards.md) → *infrastructure* →
 *Agent bundles are artifacts, not image contents*
 **Decision:** [design/decisions/infrastructure-agent-bundles-are-artifacts.md](../../design/decisions/infrastructure-agent-bundles-are-artifacts.md)
-**Blocked on:** the GCS credential blocker in
-[docs/runbooks/artifact-storage.md](../runbooks/artifact-storage.md) — also an R1 prerequisite.
+**Blocked on:** `R1-BE-0` ([ota-deploy.md](ota-deploy.md)) — a non-key GCS credential in
+`storage/factory.py`. **Not** blocked on V4 signing: this feature needs authenticated
+reads only, and prod can already read the bucket. See
+[docs/runbooks/artifact-storage.md](../runbooks/artifact-storage.md) →
+*The credential already exists* (amended 2026-09-11).
 
 ### Problem
 
