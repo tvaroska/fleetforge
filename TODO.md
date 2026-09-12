@@ -163,7 +163,7 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       Acceptance: on the Mac, `hard_reset` from the console on a native-USB board
       reconnects inside the window and streams the boot log without operator action.
 
-- [ ] **S0-infra-2**: Rebuild the c3/c6/s3 agent bundles before they ship again (P2, 0.5d)
+- [x] **S0-infra-2**: Rebuild the c3/c6/s3 agent bundles before they ship again (P2, 0.5d)
       Found 2026-09-11 while preparing the v0.3.0 release. `Dockerfile:68` bakes
       `agent/dist` into the app image, and only `agent/dist/esp32` contains the S0-fw-1
       stage reporter — `esp32c3`, `esp32c6` and `esp32s3` predate it. Verified by
@@ -178,6 +178,9 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       Acceptance: all four bundles contain `/v1/device-progress`; a check in the build
       path fails when any bundle is older than `agent/main/`, vacuity-checked by
       reverting one bundle.
+      _(done 2026-09-11; see docs/features/infrastructure.md — all four targets rebuilt,
+      esp32 was also stale (missing S0-fw-2); `just agent-check-fresh` gates `just build`;
+      bundles remain gitignored so fresh firmware reaches prod only at next release)_
 
 ---
 
