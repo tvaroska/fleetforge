@@ -52,3 +52,49 @@ is a defect in the panel, not an inconvenience for the operator.
       end-to-end using only what is on screen, and separately diagnoses a deliberately
       induced fault — a brownout, a wrong PSK, a spent token — without assistance. This
       is the criterion that actually decides the feature; the others are its parts.
+
+---
+
+## infrastructure
+
+### Agent bundles are artifacts, not image contents
+
+**Requirement:** The agent firmware bundles the browser flasher writes to a board must
+be distributed as versioned artifacts through the same object-store path as user
+artifacts, not baked into the application container image. Publishing a new agent
+bundle must not require rebuilding or redeploying the application.
+
+The driver is arithmetic. Every supported chip target adds ~1.2 MB to every application
+image, and the target list only grows — `esp32`, `esp32s3`, `esp32c3`, `esp32c6` today,
+with ESP32-H2, a Thread path and a Raspberry Pi adapter already named in the roadmap. But
+the size is the lesser half: baking the bundles welds firmware to the application's
+release cadence, so an agent fix cannot ship without a full app deploy, and a bundle can
+silently miss a release that the application half of the same image did not.
+
+**One path, not two.** Fleetforge distributes exactly one kind of firmware artifact by
+exactly one mechanism. That the agent bundle is a build output and a user artifact is
+user data is a fact about provenance, not a reason for a second distribution path.
+
+**What must survive the move.** Verification is not a property of the filesystem it
+reads from: every bundle is sha256-verified part by part and checked for
+`partition_layout` / `ota_slot_size` agreement with `spec/device-protocol.md` before it
+is servable, and a bundle failing either is dropped with its target named rather than
+served. Provenance — `source_commit` and the digest-pinned IDF image in the manifest —
+stays attached to the bundle.
+
+**Acceptance Criteria:**
+
+- [ ] **The image ships no firmware.** A built application image contains no agent
+      bundle, verified by inspecting the image rather than the Dockerfile.
+- [ ] **Publishing is not deploying.** A new agent bundle is published and a board
+      flashes it, with the running application neither rebuilt nor restarted. This is
+      the decoupling the feature exists for; nothing else proves it.
+- [ ] **Corruption is still refused.** A bundle whose bytes disagree with its manifest,
+      and one whose `partition_layout` or `ota_slot_size` disagrees with the protocol,
+      are both refused with the target named — vacuity-checked by corrupting each.
+- [ ] **An unreachable store is a named fault, not a broken page.** When bundles cannot
+      be fetched, the flasher says so in plain language and does not offer a manifest it
+      cannot honour. Held to the same standard as *Unaided onboarding* above: a board
+      that cannot be flashed must say why.
+- [ ] **Self-hosting is unaffected.** The dev and self-host stacks serve bundles through
+      the same interface against MinIO, with no GCS dependency.

@@ -996,3 +996,61 @@ self-checks in one command, and a written record. Hashing one binary is also not
 image integrity check — shared libraries and the Python tooling are not covered. If the
 panic returns, `just agent-qemu-smoke` names it in seventeen seconds instead of a
 backtrace decode.
+
+## Agent bundles served from the object store (planned)
+
+**Status:** Planned · **Priority:** P2 · **Added:** 2026-09-11
+**Requirements:** [spec/standards.md](../../spec/standards.md) → *infrastructure* →
+*Agent bundles are artifacts, not image contents*
+**Decision:** [design/decisions/infrastructure-agent-bundles-are-artifacts.md](../../design/decisions/infrastructure-agent-bundles-are-artifacts.md)
+**Blocked on:** the GCS credential blocker in
+[docs/runbooks/artifact-storage.md](../runbooks/artifact-storage.md) — also an R1 prerequisite.
+
+### Problem
+
+`Dockerfile:68` bakes `agent/dist` into the application image and
+`src/fleetforge/firmware/` serves it from `AGENT_IMAGES_DIR`, while R1's user artifacts
+go through `fleetforge.storage` / `ObjectStore`. Two firmware distribution paths in one
+product, and the wrong one is load-bearing for onboarding.
+
+That was the right call at R0-infra-2 and the module says why: the bundles version with
+the image, they are identical for every tenant, and routing them through `ObjectStore`
+would have made the flasher depend on a GCS credential that cannot currently be minted
+at all. Shipping a working flasher beat shipping an elegant one.
+
+Two things have changed since. **The target list grows** — four chips at ~1.2 MB each
+today, with ESP32-H2, a Thread path and a Raspberry Pi adapter already named in
+[roadmap.md](../roadmap.md), so every future chip taxes every application image. And
+**the coupling has already failed once**: `S0-infra-2` exists because three of the four
+bundles missed the S0-fw-1 stage reporter and shipped stale in v0.3.0, invisible in
+exactly the way S0-fw-1 was built to prevent. Baking makes "the firmware is current"
+a property of whoever remembered to run `just agent-build-all` before `just build`.
+
+### Shape
+
+A full move: the application image ships **zero** agent bundles and the object store is
+the only source. The alternative considered and rejected was a baked fallback tier —
+see the ADR for why that was judged to preserve the defect rather than mitigate it.
+
+The verification in `firmware/catalog.py` moves with the bundles rather than being
+dropped: per-part sha256, `partition_layout` / `ota_slot_size` agreement with
+`spec/device-protocol.md`, and a bundle failing either is dropped with its target named.
+Provenance (`source_commit`, digest-pinned IDF image) stays in the manifest.
+
+### Interaction with S0-infra-2
+
+`S0-infra-2` ships a build-time guard that fails when a bundle is older than
+`agent/main/`. **The two must not contradict each other.** That guard belongs at the
+point where a bundle is published, not at the point where an image is built — this
+feature removes the image build from the path entirely. Whoever implements this
+re-points the guard; whoever implements `S0-infra-2` first should site it so that
+re-pointing is a move rather than a rewrite.
+
+### The accepted risk
+
+A full move makes onboarding — the product's core flow — depend on the object store
+being reachable and credentialled. Today it is neither: the prod GCS credential cannot
+be minted at all. Owner's call, taken 2026-09-11 with that consequence stated; the
+mitigation is that the store blocker is a hard prerequisite rather than a caveat, and
+that an unreachable store must present as a named fault in the flasher rather than a
+broken page.

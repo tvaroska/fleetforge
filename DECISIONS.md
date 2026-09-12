@@ -6,6 +6,21 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-11 — agent bundles are artifacts, not image contents (planned, infrastructure)
+
+The application image will ship **zero** agent firmware bundles; they move behind
+`ObjectStore` onto the same distribution path as R1's user artifacts, so publishing a
+bundle stops requiring an app rebuild and deploy. Reverses the distribution half of
+R0-infra-2's `COPY agent/dist /app/agent` (its build half is unchanged) on two grounds:
+the target list only grows (~1.2 MB per chip, with H2 / Thread / RPi already on the
+roadmap), and the coupling has already produced its defect once — `S0-infra-2`, three
+stale bundles shipped in v0.3.0. A baked fallback tier was considered and rejected as
+preserving the defect with an extra branch. Accepted cost, stated: onboarding comes to
+depend on a store that today cannot be credentialled, making the GCS blocker in
+`docs/runbooks/artifact-storage.md` a hard prerequisite rather than a caveat. Details:
+[design/decisions/infrastructure-agent-bundles-are-artifacts.md](design/decisions/infrastructure-agent-bundles-are-artifacts.md),
+[docs/features/infrastructure.md](docs/features/infrastructure.md) → *Agent bundles served from the object store*.
+
 ## 2026-09-11 — the panel performs the fix it names (S0-fe-6)
 
 Layer 3 of *Unaided onboarding*. The panel already named the fault (S0-fe-4) and always saw
