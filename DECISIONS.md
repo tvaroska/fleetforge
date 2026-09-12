@@ -6,6 +6,49 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-11 — a bundle is stale when its provenance predates the agent sources (S0-infra-2)
+
+The staleness rule is **git ancestry over the agent source pathspec, not mtime**. A bundle
+whose `manifest.json:source_commit` predates the newest `git log -1 -- agent :(exclude)agent/dist`
+is stale and fails `just agent-check-fresh`, which gates `just build` (the app-image
+pipeline). Four verdicts: **fresh** (built from a commit containing the newest agent
+change), **STALE** (ancestor check fails), **UNTRACEABLE** (`source_commit` absent/unknown
+or not a commit in this repo), **NOT BUILT** (no manifest). A fifth, **DIRTY SOURCES**,
+refuses the release path when `git status --porcelain -- agent :(exclude)agent/dist` reports
+uncommitted changes — a bundle records HEAD, not what was compiled.
+
+- **Why git ancestry, not mtime.** The TODO's literal wording was "bundle is older than
+  `agent/main/`" by mtime. `git checkout`, `git pull` and branch switches rewrite source
+  mtimes with no content change; a clone sets them all to clone time. A check that fires
+  on a correct tree is the check people delete — the runbook already carries that lesson
+  verbatim about a `CONFIG_SECURE_BOOT_V1_SUPPORTED` prefix match. Git ancestry answers
+  the same question ("does this bundle contain the newest agent source change?") and
+  cannot be wrong about it. This deviation from the TODO's wording is deliberate.
+- **The dirty-tree refusal lives in the release path only**, never in `just agent-build`.
+  Dirty-tree builds are the firmware dev loop (edit → build → QEMU → commit), and
+  breaking that would get the guard deleted. The release path gets condition 4 because
+  `make_manifest.py` records `git rev-parse HEAD`, so a bundle built from a dirty tree
+  claims provenance it does not have — the runbook already says "commit before building
+  anything you intend to push", and refusing a dirty agent tree in `just build` closes
+  the one place that rule is otherwise unenforced.
+- **Source pathspec is `agent/` minus `agent/dist/`**, i.e. exactly the Docker build
+  context `agent/.dockerignore` defines (`COPY . /project`). Rejected narrower variants
+  (per-target `sdkconfig.defaults.<target>`, "only `agent/main/`"): they drift from
+  `.dockerignore`, and the whole point is that anything that can change a bundle is
+  counted. Over-strict costs a rebuild; under-strict costs a fleet.
+- **No bypass env var.** v0.3.0 shipped stale knowingly; the harm was that it became
+  invisible afterwards. If a stale ship is wanted again, `just agent-build-all` is 20
+  minutes, and deleting a justfile line is a reviewable commit.
+- **The esp32 bundle was stale too**, which the filed task did not know. All four targets
+  were rebuilt. `agent/dist/esp32/manifest.json` recorded `source_commit 81aea08`
+  (S0-fe-7), while the newest commit touching agent sources was `43aeb31` (S0-fw-2,
+  "hold pre-clock stage reports"). So the shipped esp32 bundle was missing the S0-fw-2
+  fix — consistent with DECISIONS.md 2026-09-11 S0-fw-2: *"Real boards do not have this
+  fix yet, and no commit here can give it to them."*
+
+Details: `docs/runbooks/agent-build.md` → *Staleness*, `agent/tools/check_bundles_fresh.py`
+(the guard), `tests/test_agent_bundle_freshness.py` (8 cases).
+
 ## 2026-09-11 — a stage report that predates the clock is held, not lost (S0-fw-2)
 
 `link_up` — the report the entry below calls "a board is visible as `arriving` before it

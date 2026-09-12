@@ -84,3 +84,5 @@ ignore = ["E501"]
 # Alembic's env.py must extend sys.path before importing the app package.
 "alembic/env.py" = ["E402"]
 "alembic/versions/*" = ["E402"]
+# agent/tools/ runs in the ESP-IDF builder image (no venv); subprocess calls git with fixed args.
+"agent/tools/*" = ["S603", "S607"]

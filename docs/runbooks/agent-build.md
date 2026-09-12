@@ -121,6 +121,41 @@ ota_1,app,ota_1,0x200000,1920K,
 in `up/announce`, and the layout id is `ab-4m-v1`. **Those three facts move together or
 not at all** — see *Changing the partition table* below.
 
+## Staleness — a bundle can be correct and still be wrong
+
+`just agent-verify` proves the bundle is correct; `just agent-check-fresh` proves it is
+**current**. v0.3.0 shipped three targets (esp32c3, esp32c6, esp32s3) that predated
+S0-fw-1 (the stage reporter) — not because anyone edited the code and forgot to rebuild,
+but because nothing checked. A bundle built from a commit that predates the agent sources
+is stale.
+
+```bash
+just agent-check-fresh    # exit 0 only if every target is fresh
+```
+
+Four verdicts, decided by **git ancestry, not mtime**:
+
+| Verdict | Meaning |
+|---|---|
+| **fresh** | bundle built from a commit containing the newest agent source change |
+| **STALE** | bundle predates a later commit under `agent/` (excluding `agent/dist`) |
+| **UNTRACEABLE** | `source_commit` absent/unknown, or not a commit in this repo |
+| **NOT BUILT** | no `manifest.json` — run `just agent-build <target>` |
+| **DIRTY SOURCES** | uncommitted edits under `agent/` — a bundle records HEAD, not what was compiled |
+
+Why git ancestry, not mtime: `git checkout`, `git pull` and branch switches rewrite
+source mtimes with no content change; a clone sets them all to clone time. A check that
+fires on a correct tree is the check people delete.
+
+**The dirty-tree refusal lives in the release path only** (`just build` runs
+`agent-check-fresh`). The firmware dev loop (edit → `just agent-build` → QEMU → commit)
+deliberately allows a dirty build — condition 4 exists so that dirty build never
+reaches an image.
+
+When bundles move to the object store (DECISIONS.md 2026-09-11, "agent bundles are
+artifacts"), this check moves to the publish step and validates the one bundle being
+uploaded. The script is sited for exactly that re-point.
+
 > Note the check on (5) matches **exact option names**. An earlier prefix match also hit
 > `CONFIG_SECURE_BOOT_V1_SUPPORTED=y`, which is a SoC *capability* symbol present in every
 > ESP32 build — a check that fails on a correct build teaches whoever hits it to delete
@@ -139,9 +174,11 @@ naming the target. One bad target does not stop the other three from serving.
 | `just up-prod`, production | baked by `COPY agent/dist /app/agent` |
 | no bundles | startup WARNING + `/v1/agent/*` answers `503 {"detail":"no agent images available"}` |
 
-`just build` (the app-image pipeline) runs `_require-agent-dist` first, so an image with
-an empty flasher cannot be released by accident. On a clean clone `agent/dist/` holds
-only `.gitkeep` — run `just agent-build-all` before `just build`.
+`just build` (the app-image pipeline) runs **two gates** before anything is built:
+`_require-agent-dist` (at least one manifest exists) and `agent-check-fresh` (every
+bundle is current). An image with an empty flasher or with stale bundles cannot be
+released by accident. On a clean clone `agent/dist/` holds only `.gitkeep` — run
+`just agent-build-all` before `just build`.
 
 ## Pushing to Artifact Registry
 

@@ -210,7 +210,11 @@ latest_tag := `git describe --tags --abbrev=0 2>/dev/null || echo "latest"`
 # `agent/dist` in (Dockerfile -> `COPY agent/dist /app/agent`), so an empty
 # `agent/dist` ships an api whose `/v1/agent/manifest` answers 503 — and the
 # failure surfaces in production as a flasher with nothing to flash.
-build: _require-agent-dist test frontend-build frontend-test _build-images _verify-images _push-images
+#
+# `agent-check-fresh` is the second gate (S0-infra-2): a bundle can be correct
+# and still be wrong to ship. v0.3.0 shipped three stale targets, which the guard
+# now prevents.
+build: _require-agent-dist agent-check-fresh test frontend-build frontend-test _build-images _verify-images _push-images
     @echo ""
     @echo "✓ {{ registry }}/fleetforge:{{ latest_tag }}"
     @echo "✓ {{ registry }}/fleetforge-frontend:{{ latest_tag }}"
@@ -332,6 +336,21 @@ agent-verify target="esp32":
     docker run --rm -v "$PWD/agent/dist/{{ target }}:/d:ro" --entrypoint bash {{ idf_image }} -c \
         '. $IDF_PATH/export.sh >/dev/null 2>&1 && python $IDF_PATH/components/partition_table/gen_esp32part.py /d/partition-table.bin'
     @echo "BUNDLE OK: {{ target }}"
+
+# Every bundle in `agent_targets` must exist and must have been built from a commit
+# that already contains the newest change to the agent sources (S0-infra-2). v0.3.0
+# shipped three bundles predating the S0-fw-1 stage reporter and nothing said so.
+# Provenance, not mtime, and not hashes — a rebuild of the same commit is not
+# byte-identical (docs/runbooks/agent-build.md -> Reproducibility).
+#
+# WHEN BUNDLES MOVE TO THE OBJECT STORE (DECISIONS.md 2026-09-11, "agent bundles are
+# artifacts"), this recipe moves to the publish step and passes the one bundle dir
+# being uploaded — the script takes bundle dirs as arguments for exactly that reason.
+agent-check-fresh:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    dirs=(); for t in {{ agent_targets }}; do dirs+=("agent/dist/$t"); done
+    python3 agent/tools/check_bundles_fresh.py "${dirs[@]}"
 
 # The pushable artifact: a FROM-scratch OCI image whose entire payload is the
 # bundle. Kilobytes in the registry, and a digest to pin in provenance.

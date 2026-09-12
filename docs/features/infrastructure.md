@@ -649,8 +649,8 @@ one bundle per chip target:
 Each `agent/dist/<target>/` holds the four flashable binaries, the **resolved** sdkconfig
 and a `manifest.json` of offsets, sizes, sha256s and provenance (`idf_image` digest,
 `source_commit`, `built_at`). `just agent-build` / `agent-build-all` / `agent-verify` /
-`agent-image` / `agent-push` / `agent-clean` drive it;
-[docs/runbooks/agent-build.md](../runbooks/agent-build.md) is the operator's copy.
+`agent-check-fresh` (S0-infra-2, 2026-09-11) / `agent-image` / `agent-push` / `agent-clean`
+drive it; [docs/runbooks/agent-build.md](../runbooks/agent-build.md) is the operator's copy.
 
 Server side: `src/fleetforge/firmware/` loads and verifies the bundles once per app into
 `app.state.firmware_catalog`, and `GET /v1/agent/manifest` + `GET /v1/agent/{target}/{part}`
@@ -1042,12 +1042,14 @@ Provenance (`source_commit`, digest-pinned IDF image) stays in the manifest.
 
 ### Interaction with S0-infra-2
 
-`S0-infra-2` ships a build-time guard that fails when a bundle is older than
-`agent/main/`. **The two must not contradict each other.** That guard belongs at the
-point where a bundle is published, not at the point where an image is built — this
-feature removes the image build from the path entirely. Whoever implements this
-re-points the guard; whoever implements `S0-infra-2` first should site it so that
-re-pointing is a move rather than a rewrite.
+`S0-infra-2` (2026-09-11) shipped `agent/tools/check_bundles_fresh.py`, which gates
+`just build` and fails when any bundle predates the agent sources. The guard is sited as
+a standalone script that takes bundle directories as arguments, so re-pointing it to the
+publish step is a move rather than a rewrite: the justfile recipe (`agent-check-fresh`)
+expands `agent_targets` into an argv and calls the script; when this feature lands, the
+publish step calls the same script with the one bundle being uploaded. The guard and this
+feature cannot contradict each other — staleness is git provenance, which the object store
+preserves in `manifest.json:source_commit`.
 
 ### The accepted risk
 
