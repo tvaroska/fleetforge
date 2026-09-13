@@ -6,6 +6,69 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-13 — the agent's power and size posture: 80 MHz, `-Os`, max modem sleep, a TX-power retry ladder
+
+Came out of a review prompted by the observation that the agent image looked large for
+what it does. The source was not the problem — ~2,070 lines of C excluding comments, all
+of it load-bearing. The build configuration was. Four changes, two of which are also
+candidate levers for S0-fw-3.
+
+- **`-Os` instead of IDF's default `-Og`.** The connect-only agent was 1,079,520 bytes of
+  a 1,966,080-byte OTA slot — 55% full before R2 adds OTA and R5 adds signature
+  verification. The optimization level alone was worth 8-9% on every target (esp32
+  1,079,520 → 990,544; s3 1,060,800 → 969,824; c3 1,129,856 → 1,024,848; c6 1,181,840 →
+  1,074,368). Assertions stay on: `-Os` is independent of them, and the agent's
+  diagnostic output is the product. The cost is less faithful panic backtraces, which is
+  a real cost to the serial console's classifier and was taken knowingly.
+- **80 MHz CPU, down from 160.** This agent is I/O-bound by construction — DHCP, two TLS
+  handshakes, one small JSON every `hb_s`. 160 MHz bought nothing measurable and cost
+  ~20-30 mA continuously. **Also a live S0-fw-3 candidate**, which is why it is in
+  `sdkconfig.defaults` next to `REDUCE_TX_POWER` and not in a performance note:
+  `esp_clk_init()` applies it before `app_main`, so it is in effect during PHY
+  calibration, and the CPU is running flat out alongside the calibration at 160 MHz. The
+  v0.3.3 result ruled out TX power as the dominant draw; it did not rule this out.
+  Untested on hardware as of this entry.
+- **`WIFI_PS_MAX_MODEM`, stated rather than inherited.** IDF's default is
+  `WIFI_PS_MIN_MODEM`, so the radio already slept — but as an accident of the SDK's
+  default that an IDF pin bump could change, in a file whose whole style is to say why.
+  `MAX` rather than `MIN` because the workload already chooses to be deaf for tens of
+  seconds (30 s MQTT keepalive, `hb_s` heartbeat). The cost is seconds of `dn/cmd`
+  downlink latency, accepted: every command this product sends is part of a deploy, and
+  no human waits on one interactively. Revisit if R2 grows an interactive command.
+- **The Wi-Fi reconnect walks a TX-power ladder instead of repeating one attempt.**
+  Retrying forever is only useful if the attempts differ; an identical attempt repeated
+  for a year is a stuck board that looks busy. After every 3 consecutive failures the
+  radio steps down (default → 14 dBm → 8 dBm) and wraps. The counter-intuitive part is
+  that *lowering* power can make association succeed: the auth/assoc frames at full power
+  are the biggest current transient in the sequence, and on a marginal rail that is what
+  drops it under the brownout threshold mid-association.
+  - **Runtime `esp_wifi_set_max_tx_power`, not compile-time
+    `CONFIG_ESP_PHY_MAX_WIFI_TX_POWER`.** This is the per-board version of the knob
+    S0-fw-3 deliberately refused to turn fleet-wide. It costs range only on a board that
+    has already proven it cannot associate at full power, and only while that is true.
+  - **Rung 0 is read from the driver, not hardcoded to 20 dBm.** On a post-brownout boot
+    `CONFIG_ESP_PHY_REDUCE_TX_POWER` has already brought the PHY up at minimum power, and
+    a ladder that "restored" a literal 20 dBm would silently undo S0-fw-3 on exactly the
+    board it was written for.
+  - **A working rung is kept, not reset.** A board that could only associate at 8 dBm
+    will not survive its first data frame at 20 — the rail that failed during association
+    was not repaired by it succeeding. Wrap-around still reaches full power again, which
+    is what lets a board that was moved, or whose supply was fixed, climb back with no
+    re-flash.
+
+**The retry count is deliberately still unbounded** — considered and rejected in the same
+review. A board that stops trying to reach its network is a site visit, which is the
+intervention this product exists to remove, and an AP reboot or a day-long uplink outage
+is survivable only by a board still trying when it ends. The fix for "stuck in a loop" is
+to vary the attempt, not to stop making it.
+
+Guarded by `tests/test_agent_power_and_size.py`, deliberately separate from
+`test_agent_partitions.py`: everything here is OTA-recoverable, and that file's value
+comes from every line in it being a physical-recall mistake. The size budget is per
+target, ratcheted down after each measured win.
+
+---
+
 ## 2026-09-13 — the flasher erases `nvs`, never the whole chip
 
 Every flash used to pass `eraseAll: true` to esptool-js, which erases the entire chip —

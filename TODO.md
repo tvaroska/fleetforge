@@ -167,7 +167,28 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       the same board, cable and port. If that also browns out, no firmware change fixes
       this and the answer is bulk capacitance across 3V3/GND. If it survives, our image
       draws more than it needs to during startup and that is ours to fix.
-      _(attempted 2026-09-12; negative result recorded 2026-09-13)_
+
+      **Second lever prepared 2026-09-13, not yet tried on hardware: 80 MHz CPU**
+      (`CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_80`, in `agent/sdkconfig.defaults`). Came out of
+      an agent power/size review. `esp_clk_init()` applies the clock before `app_main`,
+      so it is already in effect during the calibration window — and the CPU is running
+      flat out alongside the calibration at 160 MHz, worth roughly 20-30 mA. The v0.3.3
+      result rules out TX power as the dominant draw; it does not rule this out. Unlike
+      `REDUCE_TX_POWER` it applies on EVERY boot, so it does not need the fault to have
+      already happened in order to help. Free to test: the same board, cable and port,
+      one flash.
+      Bench order for the next session, cheapest first:
+      1. 80 MHz image, existing thin cable + hub. Isolates the CPU's contribution.
+      2. Short thick cable direct to a rear port. Isolates the cable.
+      3. 470-1000 µF electrolytic across 3V3/GND at the board. Isolates the rail — and
+         is the fix if it works.
+      4. Stock Arduino Wi-Fi sketch, full chip erase (the experiment above). Only needed
+         if 1-3 all fail; at that point the answer is the regulator, not firmware.
+      One survived calibration ends the loop permanently for that board — the result is
+      cached in NVS — so any of these succeeding once is a pass, and the acceptance
+      criterion (recovery visible on the dashboard) is reachable from any of them.
+      _(attempted 2026-09-12; negative result recorded 2026-09-13; second lever staged
+      2026-09-13, awaiting bench)_
 
 - [ ] **S0-test-1**: Bench-verify the serial console on real hardware (P1, 0.5d)
       Filed 2026-09-10, when S0-fe-1 shipped. Its software half is proven in jsdom against

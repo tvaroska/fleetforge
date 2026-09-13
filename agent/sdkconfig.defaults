@@ -84,6 +84,46 @@ CONFIG_MBEDTLS_HAVE_TIME_DATE=y
 # the agent's power posture is read from, not because it is unrecoverable.
 CONFIG_ESP_PHY_REDUCE_TX_POWER=y
 
+# ── Also S0-fw-3, after the option above was measured and did NOT clear the fault ────
+# 80 MHz, not IDF's default 160.
+#
+# Two reasons, and the second is why it is here rather than in a performance note.
+#
+# 1. This agent is I/O-bound and always will be. Its whole duty cycle is: wait for DHCP,
+#    two TLS handshakes, then one small JSON every `hb_s` seconds. 160 MHz buys nothing
+#    measurable and costs roughly 20-30 mA continuously.
+# 2. `esp_clk_init()` applies this BEFORE app_main, so it is already in effect during PHY
+#    calibration — the window S0-fw-3 is about. The v0.3.3 attempt reduced TX power during
+#    that window and the board died in exactly the same place, which established that TX
+#    power is not what dominates the draw. It did not establish that nothing else does.
+#    The CPU is running flat out alongside the calibration, and 20-30 mA is a plausible
+#    margin on a rail that is already collapsing. Unlike REDUCE_TX_POWER this applies on
+#    EVERY boot, including the first one after a clean reset, so it does not need the
+#    fault to have already happened in order to help.
+#
+# The cost, accepted: TLS handshakes take roughly twice as long (hardware MPI/SHA absorb
+# most of it), and R2's OTA download will be slower. Neither is on a deadline. If R2
+# measures the download as too slow, the answer is `esp_pm_configure` to raise the clock
+# for the transfer, not a return to 160 MHz for the life of the board.
+#
+# NOT a flash-time immutable — app image, OTA can change it. Here for the same reason as
+# the option above: this file is where the power posture is read from.
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_80=y
+
+# ── Size: -Os, not IDF's default -Og ────────────────────────────────────────────────
+# The connect-only agent builds to ~1.08 MB of a 1,966,080-byte OTA slot — 55% full
+# before R2 adds OTA and R5 adds signature verification. IDF defaults new projects to
+# `COMPILER_OPTIMIZATION_DEBUG` (-Og), which is the right default for a project being
+# stepped through in a debugger and the wrong one for an image that has to fit a slot it
+# also has to be able to download a replacement into.
+#
+# Assertions stay ON (CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_ENABLE is independent of
+# this) — they are diagnostic output, and this agent's whole thesis is that faults name
+# themselves. The one real cost is that -Os makes panic backtraces less faithful, which
+# slightly degrades what the serial console (S0-fe-1) has to classify. Taken knowingly:
+# a board that cannot OTA has no backtrace worth reading either.
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+
 # app_main runs the whole boot sequence — cJSON payload building, an HTTPS request with
 # a TLS handshake on this stack, NVS. The 3584-byte default overflows during the enroll
 # handshake, and a stack overflow on a board is a reboot loop with a backtrace nobody is
