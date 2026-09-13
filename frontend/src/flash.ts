@@ -29,6 +29,7 @@ import {
 } from './api'
 import { buildFfCfgFields, encodeFfCfg, validateFfCfg, type FlashConfigInput } from './ffcfg'
 import type { BoardFlasher, ChipInfo, FlashPart, FlasherFactory } from './flasher'
+import { findPartition, parsePartitionTable } from './partitionTable'
 import { defaultFlasherFactory, explainFlashError } from './flasher'
 
 export type Phase = 'idle' | 'connecting' | 'detected' | 'flashing' | 'done' | 'error'
@@ -48,7 +49,13 @@ export type FlashProgress = {
 
 export type FlashRequest = {
   config: FlashConfigInput
-  eraseAll: boolean
+  /**
+   * Clear the stored broker credential. Named for what it does now: it erases the `nvs`
+   * partition only, and deliberately NOT `phy_init` — see `nvsWipe` for why that matters.
+   * It was `eraseAll` until 2026-09-13, when erasing the whole chip turned out to be the
+   * reason a marginal board can never cache its RF calibration.
+   */
+  wipeNvs: boolean
   baudRate: number
 }
 
@@ -123,6 +130,7 @@ export function planWrite(
   build: AgentBuildInfo,
   downloaded: Map<string, Uint8Array>,
   config: Uint8Array,
+  wipeNvs: boolean,
 ): FlashPart[] {
   if (build.config_partition === null) {
     throw new Error('planWrite called for a bundle with no config partition')
@@ -139,7 +147,51 @@ export function planWrite(
     address: build.config_partition.offset,
     data: config,
   })
+  if (wipeNvs) {
+    parts.push(nvsWipe(build, downloaded))
+  }
   return parts.sort((a, b) => a.address - b.address)
+}
+
+/**
+ * A part that erases `nvs` and nothing else.
+ *
+ * This replaces esptool-js's `eraseAll`, and the difference is the whole point. Until
+ * 2026-09-13 every flash erased the entire chip, which also destroyed the `phy_init`
+ * partition where the RF calibration is cached. That calibration is only ever written
+ * after a boot survives the full calibration — the single largest current draw in
+ * startup — so erasing it means every freshly flashed board must re-earn it, every time,
+ * forever. A board whose 3.3 V rail cannot carry that draw can then never bootstrap out
+ * of the resulting brownout loop, because the one thing that would save it is deleted on
+ * each attempt (S0-fw-3). Arduino's uploader does not do this, which is why the same
+ * board runs a stock sketch and not our image: the sketch inherits a calibration it never
+ * has to re-earn.
+ *
+ * We still must clear `nvs`: a board that already enrolled keeps its broker credential
+ * there and reuses it (R0-fw-1 logs "reusing the stored credential"), so the freshly
+ * minted token baked into `ff_cfg` would never be spent. Writing 0xFF over the partition
+ * is exactly an erase — esptool-js erases the sectors it writes, and NVS reads an erased
+ * sector as empty. It costs nothing on the wire either: `compress: true` reduces a run of
+ * 0xFF to a few hundred bytes.
+ *
+ * esptool-js 0.6.1 has no `eraseRegion`, or this would be one call instead of a part.
+ */
+function nvsWipe(build: AgentBuildInfo, downloaded: Map<string, Uint8Array>): FlashPart {
+  const table = downloaded.get('partition-table')
+  if (table === undefined) {
+    throw new Error('the partition-table image was not downloaded')
+  }
+  // Read from the table being written to this board rather than a constant: `nvs` is at
+  // 0x9000 under `ab-4m-v1` and need not be under the next layout, and a wipe aimed at the
+  // wrong offset is worse than no wipe.
+  const nvs = findPartition(parsePartitionTable(table), 'nvs')
+  if (nvs === null) {
+    throw new Error(
+      `the ${build.partition_layout} partition table has no nvs partition, so a stored ` +
+        'broker credential cannot be cleared',
+    )
+  }
+  return { label: 'nvs (erase)', address: nvs.offset, data: new Uint8Array(nvs.size).fill(0xff) }
 }
 
 /** Lowercase hex sha256, to compare against the manifest's. */
@@ -367,11 +419,10 @@ export function useFlashBoard({
         minted = true
 
         const config = encodeFfCfg({ ...fields, token: issued.token })
-        const plan = planWrite(selected, downloaded, config)
+        const plan = planWrite(selected, downloaded, config, request.wipeNvs)
 
-        setStep(request.eraseAll ? 'Erasing and writing…' : 'Writing…')
+        setStep(request.wipeNvs ? 'Erasing and writing…' : 'Writing…')
         await flasher.write(plan, {
-          eraseAll: request.eraseAll,
           onProgress: (partIndex, written, total) => {
             setProgress({
               partIndex,

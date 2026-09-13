@@ -54,7 +54,7 @@ type FormState = {
   power: string
   wakeS: string
   baudRate: number
-  eraseAll: boolean
+  wipeNvs: boolean
 }
 
 const INITIAL_FORM: FormState = {
@@ -68,7 +68,7 @@ const INITIAL_FORM: FormState = {
   power: 'always_on',
   wakeS: '',
   baudRate: BAUD_RATES[0],
-  eraseAll: true,
+  wipeNvs: true,
 }
 
 /**
@@ -189,15 +189,15 @@ export function FlashBoard({
   }
   const configError = validationMessage(config)
 
-  // S0-fe-6. `eraseAll: true` is deliberately NOT the form's checkbox: every fault a
+  // S0-fe-6. `wipeNvs: true` is deliberately NOT the form's checkbox: every fault a
   // re-flash fixes is either a spent token or a stale NVS credential, and leaving NVS in
-  // place makes the freshly minted token dead on arrival (`flasher.ts` → WriteOptions).
+  // place makes the freshly minted token dead on arrival (`flash.ts::nvsWipe`).
   //
   // Not memoised on purpose: it is only ever used from an `onClick`, and `config` is a
   // fresh literal on every render, so a `useCallback` would churn and buy nothing — and
   // one with an honest dependency list would be rebuilt every render anyway.
   const recoverByReflash = () =>
-    state.reflash({ config, eraseAll: true, baudRate: form.baudRate })
+    state.reflash({ config, wipeNvs: true, baudRate: form.baudRate })
 
   // S0-fe-7. A plain literal for the same reason `recoverByReflash` is: `config` is a
   // fresh object on every render, so a memo with an honest dependency list would be
@@ -442,16 +442,18 @@ export function FlashBoard({
         <label className="choice">
           <input
             type="checkbox"
-            checked={form.eraseAll}
-            onChange={(event) => set('eraseAll', event.target.checked)}
+            checked={form.wipeNvs}
+            onChange={(event) => set('wipeNvs', event.target.checked)}
           />{' '}
-          Erase flash first (clears any stored credential)
+          Clear stored credentials (erases NVS)
         </label>
       </p>
       <p className="muted">
         Leave it on unless you know better: a board that already enrolled keeps its broker
         credential in NVS and will reuse it, so the fresh token baked in here would never be
-        spent and the board would not re-register.
+        spent and the board would not re-register. This clears NVS only — the board&rsquo;s
+        cached radio calibration is left alone, so it does not have to re-run the calibration
+        that a weak supply cannot always carry.
       </p>
 
       <h3>3 · Flash</h3>
@@ -464,7 +466,7 @@ export function FlashBoard({
         <button
           type="button"
           onClick={() =>
-            void state.flash({ config, eraseAll: form.eraseAll, baudRate: form.baudRate })
+            void state.flash({ config, wipeNvs: form.wipeNvs, baudRate: form.baudRate })
           }
           disabled={state.busy || chip === null || configError !== null}
         >

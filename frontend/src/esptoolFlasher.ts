@@ -70,7 +70,11 @@ class EsptoolFlasher implements BoardFlasher {
       flashMode: 'keep',
       flashFreq: 'keep',
       flashSize: 'keep',
-      eraseAll: options.eraseAll,
+      // Never true. `writeFlash` erases the sectors it writes, which is all the erasing
+      // this app is allowed to do: `eraseAll` wipes the whole chip including `phy_init`,
+      // and the cached RF calibration in it is what a marginal board needs to survive its
+      // next boot (`flash.ts::nvsWipe`). Clearing NVS is a part in the plan instead.
+      eraseAll: false,
       compress: true,
       reportProgress: options.onProgress,
     })

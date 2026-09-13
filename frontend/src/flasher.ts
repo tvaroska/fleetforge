@@ -24,12 +24,13 @@ export type ChipInfo = {
 export type FlashPart = { label: string; address: number; data: Uint8Array }
 
 export type WriteOptions = {
-  /**
-   * Erase before writing. Default ON in the UI: re-flashing a board whose NVS still holds
-   * a broker credential does NOT re-enroll it (R0-fw-1 logs "reusing the stored
-   * credential"), so a freshly minted token baked into it is simply never spent.
+  /*
+   * There is deliberately no `eraseAll` here any more. Clearing the stored broker
+   * credential is a property of the write PLAN — an explicit `nvs` part, built by
+   * `flash.ts::nvsWipe` — and not of the write call, because a chip-wide erase also
+   * destroys `phy_init` and the cached RF calibration in it. See `nvsWipe` for the board
+   * that cost us. Adding it back here would put a whole-chip erase one boolean away.
    */
-  eraseAll: boolean
   /** esptool-js reports COMPRESSED bytes when `compress: true` — `total` is not `part.size`. */
   onProgress: (partIndex: number, written: number, total: number) => void
 }

@@ -6,6 +6,40 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-13 — the flasher erases `nvs`, never the whole chip
+
+Every flash used to pass `eraseAll: true` to esptool-js, which erases the entire chip —
+including the `phy_init` partition holding the cached RF calibration. That was wrong, and
+it is the one thing on our side that was demonstrably making the brownout loop
+unescapable: the calibration is written only after a boot survives the full calibration,
+the largest current draw in startup, so erasing it on every flash guarantees the expensive
+path on every freshly flashed board, forever. A board with a marginal rail can never
+bootstrap out, because the thing that would save it is deleted on each attempt.
+
+- **It also explains the comparison that kept confusing us.** Arduino's uploader writes
+  bootloader, partition table and app and leaves `nvs` and `phy_init` alone. So "the same
+  cable and port run a stock sketch fine" was never evidence that the supply is adequate —
+  the sketch inherits a calibration it never has to re-earn. Ours re-earns it every time.
+- **`nvs` still has to go.** A board that already enrolled keeps its broker credential
+  there and reuses it (R0-fw-1 logs "reusing the stored credential"), so the freshly minted
+  token in `ff_cfg` would never be spent. Implemented as an explicit part in the write plan
+  — 0xFF over exactly that partition — because `writeFlash` erases the sectors it writes
+  and NVS reads an erased sector as empty. esptool-js 0.6.1 has no `eraseRegion`, or this
+  would be one call.
+- **The offset is read, not hardcoded.** `partitionTable.ts` parses the table being written
+  to the board in the same operation and looks `nvs` up by label. `0x9000` is right for
+  `ab-4m-v1` and need not be for the next layout, and a wipe aimed at a stale constant
+  erases the wrong 24 KB of a real board.
+- **`eraseAll` is gone from `WriteOptions` entirely**, not defaulted to false. Whether to
+  clear credentials is a property of the write PLAN; leaving the flag on the write CALL
+  would put a whole-chip erase one boolean away from returning.
+- **This does not fix the board that prompted it.** That board has never completed a
+  calibration, so there was nothing to preserve. What changes is that once any board gets
+  through once — on a better supply, or with bulk capacitance — a reflash no longer throws
+  it away. See the entry below for what is still unresolved.
+
+---
+
 ## 2026-09-13 — reducing TX power does not break the brownout loop (supersedes 2026-09-12, S0-fw-3)
 
 The entry below claims `CONFIG_ESP_PHY_REDUCE_TX_POWER=y` ends the loop. On the one board

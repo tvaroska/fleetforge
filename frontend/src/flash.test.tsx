@@ -28,19 +28,56 @@ const SSID = 'fleetforge-test'
 /** A broker password in a URI, the way an operator pastes one into the form. */
 const BROKER_URI = 'mqtts://fleet:s3cr3tbrokerpw@bench.local:8883'
 
+const CONFIG_OFFSET = 0x12000
+const NVS_OFFSET = 0x9000
+const NVS_SIZE = 0x6000
+
+/**
+ * A real ESP-IDF partition table, not filler bytes.
+ *
+ * It has to be real now: the NVS wipe reads `nvs`'s offset and size out of the table being
+ * written rather than from a constant, so a fixture of 0x3c bytes would have the engine
+ * refuse the flash. Laid out like `ab-4m-v1` — and `phy_init` is in it specifically so the
+ * "we do not touch it" assertion has something to be about.
+ */
+function partitionTable(): Uint8Array {
+  const rows: Array<[string, number, number, number, number]> = [
+    // label, type, subtype, offset, size
+    ['nvs', 1, 2, NVS_OFFSET, NVS_SIZE],
+    ['otadata', 1, 0, 0xf000, 0x2000],
+    ['phy_init', 1, 1, 0x11000, 0x1000],
+    ['ff_cfg', 1, 0x40, CONFIG_OFFSET, 0x1000],
+    ['ota_0', 0, 0x10, 0x20000, 0x1e0000],
+  ]
+  const bytes = new Uint8Array(rows.length * 32 + 32)
+  const view = new DataView(bytes.buffer)
+  rows.forEach(([label, type, subtype, offset, size], index) => {
+    const at = index * 32
+    view.setUint16(at, 0x50aa, true)
+    view.setUint8(at + 2, type)
+    view.setUint8(at + 3, subtype)
+    view.setUint32(at + 4, offset, true)
+    view.setUint32(at + 8, size, true)
+    bytes.set(new TextEncoder().encode(label), at + 12)
+  })
+  // The trailing MD5 row `gen_esp32part.py` writes; the parser must stop at it, not read
+  // it as a sixth partition with a garbage offset.
+  view.setUint16(rows.length * 32, 0xebeb, true)
+  return bytes
+}
+
 // Deliberately NOT in ascending offset order: `planWrite` must sort, and the config blob
 // (0x12000) lands between the partition table and the app.
 const PART_BYTES: Record<string, Uint8Array> = {
   app: new Uint8Array(512).fill(0xa5),
   bootloader: new Uint8Array(64).fill(0x5a),
-  'partition-table': new Uint8Array(96).fill(0x3c),
+  'partition-table': partitionTable(),
 }
 const PART_OFFSETS: Record<string, number> = {
   app: 0x20000,
   bootloader: 0x1000,
   'partition-table': 0x8000,
 }
-const CONFIG_OFFSET = 0x12000
 
 async function sha256(bytes: Uint8Array): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', new Uint8Array(bytes))
@@ -258,18 +295,37 @@ describe('FlashBoard — the write plan', () => {
 
     await waitFor(() => expect(flasher.writes).toHaveLength(1))
     const plan = flasher.writes[0]
-    expect(plan.map((part) => part.address)).toEqual([0x1000, 0x8000, CONFIG_OFFSET, 0x20000])
+    expect(plan.map((part) => part.address)).toEqual([
+      0x1000,
+      0x8000,
+      NVS_OFFSET,
+      CONFIG_OFFSET,
+      0x20000,
+    ])
     expect(plan.map((part) => part.label)).toEqual([
       'bootloader',
       'partition-table',
+      'nvs (erase)',
       'ff_cfg',
       'app',
     ])
     const config = plan.find((part) => part.address === CONFIG_OFFSET)
     expect(config?.data.length).toBe(4096)
     expect(String.fromCharCode(...config!.data.slice(0, 4))).toBe('FFCF')
-    // Erase is on by default: a live NVS credential makes a fresh token dead on arrival.
-    expect(flasher.writeOptions[0].eraseAll).toBe(true)
+    // Erasing NVS is on by default: a live broker credential there makes a fresh token
+    // dead on arrival. It is done by writing 0xFF over exactly that partition, at the
+    // offset and size read from the table above rather than from a constant.
+    const nvs = plan.find((part) => part.label === 'nvs (erase)')!
+    expect(nvs.data.length).toBe(NVS_SIZE)
+    expect(nvs.data.every((byte) => byte === 0xff)).toBe(true)
+
+    // The regression this replaced a whole-chip erase to prevent: `phy_init` (0x11000) is
+    // NOT in the plan, so the cached RF calibration survives the flash. Erasing it forces
+    // the full calibration on the next boot — the biggest current draw in startup — and a
+    // board with a marginal 3.3 V rail then browns out and can never cache it, because
+    // the next flash erases it again (S0-fw-3). Arduino's uploader does not do this, which
+    // is the whole reason a stock sketch ran on a board our image could not.
+    expect(plan.map((part) => part.address)).not.toContain(0x11000)
     expect(flasher.finishes).toBe(1)
     expect(flasher.closes).toBeGreaterThan(0)
   })
@@ -520,7 +576,11 @@ describe('FlashBoard — recovery is a button (S0-fe-6)', () => {
     //    the very same fault again.
     await waitFor(() => expect(flashers[1].writes).toHaveLength(1))
     expect(calls.filter((c) => c === 'POST /v1/enrollment-tokens')).toHaveLength(2)
-    expect(flashers[1].writeOptions[0].eraseAll).toBe(true)
+    const recovery = flashers[1].writes[0]
+    expect(recovery.map((part) => part.label)).toContain('nvs (erase)')
+    // ...and still not phy_init: the recovery path is the one an operator presses when a
+    // board is already misbehaving, so it is the last place to destroy its calibration.
+    expect(recovery.map((part) => part.address)).not.toContain(0x11000)
 
     // 5. And it is the SECOND token that went into the blob, not a replay of the first.
     const config = flashers[1].writes[0].find((part) => part.address === CONFIG_OFFSET)!
