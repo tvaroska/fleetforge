@@ -130,7 +130,7 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       Acceptance: a board against prod produces a `link_up` row in `device_progress`.
       _(done 2026-09-11; see docs/features/enrollment.md)_
 
-- [x] **S0-fw-3**: A board that browns out during RF calibration cannot escape it (P1, 0.5d)
+- [!] **S0-fw-3**: A board that browns out during RF calibration cannot escape it (P1, 0.5d)
       Found 2026-09-12 from an operator's diagnostic bundle: six boots, each one
       `phy_init: failed to load RF calibration data (0x1102), falling back to full
       calibration` and then `E BOD: Brownout detector was triggered`. Self-sustaining —
@@ -145,7 +145,29 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       stage, so the boot that escapes SAYS it escaped instead of looking healthy.
       Acceptance: a board in the loop reaches the fleet, and its recovery is visible on
       the dashboard and in the flashing console rather than inferred from a UART log.
-      _(done 2026-09-12)_
+
+      **Attempted 2026-09-12, shipped in v0.3.3, and it does not clear the fault.** The
+      reporting half works. The escape does not: on the one board in the loop, reduced-TX
+      calibration dies in exactly the same place as full-power calibration. A bundle from
+      2026-09-13T14:15 contains the A/B in a single log — its first boot follows a
+      non-brownout reset, so the option was inactive and the PHY came up at full power,
+      and boots two through six all print `the previous boot ended in a BROWNOUT`, so it
+      was active. Every one of the six dies at `phy_init … falling back to full
+      calibration` → `E BOD`. The lever is aimed correctly — IDF v5.5.5 `phy_init.c`
+      passes the reduced `init_data` *into* `register_chipv7_phy()` with
+      `calibration_mode == PHY_RF_CAL_FULL`, so it applies during the calibration, not
+      after it — and it simply does not move this board. Whatever dominates the current
+      draw of a cold calibration here, it is not TX power.
+
+      Left open because the acceptance criterion is unmet, not because the code is wrong:
+      the shipped change is a correct, inert-on-healthy-boards improvement and is worth
+      keeping. What is still unknown is whether the remaining fault is this board's
+      regulator or something the agent does, and the experiment that separates them has
+      not been run: flash the stock Arduino Wi-Fi sketch **with a full chip erase** onto
+      the same board, cable and port. If that also browns out, no firmware change fixes
+      this and the answer is bulk capacitance across 3V3/GND. If it survives, our image
+      draws more than it needs to during startup and that is ours to fix.
+      _(attempted 2026-09-12; negative result recorded 2026-09-13)_
 
 - [ ] **S0-test-1**: Bench-verify the serial console on real hardware (P1, 0.5d)
       Filed 2026-09-10, when S0-fe-1 shipped. Its software half is proven in jsdom against

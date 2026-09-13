@@ -45,6 +45,23 @@ const SPENT_TOKEN = [
     'ff_cfg with a fresh ffe_ token (POST /v1/enrollment-tokens)',
 ]
 
+/**
+ * Restarting, and the log says nothing about why — no BOD line, no halt, no disconnect
+ * reason. This is the only case where the reboot-loop banner is allowed to guess, so it
+ * is the counterpart to the assertion in the 2026-09-11 bench test that it must NOT.
+ */
+const UNEXPLAINED_LOOP = [
+  'rst:0x1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)',
+  'I (100) ff-agent: fleetforge agent 0.1.0 (idf v5.5.5), built Sep 10 2026 00:00:00',
+  'I (120) ff-id: device_id a4cf12b3de90',
+  'rst:0x1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)',
+  'I (100) ff-agent: fleetforge agent 0.1.0 (idf v5.5.5), built Sep 10 2026 00:00:00',
+  'I (120) ff-id: device_id a4cf12b3de90',
+  'rst:0x1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)',
+  'I (100) ff-agent: fleetforge agent 0.1.0 (idf v5.5.5), built Sep 10 2026 00:00:00',
+  'I (120) ff-id: device_id a4cf12b3de90',
+]
+
 const SILENT_BOARD = [
   'I (100) ff-agent: fleetforge agent 0.1.0 (idf v5.5.5), built Sep 10 2026 00:00:00',
   'I (120) ff-id: device_id a4cf12b3de90',
@@ -173,6 +190,14 @@ describe('BoardConsolePanel', () => {
 
     const loop = await screen.findByTestId('console-reboot-loop')
     expect(loop).toHaveTextContent(/keeps restarting — 3 times/)
+    // And it does NOT second-guess the fault above it. This banner used to recommend a
+    // shorter, thicker cable unconditionally, one line under a fault that already named
+    // the cause off the log — which is how an operator with a perfectly good cable came
+    // to spend an evening swapping cables and USB ports. When a cause is named, the
+    // guess stays off the screen.
+    expect(loop).not.toHaveTextContent(/cable/)
+    expect(loop).not.toHaveTextContent(/hub/)
+    expect(loop).toHaveTextContent(/cause named above/)
 
     // The stale ✓ that sent the diagnosis the wrong way for most of that session.
     const milestones = screen.getByTestId('boot-milestones')
@@ -181,6 +206,19 @@ describe('BoardConsolePanel', () => {
     })
     expect(milestones.querySelector('[data-state="waiting"]')).toHaveTextContent('Network up')
     expect(screen.queryByTestId('console-online')).not.toBeInTheDocument()
+  })
+
+  it('guesses at power only when the log names no cause at all', async () => {
+    const { factory } = fakeConsole(UNEXPLAINED_LOOP)
+    render(<BoardConsolePanel autoWatch createConsole={factory} />)
+
+    const loop = await screen.findByTestId('console-reboot-loop')
+    expect(loop).toHaveTextContent(/keeps restarting — 3 times/)
+    expect(screen.queryByTestId('console-fault')).not.toBeInTheDocument()
+    // Nothing better is on screen, so the guess earns its place — but it stops short of
+    // blaming the cable outright, because that is the advice that wasted the evening.
+    expect(loop).toHaveTextContent(/shorter, thicker/)
+    expect(loop).toHaveTextContent(/suspect the board’s own supply/)
   })
 
   it('never spins forever: a milestone past its deadline says so on its own', async () => {

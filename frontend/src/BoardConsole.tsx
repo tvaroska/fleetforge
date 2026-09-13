@@ -268,9 +268,23 @@ export function BoardConsolePanel({
         <p className="bad" role="status" data-testid="console-reboot-loop">
           <strong>This board keeps restarting — {rebootLoop.boots} times so far.</strong>
           <br />
-          It is not staying up long enough to join the fleet. A board that restarts on its own
-          is almost always short of power — try a shorter, thicker USB cable straight into the
-          machine, not a hub. If a cause is named above, start there.
+          It is not staying up long enough to join the fleet.{' '}
+          {/* The guess is only worth printing when nothing better is on screen. Until
+              2026-09-13 this line recommended a shorter, thicker cable unconditionally,
+              including directly beneath a fault that had already named the exact cause —
+              so an operator whose cable was fine spent an evening swapping cables and
+              USB ports on the strength of it. When a fault is named, it has the log
+              behind it and this line has nothing; defer to it. */}
+          {fault !== null ? (
+            <>Follow the cause named above — it is the one with evidence behind it.</>
+          ) : (
+            <>
+              Nothing in the log says why, which usually means power: try a shorter, thicker
+              USB cable straight into the machine rather than a hub, and if that changes
+              nothing, suspect the board&rsquo;s own supply rather than what it is plugged
+              into.
+            </>
+          )}
         </p>
       )}
 

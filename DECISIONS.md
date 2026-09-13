@@ -6,6 +6,43 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-13 — reducing TX power does not break the brownout loop (supersedes 2026-09-12, S0-fw-3)
+
+The entry below claims `CONFIG_ESP_PHY_REDUCE_TX_POWER=y` ends the loop. On the one board
+that has ever been in the loop, it does not. Recording that here because the claim shipped
+in v0.3.3 and an untested claim left standing is how the next person wastes an evening.
+
+- **The evidence is an A/B inside one log.** Diagnostic bundle 2026-09-13T14:15, device
+  `8c94df4cf3f8`, agent `19b0a0b`. Its first boot follows a non-brownout reset, so
+  `esp_reset_reason() != ESP_RST_BROWNOUT` and the PHY came up at full power; boots two
+  through six each print `the previous boot ended in a BROWNOUT`, so the reduction was
+  active. All six die identically at `phy_init: failed to load RF calibration data
+  (0x1102), falling back to full calibration` → `E BOD: Brownout detector was triggered`.
+  The 774 ms / 822 ms difference between them is the UART time to print that warning line,
+  not progress.
+- **The lever was aimed correctly; it just has no effect here.** IDF v5.5.5
+  `components/esp_phy/src/phy_init.c` calls `esp_phy_reduce_tx_power(init_data)` before
+  `register_chipv7_phy(init_data, cal_data, calibration_mode)`, and an empty NVS forces
+  `calibration_mode = PHY_RF_CAL_FULL` regardless of `CONFIG_ESP_PHY_CALIBRATION_MODE` — so
+  the lowered power table is in force *during* the full calibration. The conclusion is not
+  that the option was misapplied but that TX power is not what dominates a cold
+  calibration's current draw on this hardware.
+- **The change stays in.** It is gated on the brownout reset reason, inert on a healthy
+  board, and costs nothing. Reverting it would buy nothing either. What changes is the
+  claim attached to it: it is a plausible mitigation with one negative result, not a fix.
+- **The reporting half of S0-fw-3 is unaffected and does work.**
+  `agent_main.c::log_power_fault()` and the `brownout` progress stage behave exactly as
+  designed — the warning line appears on every post-brownout boot in the bundle above.
+  That half is what made this negative result legible at all.
+- **What would actually settle it is a hardware experiment, not a firmware one.** Flash the
+  stock Arduino Wi-Fi sketch with a full chip erase onto the same board, cable and port. A
+  brownout there rules out every firmware avenue and points at bulk capacitance across
+  3V3/GND; survival there means our startup draws more than it needs to. Until that runs,
+  "the supply is marginal" is the best-supported reading but is not proven against our own
+  image.
+
+---
+
 ## 2026-09-12 — brownout recovery is targeted, not a fleet-wide power cut (S0-fw-3)
 
 A board with no cached RF calibration browns out inside `phy_init`'s full calibration and
