@@ -1,6 +1,6 @@
 [project]
 name = "fleetforge"
-version = "0.3.3"
+version = "0.3.4"
 description = "OTA firmware management for embedded fleets"
 readme = "README.md"
 requires-python = ">=3.12"
