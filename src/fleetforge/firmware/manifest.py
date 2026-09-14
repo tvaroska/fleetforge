@@ -40,6 +40,12 @@ PART_NAMES = ("bootloader", "partition-table", "ota-data", "app")
 SAFE_SEGMENT = r"^[a-z0-9][a-z0-9-]{0,31}$"
 SafeSegment = Annotated[str, Field(pattern=SAFE_SEGMENT)]
 
+# S0-infra-3. Both are lowercase hex sha256, written by `make_manifest.py::build_identity`
+# and never recomputed here — this module reads a manifest, it does not re-derive one.
+# `Sha256Hex | None` everywhere: a bundle built before S0-infra-3 has neither field, and
+# that makes it *old*, not invalid (see `BundleManifest` below).
+Sha256Hex = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+
 
 class PartManifest(BaseModel):
     """One flashable file: where it goes, how big it is, what it hashes to."""
@@ -90,6 +96,13 @@ class BundleManifest(BaseModel):
     partition_layout: str
     ota_slot_size: int = Field(ge=1)
     flash_size: str = ""
+    # S0-infra-3, and optional for the same reason `config_partition` is: bundles built
+    # before it exist. `config_sha256` is the hash of the bundle's `sdkconfig.resolved`;
+    # `build_digest` covers the parts and the provenance fields together, so two builds of
+    # one commit with different configuration are finally distinguishable. Malformed is
+    # still refused — the pattern means a bundle either carries a real digest or none.
+    config_sha256: Sha256Hex | None = None
+    build_digest: Sha256Hex | None = None
     # Optional, and it has to stay optional: bundles built before R0-fw-1 are on disk and
     # in the registry, and refusing to load one would take the flasher offline for a field
     # that only the *new* flow needs.
@@ -123,6 +136,11 @@ class AgentBuildInfo(BaseModel):
     partition_layout: str
     ota_slot_size: int
     flash_size: str
+    # `None` for a bundle built before S0-infra-3. Served so the S0-fe-7 diagnostic bundle
+    # can name the exact build a board was flashed from — the question that cost S0-fw-3
+    # three sessions of correlating timestamps against `git log`.
+    config_sha256: str | None = None
+    build_digest: str | None = None
     # `None` for a bundle built before R0-fw-1; the flasher then has no offset to write a
     # config blob to and must say so rather than guess one.
     config_partition: ConfigPartition | None = None

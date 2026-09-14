@@ -32,6 +32,11 @@ const MQTT_URI = `mqtts://fleet:${BROKER_PASSWORD}@bench.local:8883`
 
 const PAGE = { origin: 'https://bingo.tvaroska.sk', userAgent: 'Mozilla/5.0 (X11) Chrome/140' }
 
+// S0-infra-3 build identity. Distinct 64-hex values so a test can tell which one was
+// printed where — the two fields sit next to each other and answer different questions.
+const CONFIG_SHA256 = 'c0'.repeat(32)
+const BUILD_DIGEST = 'b1'.repeat(32)
+
 function build(overrides: Partial<AgentBuildInfo> = {}): AgentBuildInfo {
   return {
     target: 'esp32',
@@ -44,6 +49,8 @@ function build(overrides: Partial<AgentBuildInfo> = {}): AgentBuildInfo {
     partition_layout: 'ab-4m-v1',
     ota_slot_size: 1966080,
     flash_size: '4MB',
+    config_sha256: CONFIG_SHA256,
+    build_digest: BUILD_DIGEST,
     config_partition: { label: 'ff_cfg', offset: 0x12000, size: 4096 },
     parts: [],
     ...overrides,
@@ -181,6 +188,29 @@ describe('buildDiagnosticBundle', () => {
     expect(bundle).toContain('rail collapsed during radio calibration')
     expect(bundle).toContain('not detected in this tab')
     expect(bundle).toContain('unavailable (this page could not reach /v1/healthz)')
+  })
+
+  it('names the exact build the board was flashed from (S0-infra-3)', () => {
+    const bundle = bundleOf(BENCH_2026_09_11)
+
+    // In FULL. Truncating to a prefix would make "is this the same build as yours?" a
+    // judgement call, which is the thing this field removes.
+    expect(bundle).toContain(`config       ${CONFIG_SHA256}`)
+    expect(bundle).toContain(`build id     ${BUILD_DIGEST}`)
+    // Above the log, with the rest of the identification: a reader must not have to
+    // scroll past a hundred UART lines to answer "which build?".
+    expect(bundle.indexOf(BUILD_DIGEST)).toBeLessThan(bundle.indexOf('console log ('))
+  })
+
+  it('says so plainly when the build predates build identity', () => {
+    const bundle = bundleOf(BENCH_2026_09_11, {
+      build: build({ config_sha256: null, build_digest: null }),
+    })
+
+    expect(bundle).toContain('config       unknown (this bundle predates build identity)')
+    expect(bundle).toContain('build id     unknown (this bundle predates build identity)')
+    // Not the string `null`, and not an empty value that reads as a bug in this page.
+    expect(bundle).not.toContain('config       null')
   })
 
   it('leaves prose that merely mentions a token alone', () => {

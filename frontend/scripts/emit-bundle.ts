@@ -59,6 +59,12 @@ const context: DiagnosticContext = {
     partition_layout: 'ab-4m-v1',
     ota_slot_size: 1966080,
     flash_size: '4MB',
+    // Real digests, from an `agent/dist/esp32` manifest — not because the values matter
+    // but because what this script is for is reading the output as an operator would, and
+    // whether two 64-char lines survive a chat client's reflow is the kind of thing only
+    // looking at it reveals.
+    config_sha256: '8c8ae96b473a6209aeecc0067e17bd7689d11815b1d21995ee6406e28c3bd49a',
+    build_digest: '28fd4e0fdccdedfe2526c8bf1595187f2ed3f844142fea82ec5909c84b286c9c',
     config_partition: { label: 'ff_cfg', offset: 0x12000, size: 4096 },
     parts: [],
   },

@@ -116,6 +116,12 @@ export type AgentBuildInfo = {
   partition_layout: string
   ota_slot_size: number
   flash_size: string
+  // S0-infra-3 build identity: the sha256 of the build's `sdkconfig.resolved`, and one
+  // digest over the parts plus the provenance fields. `null` for a bundle built before
+  // the field existed. Printed verbatim in the diagnostic bundle (`diagnostics.ts`) and
+  // compared as strings — never truncated, never parsed.
+  config_sha256: string | null
+  build_digest: string | null
   config_partition: ConfigPartition | null
   parts: AgentPartInfo[]
 }

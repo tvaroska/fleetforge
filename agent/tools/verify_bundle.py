@@ -1,7 +1,8 @@
 """Check that a built agent bundle is what its manifest says it is.
 
 The host-side half of `just agent-verify <target>`: re-hashes every part, re-checks
-every size, and greps the **resolved** sdkconfig for the bootloader posture. The other
+every size, recomputes the S0-infra-3 build identity (`config_sha256`, `build_digest`)
+rather than trusting it, and greps the **resolved** sdkconfig for the posture. The other
 half — decoding `partition-table.bin` with ESP-IDF's own `gen_esp32part.py` — needs the
 builder image and lives in the justfile recipe.
 
@@ -23,6 +24,14 @@ import re
 import sys
 from pathlib import Path
 from typing import Any
+
+# Its sibling in this directory, and the writer of the digest this script re-checks.
+# `sys.path[0]` is `agent/tools/` whether the script is run from the repo root on the host
+# or from `/project/tools` inside the builder, and both files are stdlib-only. Importing
+# rather than reimplementing is the point: a second copy of the canonical serialisation
+# would eventually disagree with the first, and the disagreement would look like a
+# corrupt bundle.
+from make_manifest import BuildError, build_identity
 
 # design/architecture.md → Flash-time immutables, item 2. A BOOTLOADER option: absent
 # here means R2 auto-rollback is impossible on every board flashed with this bundle.
@@ -103,7 +112,32 @@ def verify(bundle_dir: Path) -> dict[str, Any]:
         f"{int(config['size']):>8} B  config partition (written per board)"
     )
 
-    resolved = (bundle_dir / "sdkconfig.resolved").read_text()
+    # Build identity (S0-infra-3), recomputed rather than read. Both are optional: a
+    # bundle built before this landed is old, not broken, and refusing it here would stop
+    # `just agent-verify` on artefacts that are still perfectly flashable.
+    resolved_bytes = (bundle_dir / "sdkconfig.resolved").read_bytes()
+    claimed_config = manifest.get("config_sha256")
+    if claimed_config is None:
+        print("  build identity: absent (bundle predates S0-infra-3)")
+    else:
+        actual_config = hashlib.sha256(resolved_bytes).hexdigest()
+        if actual_config != claimed_config:
+            raise BundleError(
+                f"config_sha256 mismatch: sdkconfig.resolved hashes to {actual_config[:12]}…, "
+                f"the manifest claims {str(claimed_config)[:12]}…"
+            )
+        # Recomputed from the manifest's own fields with the writer's function, so the
+        # digest cannot drift from what it claims to cover.
+        actual_digest = build_identity(manifest)
+        if actual_digest != manifest.get("build_digest"):
+            raise BundleError(
+                f"build_digest mismatch: recomputed {actual_digest[:12]}…, "
+                f"the manifest claims {str(manifest.get('build_digest'))[:12]}…"
+            )
+        print(f"  config_sha256 {actual_config}")
+        print(f"  build_digest  {actual_digest}  (recomputed, matches)")
+
+    resolved = resolved_bytes.decode()
     for option in REQUIRED_RESOLVED:
         if option not in resolved.splitlines():
             raise BundleError(f"the BUILT config does not carry {option}")
@@ -126,7 +160,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         verify(args.bundle_dir)
-    except (BundleError, KeyError, OSError, ValueError) as exc:
+    except (BundleError, BuildError, KeyError, OSError, ValueError) as exc:
         print(f"verify_bundle: {exc}", file=sys.stderr)
         return 1
     return 0

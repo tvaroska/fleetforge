@@ -94,6 +94,10 @@ class TestManifest:
         assert build["partition_layout"] == "ab-4m-v1"
         assert build["ota_slot_size"] == 1966080
         assert build["flash_size"] == "4MB"
+        # S0-infra-3: served, because the diagnostic bundle the flasher page builds is
+        # downstream of this response and nothing else tells it which build it wrote.
+        assert build["config_sha256"] == "c0" * 32
+        assert build["build_digest"] == "b1" * 32
         assert [part["name"] for part in build["parts"]] == [
             "bootloader",
             "partition-table",

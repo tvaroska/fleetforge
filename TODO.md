@@ -2,7 +2,7 @@
 
 **Goal:** Self-hosted OTA firmware management for embedded fleets (ESP32 first) — a bad
 build is caught before the fleet, and any device that gets one recovers itself.
-**Updated:** 2026-09-11
+**Updated:** 2026-09-14
 **Focus:** R0 is deployed and live at `bingo.tvaroska.sk`; only R0-test-2 (E2E on real
 hardware) remains. Device visibility is now covered from both ends — the serial console
 (S0-fe-1) and boot/enrol stage reports (S0-fw-1, verified on an emulated board
@@ -17,11 +17,36 @@ is the GCS blocker in `docs/runbooks/artifact-storage.md` — unfiled, and a pre
 for R1.
 
 The bench itself found no server-side bug and three onboarding bugs. The board never
-enrolled: it brownouts during Wi-Fi PHY calibration and resets, forever. That is a
-power-supply fault, not ours — but **the product could not say so**, and diagnosing it
-took a serial log pasted by hand into a chat. `S0-fe-4` is the P0 that came out of
-that, and it gates R0: a board that cannot be onboarded without an engineer reading raw
-UART is not onboarded.
+enrolled: it brownouts during Wi-Fi PHY calibration and resets, forever. **That fault is
+ours, not the supply's** — settled 2026-09-14, see S0-fw-3 — but **the product could not
+say so either way**, and diagnosing it took a serial log pasted by hand into a chat.
+`S0-fe-4` is the P0 that came out of that, and it gates R0: a board that cannot be
+onboarded without an engineer reading raw UART is not onboarded.
+
+**2026-09-14, ESPHome comparison.** A *brand-new* board — same cable, same port, nothing
+cached on either side — was flashed with ESPHome, associated to Wi-Fi and ran. That is
+the experiment S0-fw-3 asked for, and it comes back on the "ours to fix" branch: this
+rail carries a cold full RF calibration. Two consequences, both filed: S0-fw-3 is
+reopened against a firmware cause rather than closed as a hardware one, and S0-fw-4
+records a second, independent defect found while checking it — the flasher erases the
+cached calibration on **every** flash, because the calibration is in `nvs`, not in
+`phy_init`. A broader review of ESPHome — what to reuse, what to copy, what to refuse —
+is in `products/docs/esphome-review.md`.
+
+**2026-09-14, artifacts.** A review of how images are stored and versioned
+(`design/artifacts.md`, DECISIONS.md same date) found the product running two firmware
+distribution paths with different rules, and no identifier anywhere that says which
+*build* produced a bundle — the gap that cost S0-fw-3 three sessions. It also found that
+`design/decisions/infrastructure-agent-bundles-are-artifacts.md` has been Accepted since
+2026-09-11 with nothing in this file pointing at it. Five tasks filed. **S0-infra-3**
+(build identity in the manifest) **landed 2026-09-14** — every bundle now carries
+`config_sha256` and `build_digest`, and the diagnostic bundle prints both, so step 2 of
+the S0-fw-3 bench order (an `sdkconfig` diff against ESPHome's) is answerable from an
+artifact. The remaining four: **S0-infra-4** (freeze the content-addressed key scheme before R1 writes an object),
+**S0-infra-5** (a GCS credential that is not a key file — the actual blocker),
+**S0-infra-6** (bundles served from the store, image ships none) and **S0-infra-7**
+(catalog keyed by target *and* layout). The build engine itself stays R9; only its cache
+key changed.
 
 Designed up on 2026-09-11 as one feature — **Unaided onboarding: flash → on the fleet**
 (`docs/features/enrollment.md`, requirements in `spec/standards.md`, reasoning in
@@ -37,15 +62,16 @@ missed, and where a fault's remedy is software the panel offers it as one button
 the same day** — one click copies a redacted diagnostic bundle, so a stuck operator can
 hand the whole session to someone who can help. S0-test-3, the unaided run, is next.
 
-<!-- Counters: spec=1 infra=5 db=1 be=6 fe=7 sec=1 fw=3 test=3 -->
-<!-- Sprint 0 counters: fe=7 fw=3 infra=2 test=3 -->
+<!-- Counters: spec=1 infra=7 db=1 be=6 fe=7 sec=1 fw=4 test=3 -->
+<!-- Sprint 0 counters: fe=7 fw=4 infra=7 test=3 -->
 
 Live status lives ONLY here. States: `- [ ]` open · `- [x]` done · `- [!]`
 attempted-but-failed. `spec/` and `design/` are status-free.
 
 > Requirements: [spec/prd.md](spec/prd.md) · Wire contract: [spec/device-protocol.md](spec/device-protocol.md) ·
 > Flows: [spec/flows.md](spec/flows.md) · Contracts & platform design: [design/architecture.md](design/architecture.md) ·
-> Topology & stack: [design/production.md](design/production.md)
+> Topology & stack: [design/production.md](design/production.md) ·
+> Image storage & versioning: [design/artifacts.md](design/artifacts.md)
 > Release ladder: [docs/roadmap.md](docs/roadmap.md) · [docs/releases.md](docs/releases.md) ·
 > Completed work: [docs/features/](docs/features/) · Decisions: `DECISIONS.md`
 
@@ -136,8 +162,10 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       calibration` and then `E BOD: Brownout detector was triggered`. Self-sustaining —
       the full calibration is the biggest current draw in startup, the rail collapses
       during it, and the result is only cached once a boot survives it, so every boot is
-      identical. The same cable and port flash and run a plain Wi-Fi sketch fine, because
-      that sketch inherits a calibration it never has to re-earn.
+      identical. (This entry originally added "the same cable and port run a plain Wi-Fi
+      sketch fine, because that sketch inherits a calibration it never has to re-earn."
+      That reasoning is retired by the 2026-09-14 result below — a board with nothing
+      cached on either side survived.)
       Fix: `CONFIG_ESP_PHY_REDUCE_TX_POWER=y` — after a brownout reset the PHY comes up
       at its lowest TX power, which is often enough to get through once; one survived
       boot caches the calibration and the loop ends. Fleet-wide TX power deliberately
@@ -161,12 +189,22 @@ Bricking risks, broker auth and security issues get filed here as they surface.
 
       Left open because the acceptance criterion is unmet, not because the code is wrong:
       the shipped change is a correct, inert-on-healthy-boards improvement and is worth
-      keeping. What is still unknown is whether the remaining fault is this board's
-      regulator or something the agent does, and the experiment that separates them has
-      not been run: flash the stock Arduino Wi-Fi sketch **with a full chip erase** onto
-      the same board, cable and port. If that also browns out, no firmware change fixes
-      this and the answer is bulk capacitance across 3V3/GND. If it survives, our image
-      draws more than it needs to during startup and that is ours to fix.
+      keeping. What was still unknown on 2026-09-13 was whether the remaining fault is
+      this board's regulator or something the agent does. **That is now known.**
+
+      **2026-09-14 — settled: the fault is ours.** A *brand-new* board — same cable, same
+      port — was flashed with ESPHome, associated to Wi-Fi and ran. A new board has no
+      cached calibration, so ESPHome ran the same cold full calibration that kills our
+      image, on the same rail, and survived it. That is the discriminating experiment this
+      entry asked for, arriving on the "it survives" branch: **this supply carries a cold
+      full RF calibration, and our startup draws more than it needs to.** The
+      "marginal supply / bulk capacitance across 3V3/GND" reading is retired, along with
+      every conclusion built on it (see DECISIONS.md 2026-09-14).
+
+      **And the failing image was never the current one.** The 2026-09-13T14:15 bundle is
+      agent `19b0a0b`, which predates `d705652` (`-Os`, 80 MHz, max modem sleep, TX-power
+      ladder). Every brownout on record was therefore produced by a **160 MHz, `-Og`**
+      build. The 80 MHz lever below has still never reached this board.
 
       **Second lever prepared 2026-09-13, not yet tried on hardware: 80 MHz CPU**
       (`CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_80`, in `agent/sdkconfig.defaults`). Came out of
@@ -177,18 +215,157 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       `REDUCE_TX_POWER` it applies on EVERY boot, so it does not need the fault to have
       already happened in order to help. Free to test: the same board, cable and port,
       one flash.
-      Bench order for the next session, cheapest first:
-      1. 80 MHz image, existing thin cable + hub. Isolates the CPU's contribution.
-      2. Short thick cable direct to a rear port. Isolates the cable.
-      3. 470-1000 µF electrolytic across 3V3/GND at the board. Isolates the rail — and
-         is the fix if it works.
-      4. Stock Arduino Wi-Fi sketch, full chip erase (the experiment above). Only needed
-         if 1-3 all fail; at that point the answer is the regulator, not firmware.
+      Bench order for the next session, cheapest first — **rewritten 2026-09-14**, since
+      the hardware branch is now closed and everything below is a firmware question:
+      1. **Flash v0.2.0 (`d705652`) to the board.** 160 → 80 MHz plus `-Os`, one flash,
+         no new hardware. The single most plausible untested lever, and the only one that
+         has already been written.
+      2. **Diff `agent/dist/esp32/sdkconfig.resolved` against ESPHome's**
+         (`.esphome/build/<node>/.pioenvs/<node>/sdkconfig`). Both files exist; stop
+         reasoning about current draw and read the delta. Fields that move startup current
+         or the trip point: `ESP_DEFAULT_CPU_FREQ_MHZ`, `ESPTOOLPY_FLASHMODE`/`FLASHFREQ`
+         (ours is already the low-power `dio`/`40m`), `SPIRAM`, `ESP_WIFI_*_BUFFER_NUM`.
+      3. **`ESP_BROWNOUT_DET_LVL_SEL` and `ESP32_REV_MIN`.** We are on level 0 and
+         `ESP32_REV_MIN_0`, both IDF defaults. In IDF v5.5
+         `components/esp_hw_support/port/esp32/Kconfig.hw_support`, the rev-0 option
+         carries `select ESP_BROWNOUT_USE_INTR` — *"Brownout on Rev 0 is bugged, must use
+         interrupt"* — so our min-revision choice force-enables the interrupt-based
+         detector that `agent_main.c::log_power_fault()` already documents. If the board
+         is rev 1 or rev 3 and ESPHome builds for a higher min revision, the two images
+         are using **different brownout mechanisms on the same silicon**, which produces
+         this symptom with no difference in current at all. The revision is in the boot
+         banner of the bundles already collected.
       One survived calibration ends the loop permanently for that board — the result is
       cached in NVS — so any of these succeeding once is a pass, and the acceptance
-      criterion (recovery visible on the dashboard) is reachable from any of them.
+      criterion (recovery visible on the dashboard) is reachable from any of them. Note
+      that S0-fw-4 must land too, or the next reflash throws that result away.
       _(attempted 2026-09-12; negative result recorded 2026-09-13; second lever staged
-      2026-09-13, awaiting bench)_
+      2026-09-13; hardware cause ruled out 2026-09-14, awaiting bench)_
+
+- [ ] **S0-fw-4**: The flasher erases the cached RF calibration on every flash (P1, 0.5d)
+      Found 2026-09-14 while checking S0-fw-3. The 2026-09-13 change that replaced
+      esptool-js's `eraseAll` with a targeted wipe **preserved the wrong partition.**
+      `flash.ts::nvsWipe` states the premise it was built on — *"destroyed the `phy_init`
+      partition where the RF calibration is cached"* — and RF calibration is not in
+      `phy_init`. It is in **NVS**, under IDF's `phy` namespace, which `nvsWipe` fills
+      with 0xFF on every flash. Four confirmations:
+      * `agent/dist/esp32/sdkconfig.resolved` has `CONFIG_ESP_PHY_CALIBRATION_AND_DATA_STORAGE=y`
+        (calibration → NVS) and `# CONFIG_ESP_PHY_INIT_DATA_IN_PARTITION is not set`, so
+        the `phy_init` partition at `0x11000` **holds nothing at all** in this build — the
+        init data is compiled into DROM.
+      * ESP-IDF's RF-calibration guide lists "NVS does not exist" / "has been erased"
+        among the triggers for full calibration, and ships
+        `esp_phy_erase_cal_data_in_nvs()` documented as clearing *only* the PHY namespace
+        rather than all of NVS — the exact inverse of what the flasher does.
+      * The error in every bundle, `failed to load RF calibration data (0x1102)`, is
+        `ESP_ERR_NVS_NOT_FOUND` (`ESP_ERR_NVS_BASE` = `0x1100`). The log line already said
+        "NVS key not found".
+      * S0-fw-3's own closing note above says the result is "cached in NVS". The two
+        statements have been contradicting each other since 2026-09-13.
+      Consequence: **no fleetforge-flashed board can ever retain a calibration.** Every
+      one takes the maximum-current cold path on every boot after every flash, forever.
+      Independent of S0-fw-3 — it does not explain the brand-new board, which had nothing
+      cached either way — but it is what would throw away that board's recovery the moment
+      it is reflashed.
+      Fix: drop `nvsWipe` from the flasher and move credential invalidation into the
+      agent, which can act per namespace where a flasher writing raw bytes cannot.
+      `ff_store` already persists `api_base` alongside the credential; add a fingerprint
+      of the `ff_cfg` enrolment token and, when it differs from the stored one, erase
+      `FF_STORE_NAMESPACE` only. IDF's `phy` namespace survives. This also fixes the same
+      problem for boards reflashed in the field, which a browser flasher cannot reach.
+      No partition-table change, so nothing here is a flash-time immutable.
+      Also correct the three comments built on the wrong premise —
+      `frontend/src/flash.ts` (`nvsWipe` and the `wipeNvs` option),
+      `frontend/src/esptoolFlasher.ts::write`, `frontend/src/partitionTable.ts` — and the
+      two `DECISIONS.md` entries superseded on 2026-09-14.
+      Acceptance: a board that has completed one calibration still logs a successful
+      `esp_phy_load_cal_data_from_nvs` after a reflash (no `0x1102`), while a reflash
+      carrying a *new* enrolment token still spends that token rather than reusing the
+      stored credential. Both halves tested — the second is what `nvsWipe` existed for.
+
+- [ ] **S0-infra-4**: Freeze the content-addressed key scheme before R1 writes an object (P1, 0.5d)
+      Filed 2026-09-14. `storage/objectstore.py::put` already justifies overwrite-is-safe
+      with *"R1-BE-1 content-addresses artifacts by sha256"*, and no `R1-` task exists
+      yet — so the scheme is asserted in a docstring and implemented nowhere. Free to
+      settle now, a migration over live objects later.
+      Scope is deliberately narrow: name the layout (`fleetforge/blobs/sha256/<hex>`,
+      write-once, `Cache-Control: immutable`), the `artifacts` and `builds` tables that
+      hold what the bytes cannot, and the rule that a manifest is generated from digests
+      rather than stored. No upload endpoint, no device-facing change.
+      `spec/` is protected: **PROPOSE** the wire-visible half (artifact identity in
+      `spec/device-protocol.md`, if it is wire-visible at all) rather than editing it.
+      The prefix rule is untouched and non-negotiable — `resolve_key` rejects rather than
+      normalises, because `gs://btvaroska` also holds `secrets/`.
+      Acceptance: the scheme is written down in `design/artifacts.md` and the migration
+      creating `artifacts`/`builds` is reviewed and merged, with a test that a blob key
+      outside `fleetforge/blobs/` is refused.
+
+- [ ] **S0-infra-5**: `storage/factory.py` accepts a credential that is not a key file (P1, 1d)
+      Filed 2026-09-14. Named as the real prerequisite in
+      `design/decisions/infrastructure-agent-bundles-are-artifacts.md` (amended
+      2026-09-11): the GCS blocker in `docs/runbooks/artifact-storage.md` is
+      `constraints/iam.disableServiceAccountKeyCreation`, and `_gcs_store` raises unless
+      `GCS_CREDENTIALS_FILE` names an existing file. So the blocker is not an org-policy
+      exemption — it is a factory that only knows one credential shape. This is ordinary
+      backend work and it unblocks both S0-infra-6 and R1.
+      Add service-account **impersonation** (`impersonated_credentials` over the VM's
+      attached identity, target `fleetforge-artifacts`). Impersonation is required for
+      **containment** independently of signing: prod's attached identity is
+      `mainsite@sites-470716`, the shared VM account for the whole estate, which can read
+      `secrets/`, `podcasts/` and `backup/` in the same bucket.
+      **Plain ADC must not be accepted as a fallback.** `_gcs_store`'s docstring already
+      says why and it stays true: ADC carries no private key, so V4 signing silently
+      becomes a `signBlob` round trip, and it picks up the wrong service account. Both
+      failures first appear on a real device. Refuse at construction, as now.
+      Verify `signBlob` actually works under impersonation — the ADR calls it "expected
+      but not yet verified", and R1 depends on it where this task does not.
+      Acceptance: prod reads a `fleetforge/`-prefixed object with no key file on disk and
+      is refused an object under `secrets/`; `GCS_CREDENTIALS_FILE` still works unchanged;
+      ambiguous configuration still raises rather than resolving. Record the `signBlob`
+      result either way — a negative is what R1 needs to know.
+
+- [ ] **S0-infra-6**: Agent bundles are served from the store, not baked into the image (P1, 2d)
+      The unimplemented half of
+      `design/decisions/infrastructure-agent-bundles-are-artifacts.md` (Accepted
+      2026-09-11), finally filed. Depends on S0-infra-5 for the credential and S0-infra-4
+      for the key scheme.
+      **The application image ships zero agent bundles** — `Dockerfile:68`'s
+      `COPY agent/dist /app/agent` goes away, and publishing a bundle stops requiring a
+      redeploy. The ADR considered and rejected keeping a baked set as fallback: it
+      preserves the defect rather than mitigating it, the image still grows with every
+      new target, and "which tier answered?" becomes a new thing to diagnose during the
+      one flow four tasks have just been spent making self-explanatory.
+      Two things this buys beyond tidiness: **agent-version rollback**, which the S0-fw-3
+      bench would use today (getting `19b0a0b` back currently means rebuild + redeploy),
+      and making `S0-infra-2`-class staleness structurally impossible rather than a
+      matter of remembering `just agent-build-all`.
+      Verification moves with the bundles, it is not dropped: per-part sha256, plus
+      `partition_layout`/`ota_slot_size` agreement with `spec/device-protocol.md`. Keep
+      the current serving shape — the API reads from the store and streams through the
+      authenticated `GET /v1/agent/{target}/{part}`, so no signed URL and no private key
+      enters the onboarding path. Re-point `S0-infra-2`'s `just agent-check-fresh` guard
+      from the image build to the publish step; that is a move, not a rewrite.
+      An unreachable store must present as a **named fault** in the flasher, held to the
+      *Unaided onboarding* standard: say why, in plain language, and do not offer a
+      manifest that cannot be honoured.
+      Acceptance: an image built with no `agent/dist` present flashes a board end to end;
+      publishing a new bundle changes what the flasher offers with no redeploy; a
+      previous agent version is still flashable; with the store unreachable the console
+      names the fault instead of failing mid-write.
+
+- [ ] **S0-infra-7**: The firmware catalog is keyed by target alone (P2, 0.25d)
+      Filed 2026-09-14. `firmware/catalog.py` indexes bundles by directory name, which is
+      the chip target, while `partition_layout` lives inside the manifest where nothing
+      can select on it. One layout exists (`ab-4m-v1`, frozen at R0) so nothing is broken
+      today; the moment a second appears, two bundles for one target cannot coexist and
+      the flasher has no way to ask for the right one.
+      Fix: key on `(target, partition_layout)` and have the manifest endpoint expose the
+      layout so the caller selects rather than guesses. A one-line change now against a
+      migration and a wire change later. Land it with or before S0-infra-6, whose store
+      keys should not encode the narrower assumption.
+      Acceptance: two bundles for the same target with different layouts both load and
+      are separately addressable; a request with no layout still resolves while exactly
+      one exists, and names the ambiguity when more than one does.
 
 - [ ] **S0-test-1**: Bench-verify the serial console on real hardware (P1, 0.5d)
       Filed 2026-09-10, when S0-fe-1 shipped. Its software half is proven in jsdom against

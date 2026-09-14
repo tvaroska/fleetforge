@@ -80,6 +80,12 @@ def write_bundle(
         "partition_layout": EXPECTED_PARTITION_LAYOUT,
         "ota_slot_size": EXPECTED_OTA_SLOT_SIZE,
         "flash_size": "4MB",
+        # S0-infra-3 build identity. In the default fixture because a bundle *without* it
+        # now logs a warning, and the tests that assert on warnings must be reading the
+        # one they mean. `make_manifest.py` is what computes these for real; here they are
+        # opaque 64-hex values, because this module is the reader.
+        "config_sha256": "c0" * 32,
+        "build_digest": "b1" * 32,
         # R0-fw-1: where the flasher writes per-board config. Optional in the model
         # because bundles built before it exist on disk — see the test below.
         "config_partition": {"label": "ff_cfg", "offset": 0x12000, "size": 0x1000},
@@ -128,6 +134,60 @@ class TestConfigPartition:
         (bundle_dir / "manifest.json").write_text(json.dumps(manifest))
 
         assert FirmwareCatalog.load(tmp_path).bundle("esp32") is None
+
+
+class TestBuildIdentity:
+    """S0-infra-3. Two fields the reader carries and never recomputes.
+
+    The behaviour that matters here is the *degradation*: an old bundle is still a
+    flashable bundle. Dropping it would take the flasher offline over a field nothing on
+    the flash path reads — the failure mode this module's docstring exists to prevent —
+    so the answer is one warning and a `None`.
+    """
+
+    def test_both_are_carried_through_to_the_bundle(self, tmp_path: Path) -> None:
+        write_bundle(tmp_path, "esp32")
+        bundle = FirmwareCatalog.load(tmp_path).bundle("esp32")
+        assert bundle is not None
+        assert bundle.config_sha256 == "c0" * 32
+        assert bundle.build_digest == "b1" * 32
+
+    def test_a_bundle_without_them_loads_with_a_warning(self, tmp_path: Path) -> None:
+        """A bundle built before S0-infra-3 is old, not invalid."""
+        bundle_dir = write_bundle(tmp_path, "esp32")
+        manifest = json.loads((bundle_dir / "manifest.json").read_text())
+        del manifest["config_sha256"]
+        del manifest["build_digest"]
+        (bundle_dir / "manifest.json").write_text(json.dumps(manifest))
+
+        with capture_logs() as records:
+            catalog = FirmwareCatalog.load(tmp_path)
+
+        bundle = catalog.bundle("esp32")
+        assert bundle is not None, "an old bundle must still be servable"
+        assert bundle.config_sha256 is None
+        assert bundle.build_digest is None
+        warnings = dropped_targets(records)
+        assert any("build identity" in message for message in warnings)
+        assert not any("dropped" in message for message in warnings)
+
+    def test_a_present_bundle_warns_about_nothing(self, tmp_path: Path) -> None:
+        """Vacuity guard for the test above: the warning must be about the missing field,
+        not something this fixture does on every load."""
+        write_bundle(tmp_path, "esp32")
+        with capture_logs() as records:
+            FirmwareCatalog.load(tmp_path)
+        assert dropped_targets(records) == []
+
+    @pytest.mark.parametrize("field", ["config_sha256", "build_digest"])
+    def test_a_malformed_digest_is_refused(self, tmp_path: Path, field: str) -> None:
+        """Absent is old; truncated or non-hex is corrupt, and a corrupt identity is worse
+        than none — it would be compared against another bundle's and believed."""
+        write_bundle(tmp_path, "esp32", manifest_overrides={field: "not-a-digest"})
+        with capture_logs() as records:
+            catalog = FirmwareCatalog.load(tmp_path)
+        assert catalog.targets == ()
+        assert any("esp32" in message for message in dropped_targets(records))
 
 
 class TestHappyPath:

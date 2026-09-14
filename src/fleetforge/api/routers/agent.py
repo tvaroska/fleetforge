@@ -99,6 +99,8 @@ async def agent_manifest(admin: AdminDep, catalog: CatalogDep) -> AgentManifest:
                 partition_layout=bundle.partition_layout,
                 ota_slot_size=bundle.ota_slot_size,
                 flash_size=bundle.flash_size,
+                config_sha256=bundle.config_sha256,
+                build_digest=bundle.build_digest,
                 config_partition=bundle.config_partition,
                 parts=[
                     AgentPartInfo(

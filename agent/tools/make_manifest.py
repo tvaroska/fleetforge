@@ -20,6 +20,10 @@ Likewise `agent_version` and `idf_version` are parsed out of the **built binary'
 `esp_app_desc_t`, not out of `version.txt` or an environment variable: what the manifest
 claims is then what the board will report in `up/announce`, even if the two ever diverge.
 
+`config_sha256` and `build_digest` (S0-infra-3) are what let two builds of the *same
+commit* be told apart. See `build_identity()` for what goes into the second one, and for
+the one thing deliberately left out of it.
+
 `ota_slot_size` is decoded from the generated `partition-table.bin`, not copied from
 `partitions.csv`, for the same reason — and this script refuses to emit a bundle whose
 decoded table has a `factory` partition or mismatched OTA slots, because a bundle that
@@ -103,6 +107,60 @@ def sha256_of(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+# ── Build identity (S0-infra-3) ──────────────────────────────────────────────────────
+#
+# The fields that answer "which build produced this bundle?". Everything here is either
+# an input to the build or a digest of an output; nothing is a property of the moment it
+# ran.
+#
+# **`built_at` is deliberately NOT one of them.** The whole point of `build_digest` is
+# that two builds of identical inputs are recognisably the same build — a timestamp in
+# the digest would make every rebuild look new, which is the failure this field exists to
+# remove. `flash_size` and `chip_family` are out for a different reason: both are
+# functions of `target` and the config, so they are already covered by the fields that
+# are in.
+BUILD_IDENTITY_VERSION = 1
+BUILD_IDENTITY_FIELDS = (
+    "target",
+    "agent_version",
+    "idf_version",
+    "idf_image",
+    "source_commit",
+    "partition_layout",
+    "ota_slot_size",
+    "config_sha256",
+)
+# A part's bytes are `sha256`; the other three say where those bytes get written, and a
+# bundle that writes the same bytes to a different offset is a different build.
+BUILD_IDENTITY_PART_FIELDS = ("name", "offset", "size", "sha256")
+
+
+def build_identity(manifest: dict[str, Any]) -> str:
+    """The `build_digest` for `manifest` — one id over its inputs and its parts.
+
+    Kept as a pure function of an already-assembled manifest so that the *reader* can
+    recompute it (`verify_bundle.py` does, on every `just agent-verify`) instead of
+    trusting a number the writer put there. That is also why the serialisation is pinned
+    rather than incidental: sorted keys, no whitespace, parts sorted by name. Anything
+    looser and the digest would depend on dict ordering, which is not a property of the
+    build.
+
+    Bump `BUILD_IDENTITY_VERSION` if the input set changes — the `v` field is what stops
+    an old digest and a new one being compared as if they meant the same thing.
+    """
+    missing = [field for field in BUILD_IDENTITY_FIELDS if manifest.get(field) is None]
+    if missing:
+        raise BuildError(f"cannot compute build_digest: manifest is missing {missing}")
+    document: dict[str, Any] = {"v": BUILD_IDENTITY_VERSION}
+    document.update({field: manifest[field] for field in BUILD_IDENTITY_FIELDS})
+    document["parts"] = [
+        {field: part[field] for field in BUILD_IDENTITY_PART_FIELDS}
+        for part in sorted(manifest["parts"], key=lambda part: str(part["name"]))
+    ]
+    canonical = json.dumps(document, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
 
 
 def read_json(path: Path) -> dict[str, Any]:
@@ -286,6 +344,9 @@ def build_manifest(args: argparse.Namespace) -> dict[str, Any]:
             "project_description.json -> config_file did not point at it"
         )
     shutil.copyfile(resolved_config, out_dir / "sdkconfig.resolved")
+    # Hashed from the copy in the bundle, not from the source: the bundle is what ships,
+    # and `verify_bundle.py` re-hashes the same file to check this number.
+    config_sha256 = sha256_of(out_dir / "sdkconfig.resolved")
 
     agent_version, idf_version, project_name = app_description(out_dir / "app.bin")
     rows = decode_partition_table(out_dir / "partition-table.bin")
@@ -301,7 +362,7 @@ def build_manifest(args: argparse.Namespace) -> dict[str, Any]:
     flash_settings = flasher_args.get("flash_settings")
     flash_size = str(flash_settings.get("flash_size")) if isinstance(flash_settings, dict) else ""
 
-    return {
+    manifest: dict[str, Any] = {
         "schema": MANIFEST_SCHEMA,
         "target": target,
         "chip_family": CHIP_FAMILY[target],
@@ -316,10 +377,14 @@ def build_manifest(args: argparse.Namespace) -> dict[str, Any]:
         .replace("+00:00", "Z"),
         "partition_layout": partition_layout_id(args.partitions),
         "ota_slot_size": slot_size,
+        "config_sha256": config_sha256,
         "config_partition": config_partition(rows),
         "flash_size": flash_size,
         "parts": parts,
     }
+    # Last, because it is a digest *of* everything above it.
+    manifest["build_digest"] = build_identity(manifest)
+    return manifest
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -341,6 +406,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"make_manifest: {manifest['target']} -> {args.out}")
     for part in manifest["parts"]:
         print(f"  0x{part['offset']:06x}  {part['path']:<22} {part['size']:>8} bytes")
+    print(f"  config_sha256 {manifest['config_sha256']}")
+    print(f"  build_digest  {manifest['build_digest']}")
     return 0
 
 

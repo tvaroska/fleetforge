@@ -141,6 +141,19 @@ function headerSection(
       : `${context?.agentVersion ?? build.agent_version} — ${build.target} (${build.chip_family}), ` +
         `idf ${build.idf_version}, commit ${build.source_commit}, layout ${build.partition_layout}`
 
+  // S0-infra-3. Printed in FULL, never a 12-char prefix: the only thing anyone does with
+  // these is compare them against another bundle's, and a truncated digest turns that
+  // into an argument. They are the difference between "which build produced this log?"
+  // being a string comparison and being three sessions of correlating `built_at` against
+  // `git log`, which is what it cost on S0-fw-3.
+  const identity: string[] =
+    build === null
+      ? []
+      : [
+          field('config', build.config_sha256 ?? 'unknown (this bundle predates build identity)'),
+          field('build id', build.build_digest ?? 'unknown (this bundle predates build identity)'),
+        ]
+
   const boot = lastEvent(events, (event) => event.milestone === 'boot')
   const id = lastEvent(events, (event) => event.tag === 'ff-id')
   const reportedId = id === null ? null : (/([0-9a-f]{12})/i.exec(id.text)?.[1] ?? id.text)
@@ -156,6 +169,7 @@ function headerSection(
     field('browser', page.userAgent || '(unknown)'),
     field('server', context?.serverVersion ?? 'unavailable (this page could not reach /v1/healthz)'),
     field('agent', agent),
+    ...identity,
     field('on board', boot === null ? 'nothing on this port announced itself as the agent' : boot.text),
     field(
       'device id',

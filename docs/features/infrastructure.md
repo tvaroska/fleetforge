@@ -1149,3 +1149,72 @@ be minted at all. Owner's call, taken 2026-09-11 with that consequence stated; t
 mitigation is that the store blocker is a hard prerequisite rather than a caveat, and
 that an unreachable store must present as a named fault in the flasher rather than a
 broken page.
+
+## Build identity in the agent manifest (S0-infra-3, closed 2026-09-14)
+
+**Filed as:** "The manifest cannot say which build produced a bundle." A bundle carried
+`agent_version`, `source_commit`, `idf_version` and a digest-pinned `idf_image` — good
+provenance that still cannot tell apart two builds of the *same commit* with a different
+`sdkconfig`. That is exactly the pair S0-fw-3 spent three sessions separating, and it did
+so by correlating a bundle's `built_at` against `git log` rather than reading it off the
+artifact. Every bundle now carries two more fields.
+
+### The two fields
+
+**`config_sha256`** — `sha256` of the bundle's own copy of `sdkconfig.resolved`, the file
+`make_manifest.py` already copies out of the build directory. A plain hash of the bytes,
+no canonicalisation: the resolved config is a build output, not a document anyone edits.
+
+**`build_digest`** — one id for the whole build, `sha256` over a canonical JSON document
+(`json.dumps(…, sort_keys=True, separators=(",", ":"))`) containing a version tag, the
+provenance fields (`target`, `agent_version`, `idf_version`, `idf_image`, `source_commit`,
+`partition_layout`, `ota_slot_size`), `config_sha256`, and each part's
+`name`/`offset`/`size`/`sha256` **sorted by name** — so the manifest's own part ordering,
+which is by offset for the flasher's benefit, cannot leak into the identity.
+
+`built_at` is excluded on purpose. Two builds of identical inputs must produce the same
+id; a timestamp in the digest would make every rebuild look like a new build, and the
+field would be decoration. See DECISIONS.md, 2026-09-14.
+
+### Where it surfaces
+
+`agent/tools/verify_bundle.py` recomputes both from the bundle on disk and fails on
+mismatch — it imports `build_identity` from its sibling rather than reimplementing the
+serialisation, so writer and verifier cannot drift. `firmware/manifest.py` accepts both as
+optional `Sha256Hex` fields (`MANIFEST_SCHEMA` stays 1: additive and optional means a
+reader has nothing to switch on), `firmware/catalog.py` carries them through,
+`GET /v1/agent/manifest` serves them, and the S0-fe-7 diagnostic bundle prints both in its
+header, at full 64 hex — a truncated prefix invites an argument about whether two bundles
+match, which is the argument the fields exist to end.
+
+### Old bundles warn, malformed bundles drop
+
+A bundle with no `config_sha256` predates this change: it loads, with a WARNING naming the
+target and telling the reader to rebuild. A bundle with a *malformed* digest is dropped,
+because a corrupt digest is one that would be compared and believed. The distinction is
+the whole safety argument, and `tests/test_firmware_catalog.py::TestBuildIdentity` pins
+both halves plus a vacuity guard that a healthy load warns about nothing.
+
+### T2 acceptance evidence (2026-09-14)
+
+A **real two-pass ESP-IDF build**, not a synthesised one. Build A — `just agent-build
+esp32` on a pristine tree — emitted `config_sha256 8c8ae96b…d49a` / `build_digest
+28fd4e0f…6c9c`, and `just agent-verify` printed `(recomputed, matches)`. Build B changed
+one line of `agent/sdkconfig.defaults` (`CONFIG_ESP_MAIN_TASK_STACK_SIZE` 8192 → 9216) and
+built to `/tmp/ff-build-b`, never into `agent/dist`, so the variant image could not be
+flashed: `config_sha256 6346e2a8…8685` / `build_digest 9d583fdf…2c7a`, while
+`source_commit`, `agent_version`, `idf_version`, `idf_image`, `partition_layout` and
+`ota_slot_size` were all identical — the pair the old manifest could not distinguish. The
+resolved `sdkconfig` diff was exactly the two stack-size lines. The edit was reverted and
+`agent/sdkconfig.defaults` is untouched by the commit (CRITICAL path).
+
+Vacuity: tampering with the shipped `sdkconfig.resolved` gives `config_sha256 mismatch`
+exit 1; tampering with the claimed digest gives `build_digest mismatch` exit 1; removing
+both fields gives `build identity: absent (bundle predates S0-infra-3)` exit 0.
+`npx vite-node scripts/emit-bundle.ts` prints `config` and `build id` directly under
+`agent`, with the redaction check still finding none of the planted secrets. A copy of a
+real bundle with both fields stripped loaded with both attributes `None` and the intended
+WARNING.
+
+**Known follow-up:** only `esp32` was rebuilt, so `agent/dist/esp32c3|c6|s3` now warn on
+load. `just agent-build-all` clears it.

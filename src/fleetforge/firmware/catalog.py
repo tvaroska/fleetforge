@@ -93,6 +93,12 @@ class AgentBundle:
     partition_layout: str
     ota_slot_size: int
     flash_size: str
+    # S0-infra-3 build identity; `None` in a bundle built before it. Carried, never
+    # recomputed: `build_digest` is checked against its inputs by `just agent-verify`, at
+    # build time, where a mismatch is actionable. Doing it again per startup would re-read
+    # `sdkconfig.resolved` on a path that exists to hash the parts.
+    config_sha256: str | None
+    build_digest: str | None
     # Absent in bundles built before R0-fw-1. Not verified against a file, because there
     # is none: the blob is written per board at flash time.
     config_partition: ConfigPartition | None
@@ -232,6 +238,18 @@ def _load_bundle(bundle_dir: Path) -> AgentBundle:
             "a board flashed with this image could never be updated"
         )
 
+    # Loaded, not dropped: the bundle is flashable and nothing on the flash path needs
+    # this. What is lost is the ability to answer "which build is on that board?" from a
+    # diagnostic bundle, which is worth one line in the log and not an outage.
+    if manifest.config_sha256 is None:
+        logger.warning(
+            "agent image for target %s carries no build identity (config_sha256): it "
+            "predates S0-infra-3, so a diagnostic bundle from a board flashed with it "
+            "cannot name the build configuration. Rebuild with `just agent-build %s`.",
+            target,
+            target,
+        )
+
     return AgentBundle(
         target=manifest.target,
         chip_family=manifest.chip_family,
@@ -243,6 +261,8 @@ def _load_bundle(bundle_dir: Path) -> AgentBundle:
         partition_layout=manifest.partition_layout,
         ota_slot_size=manifest.ota_slot_size,
         flash_size=manifest.flash_size,
+        config_sha256=manifest.config_sha256,
+        build_digest=manifest.build_digest,
         config_partition=manifest.config_partition,
         parts=tuple(sorted(parts, key=lambda part: part.offset)),
     )

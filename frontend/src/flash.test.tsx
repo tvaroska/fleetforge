@@ -101,6 +101,8 @@ async function manifest(overrides: Partial<AgentManifest['builds'][number]> = {}
         partition_layout: 'ab-4m-v1',
         ota_slot_size: 1966080,
         flash_size: '4MB',
+        config_sha256: 'c0'.repeat(32),
+        build_digest: 'b1'.repeat(32),
         config_partition: { label: 'ff_cfg', offset: CONFIG_OFFSET, size: 4096 },
         parts: await Promise.all(
           Object.entries(PART_BYTES).map(async ([name, bytes]) => ({

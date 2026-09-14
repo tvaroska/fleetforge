@@ -6,6 +6,154 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-14 — `build_digest` covers the inputs, not the clock
+
+S0-infra-3 adds `config_sha256` and `build_digest` to every agent bundle manifest. The
+part worth recording is what goes *into* `build_digest`, because it is the thing a future
+reader will second-guess.
+
+**In:** a version tag (`v: 1`), `target`, `agent_version`, `idf_version`, `idf_image`,
+`source_commit`, `partition_layout`, `ota_slot_size`, `config_sha256`, and each part's
+`name`/`offset`/`size`/`sha256` sorted by name. Canonical JSON
+(`sort_keys=True, separators=(",", ":")`), then sha256.
+
+**Out, and this is the decision: `built_at`.** A build id has to answer *"is the bundle
+on my bench the one you built?"*. A timestamp inside it makes every rebuild of identical
+inputs look like a different build, and the field becomes decoration. Identical inputs →
+identical digest is therefore a property, not an accident, and
+`tests/test_agent_manifest_identity.py` asserts it directly — nothing else would catch a
+regression there. `flash_size` and `chip_family` are out too: both are functions of target
+and config, already covered.
+
+Two smaller calls made with it:
+
+- **One definition, verified rather than duplicated.** `verify_bundle.py` imports
+  `build_identity` from `make_manifest.py` (same directory, `sys.path[0]` resolves it,
+  both stdlib-only so they still run inside the ESP-IDF builder image). A second copy of
+  the canonical serialisation would drift and the drift would present as a false mismatch
+  on a good bundle.
+- **Absent identity warns; malformed identity drops.** A bundle with no `config_sha256` is
+  old, not invalid — dropping it would take the flasher offline for a cosmetic reason. A
+  bundle with a digest that does not match `^[0-9a-f]{64}$` is dropped, because a corrupt
+  digest is one that gets compared and believed. `MANIFEST_SCHEMA` stays 1: both fields are
+  additive and optional, so a reader has nothing to switch on. It bumps when one is made
+  required, which S0-infra-6 may want once every bundle comes from the object store.
+
+Gotcha for the next person who needs an A/B firmware build: pick a config lever that is
+not already set. The planned `CONFIG_ESP_MAIN_TASK_STACK_SIZE=4096` was a no-op waiting to
+happen — the repo already sets it to 8192 — so the verification moved that existing line
+instead. An option set to its current value leaves `sdkconfig.resolved` byte-identical and
+proves nothing.
+
+---
+
+## 2026-09-14 — one storage model for every image: content-addressed blobs, manifests as views, builds as a cache
+
+Asked whether growing image count means moving from fixed artifacts to dynamic build
+with caching. It does not: **prebuilt-and-cached is the steady state and a build is what
+happens on a cache miss.** Onboarding must never wait on a compile — there is always a
+pinned known-good bundle set that needs no builder running. Design in
+[design/artifacts.md](design/artifacts.md); tasks S0-infra-3 … S0-infra-7.
+
+**Extends, does not supersede, `design/decisions/infrastructure-agent-bundles-are-artifacts.md`**
+(2026-09-11). That ADR decided agent bundles move behind `ObjectStore` and rejected a
+baked fallback tier; both hold. This entry says what the storage underneath looks like
+once they get there, and finally files the tasks — the ADR has sat "Accepted, not yet
+implemented" for three days with nothing in `TODO.md` pointing at it.
+
+- **Artifacts are content-addressed**: `fleetforge/blobs/sha256/<hex>`, write-once,
+  `Cache-Control: immutable`. `objectstore.py::put` already documents overwrite-is-safe
+  *because* R1 content-addresses; this makes the key scheme real before R1 writes the
+  first object. Dedup is a side effect that pays for itself immediately — a new agent
+  version changes `app.bin` and nothing else.
+- **Manifests are generated views, not the storage unit.** A manifest for a given
+  (target, layout, version) becomes a query rather than a directory of copied bytes,
+  which is the only thing that makes the coming combinatorics tractable: 4+ targets ×
+  layouts × retained versions, then V2's repo × ref, then V3's delta images, which are
+  indexed by *pairs* of versions and therefore quadratic.
+- **Per-device data stays out of artifact identity.** `ff_cfg` as a separate part is
+  what lets N devices share one artifact, and it is the structural advantage over
+  ESPHome's compile-per-device. Adopted as a standing constraint on future features.
+- **The R9 build-cache key is wrong as specified.** `docs/features/build-pipeline.md`
+  says `(repo, ref, toolchain)`; that omits build configuration, so two builds of the
+  same ref with different `sdkconfig` collide. Corrected to
+  `H(idf_image_digest, target, partition_layout, source_tree_digest, config_digest)`.
+  Source *tree*, not commit — a dirty tree must not hit a stale entry.
+
+**What this came out of, and it is the same lesson as the entry below.** The manifest
+records `agent_version`, `source_commit`, `idf_version` and a digest-pinned `idf_image`,
+and still could not answer "which build produced this failing bundle?" — because it
+carries no digest of the **build configuration**. Establishing that every brownout on
+record came from a 160 MHz `-Og` build took three sessions and a `git log` correlation
+against a timestamp. Provenance that names the inputs but not the configuration is
+provenance that cannot settle an argument. `config_sha256` in the manifest and in the
+`S0-fe-7` diagnostic bundle (S0-infra-3) is a few lines and would have made it a string
+comparison.
+
+Also noted, not yet fixed: `agent_version` (`0.2.0`) and the server release version
+(`v0.3.3`) are two schemes sharing one word in the prose. The wire protocol already
+keeps `fw_version` and `agent_version` apart; the docs should follow it.
+
+---
+
+## 2026-09-14 — the brownout is ours, and the flasher erases the calibration it was written to save
+
+Two corrections, both from one observation. **Supersedes the 2026-09-13 entries
+*"reducing TX power does not break the brownout loop"* and *"the flasher erases `nvs`,
+never the whole chip"*, and the hardware conclusion in S0-fw-3.**
+
+**The observation.** A *brand-new* ESP32 board — same cable, same port that fail under our
+image — was flashed with ESPHome, associated to Wi-Fi and ran. A new board has no cached
+RF calibration, so ESPHome performed the same cold full calibration our image dies in, on
+the same rail, and survived it.
+
+- **The supply carries a cold full calibration.** The 2026-09-13 entry named the
+  discriminating experiment ("flash the stock Arduino sketch with a full chip erase … if
+  it survives, our image draws more than it needs to") and called "the supply is marginal"
+  the best-supported reading. That reading is now falsified, and so is the
+  bulk-capacitance-across-3V3/GND conclusion it pointed at. **The fault is in our image or
+  our build configuration.**
+- **Every brownout on record was produced by a build we no longer ship.** The
+  2026-09-13T14:15 bundle is agent `19b0a0b`, which predates `d705652` (`-Os`, 80 MHz, max
+  modem sleep, TX-power ladder). So all six failing boots ran at **160 MHz with `-Og`**.
+  The entry below concedes 80 MHz was "untested on hardware"; what was not noticed is that
+  it is untested *against the only failure we have*. Retesting costs one flash.
+- **A lead the sdkconfig already contains.** We build with `CONFIG_ESP32_REV_MIN_0=y`
+  (IDF's default). In IDF v5.5 `components/esp_hw_support/port/esp32/Kconfig.hw_support`
+  the rev-0 option carries `select ESP_BROWNOUT_USE_INTR`, justified inline as *"Brownout
+  on Rev 0 is bugged, must use interrupt"* — so our min-revision choice force-enables the
+  interrupt-based detector. If the board is rev 1 or 3 and ESPHome builds for a higher
+  min revision, the two images use **different brownout mechanisms on the same silicon**,
+  which reproduces this symptom with no difference in current draw at all. Unresolved;
+  the revision is in the boot banner of bundles already collected.
+
+**The second correction: the flasher preserves a partition that holds nothing.** The
+2026-09-13 entry below replaced `eraseAll` with a targeted `nvs` wipe in order to keep
+"the `phy_init` partition holding the cached RF calibration". RF calibration is not in
+`phy_init`; it is in **NVS**, under IDF's `phy` namespace — exactly the bytes `nvsWipe`
+fills with 0xFF. With `CONFIG_ESP_PHY_INIT_DATA_IN_PARTITION` unset (our build) the
+`phy_init` partition at `0x11000` is unused entirely, the init data being compiled into
+DROM. The error code in every bundle says so: `0x1102` is `ESP_ERR_NVS_NOT_FOUND`.
+
+So the reasoning in that entry survives intact and the implementation does not: erasing the
+calibration on every flash *is* the mechanism it identified, and the fix aimed at the wrong
+address. **No fleetforge-flashed board can currently retain a calibration.** Filed as
+S0-fw-4; the remedy is to stop wiping from the flasher and let the agent erase
+`FF_STORE_NAMESPACE` when the `ff_cfg` token fingerprint changes, which is the only place
+with namespace granularity. Note this does **not** explain the brand-new board above —
+nothing was cached either way — so the two defects are independent and both are open.
+
+**Method note, worth more than either finding.** Both errors have the same shape: a
+comparison against another toolchain ("a stock sketch runs fine") read as evidence about
+*hardware*, when the toolchains also differed in what they erase and how they are built.
+The comparison is only informative when the other side's configuration is known. The
+mechanical version — diff `agent/dist/<target>/sdkconfig.resolved` against the other
+build's `sdkconfig` — was available the whole time and was never run. Do that before
+theorising about current draw again. Wider ESPHome review, including what is worth reusing:
+`products/docs/esphome-review.md`.
+
+---
+
 ## 2026-09-13 — the agent's power and size posture: 80 MHz, `-Os`, max modem sleep, a TX-power retry ladder
 
 Came out of a review prompted by the observation that the agent image looked large for
