@@ -48,7 +48,13 @@ must be treated as such **from the first commit**, not hardened later:
   pinned *per project* — an unpinned IDF makes builds irreproducible, which destroys
   the provenance guarantee R6 exists to provide.
 - Record the toolchain version in the artifact's provenance alongside repo/commit/tag.
-- Build cache keyed on (repo, ref, toolchain) so re-deploys are instant.
+- Build cache keyed on
+  `H(idf_image_digest, target, partition_layout, source_tree_digest, config_digest)` so
+  re-deploys are instant. **Corrected 2026-09-14** from `(repo, ref, toolchain)`, which
+  omits build configuration: two builds of the same ref with different `sdkconfig` or
+  PlatformIO env produce different bytes and collide on that key. Not hypothetical — it
+  is the shape of the S0-fw-3 confusion. Source *tree*, not commit, so a dirty tree or a
+  config-only change cannot hit a stale entry. See `design/artifacts.md`.
 
 ## Toolchain support
 
@@ -65,7 +71,7 @@ producer of design/architecture.md principle 2). Arduino CLI later, if asked for
 | R9-BE-1 | Repo/ref registration + scoped clone credentials for private repos | P0 | 1.5d |
 | R9-BE-2 | Build job queue + status state machine | P0 | 1.5d |
 | R9-BE-3 | Emit artifact into the R6 upload API with full provenance incl. toolchain version | P0 | 1d |
-| R9-BE-4 | Build cache keyed on (repo, ref, toolchain) | P1 | 1d |
+| R9-BE-4 | Build cache: exact-key hit + warm toolchain tier (ccache / IDF build dir keyed on `(idf_image_digest, target)`) | P1 | 1d |
 | R9-FE-1 | Repo config UI + build list | P0 | 1.5d |
 | R9-FE-2 | Streamed build logs | P0 | 1d |
 | R9-TEST-1 | E2E: register repo → build at a tag → artifact appears, deployable | P0 | 1d |
