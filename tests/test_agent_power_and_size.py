@@ -70,11 +70,18 @@ FORBIDDEN_OPTIONS = [
 # RATCHET THESE when a build measures smaller. The budget is worth exactly the amount by
 # which it is tighter than the last known image, so leaving slack after a win throws the
 # win away.
+#
+# Raised 2026-09-14 (S0-fw-4) to the exact measured byte of the rebuilt bundles. The added
+# code is `ff_store_sync_token` — the agent now decides for itself when to discard its
+# broker credential, because the flasher used to do it by erasing the whole `nvs` partition
+# and taking the cached RF calibration with it. sha256 came for free (mbedtls is already
+# linked by esp-tls); the cost is the function, its three long log strings, and nothing
+# else.
 APP_SIZE_BUDGET_BYTES = {
-    "esp32": 991_776,
-    "esp32s3": 971_168,
-    "esp32c3": 1_026_240,
-    "esp32c6": 1_075_744,
+    "esp32": 993_696,
+    "esp32s3": 973_136,
+    "esp32c3": 1_028_336,
+    "esp32c6": 1_077_840,
 }
 
 # An app may occupy at most this much of an OTA slot. Not a style rule: R2 downloads the

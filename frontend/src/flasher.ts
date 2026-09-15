@@ -25,11 +25,15 @@ export type FlashPart = { label: string; address: number; data: Uint8Array }
 
 export type WriteOptions = {
   /*
-   * There is deliberately no `eraseAll` here any more. Clearing the stored broker
-   * credential is a property of the write PLAN — an explicit `nvs` part, built by
-   * `flash.ts::nvsWipe` — and not of the write call, because a chip-wide erase also
-   * destroys `phy_init` and the cached RF calibration in it. See `nvsWipe` for the board
-   * that cost us. Adding it back here would put a whole-chip erase one boolean away.
+   * There is deliberately no `eraseAll` here, and adding it back would put a whole-chip
+   * erase one boolean away. A chip-wide erase destroys the cached RF calibration, which
+   * lives in NVS under IDF's `phy` namespace — a board that loses it re-runs the cold full
+   * calibration, the largest current draw in startup, on every boot.
+   *
+   * Nothing in the write plan is allowed to touch NVS either: `flash.ts` erases nothing at
+   * all now and asserts it (`assertLeavesNvsAlone`). Clearing the stored broker credential
+   * is the agent's job — `ff_store_sync_token` drops the `ff` namespace when the `ff_cfg`
+   * token changes (S0-fw-4).
    */
   /** esptool-js reports COMPRESSED bytes when `compress: true` — `total` is not `part.size`. */
   onProgress: (partIndex: number, written: number, total: number) => void

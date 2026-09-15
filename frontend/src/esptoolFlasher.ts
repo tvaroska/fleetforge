@@ -72,9 +72,10 @@ class EsptoolFlasher implements BoardFlasher {
       flashSize: 'keep',
       // Never true. `writeFlash` erases the sectors it writes, which is all the erasing
       // this app is allowed to do: `eraseAll` wipes the whole chip, including the cached
-      // RF calibration a board needs to survive its next boot. Clearing NVS is a part in
-      // the plan instead — though that part currently erases the calibration too, because
-      // it lives in `nvs` and not in `phy_init` (S0-fw-4, `flash.ts::nvsWipe`).
+      // RF calibration a board needs to survive its next boot. That calibration is in NVS,
+      // under IDF's `phy` namespace — not in `phy_init`, which our build leaves empty — so
+      // nothing writes into the `nvs` partition any more either (`flash.ts` rule 5).
+      // Clearing the broker credential is the agent's job (S0-fw-4).
       eraseAll: false,
       compress: true,
       reportProgress: options.onProgress,

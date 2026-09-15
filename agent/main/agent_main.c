@@ -128,7 +128,14 @@ static void log_boot_facts(void)
 /* NVS holds the broker credential, so a board that cannot mount it cannot remember an
  * enrollment. Erase-and-retry is the standard IDF recipe for the two recoverable causes
  * (a full page table, a format from a different IDF major); it costs this board its
- * credential and therefore a token, which is why it is logged as loudly as it is. */
+ * credential and therefore a token, which is why it is logged as loudly as it is.
+ *
+ * It costs more than that, and since S0-fw-4 this is the ONLY thing left in the system
+ * that erases NVS wholesale: nvs_flash_erase() takes the whole partition, including IDF's
+ * `phy` namespace and the RF calibration cached in it, so the next boot pays the cold full
+ * calibration. That is the right trade for an NVS that cannot be mounted at all — there is
+ * no other way back — but it must never become the routine path again. Credential
+ * invalidation is ff_store_sync_token()'s job and touches one namespace. */
 static esp_err_t nvs_ready(void)
 {
     esp_err_t err = nvs_flash_init();
@@ -189,6 +196,17 @@ void app_main(void)
         park("no usable ff_cfg partition — re-flash it (agent/tools/ff_cfg.py)");
     }
     ff_cfg_log(&cfg);
+
+    /* S0-fw-4. The flasher no longer erases NVS: the cached RF calibration lives there, in
+     * IDF's `phy` namespace, and erasing it costs every re-flashed board the cold full
+     * calibration on every boot (DECISIONS.md 2026-09-14). Credential invalidation happens
+     * HERE instead, where it can act on one namespace — a token this board has not seen
+     * before means the operator intends it to re-enroll.
+     *
+     * Not fatal, deliberately: the failure is already logged inside ff_store, an NVS fault
+     * is about to be reported far better by ff_store_load() a few lines down, and parking
+     * on it would take a board offline for something that may cost nothing. */
+    (void)ff_store_sync_token(cfg.token);
 
     /* Armed as early as the config allows — but it stays silent until there is both a
      * device_id and a link, so the first stage it can ever produce is `link_up`. On an

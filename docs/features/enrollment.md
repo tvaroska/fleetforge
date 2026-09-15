@@ -330,6 +330,9 @@ deliberately split.
 `agent/dist/esp32` bundle in the QEMU that comes inside the pinned ESP-IDF image, on the
 emulated OpenCores NIC, against the local stack. First boot: `ff_cfg v1 loaded (crc ok)`
 → `device_id` → `eth link up, ip 10.0.2.15` → `sntp: 1970-01-01T00:00:02Z → 2026-09-10…`
+→ `recording the ff_cfg enrollment token as <fp>; nothing was stored to invalidate`
+(S0-fw-4; on a board that has enrolled before under a *different* token this is instead the
+loud `the ff_cfg enrollment token has changed (… -> …): erasing the stored credential`)
 → `enroll 200` → `credential stored in NVS` → MQTT connect, `subscribe …/dn/#`, retained
 `announce` + `presence`, `hb` every 10 s (not retained). Server side: `"online": true`
 with `partition_layout "ab-4m-v1"` and `ota_slot_size 1966080`, the token flipped to
@@ -430,9 +433,19 @@ length of one call — not React state, not the log panel, not the DOM, and this
 touches neither `localStorage` nor `sessionStorage` at all. Same rule as R0-fe-1, extended
 to the Wi-Fi passphrase, and `flash.test.tsx` asserts all four places for both secrets.
 
-**Erase is on by default.** A board that already enrolled keeps its broker credential in
-NVS and reuses it (R0-fw-1 logs "reusing the stored credential"), so a fresh token baked
-into a re-flashed board would simply never be spent and the board would never re-register.
+**The flasher erases nothing, and the board invalidates its own credential** (S0-fw-4).
+A board that already enrolled keeps its broker credential in NVS and reuses it (R0-fw-1
+logs "reusing the stored credential"), so a fresh token baked into a re-flashed board has
+to be made to matter somehow. It used to be the flasher's job — a part in the write plan
+that filled the whole `nvs` partition with 0xFF — and that was the wrong place: NVS is
+also where IDF caches the RF calibration, in its `phy` namespace, so every flash cost the
+board the cold full calibration on every subsequent boot. The flasher writes raw bytes and
+cannot act on one namespace; the agent can. `ff_store_sync_token()` now compares a
+fingerprint of the `ff_cfg` token against the one stored beside the credential and erases
+the `ff` namespace — only that namespace — when they differ. The flasher mints a fresh
+token on every flash, so the operator-visible behaviour is unchanged; there is no checkbox
+any more, and boards re-flashed in the field with `agent/tools/ff_cfg.py`, which a browser
+flasher never reaches, are covered too.
 
 **The form validates as it is typed**, running the same `buildFfCfgFields` +
 `validateFfCfg` pair the engine runs first, and the Flash button is dead until it passes.
@@ -824,7 +837,8 @@ board**) described to an operator who is not expected to know what a token is.
 it as one button inside the fault box. There are exactly two remedies, because the panel's
 only channel to the board is the serial port: `reboot` (pulse EN through the console
 session) and `reflash` (release the port, re-acquire it with esptool, mint a fresh
-single-use token, write `ff_cfg` + the agent, erase NVS). "Retry enrol" and "mint a fresh
+single-use token, write `ff_cfg` + the agent — and since S0-fw-4 it erases nothing: the
+fresh token is what makes the board discard its credential, on its own, at next boot). "Retry enrol" and "mint a fresh
 token" from the task text are not separate mechanisms — the agent exposes no serial command
 surface, and a token that is not written into `ff_cfg` changes nothing — so both collapse
 into `reflash`. `useFlashBoard` grew a `reflash(request)` that chains `connect()` into the
@@ -838,10 +852,14 @@ existing `flash()`, inheriting its mint-last and revoke-on-failure discipline un
   (60 s → 15 min for a 503, forever for the link), so a button that restarts a retry
   already in progress is a button that cannot work. Brownout, wrong PSK, blocked NTP and
   DHCP silence therefore render *no* button — the acceptance's second half.
-- **The recovery re-flash always erases, regardless of the form's checkbox.** A board that
-  already enrolled keeps its broker credential in NVS and reuses it, so a freshly minted
-  token written beside it is dead on arrival — and the operator would press the button and
-  see the identical fault, the worst possible outcome for this feature.
+- **The recovery re-flash always mints a fresh token.** A board that already enrolled keeps
+  its broker credential in NVS and reuses it, so a token written beside it that the board
+  has seen before is dead on arrival — and the operator would press the button and see the
+  identical fault, the worst possible outcome for this feature. It used to force an NVS
+  erase for this reason; S0-fw-4 moved the erase into the agent, which does it per
+  namespace, so the fresh token alone is now sufficient *and* the board keeps its cached RF
+  calibration — which matters most on exactly this path, where the board is already
+  misbehaving. The form's checkbox is gone; there is nothing left to override.
 - **`halted:` became a *generic* hint, correcting the plan's table.** `park()` logs its
   reason strictly after the failure it reports, so on the flagship case the halted line was
   replacing "this token is single-use, flash the board again" with the engineer-facing

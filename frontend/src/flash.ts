@@ -18,6 +18,13 @@
 //    orphan credential nobody is tracking. The plaintext lives in a local variable for the
 //    length of one call — never in React state, never in the log, never in the DOM.
 // 4. **The port is always released.** `close()` in a `finally`, whatever happened.
+// 5. **The flasher erases nothing.** `writeFlash` erases the sectors it writes and not one
+//    byte more. NVS is off limits: the cached RF calibration lives there, in IDF's `phy`
+//    namespace, and a board that loses it re-runs the cold full calibration — the largest
+//    current draw in startup — on every boot. Clearing the stored broker credential is the
+//    AGENT's job: `ff_store_sync_token` erases the `ff` namespace when the `ff_cfg` token
+//    changes, which this flasher guarantees on every flash because it mints a fresh one
+//    (rule 3). `assertLeavesNvsAlone` below is the guard. S0-fw-4; `agent/main/ff_store.c`.
 
 import { useCallback, useRef, useState } from 'react'
 import {
@@ -49,14 +56,6 @@ export type FlashProgress = {
 
 export type FlashRequest = {
   config: FlashConfigInput
-  /**
-   * Clear the stored broker credential. Named for what it does now: it erases the `nvs`
-   * partition only, and deliberately NOT `phy_init`. That distinction turns out to be
-   * worthless — the RF calibration lives in `nvs`, not `phy_init` (S0-fw-4). See `nvsWipe`.
-   * It was `eraseAll` until 2026-09-13, when erasing the whole chip turned out to be the
-   * reason a marginal board can never cache its RF calibration.
-   */
-  wipeNvs: boolean
   baudRate: number
 }
 
@@ -142,7 +141,6 @@ export function planWrite(
   build: AgentBuildInfo,
   downloaded: Map<string, Uint8Array>,
   config: Uint8Array,
-  wipeNvs: boolean,
 ): FlashPart[] {
   if (build.config_partition === null) {
     throw new Error('planWrite called for a bundle with no config partition')
@@ -159,60 +157,51 @@ export function planWrite(
     address: build.config_partition.offset,
     data: config,
   })
-  if (wipeNvs) {
-    parts.push(nvsWipe(build, downloaded))
-  }
+  assertLeavesNvsAlone(parts, downloaded)
   return parts.sort((a, b) => a.address - b.address)
 }
 
+/** esptool erases in 4 KB sectors, so a write is only as precise as a sector boundary. */
+const FLASH_SECTOR_SIZE = 0x1000
+
 /**
- * A part that erases `nvs` and nothing else.
+ * Refuse any plan that would write into `nvs`. S0-fw-4, and it is a guard, not a
+ * formality: the whole defect this replaces was a write aimed at this partition, and the
+ * cost of it landing again is a fleet that can never cache an RF calibration — the
+ * calibration is in NVS, in IDF's `phy` namespace, not in `phy_init` (which our build
+ * leaves empty). Clearing the broker credential is `ff_store_sync_token`'s job now.
  *
- * !! WRONG AS WRITTEN — see S0-fw-4 and DECISIONS.md 2026-09-14. The RF calibration is
- * !! NOT in `phy_init`; it is in NVS under IDF's `phy` namespace, i.e. inside exactly the
- * !! bytes this function erases. `CONFIG_ESP_PHY_INIT_DATA_IN_PARTITION` is unset in our
- * !! build, so `phy_init` holds nothing at all. This wipe therefore still destroys the
- * !! calibration on every flash — the failure described below, at a different address.
- * !! Left in place until S0-fw-4 moves credential invalidation into the agent, which is
- * !! the only place with per-namespace granularity. The reasoning below is sound; the
- * !! address it acts on is not.
- *
- * This replaces esptool-js's `eraseAll`, and the difference is the whole point. Until
- * 2026-09-13 every flash erased the entire chip, which also destroyed the `phy_init`
- * partition where the RF calibration is cached. That calibration is only ever written
- * after a boot survives the full calibration — the single largest current draw in
- * startup — so erasing it means every freshly flashed board must re-earn it, every time,
- * forever. A board whose 3.3 V rail cannot carry that draw can then never bootstrap out
- * of the resulting brownout loop, because the one thing that would save it is deleted on
- * each attempt (S0-fw-3). Arduino's uploader does not do this, which is why the same
- * board runs a stock sketch and not our image: the sketch inherits a calibration it never
- * has to re-earn.
- *
- * We still must clear `nvs`: a board that already enrolled keeps its broker credential
- * there and reuses it (R0-fw-1 logs "reusing the stored credential"), so the freshly
- * minted token baked into `ff_cfg` would never be spent. Writing 0xFF over the partition
- * is exactly an erase — esptool-js erases the sectors it writes, and NVS reads an erased
- * sector as empty. It costs nothing on the wire either: `compress: true` reduces a run of
- * 0xFF to a few hundred bytes.
- *
- * esptool-js 0.6.1 has no `eraseRegion`, or this would be one call instead of a part.
+ * Ranges are rounded out to 4 KB sectors because that is the granularity esptool erases
+ * at: a part whose tail shares a sector with `nvs`'s first sector still erases it.
+ * The offset is READ from the table being written, never a constant — `nvs` is at 0x9000
+ * under `ab-4m-v1` and need not be under the next layout. A table with no `nvs` entry is
+ * not this guard's business, so it passes.
  */
-function nvsWipe(build: AgentBuildInfo, downloaded: Map<string, Uint8Array>): FlashPart {
+function assertLeavesNvsAlone(parts: FlashPart[], downloaded: Map<string, Uint8Array>): void {
   const table = downloaded.get('partition-table')
   if (table === undefined) {
     throw new Error('the partition-table image was not downloaded')
   }
-  // Read from the table being written to this board rather than a constant: `nvs` is at
-  // 0x9000 under `ab-4m-v1` and need not be under the next layout, and a wipe aimed at the
-  // wrong offset is worse than no wipe.
   const nvs = findPartition(parsePartitionTable(table), 'nvs')
-  if (nvs === null) {
-    throw new Error(
-      `the ${build.partition_layout} partition table has no nvs partition, so a stored ` +
-        'broker credential cannot be cleared',
-    )
+  if (nvs === null) return
+
+  const floor = (value: number): number => Math.floor(value / FLASH_SECTOR_SIZE) * FLASH_SECTOR_SIZE
+  const ceil = (value: number): number => Math.ceil(value / FLASH_SECTOR_SIZE) * FLASH_SECTOR_SIZE
+  const nvsStart = floor(nvs.offset)
+  const nvsEnd = ceil(nvs.offset + nvs.size)
+
+  for (const part of parts) {
+    const start = floor(part.address)
+    const end = ceil(part.address + part.data.length)
+    if (start < nvsEnd && nvsStart < end) {
+      throw new Error(
+        `the write plan puts '${part.label}' at 0x${part.address.toString(16)} inside the nvs ` +
+          `partition (0x${nvs.offset.toString(16)}, ${nvs.size} bytes). Nothing was written: ` +
+          'erasing nvs destroys the cached RF calibration, and clearing the broker credential ' +
+          'is the agent’s job (S0-fw-4).',
+      )
+    }
   }
-  return { label: 'nvs (erase)', address: nvs.offset, data: new Uint8Array(nvs.size).fill(0xff) }
 }
 
 /** Lowercase hex sha256, to compare against the manifest's. */
@@ -440,9 +429,9 @@ export function useFlashBoard({
         minted = true
 
         const config = encodeFfCfg({ ...fields, token: issued.token })
-        const plan = planWrite(selected, downloaded, config, request.wipeNvs)
+        const plan = planWrite(selected, downloaded, config)
 
-        setStep(request.wipeNvs ? 'Erasing and writing…' : 'Writing…')
+        setStep('Writing…')
         await flasher.write(plan, {
           onProgress: (partIndex, written, total) => {
             setProgress({

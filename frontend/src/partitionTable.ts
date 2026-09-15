@@ -1,14 +1,16 @@
 // Reads the ESP-IDF partition table binary that every flash already downloads.
 //
-// Exists for one reason: the flasher needs to erase a named partition rather than a
-// hardcoded address, and the only honest source for where it lives is the table being
-// written to the board in the same operation. Hardcoding 0x9000 would be right for
-// `ab-4m-v1` today and silently wrong for the next layout — and "silently wrong" here
-// means erasing the wrong 24 KB.
+// Exists for one reason: so the flasher can *prove* it is not writing into `nvs`
+// (`flash.ts::assertLeavesNvsAlone`). The only honest source for where a named partition
+// lives is the table being written to the board in the same operation. Hardcoding 0x9000
+// would be right for `ab-4m-v1` today and silently wrong for the next layout — and
+// "silently wrong" here means guarding the wrong 24 KB.
 //
 // This originally read "wipe `nvs` without touching `phy_init`". That goal was misconceived
 // — the RF calibration is in `nvs` too, and `phy_init` is unused in our build (S0-fw-4).
-// The lookup-by-label is still right; only its stated purpose was wrong.
+// The lookup-by-label is still right; only its stated purpose was wrong, and the purpose is
+// now the inverse: nothing in a write plan may land in `nvs`, because the agent, not the
+// flasher, clears the stored credential.
 //
 // Format (ESP-IDF `partition_table/gen_esp32part.py`): a run of 32-byte little-endian
 // entries at 0x8000. Each is magic 0xAA50, type, subtype, offset, size, a 16-byte

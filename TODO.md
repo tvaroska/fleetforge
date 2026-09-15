@@ -240,12 +240,13 @@ Bricking risks, broker auth and security issues get filed here as they surface.
          banner of the bundles already collected.
       One survived calibration ends the loop permanently for that board — the result is
       cached in NVS — so any of these succeeding once is a pass, and the acceptance
-      criterion (recovery visible on the dashboard) is reachable from any of them. Note
-      that S0-fw-4 must land too, or the next reflash throws that result away.
+      criterion (recovery visible on the dashboard) is reachable from any of them. S0-fw-4
+      has landed, so that result is now durable: the flasher erases nothing and a reflash
+      no longer throws a survived calibration away.
       _(attempted 2026-09-12; negative result recorded 2026-09-13; second lever staged
       2026-09-13; hardware cause ruled out 2026-09-14, awaiting bench)_
 
-- [ ] **S0-fw-4**: The flasher erases the cached RF calibration on every flash (P1, 0.5d)
+- [x] **S0-fw-4**: The flasher erases the cached RF calibration on every flash (P1, 0.5d)
       Found 2026-09-14 while checking S0-fw-3. The 2026-09-13 change that replaced
       esptool-js's `eraseAll` with a targeted wipe **preserved the wrong partition.**
       `flash.ts::nvsWipe` states the premise it was built on — *"destroyed the `phy_init`
@@ -285,6 +286,22 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       `esp_phy_load_cal_data_from_nvs` after a reflash (no `0x1102`), while a reflash
       carrying a *new* enrolment token still spends that token rather than reusing the
       stored credential. Both halves tested — the second is what `nvsWipe` existed for.
+      _(done 2026-09-14; reviewed; see docs/features/enrollment.md and
+      docs/runbooks/agent-qemu.md. `nvsWipe`/`wipeNvs`/the checkbox are gone;
+      `planWrite` now asserts no part lands in `nvs` (`assertLeavesNvsAlone`, sector-rounded,
+      offset read from the downloaded table) and a new test doctors a build so `ff_cfg`
+      lands at 0x9000 and proves it throws. Device side: `ff_store_sync_token()` in
+      `agent/main/ff_store.{c,h}`, called from `agent_main.c` after `ff_cfg_log`, stores
+      `tok_fp` = first 8 bytes of sha256(token) as hex and erases ONLY the `ff` namespace
+      when it differs; absent ⇒ adopt, never erase (an OTA at R2 would otherwise brick the
+      fleet); tokenless config ⇒ no-op. T1: frontend typecheck + 203 vitest, ruff + mypy +
+      650 pytest, `just agent-build esp32` clean under -Werror, `agent-verify` OK, all four
+      size budgets ratcheted to measured bytes. T2 in QEMU against `just up`: boot 1 adopt +
+      `enroll 200`; boot 2 same token → `reusing the stored credential`, no HTTP; boot 3 after
+      `just agent-qemu-recfg` with a new token → loud erase line, `enroll 200`, MQTT online,
+      both tokens `used` in the DB; `nvs_tool.py` still shows `phy/cal_data =
+      ff-s0-fw-4-canary` beside the new credential. Bench confirmation on real hardware still
+      owed, jointly with S0-fw-3.)_
 
 - [x] **S0-infra-4**: Freeze the content-addressed key scheme before R1 writes an object (P1, 0.5d)
       Filed 2026-09-14. `storage/objectstore.py::put` already justifies overwrite-is-safe

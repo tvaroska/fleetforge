@@ -6,6 +6,87 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-14 — the agent invalidates its own credential; the flasher erases nothing (S0-fw-4)
+
+**Completes** the 2026-09-14 correction entry *"the brownout is ours, and the flasher erases
+the calibration it was written to save"*, which diagnosed the defect and named this remedy.
+**Supersedes the implementation half** of 2026-09-13 *"the flasher erases `nvs`, never the
+whole chip"*: the reasoning in that entry stands unchanged — a chip-wide erase destroys the
+cached RF calibration, and whether to clear credentials is a property of the write plan and
+never a boolean on the write call — but the address it acted on was wrong. RF calibration is
+in NVS, in IDF's `phy` namespace, not in the `phy_init` partition (which our build leaves
+empty: `CONFIG_ESP_PHY_INIT_DATA_IN_PARTITION` is unset, the data is compiled into DROM). The
+targeted wipe therefore destroyed exactly what it was written to save, on every flash, for
+every board, forever.
+
+After this task it is a property of neither. **The flasher erases nothing at all.**
+`frontend/src/flash.ts::nvsWipe` is gone, the `wipeNvs` option and its checkbox are gone, and
+`planWrite` now *asserts* that no part lands in `nvs` (`assertLeavesNvsAlone`, ranges rounded
+out to the 4 KB sectors esptool actually erases, offset read from the table being written).
+That guard is why `partitionTable.ts` survives with no wipe to aim: its purpose inverted from
+"find `nvs`" to "prove we are not in it", and the new test that doctors a build so a part
+lands at 0x9000 is the test that would have caught the original bug.
+
+**Credential invalidation moved into the agent, because only the agent can act on one
+namespace.** `ff_store_sync_token()` (`agent/main/ff_store.c`, called from `agent_main.c`
+right after `ff_cfg_log`) erases `FF_STORE_NAMESPACE` — `ff`, and nothing else — when the
+enrollment token in `ff_cfg` is not the one the stored credential was issued against. `phy`
+survives. As a bonus it also covers boards re-flashed in the field with
+`agent/tools/ff_cfg.py`, which a browser flasher never reaches.
+
+**A digest, not the token.** The stored key is `tok_fp`: the first 8 bytes of
+`sha256(cfg.token)` as 16 lowercase hex characters. The token is already in flash in `ff_cfg`
+— it stays there after enrollment and nothing blanks it, which is the property the whole
+design rests on — so storing it again is not a new exposure *in principle*, but **a digest is
+loggable and a live single-use fleet-join credential is not**, and every diagnostic line in
+this change wants to name the thing that changed. sha256 via `mbedtls` (already a REQUIRES,
+already linked by esp-tls, so ~0 bytes) rather than a CRC, which would have saved nothing and
+invited the question. 16 characters is inside NVS's string limits; `tok_fp` is inside its
+15-character key limit.
+
+**The four cases:**
+
+| `cfg.token` | stored `tok_fp` | action |
+|---|---|---|
+| `""` / NULL | anything | nothing. A tokenless config — the QEMU smoke build, a diagnostic flash — must never cost a board its credential. Same refusal `ff_store_matches_api_base` already makes for a hostname change. |
+| `T` | `== fp(T)` | nothing. The common case, every boot of a settled board. |
+| `T` | `!= fp(T)`, or unreadable | `nvs_erase_all` → write `fp(T)` → one `nvs_commit`, in that order on one handle. Erase first because `nvs_erase_all` takes `tok_fp` with it; one commit makes the pair atomic, so a power cut leaves the board as it was and the next boot retries. A fingerprint we cannot compare is not proof the credential belongs to this token. |
+| `T` | absent | **adopt: write `fp(T)`, erase nothing.** |
+
+**Why absent ⇒ adopt and not erase — the decision a future reader will second-guess.**
+"Absent fingerprint means this board predates the mechanism, so clear it to be safe" is a
+landmine. At R2 an OTA replaces the agent *without* writing a new `ff_cfg`; the first post-OTA
+boot of every board in the fleet would find no fingerprint, erase its credential, and try to
+re-enrol with the long-spent token still sitting in `ff_cfg` → 409 → `park()`. That is a
+fleet-wide brick delivered by an update. The migration cost of adopting instead is one extra
+flash for the handful of boards enrolled before today, and the log says so in those words.
+`nvs_open(NVS_READWRITE)` creating the namespace is likewise intended and safe: `ff_store_load`
+probes `mqtt_pass`, not the namespace, so a namespace holding only `tok_fp` still reports
+"nothing stored, enroll".
+
+**One wholesale eraser remains, deliberately:** `agent_main.c::nvs_ready()`'s recovery path
+still calls `nvs_flash_erase()` on an NVS that cannot be mounted (`NO_FREE_PAGES`,
+`NEW_VERSION_FOUND`). That takes the calibration too, and it stays — there is no other way
+back from an unmountable NVS — but its comment now says out loud that it is the last one.
+
+**T2, without a bench.** QEMU has no radio and so never writes a `phy` namespace of its own;
+seeding one with a canary before the first boot makes the calibration half provable anyway.
+Three boots against `just up`: enrol → same token, `reusing the stored credential`, no HTTP
+at all → new token written with the new `just agent-qemu-recfg` (writes `ff_cfg` into an
+existing image at the manifest offset, NVS untouched; `--fresh` was the only previous option
+and it is the opposite of this test), loud erase, `enroll 200`, both tokens `used` on the
+server, device `online`. `nvs_tool.py` then still shows `phy/cal_data = ff-s0-fw-4-canary`
+beside the *new* credential. Bench confirmation on real hardware is still owed, jointly with
+S0-fw-3.
+
+**Size:** `APP_SIZE_BUDGET_BYTES` ratcheted to the measured byte of a rebuild of all four
+targets — esp32 991,776 → 993,696, esp32s3 971,168 → 973,136, esp32c3 1,026,240 → 1,028,336,
+esp32c6 1,075,744 → 1,077,840 — for the new function and its three log strings. All four
+bundles were rebuilt so `agent-check-fresh` stays green. Nothing on the wire changed, so
+`spec/` was not edited —
+enrolment is the same endpoint, the same payloads and the same single-use rule, and *when* a
+device decides to re-enrol has always been device-local and unspecified.
+
 ## 2026-09-14 — the firmware catalog is keyed on (target, partition_layout) (S0-infra-7)
 
 `firmware/catalog.py` now indexes bundles by `(target, partition_layout)` rather than

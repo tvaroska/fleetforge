@@ -156,6 +156,69 @@ A re-enroll inside the server's 600 s grace window succeeds with the *same* toke
 window exists so a board that crashed after enrolling can retry). Later than that, the
 already-used token is refused with a 409 and the log names *used, revoked or expired*.
 
+**`--fresh` is not how a board is made to re-enrol any more** (S0-fw-4). It throws the
+whole image away, credential *and* the cached RF calibration in IDF's `phy` namespace —
+which is the very thing the flasher used to do on every flash and no longer does. What
+clears the credential now is a **new enrollment token**: `ff_store_sync_token()` compares a
+fingerprint of the `ff_cfg` token against the one stored beside the credential and erases
+the `ff` namespace, and only that namespace, when they differ. So `--fresh` is the "brand
+new board" button, and the section below is the "re-flashed board" one.
+
+## Re-flash ff_cfg without erasing NVS
+
+`just agent-qemu-recfg <target>` writes `.qemu/ff_cfg.bin` into an **existing** flash image
+at the offset the bundle manifest declares, leaving NVS alone. It is the emulator's
+equivalent of re-flashing a board's config in the field, and it is the only way to exercise
+the S0-fw-4 path: a board holding a live credential, handed a token it has not seen.
+
+```bash
+just agent-qemu-stop esp32        # QEMU writes the image back on exit; it must not be running
+FFE2=$(curl -sS -X POST "$BASE/v1/enrollment-tokens" -H "Authorization: Bearer $TOKEN" \
+       -H 'content-type: application/json' -d '{}' | jq -r .token)
+just agent-cfg --api-base http://10.0.2.2:8080 --mqtt-uri mqtt://10.0.2.2:8883 \
+      --link ethernet --hb 10 --token "$FFE2"
+just agent-qemu-recfg esp32       # wrote ff_cfg at 0x12000 — NVS untouched
+just agent-qemu esp32
+#   W ff-store: the ff_cfg enrollment token has changed (7e8c7d9ba055eb70 -> 264ea1ed45b0b379):
+#               erasing the stored credential so this board re-enrolls. ONLY the 'ff'
+#               namespace is erased — the cached RF calibration lives in the 'phy' namespace …
+#   I ff-enroll: enroll 200 http://10.0.2.2:8080/v1/enroll
+#   I ff-store: credential stored in NVS
+```
+
+Boot it a second time with the *same* config and the fingerprint matches: `reusing the
+stored credential (no enrollment)`, no HTTP request, no token spent.
+
+**To prove the calibration survives**, seed a `phy` namespace before the first boot — QEMU
+has no radio, so the board never writes one itself — and read it back afterwards. Use IDF's
+own tools; do **not** `grep`/`strings` the region, because NVS marks entries erased in a
+state bitmap and leaves the key bytes in flash until compaction, so a hit proves nothing.
+
+```bash
+printf 'key,type,encoding,value\nphy,namespace,,\ncal_data,data,string,ff-s0-fw-4-canary\n' \
+    > .qemu/phy.csv
+# Build the image WITHOUT booting, then generate a 24 KB nvs image carrying the canary.
+docker run --rm -u $(id -u):$(id -g) -v "$PWD/.qemu:/q" -v "$PWD/agent/tools:/t:ro" \
+  -v "$PWD/agent/dist/esp32:/d:ro" --entrypoint bash <the pinned idf_image> -c '
+    . $IDF_PATH/export.sh >/dev/null 2>&1
+    python3 /t/qemu_image.py flash --bundle /d --config /q/ff_cfg.bin --out /q/flash-esp32.bin
+    python3 $IDF_PATH/components/nvs_flash/nvs_partition_generator/nvs_partition_gen.py \
+        generate /q/phy.csv /q/phy.bin 0x6000'
+# nvs is at 0x9000, size 0x6000 -> 6 sectors of 4096 from sector 9. Both numbers are
+# `ab-4m-v1` values, not universal ones: check them against `just agent-verify esp32`.
+dd if=.qemu/phy.bin of=.qemu/flash-esp32.bin bs=4096 seek=9 count=6 conv=notrunc status=none
+
+# … boot, re-cfg with a new token, boot again … then read the region back:
+dd if=.qemu/flash-esp32.bin of=.qemu/nvs.bin bs=4096 skip=9 count=6 status=none
+docker run --rm -u $(id -u):$(id -g) -v "$PWD/.qemu:/q" --entrypoint bash <the pinned idf_image> -c \
+  '. $IDF_PATH/export.sh >/dev/null 2>&1 \
+   && python3 $IDF_PATH/components/nvs_flash/nvs_partition_tool/nvs_tool.py /q/nvs.bin -d written'
+```
+
+The dump must still list namespace `phy` with `cal_data = ff-s0-fw-4-canary`, alongside the
+`ff` namespace's *new* `tok_fp` and credential. That is S0-fw-4 demonstrated: the board
+erased its own credential and kept its calibration.
+
 ## Proving the clock rule
 
 `spec/device-protocol.md` → *Clock — SNTP before TLS* only means something because the

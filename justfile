@@ -510,6 +510,41 @@ agent-qemu-stop target="esp32":
     @docker kill "ff-qemu-{{ target }}" >/dev/null 2>&1 && echo "stopped ff-qemu-{{ target }}" \
         || echo "no ff-qemu-{{ target }} running"
 
+# Write .qemu/ff_cfg.bin into an EXISTING flash image, leaving NVS alone — the emulator's
+# equivalent of re-flashing a board's config in the field (S0-fw-4). `--fresh` is the
+# opposite: it throws the board's memory away, credential and cached RF calibration alike,
+# so it cannot be used to test the thing that matters here — that a board holding a live
+# credential discards it when, and only when, the enrollment token in ff_cfg changes.
+#
+# The offset comes from the bundle manifest, never from a constant (agent/tools/qemu_image.py
+# states the rule), and the alignment it needs is asserted rather than assumed: `dd` seeks in
+# whole blocks, so an ff_cfg partition that did not start on a multiple of its own size would
+# be written to the wrong address. 0x12000 / 0x1000 holds under `ab-4m-v1`.
+agent-qemu-recfg target="esp32":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    img=".qemu/flash-{{ target }}.bin"
+    test -f "$img" || {
+        echo "no $img — boot it once with: just agent-qemu {{ target }}"; exit 1; }
+    test -f .qemu/ff_cfg.bin || {
+        echo "no .qemu/ff_cfg.bin — run: just agent-cfg --api-base … --mqtt-uri … --token …"
+        exit 1; }
+    if [ -n "$(docker ps -q --filter name='^ff-qemu-{{ target }}$')" ]; then
+        echo "a {{ target }} board is RUNNING and QEMU writes this image back on exit,"
+        echo "so anything written now would be overwritten. Stop it first:"
+        echo "  just agent-qemu-stop {{ target }}"
+        exit 1
+    fi
+    read -r off size < <(python3 -c "import json;m=json.load(open('agent/dist/{{ target }}/manifest.json'))['config_partition'];print(m['offset'], m['size'])")
+    if [ $((off % size)) -ne 0 ]; then
+        echo "ff_cfg is at $(printf 0x%x "$off"), not a multiple of its $size-byte size —"
+        echo "dd cannot seek to it in whole blocks. Widen this recipe before using it."
+        exit 1
+    fi
+    dd if=.qemu/ff_cfg.bin of="$img" bs="$size" seek=$((off / size)) count=1 \
+        conv=notrunc status=none
+    echo "wrote ff_cfg at $(printf 0x%x "$off") — NVS untouched"
+
 # Is the harness alive? One command, no enrollment token, no running stack, no board.
 #
 # This exists because S0-infra-1 — "the emulator boot-loops" — cost a decoded backtrace

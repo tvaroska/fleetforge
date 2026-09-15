@@ -14,7 +14,8 @@ import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { FlashBoard } from './FlashBoard'
-import type { AgentManifest } from './api'
+import { planWrite } from './flash'
+import type { AgentBuildInfo, AgentManifest } from './api'
 import type { BoardConsole, ConsoleFactory } from './boardConsole'
 import type { BoardFlasher, ChipInfo, FlashPart, WriteOptions } from './flasher'
 
@@ -35,10 +36,11 @@ const NVS_SIZE = 0x6000
 /**
  * A real ESP-IDF partition table, not filler bytes.
  *
- * It has to be real now: the NVS wipe reads `nvs`'s offset and size out of the table being
- * written rather than from a constant, so a fixture of 0x3c bytes would have the engine
- * refuse the flash. Laid out like `ab-4m-v1` — and `phy_init` is in it specifically so the
- * "we do not touch it" assertion has something to be about.
+ * It has to be real: `planWrite`'s guard reads `nvs`'s offset and size out of the table
+ * being written rather than from a constant, so a fixture of 0x3c bytes would have the
+ * engine refuse the flash. Laid out like `ab-4m-v1` — `nvs` is in it so the guard has a
+ * range to defend, and `phy_init` so the "we do not touch it" assertion has something to
+ * be about.
  */
 function partitionTable(): Uint8Array {
   const rows: Array<[string, number, number, number, number]> = [
@@ -301,39 +303,61 @@ describe('FlashBoard — the write plan', () => {
 
     await waitFor(() => expect(flasher.writes).toHaveLength(1))
     const plan = flasher.writes[0]
-    expect(plan.map((part) => part.address)).toEqual([
-      0x1000,
-      0x8000,
-      NVS_OFFSET,
-      CONFIG_OFFSET,
-      0x20000,
-    ])
+    expect(plan.map((part) => part.address)).toEqual([0x1000, 0x8000, CONFIG_OFFSET, 0x20000])
     expect(plan.map((part) => part.label)).toEqual([
       'bootloader',
       'partition-table',
-      'nvs (erase)',
       'ff_cfg',
       'app',
     ])
     const config = plan.find((part) => part.address === CONFIG_OFFSET)
     expect(config?.data.length).toBe(4096)
     expect(String.fromCharCode(...config!.data.slice(0, 4))).toBe('FFCF')
-    // Erasing NVS is on by default: a live broker credential there makes a fresh token
-    // dead on arrival. It is done by writing 0xFF over exactly that partition, at the
-    // offset and size read from the table above rather than from a constant.
-    const nvs = plan.find((part) => part.label === 'nvs (erase)')!
-    expect(nvs.data.length).toBe(NVS_SIZE)
-    expect(nvs.data.every((byte) => byte === 0xff)).toBe(true)
 
-    // The regression this replaced a whole-chip erase to prevent: `phy_init` (0x11000) is
-    // NOT in the plan, so the cached RF calibration survives the flash. Erasing it forces
-    // the full calibration on the next boot — the biggest current draw in startup — and a
-    // board with a marginal 3.3 V rail then browns out and can never cache it, because
-    // the next flash erases it again (S0-fw-3). Arduino's uploader does not do this, which
-    // is the whole reason a stock sketch ran on a board our image could not.
+    // The flasher erases NOTHING (S0-fw-4). NVS is where the cached RF calibration lives,
+    // in IDF's `phy` namespace — a write aimed there costs every flashed board the cold
+    // full calibration, the biggest current draw in startup, on every boot forever, and a
+    // board with a marginal 3.3 V rail then browns out and can never cache it (S0-fw-3).
+    // Clearing the stored broker credential is the agent's job now: it drops the `ff`
+    // namespace when the `ff_cfg` token changes, and this flasher mints a fresh token on
+    // every flash.
+    expect(plan.map((part) => part.address)).not.toContain(NVS_OFFSET)
+    expect(plan.map((part) => part.label).filter((label) => /nvs/.test(label))).toEqual([])
+
+    // `phy_init` (0x11000) is not in the plan either. It holds nothing in our build —
+    // `CONFIG_ESP_PHY_INIT_DATA_IN_PARTITION` is unset — but the assertion stays: a plan
+    // that grew a part there would be writing bytes no one had decided to write.
     expect(plan.map((part) => part.address)).not.toContain(0x11000)
     expect(flasher.finishes).toBe(1)
     expect(flasher.closes).toBeGreaterThan(0)
+  })
+
+  it('refuses a plan that would write into nvs, naming the offending part', async () => {
+    // The test that would have caught the original defect. `planWrite` is called directly:
+    // no manifest the server can serve today produces this plan, and that is the point —
+    // the guard has to hold for the bundle nobody has built yet.
+    const built = await manifest()
+    const downloaded = new Map(Object.entries(PART_BYTES))
+    const inNvs: AgentBuildInfo = {
+      ...built.builds[0],
+      config_partition: { label: 'ff_cfg', offset: NVS_OFFSET, size: 4096 },
+    }
+    expect(() => planWrite(inNvs, downloaded, new Uint8Array(4096))).toThrow(/'ff_cfg'/)
+    expect(() => planWrite(inNvs, downloaded, new Uint8Array(4096))).toThrow(/nvs/)
+
+    // And the last sector before `nvs` is fine, while a part that merely OVERLAPS the
+    // sector `nvs` starts in is not: esptool erases whole 4 KB sectors, so a tail one byte
+    // inside the range takes the whole sector with it.
+    const justBefore: AgentBuildInfo = {
+      ...built.builds[0],
+      config_partition: { label: 'ff_cfg', offset: NVS_OFFSET - 0x1000, size: 4096 },
+    }
+    expect(() => planWrite(justBefore, downloaded, new Uint8Array(4096))).not.toThrow()
+    const straddling: AgentBuildInfo = {
+      ...built.builds[0],
+      config_partition: { label: 'ff_cfg', offset: NVS_OFFSET + NVS_SIZE - 1, size: 4096 },
+    }
+    expect(() => planWrite(straddling, downloaded, new Uint8Array(4096))).toThrow(/nvs/)
   })
 })
 
@@ -579,15 +603,16 @@ describe('FlashBoard — recovery is a button (S0-fe-6)', () => {
     await waitFor(() => expect(flashers).toHaveLength(2))
     expect(console_.closed).toBe(1)
 
-    // 4. A FRESH single-use token was minted, and the recovery write erases — a stale NVS
-    //    credential would make the new token dead on arrival and the operator would see
-    //    the very same fault again.
+    // 4. A FRESH single-use token was minted — and that alone is what clears the stale
+    //    broker credential: the agent erases the `ff` namespace on the first boot with a
+    //    token it has not seen (`ff_store_sync_token`, S0-fw-4). The recovery write must
+    //    NOT touch NVS. The recovery path is the one an operator presses when a board is
+    //    already misbehaving, so it is the last place to destroy its cached calibration.
     await waitFor(() => expect(flashers[1].writes).toHaveLength(1))
     expect(calls.filter((c) => c === 'POST /v1/enrollment-tokens')).toHaveLength(2)
     const recovery = flashers[1].writes[0]
-    expect(recovery.map((part) => part.label)).toContain('nvs (erase)')
-    // ...and still not phy_init: the recovery path is the one an operator presses when a
-    // board is already misbehaving, so it is the last place to destroy its calibration.
+    expect(recovery.map((part) => part.label).filter((label) => /nvs/.test(label))).toEqual([])
+    expect(recovery.map((part) => part.address)).not.toContain(NVS_OFFSET)
     expect(recovery.map((part) => part.address)).not.toContain(0x11000)
 
     // 5. And it is the SECOND token that went into the blob, not a replay of the first.
