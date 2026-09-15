@@ -29,6 +29,13 @@ MANIFEST_SCHEMA = 1
 EXPECTED_PARTITION_LAYOUT = "ab-4m-v1"
 EXPECTED_OTA_SLOT_SIZE = 1966080
 
+# Every layout this server understands, and the slot size a bundle claiming it MUST
+# declare. One entry today: `ab-4m-v1` is frozen (DECISIONS.md 2026-09-09) and a new
+# layout is a new id plus an entry here plus a `spec/device-protocol.md` change — never
+# an edit to an existing row. The mapping is what keeps `partition_layout` and
+# `ota_slot_size` from drifting apart: a bundle cannot claim `ab-4m-v1` with a 4 MB slot.
+SUPPORTED_LAYOUTS: dict[str, int] = {EXPECTED_PARTITION_LAYOUT: EXPECTED_OTA_SLOT_SIZE}
+
 # Logical part ids, and the only values `GET /v1/agent/{target}/{part}` will resolve.
 # `bootloader` first, `app` last: the flasher writes them in ascending offset order.
 PART_NAMES = ("bootloader", "partition-table", "ota-data", "app")

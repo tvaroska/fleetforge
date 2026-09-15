@@ -21,6 +21,10 @@ its manifest or whose `partition_layout`/`ota_slot_size` disagree with
 bundle with the wrong layout is a board that can never OTA — neither is worth serving to
 keep an endpoint from answering 503.
 
+**The catalog is keyed by `(target, partition_layout)`.** A bundle directory is `<target>`
+or `<target>.<layout>` (S0-infra-7). The dot-suffixed form lets two layouts for one chip
+coexist; `just agent-build` still writes the bare `<target>` name and is unchanged.
+
 Loaded **once per app** into `app.state.firmware_catalog` (`create_app()`), the same rule
 as `token_cache`/`event_hub`: per app, never module-level, so tests get a fresh one. The
 dev override bind-mounts `./agent/dist`, so a rebuilt bundle needs an api restart —
@@ -31,6 +35,7 @@ from fleetforge.firmware.catalog import (
     AgentBundle,
     AgentBundleError,
     AgentPart,
+    AmbiguousBundleError,
     FirmwareCatalog,
     load_bundles,
 )
@@ -39,6 +44,7 @@ from fleetforge.firmware.manifest import (
     EXPECTED_PARTITION_LAYOUT,
     MANIFEST_SCHEMA,
     PART_NAMES,
+    SUPPORTED_LAYOUTS,
     AgentBuildInfo,
     AgentManifest,
     AgentPartInfo,
@@ -48,19 +54,21 @@ from fleetforge.firmware.manifest import (
 )
 
 __all__ = [
-    "EXPECTED_OTA_SLOT_SIZE",
-    "EXPECTED_PARTITION_LAYOUT",
-    "MANIFEST_SCHEMA",
-    "PART_NAMES",
     "AgentBuildInfo",
     "AgentBundle",
     "AgentBundleError",
     "AgentManifest",
     "AgentPart",
     "AgentPartInfo",
+    "AmbiguousBundleError",
     "BundleManifest",
     "ConfigPartition",
+    "EXPECTED_OTA_SLOT_SIZE",
+    "EXPECTED_PARTITION_LAYOUT",
     "FirmwareCatalog",
+    "MANIFEST_SCHEMA",
+    "PART_NAMES",
     "PartManifest",
+    "SUPPORTED_LAYOUTS",
     "load_bundles",
 ]

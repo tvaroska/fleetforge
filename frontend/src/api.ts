@@ -244,8 +244,15 @@ export const api = {
   // flasher uses comes out of this manifest.
   agentManifest: () => request<AgentManifest>('/v1/agent/manifest'),
 
-  // `target`/`part` are manifest-supplied logical ids, not operator input — but encode
-  // them anyway, the same rule `revokeEnrollmentToken` follows.
-  agentPart: (target: string, part: string) =>
-    requestBytes(`/v1/agent/${encodeURIComponent(target)}/${encodeURIComponent(part)}`),
+  // `target`/`part`/`layout` are manifest-supplied logical ids, not operator input — but
+  // encode them anyway, the same rule `revokeEnrollmentToken` follows. The layout selects
+  // which partition_layout when more than one exists for a target; omit it when exactly
+  // one exists, or the server returns 409 naming the ambiguity.
+  agentPart: (target: string, part: string, layout?: string | null) => {
+    let path = `/v1/agent/${encodeURIComponent(target)}/${encodeURIComponent(part)}`
+    if (layout) {
+      path += `?layout=${encodeURIComponent(layout)}`
+    }
+    return requestBytes(path)
+  },
 }

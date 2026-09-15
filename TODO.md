@@ -362,7 +362,7 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       previous agent version is still flashable; with the store unreachable the console
       names the fault instead of failing mid-write.
 
-- [ ] **S0-infra-7**: The firmware catalog is keyed by target alone (P2, 0.25d)
+- [x] **S0-infra-7**: The firmware catalog is keyed by target alone (P2, 0.25d)
       Filed 2026-09-14. `firmware/catalog.py` indexes bundles by directory name, which is
       the chip target, while `partition_layout` lives inside the manifest where nothing
       can select on it. One layout exists (`ab-4m-v1`, frozen at R0) so nothing is broken
@@ -375,6 +375,7 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       Acceptance: two bundles for the same target with different layouts both load and
       are separately addressable; a request with no layout still resolves while exactly
       one exists, and names the ambiguity when more than one does.
+      _(done 2026-09-14; see docs/features/infrastructure.md)_
 
 - [ ] **S0-test-1**: Bench-verify the serial console on real hardware (P1, 0.5d)
       Filed 2026-09-10, when S0-fe-1 shipped. Its software half is proven in jsdom against

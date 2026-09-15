@@ -168,6 +168,33 @@ loading; a bundle whose bytes disagree with its manifest, or whose
 `partition_layout`/`ota_slot_size` disagree with the spec, is dropped with a WARNING
 naming the target. One bad target does not stop the other three from serving.
 
+### Catalog key and directory convention (S0-infra-7)
+
+The catalog is keyed on `(target, partition_layout)`. A bundle directory is `<target>` or
+`<target>.<layout>`:
+
+* `agent/dist/esp32/` — the bare target form, `partition_layout = ab-4m-v1`
+* `agent/dist/esp32.ab-8m-v1/` — the suffixed form, for a second layout
+
+The dot-suffixed form is how two layouts for one chip coexist; `just agent-build` still
+writes the bare `<target>` form and is unchanged. The separator is `.` because no chip
+target and no layout id contains one (both match `SAFE_SEGMENT`: lowercase alnum and `-`),
+so the split is unambiguous — `esp32-ab-8m-v1` would not be.
+
+On the wire, `GET /v1/agent/{target}/{part}?layout=` selects which partition_layout when
+more than one exists for a target:
+
+* 404 for an unknown target, unknown layout or unknown part (indistinguishable: the
+  404-for-everything rule means a probe learns nothing)
+* 409 `"target 'esp32' has bundles for layouts ab-4m-v1, ab-8m-v1; name one with ?layout="`
+  when the caller omits the parameter and more than one layout exists
+* No layout specified and exactly one exists → resolves, for backward compatibility with
+  the R0 case
+
+**Adding a layout** means a `SUPPORTED_LAYOUTS` entry in `src/fleetforge/firmware/manifest.py`,
+a `spec/device-protocol.md` change documenting it, and a new `agent/partitions.csv` id.
+A new layout is **never** an edit to an existing row (DECISIONS.md 2026-09-09).
+
 | Shape | Where the bytes come from |
 |---|---|
 | `just up` (dev) | bind mount `./agent/dist:/app/agent:ro` — **restart the api** after a rebuild; `--reload` only watches `src/` |

@@ -15,6 +15,12 @@ that would otherwise be bricked or unflashable:
   capability check silently passes);
 * a `path` that is not a bare filename inside the bundle directory.
 
+A bundle directory is `<target>` or `<target>.<layout>`. The suffix is how two
+layouts for one target coexist on disk; `just agent-build` still writes the bare
+`<target>` form and is unchanged. `.` separates because no chip target and no layout
+id contains one (both are SAFE_SEGMENT: lowercase alnum and `-`), so the split is
+unambiguous — `esp32-ab-4m-v1` would not be.
+
 A rejected bundle is *dropped with a WARNING naming the target*, never repaired and never
 raised: one bad target must not stop the other three from being flashable, and a stack
 with no bundles at all is a legitimate configuration (`create_app()` warns, and
@@ -32,10 +38,9 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from fleetforge.firmware.manifest import (
-    EXPECTED_OTA_SLOT_SIZE,
-    EXPECTED_PARTITION_LAYOUT,
     PART_NAMES,
     SAFE_SEGMENT,
+    SUPPORTED_LAYOUTS,
     BundleManifest,
     ConfigPartition,
 )
@@ -61,6 +66,24 @@ class AgentBundleError(ValueError):
     `load_bundles` catches it, logs it and drops the target — it does not propagate,
     because one bad bundle must not stop the API from starting.
     """
+
+
+class AmbiguousBundleError(LookupError):
+    """More than one layout for a target, and the caller did not name one.
+
+    A `LookupError`, not an `AgentBundleError`: nothing is wrong with any bundle. The
+    request is under-specified, and the answer is to say so — `spec/standards.md`'s
+    Unaided onboarding rule — rather than to serve whichever sorted first and flash a
+    board with the wrong partition table.
+    """
+
+    def __init__(self, target: str, layouts: tuple[str, ...]) -> None:
+        self.target = target
+        self.layouts = layouts
+        super().__init__(
+            f"target {target!r} has bundles for layouts {', '.join(layouts)}; "
+            "name one with ?layout="
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,6 +127,11 @@ class AgentBundle:
     config_partition: ConfigPartition | None
     parts: tuple[AgentPart, ...]
 
+    @property
+    def key(self) -> tuple[str, str]:
+        """The catalog key: (target, partition_layout). S0-infra-6's store keys must use this shape."""
+        return (self.target, self.partition_layout)
+
     def part(self, name: str) -> AgentPart | None:
         """The named part, or `None`. The lookup is by logical id, never by filename."""
         for part in self.parts:
@@ -114,7 +142,7 @@ class AgentBundle:
 
 @dataclass(frozen=True, slots=True)
 class FirmwareCatalog:
-    """Every servable bundle, indexed by target. Built once per app."""
+    """Every servable bundle, indexed by (target, partition_layout). Built once per app."""
 
     bundles: tuple[AgentBundle, ...]
 
@@ -126,17 +154,57 @@ class FirmwareCatalog:
         return cls(bundles=tuple(load_bundles(Path(directory))))
 
     @property
-    def targets(self) -> tuple[str, ...]:
-        return tuple(bundle.target for bundle in self.bundles)
+    def keys(self) -> tuple[tuple[str, str], ...]:
+        """The catalog keys, in order: (target, partition_layout) pairs."""
+        return tuple(bundle.key for bundle in self.bundles)
 
-    def bundle(self, target: str) -> AgentBundle | None:
-        for bundle in self.bundles:
-            if bundle.target == target:
-                return bundle
-        return None
+    @property
+    def targets(self) -> tuple[str, ...]:
+        """Unique targets, order preserved. A target with two layouts is one target."""
+        return tuple(dict.fromkeys(bundle.target for bundle in self.bundles))
+
+    def layouts_for(self, target: str) -> tuple[str, ...]:
+        """Every partition_layout registered for `target`, in catalog order."""
+        return tuple(bundle.partition_layout for bundle in self.bundles if bundle.target == target)
+
+    def bundle(self, target: str, layout: str | None = None) -> AgentBundle | None:
+        """The bundle for (target, layout), or None.
+
+        If `layout` is given, returns an exact match or None. If omitted, returns the sole
+        bundle for `target` when exactly one exists, raises `AmbiguousBundleError` when more
+        than one exists, and returns None when none exist.
+        """
+        candidates = [b for b in self.bundles if b.target == target]
+        if layout is not None:
+            # Exact match requested.
+            for bundle in candidates:
+                if bundle.partition_layout == layout:
+                    return bundle
+            return None
+        # No layout specified: 0 → None, 1 → it, >1 → raise.
+        if len(candidates) == 0:
+            return None
+        if len(candidates) == 1:
+            return candidates[0]
+        # More than one layout for this target and the caller did not say which.
+        layouts = tuple(b.partition_layout for b in candidates)
+        raise AmbiguousBundleError(target, layouts)
 
     def __bool__(self) -> bool:
         return bool(self.bundles)
+
+
+def _split_dir_name(name: str) -> tuple[str, str | None]:
+    """Parse a bundle directory name into (target, layout_hint).
+
+    Returns (target, None) for `esp32`, (target, layout) for `esp32.ab-8m-v1`.
+    """
+    target, sep, layout = name.partition(".")
+    if not SAFE_TARGET.match(target):
+        raise AgentBundleError(f"{name!r} is not a usable bundle directory name")
+    if sep and not SAFE_TARGET.match(layout):
+        raise AgentBundleError(f"{name!r} has an unusable layout suffix")
+    return target, (layout or None)
 
 
 def _sha256_of(path: Path) -> str:
@@ -180,27 +248,32 @@ def _resolve_part_path(bundle_dir: Path, filename: str) -> Path:
 
 def _load_bundle(bundle_dir: Path) -> AgentBundle:
     """Read, verify and return the bundle in `bundle_dir`. Raises `AgentBundleError`."""
-    target = bundle_dir.name
-    if not SAFE_TARGET.match(target):
-        raise AgentBundleError(f"{target!r} is not a usable target directory name")
+    target, layout_hint = _split_dir_name(bundle_dir.name)
 
     manifest = _read_manifest(bundle_dir / MANIFEST_FILENAME)
     if manifest.target != target:
         raise AgentBundleError(
-            f"manifest says target {manifest.target!r} but it sits in {target!r}"
+            f"manifest says target {manifest.target!r} but it sits in {bundle_dir.name!r}"
         )
 
     # The protocol contract. A bundle that disagrees would be flashed onto a board that
     # then announces a layout the server does not support — spec/device-protocol.md.
-    if manifest.partition_layout != EXPECTED_PARTITION_LAYOUT:
+    known_layouts = list(SUPPORTED_LAYOUTS.keys())
+    expected_slot = SUPPORTED_LAYOUTS.get(manifest.partition_layout)
+    if expected_slot is None:
         raise AgentBundleError(
-            f"partition_layout {manifest.partition_layout!r} is not "
-            f"{EXPECTED_PARTITION_LAYOUT!r} (spec/device-protocol.md)"
-        )
-    if manifest.ota_slot_size != EXPECTED_OTA_SLOT_SIZE:
-        raise AgentBundleError(
-            f"ota_slot_size {manifest.ota_slot_size} is not {EXPECTED_OTA_SLOT_SIZE} "
+            f"partition_layout {manifest.partition_layout!r} is not one of {known_layouts} "
             "(spec/device-protocol.md)"
+        )
+    if manifest.ota_slot_size != expected_slot:
+        raise AgentBundleError(
+            f"ota_slot_size {manifest.ota_slot_size} is not the {expected_slot} that layout "
+            f"{manifest.partition_layout!r} declares"
+        )
+
+    if layout_hint is not None and manifest.partition_layout != layout_hint:
+        raise AgentBundleError(
+            f"manifest says layout {manifest.partition_layout!r} but it sits in {bundle_dir.name!r}"
         )
 
     names = [part.name for part in manifest.parts]
@@ -269,7 +342,7 @@ def _load_bundle(bundle_dir: Path) -> AgentBundle:
 
 
 def load_bundles(directory: Path) -> list[AgentBundle]:
-    """Every verified bundle under `directory`, sorted by target. Never raises.
+    """Every verified bundle under `directory`, sorted by (target, partition_layout). Never raises.
 
     A missing directory, an empty one, and one holding nothing but junk all yield `[]` —
     that is the shape of a stack built without `agent/dist`, and `create_app()` logs one
@@ -284,16 +357,31 @@ def load_bundles(directory: Path) -> list[AgentBundle]:
         )
         return []
 
-    bundles: list[AgentBundle] = []
+    loaded: list[AgentBundle] = []
+    seen_keys: dict[tuple[str, str], str] = {}
     for child in sorted(directory.iterdir()):
         if not child.is_dir() or not (child / MANIFEST_FILENAME).is_file():
             continue
         try:
-            bundles.append(_load_bundle(child))
+            bundle = _load_bundle(child)
+            # Drop duplicate keys (first-wins).
+            if bundle.key in seen_keys:
+                logger.warning(
+                    "agent image dir %r dropped: %s is already provided by %r",
+                    child.name,
+                    bundle.key,
+                    seen_keys[bundle.key],
+                )
+                continue
+            seen_keys[bundle.key] = child.name
+            loaded.append(bundle)
         except AgentBundleError as exc:
             logger.warning("agent image for target %s dropped: %s", child.name, exc)
         except OSError as exc:
             logger.warning("agent image for target %s is unreadable: %s", child.name, exc)
+
+    # Sort by (target, partition_layout).
+    bundles = sorted(loaded, key=lambda b: b.key)
 
     if not bundles:
         logger.warning(
@@ -305,6 +393,6 @@ def load_bundles(directory: Path) -> list[AgentBundle]:
         logger.info(
             "loaded %d agent image(s): %s",
             len(bundles),
-            ", ".join(f"{b.target}@{b.agent_version}" for b in bundles),
+            ", ".join(f"{b.target}/{b.partition_layout}@{b.agent_version}" for b in bundles),
         )
     return bundles

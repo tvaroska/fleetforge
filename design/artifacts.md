@@ -44,12 +44,11 @@ shipped in v0.3.0 — is the same coupling presenting as staleness rather than a
 absent rollback.
 
 **2. The combinatorics.** Four chip targets today, with ESP32-H2, Thread and a Pi
-adapter named in the roadmap. More than one partition layout eventually — and note that
-`firmware/catalog.py` keys bundles by directory name, i.e. by target *alone*, while
-`partition_layout` is carried inside the manifest where nothing can select on it. Add
-the agent versions worth keeping, then V2's repo × ref × target, then V3's delta images,
-which are indexed by *pairs* of versions and therefore quadratic. Nothing in this
-sequence is tractable if an image is "a directory someone named".
+adapter named in the roadmap. More than one partition layout eventually — `firmware/catalog.py`
+is now keyed on `(target, partition_layout)` since S0-infra-7, so two layouts for one
+chip coexist. Add the agent versions worth keeping, then V2's repo × ref × target, then
+V3's delta images, which are indexed by *pairs* of versions and therefore quadratic.
+Nothing in this sequence is tractable if an image is "a directory someone named".
 
 **3. Nothing identifies a build.** `manifest.json` carries `agent_version`,
 `source_commit`, `idf_version` and a digest-pinned `idf_image` — good provenance, and

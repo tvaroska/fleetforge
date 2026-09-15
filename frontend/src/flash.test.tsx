@@ -206,7 +206,11 @@ async function defaultRoutes(extra: Routes = {}): Promise<Routes> {
     [`POST /v1/enrollment-tokens/${TOKEN_ID}/revoke`]: () => new Response(null, { status: 204 }),
   }
   for (const [name, bytes] of Object.entries(PART_BYTES)) {
+    // S0-infra-7: the download now passes the layout the manifest gave. Match both the
+    // no-layout form (backward compat) and the with-layout form.
     routes[`GET /v1/agent/esp32/${name}`] = () =>
+      new Response(bytes.slice(), { headers: { 'content-type': 'application/octet-stream' } })
+    routes[`GET /v1/agent/esp32/${name}?layout=ab-4m-v1`] = () =>
       new Response(bytes.slice(), { headers: { 'content-type': 'application/octet-stream' } })
   }
   return { ...routes, ...extra }
@@ -377,8 +381,10 @@ describe('FlashBoard — refusals, all before a token is minted', () => {
   it('aborts on a sha256 mismatch without minting', async () => {
     const { calls } = mockFetch(
       await defaultRoutes({
-        // Right length, wrong bytes: exactly what a corrupted download looks like.
+        // Right length, wrong bytes: exactly what a corrupted download looks like. S0-infra-7:
+        // the download now passes the layout, so the override must match it too.
         'GET /v1/agent/esp32/app': () => new Response(new Uint8Array(512).fill(0x00)),
+        'GET /v1/agent/esp32/app?layout=ab-4m-v1': () => new Response(new Uint8Array(512).fill(0x00)),
       }),
     )
     const flasher = new FakeFlasher(chipInfo())

@@ -6,6 +6,48 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-14 — the firmware catalog is keyed on (target, partition_layout) (S0-infra-7)
+
+`firmware/catalog.py` now indexes bundles by `(target, partition_layout)` rather than
+target alone, so two layouts for one chip can coexist. One layout exists today
+(`ab-4m-v1`, frozen at R0); the moment a second appears, two bundles for one target
+would otherwise collide on the same key and the flasher would have no way to ask for the
+right one.
+
+**A bundle directory is `<target>` or `<target>.<layout>`.** The dot-suffixed form is the
+reader-side convention for two layouts; `just agent-build` still writes the bare
+`<target>` form and is unchanged. `.` separates because no chip target and no layout id
+contains one (both are `SAFE_SEGMENT`: lowercase alnum and `-`), so the split is
+unambiguous — `esp32-ab-4m-v1` would not be. Directory/manifest mismatch (a directory
+named `esp32.ab-8m-v1` containing a manifest with `partition_layout: ab-4m-v1`) is
+dropped with a warning, the same rule as target/directory mismatch.
+
+**The registry, not a relaxation.** Today `catalog.py` compares
+`manifest.partition_layout` and `manifest.ota_slot_size` against two module constants.
+The wrong fix is to drop the layout check so "two layouts both load" — that would let a
+bundle declaring *any* string load, and `ota_slot_size` would float free of the layout
+id, breaking the three-way contract `DECISIONS.md` 2026-09-09 protects. The right fix is
+**`SUPPORTED_LAYOUTS: dict[str, int]`**, mapping every layout id the server understands
+to the slot size a bundle claiming it must declare. A bundle cannot claim `ab-4m-v1` with
+a 4 MB slot. It is a plain `dict`, not `MappingProxyType`/`frozenset` — tests register a
+second layout with `monkeypatch.setitem(SUPPORTED_LAYOUTS, ...)`, which is the only way
+to exercise multi-layout behaviour without a spec change.
+
+**Absent layout resolves while unique; ambiguous requests name the layouts.** If `?layout=`
+is omitted and exactly one candidate exists, `catalog.bundle(target)` returns it — the R0
+case, and the backward-compatibility proof for every existing caller. If more than one
+exists, it **raises `AmbiguousBundleError`** naming the layouts, which the download route
+maps to 409. A `LookupError`, not an `AgentBundleError`: nothing is wrong with any bundle,
+the request is under-specified, and the answer is to say so (`spec/standards.md`'s Unaided
+onboarding rule) rather than to serve whichever sorted first and flash a board with the
+wrong partition table. An unknown layout is a clean 404, same as an unknown target.
+
+**S0-infra-6 hand-off:** the object-store key and the publish index must carry
+`(target, partition_layout)` — `AgentBundle.key` is the shape to reuse. Do not re-narrow
+it to target alone.
+
+---
+
 ## 2026-09-14 — the blob key is store-relative, lowercase-only, and carries its own cache header
 
 S0-infra-4 froze the content-addressed key scheme while **zero objects exist**: the same

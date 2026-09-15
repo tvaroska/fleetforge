@@ -28,6 +28,7 @@ from fleetforge.firmware import (
     AgentBuildInfo,
     AgentManifest,
     AgentPartInfo,
+    AmbiguousBundleError,
     FirmwareCatalog,
 )
 from fleetforge.firmware.manifest import SafeSegment
@@ -127,18 +128,30 @@ async def agent_part(
     catalog: CatalogDep,
     target: SafeSegment,
     part: SafeSegment,
+    layout: SafeSegment | None = None,
 ) -> FileResponse:
     """The raw bytes of one part, with the manifest's sha256 as a strong ETag.
 
-    404 for an unknown target and for an unknown part: the flasher only ever asks for
-    what the manifest listed, so either is a client bug or a probe, and distinguishing
+    `?layout=` selects which partition_layout when more than one exists for a target. If
+    omitted and exactly one layout exists, it resolves; if omitted and multiple exist, 409.
+
+    404 for an unknown target, unknown layout and unknown part: the flasher only ever asks
+    for what the manifest listed, so any is a client bug or a probe, and distinguishing
     them in the response body would tell a prober which targets exist.
     """
     _require_catalog(catalog)
-    bundle = catalog.bundle(target)
+    try:
+        bundle = catalog.bundle(target, layout)
+    except AmbiguousBundleError as exc:
+        # 409, not 404: the target exists and every candidate is servable — the request is
+        # under-specified. Behind the admin credential, so naming the layouts is not the
+        # enumeration leak the 404-for-everything rule above guards against, and a caller
+        # that cannot see them cannot fix the request.
+        logger.info("agent image ambiguous: target=%s layouts=%s", target, exc.layouts)
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     entry = bundle.part(part) if bundle is not None else None
     if entry is None:
-        logger.info("agent image not found: target=%s part=%s", target, part)
+        logger.info("agent image not found: target=%s part=%s layout=%s", target, part, layout)
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
 
     return FileResponse(

@@ -51,7 +51,8 @@ export type FlashRequest = {
   config: FlashConfigInput
   /**
    * Clear the stored broker credential. Named for what it does now: it erases the `nvs`
-   * partition only, and deliberately NOT `phy_init` — see `nvsWipe` for why that matters.
+   * partition only, and deliberately NOT `phy_init`. That distinction turns out to be
+   * worthless — the RF calibration lives in `nvs`, not `phy_init` (S0-fw-4). See `nvsWipe`.
    * It was `eraseAll` until 2026-09-13, when erasing the whole chip turned out to be the
    * reason a marginal board can never cache its RF calibration.
    */
@@ -65,17 +66,28 @@ export type FlashRequest = {
  * `chip_family` is exactly `ESPLoader.chip.CHIP_NAME` on both sides, so this is `===` and
  * not a translation table. Flashing an ESP32-S3 bundle to an ESP32-C3 produces a board
  * that erases cleanly and never boots.
+ *
+ * When more than one layout exists for a chip, refuses to guess: the flasher cannot
+ * currently choose between them, and flashing the wrong partition table is not fixable by
+ * OTA. A UI selector is needed (S0-infra-7).
  */
 export function selectBuild(manifest: AgentManifest, chip: ChipInfo): AgentBuildInfo {
-  const build = manifest.builds.find((candidate) => candidate.chip_family === chip.chipName)
-  if (build === undefined) {
+  const candidates = manifest.builds.filter((candidate) => candidate.chip_family === chip.chipName)
+  if (candidates.length === 0) {
     const available = manifest.builds.map((b) => `${b.target} (${b.chip_family})`).join(', ')
     throw new Error(
       `no agent bundle for ${chip.chipName}. Available: ${available || 'none'} — ` +
         'build one with `just agent-build <target>`.',
     )
   }
-  return build
+  if (candidates.length > 1) {
+    const layouts = candidates.map((b) => b.partition_layout).join(', ')
+    throw new Error(
+      `this server has ${candidates.length} agent bundles for ${chip.chipName} (layouts ${layouts}) ` +
+        'and the console cannot tell which partition layout this board should get. Nothing was written.',
+    )
+  }
+  return candidates[0]
 }
 
 /** The highest byte the write plan will touch: every part, plus the config partition. */
@@ -155,6 +167,15 @@ export function planWrite(
 
 /**
  * A part that erases `nvs` and nothing else.
+ *
+ * !! WRONG AS WRITTEN — see S0-fw-4 and DECISIONS.md 2026-09-14. The RF calibration is
+ * !! NOT in `phy_init`; it is in NVS under IDF's `phy` namespace, i.e. inside exactly the
+ * !! bytes this function erases. `CONFIG_ESP_PHY_INIT_DATA_IN_PARTITION` is unset in our
+ * !! build, so `phy_init` holds nothing at all. This wipe therefore still destroys the
+ * !! calibration on every flash — the failure described below, at a different address.
+ * !! Left in place until S0-fw-4 moves credential invalidation into the agent, which is
+ * !! the only place with per-namespace granularity. The reasoning below is sound; the
+ * !! address it acts on is not.
  *
  * This replaces esptool-js's `eraseAll`, and the difference is the whole point. Until
  * 2026-09-13 every flash erased the entire chip, which also destroyed the `phy_init`
@@ -407,7 +428,7 @@ export function useFlashBoard({
         const downloaded = new Map<string, Uint8Array>()
         for (const part of selected.parts) {
           setStep(`Downloading ${part.name}…`)
-          const bytes = await api.agentPart(selected.target, part.name)
+          const bytes = await api.agentPart(selected.target, part.name, selected.partition_layout)
           await verifyPart(part, bytes)
           downloaded.set(part.name, bytes)
         }
