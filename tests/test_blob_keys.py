@@ -24,40 +24,13 @@ from fleetforge.storage import (
     put_blob,
     resolve_key,
 )
+from tests.conftest import MemoryObjectStore
 
 # Two fixtures on purpose: the obviously-synthetic one reads well in failure output, and
 # a real hashlib digest proves nothing depends on the string being all one character.
 DIGEST = "a" * 64
 REAL_PAYLOAD = b"fleetforge-agent-app.bin"
 REAL_DIGEST = hashlib.sha256(REAL_PAYLOAD).hexdigest()
-
-
-class FakeStore:
-    """Records what `put_blob` asked the store to do. Nothing else is needed here."""
-
-    def __init__(self) -> None:
-        self.puts: list[tuple[str, bytes, str, str | None]] = []
-
-    async def put(
-        self,
-        key: str,
-        data: bytes,
-        *,
-        content_type: str = "application/octet-stream",
-        cache_control: str | None = None,
-    ) -> None:
-        self.puts.append((key, data, content_type, cache_control))
-
-    async def get(self, key: str) -> bytes:  # pragma: no cover - not exercised here
-        raise NotImplementedError
-
-    async def signed_url(  # pragma: no cover - not exercised here
-        self, key: str, *, ttl_s: int | None = None
-    ) -> str:
-        raise NotImplementedError
-
-    async def delete(self, key: str) -> None:  # pragma: no cover - not exercised here
-        raise NotImplementedError
 
 
 @pytest.mark.parametrize("digest", [DIGEST, REAL_DIGEST])
@@ -137,7 +110,7 @@ def test_blob_key_does_not_normalise_an_uppercase_digest() -> None:
 
 
 async def test_put_blob_derives_the_key_and_marks_it_immutable() -> None:
-    store = FakeStore()
+    store = MemoryObjectStore()
     key = await put_blob(store, REAL_PAYLOAD)
     assert key == f"{BLOB_PREFIX}{REAL_DIGEST}"
     (recorded_key, data, content_type, cache_control) = store.puts[0]
@@ -149,7 +122,7 @@ async def test_put_blob_derives_the_key_and_marks_it_immutable() -> None:
 
 
 async def test_put_blob_accepts_a_matching_expected_digest() -> None:
-    store = FakeStore()
+    store = MemoryObjectStore()
     assert await put_blob(store, REAL_PAYLOAD, expected_digest=REAL_DIGEST) == (
         f"{BLOB_PREFIX}{REAL_DIGEST}"
     )
@@ -159,14 +132,14 @@ async def test_put_blob_accepts_a_matching_expected_digest() -> None:
 @pytest.mark.parametrize("expected", [DIGEST, REAL_DIGEST.upper(), "nope"])
 async def test_put_blob_refuses_a_mismatching_expected_digest(expected: str) -> None:
     """A client-supplied digest is checked, never trusted — and nothing is written."""
-    store = FakeStore()
+    store = MemoryObjectStore()
     with pytest.raises(ObjectKeyError):
         await put_blob(store, REAL_PAYLOAD, expected_digest=expected)
     assert store.puts == []
 
 
 async def test_put_blob_passes_a_content_type_through() -> None:
-    store = FakeStore()
+    store = MemoryObjectStore()
     await put_blob(store, REAL_PAYLOAD, content_type="application/json")
     assert store.puts[0][2] == "application/json"
 

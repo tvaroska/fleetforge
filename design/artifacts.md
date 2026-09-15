@@ -19,22 +19,35 @@ device-facing thin waist) · [../docs/features/build-pipeline.md](../docs/featur
 
 | | **Agent bundles** | **User artifacts** |
 |---|---|---|
-| Location | `agent/dist/<target>/`, `COPY`d into the app image at `/app/agent` | `ObjectStore` → GCS in prod, MinIO in dev |
-| Identity | the directory name, which is the chip target | sha256 (stated in `objectstore.py::put`; unimplemented) |
-| Versioned by | **the application image** | their own record |
-| Verified | every part re-hashed at startup (`firmware/catalog.py`) | on upload |
-| Served | `GET /v1/agent/{target}/{part}`, behind the admin credential | signed URL, short TTL |
-| Status | shipping since R0 | R1 |
+| Location | `ObjectStore` → GCS in prod, MinIO in dev (S0-infra-6) | `ObjectStore` → GCS in prod, MinIO in dev |
+| Identity | sha256 per part, `blobs/sha256/<digest>` (`storage/blobs.py`) | sha256 (stated in `objectstore.py::put`; unimplemented) |
+| Versioned by | **the index object**, re-pointed by `just agent-publish` | their own record |
+| Verified | at publish (`firmware/bundledir.py`) and again on read (`firmware/catalog.py`) | on upload |
+| Served | `GET /v1/agent/{target}/{part}`, streamed behind the admin credential | signed URL, short TTL |
+| Status | shipping since R0, in the store since S0-infra-6 | R1 |
 
-The split was a correct trade at R0-infra-2 and `firmware/__init__.py` records why: the
-bundles are identical for every tenant, they version with the image, and routing them
-through `ObjectStore` would have made the R0 flasher depend on a GCS credential that
-could not be minted. A working flasher beat an elegant one.
+The one key in the whole scheme that is **not** content-addressed is
+`agent/index.json` — a small mutable JSON naming the current manifest digest per
+`(target, partition_layout)`, plus a capped history of superseded digests. It exists
+because `ObjectStore` has four verbs and `list` is not one of them (listing is a
+per-backend paging contract, and the catalog would then be defined by whatever bytes
+happen to be in a prefix). A pointer object makes "what is current" one read, makes a
+publish atomic at the pointer, and makes rollback an index write rather than a rebuild.
+It is written with `Cache-Control: no-store`; every blob it points at is immutable.
 
-What has changed is that both halves of that reasoning have expiry dates. Targets grow
-monotonically; "versions with the image" turns into "cannot be rolled back without a
-redeploy" the first time a bundle is bad — which is exactly the S0-fw-3 situation, where
-getting agent `19b0a0b` back means rebuilding and redeploying the API.
+**Until S0-infra-6** the left-hand column read `agent/dist/<target>/`, `COPY`d into the
+app image at `/app/agent`, verified once at startup and versioned by the application
+image. That split was a correct trade at R0-infra-2 and `firmware/__init__.py` recorded
+why: the bundles are identical for every tenant, they version with the image, and
+routing them through `ObjectStore` would have made the R0 flasher depend on a GCS
+credential that could not be minted. A working flasher beat an elegant one.
+
+Both halves of that reasoning then expired — S0-infra-5 produced a keyless credential,
+and the coupling started costing releases: targets grow monotonically, and "versions
+with the image" turns into "cannot be rolled back without a redeploy" the first time a
+bundle is bad — exactly the S0-fw-3 situation, where getting agent `19b0a0b` back used
+to mean rebuilding and redeploying the API. It is now `just agent-rollback esp32 <digest>`
+and one index write.
 
 ## Three pressures
 

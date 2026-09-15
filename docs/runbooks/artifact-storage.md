@@ -45,6 +45,8 @@ the key.
 | dev (MinIO) | *(none)* | `blobs/sha256/<hex>` | `blobs/sha256/<hex>` in bucket `fleetforge` |
 | production (GCS) | `fleetforge/` | `blobs/sha256/<hex>` | `gs://btvaroska/fleetforge/blobs/sha256/<hex>` |
 
+| both | *(as above)* | `agent/index.json` | the one **mutable** object in the store |
+
 So in a bucket listing both deployments read the same way, and a key that already starts
 with `fleetforge/` is a bug (it would store `fleetforge/fleetforge/blobs/…`) — the
 adapters refuse it rather than repairing it. The digest is lowercase hex, always; an
@@ -353,11 +355,59 @@ the URL is a real failure; a **connection refused** from inside the container is
 `Cache-Control` header (see *Key layout* above); `--key` and `--blob` are mutually
 exclusive, because a blob's key is its digest and nothing else.
 
+## Publishing agent bundles (S0-infra-6)
+
+The agent bundles the browser flasher writes to a board are ordinary artifacts in this
+store. The app image ships none, so **publishing is how a firmware fix reaches a board** —
+there is no redeploy in the path:
+
+```bash
+just agent-publish esp32          # verify, upload, re-point the index
+just agent-list                   # what is current, and what can be rolled back to
+just agent-rollback esp32 <manifest-digest>
+```
+
+What lands in the store:
+
+* every part and the manifest at `blobs/sha256/<digest>`, immutable, shared between
+  targets when the bytes are identical (the partition table and ota-data usually are);
+* `agent/index.json` — the **only mutable object in the scheme**: current manifest digest
+  per `(target, partition_layout)`, plus up to 20 superseded digests per target, written
+  with `Cache-Control: no-store`. Blobs go up first and the index last, so an interrupted
+  publish is invisible rather than half-applied.
+
+The API re-reads the index at most once per `AGENT_CATALOG_TTL_S` (default 60 s), so a
+publish is visible within a minute with nothing restarted. Nothing is ever deleted: a
+rollback re-points the index at a digest that is still there, which is why it is an index
+write and not a rebuild.
+
+### Publishing to production's GCS from this box
+
+```bash
+mkdir -p /tmp/no-gcloud-adc
+CLOUDSDK_CONFIG=/tmp/no-gcloud-adc \
+OBJECT_STORE_BACKEND=gcs GCS_BUCKET=btvaroska GCS_PREFIX=fleetforge/ \
+GCS_IMPERSONATE_SERVICE_ACCOUNT=fleetforge-artifacts@btvaroska.iam.gserviceaccount.com \
+just agent-publish esp32
+```
+
+`CLOUDSDK_CONFIG=/tmp/no-gcloud-adc` (any empty directory) is not optional and is the same gotcha as *on this dev box,
+ADC is a USER* above: the ADC **file** here is a user principal with no
+`roles/iam.serviceAccountTokenCreator` on `fleetforge-artifacts`, while an empty config
+dir makes google-auth fall through to the metadata server, which answers with
+`devserver@btvaroska` — the identity that *is* granted it (DECISIONS.md 2026-09-15).
+
+**Order matters on a release:** publish the bundles *before* deploying an app image that
+no longer carries them, or the flasher answers 503 in the window between. And never run
+`just agent-build*` on `prod` — bundles are built here and published there.
+
 ## Production configuration
 
-**Not wired yet — that is S0-infra-6's first act.** The running `fleetforge-api` container
-still has no object store (`services/prod/docker-compose.yml` says so in a comment that
-S0-infra-5 made stale). Three env lines wire it, and **nothing is mounted**:
+**Still not wired on the running container as of S0-infra-6.** `services/prod/` lives in
+the `services` repo and its env is protected (root `CLAUDE.md`: ask first), so S0-infra-6
+PROPOSES the change rather than applying it — and **until it is applied, prod's flasher
+answers 503**, because the deployed app image will no longer carry the bundles. Four env
+lines wire it, and **nothing is mounted**:
 
 ```yaml
       OBJECT_STORE_BACKEND: gcs

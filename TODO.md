@@ -44,12 +44,17 @@ distribution paths with different rules, and no identifier anywhere that says wh
 the S0-fw-3 bench order (an `sdkconfig` diff against ESPHome's) is answerable from an
 artifact. **S0-infra-4** (the content-addressed key scheme) **landed 2026-09-14** — the
 layout is frozen in `src/fleetforge/storage/blobs.py` and the `artifacts`/`builds` tables
-exist (migration `0003`), empty and unread, while no object has yet been written. The
-remaining three:
-**S0-infra-5** (a GCS credential that is not a key file — the actual blocker),
-**S0-infra-6** (bundles served from the store, image ships none) and **S0-infra-7**
-(catalog keyed by target *and* layout). The build engine itself stays R9; only its cache
-key changed.
+exist (migration `0003`), empty and unread. **S0-infra-7** (catalog keyed by target *and*
+layout) **landed 2026-09-14**, **S0-infra-5** (a GCS credential that is not a key file —
+the actual blocker) **landed 2026-09-15**, and **S0-infra-6** followed the same day: the
+app image now ships **zero** firmware, `just agent-publish <target>` uploads a
+verified bundle as content-addressed blobs, and `agent/index.json` — a pointer, because
+`ObjectStore` has no `list` — says which one is current. A firmware fix reaches the
+flasher within `AGENT_CATALOG_TTL_S` with nothing restarted, and a rollback is one index
+write. The prod container is still unwired on purpose (production config needs asking
+first); the replacement block and its ordering constraint are in
+`docs/features/infrastructure.md` → *Production hand-off*. All five artifact tasks are
+done. The build engine itself stays R9; only its cache key changed.
 
 Designed up on 2026-09-11 as one feature — **Unaided onboarding: flash → on the fleet**
 (`docs/features/enrollment.md`, requirements in `spec/standards.md`, reasoning in
@@ -367,7 +372,9 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       ambiguous configuration still raises rather than resolving. Record the `signBlob`
       result either way — a negative is what R1 needs to know.
 
-- [ ] **S0-infra-6**: Agent bundles are served from the store, not baked into the image (P1, 2d)
+- [x] **S0-infra-6**: Agent bundles are served from the store, not baked into the image (P1, 2d)
+      _(done 2026-09-15; reviewed; see docs/features/infrastructure.md → Agent bundles are
+      served from the store)_
       The unimplemented half of
       `design/decisions/infrastructure-agent-bundles-are-artifacts.md` (Accepted
       2026-09-11), finally filed. Depends on S0-infra-5 for the credential and S0-infra-4

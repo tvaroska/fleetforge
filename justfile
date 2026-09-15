@@ -206,15 +206,11 @@ latest_tag := `git describe --tags --abbrev=0 2>/dev/null || echo "latest"`
 # Build, verify and push both app images. Runs the T1 gate first — a broken
 # build must not reach the registry, because prod pulls by tag.
 #
-# `_require-agent-dist` runs before anything is built: the app image bakes
-# `agent/dist` in (Dockerfile -> `COPY agent/dist /app/agent`), so an empty
-# `agent/dist` ships an api whose `/v1/agent/manifest` answers 503 — and the
-# failure surfaces in production as a flasher with nothing to flash.
-#
-# `agent-check-fresh` is the second gate (S0-infra-2): a bundle can be correct
-# and still be wrong to ship. v0.3.0 shipped three stale targets, which the guard
-# now prevents.
-build: _require-agent-dist agent-check-fresh test frontend-build frontend-test _build-images _verify-images _push-images
+# NO agent/dist gate here any more (S0-infra-6): the image ships no firmware at
+# all, so an empty `agent/dist` cannot make a bad app image. The freshness gate
+# moved to where the staleness actually escapes — `just agent-publish`, which is
+# now the only way a bundle reaches a flasher (S0-infra-2's v0.3.0 incident).
+build: test frontend-build frontend-test _build-images _verify-images _push-images
     @echo ""
     @echo "✓ {{ registry }}/fleetforge:{{ latest_tag }}"
     @echo "✓ {{ registry }}/fleetforge-frontend:{{ latest_tag }}"
@@ -343,14 +339,68 @@ agent-verify target="esp32":
 # Provenance, not mtime, and not hashes — a rebuild of the same commit is not
 # byte-identical (docs/runbooks/agent-build.md -> Reproducibility).
 #
-# WHEN BUNDLES MOVE TO THE OBJECT STORE (DECISIONS.md 2026-09-11, "agent bundles are
-# artifacts"), this recipe moves to the publish step and passes the one bundle dir
-# being uploaded — the script takes bundle dirs as arguments for exactly that reason.
+# Since S0-infra-6 the gate that matters runs inside `agent-publish`, on the one
+# bundle being uploaded — publishing, not image-building, is what reaches a board.
+# This recipe stays as the sweep over every target you intend to ship.
 agent-check-fresh:
     #!/usr/bin/env bash
     set -euo pipefail
     dirs=(); for t in {{ agent_targets }}; do dirs+=("agent/dist/$t"); done
     python3 agent/tools/check_bundles_fresh.py "${dirs[@]}"
+
+# ── Publishing bundles to the object store (S0-infra-6) ──────────────────────
+#
+# How a built bundle reaches a flasher. Nothing is baked into the app image, so
+# THIS is the deploy step for firmware: parts go in content-addressed and
+# immutable, the manifest goes in verbatim, and `agent/index.json` — the single
+# mutable object — is re-pointed last. The API picks it up within
+# AGENT_CATALOG_TTL_S (60s) with NOTHING restarted and no image rebuilt.
+#
+#     just agent-publish esp32          # dev stack's MinIO, from .env
+#     just agent-list                   # what is current, and what can be rolled back to
+#     just agent-rollback esp32 <digest>
+#
+# The freshness gate runs first, on this bundle: a stale bundle published is a
+# stale bundle flashed, and unlike a bad image there is no rebuild in the way.
+#
+# TO PUBLISH TO PRODUCTION'S GCS FROM THIS BOX, set the GCS_* variables AND point
+# CLOUDSDK_CONFIG at an EMPTY directory: the gcloud ADC *file* here is a user principal
+# with no tokenCreator binding on fleetforge-artifacts, while an empty config dir makes
+# google-auth fall through to the metadata server, which answers with
+# `devserver@btvaroska` — the identity that IS granted it (DECISIONS.md 2026-09-15):
+#
+#     mkdir -p /tmp/no-gcloud-adc
+#     CLOUDSDK_CONFIG=/tmp/no-gcloud-adc OBJECT_STORE_BACKEND=gcs GCS_BUCKET=btvaroska \
+#       GCS_PREFIX=fleetforge/ \
+#       GCS_IMPERSONATE_SERVICE_ACCOUNT=fleetforge-artifacts@btvaroska.iam.gserviceaccount.com \
+#       just agent-publish esp32
+#
+# NEVER run `just agent-build*` against prod — bundles are built here and published
+# there; prod has no toolchain and no checkout.
+agent-publish target="esp32":
+    python3 agent/tools/check_bundles_fresh.py agent/dist/{{ target }}
+    PYTHONPATH=src uv run python -m fleetforge.firmware publish agent/dist/{{ target }}
+
+# Every target in `agent_targets`, in one index write per bundle. Not atomic across
+# targets: a failure part-way leaves the earlier targets published, which is the
+# correct outcome — each (target, layout) is independent.
+agent-publish-all:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    dirs=(); for t in {{ agent_targets }}; do dirs+=("agent/dist/$t"); done
+    python3 agent/tools/check_bundles_fresh.py "${dirs[@]}"
+    PYTHONPATH=src uv run python -m fleetforge.firmware publish "${dirs[@]}"
+
+# What the flasher would serve right now, straight from the index — the answer to
+# "is prod actually running the bundle I think it is?".
+agent-list:
+    PYTHONPATH=src uv run python -m fleetforge.firmware list
+
+# Re-point one target at a bundle that was published before. Nothing is uploaded and
+# nothing is deleted: rollback is an index write, so it is as fast as it needs to be
+# at 2am. Digests come from `just agent-list`.
+agent-rollback target digest:
+    PYTHONPATH=src uv run python -m fleetforge.firmware rollback {{ target }} --manifest {{ digest }}
 
 # The pushable artifact: a FROM-scratch OCI image whose entire payload is the
 # bundle. Kilobytes in the registry, and a digest to pin in provenance.
@@ -623,11 +673,3 @@ agent-qemu-clean:
 agent-clean:
     find agent/dist -mindepth 1 -not -name .gitkeep -delete
     docker builder prune -f
-
-# `just build` bakes agent/dist into the app image; an empty one ships a flasher
-# with nothing to flash. Fail here, loudly, rather than in production.
-_require-agent-dist:
-    @ls agent/dist/*/manifest.json >/dev/null 2>&1 || { \
-        echo "agent/dist holds no bundle — the app image would ship an empty flasher."; \
-        echo "Run: just agent-build esp32   (see docs/runbooks/agent-build.md)"; \
-        exit 1; }

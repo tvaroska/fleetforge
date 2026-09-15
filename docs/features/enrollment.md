@@ -686,6 +686,10 @@ bundle baked into the app image (`COPY agent/dist /app/agent`, R0-infra-2), so p
 handing out firmware with this bug until the next release build. That coupling is what the
 *agent bundles are artifacts* decision (DECISIONS.md, 2026-09-11) exists to remove.
 
+> **Removed by S0-infra-6 (2026-09-15):** the bundles are artifacts in the object store
+> now. A firmware fix reaches the flasher with `just agent-publish <target>` — no app
+> image, no release build, no restart.
+
 ### An arrival that finished stops arriving (S0-fe-3)
 
 **Done 2026-09-11.** Filed by the S0-fw-1 verification above, and it is the second clause

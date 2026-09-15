@@ -21,11 +21,9 @@ services:
       - ./src:/app/src:ro
       - ./alembic:/app/alembic:ro
       - ./alembic.ini:/app/alembic.ini:ro
-      # The agent bundles come from the working tree, not from the image, so
-      # `just agent-build <target>` shows up without an app-image rebuild. It still
-      # needs an api RESTART: the catalog is read (and every part sha256-verified)
-      # once at startup, and uvicorn --reload only watches ./src.
-      - ./agent/dist:/app/agent:ro
+      # No agent/dist mount, by design (S0-infra-6): the bundles reach the api through
+      # MinIO, the same way they reach prod through GCS. `just agent-publish <target>`
+      # after a build — no bind mount, no api restart, visible within AGENT_CATALOG_TTL_S.
 
   ingestor:
     build:

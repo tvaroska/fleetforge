@@ -718,6 +718,65 @@ describe('FlashBoard — capability branches', () => {
     expect(await screen.findByTestId('agent-targets')).toHaveTextContent('Agent 0.1.0')
     expect(screen.getByTestId('agent-targets')).toHaveTextContent('esp32 (ESP32)')
   })
+
+  // ── S0-infra-6 ────────────────────────────────────────────────────────────────────
+  //
+  // The images come out of the object store now, so "there is no manifest" is a real
+  // running state (store unreachable, nothing published) rather than a broken image.
+  it('refuses to flash when the manifest could not be read, and says why', async () => {
+    const detail =
+      'the agent image store cannot be reached, so there is no firmware to offer. ' +
+      'No board can be flashed until it is back.'
+    mockFetch(
+      await defaultRoutes({ 'GET /v1/agent/manifest': () => json({ detail }, 503) }),
+    )
+    render(
+      <FlashBoard
+        onSessionExpired={vi.fn()}
+        createFlasher={async () => new FakeFlasher(chipInfo())}
+      />,
+    )
+
+    // The server's sentence, verbatim: this page must not invent its own wording for a
+    // fault it cannot diagnose, and must not show an exception or a bucket name.
+    // `findByText`, not `findByRole('alert')`: the untouched form is also complaining
+    // that Wi-Fi needs an SSID, and two alerts are two alerts.
+    expect(await screen.findByText(detail)).toBeInTheDocument()
+    // And the button is dead BEFORE a board is put into bootloader mode — the whole
+    // point of the check. It stays dead after a successful detect.
+    expect(screen.getByRole('button', { name: /flash this board/i })).toBeDisabled()
+    await userEvent.click(screen.getByRole('button', { name: /select port and detect/i }))
+    await screen.findByTestId('chip-info')
+    expect(screen.getByRole('button', { name: /flash this board/i })).toBeDisabled()
+    expect(screen.queryByTestId('agent-targets')).toBeNull()
+  })
+
+  it('names the version of each target when a publish has left them out of step', async () => {
+    // Targets are published one at a time now, so this is reachable without a bug:
+    // esp32c6 republished, esp32 not. Which board gets which version has to be visible.
+    const built = await manifest()
+    const older: AgentBuildInfo = {
+      ...built.builds[0],
+      target: 'esp32c6',
+      chip_family: 'ESP32-C6',
+      agent_version: '0.0.9',
+    }
+    mockFetch(
+      await defaultRoutes({
+        'GET /v1/agent/manifest': () => json({ ...built, builds: [...built.builds, older] }),
+      }),
+    )
+    render(
+      <FlashBoard
+        onSessionExpired={vi.fn()}
+        createFlasher={async () => new FakeFlasher(chipInfo())}
+      />,
+    )
+
+    const targets = await screen.findByTestId('agent-targets')
+    expect(targets).toHaveTextContent('esp32 (ESP32, 0.1.0)')
+    expect(targets).toHaveTextContent('esp32c6 (ESP32-C6, 0.0.9)')
+  })
 })
 
 /**

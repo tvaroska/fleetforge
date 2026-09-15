@@ -1,4 +1,4 @@
-"""`fleetforge.firmware` — loading, verifying and indexing agent bundles.
+"""`fleetforge.firmware.bundledir` — reading and verifying a local bundle directory.
 
 No toolchain and no ESP-IDF: every fixture here is a synthetic bundle written to a tmp
 directory, because what is under test is the *reader*, not the build. The build's own
@@ -6,9 +6,14 @@ gate is `just agent-verify <target>` (see `tests/test_agent_partitions.py`'s doc
 for why that one cannot live in `just test`).
 
 The rejections are the point. Each of the bad-bundle cases below is a board that would
-otherwise be bricked or unflashable, and each must be a **dropped bundle with a warning**
-rather than an exception: one corrupt target must not stop the API from starting and
-serving the other three.
+otherwise be bricked or unflashable. Since S0-infra-6 they are **publish-time**
+rejections and they *raise*: nothing must be uploaded, and `just agent-publish` must exit
+non-zero with the target named, rather than reporting success and leaving the flasher on
+the previous build. The drop-with-a-warning behaviour still exists on the read side and
+is tested in `tests/test_agent_catalog_store.py`.
+
+The module keeps its old name because `write_bundle` is imported from here by
+`tests/test_api_agent.py` and `tests/test_agent_publish.py`.
 """
 
 import hashlib
@@ -22,8 +27,8 @@ import pytest
 from fleetforge.firmware import (
     EXPECTED_OTA_SLOT_SIZE,
     EXPECTED_PARTITION_LAYOUT,
-    FirmwareCatalog,
-    load_bundles,
+    AgentBundleError,
+    load_bundle_dir,
 )
 from tests.conftest import capture_logs
 
@@ -48,9 +53,10 @@ def write_bundle(
     manifest_overrides: dict[str, Any] | None = None,
     part_overrides: dict[str, dict[str, Any]] | None = None,
     skip_files: tuple[str, ...] = (),
+    dir_name: str | None = None,
 ) -> Path:
     """Write a synthetic but structurally faithful bundle to `root/<target>`."""
-    bundle_dir = root / target
+    bundle_dir = root / (dir_name or target)
     bundle_dir.mkdir(parents=True, exist_ok=True)
 
     parts: list[dict[str, Any]] = []
@@ -97,7 +103,7 @@ def write_bundle(
     return bundle_dir
 
 
-def dropped_targets(records: list[logging.LogRecord]) -> list[str]:
+def warnings_in(records: list[logging.LogRecord]) -> list[str]:
     return [record.getMessage() for record in records if record.levelno >= logging.WARNING]
 
 
@@ -105,13 +111,11 @@ class TestConfigPartition:
     """`config_partition` is what stops `R0-fe-3` typing `0x12000`, and it is additive."""
 
     def test_is_carried_through_to_the_bundle(self, tmp_path: Path) -> None:
-        write_bundle(tmp_path, "esp32")
-        bundle = FirmwareCatalog.load(tmp_path).bundle("esp32")
-        assert bundle is not None
-        assert bundle.config_partition is not None
-        assert bundle.config_partition.label == "ff_cfg"
-        assert bundle.config_partition.offset == 0x12000
-        assert bundle.config_partition.size == 0x1000
+        bundle = load_bundle_dir(write_bundle(tmp_path, "esp32"))
+        assert bundle.manifest.config_partition is not None
+        assert bundle.manifest.config_partition.label == "ff_cfg"
+        assert bundle.manifest.config_partition.offset == 0x12000
+        assert bundle.manifest.config_partition.size == 0x1000
 
     def test_a_bundle_without_one_still_loads(self, tmp_path: Path) -> None:
         """A bundle built before R0-fw-1 is on disk and in the registry. Refusing it would
@@ -121,11 +125,9 @@ class TestConfigPartition:
         del manifest["config_partition"]
         (bundle_dir / "manifest.json").write_text(json.dumps(manifest))
 
-        bundle = FirmwareCatalog.load(tmp_path).bundle("esp32")
-        assert bundle is not None
-        assert bundle.config_partition is None
+        assert load_bundle_dir(bundle_dir).manifest.config_partition is None
 
-    def test_a_malformed_one_drops_the_bundle(self, tmp_path: Path) -> None:
+    def test_a_malformed_one_refuses_the_bundle(self, tmp_path: Path) -> None:
         """Present but wrong is not the same as absent: an offset of `null` reaching the
         flasher would write a config blob over whatever sits at address 0."""
         bundle_dir = write_bundle(tmp_path, "esp32")
@@ -133,24 +135,22 @@ class TestConfigPartition:
         manifest["config_partition"] = {"label": "ff_cfg", "offset": None, "size": 4096}
         (bundle_dir / "manifest.json").write_text(json.dumps(manifest))
 
-        assert FirmwareCatalog.load(tmp_path).bundle("esp32") is None
+        with pytest.raises(AgentBundleError):
+            load_bundle_dir(bundle_dir)
 
 
 class TestBuildIdentity:
     """S0-infra-3. Two fields the reader carries and never recomputes.
 
     The behaviour that matters here is the *degradation*: an old bundle is still a
-    flashable bundle. Dropping it would take the flasher offline over a field nothing on
-    the flash path reads — the failure mode this module's docstring exists to prevent —
-    so the answer is one warning and a `None`.
+    flashable bundle. Refusing it would take the flasher offline over a field nothing on
+    the flash path reads, so the answer is one warning and a `None`.
     """
 
     def test_both_are_carried_through_to_the_bundle(self, tmp_path: Path) -> None:
-        write_bundle(tmp_path, "esp32")
-        bundle = FirmwareCatalog.load(tmp_path).bundle("esp32")
-        assert bundle is not None
-        assert bundle.config_sha256 == "c0" * 32
-        assert bundle.build_digest == "b1" * 32
+        bundle = load_bundle_dir(write_bundle(tmp_path, "esp32"))
+        assert bundle.manifest.config_sha256 == "c0" * 32
+        assert bundle.manifest.build_digest == "b1" * 32
 
     def test_a_bundle_without_them_loads_with_a_warning(self, tmp_path: Path) -> None:
         """A bundle built before S0-infra-3 is old, not invalid."""
@@ -161,50 +161,32 @@ class TestBuildIdentity:
         (bundle_dir / "manifest.json").write_text(json.dumps(manifest))
 
         with capture_logs() as records:
-            catalog = FirmwareCatalog.load(tmp_path)
+            bundle = load_bundle_dir(bundle_dir)
 
-        bundle = catalog.bundle("esp32")
-        assert bundle is not None, "an old bundle must still be servable"
-        assert bundle.config_sha256 is None
-        assert bundle.build_digest is None
-        warnings = dropped_targets(records)
-        assert any("build identity" in message for message in warnings)
-        assert not any("dropped" in message for message in warnings)
+        assert bundle.manifest.config_sha256 is None
+        assert bundle.manifest.build_digest is None
+        assert any("build identity" in message for message in warnings_in(records))
 
     def test_a_present_bundle_warns_about_nothing(self, tmp_path: Path) -> None:
         """Vacuity guard for the test above: the warning must be about the missing field,
         not something this fixture does on every load."""
-        write_bundle(tmp_path, "esp32")
+        bundle_dir = write_bundle(tmp_path, "esp32")
         with capture_logs() as records:
-            FirmwareCatalog.load(tmp_path)
-        assert dropped_targets(records) == []
+            load_bundle_dir(bundle_dir)
+        assert warnings_in(records) == []
 
     @pytest.mark.parametrize("field", ["config_sha256", "build_digest"])
     def test_a_malformed_digest_is_refused(self, tmp_path: Path, field: str) -> None:
         """Absent is old; truncated or non-hex is corrupt, and a corrupt identity is worse
         than none — it would be compared against another bundle's and believed."""
-        write_bundle(tmp_path, "esp32", manifest_overrides={field: "not-a-digest"})
-        with capture_logs() as records:
-            catalog = FirmwareCatalog.load(tmp_path)
-        assert catalog.targets == ()
-        assert any("esp32" in message for message in dropped_targets(records))
+        bundle_dir = write_bundle(tmp_path, "esp32", manifest_overrides={field: "not-a-digest"})
+        with pytest.raises(AgentBundleError):
+            load_bundle_dir(bundle_dir)
 
 
 class TestHappyPath:
-    def test_loads_every_bundle_sorted_by_target(self, tmp_path: Path) -> None:
-        write_bundle(tmp_path, "esp32")
-        write_bundle(tmp_path, "esp32c6")
-
-        catalog = FirmwareCatalog.load(tmp_path)
-
-        assert catalog.targets == ("esp32", "esp32c6")
-        assert bool(catalog) is True
-
     def test_parts_are_indexed_by_logical_name_and_sorted_by_offset(self, tmp_path: Path) -> None:
-        write_bundle(tmp_path, "esp32")
-        bundle = FirmwareCatalog.load(tmp_path).bundle("esp32")
-        assert bundle is not None
-
+        bundle = load_bundle_dir(write_bundle(tmp_path, "esp32"))
         assert [part.name for part in bundle.parts] == [
             "bootloader",
             "partition-table",
@@ -212,8 +194,7 @@ class TestHappyPath:
             "app",
         ]
         assert [part.offset for part in bundle.parts] == [4096, 32768, 61440, 131072]
-        assert bundle.part("app") is not None
-        assert bundle.part("nope") is None
+        assert bundle.key == ("esp32", EXPECTED_PARTITION_LAYOUT)
 
     def test_the_chip_specific_bootloader_offset_survives_the_round_trip(
         self, tmp_path: Path
@@ -223,127 +204,115 @@ class TestHappyPath:
         `0x1000` on ESP32, `0x0` on the C6. A loader that "helpfully" defaulted it would
         produce an image that flashes cleanly and never boots, on half the fleet.
         """
-        write_bundle(tmp_path, "esp32")
-        write_bundle(tmp_path, "esp32c6")
-        catalog = FirmwareCatalog.load(tmp_path)
-
-        esp32 = catalog.bundle("esp32")
-        esp32c6 = catalog.bundle("esp32c6")
-        assert esp32 is not None and esp32c6 is not None
-        assert esp32.part("bootloader").offset == 4096  # type: ignore[union-attr]
-        assert esp32c6.part("bootloader").offset == 0  # type: ignore[union-attr]
+        esp32 = load_bundle_dir(write_bundle(tmp_path, "esp32"))
+        esp32c6 = load_bundle_dir(write_bundle(tmp_path, "esp32c6"))
+        assert next(p for p in esp32.parts if p.name == "bootloader").offset == 4096
+        assert next(p for p in esp32c6.parts if p.name == "bootloader").offset == 0
 
     def test_part_paths_are_absolute_and_inside_the_bundle(self, tmp_path: Path) -> None:
         bundle_dir = write_bundle(tmp_path, "esp32")
-        bundle = FirmwareCatalog.load(tmp_path).bundle("esp32")
-        assert bundle is not None
+        bundle = load_bundle_dir(bundle_dir)
         for part in bundle.parts:
             assert part.path.is_absolute()
             assert part.path.is_relative_to(bundle_dir)
 
-    def test_etag_is_a_strong_content_hash(self, tmp_path: Path) -> None:
-        write_bundle(tmp_path, "esp32")
-        bundle = FirmwareCatalog.load(tmp_path).bundle("esp32")
-        assert bundle is not None
-        app = bundle.part("app")
-        assert app is not None
-        assert app.etag == f'"sha256-{app.sha256}"'
+    def test_the_manifest_bytes_are_the_file_verbatim(self, tmp_path: Path) -> None:
+        """The digest the index records must be the digest of a file on disk.
+
+        A re-serialised pydantic model hashes to something no one can reproduce from the
+        artifact, and `build_digest` stops being checkable against it.
+        """
+        bundle_dir = write_bundle(tmp_path, "esp32")
+        bundle = load_bundle_dir(bundle_dir)
+        assert bundle.manifest_bytes == (bundle_dir / "manifest.json").read_bytes()
+
+    def test_a_layout_suffixed_directory_loads(self, tmp_path: Path) -> None:
+        """`<target>.<layout>` is how two layouts for one chip coexist (S0-infra-7)."""
+        bundle_dir = write_bundle(tmp_path, "esp32", dir_name=f"esp32.{EXPECTED_PARTITION_LAYOUT}")
+        assert load_bundle_dir(bundle_dir).key == ("esp32", EXPECTED_PARTITION_LAYOUT)
 
 
 class TestRejections:
-    """Every case here is a bundle that must be DROPPED, with a warning, not raised."""
+    """Every case here must RAISE, naming the problem: nothing may be published."""
 
-    def test_a_wrong_sha256_drops_the_bundle(self, tmp_path: Path) -> None:
-        write_bundle(tmp_path, "esp32", part_overrides={"app": {"sha256": "b" * 64}})
-        with capture_logs() as records:
-            catalog = FirmwareCatalog.load(tmp_path)
-        assert catalog.targets == ()
-        assert any(
-            "esp32" in message and "sha256" in message for message in dropped_targets(records)
-        )
+    def test_a_wrong_sha256_is_refused(self, tmp_path: Path) -> None:
+        bundle_dir = write_bundle(tmp_path, "esp32", part_overrides={"app": {"sha256": "b" * 64}})
+        with pytest.raises(AgentBundleError, match="sha256"):
+            load_bundle_dir(bundle_dir)
 
-    def test_a_flipped_byte_drops_the_bundle(self, tmp_path: Path) -> None:
+    def test_a_flipped_byte_is_refused(self, tmp_path: Path) -> None:
         """The corruption the manifest exists to catch — a brick on someone's desk."""
         bundle_dir = write_bundle(tmp_path, "esp32")
         blob = bytearray((bundle_dir / "app.bin").read_bytes())
         blob[0] ^= 0xFF
         (bundle_dir / "app.bin").write_bytes(bytes(blob))
 
-        with capture_logs() as records:
-            catalog = FirmwareCatalog.load(tmp_path)
-        assert catalog.targets == ()
-        assert dropped_targets(records)
+        with pytest.raises(AgentBundleError, match="sha256"):
+            load_bundle_dir(bundle_dir)
 
-    def test_a_wrong_size_drops_the_bundle(self, tmp_path: Path) -> None:
-        write_bundle(tmp_path, "esp32", part_overrides={"app": {"size": 999999}})
-        with capture_logs() as records:
-            assert FirmwareCatalog.load(tmp_path).targets == ()
-        assert dropped_targets(records)
+    def test_a_wrong_size_is_refused(self, tmp_path: Path) -> None:
+        bundle_dir = write_bundle(tmp_path, "esp32", part_overrides={"app": {"size": 999999}})
+        with pytest.raises(AgentBundleError):
+            load_bundle_dir(bundle_dir)
 
-    def test_a_missing_part_file_drops_the_bundle(self, tmp_path: Path) -> None:
-        write_bundle(tmp_path, "esp32", skip_files=("app.bin",))
-        with capture_logs() as records:
-            assert FirmwareCatalog.load(tmp_path).targets == ()
-        assert dropped_targets(records)
+    def test_a_missing_part_file_is_refused(self, tmp_path: Path) -> None:
+        bundle_dir = write_bundle(tmp_path, "esp32", skip_files=("app.bin",))
+        with pytest.raises(AgentBundleError):
+            load_bundle_dir(bundle_dir)
 
-    def test_a_part_absent_from_the_manifest_drops_the_bundle(self, tmp_path: Path) -> None:
+    def test_a_part_absent_from_the_manifest_is_refused(self, tmp_path: Path) -> None:
         bundle_dir = write_bundle(tmp_path, "esp32")
         manifest = json.loads((bundle_dir / "manifest.json").read_text())
         manifest["parts"] = [p for p in manifest["parts"] if p["name"] != "ota-data"]
         (bundle_dir / "manifest.json").write_text(json.dumps(manifest))
 
-        with capture_logs() as records:
-            assert FirmwareCatalog.load(tmp_path).targets == ()
-        assert any("ota-data" in message for message in dropped_targets(records))
+        with pytest.raises(AgentBundleError, match="ota-data"):
+            load_bundle_dir(bundle_dir)
 
-    def test_a_superseded_partition_layout_drops_the_bundle(self, tmp_path: Path) -> None:
+    def test_a_superseded_partition_layout_is_refused(self, tmp_path: Path) -> None:
         """`spec/device-protocol.md` fixes the layout; a board flashed with another
         announces something the server's capability check does not understand."""
-        write_bundle(tmp_path, "esp32", manifest_overrides={"partition_layout": "ab-2m-v0"})
-        with capture_logs() as records:
-            assert FirmwareCatalog.load(tmp_path).targets == ()
-        assert any("ab-2m-v0" in message for message in dropped_targets(records))
+        bundle_dir = write_bundle(
+            tmp_path, "esp32", manifest_overrides={"partition_layout": "ab-2m-v0"}
+        )
+        with pytest.raises(AgentBundleError, match="ab-2m-v0"):
+            load_bundle_dir(bundle_dir)
 
-    def test_a_wrong_ota_slot_size_drops_the_bundle(self, tmp_path: Path) -> None:
-        write_bundle(tmp_path, "esp32", manifest_overrides={"ota_slot_size": 1048576})
-        with capture_logs() as records:
-            assert FirmwareCatalog.load(tmp_path).targets == ()
-        assert dropped_targets(records)
+    def test_a_wrong_ota_slot_size_is_refused(self, tmp_path: Path) -> None:
+        bundle_dir = write_bundle(tmp_path, "esp32", manifest_overrides={"ota_slot_size": 1048576})
+        with pytest.raises(AgentBundleError, match="ota_slot_size"):
+            load_bundle_dir(bundle_dir)
 
-    def test_a_manifest_target_that_disagrees_with_its_directory_drops_the_bundle(
+    def test_a_manifest_target_that_disagrees_with_its_directory_is_refused(
         self, tmp_path: Path
     ) -> None:
-        write_bundle(tmp_path, "esp32", manifest_overrides={"target": "esp32c3"})
-        with capture_logs() as records:
-            assert FirmwareCatalog.load(tmp_path).targets == ()
-        assert dropped_targets(records)
+        bundle_dir = write_bundle(tmp_path, "esp32", manifest_overrides={"target": "esp32c3"})
+        with pytest.raises(AgentBundleError, match="esp32"):
+            load_bundle_dir(bundle_dir)
 
-    def test_an_unknown_schema_drops_the_bundle(self, tmp_path: Path) -> None:
-        write_bundle(tmp_path, "esp32", manifest_overrides={"schema": 2})
-        with capture_logs() as records:
-            assert FirmwareCatalog.load(tmp_path).targets == ()
-        assert dropped_targets(records)
+    def test_an_unknown_schema_is_refused(self, tmp_path: Path) -> None:
+        bundle_dir = write_bundle(tmp_path, "esp32", manifest_overrides={"schema": 2})
+        with pytest.raises(AgentBundleError):
+            load_bundle_dir(bundle_dir)
 
-    def test_unparseable_json_drops_the_bundle(self, tmp_path: Path) -> None:
+    def test_unparseable_json_is_refused(self, tmp_path: Path) -> None:
         bundle_dir = write_bundle(tmp_path, "esp32")
         (bundle_dir / "manifest.json").write_text("{not json")
-        with capture_logs() as records:
-            assert FirmwareCatalog.load(tmp_path).targets == ()
-        assert dropped_targets(records)
+        with pytest.raises(AgentBundleError):
+            load_bundle_dir(bundle_dir)
 
     @pytest.mark.parametrize(
         "hostile_path",
         ["../../etc/passwd", "/etc/passwd", "sub/dir.bin", ".hidden", "app.bin\x00"],
     )
-    def test_a_manifest_path_that_is_not_a_bare_filename_drops_the_bundle(
+    def test_a_manifest_path_that_is_not_a_bare_filename_is_refused(
         self, tmp_path: Path, hostile_path: str
     ) -> None:
-        write_bundle(tmp_path, "esp32", part_overrides={"app": {"path": hostile_path}})
-        with capture_logs() as records:
-            assert FirmwareCatalog.load(tmp_path).targets == ()
-        assert dropped_targets(records)
+        bundle_dir = write_bundle(tmp_path, "esp32", part_overrides={"app": {"path": hostile_path}})
+        with pytest.raises(AgentBundleError):
+            load_bundle_dir(bundle_dir)
 
-    def test_a_symlink_out_of_the_bundle_drops_it(self, tmp_path: Path) -> None:
+    def test_a_symlink_out_of_the_bundle_is_refused(self, tmp_path: Path) -> None:
         """`_resolve_part_path`'s second layer: the name is legal, the target is not."""
         outside = tmp_path / "outside.bin"
         outside.write_bytes(b"not firmware")
@@ -351,44 +320,19 @@ class TestRejections:
         (bundle_dir / "app.bin").unlink()
         (bundle_dir / "app.bin").symlink_to(outside)
 
-        with capture_logs() as records:
-            assert FirmwareCatalog.load(tmp_path).targets == ()
-        assert dropped_targets(records)
+        with pytest.raises(AgentBundleError):
+            load_bundle_dir(bundle_dir)
 
-    def test_one_bad_bundle_does_not_take_the_good_ones_with_it(self, tmp_path: Path) -> None:
-        write_bundle(tmp_path, "esp32")
-        write_bundle(tmp_path, "esp32c6", part_overrides={"app": {"sha256": "c" * 64}})
+    def test_a_directory_with_no_manifest_is_refused(self, tmp_path: Path) -> None:
+        (tmp_path / "esp32").mkdir()
+        with pytest.raises(AgentBundleError, match="manifest.json"):
+            load_bundle_dir(tmp_path / "esp32")
 
-        with capture_logs() as records:
-            catalog = FirmwareCatalog.load(tmp_path)
+    def test_a_missing_directory_is_refused(self, tmp_path: Path) -> None:
+        with pytest.raises(AgentBundleError):
+            load_bundle_dir(tmp_path / "nope")
 
-        assert catalog.targets == ("esp32",)
-        assert any("esp32c6" in message for message in dropped_targets(records))
-
-
-class TestEmptyAndMissing:
-    def test_an_empty_directory_is_an_empty_catalog(self, tmp_path: Path) -> None:
-        with capture_logs() as records:
-            catalog = FirmwareCatalog.load(tmp_path)
-        assert catalog.targets == ()
-        assert bool(catalog) is False
-        assert dropped_targets(records), "an empty bundle dir must warn, not pass silently"
-
-    def test_a_missing_directory_does_not_raise(self, tmp_path: Path) -> None:
-        with capture_logs() as records:
-            catalog = FirmwareCatalog.load(tmp_path / "nope")
-        assert catalog.targets == ()
-        assert dropped_targets(records)
-
-    def test_none_is_an_empty_catalog(self) -> None:
-        assert FirmwareCatalog.load(None).targets == ()
-
-    def test_stray_files_and_dirs_are_ignored(self, tmp_path: Path) -> None:
-        write_bundle(tmp_path, "esp32")
-        (tmp_path / "README.md").write_text("not a bundle")
-        (tmp_path / "scratch").mkdir()
-        assert FirmwareCatalog.load(tmp_path).targets == ("esp32",)
-
-    def test_load_bundles_returns_a_list(self, tmp_path: Path) -> None:
-        write_bundle(tmp_path, "esp32")
-        assert [bundle.target for bundle in load_bundles(tmp_path)] == ["esp32"]
+    def test_an_unusable_directory_name_is_refused(self, tmp_path: Path) -> None:
+        bundle_dir = write_bundle(tmp_path, "esp32", dir_name="ESP32")
+        with pytest.raises(AgentBundleError):
+            load_bundle_dir(bundle_dir)

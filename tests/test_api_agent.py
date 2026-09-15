@@ -1,13 +1,16 @@
 """`GET /v1/agent/manifest` and `GET /v1/agent/{target}/{part}`.
 
-What `R0-fe-3`'s `esptool-js` page will call. Two things it must never get wrong, because
+What `R0-fe-3`'s `esptool-js` page calls. Two things it must never get wrong, because
 both end in a board that flashes cleanly and does not boot:
 
-* the **bytes** must be byte-identical to the file on disk (no encoding, no truncation),
+* the **bytes** must be byte-identical to what was published (no encoding, no truncation),
 * the **offsets** must be the per-chip ones from the build, not a normalised default.
 
-The catalog is pointed at a tmp fixture through `dependency_overrides` on
-`firmware_catalog`, so no test here needs a toolchain or a real `agent/dist`.
+Since S0-infra-6 the fixture is a real publish into an in-memory `ObjectStore` rather
+than a directory: `get_object_store` is overridden, `firmware_catalog` is not, so every
+test here exercises the index read, the manifest re-check and the blob fetch the
+production path takes. The store fake is the one in `conftest.py`, which is also what
+the publish and catalog suites use.
 """
 
 import hashlib
@@ -17,9 +20,13 @@ from pathlib import Path
 import pytest
 from fastapi import FastAPI
 
-from fleetforge.api.routers.agent import firmware_catalog
-from fleetforge.firmware import FirmwareCatalog
-from tests.conftest import client_for, login_admin
+from fleetforge.api.deps import get_object_store
+from fleetforge.api.routers.agent import NOTHING_PUBLISHED
+from fleetforge.firmware import DEFAULT_INDEX_KEY, CatalogCache, load_bundle_dir
+from fleetforge.firmware.publish import publish_bundle, read_index
+from fleetforge.storage.blobs import blob_key
+from fleetforge.storage.objectstore import ObjectStoreError
+from tests.conftest import MemoryObjectStore, client_for, login_admin
 from tests.test_firmware_catalog import PART_FILES, write_bundle
 
 
@@ -31,21 +38,36 @@ def bundles(tmp_path: Path) -> Path:
     return tmp_path
 
 
-@pytest.fixture
-def agent_app(admin_app: FastAPI, bundles: Path) -> Iterator[FastAPI]:
-    catalog = FirmwareCatalog.load(bundles)
-    assert catalog.targets == ("esp32", "esp32c6"), "fixture bundles must load"
-    admin_app.dependency_overrides[firmware_catalog] = lambda: catalog
-    yield admin_app
-    admin_app.dependency_overrides.pop(firmware_catalog, None)
+def use_store(app: FastAPI, store: MemoryObjectStore) -> None:
+    """Point the app at `store` and give it a cache that has not read anything yet."""
+    app.dependency_overrides[get_object_store] = lambda: store
+    # A TTL of 0 keeps each request honest: the assertions below are about what the
+    # store holds now, not about what some earlier test left in a snapshot.
+    app.state.agent_catalog = CatalogCache(ttl_s=0.0)
 
 
 @pytest.fixture
-def empty_agent_app(admin_app: FastAPI, tmp_path: Path) -> Iterator[FastAPI]:
-    empty = FirmwareCatalog.load(tmp_path / "no-bundles-here")
-    admin_app.dependency_overrides[firmware_catalog] = lambda: empty
+async def store(admin_app: FastAPI, bundles: Path) -> MemoryObjectStore:
+    """Both targets published, exactly as `just agent-publish` would."""
+    store = MemoryObjectStore()
+    for target in ("esp32", "esp32c6"):
+        await publish_bundle(store, load_bundle_dir(bundles / target))
+    use_store(admin_app, store)
+    return store
+
+
+@pytest.fixture
+def agent_app(admin_app: FastAPI, store: MemoryObjectStore) -> Iterator[FastAPI]:
     yield admin_app
-    admin_app.dependency_overrides.pop(firmware_catalog, None)
+    admin_app.dependency_overrides.pop(get_object_store, None)
+
+
+@pytest.fixture
+def empty_agent_app(admin_app: FastAPI) -> Iterator[FastAPI]:
+    """A reachable store with nothing published — no index object at all."""
+    use_store(admin_app, MemoryObjectStore())
+    yield admin_app
+    admin_app.dependency_overrides.pop(get_object_store, None)
 
 
 class TestAuth:
@@ -73,6 +95,15 @@ class TestAuth:
         async with client_for(agent_app) as client:
             response = await client.get("/v1/agent/nosuchchip/app")
         assert response.status_code == 401
+
+    async def test_an_anonymous_request_never_touches_the_store(
+        self, agent_app: FastAPI, store: MemoryObjectStore
+    ) -> None:
+        """The credential is checked before a byte is read: no unauthenticated egress."""
+        store.gets.clear()
+        async with client_for(agent_app) as client:
+            await client.get("/v1/agent/esp32/app")
+        assert store.gets == []
 
 
 class TestManifest:
@@ -134,10 +165,15 @@ class TestManifest:
         assert offsets["esp32"]["bootloader"] == 4096
         assert offsets["esp32c6"]["bootloader"] == 0
 
-    async def test_the_manifest_carries_no_local_path(
+    async def test_the_manifest_carries_no_path_bucket_or_key(
         self, agent_app: FastAPI, tmp_path: Path
     ) -> None:
-        """The filesystem layout of the server is not the flasher's business."""
+        """Neither the server's filesystem nor its object layout is the flasher's business.
+
+        Leaking `blobs/sha256/…` here would invite the browser to build its own key, which
+        is the one thing the "no key is ever built from a request" rule in the router rules
+        out.
+        """
         token = await login_admin(agent_app)
         async with client_for(agent_app) as client:
             response = await client.get(
@@ -145,6 +181,7 @@ class TestManifest:
             )
         assert "path" not in response.text
         assert str(tmp_path) not in response.text
+        assert "blobs/" not in response.text
 
 
 class TestDownload:
@@ -212,13 +249,15 @@ class TestDownload:
             "app%00",
         ],
     )
-    async def test_a_hostile_part_never_reads_a_file(
-        self, agent_app: FastAPI, hostile: str
+    async def test_a_hostile_part_never_reads_an_object(
+        self, agent_app: FastAPI, store: MemoryObjectStore, hostile: str
     ) -> None:
         """404 or 422 — never a 200, never a 500. The lookup is a dict hit on names the
-        loader produced, so there is no filesystem call to escape from in the first
-        place; this is the assertion that keeps it that way."""
+        published manifest produced, and the only key that reaches the store is
+        `blob_key(<a digest that manifest carried>)`, so there is nothing to escape from;
+        this is the assertion that keeps it that way."""
         token = await login_admin(agent_app)
+        store.gets.clear()
         async with client_for(agent_app) as client:
             response = await client.get(
                 f"/v1/agent/esp32/{hostile}", headers={"Authorization": f"Bearer {token}"}
@@ -226,6 +265,11 @@ class TestDownload:
         assert response.status_code in (404, 422), response.text
         assert "root:" not in response.text
         assert "manifest" not in response.text.lower() or response.status_code == 422
+        # Only the index and the two published manifests may have been read — no key
+        # derived from the request ever reached the store.
+        index = await read_index(store)
+        allowed = {DEFAULT_INDEX_KEY} | {blob_key(e.manifest_sha256) for e in index.bundles}
+        assert set(store.gets) <= allowed, store.gets
 
     @pytest.mark.parametrize("hostile", ["..", "%2e%2e", "esp32%2f..%2fesp32c6"])
     async def test_a_hostile_target_never_reads_a_file(
@@ -239,9 +283,112 @@ class TestDownload:
         assert response.status_code in (404, 422), response.text
 
 
-class TestEmptyCatalog:
-    """`just build` refuses to ship an app image with an empty `agent/dist`, so in
-    production this means a broken bind mount — 503 is the honest answer."""
+class TestPublishedWhileRunning:
+    """The point of the whole task: a publish reaches the flasher with nothing restarted."""
+
+    async def test_a_target_published_after_startup_appears(
+        self, admin_app: FastAPI, tmp_path: Path
+    ) -> None:
+        store = MemoryObjectStore()
+        use_store(admin_app, store)
+        await publish_bundle(store, load_bundle_dir(write_bundle(tmp_path, "esp32")))
+        token = await login_admin(admin_app)
+        headers = {"Authorization": f"Bearer {token}"}
+
+        async with client_for(admin_app) as client:
+            first = await client.get("/v1/agent/manifest", headers=headers)
+            assert [b["target"] for b in first.json()["builds"]] == ["esp32"]
+
+            await publish_bundle(store, load_bundle_dir(write_bundle(tmp_path, "esp32c6")))
+            second = await client.get("/v1/agent/manifest", headers=headers)
+
+        assert [b["target"] for b in second.json()["builds"]] == ["esp32", "esp32c6"]
+        admin_app.dependency_overrides.pop(get_object_store, None)
+
+
+class TestStoreFaults:
+    """Three different faults, three different answers, all in plain language.
+
+    `api.ts::detailOf` lifts `detail` straight into the flasher's banner, so these
+    assertions are also the copy review: no exception class, no bucket, no key.
+    """
+
+    async def test_an_unreachable_store_is_503_naming_the_store(
+        self, agent_app: FastAPI, store: MemoryObjectStore
+    ) -> None:
+        token = await login_admin(agent_app)
+        store.fail_with = ObjectStoreError("connection refused to minio:9000/ff-artifacts")
+        async with client_for(agent_app) as client:
+            response = await client.get(
+                "/v1/agent/manifest", headers={"Authorization": f"Bearer {token}"}
+            )
+
+        assert response.status_code == 503
+        detail = response.json()["detail"]
+        assert "store" in detail
+        assert "cannot be reached" in detail
+        assert detail != NOTHING_PUBLISHED, "down and empty are different answers"
+        for leak in ("minio", "ff-artifacts", "Traceback", "ObjectStoreError", "blobs/"):
+            assert leak not in detail, detail
+
+    async def test_an_unreachable_store_is_503_on_a_part_too(
+        self, agent_app: FastAPI, store: MemoryObjectStore
+    ) -> None:
+        token = await login_admin(agent_app)
+        store.fail_with = ObjectStoreError("connection refused")
+        async with client_for(agent_app) as client:
+            response = await client.get(
+                "/v1/agent/esp32/app", headers={"Authorization": f"Bearer {token}"}
+            )
+        assert response.status_code == 503
+        assert "cannot be reached" in response.json()["detail"]
+
+    async def test_a_missing_part_blob_is_503_naming_the_part(
+        self, agent_app: FastAPI, store: MemoryObjectStore
+    ) -> None:
+        """A publish-integrity bug, not a transport blip — and it must say which part."""
+        token = await login_admin(agent_app)
+        headers = {"Authorization": f"Bearer {token}"}
+        async with client_for(agent_app) as client:
+            # Locate the blob through the API's own view of the catalog, so the test
+            # cannot pass by deleting something the router never asks for.
+            manifest = await client.get("/v1/agent/manifest", headers=headers)
+            build = next(b for b in manifest.json()["builds"] if b["target"] == "esp32")
+            app_key = blob_key(next(p["sha256"] for p in build["parts"] if p["name"] == "app"))
+            await store.delete(app_key)
+
+            response = await client.get("/v1/agent/esp32/app", headers=headers)
+
+        assert response.status_code == 503
+        detail = response.json()["detail"]
+        assert "app" in detail and "esp32" in detail
+        assert app_key not in detail, "the key is for the log line, not the banner"
+
+    async def test_tampered_bytes_are_502_and_never_reach_the_board(
+        self, agent_app: FastAPI, store: MemoryObjectStore
+    ) -> None:
+        """Content addressing makes this impossible, which is why it is worth one hash:
+        the failure that happens in the field is a truncated read, and without this check
+        the symptom is a board that flashes cleanly and never boots."""
+        token = await login_admin(agent_app)
+        headers = {"Authorization": f"Bearer {token}"}
+        async with client_for(agent_app) as client:
+            manifest = await client.get("/v1/agent/manifest", headers=headers)
+            build = next(b for b in manifest.json()["builds"] if b["target"] == "esp32")
+            app_key = blob_key(next(p["sha256"] for p in build["parts"] if p["name"] == "app"))
+            store.objects[app_key] = store.objects[app_key][:-1]
+
+            response = await client.get("/v1/agent/esp32/app", headers=headers)
+
+        assert response.status_code == 502
+        assert response.content != store.objects[app_key], "truncated bytes must not be served"
+        assert "do not match the manifest" in response.json()["detail"]
+
+
+class TestNothingPublished:
+    """A reachable store with no index: the answer is "publish something", not "look at
+    the network". Reachable-but-empty is now a real production state — the image ships
+    no bundles at all — so this is the first thing a fresh deployment shows."""
 
     async def test_manifest_is_503(self, empty_agent_app: FastAPI) -> None:
         token = await login_admin(empty_agent_app)
@@ -250,7 +397,8 @@ class TestEmptyCatalog:
                 "/v1/agent/manifest", headers={"Authorization": f"Bearer {token}"}
             )
         assert response.status_code == 503
-        assert response.json()["detail"] == "no agent images available"
+        assert response.json()["detail"] == NOTHING_PUBLISHED
+        assert "agent-publish" in NOTHING_PUBLISHED, "the message must say what to do"
 
     async def test_download_is_503(self, empty_agent_app: FastAPI) -> None:
         async with client_for(empty_agent_app) as client:

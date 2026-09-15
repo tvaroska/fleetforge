@@ -9,12 +9,13 @@ of the `justfile`; the API side is `src/fleetforge/firmware/` + `/v1/agent/*`.
 | Toolchain | `espressif/idf:v5.5.5`, **pinned by digest** (`sha256:a9231d06…65cf2`) |
 | Targets | `esp32`, `esp32s3`, `esp32c3`, `esp32c6` (`agent_targets` in the justfile) |
 | Output | `agent/dist/<target>/` — 4 binaries + `sdkconfig.resolved` + `manifest.json` |
-| Consumed by | `COPY agent/dist /app/agent` in the app image → `AGENT_IMAGES_DIR` → `/v1/agent/*` |
+| Consumed by | `just agent-publish <target>` → `ObjectStore` (`blobs/sha256/…` + `agent/index.json`) → `/v1/agent/*` |
 | Registry | `us-central1-docker.pkg.dev/sites-470716/containers/fleetforge-agent-<target>` |
 
 **Never run any of this on `prod`.** The production VM cannot hold a ~9 GB toolchain
 image and a build there would starve the broker. This is a developer-box pipeline whose
-*output* is baked into the app image.
+*output* is **published** from this box to the object store prod reads (S0-infra-6) — the
+app image carries no firmware at all.
 
 ## Build
 
@@ -152,21 +153,50 @@ fires on a correct tree is the check people delete.
 deliberately allows a dirty build — condition 4 exists so that dirty build never
 reaches an image.
 
-When bundles move to the object store (DECISIONS.md 2026-09-11, "agent bundles are
-artifacts"), this check moves to the publish step and validates the one bundle being
-uploaded. The script is sited for exactly that re-point.
+Since S0-infra-6 this check also runs **inside `just agent-publish`**, on the one bundle
+being uploaded — publishing, not image-building, is now what puts a bundle in front of a
+board, so that is where staleness has to be stopped. `just agent-check-fresh` remains as
+the sweep over every target you intend to ship.
 
 > Note the check on (5) matches **exact option names**. An earlier prefix match also hit
 > `CONFIG_SECURE_BOOT_V1_SUPPORTED=y`, which is a SoC *capability* symbol present in every
 > ESP32 build — a check that fails on a correct build teaches whoever hits it to delete
 > the check.
 
+## Publishing them (S0-infra-6)
+
+A built bundle reaches a flasher by being **published**, not by being baked into an
+image. Nothing is copied into the app image and nothing is bind-mounted:
+
+```bash
+just agent-publish esp32      # verify freshness + integrity, then upload
+just agent-publish-all        # every target in `agent_targets`
+just agent-list               # what is current, and what can be rolled back to
+just agent-rollback esp32 <manifest-digest>
+```
+
+`agent-publish` runs the freshness gate, re-verifies the bundle locally (every part
+re-hashed, layout and OTA slot checked against `spec/device-protocol.md`), then writes:
+each part and the manifest at `blobs/sha256/<digest>` with an immutable `Cache-Control`,
+and finally `agent/index.json` — the single mutable object naming the current manifest
+digest per `(target, partition_layout)`. Blobs first, pointer last, so a half-finished
+publish is invisible rather than broken. Re-publishing the same bundle is a no-op.
+
+Full recipe, including publishing to production's GCS from this box: 
+[artifact-storage.md](artifact-storage.md) → *Publishing agent bundles*.
+
 ## Serving them
 
-The API loads `AGENT_IMAGES_DIR` **once at startup** and re-hashes every part while
-loading; a bundle whose bytes disagree with its manifest, or whose
-`partition_layout`/`ota_slot_size` disagree with the spec, is dropped with a WARNING
-naming the target. One bad target does not stop the other three from serving.
+The API reads `agent/index.json` **lazily, at most once per `AGENT_CATALOG_TTL_S`**
+(default 60 s) — not once at startup. A `just agent-publish` therefore reaches the
+flasher within a minute with nothing restarted and no image rebuilt. Every manifest is
+re-validated on read, and every part's bytes are re-hashed as they are streamed, so a
+bundle whose manifest disagrees with the spec is dropped with a WARNING naming the
+target, and bytes that disagree with the manifest are a 502 rather than a bad flash. One
+bad target does not stop the others from serving.
+
+Constructing the app does **no** store I/O: a container must start when the bucket is
+slow or down, and say so per request instead of crash-looping.
 
 ### Catalog key and directory convention (S0-infra-7)
 
@@ -197,15 +227,17 @@ A new layout is **never** an edit to an existing row (DECISIONS.md 2026-09-09).
 
 | Shape | Where the bytes come from |
 |---|---|
-| `just up` (dev) | bind mount `./agent/dist:/app/agent:ro` — **restart the api** after a rebuild; `--reload` only watches `src/` |
-| `just up-prod`, production | baked by `COPY agent/dist /app/agent` |
-| no bundles | startup WARNING + `/v1/agent/*` answers `503 {"detail":"no agent images available"}` |
+| `just up` / `just up-prod` (dev box) | MinIO, via `just agent-publish <target>` — no bind mount, no api restart |
+| production | `gs://btvaroska/fleetforge/`, via the same `just agent-publish` run from this box |
+| nothing published | `/v1/agent/*` answers 503 *"no agent images have been published yet…"* |
+| store unreachable | `/v1/agent/*` answers 503 *"the agent image store cannot be reached…"*, and the dashboard's Flash button is disabled |
 
-`just build` (the app-image pipeline) runs **two gates** before anything is built:
-`_require-agent-dist` (at least one manifest exists) and `agent-check-fresh` (every
-bundle is current). An image with an empty flasher or with stale bundles cannot be
-released by accident. On a clean clone `agent/dist/` holds only `.gitkeep` — run
-`just agent-build-all` before `just build`.
+Those last two are deliberately different sentences: "publish something" and "look at the
+network" send an operator to different places.
+
+`just build` no longer gates on `agent/dist` at all — the image ships no firmware, so an
+empty `agent/dist` cannot produce a bad image. The gate that matters moved to
+`just agent-publish`.
 
 ## Pushing to Artifact Registry
 

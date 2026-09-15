@@ -10,20 +10,28 @@ chip family), then one call per part for the bytes.
 serve multi-megabyte downloads to anyone who finds it. Nothing about the firmware is
 secret — the reason is bandwidth and blast radius, not confidentiality.
 
-**No path is ever built from a request.** `{target}` and `{part}` are looked up in the
-in-memory catalog (`firmware/catalog.py`) and the filename comes from the manifest the
-loader already resolved and confined, so traversal is impossible by construction. The
+**No key is ever built from a request.** Since S0-infra-6 the bytes come from the object
+store, and a part's key is `blob_key(<the digest the published manifest carries>)` —
+`blob_key` validates it, `{target}` and `{part}` only ever index the catalog. The
 `SafeSegment` pattern on both parameters is the second layer: it keeps a hostile value out
 of the log line and makes `..%2f…` a clean 404 instead of a 422 from deeper in the stack.
+
+**The API reads and streams the bytes itself; it never redirects to a signed URL.** A
+signed URL in the onboarding path would drag `signBlob` (a network call since S0-infra-5)
+into the flasher and hand a browser a credential whose signature *is* its authority. The
+admin cookie is the only credential on this path.
+
+The three unhappy states are all 503 and all plain language: `detail` is lifted verbatim
+into the flasher's banner by `api.ts::detailOf`, so it never carries an exception string,
+a bucket, a key or a traceback.
 """
 
 import logging
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
-from fastapi.responses import FileResponse
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 
-from fleetforge.api.deps import AdminDep, bearer_scheme, cookie_scheme
+from fleetforge.api.deps import AdminDep, ObjectStoreDep, bearer_scheme, cookie_scheme
 from fleetforge.firmware import (
     AgentBuildInfo,
     AgentManifest,
@@ -32,6 +40,8 @@ from fleetforge.firmware import (
     FirmwareCatalog,
 )
 from fleetforge.firmware.manifest import SafeSegment
+from fleetforge.storage.blobs import digest_bytes
+from fleetforge.storage.objectstore import ObjectNotFound, ObjectStoreError
 
 logger = logging.getLogger(__name__)
 
@@ -45,17 +55,40 @@ router = APIRouter(
 # it is behind the admin credential, so no shared cache may keep a copy.
 CACHE_CONTROL = "private, max-age=3600"
 
+# What an operator reads when the store is down. Named, retriable, and about the store —
+# not about a bucket, a key or an exception class.
+STORE_UNREACHABLE = (
+    "the agent image store cannot be reached, so there is no firmware to offer. "
+    "No board can be flashed until it is back."
+)
+NOTHING_PUBLISHED = (
+    "no agent images have been published yet. Publish one with `just agent-publish <target>`."
+)
 
-def firmware_catalog(request: Request) -> FirmwareCatalog:
-    """The per-app catalog, loaded once in `create_app()`.
+
+async def firmware_catalog(request: Request, store: ObjectStoreDep) -> FirmwareCatalog:
+    """The catalog, re-read from the store at most once per `AGENT_CATALOG_TTL_S`.
 
     Per app rather than module-level for the same reason as `token_cache` and
     `event_hub` (`api/deps.py`): tests get a fresh one, and `dependency_overrides`
     on this function is how they point it at a fixture. Reached through `Depends`
     below and never called directly — a direct call would bypass those overrides,
     which is a test that silently exercises the wrong catalog.
+
+    An unreachable store is a **503 naming the store**, never an empty catalog: "nothing
+    published" and "we cannot see what is published" are different answers and the
+    operator acts differently on each.
     """
-    catalog: FirmwareCatalog = request.app.state.firmware_catalog
+    cache = request.app.state.agent_catalog
+    try:
+        catalog: FirmwareCatalog = await cache.get(store)
+    except ObjectStoreError as exc:
+        # The exception names the bucket and the key; the log gets those, the body does not.
+        logger.error("agent catalog unavailable: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=STORE_UNREACHABLE,
+        ) from exc
     return catalog
 
 
@@ -63,16 +96,15 @@ CatalogDep = Annotated[FirmwareCatalog, Depends(firmware_catalog)]
 
 
 def _require_catalog(catalog: FirmwareCatalog) -> FirmwareCatalog:
-    """503 when nothing is servable — the same shape as `deps.get_object_store`.
+    """503 when the store is reachable but holds nothing servable.
 
-    The honest answer on a stack built with an empty `agent/dist`. `just build` refuses
-    to produce such an app image (`_require-agent-dist`), so in production this means the
-    bind mount or the `COPY` is wrong, and the startup WARNING says which.
+    Distinct from the unreachable case above: here the answer is "publish something",
+    and the message says so rather than sending an operator to look at the network.
     """
     if not catalog:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="no agent images available",
+            detail=NOTHING_PUBLISHED,
         )
     return catalog
 
@@ -83,7 +115,7 @@ async def agent_manifest(admin: AdminDep, catalog: CatalogDep) -> AgentManifest:
 
     `agent_version` is hoisted to the top level because one build of the agent produces
     every target: a response whose targets disagreed about it would mean a partial
-    `just agent-build-all`, and the per-build copy is still there to show which.
+    `just agent-publish-all`, and the per-build copy is still there to show which.
     """
     _require_catalog(catalog)
     return AgentManifest(
@@ -120,16 +152,17 @@ async def agent_manifest(admin: AdminDep, catalog: CatalogDep) -> AgentManifest:
 
 @router.get(
     "/{target}/{part}",
-    response_class=FileResponse,
+    response_class=Response,
     summary="One flashable part of one target's image",
 )
 async def agent_part(
     admin: AdminDep,
     catalog: CatalogDep,
+    store: ObjectStoreDep,
     target: SafeSegment,
     part: SafeSegment,
     layout: SafeSegment | None = None,
-) -> FileResponse:
+) -> Response:
     """The raw bytes of one part, with the manifest's sha256 as a strong ETag.
 
     `?layout=` selects which partition_layout when more than one exists for a target. If
@@ -154,9 +187,49 @@ async def agent_part(
         logger.info("agent image not found: target=%s part=%s layout=%s", target, part, layout)
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
 
-    return FileResponse(
-        entry.path,
+    try:
+        data = await store.get(entry.blob_key)
+    except ObjectNotFound as exc:
+        # A publish-integrity bug, not a transport blip: the index promised a manifest
+        # whose parts are not all there. ERROR, and the operator is told which part.
+        logger.error(
+            "agent part blob missing: target=%s part=%s key=%s", target, part, entry.blob_key
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=(
+                f"the agent image store is missing part '{part}' of {target}. "
+                "Re-publish the bundle."
+            ),
+        ) from exc
+    except ObjectStoreError as exc:
+        logger.error("agent part unavailable: target=%s part=%s: %s", target, part, exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=STORE_UNREACHABLE,
+        ) from exc
+
+    if digest_bytes(data) != entry.sha256:
+        # Should be impossible under content addressing, which is exactly why it is worth
+        # one hash of 1.2 MB: the failure that actually happens is a truncated read, and
+        # the symptom without this check is a board that flashes cleanly and never boots.
+        logger.error(
+            "agent part bytes do not match the manifest: target=%s part=%s key=%s",
+            target,
+            part,
+            entry.blob_key,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="the agent image store served bytes that do not match the manifest",
+        )
+
+    return Response(
+        content=data,
         media_type="application/octet-stream",
-        filename=f"{target}-{part}.bin",
-        headers={"ETag": entry.etag, "Cache-Control": CACHE_CONTROL},
+        headers={
+            "ETag": entry.etag,
+            "Cache-Control": CACHE_CONTROL,
+            "Content-Disposition": f'attachment; filename="{target}-{part}.bin"',
+        },
     )

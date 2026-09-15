@@ -41,6 +41,7 @@ from fleetforge.api.main import create_app
 from fleetforge.auth.hashing import hash_secret
 from fleetforge.config import Settings, get_settings
 from fleetforge.db.base import get_sessionmaker
+from fleetforge.storage.objectstore import ObjectNotFound
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TEST_DB_NAME = "fleetforge_test"
@@ -315,3 +316,56 @@ async def login_admin(app: FastAPI, password: str = TEST_PASSWORD) -> str:
     token = response.cookies[COOKIE_NAME]
     assert isinstance(token, str)
     return token
+
+
+class MemoryObjectStore:
+    """An in-memory `ObjectStore`: a dict, plus the contract's error behaviour.
+
+    Shared by `test_blob_keys.py` (which only reads `puts`), `test_agent_publish.py` and
+    `test_agent_catalog_store.py`, so there is one fake rather than three that drift. It
+    implements the Protocol structurally — no base class, the same way the real adapters
+    do — and its `get` raises `ObjectNotFound`, never returns `None`, because a fake that
+    is more forgiving than the contract hides exactly the bug the contract exists to stop.
+
+    `fail_with` makes the store refuse every verb: the named-fault path
+    (`ObjectStoreError` → 503) has to be reachable without unplugging MinIO.
+    """
+
+    def __init__(self) -> None:
+        self.objects: dict[str, bytes] = {}
+        # (key, data, content_type, cache_control) per put, in order.
+        self.puts: list[tuple[str, bytes, str, str | None]] = []
+        self.gets: list[str] = []
+        self.fail_with: Exception | None = None
+
+    def _maybe_fail(self) -> None:
+        if self.fail_with is not None:
+            raise self.fail_with
+
+    async def put(
+        self,
+        key: str,
+        data: bytes,
+        *,
+        content_type: str = "application/octet-stream",
+        cache_control: str | None = None,
+    ) -> None:
+        self._maybe_fail()
+        self.puts.append((key, data, content_type, cache_control))
+        self.objects[key] = data
+
+    async def get(self, key: str) -> bytes:
+        self._maybe_fail()
+        self.gets.append(key)
+        try:
+            return self.objects[key]
+        except KeyError as exc:
+            raise ObjectNotFound(f"no object at {key}") from exc
+
+    async def signed_url(self, key: str, *, ttl_s: int | None = None) -> str:
+        self._maybe_fail()
+        return f"https://memory.invalid/{key}?ttl={ttl_s}"
+
+    async def delete(self, key: str) -> None:
+        self._maybe_fail()
+        self.objects.pop(key, None)

@@ -657,6 +657,11 @@ Server side: `src/fleetforge/firmware/` loads and verifies the bundles once per 
 serve them behind the admin credential. `COPY agent/dist /app/agent` bakes them into the
 app image; the dev override bind-mounts the working tree instead.
 
+> **Superseded by S0-infra-6 (2026-09-15):** the distribution half of this is gone. The
+> image carries no firmware, the bundles are artifacts in the object store, and the
+> catalog is read per TTL rather than once at startup. The build half below is unchanged.
+
+
 ### The flash-time immutables
 
 `agent/partitions.csv` — layout id `ab-4m-v1`, frozen at R0 because **a partition table
@@ -1091,19 +1096,22 @@ be the staleness signal. Provenance in the manifest (`source_commit`, `idf_image
 `built_at`) is the only durable handle. Documented in the runbook's *Reproducibility*
 section.
 
-## Agent bundles served from the object store (planned)
+## Agent bundles served from the object store (planned 2026-09-11)
 
-**Status:** Planned · **Priority:** P2 · **Added:** 2026-09-11
+**Landed as S0-infra-6 on 2026-09-15** — see *Agent bundles are served from the store
+(S0-infra-6, closed 2026-09-15)* at the end of this file for what actually shipped and
+what was measured. The planning material below is kept as the record of why the move was
+taken and of the shape that was agreed before it was built.
+
+**Status:** Closed 2026-09-15 · **Priority:** P2 · **Added:** 2026-09-11
 **Requirements:** [spec/standards.md](../../spec/standards.md) → *infrastructure* →
 *Agent bundles are artifacts, not image contents*
 **Decision:** [design/decisions/infrastructure-agent-bundles-are-artifacts.md](../../design/decisions/infrastructure-agent-bundles-are-artifacts.md)
-**Blocked on:** `R1-BE-0` ([ota-deploy.md](ota-deploy.md)) — a non-key GCS credential in
-`storage/factory.py`. **Not** blocked on V4 signing: this feature needs authenticated
-reads only, and prod can already read the bucket. See
-[docs/runbooks/artifact-storage.md](../runbooks/artifact-storage.md) →
-*The credential already exists* (amended 2026-09-11).
+**Was blocked on:** `R1-BE-0` ([ota-deploy.md](ota-deploy.md)) — a non-key GCS
+credential in `storage/factory.py`. Unblocked by S0-infra-5 (keyless impersonation,
+2026-09-15). **Not** blocked on V4 signing: this feature needs authenticated reads only.
 
-### Problem
+### Problem (as stated 2026-09-11)
 
 `Dockerfile:68` bakes `agent/dist` into the application image and
 `src/fleetforge/firmware/` serves it from `AGENT_IMAGES_DIR`, while R1's user artifacts
@@ -1471,3 +1479,177 @@ service-account key cannot be minted"*. Four env lines wire it and nothing is mo
 `GCS_IMPERSONATE_SERVICE_ACCOUNT: fleetforge-artifacts@btvaroska.iam.gserviceaccount.com`.
 None is a secret. Root `CLAUDE.md` requires asking before touching production config, so
 this task proposed them rather than applying them.
+
+## Agent bundles are served from the store (S0-infra-6, closed 2026-09-15)
+
+**Filed as:** "Agent bundles are served from the store, not baked into the image" — the
+move named by `design/decisions/infrastructure-agent-bundles-are-artifacts.md`, unblocked
+by S0-infra-5's keyless credential.
+
+### What shipped
+
+The prebuilt agent bundles the browser flasher writes to a board stopped being image
+contents and became ordinary content-addressed artifacts, on the same `ObjectStore` seam
+R1's user artifacts use. `COPY agent/dist /app/agent` and `AGENT_IMAGES_DIR` are gone;
+`.dockerignore` now excludes `agent/` outright.
+
+**Publish side.** `firmware/catalog.py`'s old filesystem loader became
+`firmware/bundledir.py` — the same verification (every part re-hashed, layout and OTA
+slot checked against `spec/device-protocol.md`, `path` forced to a bare filename), but it
+now **raises** instead of dropping, because a publisher that skipped a corrupt bundle
+would report success and leave the flasher serving the previous build. `firmware/publish.py`
+uploads each part and the manifest through `put_blob` (immutable `Cache-Control`,
+`expected_digest` checked), then re-points the index. `python -m fleetforge.firmware`
+exposes `publish` / `list` / `rollback`, wrapped by `just agent-publish`,
+`just agent-publish-all`, `just agent-list`, `just agent-rollback`.
+
+**The index object.** `agent/index.json` (`firmware/index.py`) is the only mutable key in
+the scheme: schema version, `updated_at`, and one entry per `(target, partition_layout)`
+naming the current manifest digest plus up to 20 superseded ones. Written with
+`Cache-Control: no-store`, never through `put_blob`.
+
+**Read side.** `firmware/catalog.py` is now store-backed: `load_catalog` reads the index,
+fetches each manifest blob and re-validates it, and `CatalogCache` holds the result for
+`AGENT_CATALOG_TTL_S` (default 60 s) behind an `asyncio.Lock`. `agent_part` streams the
+bytes from the store under the admin credential and re-hashes them before answering.
+
+**Frontend.** The Flash button is disabled while the manifest is unreadable, and the
+target line names each build's version when a partial publish has left them out of step.
+
+### Publishing is not deploying — the criterion the task exists for
+
+A firmware fix used to require a bundle rebuild, an app-image rebuild, a registry push
+and a redeploy; rolling one back required the same in reverse (S0-fw-3, and S0-infra-2's
+three stale bundles in v0.3.0). It is now one `just agent-publish`, visible to the
+flasher within the catalog TTL with **the same api container still running**, and one
+`just agent-rollback` — an index write — to go back.
+
+### Five criteria from `spec/standards.md`
+
+- **Named faults, never silence.** Three distinct answers: *"no agent images have been
+  published yet"* (503, reachable-but-empty), *"the agent image store cannot be reached"*
+  (503, transport), and 502 for bytes that do not match the manifest. The 503 detail is
+  lifted verbatim into the flasher's banner, so it carries no bucket, key, exception class
+  or traceback — those go to the log.
+- **No stale snapshot over a failing refresh.** `CatalogCache` drops its snapshot
+  *before* the refresh read, so a store outage produces a named 503 rather than a manifest
+  the API can no longer honour. Failures are not cached either.
+- **One bad entry does not take the others down.** A manifest that is missing, unparseable
+  or disagrees with the protocol is dropped with a WARNING naming the target; the other
+  targets still serve. That rule survived the move from the filesystem.
+- **No key is ever built from a request.** `{target}`/`{part}` only index the catalog; the
+  only key that reaches the store is `blob_key(<a digest the published manifest carried>)`.
+- **The container starts when the bucket is down.** `create_app()` does no store I/O; the
+  catalog is lazy.
+
+### Deliberate non-goals
+
+- **No `list` verb.** The store seam keeps four verbs. Listing is a per-backend paging
+  contract, and a catalog defined by "whatever is in the prefix" cannot be rolled back,
+  cannot be made atomic, and answers "what is current?" with a guess.
+- **No database tables.** The index is the catalog. Agent bundles are per-deployment
+  facts, not per-tenant records, and a DB row would have to be kept in step with the
+  bytes by hand.
+- **No multi-version serving.** One current bundle per `(target, layout)`; rollback
+  re-points the index rather than exposing a version axis on the wire, which would change
+  `/v1/agent/manifest` for every client to serve a case that happens twice a year.
+- **No signed URL on this path.** The API streams the bytes under the admin credential; a
+  signed URL would drag `signBlob` (a network call since S0-infra-5) into onboarding.
+
+### Files created
+
+- `src/fleetforge/firmware/bundledir.py` — the local, publish-time verifier (`git mv` of
+  the old `catalog.py`)
+- `src/fleetforge/firmware/index.py` — `AgentIndex`, the pointer object and its pure `upsert`
+- `src/fleetforge/firmware/publish.py` — `publish_bundle`, `read_index`/`write_index`, `rollback`
+- `src/fleetforge/firmware/__main__.py` — `publish` / `list` / `rollback` CLI
+- `tests/test_agent_publish.py`, `tests/test_agent_catalog_store.py`
+
+### Files modified
+
+- `src/fleetforge/firmware/catalog.py` — rewritten store-backed, plus `CatalogCache`
+- `src/fleetforge/api/routers/agent.py` — async store-backed catalog dependency, blob
+  streaming, the three named faults
+- `src/fleetforge/api/main.py` — `app.state.agent_catalog = CatalogCache(...)`, no I/O
+- `src/fleetforge/config.py` — `AGENT_IMAGES_DIR` out, `AGENT_INDEX_KEY` /
+  `AGENT_CATALOG_TTL_S` in
+- `Dockerfile`, `.dockerignore`, `docker-compose.yml`, `docker-compose.override.yml`,
+  `.env.example`, `justfile`
+- `frontend/src/FlashBoard.tsx`, `frontend/src/flash.test.tsx`
+- `tests/conftest.py` (shared `MemoryObjectStore`), `tests/test_blob_keys.py`,
+  `tests/test_firmware_catalog.py`, `tests/test_api_agent.py`
+- `design/artifacts.md`, `design/decisions/infrastructure-agent-bundles-are-artifacts.md`,
+  `docs/runbooks/agent-build.md`, `docs/runbooks/artifact-storage.md`
+
+### Gotchas learned
+
+**A bundle directory copied elsewhere fails on its name, not its contents.** The loader
+derives the target from the directory name, so `cp -r agent/dist/esp32 /tmp/bad` fails
+with *"manifest says target 'esp32' but it sits in 'bad'"* before any integrity check
+runs. Corruption drills must keep the directory named after the target.
+
+**Part failures must name the target.** `just agent-publish-all` verifies several bundles
+in one run, and *"app is 993697 bytes on disk"* does not say which board would have been
+bricked.
+
+**The TTL is visible in an outage drill.** With a fresh snapshot, `/v1/agent/manifest`
+keeps answering 200 for up to `AGENT_CATALOG_TTL_S` after the store goes down, while a
+part download fails immediately. That is the cache working, not a stale-serve bug — the
+no-stale rule binds at refresh time.
+
+**The index RMW is a read-modify-write race, knowingly accepted.** Two concurrent
+publishes of *different* targets can lose one entry. There is one publisher (an operator
+at a terminal) and the loser is re-published by re-running one command; a compare-and-set
+would need a generation precondition the seam deliberately does not expose.
+
+### Verification (T2)
+
+- **AC1 — the image carries no firmware.** `docker build --target=production` then
+  `ls /app/agent` → *No such file or directory*; `find /app -name '*.bin' | wc -l` → `0`.
+- **AC2 — it builds with no bundles at all and the flasher still works.** With
+  `agent/dist` moved aside the build succeeded and produced the **same image id**
+  (`sha256:0c4f698b…`), proving the bundles are not in the build context. Against
+  `just up-prod` + `just agent-publish esp32`: the manifest lists `esp32`, and
+  `GET /v1/agent/esp32/app` is 200 whose sha256 (`2484cb76…`) equals the manifest's app
+  digest. `just agent-qemu-smoke esp32` → *HARNESS OK: esp32 boots, reads its config, and
+  does not loop.*
+- **AC3 — publishing is not deploying.** `just agent-publish esp32c6`, then after the TTL
+  the manifest lists `esp32, esp32c6` with the api container id **unchanged** and
+  `docker compose logs … | grep -ci restart` → `0`.
+- **AC4 — an unreachable store is a named fault.** With `docker compose stop minio`, both
+  `/v1/agent/manifest` and `/v1/agent/esp32/app` answer 503 *"the agent image store cannot
+  be reached, so there is no firmware to offer. No board can be flashed until it is
+  back."* — no bucket, key or traceback in the body; the key appears only in the ERROR
+  log line. 401 still precedes 503 for an anonymous caller.
+- **AC5 — corruption is still refused, with the target named.** One appended byte →
+  *"esp32: app is 993697 bytes on disk, manifest says 993696"*, exit 1; a hand-edited
+  `ota_slot_size` → *"ota_slot_size 4194304 is not the 1966080 that layout 'ab-4m-v1'
+  declares"*, exit 1. Nothing was written (`agent-list` unchanged), and the uncorrupted
+  publish exits 0 (vacuity check).
+- **AC6 — a previous version is still flashable with no rebuild.** Published a second,
+  distinguishable build, then `rollback esp32 --manifest <D1>`: the manifest reports the
+  older `agent_version`, the part download still verifies, and the api container id is
+  unchanged.
+- **AC7 — self-hosting is unaffected.** Everything above ran against MinIO with no GCS
+  configuration present at all.
+- **AC8 — T1.** `just lint`, `just typecheck`, `uv run pytest tests/` (703 passed),
+  `npm test` (205 passed) and `npm run build` all green.
+- **AC9 — prod.** Not run: the production container is still unwired and root `CLAUDE.md`
+  requires asking before touching production config. Proposed below.
+
+### Production hand-off (proposed, NOT applied)
+
+`services/prod/docker-compose.yml`'s `fleetforge-api` block still sets
+`AGENT_IMAGES_DIR: /app/agent` and carries the now-false comment *"No object store on
+purpose: the GCS service-account key cannot be minted"*. Replace both with:
+
+```yaml
+      OBJECT_STORE_BACKEND: gcs
+      GCS_BUCKET: btvaroska
+      GCS_PREFIX: fleetforge/
+      GCS_IMPERSONATE_SERVICE_ACCOUNT: fleetforge-artifacts@btvaroska.iam.gserviceaccount.com
+```
+
+**Order matters:** publish the bundles to GCS *before* deploying an app image that no
+longer carries them, or prod's flasher answers 503 in between. Nothing is mounted and no
+key exists (S0-infra-5).

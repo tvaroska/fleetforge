@@ -173,6 +173,8 @@ export function FlashBoard({
 
   const chip = state.chip
   const candidates = chip === null ? [] : shortlist(chip)
+  const mixedVersions =
+    manifest !== null && new Set(manifest.builds.map((b) => b.agent_version)).size > 1
   const predicted = chip === null ? null : predictDeviceId(chip)
   const apiBase = defaultApiBase()
   const config: FlashConfigInput = {
@@ -241,7 +243,16 @@ export function FlashBoard({
       {manifest !== null && (
         <p className="muted" data-testid="agent-targets">
           Agent {manifest.agent_version} ·{' '}
-          {manifest.builds.map((b) => `${b.target} (${b.chip_family})`).join(', ')}
+          {manifest.builds
+            .map((b) =>
+              // Targets are published one at a time (S0-infra-6), so two of them may now
+              // legitimately be different versions — and which board got which matters.
+              // Only spelled out when they actually disagree; the common case stays short.
+              mixedVersions
+                ? `${b.target} (${b.chip_family}, ${b.agent_version})`
+                : `${b.target} (${b.chip_family})`,
+            )
+            .join(', ')}
         </p>
       )}
 
@@ -456,7 +467,11 @@ export function FlashBoard({
           onClick={() =>
             void state.flash({ config, baudRate: form.baudRate })
           }
-          disabled={state.busy || chip === null || configError !== null}
+          // `manifest === null` disables it too: since S0-infra-6 the agent images come
+          // from the object store, so "no manifest" is a real running state (store down,
+          // nothing published). Without this the operator presses Flash, the board is put
+          // into bootloader mode, and the failure only surfaces at part 1 of 4.
+          disabled={state.busy || chip === null || configError !== null || manifest === null}
         >
           Flash this board
         </button>

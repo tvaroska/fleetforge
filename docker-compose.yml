@@ -236,6 +236,13 @@ services:
         condition: service_healthy
       mosquitto:
         condition: service_healthy
+      # Since S0-infra-6 the flasher reads the agent bundles out of the store, so a dev
+      # stack whose bucket does not exist yet cannot onboard a board. Ordering only: the
+      # api itself starts fine without MinIO (it does no store I/O at startup and answers
+      # a named 503 while the store is down) — this just spares the operator a confusing
+      # first-run 503 in the one topology where we own the bucket's creation.
+      minio-init:
+        condition: service_completed_successfully
     environment:
       # Container URL, not the host URL from .env — see the header note.
       DATABASE_URL: postgresql+asyncpg://fleetforge:fleetforge@postgres:5432/fleetforge
@@ -295,13 +302,12 @@ services:
       # Recipe and rotation: docs/runbooks/artifact-storage.md. Nothing in this repo's
       # compose mounts a real key, and none is ever committed.
       #
-      # The prebuilt agent images (R0-infra-2), baked into the image by
-      # `COPY agent/dist /app/agent`. NOT the object store: these are build outputs
-      # that version with the app, not user artifacts, and routing them through GCS
-      # would make the flasher depend on a credential that cannot be minted today
-      # (docs/runbooks/artifact-storage.md -> BLOCKED). The dev override bind-mounts
-      # ./agent/dist over this path instead.
-      AGENT_IMAGES_DIR: /app/agent
+      # The prebuilt agent images live in that same store since S0-infra-6 — the app
+      # image ships none — so the S3_* block above is now what ONBOARDING depends on,
+      # not just deploy. Nothing to set here: AGENT_INDEX_KEY (agent/index.json) and
+      # AGENT_CATALOG_TTL_S (60s, how long a `just agent-publish` takes to reach the
+      # flasher with nothing restarted) default correctly. Publish into this stack with
+      # `just agent-publish <target>`.
     # No published host port: the only way in is the frontend's nginx.
     networks:
       - backend

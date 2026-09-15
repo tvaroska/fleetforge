@@ -209,17 +209,22 @@ class Settings(BaseSettings):
     # neither set is still an error, never a fall back to plain ADC.
     gcs_impersonate_service_account: str | None = None
 
-    # --- Prebuilt agent images (R0-infra-2) -----------------------------------
-    # Where the per-target agent bundles live. Two shapes, both real:
-    #   * production / `up-prod`: baked into the app image at /app/agent by the
-    #     Dockerfile's `COPY agent/dist /app/agent` — the bundles version with the app
-    #     and are digest-pinned by `just build`;
-    #   * dev: docker-compose.override.yml bind-mounts ./agent/dist there instead, so a
-    #     rebuilt bundle appears without an image rebuild (an api restart is still
-    #     needed — the catalog is read once at startup, and uvicorn --reload only
-    #     watches src/).
-    # `None` disables the flasher endpoints (503) rather than guessing at a path.
-    agent_images_dir: str | None = "/app/agent"
+    # --- Agent bundles in the object store (S0-infra-6) ------------------------
+    # The bundles are artifacts now, not image contents: the app image ships no firmware
+    # at all and the flasher reads parts out of the store above, through the same seam
+    # R1's user artifacts use. So the S3_*/GCS_* settings are what onboarding depends on,
+    # not just deploy. `AGENT_IMAGES_DIR` is gone; a stale one left in an env file is
+    # harmless (`extra="ignore"`).
+    #
+    # The index object is the catalog: one small mutable JSON naming the current bundle
+    # per (target, partition_layout), written by `just agent-publish`. STORE-RELATIVE —
+    # it must NOT start with `fleetforge/`, which is `gcs_prefix`'s half and is joined on
+    # by `resolve_key` (the same trap `storage/blobs.py` documents).
+    agent_index_key: str = "agent/index.json"
+    # How long a published bundle takes to appear in `/v1/agent/manifest` without any
+    # restart, and the ceiling on how many index reads a flash costs (a flash pulls four
+    # parts). `0` means read the index on every request — useful mid-incident.
+    agent_catalog_ttl_s: float = 60.0
 
     # How long a signed artifact URL lives. 30 min = 2x spec/prd.md's degraded-link
     # deploy budget (15 min), so a range-resumed download cannot outlive its own URL.

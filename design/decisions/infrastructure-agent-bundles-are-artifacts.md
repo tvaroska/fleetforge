@@ -1,8 +1,8 @@
 # Agent bundles are artifacts, not image contents
 
-**Date:** 2026-09-11 · **Area:** infrastructure · **Status:** Accepted, filed 2026-09-14
-as `S0-infra-6` (the move) and `S0-infra-5` (its stated prerequisite, a credential that
-is not a key file). Storage model underneath: [../artifacts.md](../artifacts.md).
+**Date:** 2026-09-11 · **Area:** infrastructure · **Status:** **Implemented in
+S0-infra-6, 2026-09-15** (its prerequisite `S0-infra-5`, a credential that is not a key
+file, landed first). Storage model underneath: [../artifacts.md](../artifacts.md).
 **Supersedes:** the distribution half of R0-infra-2's `COPY agent/dist /app/agent` — not
 its build half, which is unchanged.
 

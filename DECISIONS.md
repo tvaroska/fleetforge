@@ -6,6 +6,58 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-15 — the agent catalog is a pointer object, not a bucket listing (S0-infra-6)
+
+**Closes** the 2026-09-11 entry *agent bundles are artifacts, not image contents*, whose
+blocker the S0-infra-5 entry above removed. The application image now ships **zero**
+firmware: `COPY agent/dist /app/agent` and `AGENT_IMAGES_DIR` are gone, `just agent-publish
+<target>` uploads a verified bundle as content-addressed blobs, and the flasher reads it
+back through `ObjectStore`. A firmware fix now reaches boards with no app-image rebuild and
+**no restart** — measured at the TTL, same container id.
+
+- **`agent/index.json` is a pointer, not a listing, because `ObjectStore` has four verbs
+  and `list` is not one of them.** Adding a fifth verb to serve this was rejected twice
+  over: listing is a per-backend paging contract, and a catalog defined as "whatever is in
+  the prefix" cannot be rolled back, cannot be published atomically, and answers "what is
+  current?" with a guess over lexicographic order. The index is the single mutable key in
+  the scheme (`Cache-Control: no-store`, never through `put_blob`); everything else is
+  immutable `blobs/sha256/<digest>`. Publish writes blobs first and the index last, so a
+  crash leaves unreferenced blobs rather than a catalog pointing at bytes that do not
+  exist. **Rollback is therefore one index write** (`just agent-rollback <target> <digest>`)
+  against a capped 20-entry `superseded` history — not a rebuild, which is what S0-fw-3 and
+  S0-infra-2's three stale bundles each cost.
+- **No database table for the catalog.** Agent bundles are per-deployment facts, not
+  per-tenant records; a row would have to be kept in step with the bytes by hand, and the
+  index already is that state. `firmware_builds`/`firmware_artifacts` stay empty here.
+- **A failing refresh never serves the previous snapshot.** `CatalogCache` clears before it
+  reads, so a store outage is a named 503 rather than a manifest whose parts the API can no
+  longer hand out; failures are not cached either. Three distinct answers, and the 503 text
+  is lifted verbatim into the flasher banner, so it carries no bucket, key or traceback:
+  *"no agent images have been published yet"*, *"the agent image store cannot be reached…"*,
+  and 502 for bytes that do not match the manifest. `create_app()` does no store I/O — the
+  container still starts when the bucket is down.
+- **Verification moved forward, it did not move away.** The old startup loader became
+  `firmware/bundledir.py` and now **raises** instead of dropping: a publisher that skipped a
+  corrupt bundle would report success and leave the flasher serving the previous build.
+  Dropping-with-a-warning is still correct on the read side, where one bad manifest must not
+  take the other three targets down.
+- **The index read-modify-write race is knowingly accepted.** Two concurrent publishes of
+  different targets can lose one entry. There is one publisher (an operator at a terminal),
+  the loser is repaired by re-running one command, and a compare-and-set would need a
+  generation precondition the seam deliberately does not expose. Revisit if publishing is
+  ever automated in CI.
+- **Prod is proposed, not applied.** `services/prod/docker-compose.yml` still sets
+  `AGENT_IMAGES_DIR` and carries the now-false "no object store on purpose" comment; the
+  replacement (`OBJECT_STORE_BACKEND: gcs` + bucket/prefix/impersonation) is written out in
+  [docs/features/infrastructure.md](docs/features/infrastructure.md) → *Production hand-off*
+  and root `CLAUDE.md` requires asking before touching production config. **Ordering is
+  load-bearing: publish the bundles to GCS before deploying an image that no longer carries
+  them**, or prod's flasher answers 503 in between.
+
+Details: [docs/features/infrastructure.md](docs/features/infrastructure.md) → *Agent bundles
+are served from the store*, [docs/runbooks/agent-build.md](docs/runbooks/agent-build.md),
+[docs/runbooks/artifact-storage.md](docs/runbooks/artifact-storage.md).
+
 ## 2026-09-15 — the GCS credential is an impersonation, and signing is no longer local (S0-infra-5)
 
 **Completes** the 2026-09-11 entry *agent bundles are artifacts, not image contents*, whose

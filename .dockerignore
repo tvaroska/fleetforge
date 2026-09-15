@@ -31,15 +31,11 @@ design
 *.md
 !README.md
 
-# The agent firmware (R0-infra-2). `agent/dist` is the ONLY part that belongs in the
-# app image — the Dockerfile copies it to /app/agent. The ESP-IDF project itself is
-# built by agent/Dockerfile, in a different context, and would otherwise invalidate
-# the app image's layers on every firmware edit.
-agent/build
-agent/main
-agent/tools
-agent/CMakeLists.txt
-agent/Dockerfile
-agent/partitions.csv
-agent/sdkconfig*
-agent/version.txt
+# The agent firmware. NONE of it belongs in the app image since S0-infra-6: the built
+# bundles are artifacts served out of the object store (`just agent-publish`), and the
+# ESP-IDF project itself is built by agent/Dockerfile in a different context. Excluding
+# the whole directory is also what keeps a firmware edit from invalidating the app
+# image's layers. `agent/dist` is listed explicitly as well as under `agent/` so that
+# re-adding a narrower rule cannot quietly let the 1.2 MB-per-target bundles back in.
+agent/
+agent/dist
