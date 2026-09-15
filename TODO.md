@@ -326,7 +326,12 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       store's prefix, so a `fleetforge/`-prefixed key is refused. `spec/` was proposed
       against, not edited.)_
 
-- [!] **S0-infra-5**: `storage/factory.py` accepts a credential that is not a key file (P1, 1d) _(⚠ failed 2026-09-14; blocker: agent returned no result (after 2 attempts))_
+- [!] **S0-infra-5**: `storage/factory.py` accepts a credential that is not a key file (P1, 1d) _(⚠ attempted 2026-09-14, twice; NOT a code failure — both runs were halted
+      before writing anything by a safety classifier refusing the IAM grant in AC0
+      (`gcloud iam service-accounts add-iam-policy-binding … --role=roles/iam.serviceAccountTokenCreator`).
+      The grant must be run by the owner; the plan survives at
+      `.claude/plans/S0-infra-5-gcs-credential-that-is-not-a-key-file.md`. Re-run once
+      `fleetforge-artifacts@btvaroska` has a tokenCreator binding for the calling identity.)_
       Filed 2026-09-14. Named as the real prerequisite in
       `design/decisions/infrastructure-agent-bundles-are-artifacts.md` (amended
       2026-09-11): the GCS blocker in `docs/runbooks/artifact-storage.md` is
