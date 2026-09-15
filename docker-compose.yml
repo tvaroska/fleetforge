@@ -276,12 +276,22 @@ services:
       # NOT wired: production (R0-infra-3 / R1) selects the GCS backend instead, with
       #     GCS_BUCKET: btvaroska
       #     GCS_PREFIX: fleetforge/            # gs://btvaroska is SHARED — see below
-      #     GCS_CREDENTIALS_FILE: /run/secrets/fleetforge-artifacts.json
-      # and the service-account key mounted read-only. Two things to get right there:
-      # the key is granted objectAdmin under an IAM CONDITION limiting it to
-      # `…/objects/fleetforge/…` (the bucket also holds this estate's secrets/ backups
-      # and the boris podcast audio), and THE CONTAINER RUNS AS NON-ROOT `appuser`, so
-      # a 0600 root-owned key mounted in is unreadable — mount it 0644 or chown it.
+      #     GCS_IMPERSONATE_SERVICE_ACCOUNT: fleetforge-artifacts@btvaroska.iam.gserviceaccount.com
+      # and NO key file mounted at all (S0-infra-5). btvaroska inherits
+      # constraints/iam.disableServiceAccountKeyCreation, so a key cannot be minted; the
+      # container impersonates `fleetforge-artifacts` over the VM's attached identity,
+      # which needs roles/iam.serviceAccountTokenCreator on that service account. That
+      # email is not a credential, which is why it can sit here in plain sight.
+      # Impersonation is also what CONTAINS us: `fleetforge-artifacts` is granted
+      # objectAdmin under an IAM CONDITION limiting it to `…/objects/fleetforge/…`, while
+      # the VM's own identity holds objectAdmin on the WHOLE bucket — which also holds
+      # this estate's secrets/ backups and the boris podcast audio. Plain ADC is refused
+      # for exactly that reason.
+      # The legacy alternative, where a key can still be minted, is
+      # `GCS_CREDENTIALS_FILE: /run/secrets/fleetforge-artifacts.json` with the key
+      # mounted read-only — and THE CONTAINER RUNS AS NON-ROOT `appuser`, so a 0600
+      # root-owned key mounted in is unreadable (mount it 0644 or chown it). Setting both
+      # credentials is refused, not resolved.
       # Recipe and rotation: docs/runbooks/artifact-storage.md. Nothing in this repo's
       # compose mounts a real key, and none is ever committed.
       #

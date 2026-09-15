@@ -6,27 +6,37 @@ touching the API process.
 
 Three properties that are easy to get wrong:
 
-1. **V4 signing needs a real private key in the credentials.** Application Default
-   Credentials on a GCE VM come from the metadata server and carry no private key, so
-   signing would need an IAM `signBlob` round trip and extra permissions. `factory.py`
-   therefore **requires `GCS_CREDENTIALS_FILE` and never falls back to ADC** — an ADC
-   fallback would also silently pick up the project-wide compute default service
-   account, which is exactly the credential the prefix IAM condition exists to avoid.
+1. **The credential is a key file or an impersonated service account, never plain ADC.**
+   `factory.py` requires exactly one of `GCS_CREDENTIALS_FILE` /
+   `GCS_IMPERSONATE_SERVICE_ACCOUNT` and refuses to construct this adapter without one —
+   plain ADC in prod is the estate's shared VM account, which can read
+   `gs://btvaroska/secrets/` and would make the prefix IAM condition decorative, and it
+   carries no private key so V4 signing would silently become an IAM `signBlob` call by
+   the wrong identity. This adapter holds only an opaque `bucket_factory` and **cannot
+   tell which credential is behind it**, which is why property 4 has one code path.
 2. **`gs://btvaroska` is shared** with this estate's `secrets/` backups and the `boris`
    podcast audio. `validate_prefix` runs in the constructor and `resolve_key` runs on
-   every verb; the service-account key is additionally bound by an IAM condition to
-   `…/objects/fleetforge/…` (`docs/runbooks/artifact-storage.md`).
+   every verb; `fleetforge-artifacts@btvaroska` — whether reached by key file or by
+   impersonation — is additionally bound by an IAM condition to
+   `…/objects/fleetforge/…` (`docs/runbooks/artifact-storage.md`). Two confinements, and
+   the in-process one is not a substitute for the IAM one.
 3. **`delete` of a missing blob raises `NotFound` here and does not on S3.** The
    idempotency lives in the Protocol contract, so this adapter swallows it rather than
    every caller learning which backend it is talking to.
+4. **Signing is not local CPU any more, and neither is getting a `Bucket`.** Under
+   impersonation `generate_signed_url(version="v4")` POSTs to the IAM `signBlob`
+   endpoint, and the first `bucket_factory()` call resolves ADC and mints a token. Both
+   are synchronous HTTPS round trips with no timeout of their own, so **every** verb
+   runs both through `asyncio.to_thread` inside `_guard` — one path, key file or not.
 
 `google-cloud-storage` is synchronous: every network call goes through
-`asyncio.to_thread` under an `asyncio.timeout`. Signing does not — it is local CPU.
+`asyncio.to_thread` under an `asyncio.timeout`.
 """
 
 import asyncio
 import contextlib
 import datetime as dt
+import functools
 import logging
 from collections.abc import AsyncIterator, Callable
 from typing import Any
@@ -66,6 +76,7 @@ class GcsObjectStore:
         default_ttl_s: int,
         max_get_bytes: int,
         timeout_s: float,
+        credential_mode: str = "key-file",
     ) -> None:
         self._bucket_factory = bucket_factory
         self._bucket = bucket
@@ -73,11 +84,26 @@ class GcsObjectStore:
         self._default_ttl_s = default_ttl_s
         self._max_get_bytes = max_get_bytes
         self._timeout_s = timeout_s
+        self._credential_mode = credential_mode
 
     @property
     def describe(self) -> str:
-        """A one-line, **credential-free** description for logs and the selftest."""
-        return f"gcs bucket={self._bucket} prefix={self._prefix or '(none)'}"
+        """A one-line, **credential-free** description for logs and the selftest.
+
+        `credential_mode` is `key-file` or `impersonated(<email>)`. A service-account
+        *email* is not a credential and is exactly what proves no key file was used; a
+        path, a token or key content would be, and none of them appear here.
+        """
+        return (
+            f"gcs bucket={self._bucket} prefix={self._prefix or '(none)'} "
+            f"creds={self._credential_mode}"
+        )
+
+    def _blob(self, resolved: str) -> Any:
+        """Bucket + blob. Cheap after the first call; the FIRST call may do network I/O
+        (impersonation resolves ADC and mints a token), which is why every caller runs it
+        in a thread inside `_guard`."""
+        return self._bucket_factory().blob(resolved)
 
     async def put(
         self,
@@ -89,21 +115,21 @@ class GcsObjectStore:
     ) -> None:
         """Store `data` at `key`, overwriting. See the Protocol for the contract."""
         resolved = resolve_key(self._prefix, key)
-        blob = self._bucket_factory().blob(resolved)
-        if cache_control is not None:
-            # Set on the blob *before* the upload: `upload_from_string` writes the
-            # object's metadata in the same request, so assigning it afterwards would
-            # need a second `patch` call — and would leave a window where a device's
-            # GET sees no caching headers at all.
-            blob.cache_control = cache_control
         async with self._guard("put", resolved):
+            blob = await asyncio.to_thread(self._blob, resolved)
+            if cache_control is not None:
+                # Set on the blob *before* the upload: `upload_from_string` writes the
+                # object's metadata in the same request, so assigning it afterwards would
+                # need a second `patch` call — and would leave a window where a device's
+                # GET sees no caching headers at all.
+                blob.cache_control = cache_control
             await asyncio.to_thread(blob.upload_from_string, data, content_type=content_type)
 
     async def get(self, key: str) -> bytes:
         """Return the bytes at `key`, refusing an oversized object before downloading."""
         resolved = resolve_key(self._prefix, key)
-        blob = self._bucket_factory().blob(resolved)
         async with self._guard("get", resolved):
+            blob = await asyncio.to_thread(self._blob, resolved)
             # `reload()` populates `size` from object metadata; it is also what turns a
             # missing object into `NotFound` before any bytes move.
             await asyncio.to_thread(blob.reload)
@@ -116,32 +142,35 @@ class GcsObjectStore:
         return bytes(data)
 
     async def signed_url(self, key: str, *, ttl_s: int | None = None) -> str:
-        """A V4 signed GET URL. Local CPU only — no `to_thread`, no I/O.
+        """A V4 signed GET URL. **Not local CPU — it may be a network call.**
 
-        Requires the credentials to carry a private key; `factory.py` guarantees that
-        by refusing to construct this adapter without `GCS_CREDENTIALS_FILE`.
+        With a key file the signature is computed locally. Under impersonation
+        `generate_signed_url` calls the IAM `signBlob` API over HTTPS, with its own retry
+        loop and no timeout, and this adapter cannot tell the two apart: it holds an
+        opaque `bucket_factory`. So there is one path, and it is the safe one — into a
+        thread, under `_guard`'s timeout. `validate_ttl` stays outside the guard: a bad
+        TTL is a programming error and must still raise synchronously.
         """
         resolved = resolve_key(self._prefix, key)
         ttl = validate_ttl(self._default_ttl_s if ttl_s is None else ttl_s)
-        blob = self._bucket_factory().blob(resolved)
-        try:
-            url = blob.generate_signed_url(
-                version="v4",
-                expiration=dt.timedelta(seconds=ttl),
-                method="GET",
+        async with self._guard("signed_url", resolved):
+            blob = await asyncio.to_thread(self._blob, resolved)
+            url = await asyncio.to_thread(
+                functools.partial(
+                    blob.generate_signed_url,
+                    version="v4",
+                    expiration=dt.timedelta(seconds=ttl),
+                    method="GET",
+                )
             )
-        except (gcs_exceptions.GoogleAPIError, auth_exceptions.GoogleAuthError, OSError) as exc:
-            raise ObjectStoreError(
-                f"could not sign a URL for {resolved}: {type(exc).__name__}"
-            ) from exc
         return str(url)
 
     async def delete(self, key: str) -> None:
         """Remove `key`. Idempotent — GCS raises `NotFound`, which is swallowed here."""
         resolved = resolve_key(self._prefix, key)
-        blob = self._bucket_factory().blob(resolved)
         try:
             async with self._guard("delete", resolved):
+                blob = await asyncio.to_thread(self._blob, resolved)
                 await asyncio.to_thread(blob.delete)
         except ObjectNotFound:
             logger.debug("gcs delete of %s: already absent", resolved)

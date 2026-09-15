@@ -326,12 +326,24 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       store's prefix, so a `fleetforge/`-prefixed key is refused. `spec/` was proposed
       against, not edited.)_
 
-- [!] **S0-infra-5**: `storage/factory.py` accepts a credential that is not a key file (P1, 1d) _(⚠ attempted 2026-09-14, twice; NOT a code failure — both runs were halted
-      before writing anything by a safety classifier refusing the IAM grant in AC0
-      (`gcloud iam service-accounts add-iam-policy-binding … --role=roles/iam.serviceAccountTokenCreator`).
-      The grant must be run by the owner; the plan survives at
-      `.claude/plans/S0-infra-5-gcs-credential-that-is-not-a-key-file.md`. Re-run once
-      `fleetforge-artifacts@btvaroska` has a tokenCreator binding for the calling identity.)_
+- [x] **S0-infra-5**: `storage/factory.py` accepts a credential that is not a key file (P1, 1d)
+      _(done 2026-09-15; reviewed; see docs/features/infrastructure.md → *A GCS credential
+      that is not a key file*, docs/features/ota-deploy.md → R1-BE-0, the rewritten
+      docs/runbooks/artifact-storage.md and DECISIONS.md 2026-09-15.
+      `GCS_IMPERSONATE_SERVICE_ACCOUNT` is a second credential shape, mutually exclusive
+      with `GCS_CREDENTIALS_FILE`; neither set is still a refusal, so the no-ADC-fallback
+      rule is intact. **`signBlob` WORKS — measured, not assumed**: `just storage-check
+      --backend gcs --blob` against real `gs://btvaroska` ends `SELFTEST OK` with
+      `creds=impersonated(fleetforge-artifacts@…)`, no key file in the process, and the V4
+      URL redeemed by an unauthenticated GET. Containment measured through the adapter with
+      `GCS_PREFIX=` empty: a `put` to `secrets/…` fails `Forbidden`. `signed_url` and the
+      first `bucket_factory()` call moved into `asyncio.to_thread` under `_guard` in all
+      four verbs, because signing is an IAM API call now. AC3 (the same run **from prod**)
+      was not executed — prod's `mainsite@sites-470716` holds the same tokenCreator grant,
+      so it is expected to pass; **S0-infra-6 wires the prod container and runs it**, since
+      `services/prod/*` is production config and was proposed, not edited. Two previous
+      attempts (2026-09-14) were halted before writing code by the IAM-write refusal in
+      AC0; the grant has since been made by the owner.)_
       Filed 2026-09-14. Named as the real prerequisite in
       `design/decisions/infrastructure-agent-bundles-are-artifacts.md` (amended
       2026-09-11): the GCS blocker in `docs/runbooks/artifact-storage.md` is

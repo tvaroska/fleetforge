@@ -839,6 +839,10 @@ No GCS credential is wired. `constraints/iam.disableServiceAccountKeyCreation` o
 `select_backend` only raises when something calls it. R1 is blocked until the key exists;
 tracked in docs/runbooks/artifact-storage.md → BLOCKED.
 
+*(Superseded 2026-09-15 by S0-infra-5 below: the key is still un-mintable and always will
+be, but the credential is no longer a key — the adapter impersonates
+`fleetforge-artifacts@btvaroska`. The prod container is still unwired; that is S0-infra-6.)*
+
 ### Verification (T2)
 
 Against production, all five acceptance criteria:
@@ -1359,3 +1363,111 @@ Full T1 gate (`just test` + frontend tests) green, including new TestLayoutKeyin
 ### S0-infra-6 hand-off
 
 The object-store key and publish index must carry `(target, partition_layout)` — `AgentBundle.key` property provides the correct shape. Do not re-narrow it to target alone.
+
+## A GCS credential that is not a key file (S0-infra-5, closed 2026-09-15)
+
+**Filed as:** "`storage/factory.py` accepts a credential that is not a key file" — the real
+prerequisite named by `design/decisions/infrastructure-agent-bundles-are-artifacts.md`
+(amended 2026-09-11), and the blocker under both S0-infra-6 and R1.
+
+### What shipped
+
+`storage/factory.py` learned a second credential shape: **`GCS_IMPERSONATE_SERVICE_ACCOUNT`**,
+an `impersonated_credentials.Credentials` over the runtime's ADC targeting
+`fleetforge-artifacts@btvaroska.iam.gserviceaccount.com`. No key file is involved anywhere,
+which matters because `btvaroska` inherits
+`constraints/iam.disableServiceAccountKeyCreation` and cannot issue one. The setting is
+**mutually exclusive** with `GCS_CREDENTIALS_FILE`; **neither set is still a refusal**, so
+there is no silent fall back to plain ADC.
+
+* `config.py` — `gcs_impersonate_service_account: str | None = None`.
+* `storage/factory.py` — credential selection in four ordered rules (both set → mutually
+  exclusive; neither → the ADC refusal, reworded to name both options and the containment
+  reason; key file → unchanged; impersonation → the principal must match
+  `<name>@<project>.iam.gserviceaccount.com`, lowercase, rejected and never normalised).
+  `_impersonated_bucket` builds the client **lazily, inside the closure**, and passes
+  `project=None` deliberately.
+* `storage/gcs.py` — `credential_mode` in `describe`
+  (`creds=key-file` | `creds=impersonated(<email>)`), and every verb now gets its `Bucket`
+  **and** its signature through `asyncio.to_thread` inside `_guard`.
+* `.env.example`, `docker-compose.yml`, `docs/runbooks/artifact-storage.md`,
+  `docs/features/ota-deploy.md` (R1-BE-0), `DECISIONS.md`.
+
+### Containment is the primary reason, signing the secondary one
+
+The old docstrings refused ADC because ADC carries no private key. That is true and it is
+the weaker argument. Prod's attached identity is `mainsite@sites-470716`, the estate's
+shared VM account, which holds `roles/storage.objectAdmin` on the **whole** of
+`gs://btvaroska` unconditionally — including this estate's `secrets/` `.env` backups. Plain
+ADC would make the `fleetforge-prefix-only` IAM condition on `fleetforge-artifacts`
+decorative. Impersonation is what keeps it real, and it would be the right answer even if
+an org-policy exemption existed.
+
+### Signing left the event loop
+
+Under impersonation `blob.generate_signed_url(version="v4")` POSTs to the IAM `signBlob`
+endpoint through an `AuthorizedSession` with a backoff retry loop and no timeout of its
+own — one or more synchronous HTTPS round trips. The adapter holds an opaque
+`bucket_factory` and **cannot branch on which credential is behind it**, so there is one
+path: signing goes through `to_thread` under `_guard` on both. Same argument moved
+`self._bucket_factory()` inside the guard in all four verbs — the first call resolves ADC
+and mints a token, which on a non-GCP host hangs for seconds. `put`'s
+`blob.cache_control = …` moved with it and still lands **before** `upload_from_string`.
+
+### Verification (T2)
+
+* **Real GCS, keyless, from the dev box:** `just storage-check --backend gcs --blob` ends
+  `SELFTEST OK` with `creds=impersonated(fleetforge-artifacts@…)`; the signed URL carries
+  `X-Goog-Credential=fleetforge-artifacts@…` and an **unauthenticated** GET returns the
+  bytes — with no private key in the process, that is the `signBlob` verification.
+* **Containment through our own adapter:** with `GCS_PREFIX=` empty (in-process
+  confinement deliberately disabled), `--key secrets/ff-impersonation-probe-<uuid>.bin`
+  exits non-zero with `gcs put of secrets/… failed: Forbidden`.
+* **Ambiguity:** key file + impersonation → non-zero,
+  `ObjectStoreConfigError: … mutually exclusive …`.
+* **No MinIO regression:** `just minio-up && just storage-check --blob` → `SELFTEST OK`.
+* **Not run:** the same selftest on prod (AC3). `ssh prod` write access was refused by the
+  sandbox classifier. Prod's identity holds the same grant, so it is expected to pass;
+  S0-infra-6 wires the container and runs it.
+
+### Gotchas learned
+
+**On this dev box ADC is a USER, not `devserver@`.** `gcloud config` shows the active
+account as `devserver@btvaroska`, but `google.auth.default()` returns an `authorized_user`
+from `gcloud auth application-default login` — the ADC **file** wins over the metadata
+server. That principal has no tokenCreator binding, so impersonation 403s on
+`iam.serviceAccounts.getAccessToken`. `CLOUDSDK_CONFIG=/tmp/empty` for one command takes
+the file out of the search path and the metadata server answers with this VM's attached
+identity, which *is* granted. That is the dev-box fast loop against real GCS, and it
+corrects the plan's standing claim that this box cannot impersonate at all.
+
+**A credential-resolution failure is an `ObjectStoreError`, never an
+`ObjectStoreConfigError`.** `objectstore.py` promises config errors are raised "at
+construction/selection time, never mid-request-body", and `api/deps.get_object_store`
+translates them only around `create_object_store`. One raised inside `put`/`get`/
+`signed_url` escapes an already-started request as a **500** where the docstring promises a
+retriable 503. So: eager shape checks raise `ObjectStoreConfigError`; no ADC, a refused
+token and a `signBlob` 403 all raise `ObjectStoreError`.
+
+**The likely failure is a refused token, and it says nothing useful by default.** An ADC
+that resolves but may not impersonate raises `RefreshError` **lazily, at first use**, which
+`_guard` reports as `gcs get of … failed: RefreshError` — naming neither the principal nor
+the missing role. `_impersonated_bucket` therefore refreshes the credential eagerly and
+translates, naming the target and `roles/iam.serviceAccountTokenCreator` and nothing else
+(the 403 body carries an opaque troubleshooter id that must not reach a handler). Cost is
+zero: the next call would have minted that token anyway.
+
+**`project=None`, never omitted.** `storage.Client.__init__` maps `None` to "no project";
+the default `_marker` sentinel makes google-cloud-storage go looking for a project through
+ADC and raise when it cannot find one. The bucket is cross-project and nothing lists
+buckets.
+
+### S0-infra-6 hand-off
+
+The prod container is **still unwired** — `services/prod/docker-compose.yml`'s
+`fleetforge-api` block carries the now-stale comment *"No object store on purpose: the GCS
+service-account key cannot be minted"*. Four env lines wire it and nothing is mounted:
+`OBJECT_STORE_BACKEND: gcs`, `GCS_BUCKET: btvaroska`, `GCS_PREFIX: fleetforge/`,
+`GCS_IMPERSONATE_SERVICE_ACCOUNT: fleetforge-artifacts@btvaroska.iam.gserviceaccount.com`.
+None is a secret. Root `CLAUDE.md` requires asking before touching production config, so
+this task proposed them rather than applying them.

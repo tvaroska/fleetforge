@@ -268,6 +268,7 @@ def settings_for_tests(**overrides: object) -> Settings:
         "s3_public_endpoint_url": None,
         "gcs_bucket": None,
         "gcs_credentials_file": None,
+        "gcs_impersonate_service_account": None,
     }
     values.update(overrides)
     return Settings(**values)  # type: ignore[arg-type]

@@ -116,10 +116,31 @@ ESP32 adapter: write OTA1 partition → broker reconnect + self-test → switch 
 
 > ⚠️ Not yet safe — a broken build stays broken until R2.
 
-### R1-BE-0 — a production GCS credential that is not a key file
+### R1-BE-0 — a production GCS credential that is not a key file — **LANDED 2026-09-15**
 
-**P0, ~1d. Gates R1-BE-2 and R1-BE-3, and nothing in R1 can be verified against
-production storage until it lands.** Added 2026-09-11.
+**Delivered by S0-infra-5.** R1 no longer needs to solve this; read the answers below
+rather than re-deriving the question.
+
+* **The credential is `GCS_IMPERSONATE_SERVICE_ACCOUNT`**, an impersonation over the
+  runtime's ADC targeting `fleetforge-artifacts@btvaroska.iam.gserviceaccount.com`.
+  Mutually exclusive with `GCS_CREDENTIALS_FILE`; neither set is still a refusal, so there
+  is no silent ADC fallback.
+* **`signBlob` WORKS, measured not assumed.** `just storage-check --backend gcs --blob`
+  ends `SELFTEST OK` against `gs://btvaroska` with no key file anywhere: the V4 URL carries
+  `X-Goog-Credential=fleetforge-artifacts@…` and an unauthenticated GET returns the bytes.
+  There is no private key in the process, so the signature can only have come from the IAM
+  API. **R1-BE-3's signed-URL delivery rests on a verified mechanism.**
+* **Containment is real**, measured through the adapter with `GCS_PREFIX=` empty: a `put`
+  to `secrets/…` fails `Forbidden` from the IAM condition alone.
+* **Signing is a network call now, and it is on R1's latency budget.** `signed_url` runs in
+  a thread under `OBJECT_STORE_TIMEOUT_S` (the adapter cannot tell a key file from an
+  impersonation, so there is one path). One extra Google round trip per URL handed to a
+  device, and it can rate-limit. If R1-BE-3 hands out URLs per range request, cache them.
+* **Still owed:** the same selftest **from the prod container**. Prod's identity
+  `mainsite@sites-470716` holds the tokenCreator grant, so it is expected to pass, but its
+  metadata server and egress are its own. S0-infra-6 wires the container and runs it.
+
+Original filing, 2026-09-11, kept for the reasoning:
 
 `storage/factory.py` requires `GCS_CREDENTIALS_FILE` and never falls back, but
 `btvaroska` inherits `constraints/iam.disableServiceAccountKeyCreation` and will not
@@ -149,8 +170,10 @@ is still refused. Closes `R0-be-6`'s unexecuted AC5/AC6.
 
 **Unverified going in:** that `mainsite` can `signBlob` at all. Both probes were refused
 by the dev-box sandbox on 2026-09-11 — confirm it first, since the whole approach rests
-on it. Details: [docs/runbooks/artifact-storage.md](../runbooks/artifact-storage.md) →
-*The credential already exists*.
+on it. *(Resolved: `signBlob` verified 2026-09-15 under `devserver@btvaroska`, which holds
+the same grant. See the summary above.)* Details:
+[docs/runbooks/artifact-storage.md](../runbooks/artifact-storage.md) →
+*Verified against real GCS*.
 
 ## Phase 2: R2 — Safe deploy: verify + auto-rollback ⭐
 

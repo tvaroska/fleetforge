@@ -201,6 +201,13 @@ class Settings(BaseSettings):
     # silently use the project-wide compute default SA. Never committed — `secrets/` is
     # gitignored; see docs/runbooks/artifact-storage.md.
     gcs_credentials_file: str | None = None
+    # Keyless alternative to GCS_CREDENTIALS_FILE: impersonate this service account over
+    # the runtime's ADC (the VM's attached identity in prod). Required in prod because
+    # btvaroska inherits constraints/iam.disableServiceAccountKeyCreation, and required for
+    # CONTAINMENT regardless: prod's attached identity is the estate's shared VM account
+    # and can read gs://btvaroska/secrets/. MUTUALLY EXCLUSIVE with GCS_CREDENTIALS_FILE;
+    # neither set is still an error, never a fall back to plain ADC.
+    gcs_impersonate_service_account: str | None = None
 
     # --- Prebuilt agent images (R0-infra-2) -----------------------------------
     # Where the per-target agent bundles live. Two shapes, both real:

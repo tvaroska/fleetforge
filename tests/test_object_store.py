@@ -11,6 +11,8 @@ endpoint works from inside the compose network and fails on every real device.
 """
 
 import datetime as dt
+import time
+from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
@@ -20,6 +22,7 @@ from botocore.exceptions import EndpointConnectionError
 from botocore.stub import Stubber
 from fastapi import FastAPI, HTTPException
 from google.api_core import exceptions as gcs_exceptions
+from google.auth import exceptions as auth_exceptions
 
 from fleetforge.api.deps import ObjectStoreDep, get_object_store
 from fleetforge.config import Settings, get_settings
@@ -51,6 +54,8 @@ from tests.conftest import capture_logs, client_for, settings_for_tests
 PREFIX = "fleetforge/"
 BUCKET = "artifacts"
 SECRET_KEY = "s3-secret-nobody-should-ever-log"  # noqa: S105 - a fake, and that is the point
+# The prefix-scoped production principal (S0-infra-5). An EMAIL, never a credential.
+TARGET_SA = "fleetforge-artifacts@btvaroska.iam.gserviceaccount.com"
 
 
 # ---------------------------------------------------------------------------
@@ -211,10 +216,49 @@ def test_empty_strings_count_as_unset() -> None:
     assert not object_store_configured(settings)
 
 
-def test_gcs_without_a_key_file_raises_rather_than_falling_back_to_adc() -> None:
-    """ADC cannot sign a V4 URL and would use the wrong service account."""
-    with pytest.raises(ObjectStoreConfigError, match="GCS_CREDENTIALS_FILE is required"):
+def test_gcs_with_neither_credential_raises_rather_than_falling_back_to_adc() -> None:
+    """Plain ADC in prod is the estate's shared VM account and can read `secrets/`."""
+    with pytest.raises(ObjectStoreConfigError, match="GCS_CREDENTIALS_FILE is required") as excinfo:
         create_object_store(_settings(gcs_bucket="btvaroska"))
+    message = str(excinfo.value)
+    assert "Application Default Credentials" in message
+    assert "GCS_IMPERSONATE_SERVICE_ACCOUNT" in message
+
+
+def test_gcs_empty_impersonation_string_counts_as_unset() -> None:
+    """Compose interpolation of an unset variable yields "", not absence."""
+    settings = _settings(gcs_bucket="btvaroska", gcs_impersonate_service_account="   ")
+    with pytest.raises(ObjectStoreConfigError, match="GCS_CREDENTIALS_FILE is required"):
+        create_object_store(settings)
+
+
+def test_gcs_refuses_a_key_file_and_impersonation_together() -> None:
+    """Ambiguous CREDENTIALS are refused for the same reason ambiguous backends are."""
+    settings = _settings(
+        gcs_bucket="btvaroska",
+        gcs_credentials_file="/dev/null",
+        gcs_impersonate_service_account=TARGET_SA,
+    )
+    with pytest.raises(ObjectStoreConfigError, match="mutually exclusive"):
+        create_object_store(settings)
+
+
+@pytest.mark.parametrize(
+    "principal",
+    [
+        "boris@gmail.com",
+        "fleetforge-artifacts",
+        "a@b.com",
+        "FLEETFORGE-ARTIFACTS@btvaroska.iam.gserviceaccount.com",
+    ],
+)
+def test_gcs_impersonation_rejects_a_principal_that_is_not_a_service_account(
+    principal: str,
+) -> None:
+    """Rejected, never normalised — uppercase included. `resolve_key`'s standing rule."""
+    settings = _settings(gcs_bucket="btvaroska", gcs_impersonate_service_account=principal)
+    with pytest.raises(ObjectStoreConfigError, match="not a service-account email"):
+        create_object_store(settings)
 
 
 def test_gcs_with_a_missing_key_file_raises() -> None:
@@ -628,6 +672,260 @@ async def test_gcs_verbs_reject_an_escaping_key() -> None:
         with pytest.raises(ObjectKeyError):
             await store.put(key, b"x")
     assert bucket.objects == {}
+
+
+# ---------------------------------------------------------------------------
+# The credential is an impersonation, not a key file (S0-infra-5).
+#
+# **No network in any of these.** The SDK entry points are patched by dotted
+# path because `factory.py` imports them INSIDE the function that uses them, so
+# the attribute is resolved at call time and a `monkeypatch.setattr` lands.
+# ---------------------------------------------------------------------------
+
+# The 403 body the real API returns; it carries an opaque troubleshooter id that must
+# never reach the exception an operator (or a handler) sees.
+REFUSED_403 = (
+    "('Unable to acquire impersonated credentials', "
+    '\'{"error":{"code":403,"message":"Permission \\\'iam.serviceAccounts.getAccessToken\\\' '
+    'denied on resource …","status":"PERMISSION_DENIED"}}\')'
+)
+
+
+class FakeImpersonatedCredentials:
+    """Stands in for `google.auth.impersonated_credentials.Credentials`."""
+
+    def __init__(
+        self,
+        *,
+        source_credentials: Any,
+        target_principal: str,
+        target_scopes: list[str],
+        lifetime: int | None = None,
+    ) -> None:
+        self.source_credentials = source_credentials
+        self.target_principal = target_principal
+        self.target_scopes = target_scopes
+        self.lifetime = lifetime
+        self.refreshes = 0
+
+    def refresh(self, request: Any) -> None:
+        self.refreshes += 1
+
+
+class RefusedCredentials(FakeImpersonatedCredentials):
+    """The failure this dev box actually produces: ADC resolves, the token mint is 403."""
+
+    def refresh(self, request: Any) -> None:
+        raise auth_exceptions.RefreshError(REFUSED_403)
+
+
+class GcsSdkSpy:
+    """What the factory asked the SDK for."""
+
+    def __init__(self, bucket: FakeBucket) -> None:
+        self.bucket = bucket
+        self.default_scopes: list[Any] = []
+        self.credentials: list[FakeImpersonatedCredentials] = []
+        self.clients: list[dict[str, Any]] = []
+
+
+def _patch_gcs_sdk(
+    monkeypatch: pytest.MonkeyPatch,
+    bucket: FakeBucket,
+    *,
+    credentials_cls: type[FakeImpersonatedCredentials] = FakeImpersonatedCredentials,
+    default_raises: Exception | None = None,
+) -> GcsSdkSpy:
+    spy = GcsSdkSpy(bucket)
+
+    def fake_default(scopes: Any = None) -> tuple[str, str]:
+        spy.default_scopes.append(scopes)
+        if default_raises is not None:
+            raise default_raises
+        return ("source-adc", "btvaroska")
+
+    def fake_credentials(**kwargs: Any) -> FakeImpersonatedCredentials:
+        creds = credentials_cls(**kwargs)
+        spy.credentials.append(creds)
+        return creds
+
+    class FakeClient:
+        def __init__(self, project: Any = None, credentials: Any = None) -> None:
+            spy.clients.append({"project": project, "credentials": credentials})
+
+        def bucket(self, name: str) -> FakeBucket:
+            assert name == spy.bucket.name
+            return spy.bucket
+
+    monkeypatch.setattr("google.auth.default", fake_default)
+    monkeypatch.setattr("google.auth.impersonated_credentials.Credentials", fake_credentials)
+    monkeypatch.setattr("google.cloud.storage.Client", FakeClient)
+    return spy
+
+
+def _impersonating_settings(**overrides: object) -> Settings:
+    return _settings(gcs_bucket="btvaroska", gcs_impersonate_service_account=TARGET_SA, **overrides)
+
+
+def test_gcs_impersonation_construction_does_not_resolve_credentials(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`create_app()` must stay cheap: no metadata-server round trip at construction."""
+
+    def exploding_default(scopes: Any = None) -> tuple[str, str]:
+        raise AssertionError("google.auth.default() must not be called at construction")
+
+    monkeypatch.setattr("google.auth.default", exploding_default)
+    store = create_object_store(_impersonating_settings())
+    assert isinstance(store, GcsObjectStore)
+
+
+async def test_gcs_impersonation_targets_the_configured_principal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One credential, minted once, for the configured SA and storage scopes only."""
+    spy = _patch_gcs_sdk(monkeypatch, FakeBucket())
+    store = create_object_store(_impersonating_settings())
+
+    await store.put("a.bin", b"x")
+    assert await store.get("a.bin") == b"x"
+
+    (creds,) = spy.credentials
+    assert creds.target_principal == TARGET_SA
+    assert creds.target_scopes == ["https://www.googleapis.com/auth/devstorage.read_write"]
+    assert creds.source_credentials == "source-adc"
+    # The SOURCE credential is the one that needs cloud-platform; signing needs no scope.
+    assert spy.default_scopes == [["https://www.googleapis.com/auth/cloud-platform"]]
+    # Eagerly refreshed once, so a refused token is diagnosed where it can be explained.
+    assert creds.refreshes == 1
+    # project=None, or google-cloud-storage goes looking for one through ADC.
+    assert spy.clients == [{"project": None, "credentials": creds}]
+
+
+async def test_gcs_impersonation_signs_without_a_private_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The impersonated credential signs V4 itself — no extra kwargs, no key file."""
+    bucket = FakeBucket()
+    _patch_gcs_sdk(monkeypatch, bucket)
+    store = create_object_store(_impersonating_settings())
+    url = await store.signed_url("a.bin", ttl_s=300)
+    assert url.startswith("https://storage.googleapis.com/")
+    (call,) = bucket.signed_url_calls
+    assert call == {
+        "name": f"{PREFIX}a.bin",
+        "version": "v4",
+        "expiration": dt.timedelta(seconds=300),
+        "method": "GET",
+    }
+
+
+async def test_gcs_missing_adc_fails_the_verb_as_a_backend_error_naming_adc(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No ADC to impersonate FROM is a 503, not a 500: it is discovered mid-verb.
+
+    `ObjectStoreConfigError` is translated only around `create_object_store`, so one
+    raised inside a verb escapes an already-started request as a 500.
+    """
+    _patch_gcs_sdk(
+        monkeypatch,
+        FakeBucket(),
+        default_raises=auth_exceptions.DefaultCredentialsError("no ADC here"),
+    )
+    store = create_object_store(_impersonating_settings())
+    with pytest.raises(ObjectStoreError) as excinfo:
+        await store.get("a.bin")
+    assert "Application Default Credentials" in str(excinfo.value)
+    assert not isinstance(excinfo.value, ObjectStoreConfigError)
+
+
+async def test_gcs_impersonation_refused_names_the_principal_and_the_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A runtime identity with no tokenCreator binding is the measured failure.
+
+    Untranslated it reads `gcs get of … failed: RefreshError`, which names neither the
+    principal nor the role. The 403 body stays out of the message.
+    """
+    _patch_gcs_sdk(monkeypatch, FakeBucket(), credentials_cls=RefusedCredentials)
+    store = create_object_store(_impersonating_settings())
+    with pytest.raises(ObjectStoreError) as excinfo:
+        await store.get("a.bin")
+    message = str(excinfo.value)
+    assert TARGET_SA in message
+    assert "serviceAccountTokenCreator" in message
+    assert not isinstance(excinfo.value, ObjectStoreConfigError)
+    assert "PERMISSION_DENIED" not in message
+    assert "getAccessToken" not in message
+
+
+async def test_gcs_describe_names_the_credential_mode_and_never_a_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`describe` is what the selftest prints. An SA email is not a credential; a path is."""
+    _patch_gcs_sdk(monkeypatch, FakeBucket())
+    impersonated = create_object_store(_impersonating_settings())
+    assert f"creds=impersonated({TARGET_SA})" in impersonated.describe
+
+    key_file = tmp_path / "fleetforge-artifacts.json"
+    key_file.write_text("{}")
+    with_key = create_object_store(
+        _settings(gcs_bucket="btvaroska", gcs_credentials_file=str(key_file))
+    )
+    assert "creds=key-file" in with_key.describe
+    assert str(key_file) not in with_key.describe
+
+
+async def test_gcs_signed_url_does_not_block_the_event_loop() -> None:
+    """Under impersonation, signing is an IAM `signBlob` call — it must not sit on the loop.
+
+    The elapsed assertion is the real guard: a signing call left on the loop would only
+    time out after the full sleep, because the timeout could never fire during it.
+    """
+
+    class SleepyBlob:
+        def generate_signed_url(self, **kwargs: Any) -> str:
+            time.sleep(2)
+            return "never-returned"
+
+    class SleepyBucket:
+        def blob(self, name: str) -> SleepyBlob:
+            return SleepyBlob()
+
+    store = GcsObjectStore(
+        SleepyBucket,
+        bucket="btvaroska",
+        prefix=PREFIX,
+        default_ttl_s=60,
+        max_get_bytes=1024,
+        timeout_s=0.2,
+    )
+    started = time.monotonic()
+    with pytest.raises(ObjectStoreError, match="gcs signed_url of .* timed out"):
+        await store.signed_url("a.bin")
+    assert time.monotonic() - started < 1.0
+
+
+async def test_gcs_a_slow_bucket_factory_times_out() -> None:
+    """The FIRST `bucket_factory()` call resolves ADC and mints a token; it can hang."""
+
+    def slow_factory() -> FakeBucket:
+        time.sleep(2)
+        return FakeBucket()
+
+    store = GcsObjectStore(
+        slow_factory,
+        bucket="btvaroska",
+        prefix=PREFIX,
+        default_ttl_s=60,
+        max_get_bytes=1024,
+        timeout_s=0.2,
+    )
+    started = time.monotonic()
+    with pytest.raises(ObjectStoreError, match="gcs get of .* timed out"):
+        await store.get("a.bin")
+    assert time.monotonic() - started < 1.0
 
 
 # ---------------------------------------------------------------------------

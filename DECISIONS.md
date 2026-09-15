@@ -6,6 +6,113 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-15 — the GCS credential is an impersonation, and signing is no longer local (S0-infra-5)
+
+**Completes** the 2026-09-11 entry *agent bundles are artifacts, not image contents*, whose
+accepted cost was "onboarding comes to depend on a store that today cannot be
+credentialled", and the amendment to
+`design/decisions/infrastructure-agent-bundles-are-artifacts.md`: *"the real prerequisite
+is not an org-policy exemption: it is that `storage/factory.py` learns to accept a
+credential that is not a key file."* It has. `gs://btvaroska` has now been round-tripped
+end to end — put, get, a V4 signed URL redeemed with no credentials, delete — with **no
+private key anywhere in the process**.
+
+**Containment is the primary reason for it, not signing.** The old docstrings refused ADC
+because ADC carries no private key. True, and the weaker argument. Prod's attached identity
+is `mainsite@sites-470716`, the estate's shared VM account, and the bucket policy (read
+2026-09-15, not inferred from a listing) grants it `roles/storage.objectAdmin` on the
+**whole** of `gs://btvaroska`, unconditionally — including this estate's `secrets/` `.env`
+backups. Plain ADC would make the `fleetforge-prefix-only` condition on
+`fleetforge-artifacts` decorative. Impersonation would be the right answer even with an
+org-policy exemption in hand, so **plain ADC is still refused, and neither credential set
+is still an error** — never a fall back. Both credentials set is `ObjectStoreConfigError:
+… mutually exclusive …`, the same "ambiguous configuration is refused, not resolved" rule
+`factory.py` already applied to backends, now applied to identities.
+
+**`signed_url` is a network call now, and there is exactly one code path.** Under
+impersonation `generate_signed_url(version="v4")` POSTs to the IAM `signBlob` endpoint
+through an `AuthorizedSession` with a backoff retry loop and no timeout of its own. The
+adapter **cannot branch on this**: it is handed an opaque `bucket_factory` and has no idea
+which credential is behind it. So signing always goes through `asyncio.to_thread` under
+`_guard` — one wasted thread hop on a pure-CPU operation with a key file, the difference
+between a timeout and a hung API without one. The same argument moved
+`self._bucket_factory()` inside the guard in all four verbs: the first call resolves ADC
+and mints a token, which on a non-GCP host hangs for seconds. `gcs.py`'s docstring said
+*"Local CPU only — no `to_thread`, no I/O"*; that sentence became a lie the moment
+impersonation was configurable, and it is gone.
+
+**`ObjectStoreError`, never `ObjectStoreConfigError`, from the lazy path — the correction
+that would otherwise be a 500.** `objectstore.py` states its contract: a config error is
+raised "at construction/selection time, never mid-request-body", and
+`api/deps.get_object_store` translates it only around `create_object_store`. So eager,
+shape-only checks in `_gcs_store` raise `ObjectStoreConfigError`; anything discovered when
+the credential is first *resolved* — no ADC, a refused token, a `signBlob` 403 — raises
+`ObjectStoreError`, which every caller already maps to a retriable 503.
+`test_gcs_missing_adc_fails_the_verb_as_a_backend_error_naming_adc` asserts the class
+explicitly, because the two are siblings and neither `isinstance` check falls out of
+`pytest.raises` alone.
+
+**The failure that actually happens is a refused token, and untranslated it says nothing.**
+An ADC that resolves but may not impersonate raises `RefreshError` **lazily, at first use**,
+which `_guard` reports as `gcs get of … failed: RefreshError` — naming neither the
+principal nor the missing role. `_impersonated_bucket` therefore refreshes eagerly and
+translates, naming the target and `roles/iam.serviceAccountTokenCreator` **and nothing
+else**: no token, no ADC path, and not the 403 body, which carries an opaque troubleshooter
+id that is fine in a log and not in an exception that may reach a handler. Cost is zero —
+the client would have minted that token on the very next call. Later refreshes still
+surface generically; the first failure is the one an operator debugs.
+
+**`project=None` is deliberate and must not be "cleaned up".** `storage.Client.__init__`
+maps `None` to no project; the default `_marker` sentinel sends google-cloud-storage
+looking for a project through ADC and raises when it cannot find one. The bucket is
+cross-project and nothing here lists buckets.
+
+**The principal is validated as a service-account email and never normalised.**
+`<name>@<project>.iam.gserviceaccount.com`, lowercase. `boris@gmail.com`, a bare name, and
+an uppercase spelling are all `ObjectStoreConfigError` — `resolve_key`'s and
+`parse_blob_key`'s standing rule, applied to an identity. `.strip()` before the match is
+the only repair allowed. The scope requested is `devstorage.read_write` only; signing needs
+no scope at all, it is the *source* credential that needs `cloud-platform`.
+
+**Measured, not assumed.** `just storage-check --backend gcs --blob` against real
+`gs://btvaroska`: `SELFTEST OK`, `creds=impersonated(fleetforge-artifacts@…)`, and a URL
+carrying `X-Goog-Credential=fleetforge-artifacts@…` that an unauthenticated GET redeems.
+With no private key in the process, **that fetch is the `signBlob` verification**.
+Containment was measured through our own adapter with `GCS_PREFIX=` empty — in-process
+confinement deliberately off, so the IAM condition is what answers — and a `put` to
+`secrets/ff-impersonation-probe-<uuid>.bin` failed `Forbidden`. Prod itself was **not**
+exercised: `ssh prod` writes were refused by the sandbox classifier. Prod's identity holds
+the same tokenCreator grant, so it is expected to pass, and S0-infra-6 owns running it.
+Relevant prior art for the 403 that will eventually appear: root `docs/ops-log.md`
+F-2026-08-18-001 (the `boris` podcast feed 500'd once on `signBlob` right after a deploy
+and recovered by itself — IAM propagation; already RESOLVED, cited here as evidence only).
+
+**Gotcha worth an hour to someone: on this dev box ADC is a USER, not `devserver@`.**
+`gcloud config` shows the active account as `devserver@btvaroska`, but
+`google.auth.default()` returns a `google.oauth2.credentials.Credentials` —
+an `authorized_user` from `gcloud auth application-default login`, because the ADC **file**
+wins over the metadata server. That principal has no tokenCreator binding and 403s on
+`iam.serviceAccounts.getAccessToken`. `CLOUDSDK_CONFIG=/tmp/empty` for one command takes
+the file out of the search path, the metadata server answers with this VM's attached
+identity (`devserver@btvaroska`, which *is* a granted member), and the selftest passes.
+This **corrects** the S0-infra-5 plan's measured claim that the dev box cannot impersonate
+at all: it can, and that is what made the live verification above possible without prod.
+
+**Not done, on purpose:** `services/prod/.env` and `services/prod/docker-compose.yml` are
+untouched (root `CLAUDE.md` — never change production config without asking), so the
+running container still has no object store and its comment *"the GCS service-account key
+cannot be minted"* is stale. Wiring it is S0-infra-6's first act, and it is four env lines
+with nothing mounted. `spec/` was not touched: `spec/device-protocol.md` already says
+`artifact.url` is an opaque, short-lived signed URL, and how the server obtains a signature
+is not wire-visible.
+
+Details: `docs/runbooks/artifact-storage.md` (rewritten — the *BLOCKED* section is now
+*resolved*, with the grant recipe, the dev-box gotcha and the signing-is-an-API-call
+gotcha), `docs/features/infrastructure.md` → *A GCS credential that is not a key file*,
+`docs/features/ota-deploy.md` → R1-BE-0 (landed).
+
+---
+
 ## 2026-09-14 — the agent invalidates its own credential; the flasher erases nothing (S0-fw-4)
 
 **Completes** the 2026-09-14 correction entry *"the brownout is ours, and the flasher erases
