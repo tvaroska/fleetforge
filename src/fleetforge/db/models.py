@@ -1,8 +1,10 @@
-"""The fleetforge registry schema — R0-db-1, plus `device_progress` (S0-fw-1).
+"""The fleetforge registry schema — R0-db-1, plus `device_progress` (S0-fw-1) and the
+content-addressed artifact tables (S0-infra-4).
 
-Six tables: `device_groups`, `devices`, `enrollment_tokens`, `admin_tokens`,
-`deploy_events`, `device_progress`. Two of them (`enrollment_tokens`, `admin_tokens`)
-are CRITICAL.md paths; read their docstrings before changing anything.
+Eight tables: `device_groups`, `devices`, `enrollment_tokens`, `admin_tokens`,
+`deploy_events`, `device_progress`, `artifacts`, `builds`. Two of them
+(`enrollment_tokens`, `admin_tokens`) are CRITICAL.md paths; read their docstrings
+before changing anything.
 
 Three conventions that hold across the whole file, each with a reason that is not
 obvious from the code:
@@ -28,8 +30,9 @@ obvious from the code:
 Deliberately deferred, all additive — they are not oversights:
 `boot_ok` and heartbeat health fields (`uptime_s`, `rssi`, `free_heap`) → R3
 telemetry, which is where the hypertable lives; the current `up/status` transaction
-state → R1, alongside the `artifacts` / `deploys` tables; per-device deploy policy →
-R10.
+state and the `deploys` table → R1; per-device deploy policy → R10. (`artifacts` is
+no longer on that list — S0-infra-4 landed it early and empty, on purpose: freezing a
+key scheme is free before the first object exists and a data migration afterwards.)
 """
 
 import datetime as dt
@@ -135,6 +138,23 @@ class ProgressStage(StrEnum):
     # after `link_up` from a board that is, right now, working — which is the point. A
     # board still stuck in the brownout loop has no link and reports nothing at all.
     BROWNOUT = "brownout"
+
+
+class ArtifactKind(StrEnum):
+    """What a stored blob is. **Advisory** — `artifacts.kind` is TEXT with no CHECK.
+
+    Same reasoning as `LinkType` (convention 1 above): a kind nobody has thought of yet
+    — a Pi image, a delta patch, an LVGL asset bundle — must be storable without a
+    migration. The four `agent_*` values are the parts of an agent bundle
+    (`agent/dist/<target>/manifest.json`); `user_firmware` is what R1's upload endpoint
+    will write.
+    """
+
+    AGENT_APP = "agent_app"
+    AGENT_BOOTLOADER = "agent_bootloader"
+    AGENT_PARTITION_TABLE = "agent_partition_table"
+    AGENT_OTA_DATA = "agent_ota_data"
+    USER_FIRMWARE = "user_firmware"
 
 
 TERMINAL_DEPLOY_STATES = frozenset(
@@ -470,3 +490,112 @@ class DeviceProgress(Base):
     token_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
     stage: Mapped[str] = mapped_column(Text, nullable=False)
     detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class Artifact(Base):
+    """One row per content digest — the metadata the bytes cannot carry. S0-infra-4.
+
+    `DECISIONS.md` 2026-09-14 → *one storage model for every image*: artifact bytes are
+    content-addressed at `fleetforge/blobs/sha256/<hex>`, write-once, and Postgres holds
+    "an `artifacts` row per digest (size, kind, target, partition_layout, provenance)".
+    The key rules are `fleetforge.storage.blobs`; this table is their metadata half.
+
+    **Lands empty, with no readers.** R1's upload endpoint is the first writer and
+    S0-infra-6 the first agent-bundle one. Freezing the scheme is free while zero objects
+    exist and is a migration over live bytes in a shared bucket afterwards — the same
+    shipping posture `fleetforge.storage` itself took at R0-be-6.
+
+    **There is deliberately no `storage_key` column.** The key is
+    `blobs.blob_key(sha256)`, a pure function of the PK; storing it creates a second
+    spelling that can disagree with the first, which is the failure the whole
+    reject-never-normalise rule exists to prevent.
+
+    **There is deliberately no `deleted_at` and no refcount.** Nothing deletes blobs
+    until R2 pruning, and a refcount with no decrementer is a lie that a future pruner
+    would believe.
+
+    The `sha256` CHECK is a security control rather than tidiness, exactly as
+    `devices.device_id_format` is: the digest *is* the object key, so a row whose digest
+    is not `^[0-9a-f]{64}$` names a key that `blobs.blob_key` will refuse to build — and
+    the disagreement would surface at download time, not at write time.
+    """
+
+    __tablename__ = "artifacts"
+    __table_args__ = (
+        CheckConstraint("sha256 ~ '^[0-9a-f]{64}$'", name="sha256_format"),
+        # A zero-byte artifact is a deploy that ships nothing; it is never a real image.
+        CheckConstraint("size_bytes > 0", name="size_positive"),
+        # How "the current app image for this chip" gets found.
+        Index("ix_artifacts_kind_target", "kind", "target"),
+    )
+
+    sha256: Mapped[str] = mapped_column(Text, primary_key=True)
+    size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    # Plain TEXT with no CHECK — see `ArtifactKind`, and convention 1 above.
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    # Chip target (`esp32c6`). NULL where the bytes are target-independent, or where a
+    # user upload simply did not say.
+    target: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Mirrors `devices.partition_layout` (`ab-4m-v1`).
+    partition_layout: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # `source_commit`, `idf_version`, `idf_image`, `agent_version`, `config_sha256`,
+    # `build_digest` — i.e. the S0-infra-3 manifest identity, **copied, never
+    # recomputed**. JSONB rather than columns because the shape belongs to the producer
+    # and a user upload has none of it; the precedent is `deploy_events.detail`.
+    provenance: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    # Server receipt time — see the module docstring.
+    created_at: Mapped[dt.datetime] = mapped_column(
+        TimestampTZ, nullable=False, server_default=text("now()")
+    )
+
+
+class Build(Base):
+    """A build-cache entry: cache key → the artifacts that build produced. S0-infra-4.
+
+    `design/artifacts.md` → *Dynamic build: a cache miss, not a mode*. Tier 1 of that
+    document's three tiers is exactly one lookup in this table; tiers 2 and 3 are the R9
+    build runner and are not here. Lands empty with no readers, like `artifacts`.
+
+    `cache_key` is `H(idf_image_digest, target, partition_layout, source_tree_digest,
+    config_digest)` — source **tree**, not commit, so a dirty tree or a config-only
+    change cannot hit a stale entry. `docs/features/build-pipeline.md`'s
+    `(repo, ref, toolchain)` is wrong as written and `DECISIONS.md` 2026-09-14 corrects
+    it.
+
+    **Why `outputs` is JSONB and not a `build_outputs` join table** — the decision a
+    reviewer will question. A build of an agent bundle produces four parts, so a single
+    `artifact_sha256` column cannot represent it, and a per-part row would collide on
+    the cache key as PK. The output set is consumed as a unit (it *is* the manifest
+    view) and is never queried part-wise across builds. The cost is real and has to be
+    stated: **PostgreSQL cannot FK into JSONB, so a future pruner must treat
+    `builds.outputs` as a GC root** rather than relying on referential integrity to keep
+    a referenced blob alive. A join table is the additive migration the day part-wise
+    queries appear.
+
+    `key_inputs` exists because a cache key nobody can explain settles no argument —
+    the same S0-fw-3 lesson that produced `config_sha256`.
+    """
+
+    __tablename__ = "builds"
+    __table_args__ = (
+        CheckConstraint("cache_key ~ '^[0-9a-f]{64}$'", name="cache_key_format"),
+        # `jsonb_typeof` because JSONB accepts `[]` and `"x"` as happily as an object,
+        # and a reader that does `outputs["app"]` on a list gets a 500, not a miss.
+        CheckConstraint("jsonb_typeof(key_inputs) = 'object'", name="key_inputs_object"),
+        CheckConstraint("jsonb_typeof(outputs) = 'object'", name="outputs_object"),
+        Index("ix_builds_target_partition_layout", "target", "partition_layout"),
+    )
+
+    cache_key: Mapped[str] = mapped_column(Text, primary_key=True)
+    # The values that were hashed into `cache_key`.
+    key_inputs: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    # `{"<part>": {"sha256": "<hex>", "offset": 65536}}`; `offset` may be absent for a
+    # single-image build. Each `sha256` names an `artifacts` row — by convention, not by
+    # FK; see the class docstring.
+    outputs: Mapped[dict] = mapped_column(JSONB, nullable=False)
+    # Denormalised from `key_inputs` for lookup. The key stays the authority.
+    target: Mapped[str | None] = mapped_column(Text, nullable=True)
+    partition_layout: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        TimestampTZ, nullable=False, server_default=text("now()")
+    )

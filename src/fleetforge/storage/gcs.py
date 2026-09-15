@@ -80,11 +80,22 @@ class GcsObjectStore:
         return f"gcs bucket={self._bucket} prefix={self._prefix or '(none)'}"
 
     async def put(
-        self, key: str, data: bytes, *, content_type: str = "application/octet-stream"
+        self,
+        key: str,
+        data: bytes,
+        *,
+        content_type: str = "application/octet-stream",
+        cache_control: str | None = None,
     ) -> None:
         """Store `data` at `key`, overwriting. See the Protocol for the contract."""
         resolved = resolve_key(self._prefix, key)
         blob = self._bucket_factory().blob(resolved)
+        if cache_control is not None:
+            # Set on the blob *before* the upload: `upload_from_string` writes the
+            # object's metadata in the same request, so assigning it afterwards would
+            # need a second `patch` call — and would leave a window where a device's
+            # GET sees no caching headers at all.
+            blob.cache_control = cache_control
         async with self._guard("put", resolved):
             await asyncio.to_thread(blob.upload_from_string, data, content_type=content_type)
 

@@ -42,7 +42,10 @@ distribution paths with different rules, and no identifier anywhere that says wh
 (build identity in the manifest) **landed 2026-09-14** — every bundle now carries
 `config_sha256` and `build_digest`, and the diagnostic bundle prints both, so step 2 of
 the S0-fw-3 bench order (an `sdkconfig` diff against ESPHome's) is answerable from an
-artifact. The remaining four: **S0-infra-4** (freeze the content-addressed key scheme before R1 writes an object),
+artifact. **S0-infra-4** (the content-addressed key scheme) **landed 2026-09-14** — the
+layout is frozen in `src/fleetforge/storage/blobs.py` and the `artifacts`/`builds` tables
+exist (migration `0003`), empty and unread, while no object has yet been written. The
+remaining three:
 **S0-infra-5** (a GCS credential that is not a key file — the actual blocker),
 **S0-infra-6** (bundles served from the store, image ships none) and **S0-infra-7**
 (catalog keyed by target *and* layout). The build engine itself stays R9; only its cache
@@ -283,7 +286,7 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       carrying a *new* enrolment token still spends that token rather than reusing the
       stored credential. Both halves tested — the second is what `nvsWipe` existed for.
 
-- [ ] **S0-infra-4**: Freeze the content-addressed key scheme before R1 writes an object (P1, 0.5d)
+- [x] **S0-infra-4**: Freeze the content-addressed key scheme before R1 writes an object (P1, 0.5d)
       Filed 2026-09-14. `storage/objectstore.py::put` already justifies overwrite-is-safe
       with *"R1-BE-1 content-addresses artifacts by sha256"*, and no `R1-` task exists
       yet — so the scheme is asserted in a docstring and implemented nowhere. Free to
@@ -299,6 +302,12 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       Acceptance: the scheme is written down in `design/artifacts.md` and the migration
       creating `artifacts`/`builds` is reviewed and merged, with a test that a blob key
       outside `fleetforge/blobs/` is refused.
+      _(done 2026-09-14; reviewed; see docs/features/infrastructure.md, and the as-built
+      record in design/artifacts.md + DECISIONS.md 2026-09-14 — `storage/blobs.py`
+      holds the frozen scheme, migration `0003` the two empty tables. The key handed to
+      `ObjectStore` is store-relative (`blobs/sha256/<hex>`); the `fleetforge/` half is the
+      store's prefix, so a `fleetforge/`-prefixed key is refused. `spec/` was proposed
+      against, not edited.)_
 
 - [ ] **S0-infra-5**: `storage/factory.py` accepts a credential that is not a key file (P1, 1d)
       Filed 2026-09-14. Named as the real prerequisite in

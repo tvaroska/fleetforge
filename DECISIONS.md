@@ -6,6 +6,57 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-14 — the blob key is store-relative, lowercase-only, and carries its own cache header
+
+S0-infra-4 froze the content-addressed key scheme while **zero objects exist**: the same
+change after R1 writes the first artifact is a migration over live bytes in a shared
+bucket. **Extends, does not supersede, the *one storage model for every image* entry
+below.** Code: `src/fleetforge/storage/blobs.py`, migration `0003_artifacts_and_builds`.
+
+- **The key is store-relative, and this is the thing that would otherwise have been got
+  wrong.** `design/artifacts.md` writes the layout as `fleetforge/blobs/sha256/<hex>`,
+  which is the absolute *object* path. The `fleetforge/` half is the store's prefix,
+  applied by `resolve_key`. So `blob_key()` returns `blobs/sha256/<hex>` and a
+  `fleetforge/`-prefixed key is **refused**. Hardcoding the prefix would have written
+  `fleetforge/fleetforge/blobs/…` in production and left dev (dedicated MinIO bucket, no
+  prefix) and prod on two different layouts — invisible to every test anyone would think
+  to write, visible only in a bucket listing months later.
+  `test_blob_key_is_store_relative` is the guard.
+- **Lowercase hex only, rejected and never repaired** — `objectstore.py`'s and
+  `identity.py`'s standing rule, applied to the digest. `AB…` and `ab…` would be two
+  objects holding one artifact. `parse_blob_key` accepts only `blobs/sha256/` + 64
+  lowercase hex: nothing before it, nothing after it, no other algorithm.
+  (Implementation note worth keeping: the Python regex anchors with `\Z`, not `$` —
+  `$` also matches before a trailing newline, so `^[0-9a-f]{64}$` accepts `"<hex>\n"`.
+  The PostgreSQL CHECK writes `$`, where POSIX has no such behaviour.)
+- **`Cache-Control: public, max-age=31536000, immutable` is object metadata, not prose.**
+  `ObjectStore.put` grew a `cache_control` parameter and both adapters send it *only*
+  when it is not None, so an ordinary `put` is byte-for-byte the request it always was.
+  A header asserted only against a fake bucket is a header nobody has seen on an object,
+  so `just storage-check --blob` reads it back off a signed-URL GET and
+  `tests/test_object_store_minio.py` does the same against real MinIO.
+- **`builds.outputs` is JSONB with no foreign key, and that has a price.** A bundle build
+  produces four parts, so one `artifact_sha256` column cannot hold the result and a
+  per-part row would collide on the cache-key PK; the set is consumed as a unit. But
+  PostgreSQL cannot FK into JSONB, so **a future pruner (R2) must treat `builds.outputs`
+  as a GC root** rather than trusting referential integrity to keep a referenced blob
+  alive. A `build_outputs` join table is the additive migration the day part-wise
+  queries appear. Likewise there is deliberately no `artifacts.storage_key` (the key is
+  a pure function of the PK; a stored copy is a second spelling that can disagree) and
+  no refcount (nothing decrements it yet, and a refcount with no decrementer is a lie).
+- **Both tables land empty with no readers**, the same posture `fleetforge.storage` took
+  at R0-be-6. That is what makes `downgrade()` an honest reverse here, and it will not
+  be true next time.
+- **The wire-visible half was proposed, not edited.** `spec/device-protocol.md` already
+  hands a device `artifact: {url, sha256, …}` and already says `url` is a short-lived
+  signed URL, so the key scheme is not wire-visible and no spec change is required. The
+  optional clarification carried to review, unedited: *`artifact.sha256` is the
+  artifact's identity — the server stores the bytes under that digest and nothing else.
+  `artifact.url` is **opaque**; a device must never construct, cache-key on, or parse
+  it.*
+
+---
+
 ## 2026-09-14 — `build_digest` covers the inputs, not the clock
 
 S0-infra-3 adds `config_sha256` and `build_digest` to every agent bundle manifest. The

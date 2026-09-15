@@ -1,6 +1,7 @@
 # Artifacts — storage, identity, and where builds come from
 
-**Area:** infrastructure · **Status:** design, partly implemented
+**Area:** infrastructure · **Status:** design, partly implemented ·
+**the key scheme below is FROZEN** (S0-infra-4 — `src/fleetforge/storage/blobs.py`)
 **Scope:** every sequence of bytes the product ever writes to a device — agent bundles
 today, user firmware from R1, compiled artifacts from R9, delta images in V3.
 
@@ -66,9 +67,34 @@ correlating a timestamp against `git log` rather than read off the artifact.
 ### Blobs
 
 `fleetforge/blobs/sha256/<hex>` — write-once, never overwritten, never deleted while
-referenced, served with `Cache-Control: immutable`. `objectstore.py::put` already
-documents overwrite-is-fine *because* R1 content-addresses; this makes that concrete and
-turns the overwrite into a no-op by construction.
+referenced. Implemented and **frozen** in `src/fleetforge/storage/blobs.py`;
+`objectstore.py::put` documents overwrite-is-fine *because* artifacts are
+content-addressed, and that module is what makes the sentence true rather than a promise.
+
+**The key handed to `ObjectStore` is store-relative.** `fleetforge/` above is the
+*store's* prefix, joined on by `resolve_key`, not part of the key:
+
+| | `Settings` | prefix | key handed to the store | resulting object |
+|---|---|---|---|---|
+| prod (GCS) | `gcs_prefix` | `fleetforge/` | `blobs/sha256/<hex>` | `gs://btvaroska/fleetforge/blobs/sha256/<hex>` |
+| dev (MinIO) | `s3_prefix` | `""` (dedicated bucket) | `blobs/sha256/<hex>` | `fleetforge/blobs/sha256/<hex>` (bucket `fleetforge`) |
+
+So `blob_key()` returns `blobs/sha256/<hex>` and never contains `fleetforge/`;
+a `fleetforge/`-prefixed key is *refused* by `parse_blob_key`. Hardcoding the prefix
+would write `fleetforge/fleetforge/blobs/…` in production and put dev and prod on two
+different layouts.
+
+Three more rules, all encoded:
+
+* **Lowercase hex only, rejected and never repaired.** `AB…` and `ab…` would be two
+  objects holding one artifact — the "two spellings of one object" failure
+  `objectstore.py`'s reject-never-normalise rule exists to stop.
+* **`Cache-Control: public, max-age=31536000, immutable`**, exactly, written as object
+  metadata by `put_blob` — not a note in this document. The key *is* the bytes, so the
+  object can never change; `ObjectStore.put` takes `cache_control` and both adapters
+  send it only when asked, so an ordinary `put` is unchanged.
+* **No existence pre-check before a put.** It is a round trip and a race, and it buys
+  nothing: the same key always carries the same bytes, so a retried upload is a no-op.
 
 Deduplication is not the headline benefit but it is a real one: a new agent version
 usually changes `app.bin` only, and `bootloader`, `partition-table` and `ota-data` are
@@ -81,9 +107,46 @@ only, and `resolve_key` rejects rather than normalises.
 
 ### Metadata
 
-Postgres holds what the bytes cannot: an `artifacts` row per digest (size, kind, target,
-partition_layout, provenance) and a `builds` row mapping cache key → digest. "Do we
-already have this?" becomes a lookup rather than a build.
+Postgres holds what the bytes cannot. Both tables exist as of S0-infra-4 (migration
+`0003`) and both land **empty with no readers** — freezing them is free before the first
+object is written and a data migration afterwards. Column rationale lives in the
+`Artifact` / `Build` docstrings in `db/models.py`.
+
+`artifacts`, one row per content digest:
+
+| column | type | notes |
+|---|---|---|
+| `sha256` | TEXT **PK** | `CHECK ~ '^[0-9a-f]{64}$'` — the digest *is* the object key |
+| `size_bytes` | BIGINT NOT NULL | `CHECK > 0`; a zero-byte artifact ships nothing |
+| `kind` | TEXT NOT NULL | vocabulary in `ArtifactKind`, advisory, no CHECK |
+| `target` | TEXT NULL | `esp32c6`; NULL where the bytes are target-independent |
+| `partition_layout` | TEXT NULL | mirrors `devices.partition_layout` |
+| `provenance` | JSONB NULL | the S0-infra-3 manifest identity, copied |
+| `created_at` | TIMESTAMPTZ NOT NULL | server receipt time |
+
+`builds`, cache key → the artifacts it produced:
+
+| column | type | notes |
+|---|---|---|
+| `cache_key` | TEXT **PK** | `CHECK ~ '^[0-9a-f]{64}$'`; the key below under *Dynamic build* |
+| `key_inputs` | JSONB NOT NULL | what was hashed; `CHECK jsonb_typeof = 'object'` |
+| `outputs` | JSONB NOT NULL | `{"<part>": {"sha256", "offset"?}}`; same CHECK |
+| `target`, `partition_layout` | TEXT NULL | denormalised for lookup; the key is authority |
+| `created_at` | TIMESTAMPTZ NOT NULL | |
+
+"Do we already have this?" is then a lookup rather than a build. Two absences are
+deliberate and must stay:
+
+* **No `artifacts.storage_key` column.** The key is `blob_key(sha256)`, a pure function
+  of the primary key; storing it makes a second spelling that can disagree with the
+  first. (Nor a `deleted_at`/refcount: nothing deletes blobs before R2, and a refcount
+  with no decrementer is a lie.)
+* **No FK from `builds.outputs`** — PostgreSQL cannot FK into JSONB. `outputs` is JSONB
+  rather than a `build_outputs` join table because an agent bundle build produces four
+  parts (one `artifact_sha256` column cannot hold them, and a per-part row would collide
+  on the cache-key PK) and the set is consumed as a unit. The price is that **a future
+  pruner must treat `builds.outputs` as a GC root**; a join table is the additive
+  migration the day part-wise queries appear.
 
 ### Manifests as views
 
@@ -163,9 +226,13 @@ R9 build runner and stay in V2; what changes in R9 is only the key.
 
 ## Sequencing
 
-The R1 key scheme is not yet frozen — no `R1-` tasks exist — so the storage decisions
-here are free now and expensive after the first object is written under a different
-scheme. Filed in Sprint 0 as S0-infra-3 (build identity), S0-infra-4 (freeze the key
-scheme), S0-infra-5 (a credential that is not a key file), S0-infra-6 (bundles served
-from the store) and S0-infra-7 (catalog keyed by target *and* layout). The build engine
-itself stays R9.
+The storage decisions here were free while no object had been written under a different
+scheme and expensive afterwards, which is why the key scheme and the two tables were
+taken first, empty and unread. Filed in Sprint 0 as S0-infra-3 (build identity),
+S0-infra-4 (the frozen key scheme — `storage/blobs.py`, migration `0003`), S0-infra-5 (a
+credential that is not a key file), S0-infra-6 (bundles served from the store) and
+S0-infra-7 (catalog keyed by target *and* layout). The build engine itself stays R9.
+
+`just storage-check --blob` proves the frozen scheme against whichever backend is
+configured: it writes at `blobs/sha256/<digest of the payload>` and reads the
+`Cache-Control` back off a signed-URL GET.

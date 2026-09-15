@@ -5,7 +5,10 @@ puts, `R1-BE-2` signs a URL into the `stage` command, `R1-BE-3` gets, and R2's v
 pruning deletes. The cheapest place to get artifact-URL authorization wrong is here, so
 it ships whole rather than as a stub.
 
-Import the Protocol, the errors and the key rules from here; the adapters live in
+Import the Protocol, the errors and the key rules from here — including the frozen
+content-addressed scheme in `storage/blobs.py` (`blob_key`, `parse_blob_key`,
+`put_blob`, `BLOB_CACHE_CONTROL`), which is what makes `put`'s overwrite-is-safe
+contract true. The adapters live in
 `storage/s3.py` (MinIO/S3) and `storage/gcs.py` (Google Cloud Storage) and are imported
 **lazily** by `storage/factory.py`, so a process that never touches artifacts pays for
 neither SDK. Same layout as `fleetforge.broker`.
@@ -15,6 +18,14 @@ Round-trip the configured backend with `just storage-check`
 `docs/runbooks/artifact-storage.md`.
 """
 
+from fleetforge.storage.blobs import (
+    BLOB_CACHE_CONTROL,
+    BLOB_PREFIX,
+    blob_key,
+    digest_bytes,
+    parse_blob_key,
+    put_blob,
+)
 from fleetforge.storage.objectstore import (
     MAX_KEY_LEN,
     SIGNED_URL_MAX_TTL_S,
@@ -30,6 +41,8 @@ from fleetforge.storage.objectstore import (
 )
 
 __all__ = [
+    "BLOB_CACHE_CONTROL",
+    "BLOB_PREFIX",
     "MAX_KEY_LEN",
     "SIGNED_URL_MAX_TTL_S",
     "ObjectKeyError",
@@ -38,6 +51,10 @@ __all__ = [
     "ObjectStoreConfigError",
     "ObjectStoreError",
     "ObjectTooLarge",
+    "blob_key",
+    "digest_bytes",
+    "parse_blob_key",
+    "put_blob",
     "resolve_key",
     "validate_prefix",
     "validate_ttl",

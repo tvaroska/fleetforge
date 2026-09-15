@@ -93,19 +93,29 @@ class S3ObjectStore:
         return f"s3 bucket={self._bucket} prefix={self._prefix or '(none)'}"
 
     async def put(
-        self, key: str, data: bytes, *, content_type: str = "application/octet-stream"
+        self,
+        key: str,
+        data: bytes,
+        *,
+        content_type: str = "application/octet-stream",
+        cache_control: str | None = None,
     ) -> None:
         """Store `data` at `key`, overwriting. See the Protocol for the contract."""
         resolved = resolve_key(self._prefix, key)
         client = self._client_factory()
+        params: dict[str, Any] = {
+            "Bucket": self._bucket,
+            "Key": resolved,
+            "Body": data,
+            "ContentType": content_type,
+        }
+        if cache_control is not None:
+            # Only when asked. An empty `CacheControl` is not the same object metadata
+            # as none at all, and it would change the request every existing caller
+            # makes (including the params `tests/test_object_store.py` stubs).
+            params["CacheControl"] = cache_control
         async with self._guard("put", resolved):
-            await asyncio.to_thread(
-                client.put_object,
-                Bucket=self._bucket,
-                Key=resolved,
-                Body=data,
-                ContentType=content_type,
-            )
+            await asyncio.to_thread(client.put_object, **params)
 
     async def get(self, key: str) -> bytes:
         """Return the bytes at `key`, refusing an oversized object before downloading."""

@@ -5,7 +5,14 @@ just storage-check                       # whichever backend the environment sel
 just storage-check --backend gcs         # force one
 just storage-check --ttl 5 --keep        # leave the object, short-lived URL
 just storage-check --key '../escape.bin' # must fail with ObjectKeyError
+just storage-check --blob                # the content-addressed path (S0-infra-4)
 ```
+
+`--blob` is the T2 harness for the frozen key scheme: it writes through
+`storage.blobs.put_blob`, so the key is `blobs/sha256/<the payload's own digest>`, and
+it then checks the **`Cache-Control` the device's GET actually receives** rather than
+trusting that the adapter sent one. A header asserted only in a unit test against a fake
+bucket is a header nobody has ever seen on an object.
 
 Both the T2 harness for `R0-be-6` and the ops answer to "is the artifact store actually
 reachable from this container?" — run it inside the api container with
@@ -31,6 +38,7 @@ import urllib.request
 import uuid
 
 from fleetforge.config import Settings
+from fleetforge.storage.blobs import BLOB_CACHE_CONTROL, blob_key, digest_bytes, put_blob
 from fleetforge.storage.factory import create_object_store, select_backend
 from fleetforge.storage.objectstore import ObjectNotFound, ObjectStore
 
@@ -44,14 +52,23 @@ def _step(message: str) -> None:
     print(message, flush=True)
 
 
-def _fetch(url: str) -> bytes:
-    """GET `url` with no credentials at all — the signature is the authorization."""
+def _fetch(url: str) -> tuple[bytes, str | None]:
+    """GET `url` with no credentials at all — the signature is the authorization.
+
+    Returns the body and the object's `Cache-Control`, because the header the *device*
+    receives is the only proof that the metadata reached the object.
+    """
     with urllib.request.urlopen(url, timeout=FETCH_TIMEOUT_S) as response:  # noqa: S310 - http(s) URL from the adapter
-        return bytes(response.read())
+        return bytes(response.read()), response.headers.get("Cache-Control")
 
 
 async def _check_signed_url(
-    store: ObjectStore, local_store: ObjectStore | None, key: str, ttl_s: int, digest: str
+    store: ObjectStore,
+    local_store: ObjectStore | None,
+    key: str,
+    ttl_s: int,
+    digest: str,
+    expect_cache_control: str | None = None,
 ) -> None:
     """Sign a URL, print it, and prove it serves the right bytes.
 
@@ -73,7 +90,7 @@ async def _check_signed_url(
     _step(f"url      {url}")
 
     try:
-        downloaded = _fetch(url)
+        downloaded, cache_control = _fetch(url)
     except urllib.error.HTTPError as exc:
         raise RuntimeError(
             f"the signed URL was refused with HTTP {exc.code}: {exc.reason}"
@@ -86,7 +103,7 @@ async def _check_signed_url(
             "Expected inside the compose network: S3_PUBLIC_ENDPOINT_URL names a "
             "host-side endpoint on purpose. Fetch the URL above from the host."
         )
-        downloaded = _fetch(await local_store.signed_url(key, ttl_s=ttl_s))
+        downloaded, cache_control = _fetch(await local_store.signed_url(key, ttl_s=ttl_s))
         _step(f"fetch    {len(downloaded)} bytes over HTTP via the internal endpoint")
     else:
         _step(f"fetch    {len(downloaded)} bytes over HTTP")
@@ -95,23 +112,55 @@ async def _check_signed_url(
         raise RuntimeError("the signed URL served different bytes")
     _step("verify   the signed URL's bytes match the sha256 above")
 
+    if expect_cache_control is not None:
+        # What the device sees, read off the response — not what we believe we sent.
+        _step(f"cache    cache-control: {cache_control}")
+        if cache_control != expect_cache_control:
+            raise RuntimeError(
+                f"the object serves Cache-Control {cache_control!r}, "
+                f"expected {expect_cache_control!r}"
+            )
+
 
 async def _round_trip(
-    store: ObjectStore, local_store: ObjectStore | None, key: str, ttl_s: int, keep: bool
+    store: ObjectStore,
+    local_store: ObjectStore | None,
+    key: str,
+    payload: bytes,
+    ttl_s: int,
+    keep: bool,
+    *,
+    blob: bool = False,
 ) -> None:
-    """put → get → signed_url (fetched) → delete → ObjectNotFound → delete again."""
-    payload = secrets.token_bytes(PAYLOAD_BYTES)
-    digest = hashlib.sha256(payload).hexdigest()
+    """put → get → signed_url (fetched) → delete → ObjectNotFound → delete again.
 
-    await store.put(key, payload, content_type="application/octet-stream")
-    _step(f"put      {key} ({len(payload)} bytes, sha256={digest})")
+    `blob=True` writes through `put_blob`, so the key is a function of the bytes and the
+    object carries `BLOB_CACHE_CONTROL`; the signed-URL check then asserts that header.
+    """
+    digest = digest_bytes(payload)
+
+    if blob:
+        written = await put_blob(store, payload)
+        if written != key:
+            raise RuntimeError(f"put_blob wrote {written}, not the announced {key}")
+        _step(f"put      {key} ({len(payload)} bytes, sha256={digest}, content-addressed)")
+    else:
+        await store.put(key, payload, content_type="application/octet-stream")
+        _step(f"put      {key} ({len(payload)} bytes, sha256={digest})")
 
     fetched = await store.get(key)
     if hashlib.sha256(fetched).hexdigest() != digest:
         raise RuntimeError("get returned different bytes than put")
     _step(f"get      {len(fetched)} bytes, sha256 matches")
 
-    await _check_signed_url(store, local_store, key, ttl_s, digest)
+    await _check_signed_url(
+        store,
+        local_store,
+        key,
+        ttl_s,
+        digest,
+        BLOB_CACHE_CONTROL if blob else None,
+    )
 
     if keep:
         _step(f"keep     {key} left in place (--keep)")
@@ -150,11 +199,19 @@ async def _run(args: argparse.Namespace) -> int:
             settings.model_copy(update={"s3_public_endpoint_url": settings.s3_endpoint_url})
         )
 
-    key = args.key or f"selftest/{uuid.uuid4().hex}.bin"
+    payload = secrets.token_bytes(PAYLOAD_BYTES)
+    if args.blob:
+        if args.key:
+            # There is nothing to choose: a blob's key IS its digest. Accepting both
+            # would invite a key that does not describe its own contents.
+            raise ValueError("--key and --blob are mutually exclusive")
+        key = blob_key(digest_bytes(payload))
+    else:
+        key = args.key or f"selftest/{uuid.uuid4().hex}.bin"
     ttl_s = args.ttl if args.ttl is not None else settings.signed_url_ttl_s
     _step(f"key      {key} (signed-URL ttl {ttl_s}s)")
 
-    await _round_trip(store, local_store, key, ttl_s, args.keep)
+    await _round_trip(store, local_store, key, payload, ttl_s, args.keep, blob=args.blob)
     return 0
 
 
@@ -167,6 +224,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     selftest.add_argument("--backend", choices=("s3", "gcs"), help="force a backend")
     selftest.add_argument("--key", help="object key to use instead of selftest/<uuid>.bin")
+    selftest.add_argument(
+        "--blob",
+        action="store_true",
+        help="write through put_blob at blobs/sha256/<digest> and check Cache-Control",
+    )
     selftest.add_argument("--ttl", type=int, help="signed-URL lifetime in seconds")
     selftest.add_argument(
         "--keep", action="store_true", help="do not delete the object (leaves it for inspection)"

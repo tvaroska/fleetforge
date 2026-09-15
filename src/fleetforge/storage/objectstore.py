@@ -86,13 +86,25 @@ class ObjectStore(Protocol):
     """Artifact bytes, four verbs. `design/architecture.md` → *Artifact storage*."""
 
     async def put(
-        self, key: str, data: bytes, *, content_type: str = "application/octet-stream"
+        self,
+        key: str,
+        data: bytes,
+        *,
+        content_type: str = "application/octet-stream",
+        cache_control: str | None = None,
     ) -> None:
         """Store `data` at `key`, **overwriting** any existing object.
 
-        Overwrite rather than error-on-exists because R1-BE-1 content-addresses
-        artifacts by sha256: the same key always carries the same bytes, so a retried
-        upload is a no-op rather than a conflict to reason about.
+        Overwrite rather than error-on-exists because artifacts are content-addressed
+        by sha256: the same key always carries the same bytes, so a retried upload is a
+        no-op rather than a conflict to reason about. That is no longer a promise about
+        a future task — `storage/blobs.py` is the frozen scheme (S0-infra-4), and
+        `blobs.put_blob` is how an artifact gets written.
+
+        `cache_control=None` means the backend default — no `Cache-Control` metadata is
+        sent at all. `blobs.BLOB_CACHE_CONTROL` is what every content-addressed blob is
+        written with. It is metadata **on the object**, so it is what a device's GET
+        through a signed URL sees, not merely a note in this repo's prose.
 
         Raises `ObjectKeyError` for a key that cannot be confined to the prefix, and
         `ObjectStoreError` for anything the backend does wrong.

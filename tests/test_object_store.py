@@ -24,6 +24,7 @@ from google.api_core import exceptions as gcs_exceptions
 from fleetforge.api.deps import ObjectStoreDep, get_object_store
 from fleetforge.config import Settings, get_settings
 from fleetforge.storage import (
+    BLOB_CACHE_CONTROL,
     MAX_KEY_LEN,
     SIGNED_URL_MAX_TTL_S,
     ObjectKeyError,
@@ -31,6 +32,9 @@ from fleetforge.storage import (
     ObjectStoreConfigError,
     ObjectStoreError,
     ObjectTooLarge,
+    blob_key,
+    digest_bytes,
+    put_blob,
     resolve_key,
     validate_prefix,
 )
@@ -271,6 +275,54 @@ async def test_s3_put_sends_the_prefixed_key_and_content_type() -> None:
         stub.assert_no_pending_responses()
 
 
+async def test_s3_put_without_cache_control_sends_no_cache_control_at_all() -> None:
+    """`Stubber` matches `expected_params` exactly, so an extra `CacheControl` fails here.
+
+    Stated as its own test because the temptation is to always pass `CacheControl=...`:
+    an empty string is not the same object metadata as no header, and it would change
+    the request every existing caller makes.
+    """
+    client = _s3_client()
+    store = _s3_store(client)
+    with Stubber(client) as stub:
+        stub.add_response(
+            "put_object",
+            {},
+            {
+                "Bucket": BUCKET,
+                "Key": f"{PREFIX}plain.bin",
+                "Body": b"x",
+                "ContentType": "application/octet-stream",
+            },
+        )
+        await store.put("plain.bin", b"x")
+        stub.assert_no_pending_responses()
+
+
+async def test_s3_put_blob_sends_the_content_addressed_key_and_immutable_cache_control() -> None:
+    """The whole S0-infra-4 wire shape, in one assertion: the key and the header."""
+    payload = b"firmware"
+    digest = digest_bytes(payload)
+    client = _s3_client()
+    store = _s3_store(client)
+    with Stubber(client) as stub:
+        stub.add_response(
+            "put_object",
+            {},
+            {
+                "Bucket": BUCKET,
+                # The store's prefix, then the store-relative blob key — never
+                # `fleetforge/fleetforge/`.
+                "Key": f"{PREFIX}blobs/sha256/{digest}",
+                "Body": payload,
+                "ContentType": "application/octet-stream",
+                "CacheControl": BLOB_CACHE_CONTROL,
+            },
+        )
+        assert await put_blob(store, payload) == blob_key(digest)
+        stub.assert_no_pending_responses()
+
+
 async def test_s3_get_returns_the_bytes() -> None:
     import io
 
@@ -434,10 +486,14 @@ class FakeBlob:
         self._bucket = bucket
         self.name = name
         self.size: int | None = None
+        # Real `Blob.cache_control` is an assignable property sent with the upload; the
+        # adapter sets it before `upload_from_string`, so record what it was at upload.
+        self.cache_control: str | None = None
         self.signed_url_calls: list[dict[str, Any]] = []
 
     def upload_from_string(self, data: bytes, content_type: str = "") -> None:
         self._bucket.objects[self.name] = (data, content_type)
+        self._bucket.cache_control_at_upload[self.name] = self.cache_control
 
     def reload(self) -> None:
         stored = self._bucket.objects.get(self.name)
@@ -465,6 +521,7 @@ class FakeBucket:
     def __init__(self, name: str = "btvaroska") -> None:
         self.name = name
         self.objects: dict[str, tuple[bytes, str]] = {}
+        self.cache_control_at_upload: dict[str, str | None] = {}
         self.signed_url_calls: list[dict[str, Any]] = []
         self.reported_size: int | None = None
 
@@ -489,6 +546,24 @@ async def test_gcs_round_trip_applies_the_prefix() -> None:
     await store.put("esp32/a.bin", b"firmware", content_type="application/octet-stream")
     assert f"{PREFIX}esp32/a.bin" in bucket.objects
     assert await store.get("esp32/a.bin") == b"firmware"
+
+
+async def test_gcs_put_blob_marks_the_object_immutable() -> None:
+    """`Cache-Control` is metadata on the blob, set before the upload writes it."""
+    payload = b"firmware"
+    digest = digest_bytes(payload)
+    bucket = FakeBucket()
+    store = _gcs_store(bucket)
+    assert await put_blob(store, payload) == blob_key(digest)
+    resolved = f"{PREFIX}blobs/sha256/{digest}"
+    assert resolved in bucket.objects
+    assert bucket.cache_control_at_upload[resolved] == BLOB_CACHE_CONTROL
+
+
+async def test_gcs_ordinary_put_sets_no_cache_control() -> None:
+    bucket = FakeBucket()
+    await _gcs_store(bucket).put("plain.bin", b"x")
+    assert bucket.cache_control_at_upload[f"{PREFIX}plain.bin"] is None
 
 
 async def test_gcs_get_of_a_missing_key_raises_object_not_found() -> None:

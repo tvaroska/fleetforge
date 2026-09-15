@@ -29,6 +29,43 @@ Neither alone is enough. (1) is defeated by a future caller that bypasses the he
 when a signed URL is redeemed, so a signed URL for an out-of-prefix object is worthless
 even if one were somehow generated.
 
+## Key layout — where an artifact actually lands
+
+Artifacts are content-addressed (S0-infra-4, `src/fleetforge/storage/blobs.py`). The key
+a caller hands to `ObjectStore` is **store-relative**: the `fleetforge/` half of the
+production path is the store's prefix, applied by `resolve_key`, and is never part of
+the key.
+
+| | Prefix | Key handed to the store | Resulting object |
+|---|---|---|---|
+| dev (MinIO) | *(none)* | `blobs/sha256/<hex>` | `blobs/sha256/<hex>` in bucket `fleetforge` |
+| production (GCS) | `fleetforge/` | `blobs/sha256/<hex>` | `gs://btvaroska/fleetforge/blobs/sha256/<hex>` |
+
+So in a bucket listing both deployments read the same way, and a key that already starts
+with `fleetforge/` is a bug (it would store `fleetforge/fleetforge/blobs/…`) — the
+adapters refuse it rather than repairing it. The digest is lowercase hex, always; an
+uppercase spelling is rejected, never normalised, because it would be a second object
+holding one artifact.
+
+Blobs are written with `Cache-Control: public, max-age=31536000, immutable` as real
+object metadata — that is what a device's GET through the signed URL receives. Prove
+both against the configured backend:
+
+```bash
+just storage-check --blob
+```
+
+It writes a payload at `blobs/sha256/<that payload's digest>`, fetches it over the signed
+URL and prints the `cache-control:` line it actually got back. To check the header
+yourself, add `--keep` and `curl` the printed URL with **GET**, not `curl -I`:
+
+```bash
+curl -sS -D - -o /dev/null "$URL" | grep -i cache-control
+```
+
+`curl -I` sends `HEAD`, and SigV4 signs the HTTP method — a URL presigned for `GET`
+answers `403` to a `HEAD`. That 403 means the method is wrong, not the signature.
+
 ## Provisioning the production service account
 
 Run once, from a shell authenticated as an owner (`devserver@btvaroska` works).
@@ -213,6 +250,9 @@ prints the device-facing URL for you to `curl` from the host. An **HTTP 403/404*
 the URL is a real failure; a **connection refused** from inside the container is not.
 
 `just storage-check --key '../escape.bin'` must exit non-zero with `ObjectKeyError`.
+`just storage-check --blob` additionally checks the content-addressed key and the
+`Cache-Control` header (see *Key layout* above); `--key` and `--blob` are mutually
+exclusive, because a blob's key is its digest and nothing else.
 
 ## Production configuration
 
