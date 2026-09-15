@@ -1298,3 +1298,64 @@ Five acceptance criteria executed from `/home/boris/products/fleetforge`:
 4. **Existing functionality unchanged:** Plain `selftest` still passes with no cache-control sent; path traversal attempts still raise ObjectKeyError.
 
 5. **Full test suite:** `just test` green with ruff, mypy and all tests passing including MinIO integration tests (not skipped).
+
+## Firmware catalog keyed on (target, partition_layout) (S0-infra-7, closed 2026-09-14)
+
+**Filed as:** "Key the firmware catalog on (target, partition_layout)" — preparing for multiple partition layouts per chip target while exactly one layout exists today.
+
+### What shipped
+
+Changed the firmware catalog from indexing bundles by target alone to keying them by `(target, partition_layout)`. This enables two layouts for one chip target to coexist without collision, and gives the API and browser flasher a way to select between them.
+
+**Core module changes:** `src/fleetforge/firmware/catalog.py` now keys bundles on `(target, partition_layout)` instead of directory name (target) alone. Added `AmbiguousBundleError` for when multiple layouts exist but the caller doesn't specify which one. The catalog provides `bundle(target, layout=None)` with three outcomes: exact match when layout given, resolve-while-unique when layout omitted, or raise `AmbiguousBundleError` when ambiguous.
+
+**SUPPORTED_LAYOUTS registry:** Added `SUPPORTED_LAYOUTS: dict[str, int]` in `firmware/manifest.py` mapping layout ID to required ota_slot_size. This is what keeps `partition_layout` and `ota_slot_size` from drifting apart — a bundle cannot claim `ab-4m-v1` with a 4 MB slot. Uses a plain dict (not frozen) so tests can register a second layout via `monkeypatch.setitem`.
+
+**Directory naming convention:** Bundle directories follow `<target>` or `<target>.<layout>` naming. The dot-suffixed form allows two layouts for one target to coexist on disk. Separator is `.` because no chip target and no layout id contains one (both are SAFE_SEGMENT), making the split unambiguous. Directory/manifest mismatch drops the bundle with a warning.
+
+**HTTP surface:** `GET /v1/agent/{target}/{part}` gained optional `?layout=` parameter. Returns 404 for unknown layout, 409 Conflict with named layouts when multiple exist but caller doesn't specify. Frontend passes the layout from manifest and refuses to guess between two builds for one chip.
+
+### Why a registry, not a relaxation
+
+The wrong fix would be dropping the layout check so "two layouts both load" — that would let a bundle declaring any string load, and `ota_slot_size` would float free of the layout id. The SUPPORTED_LAYOUTS registry enforces the three-way contract (DECISIONS.md 2026-09-09): layout id, slot size, and partition table remain bound.
+
+### Backward compatibility
+
+The R0 path is unchanged: when exactly one layout exists for a target, `catalog.bundle(target)` resolves without requiring `?layout=`. Every existing caller works unmodified. The 409 only appears when a second layout is registered.
+
+### Files modified
+
+- `src/fleetforge/firmware/manifest.py` — added SUPPORTED_LAYOUTS registry
+- `src/fleetforge/firmware/catalog.py` — (target, partition_layout) keying, AmbiguousBundleError, directory convention
+- `src/fleetforge/api/routers/agent.py` — ?layout= parameter, 409 handling
+- `frontend/src/api.ts` — layout parameter
+- `frontend/src/flash.ts` — pass layout from manifest, refuse to guess
+- `design/artifacts.md` — updated keying documentation
+- `docs/runbooks/agent-build.md` — documented directory convention and layout parameter
+- Tests: comprehensive multi-layout coverage in `test_firmware_catalog.py` and `test_api_agent.py`
+
+### Gotchas learned
+
+**monkeypatch.setitem, never setattr.** The catalog imports `SUPPORTED_LAYOUTS` which binds the same dict object. Mutating via `setitem` is visible in both modules and is undone after the test. Using `setattr` rebinds only one module's name and the test proves nothing.
+
+**AmbiguousBundleError must not inherit from AgentBundleError.** `load_bundles` catches AgentBundleError to drop bad bundles. If ambiguity inherited from it, a future refactor could swallow the error and silently serve first-match.
+
+**Directory suffix validation.** `_split_dir_name` must reject what the old SAFE_TARGET check rejected (`.hidden`, `esp32.`, etc.). Malformed names drop the bundle with a warning rather than raising an exception.
+
+**409 is the only new status code.** Existing 404s stay as-is. The 409 only appears for ambiguous layout selection — it names the problem so the flasher can tell the user rather than silently picking the wrong partition table.
+
+### Verification (T2)
+
+Three executable acceptance criteria from the plan:
+
+1. **Two layouts for one target, live against real bundle bytes:** Created `esp32` and `esp32.ab-8m-v1` directories, registered the second layout, proved both load as distinct objects, are separately addressable, ambiguity raises with both ids listed, unknown layout returns None, and vacuity check (without registry entry) drops the unregistered bundle with WARNING.
+
+2. **HTTP surface including 409:** Full test suite green proving `?layout=ab-8m-v1` returns the correct directory's bytes, no layout with two candidates returns 409 with both ids in body, unknown layout is 404, manifest lists both builds.
+
+3. **R0 path unchanged on running stack:** Against `just up`, proved `GET /v1/agent/esp32/app` and `?layout=ab-4m-v1` return byte-identical content with matching sha256, hostile layout parameter is 404/422 never 200/500.
+
+Full T1 gate (`just test` + frontend tests) green, including new TestLayoutKeying class exercising all multi-layout behaviors.
+
+### S0-infra-6 hand-off
+
+The object-store key and publish index must carry `(target, partition_layout)` — `AgentBundle.key` property provides the correct shape. Do not re-narrow it to target alone.
