@@ -1218,3 +1218,83 @@ WARNING.
 
 **Known follow-up:** only `esp32` was rebuilt, so `agent/dist/esp32c3|c6|s3` now warn on
 load. `just agent-build-all` clears it.
+
+## Content-addressed blob storage (S0-infra-4, closed 2026-09-14)
+
+**Filed as:** "Freeze the content-addressed key scheme before R1 writes an object." The storage module shipped at R0-be-6 with a module docstring promising content-addressed artifact storage but zero code to enforce it. This task turned that prose into schema and code while zero objects exist, because making the same change after R1 writes the first artifact is a migration over live bytes in a shared bucket.
+
+### What shipped
+
+Two tables (`artifacts` and `builds`), a frozen key scheme (`blobs/sha256/<hex>`), cache-control metadata on content-addressed objects, and a complete test harness proving the rules against real MinIO. All code landed with the tables empty and no readers — the same shipping posture `fleetforge.storage` itself took at R0-be-6.
+
+**Core module:** `src/fleetforge/storage/blobs.py` — pure functions with no SDK import, following the same rule as `objectstore.py`. Provides `digest_bytes`, `blob_key`, `parse_blob_key` and `put_blob`. The key is `blobs/sha256/<hex>` (store-relative, explained below), and every helper validates rigorously: uppercase hex is rejected never lowercased, `parse_blob_key` accepts only the exact prefix plus 64 lowercase hex with nothing before or after.
+
+**Schema:** Migration `0003_artifacts_and_builds.py` creates two tables. `artifacts` holds one row per content digest with columns for sha256 (PK), size, kind, target, partition layout, provenance (JSONB) and created_at, plus a PostgreSQL CHECK enforcing lowercase hex format. `builds` maps cache keys to the artifacts they produced, with columns for cache_key (PK), key_inputs (JSONB), outputs (JSONB), target, partition_layout and created_at. Both tables include appropriate indexes and constraints following the db/models.py conventions.
+
+**Cache-Control metadata:** The `ObjectStore.put` Protocol signature gained an optional `cache_control` parameter. Both S3 and GCS adapters send it as real object metadata only when not None, so ordinary puts are byte-identical to before. Content-addressed blobs use `Cache-Control: public, max-age=31536000, immutable` — a header that is verifiable on signed-URL GETs and is what a device downloading firmware sees.
+
+**Verification:** `storage/__main__.py` selftest grew a `--blob` mode that round-trips a payload at `blob_key(sha256(payload))`, fetches it via signed URL, and asserts the cache-control header is present. The MinIO test suite exercises the same path against a real object store.
+
+### The store-relative key decision
+
+The single thing that would otherwise have been got wrong: keys are store-relative, not absolute. The design documents write the layout as `fleetforge/blobs/sha256/<hex>`, which is the absolute GCS object path. But `fleetforge/` is the configured store prefix applied by `resolve_key` — it differs between environments (production GCS uses `fleetforge/`, dev MinIO uses an empty prefix with a dedicated bucket).
+
+So `blob_key()` returns `blobs/sha256/<hex>` and must never contain `fleetforge/`. Hardcoding the prefix would write `fleetforge/fleetforge/blobs/...` in production and leave dev and prod on two different layouts — invisible to every test anyone would think to write, visible only in a bucket listing months later. `test_blob_key_is_store_relative` is the regression guard.
+
+### Schema design: why JSONB for build outputs
+
+`builds.outputs` is JSONB rather than a join table because a bundle build produces four parts, so one `artifact_sha256` column cannot represent it and per-part rows would collide on the cache-key primary key. The output set is consumed as a unit (it becomes the manifest view) and is never queried part-wise across builds.
+
+The cost is real and documented: PostgreSQL cannot foreign-key into JSONB, so a future pruner (R2) must treat `builds.outputs` as a GC root rather than trusting referential integrity. A `build_outputs` join table is the additive migration the day part-wise queries appear.
+
+Similarly, there is deliberately no `artifacts.storage_key` column — the key is a pure function of the sha256 primary key, and storing it creates a second spelling that can disagree. There is deliberately no refcount column — nothing decrements it yet, and a refcount with no decrementer is a lie.
+
+### Validation rules
+
+All helpers reject malformed input and never normalize it, following the `objectstore.py` and `identity.py` standing rule. Key decisions:
+
+- **Lowercase hex only:** `AB...` and `ab...` would be two objects holding one artifact. `parse_blob_key` enforces exact match.
+- **No existence pre-check before put:** It's a race plus a round trip, and unnecessary when the same key always carries the same bytes. This is documented in code.
+- **Expected digest validated before upload:** `put_blob` computes the digest from the payload and raises before any backend call if `expected_digest` disagrees. An upload path that trusts client-supplied digests is how a blob ends up at a key that lies about its contents.
+
+### Files created
+
+- `src/fleetforge/storage/blobs.py` — frozen key scheme and pure functions
+- `alembic/versions/0003_artifacts_and_builds.py` — schema migration with full downgrade
+- `tests/test_blob_keys.py` — pure-function tests for key rules and validation
+
+### Files modified
+
+- `src/fleetforge/storage/objectstore.py`, `s3.py`, `gcs.py` — cache_control parameter
+- `src/fleetforge/storage/__init__.py` — re-export blob helpers
+- `src/fleetforge/db/models.py` — ArtifactKind enum and two table definitions
+- `src/fleetforge/storage/__main__.py` — selftest --blob mode
+- `tests/test_schema.py`, `test_object_store.py`, `test_object_store_minio.py` — coverage
+- `design/artifacts.md` — frozen statement replacing prose promises
+- `docs/runbooks/artifact-storage.md` — key layout documentation
+
+### Gotchas learned
+
+**Alembic autogenerate needs hand-editing for quality.** The migration was generated with `alembic revision --autogenerate` but then hand-edited for comments, ordering and proper op.f(...) constraint names. The autogenerated output is a starting point, not a committable artifact.
+
+**Python regex anchors for digests:** The validation uses `\Z` not `$` because `$` also matches before a trailing newline, so `^[0-9a-f]{64}$` accepts `"<hex>\n"`. PostgreSQL CHECK uses `$` where POSIX has no such behavior. This is documented in DECISIONS.md.
+
+**Both tables land empty with no readers.** This is what makes `downgrade()` an honest reverse. The same thing won't be true next time a migration touches these tables.
+
+### Wire protocol unchanged
+
+The device protocol already hands devices `artifact: {url, sha256, size, ...}` where `url` is a short-lived signed URL. The key scheme is therefore not wire-visible — devices receive an opaque URL and a digest, never a key. No spec change was required or made.
+
+### Verification (T2)
+
+Five acceptance criteria executed from `/home/boris/products/fleetforge`:
+
+1. **Key parsing refuses anything outside the blob prefix:** A parametrized test proved `parse_blob_key` rejects `secrets/`, `fleetforge/blobs/...` (double-prefixed), wrong algorithms, uppercase hex, paths with extra segments, and empty strings. The double-prefix case is the store-relative regression guard.
+
+2. **Migration applies, constrains and reverses:** Tables created with correct columns and CHECKs, INSERTs with malformed values (non-hex sha256, array JSONB for outputs) correctly rejected, downgrade/upgrade round trip succeeded.
+
+3. **Blob round trip against real MinIO with cache-control header:** `just storage-check --blob` wrote a payload at `blob_key(sha256(payload))`, fetched via signed URL, and verified `Cache-Control: public, max-age=31536000, immutable` in the response. Independent verification with curl confirmed the header is real object metadata.
+
+4. **Existing functionality unchanged:** Plain `selftest` still passes with no cache-control sent; path traversal attempts still raise ObjectKeyError.
+
+5. **Full test suite:** `just test` green with ruff, mypy and all tests passing including MinIO integration tests (not skipped).
