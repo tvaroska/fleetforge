@@ -35,8 +35,9 @@ the first client of a headless core, not privileged over future clients (HA/CLI/
 
 ## Phase 1: R0 — Enroll a board
 
-**Tasks live in [TODO.md](../../TODO.md) → R0** — 16 tasks, ~20d, with build order.
-TODO.md is the single source; this file holds the decisions behind them.
+**Open tasks live in [TODO.md](../../TODO.md) → R0**, which is the single source for
+status; completed R0 work is archived in the sections below, and this file holds the
+decisions behind all of it. No counts here — they go stale the moment a task lands.
 
 **Architecture guardrails**
 - Dashboard is built against the public API + SSE event stream, so HA / CLI / MCP are
@@ -47,6 +48,31 @@ TODO.md is the single source; this file holds the decisions behind them.
   ACLs and single-use tokens are R0 work, not hardening.
 
 **Done when:** plug in a board, flash & register from the browser, watch it come online.
+
+### Device protocol v1 (R0-spec-1)
+
+Done 2026-09-08, the first R0 task — everything else in this phase is written against it.
+The artifact *is* [spec/device-protocol.md](../../spec/device-protocol.md); this entry
+only records why it came first and what it committed to.
+
+**Near-frozen by construction.** An R0 agent speaks this wire format until someone
+physically retrieves the board, so the protocol had to be settled before any firmware
+shipped. The spec's own *Evolution rules* section carries that constraint forward.
+
+What it fixed: the `up/`/`dn/` topic namespace (where the split *is* the authorization
+design — it is what makes the two pattern ACLs in R0-sec-1 expressible at all), the
+retain and QoS rules, the `announce` / `hb` / `status` / `cmd` payload schemas, and the
+update state machine. Three decisions in it are load-bearing elsewhere:
+
+- **Presence is derived, never a socket state** — consumed by R0-be-3's ingestor and
+  R0-be-5's read model, and the reason a sleepy board can go offline with no event.
+- **Enrolment happens over HTTPS, not MQTT** — the broker never authenticates a client it
+  has not already heard of (R0-be-4).
+- **SNTP before the first TLS handshake** — the clock ordering that R0-fw-1 implements and
+  that S0-fw-2 later proved had been violated for `link_up`.
+
+`dn/cfg` scope is deliberately bounded rather than left open; *Open items for R0* records
+what was knowingly deferred.
 
 ### Token Issuance (R0-be-2)
 

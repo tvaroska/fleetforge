@@ -1,6 +1,6 @@
 # Fleetforge — Roadmap
 
-**Last Updated:** 2026-09-08 (project intake — pre-R0)
+**Last Updated:** 2026-09-15
 **Purpose:** Index of the release ladder and capability areas, plus the growth-stage
 questions that are deliberately not v1's problem.
 **Source specs:** [prd.md](../spec/prd.md) · [design/architecture.md](../design/architecture.md) · [architecture.md](../design/production.md) · [flows.md](../spec/flows.md) · [device-protocol.md](../spec/device-protocol.md) · [releases.md](releases.md)
@@ -30,8 +30,8 @@ ordered to retire the biggest risk (bricking) first. Contents in [releases.md](r
 
 | Release | Theme | Risk retired | Status | Feature area |
 |---------|-------|--------------|--------|--------------|
-| **R0** ⭐ | Enroll a board (UI + recognition + flash + connect) | Onboarding, recognition, device↔server connection | 🔨 Active | [enrollment](features/enrollment.md) |
-| R1 | Upload new code (OTA deploy) | OTA transport works end-to-end | 📋 Planned | [ota-deploy](features/ota-deploy.md) |
+| **R0** ⭐ | Enroll a board (UI + recognition + flash + connect) | Onboarding, recognition, device↔server connection | 🔨 Active — **bench-gated** | [enrollment](features/enrollment.md) |
+| R1 | Upload new code (OTA deploy) | OTA transport works end-to-end | 📋 Planned — **unblocked** | [ota-deploy](features/ota-deploy.md) |
 | R2 ⭐ | Safe deploy: verify + auto-rollback | **Bricking** (the whole gamble) | 📋 Planned | [ota-deploy](features/ota-deploy.md) |
 | R3 | Health & telemetry view | Fleet visibility | 📋 Planned | [health-telemetry](features/health-telemetry.md) |
 | R4 | Custom self-test confirm | "boots but app logic broken" | 📋 Planned | [self-test](features/self-test.md) |
@@ -43,6 +43,20 @@ ordered to retire the biggest risk (bricking) first. Contents in [releases.md](r
 > release: a technician with no ESP32 knowledge takes a board from the flasher page to
 > green in the fleet list, or learns from the product what is wrong and what to do.
 > Requirements in [standards.md](../spec/standards.md).
+>
+> **R0 status, 2026-09-15.** Built, deployed and live at `bingo.tvaroska.sk`; every
+> desk-bound task is done and archived in [enrollment](features/enrollment.md) +
+> [infrastructure](features/infrastructure.md). The release does not close on code —
+> it closes on `R0-test-2`, E2E on real hardware, and that plus the four other open
+> tasks all need a board. The gating fault is `S0-fw-3`: the one board on hand cannot
+> get through RF calibration to enroll. See [TODO.md](../TODO.md) for the bench order.
+>
+> **R1 is no longer blocked, 2026-09-15.** The artifact-store blocker open since
+> `R0-be-6` — `constraints/iam.disableServiceAccountKeyCreation` makes a GCS key file
+> impossible — was closed by service-account impersonation rather than an org-policy
+> exemption. Prod reads the store keylessly and V4 signing via `signBlob` is measured,
+> not assumed, which is the part R1 depends on. See
+> [runbooks/artifact-storage.md](runbooks/artifact-storage.md).
 
 ### V2 — source to artifact: build & pre-flight verification
 
