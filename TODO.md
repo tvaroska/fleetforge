@@ -51,10 +51,17 @@ app image now ships **zero** firmware, `just agent-publish <target>` uploads a
 verified bundle as content-addressed blobs, and `agent/index.json` — a pointer, because
 `ObjectStore` has no `list` — says which one is current. A firmware fix reaches the
 flasher within `AGENT_CATALOG_TTL_S` with nothing restarted, and a rollback is one index
-write. The prod container is still unwired on purpose (production config needs asking
-first); the replacement block and its ordering constraint are in
-`docs/features/infrastructure.md` → *Production hand-off*. All five artifact tasks are
-done. The build engine itself stays R9; only its cache key changed.
+write. **Wired and shipped in v0.3.5 on 2026-09-16**: bundles for all four targets were
+published to `gs://btvaroska/fleetforge/` first, then prod was pointed at the store —
+that order matters, since the image no longer carries firmware and the gap would be a
+503. Prod reads the catalog keylessly by impersonation, verified from inside the
+container (`docs/features/infrastructure.md` → *Production hand-off*). All five artifact
+tasks are done. The build engine itself stays R9; only its cache key changed.
+
+**Consequence for the next bench session:** prod now serves the **v0.2.0 agent**, which
+is `d705652` — `-Os`, 80 MHz, max modem sleep, the TX-power ladder. That is step 1 of the
+S0-fw-3 bench order, so a board flashed from `bingo.tvaroska.sk` now tests the untried
+lever by default rather than the 160 MHz `-Og` build every recorded brownout came from.
 
 Designed up on 2026-09-11 as one feature — **Unaided onboarding: flash → on the fleet**
 (`docs/features/enrollment.md`, requirements in `spec/standards.md`, reasoning in

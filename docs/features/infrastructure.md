@@ -1637,9 +1637,19 @@ would need a generation precondition the seam deliberately does not expose.
 - **AC9 — prod.** Not run: the production container is still unwired and root `CLAUDE.md`
   requires asking before touching production config. Proposed below.
 
-### Production hand-off (proposed, NOT applied)
+### Production hand-off (APPLIED 2026-09-16, in v0.3.5)
 
-`services/prod/docker-compose.yml`'s `fleetforge-api` block still sets
+Done, in the order below, and verified from prod itself:
+`python -m fleetforge.firmware list` inside `prod-fleetforge-api` prints
+`creds=impersonated(fleetforge-artifacts@btvaroska.iam.gserviceaccount.com)` and the four
+targets at `0.2.0`, whose manifest digests match the ones `just agent-publish-all` wrote
+from the dev box (`esp32` `8b35fe50…`, `esp32c3` `fa6f9b41…`, `esp32c6` `a1fdf71c…`,
+`esp32s3` `3bfdf57f…`). No key file exists on prod and none is mounted — the VM's
+`mainsite@sites-470716` identity impersonates the scoped artifacts account.
+
+The record of what was replaced, kept because the *reason* outlives the edit:
+
+`services/prod/docker-compose.yml`'s `fleetforge-api` block used to set
 `AGENT_IMAGES_DIR: /app/agent` and carries the now-false comment *"No object store on
 purpose: the GCS service-account key cannot be minted"*. Replace both with:
 
