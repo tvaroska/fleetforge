@@ -341,7 +341,7 @@ fixes the `dn/cmd` `stage` payload and the `up/status` state machine, and is nea
 
 ### Frontend
 
-- [ ] **R1-fe-1**: Per-device Deploy button + version-change feedback (P0, 1d)
+- [x] **R1-fe-1**: Per-device Deploy button + version-change feedback (P0, 1d)
       Pick an artifact, deploy to one device, watch the `up/status` states arrive over the
       existing SSE stream. [prd.md](spec/prd.md) → *Timing* gives the dashboard **≤ 2 s**
       from server receipt to reflect a state change.
@@ -349,6 +349,7 @@ fixes the `dn/cmd` `stage` payload and the `up/status` state machine, and is nea
       in `awaiting_safe_window` is not a hung UI and must not look like one.
       Acceptance: deploy from the dashboard, the state sequence renders live, and the
       device's version changes in the list without a reload.
+      _(done 2026-09-17; see docs/features/ota-deploy.md)_
 
 ### Test
 

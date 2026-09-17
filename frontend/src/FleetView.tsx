@@ -14,7 +14,9 @@
 // because an arriving board has no fleet row yet — most columns would be em-dashes and
 // the `Status` one would be a lie.
 
-import { type ArrivalSummary, type DeviceSummary } from './api'
+import { type ArrivalSummary, type ArtifactSummary, type DeviceSummary } from './api'
+import { DeployCell } from './DeployCell'
+import { useArtifacts } from './deploy'
 import { useFleet, type EventSourceFactory } from './fleet'
 import { formatAgo, formatWhen } from './format'
 
@@ -35,7 +37,21 @@ function StatusCell({ device }: { device: DeviceSummary }) {
   )
 }
 
-function DeviceRow({ device, now }: { device: DeviceSummary; now: number }) {
+function DeviceRow({
+  device,
+  now,
+  artifacts,
+  artifactsLoaded,
+  onDeployed,
+  onSessionExpired,
+}: {
+  device: DeviceSummary
+  now: number
+  artifacts: ArtifactSummary[]
+  artifactsLoaded: boolean
+  onDeployed: () => void
+  onSessionExpired: () => void
+}) {
   // Why a sleepy board went offline is its wake interval, so put it where the pointer is.
   const power =
     device.power_class === 'sleepy' && device.expected_wake_interval_s !== null
@@ -62,6 +78,14 @@ function DeviceRow({ device, now }: { device: DeviceSummary; now: number }) {
         {formatAgo(device.last_seen, now)}
       </td>
       <td title={power}>{device.power_class}</td>
+      <DeployCell
+        device={device}
+        artifacts={artifacts}
+        artifactsLoaded={artifactsLoaded}
+        onDeployed={onDeployed}
+        onSessionExpired={onSessionExpired}
+        now={now}
+      />
     </tr>
   )
 }
@@ -116,10 +140,13 @@ export function FleetView({
   // Injected by the tests only: jsdom has no `EventSource` (see `fleet.ts`).
   createEventSource?: EventSourceFactory
 }) {
-  const { devices, arrivals, error, stream, now } = useFleet({
+  const { devices, arrivals, error, stream, now, refresh } = useFleet({
     onSessionExpired,
     createEventSource,
   })
+  // One read of the artifact list for the whole table, not one per row. It is read once
+  // on mount and never polled — see `deploy.ts`.
+  const artifacts = useArtifacts({ onSessionExpired })
 
   return (
     <section aria-labelledby="fleet-heading">
@@ -140,6 +167,15 @@ export function FleetView({
       {error !== null && (
         <p className="bad" role="alert">
           {error} — showing the last state that loaded.
+        </p>
+      )}
+
+      {/* A broken artifact list costs the Deploy column and nothing else, so it is said
+          here rather than allowed to blank the table — and it is said, rather than
+          letting every cell claim that nothing has been uploaded. */}
+      {artifacts.error !== null && (
+        <p className="bad" data-testid="artifacts-error">
+          {artifacts.error} — the versions to deploy could not be read.
         </p>
       )}
 
@@ -177,11 +213,22 @@ export function FleetView({
               <th scope="col">Firmware</th>
               <th scope="col">Last seen</th>
               <th scope="col">Power</th>
+              <th scope="col">Deploy</th>
             </tr>
           </thead>
           <tbody>
             {devices.map((device) => (
-              <DeviceRow key={device.device_id} device={device} now={now} />
+              <DeviceRow
+                key={device.device_id}
+                device={device}
+                now={now}
+                // Filtered by the board's own chip: the server refuses a mismatch
+                // (`_check_compatible`), so offering one would be offering a 409.
+                artifacts={artifacts.byTarget.get(device.platform_type) ?? []}
+                artifactsLoaded={artifacts.loaded}
+                onDeployed={refresh}
+                onSessionExpired={onSessionExpired}
+              />
             ))}
           </tbody>
         </table>

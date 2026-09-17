@@ -808,13 +808,17 @@ class TestNoSchedulerLivesHere:
     def test_only_publish_failed_authors_a_terminal_state(self) -> None:
         """The **server** authors exactly one terminal state, and it is `publish_failed`.
 
-        Three `is_terminal=` assignments in `deploys.py`, in writer order:
-        `record_requested` (never terminal), `record_publish_failure` (the one
-        server-authored terminal state), and R1-be-4's `record_observed_status` — which
-        is the **device's** reported state, so its flag is derived from
-        `TERMINAL_DEPLOY_STATES` and is never a literal `True`. A fourth assignment, or
-        any literal `True`, means someone taught the server to author an outcome for a
-        command the device provably received.
+        Three WRITE sites in `deploys.py`, in writer order: `record_requested` (never
+        terminal), `record_publish_failure` (the one server-authored terminal state),
+        and R1-be-4's `record_observed_status` — which is the **device's** reported
+        state, so its flag is derived from `TERMINAL_DEPLOY_STATES` and is never a
+        literal `True`. A fourth write, or any literal `True`, means someone taught the
+        server to author an outcome for a command the device provably received.
+
+        The fourth entry is R1-fe-1's `latest_deploys`, and it is a READ: it copies the
+        flag the row was written with into a `DeploySnapshot` so the dashboard never
+        re-derives "terminal" from a hardcoded list of states. `row.is_terminal` authors
+        nothing, which is exactly why it is spelled that way and not recomputed here.
         """
         source = self._source("deploys.py")
         assignments = re.findall(r"is_terminal=(.+?),", source)
@@ -822,6 +826,7 @@ class TestNoSchedulerLivesHere:
             "False",
             "DeployState.FAILED in TERMINAL_DEPLOY_STATES",
             "state in TERMINAL_DEPLOY_STATES",
+            "row.is_terminal",
         ]
 
     def test_the_router_never_builds_a_deploy_event_itself(self) -> None:

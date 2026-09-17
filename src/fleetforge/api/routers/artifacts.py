@@ -1,4 +1,15 @@
 """`POST /v1/artifact` — get a user's firmware into the store. R1-be-1.
+`GET /v1/artifact` — list what can be deployed. R1-fe-1.
+
+⚠️ **Both routes on this router are admin-only, and that is the whole reason this file
+is separate from `routers/artifact_download.py`.** That module owns a router with the
+*same* `/v1/artifact` prefix and no auth dependencies at all — public by design, because
+there the signature over `(sha256, exp)` is the authorization. Adding a read route there
+by accident would publish the artifact catalog to the internet, so every route this
+router carries is covered by `tests/test_api_artifact_list.py`'s 401 assertions,
+including one with an `exp`/`sig` query string that proves a download signature buys
+nothing here.
+
 
 The first writer of the `artifacts` table (S0-infra-4 landed it empty) and of the
 `artifact_versions` labels over it. `firmware/publish.py` already writes *blobs* for
@@ -48,7 +59,7 @@ from fleetforge.api.deps import (
     bearer_scheme,
     cookie_scheme,
 )
-from fleetforge.api.schemas import ArtifactUploaded
+from fleetforge.api.schemas import ArtifactList, ArtifactSummary, ArtifactUploaded
 from fleetforge.db.models import ArtifactKind
 from fleetforge.firmware.manifest import EXPECTED_PARTITION_LAYOUT, SUPPORTED_LAYOUTS, SafeSegment
 from fleetforge.storage.blobs import digest_bytes, put_blob
@@ -72,7 +83,27 @@ VERSION_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}\Z")
 # enforced as the bytes arrive instead of after they are all in memory.
 CHUNK_SIZE = 64 * 1024
 
+# Same cap and same reason as `routers/devices.py`/`routers/enrollment.py`: a guard
+# against an unbounded response, not paging. `spec/prd.md` → *Retention* keeps 20
+# versions per platform, so this is two orders of magnitude of headroom.
+LIST_LIMIT = 500
+
 STORE_UNAVAILABLE = "the artifact store cannot be reached; try again shortly"
+
+# The label joined to the bytes it names. Two tables because labels are a many-to-one
+# mutable pointer over immutable content (`db/models.py::ArtifactVersion`), so the
+# `size_bytes`/`partition_layout`/`kind` an operator is choosing between live on the
+# digest, not on the label.
+_LIST_SQL = text(
+    """
+    SELECT v.target, v.version, v.sha256, v.created_at,
+           a.size_bytes, a.partition_layout, a.kind
+      FROM artifact_versions AS v
+      JOIN artifacts AS a ON a.sha256 = v.sha256
+     ORDER BY v.target, v.created_at DESC, v.version
+     LIMIT :limit
+    """
+)
 
 # Both success cases of a content-addressed store, kept apart because the caller cares:
 # a new label is 201, re-uploading bytes already stored under this exact (target,
@@ -285,6 +316,41 @@ async def upload_artifact(
         version=version,
         partition_layout=partition_layout,
         created=created,
+    )
+
+
+@router.get("", response_model=ArtifactList, summary="Deployable firmware artifacts")
+async def list_artifacts(
+    admin: AdminDep,
+    sessionmaker: SessionMakerDep,
+) -> ArtifactList:
+    """Every labelled artifact, grouped by target and newest first within a target.
+
+    **No `?target=` filter in R1.** The dashboard picks a board's chip out of this list
+    client-side, and at `spec/prd.md` → *Capacity* — 20 versions per platform — a query
+    parameter would be a response shape fixed before anything needs it.
+
+    `kind` is reported so a future screen can tell a user upload from an agent bundle.
+    In practice R1 only ever sees `user_firmware`: `artifact_versions` has no writer but
+    the upload endpoint above, and an agent bundle is labelled by `agent/index.json`
+    rather than by a row here. That is worth knowing rather than worth filtering on.
+    """
+    async with sessionmaker() as session:
+        rows = (await session.execute(_LIST_SQL, {"limit": LIST_LIMIT})).all()
+
+    return ArtifactList(
+        artifacts=[
+            ArtifactSummary(
+                target=row.target,
+                version=row.version,
+                sha256=row.sha256,
+                size_bytes=row.size_bytes,
+                partition_layout=row.partition_layout,
+                kind=row.kind,
+                created_at=row.created_at,
+            )
+            for row in rows
+        ]
     )
 
 

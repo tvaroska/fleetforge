@@ -35,15 +35,46 @@ function device(overrides: Partial<Record<string, unknown>> = {}) {
     enrolled_at: '2026-09-10T11:00:00Z',
     broker_provisioned_at: '2026-09-10T11:00:00Z',
     online: true,
+    // Present and null, mirroring `DeviceSummary.deploy` — a board that has never been
+    // deployed to. Leaving it off would render the Deploy column from `undefined`.
+    deploy: null,
+    ...overrides,
+  }
+}
+
+function deploy(overrides: Partial<Record<string, unknown>> = {}) {
+  return {
+    cmd_id: 'cmd-a',
+    state: 'confirmed',
+    at: '2026-09-10T11:59:40Z',
+    is_terminal: true,
+    artifact_version: '1.5.0',
+    from_version: '1.4.2',
+    pct: null,
+    detail: null,
     ...overrides,
   }
 }
 
 // A FACTORY, never a shared `Response`: a body can be read once, so handing the same
 // object to two `fetch` calls makes the second one throw and reads as the API being down.
-function responds(body: unknown, status = 200) {
-  return async () =>
-    new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
+//
+// URL-aware because `FleetView` now reads `/v1/artifact` too (R1-fe-1). The artifact
+// list is a separate argument to `renderFleet`; the cell's own behaviour is tested in
+// `DeployCell.test.tsx` and this file stays about the table.
+function responds(body: unknown, status = 200, artifacts: unknown[] = []) {
+  return async (input?: unknown) => {
+    if (String(input) === '/v1/artifact') {
+      return new Response(JSON.stringify({ artifacts }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    }
+    return new Response(JSON.stringify(body), {
+      status,
+      headers: { 'content-type': 'application/json' },
+    })
+  }
 }
 
 // A source that does nothing: these tests never fire a frame.
@@ -67,11 +98,12 @@ function arrival(overrides: Partial<Record<string, unknown>> = {}) {
 }
 
 async function renderFleet(
-  devices: unknown[] | (() => Promise<Response>),
+  devices: unknown[] | ((input?: unknown) => Promise<Response>),
   arrivals: unknown[] = [],
+  artifacts: unknown[] = [],
 ) {
   vi.spyOn(globalThis, 'fetch').mockImplementation(
-    typeof devices === 'function' ? devices : responds({ devices, arrivals }),
+    typeof devices === 'function' ? devices : responds({ devices, arrivals }, 200, artifacts),
   )
   const onSessionExpired = vi.fn()
   render(<FleetView onSessionExpired={onSessionExpired} createEventSource={inertSource} />)
@@ -188,6 +220,26 @@ describe('FleetView', () => {
     await renderFleet([], [arrival()])
     expect(screen.queryByText(/no boards yet/i)).toBeNull()
     expect(screen.getByText(/no boards have finished enrolling/i)).toBeInTheDocument()
+  })
+
+  // R1-fe-1. The cell's own behaviour lives in `DeployCell.test.tsx`; what belongs here
+  // is that the column exists, that every row has one, and that the state and the
+  // version line up — which is the whole "the version changed" claim.
+  it('gives every row a Deploy cell under a Deploy column', async () => {
+    await renderFleet([device({ device_id: 'a4cf12b3de90' }), device({ device_id: 'b2000000dead' })])
+
+    expect(screen.getByRole('columnheader', { name: 'Deploy' })).toBeInTheDocument()
+    const rows = screen.getAllByTestId('device-row')
+    expect(within(rows[0]).getByTestId('deploy-cell')).toBeInTheDocument()
+    expect(within(rows[1]).getByTestId('deploy-cell')).toBeInTheDocument()
+  })
+
+  it('shows a confirmed deploy next to the firmware version it delivered', async () => {
+    await renderFleet([device({ fw_version: '1.5.0', deploy: deploy({ artifact_version: '1.5.0' }) })])
+
+    const row = screen.getAllByTestId('device-row')[0]
+    expect(within(row).getByTestId('deploy-state')).toHaveTextContent('done — running the new version')
+    expect(row).toHaveTextContent('1.5.0')
   })
 
   it('bounces a dead session to the login screen instead of showing a page error', async () => {

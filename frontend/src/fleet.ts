@@ -91,6 +91,19 @@ export type Fleet = {
   lastSyncedAt: number | null
   /** Wall clock, refreshed once a second, so relative ages tick without refetching. */
   now: number
+  /**
+   * Re-read `GET /v1/devices` now (R1-fe-1).
+   *
+   * For a caller that has just written through another endpoint and knows the read
+   * model has already changed — `DeployCell` after its 202, where the `requested` row is
+   * committed before the response is sent. It is still the same rule 1 re-read, not a
+   * patch: nothing outside this hook may hand it a row.
+   *
+   * It is NOT a second refresh engine. The interval poll and the coalesced stream
+   * handler are untouched, and the in-flight/`seq` guards in `refresh` already fold a
+   * click that lands mid-poll into one request.
+   */
+  refresh: () => void
 }
 
 export type UseFleetOptions = {
@@ -329,5 +342,7 @@ export function useFleet({ onSessionExpired, createEventSource }: UseFleetOption
     }
   }, [refresh])
 
-  return { devices, arrivals, error, stream, lastSyncedAt, now }
+  // `refresh` itself is `async`; the returned callback swallows the promise so a caller
+  // cannot accidentally `await` the fleet's internal read.
+  return { devices, arrivals, error, stream, lastSyncedAt, now, refresh: () => void refresh() }
 }

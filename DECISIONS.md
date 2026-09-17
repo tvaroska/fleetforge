@@ -6,6 +6,61 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-17 — Deploy state is a column of the fleet read model, not a feature with its own wiring
+
+**R1-fe-1.** The dashboard can now deploy a version to one board and watch it land. Almost
+every decision here was about what *not* to add.
+
+**1. `deploy` rides on `GET /v1/devices`.** No `/v1/devices/{id}/deploy/state`, no second
+poll, no SSE payload to parse — the same shape `arrivals` already uses, for the same
+reason. "The event is a hint; `GET /v1/devices` is the record" is the one refresh engine
+this app has, and a second one would have to re-derive when to fire, when to back off and
+what to do with a dead session. It also makes the page honest about a board that stopped
+reporting: a sleepy board publishes nothing for an hour and its last known deploy state is
+still on screen, because the row is read from the database rather than assembled from
+frames that arrived while the tab was open. A reload, a second tab, and a colleague's
+browser all show the same thing for free.
+
+**2. The read lives in `deploys.py`, beside the writer.** `deploy_events` has exactly one
+module that touches it — the invariant `tests/test_invariants.py` enforces for writes, and
+the same logic applies to reads: `DISTINCT ON (device_id) … ORDER BY at DESC, id DESC` is
+where "which transaction is current" is *defined*, and the router is not the place to
+define it. `devices.py` calls `latest_deploys()` the way it already calls
+`progress.latest_progress()`. The `id` tie-break is load-bearing, not tidiness: the
+`requested` row and the board's first status share a millisecond in practice.
+
+**3. `pct` is text, never a bar.** `deploy_events` is a transition log and the writer keeps
+the *first* `pct` per `(device, cmd, state)`, so our agent contributes one number for an
+entire download. A progress bar driven by that sits at one value for two minutes and reads
+as a hang — which is the exact failure this task existed to remove. There is no
+`role="progressbar"` anywhere in the cell, and a test asserts it.
+
+**4. `awaiting_safe_window` gets a sentence, not a spinner.** "waiting for a safe moment —
+the board decides when, and may wait indefinitely". It is not styled `bad`, there is no
+`aria-busy`, and nothing on either side expires it: the device owns the reboot
+(`design/architecture.md` principle 5) and a client-side deadline would be this dashboard
+inventing a policy the system does not have. T2 left a board parked for five minutes and
+confirmed the label is unchanged and `SELECT count(*) … WHERE is_terminal` is still 0.
+More generally the cell never switches exhaustively on `state`: `deploy_events.state` is
+TEXT with no CHECK, so an unknown state renders as itself, and `is_terminal` is only ever
+the server's answer — a second definition of "terminal" in TypeScript is the failure
+`deploys.py`'s header warns about.
+
+**5. An "fe" task shipped two read endpoints on purpose.** `GET /v1/artifact` and
+`DeviceSummary.deploy` are both backend, and splitting them into an R1-be-5 would have cost
+a plan, a branch and a review to add ~60 lines that only this screen consumes — while
+leaving the frontend task unshippable until it landed. The rule this follows: a read model
+belongs to the screen that needs it. The list endpoint went on the **admin** router; note
+that `/v1/artifact` is *also* a public prefix (`artifact_download.py`, where the signature
+is the authorization), so the 401 — including with a `?exp=&sig=` on it — is asserted in
+both T1 and T2.
+
+`spec/device-protocol.md` does not say that `up/status.state` is an open vocabulary the
+dashboard renders verbatim, though the server's TEXT column and advisory `DeployState`
+already assume it. A proposal only; `spec/` is protected.
+
+---
+
 ## 2026-09-17 — `fw_version` is the version that BOOTED, and there is now exactly one way to say it
 
 **R1-fw-2.** The behaviour was already right; nothing kept it right.

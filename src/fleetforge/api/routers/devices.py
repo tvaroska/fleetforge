@@ -35,6 +35,14 @@ way up from one that came up days ago and has since lost power: both are offline
 a recent stage, and the second was reappearing as "stalled at `mqtt_connected`" for the
 rest of the progress window, duplicating a row this same response already showed as
 offline (S0-fe-3). The distinction lives in `progress.py`, not here.
+
+`deploy` (R1-fe-1) rides here for the third time on the same argument. The dashboard's
+one refresh engine is hint→re-read-this-endpoint, so a deploy state on its own endpoint
+would need its own poll to answer the case that matters: a board that reported
+`awaiting_safe_window` and then went quiet for an hour emits no further event, and its
+state is still the correct thing to show. The SQL is `deploys.latest_deploys` — that
+module owns `deploy_events` for reads as well as writes — and it is bounded by the same
+`LIST_LIMIT` as the list above, because it is handed exactly the ids already read.
 """
 
 import logging
@@ -49,9 +57,10 @@ from fleetforge.api.deps import (
     bearer_scheme,
     cookie_scheme,
 )
-from fleetforge.api.schemas import ArrivalSummary, DeviceList, DeviceSummary
+from fleetforge.api.schemas import ArrivalSummary, DeploySummary, DeviceList, DeviceSummary
 from fleetforge.clock import now_utc
 from fleetforge.db.models import Device
+from fleetforge.deploys import DeploySnapshot, latest_deploys
 from fleetforge.presence import is_online
 from fleetforge.progress import has_already_arrived, latest_progress
 
@@ -66,6 +75,26 @@ router = APIRouter(
 # Same cap and same reason as `routers/enrollment.py`: a guard against an unbounded
 # response, not real paging, at a fleet size of ~25.
 LIST_LIMIT = 200
+
+
+def _deploy_summary(snapshot: DeploySnapshot | None) -> DeploySummary | None:
+    """A board's newest deploy state, or `None` when it has never been deployed to.
+
+    A field-by-field copy rather than `model_validate`, the `DeviceSummary` rule: a
+    column added to `deploy_events` must not leak into a response by default.
+    """
+    if snapshot is None:
+        return None
+    return DeploySummary(
+        cmd_id=snapshot.cmd_id,
+        state=snapshot.state,
+        at=snapshot.at,
+        is_terminal=snapshot.is_terminal,
+        artifact_version=snapshot.artifact_version,
+        from_version=snapshot.from_version,
+        pct=snapshot.pct,
+        detail=snapshot.detail,
+    )
 
 
 @router.get("", response_model=DeviceList, summary="Enrolled devices, with derived presence")
@@ -91,6 +120,9 @@ async def list_devices(
             window_s=settings.progress_window_s,
             stall_s=settings.progress_stall_s,
         )
+        # Handed the ids this response already read, so there is no second unbounded
+        # scan and the deploy read inherits `LIST_LIMIT` for free.
+        deploys = await latest_deploys(session, device_ids=[row.device_id for row in rows])
 
     online_now = {
         row.device_id
@@ -122,6 +154,7 @@ async def list_devices(
                 enrolled_at=row.enrolled_at,
                 broker_provisioned_at=row.broker_provisioned_at,
                 online=row.device_id in online_now,
+                deploy=_deploy_summary(deploys.get(row.device_id)),
             )
             for row in rows
         ],

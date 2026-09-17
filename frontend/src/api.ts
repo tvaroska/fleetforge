@@ -69,6 +69,34 @@ export type DeviceSummary = {
   enrolled_at: string
   broker_provisioned_at: string | null
   online: boolean
+  deploy: DeploySummary | null
+}
+
+// Mirrors `DeploySummary` in api/schemas.py. The newest deploy transaction's current
+// state, or `null` for a board that has never been deployed to.
+//
+// `state` and `detail` are DEVICE-CONTROLLED strings. The server's `DeployState` is
+// advisory (`deploy_events.state` is TEXT with no CHECK), so render them as text and
+// never switch exhaustively on `state` — an agent newer than this dashboard must show
+// its state as itself rather than vanish. `deploy.ts::DEPLOY_STATE_LABELS` is the
+// lookup-with-a-fallback that does it.
+//
+// `is_terminal` is the SERVER's answer, from `TERMINAL_DEPLOY_STATES`. Never re-derive
+// it here from a hardcoded list of states: two definitions of "terminal" is exactly the
+// failure `deploys.py` warns about, and the second one would disagree with the KPIs.
+//
+// `pct` is NOT a progress feed — `deploy_events` is a log of transitions and the writer
+// keeps the first `pct` per state, so our agent reports one number for a whole download.
+// Render it as text. A bar driven by it sits still and reads as a hang.
+export type DeploySummary = {
+  cmd_id: string | null
+  state: string
+  at: string
+  is_terminal: boolean
+  artifact_version: string | null
+  from_version: string | null
+  pct: number | null
+  detail: string | null
 }
 
 // Mirrors `ArrivalSummary` in api/schemas.py. A board that has reported a boot stage and
@@ -127,6 +155,41 @@ export type AgentBuildInfo = {
 }
 
 export type AgentManifest = { agent_version: string; builds: AgentBuildInfo[] }
+
+// Mirrors `ArtifactSummary` in api/schemas.py, field for field and in its order. One
+// deployable label over one digest — two labels for byte-identical firmware are two of
+// these with one `sha256`, which is ordinary and which the picker offers as two choices.
+//
+// There is deliberately NO `url`: a download link is a short-lived bearer credential
+// minted per deploy, and the server never puts one in a list.
+export type ArtifactSummary = {
+  target: string
+  version: string
+  sha256: string
+  size_bytes: number
+  partition_layout: string | null
+  kind: string
+  created_at: string
+}
+
+export type ArtifactList = { artifacts: ArtifactSummary[] }
+
+// Mirrors `DeployAccepted` in api/schemas.py — the 202 body of a deploy POST.
+//
+// `reused: true` means this POST re-published an in-flight intent under the same
+// `cmd_id`, so the board deduplicates and does not download twice. `device_online` is
+// REPORTED, never blocking: the broker queues the QoS-1 command in the board's
+// persistent session, so a `false` here is "queued", not "failed".
+export type DeployAccepted = {
+  cmd_id: string
+  device_id: string
+  version: string
+  sha256: string
+  size_bytes: number
+  apply: string
+  reused: boolean
+  device_online: boolean
+}
 
 export class ApiError extends Error {
   readonly status: number
@@ -239,6 +302,24 @@ export const api = {
 
   revokeEnrollmentToken: (id: string) =>
     request<void>(`/v1/enrollment-tokens/${encodeURIComponent(id)}/revoke`, { method: 'POST' }),
+
+  // Everything that can be deployed, grouped by chip target server-side. Admin-only —
+  // the same `/v1/artifact` path is ALSO a public download route, but only with a
+  // signature and a `/{sha256}/bin` suffix (`api/routers/artifact_download.py`).
+  listArtifacts: () => request<ArtifactList>('/v1/artifact'),
+
+  // Deploy one labelled version to one board. 202 means the command reached the broker,
+  // and nothing more; the states that follow arrive on `up/status` and ride back to this
+  // page on `GET /v1/devices` (`DeviceSummary.deploy`).
+  //
+  // There is no `target` and no `sha256` in the body on purpose: the server resolves the
+  // artifact from the device's own `platform_type`, so this call cannot flash an esp32
+  // image onto an esp32c6.
+  deployDevice: (deviceId: string, version: string, apply: 'auto' | 'on_command' = 'auto') =>
+    request<DeployAccepted>(`/v1/devices/${encodeURIComponent(deviceId)}/deploy`, {
+      method: 'POST',
+      body: JSON.stringify({ version, apply }),
+    }),
 
   // The prebuilt agent images the Web Serial flasher writes (R0-fe-3). Every offset the
   // flasher uses comes out of this manifest.

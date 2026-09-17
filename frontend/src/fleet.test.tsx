@@ -39,6 +39,7 @@ function device(overrides: Partial<Record<string, unknown>> = {}) {
     enrolled_at: '2026-09-10T11:00:00Z',
     broker_provisioned_at: '2026-09-10T11:00:00Z',
     online: true,
+    deploy: null,
     ...overrides,
   }
 }
@@ -46,9 +47,25 @@ function device(overrides: Partial<Record<string, unknown>> = {}) {
 // A FACTORY, never a shared `Response`: a body can be read once, so handing the same
 // object to two `fetch` calls makes the second one throw and reads, in the assertions,
 // as the API being down.
+//
+// `/v1/artifact` is answered separately and always with an empty list: `FleetView` reads
+// it once on mount for the Deploy column (R1-fe-1), and this file is about the fleet's
+// REFRESH ENGINE. Letting the artifact read see, say, this file's 401 would have a
+// second component calling `onSessionExpired` and make the bounce-to-login counts here
+// assert something they do not mean.
 function responds(body: unknown, status = 200) {
-  return async () =>
-    new Response(JSON.stringify(body), { status, headers: { 'content-type': 'application/json' } })
+  return async (input?: unknown) => {
+    if (String(input) === '/v1/artifact') {
+      return new Response(JSON.stringify({ artifacts: [] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      })
+    }
+    return new Response(JSON.stringify(body), {
+      status,
+      headers: { 'content-type': 'application/json' },
+    })
+  }
 }
 
 /** A structural stand-in for `EventSource`: jsdom does not have the global at all. */

@@ -772,6 +772,82 @@ example payload shows `"agent_version": "0.3.0"`, now two releases stale. Cosmet
 example rather than a contract, and worth a refresh the next time that file is opened for
 a real reason.
 
+### The dashboard half (R1-fe-1) — **LANDED 2026-09-17**
+
+R1's user-visible claim — *"push firmware from the dashboard and watch the version
+change"* — closes here. Every piece behind it existed; nothing on screen reached it.
+
+**Two read endpoints, no new machinery.**
+
+* `GET /v1/artifact` (admin) lists every deployable label: `target`, `version`, `sha256`,
+  `size_bytes`, `partition_layout`, `kind`, `created_at`, ordered `(target, created_at
+  DESC, version)`. **There is no `url` in it** — a download link is a short-lived bearer
+  credential minted per deploy, never a field in a list. It lives on
+  `api/routers/artifacts.py` (admin-only); the same `/v1/artifact` prefix is *also* the
+  public download route in `api/routers/artifact_download.py`, where the signature is the
+  authorization, so the list route asserts a 401 both bare and with a `?exp=&sig=` bolted
+  on. Two labels over one digest (an esp32 `1.5.0` and an esp32c6 `1.5.0` built from the
+  same bytes) are two rows with one `sha256`, which is ordinary.
+* `DeviceSummary.deploy` carries the newest deploy transaction's current state —
+  `cmd_id`, `state`, `at`, `is_terminal`, `artifact_version`, `from_version`, `pct`,
+  `detail` — or `null` for a board never deployed to. It is a column of the fleet read
+  model, not an endpoint: see `DECISIONS.md` 2026-09-17. The SQL
+  (`DISTINCT ON (device_id) … ORDER BY at DESC, id DESC`) lives in `deploys.py`, the
+  module that owns `deploy_events`, and `devices.py` calls it exactly the way it already
+  calls `progress.latest_progress()`.
+
+**The cell.** `frontend/src/DeployCell.tsx` (rendering + the POST) and
+`frontend/src/deploy.ts` (the label table + one `GET /v1/artifact` on mount, no poll — an
+artifact appears when a human uploads one and there is no event type for it). The picker
+offers only the versions whose `target` is this board's `platform_type`, newest
+preselected, because the server refuses a mismatch and offering one is offering a 409.
+The live line is read from `device.deploy` and from nothing this component remembers,
+which is why a reload and a second tab agree.
+
+Wording is most of the value here: `downloading the image`, `image written, waiting to
+reboot`, `done — running the new version`. A lookup with an `?? raw` fallback, the same
+idiom as `STAGE_LABELS`, because `deploy_events.state` is TEXT with no CHECK and an agent
+newer than this dashboard must render as itself rather than vanish. `pct` is text and
+never a bar; `awaiting_safe_window` gets a full sentence and no error styling.
+
+**T2 evidence** (dev stack, three simulated esp32c6 boards, Chromium via Playwright):
+
+```
+GET /v1/artifact          200 authed, grouped by target, newest-first, no `url` key
+GET /v1/artifact          401 bare
+GET /v1/artifact?exp=…&sig=AAAA
+                          401  — a download signature buys nothing on the list route
+deploy_events (otabench)  requested → staging → downloading → verifying → staged
+                          → applying → rebooting, artifact_version 1.6.0 throughout
+Firmware column           1.5.0 → 1.6.0 on its own, with no reload
+after F5                  the same live state — it came from the read model
+noota row → Deploy        role=alert, verbatim: "this device did not announce the `ota`
+                          capability, so it has no agent that can stage an update.
+                          It announced: nothing."
+Deploy twice in 30 s      "already in flight — the board deduplicates and will not
+                          download twice"; the simulator's download count is unchanged
+hold board, +300 s        "waiting for a safe moment — the board decides when, and may
+                          wait indefinitely", unstyled, no spinner, no aria-busy, and
+                          SELECT count(*) … WHERE is_terminal = 0
+revoke the session        the login gate, not an error banner in the cell
+role="progressbar"        0 on the whole page
+```
+
+One correction to the acceptance script for whoever runs it next: a simulated board
+announces its new `fw_version` on its next **connect**, not on its next heartbeat — the
+heartbeat payload does not carry the field, and `device.py` says as much ("announced on
+the next connect"). The version flip is observed by making the board reconnect
+(`docker compose restart mosquitto`), which is what a rebooting board does anyway.
+
+**Deliberately not in R1:** an upload UI (curl only), a deploy history/timeline, group
+deploy, cancel (there is no server-authored cancel), and a rollback button (R2).
+
+**Spec proposal (not applied — `spec/` is protected).** `spec/device-protocol.md` should
+say outright that `up/status.state` is an **open** vocabulary: the server stores it as TEXT
+with no CHECK, `DeployState` is advisory, and both the server and this dashboard treat an
+unrecognised value as a legitimate state to record and render verbatim. That is already
+the behaviour on both sides; the spec only implies it by listing examples.
+
 ## Phase 2: R2 — Safe deploy: verify + auto-rollback ⭐
 
 | ID | Task | Priority | Effort |

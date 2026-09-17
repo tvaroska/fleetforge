@@ -1,4 +1,4 @@
-"""`deploy_events` — the single writer. R1-be-2, R1-be-4.
+"""`deploy_events` — the single writer, and the reads beside it. R1-be-2, R1-be-4, R1-fe-1.
 
 `spec/prd.md` → *Retention*: this table is kept **forever**; "the metric history is the
 product's evidence". Both v1 KPIs (delivery success, fleet safety) are computed over the
@@ -71,11 +71,18 @@ database invariant.
 persisted here, never logged and never echoed in an API response. Device-reported
 detail is control-stripped, truncated and URL-redacted before it is stored, because it
 is device-controlled text landing in a table kept forever.
+
+**The reads live here too** (`latest_open_transaction`, `latest_deploys`). The
+single-writer tripwire in `tests/test_invariants.py` bans other modules from writing
+this table; the *spirit* extends to reading it, for the same reason `progress.py` holds
+`latest_progress` next to `record_progress` and `api/routers/devices.py` merely calls
+it. SQL about `deploy_events` belongs to this module, not to a router.
 """
 
 import datetime as dt
 import logging
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -388,3 +395,108 @@ async def record_observed_status(
         # The ops line that answers "did it land?". Never the `detail` text.
         logger.info("deploy %s for %s ended: %s", cmd_id, device_id, state)
     return row
+
+
+# The newest row per device, which *is* the newest transaction's current state: rows are
+# appended in receipt order and never updated. `DISTINCT ON` reads straight down
+# `ix_deploy_events_device_id_at`, the same reason `progress.LATEST_SQL` is hand-written.
+#
+# `id DESC` is load-bearing, not tidiness: `record_requested` and the board's first
+# `up/status` routinely land inside one millisecond, and on `at DESC` alone the
+# `requested` row can sort above the `staging` that followed it — the dashboard would
+# then walk backwards. There is deliberately **no time window**: a terminal row from last
+# week is the honest answer to "what was the last thing that happened to this board", and
+# the caller renders it muted.
+_LATEST_DEPLOYS_SQL = text(
+    """
+    SELECT DISTINCT ON (device_id)
+           device_id, cmd_id, state, at, is_terminal, artifact_version, from_version, detail
+      FROM deploy_events
+     WHERE device_id = ANY(:device_ids)
+     ORDER BY device_id, at DESC, id DESC
+    """
+)
+
+
+@dataclass(frozen=True, slots=True)
+class DeploySnapshot:
+    """One board's newest deploy state — the read model behind the dashboard's cell.
+
+    A plain dataclass rather than a `DeployEvent`, the `progress.Arrival` posture: the
+    caller wants the answer, and handing back the ORM row would invite a second place
+    to decide what `pct` means or to surface a column this is not about.
+
+    `state` is **device-controlled text** with an advisory vocabulary (`DeployState` is
+    a `StrEnum` over a TEXT column with no CHECK), so a renderer looks it up with a
+    fallback and never switches on it exhaustively. `is_terminal` is the server's
+    answer, sourced from `TERMINAL_DEPLOY_STATES` at write time — never re-derived
+    downstream from a second copy of that vocabulary.
+
+    `pct` is a transition's progress reading, not a progress feed: the writer keeps the
+    first `pct` it saw for a repeated state (rule 3 above), so a client that animated it
+    would sit at one number through a whole download.
+    """
+
+    cmd_id: str | None
+    state: str
+    at: dt.datetime
+    is_terminal: bool
+    artifact_version: str | None
+    from_version: str | None
+    pct: int | None
+    detail: str | None
+
+
+def _snapshot_pct(detail: Any) -> int | None:
+    """`pct` out of the JSONB blob, and only when it really is an `int`.
+
+    `bool` is an `int` in Python and JSONB round-trips `true` as one, so it is excluded
+    explicitly — the `isinstance` posture `latest_open_transaction` takes with `sha256`.
+    """
+    if not isinstance(detail, dict):
+        return None
+    value = detail.get("pct")
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _snapshot_detail(detail: Any) -> str | None:
+    """`detail` out of the JSONB blob — that key and no other.
+
+    A `requested` row's blob carries `sha256`/`size_bytes`/`target`/`apply`, which is
+    not a lie but is not what `detail` means in the API, so nothing else is surfaced.
+    The stored string was already sanitised at write time (`_sanitise_detail`): do not
+    re-sanitise it here, and above all do not un-redact it.
+    """
+    if not isinstance(detail, dict):
+        return None
+    value = detail.get("detail")
+    return value if isinstance(value, str) else None
+
+
+async def latest_deploys(
+    session: AsyncSession, *, device_ids: Sequence[str]
+) -> dict[str, DeploySnapshot]:
+    """The newest deploy state of each of `device_ids`, keyed by device.
+
+    Boards with no `deploy_events` row are simply absent from the mapping — "never
+    deployed to" is a different fact from "deployed and we do not know how it went",
+    and the caller renders them differently.
+
+    `device_ids` comes from the caller rather than being a full-table scan, so the read
+    is bounded by whatever cap the caller's own list carries (`devices.LIST_LIMIT`) and
+    an empty list costs one trivially-false query rather than a special case.
+    """
+    rows = (await session.execute(_LATEST_DEPLOYS_SQL, {"device_ids": list(device_ids)})).all()
+    return {
+        row.device_id: DeploySnapshot(
+            cmd_id=row.cmd_id,
+            state=row.state,
+            at=row.at,
+            is_terminal=row.is_terminal,
+            artifact_version=row.artifact_version,
+            from_version=row.from_version,
+            pct=_snapshot_pct(row.detail),
+            detail=_snapshot_detail(row.detail),
+        )
+        for row in rows
+    }

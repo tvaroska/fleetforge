@@ -21,7 +21,7 @@ from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from fleetforge.clock import now_utc
-from fleetforge.db.models import Device, DeviceProgress
+from fleetforge.db.models import DeployEvent, Device, DeviceProgress
 from tests.conftest import client_for, login_admin, settings_for_tests
 
 DEVICE_ID = "a4cf12b3de91"
@@ -36,6 +36,8 @@ async def fleet(engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
         finally:
             await session.rollback()
             await session.execute(delete(DeviceProgress))
+            # Before the devices: the FK is `ON DELETE RESTRICT`, which is the point.
+            await session.execute(delete(DeployEvent))
             await session.execute(delete(Device))
             await session.commit()
 
@@ -171,6 +173,7 @@ async def test_the_summary_carries_the_fleet_view_and_no_presence_ingredients(
         "enrolled_at",
         "broker_provisioned_at",
         "online",
+        "deploy",
     }
     assert row["fw_version"] == "1.4.2"
     assert row["capabilities"] == ["ota", "selftest"]
@@ -392,3 +395,222 @@ async def test_arrivals_are_newest_first(admin_app: FastAPI, fleet: AsyncSession
         "a4cf12b3de19",
         "a4cf12b3de17",
     ]
+
+
+# ---------------------------------------------------------------------------
+# Deploy state (R1-fe-1) — the newest transaction, carried on the fleet read
+# ---------------------------------------------------------------------------
+#
+# `deploy` rides on this response for the same reason `arrivals` does: the dashboard's
+# one refresh engine is hint→re-read-this-endpoint. The SQL lives in `deploys.py`, the
+# module that owns `deploy_events`, so these tests seed rows and assert what the fleet
+# read reports — above all the ordering, which is the part a plausible implementation
+# gets wrong silently.
+
+
+async def add_deploy_event(
+    session: AsyncSession,
+    device_id: str,
+    state: str,
+    *,
+    cmd_id: str,
+    at: dt.datetime | None = None,
+    is_terminal: bool = False,
+    artifact_version: str | None = "1.5.0",
+    from_version: str | None = "1.4.2",
+    detail: dict[str, Any] | None = None,
+) -> None:
+    session.add(
+        DeployEvent(
+            device_id=device_id,
+            cmd_id=cmd_id,
+            state=state,
+            at=at if at is not None else now_utc(),
+            is_terminal=is_terminal,
+            artifact_version=artifact_version,
+            from_version=from_version,
+            detail=detail,
+        )
+    )
+    await session.commit()
+
+
+async def deploy_of(admin_app: FastAPI, device_id: str = DEVICE_ID) -> Any:
+    body = await list_devices(admin_app, await login_admin(admin_app))
+    row = next(row for row in body["devices"] if row["device_id"] == device_id)
+    return row["deploy"]
+
+
+async def test_a_board_never_deployed_to_has_a_present_null_deploy(
+    admin_app: FastAPI, fleet: AsyncSession
+) -> None:
+    """Present and null, not absent: the client renders "never deployed", not undefined."""
+    await add_device(fleet)
+
+    row = (await list_devices(admin_app, await login_admin(admin_app)))["devices"][0]
+
+    assert "deploy" in row
+    assert row["deploy"] is None
+
+
+async def test_a_board_mid_transaction_reports_where_it_got_to(
+    admin_app: FastAPI, fleet: AsyncSession
+) -> None:
+    await add_device(fleet)
+    now = now_utc()
+    await add_deploy_event(
+        fleet, DEVICE_ID, "requested", cmd_id="cmd-a", at=now - dt.timedelta(seconds=20)
+    )
+    await add_deploy_event(
+        fleet,
+        DEVICE_ID,
+        "downloading",
+        cmd_id="cmd-a",
+        at=now - dt.timedelta(seconds=5),
+        detail={"pct": 42, "detail": "12 of 28 blocks"},
+    )
+
+    deploy = await deploy_of(admin_app)
+
+    assert deploy["state"] == "downloading"
+    assert deploy["cmd_id"] == "cmd-a"
+    assert deploy["is_terminal"] is False
+    assert deploy["artifact_version"] == "1.5.0"
+    assert deploy["from_version"] == "1.4.2"
+    assert deploy["pct"] == 42
+    assert deploy["detail"] == "12 of 28 blocks"
+
+
+async def test_the_newest_transaction_wins_over_an_older_terminal_one(
+    admin_app: FastAPI, fleet: AsyncSession
+) -> None:
+    """Last week's `confirmed` must not outrank today's in-flight deploy."""
+    await add_device(fleet)
+    now = now_utc()
+    await add_deploy_event(
+        fleet,
+        DEVICE_ID,
+        "confirmed",
+        cmd_id="cmd-a",
+        at=now - dt.timedelta(days=7),
+        is_terminal=True,
+        artifact_version="1.4.2",
+    )
+    await add_deploy_event(
+        fleet, DEVICE_ID, "requested", cmd_id="cmd-b", at=now - dt.timedelta(seconds=10)
+    )
+    await add_deploy_event(
+        fleet, DEVICE_ID, "staging", cmd_id="cmd-b", at=now - dt.timedelta(seconds=9)
+    )
+
+    deploy = await deploy_of(admin_app)
+
+    assert deploy["state"] == "staging"
+    assert deploy["cmd_id"] == "cmd-b"
+    assert deploy["is_terminal"] is False
+
+
+async def test_an_old_terminal_state_is_still_the_honest_answer(
+    admin_app: FastAPI, fleet: AsyncSession
+) -> None:
+    """No time window: "the last thing that happened" has no expiry date."""
+    await add_device(fleet)
+    await add_deploy_event(
+        fleet,
+        DEVICE_ID,
+        "failed",
+        cmd_id="cmd-a",
+        at=now_utc() - dt.timedelta(days=30),
+        is_terminal=True,
+    )
+
+    deploy = await deploy_of(admin_app)
+
+    assert deploy["state"] == "failed"
+    assert deploy["is_terminal"] is True
+
+
+async def test_two_rows_at_the_same_instant_resolve_by_insertion_order(
+    admin_app: FastAPI, fleet: AsyncSession
+) -> None:
+    """`ORDER BY at DESC, id DESC` — and the `id` half is what this pins.
+
+    `record_requested` and the board's first `up/status` routinely land inside one
+    millisecond. On `at DESC` alone the `requested` row can sort above the `staging`
+    that followed it and the dashboard walks backwards.
+    """
+    await add_device(fleet)
+    same_instant = now_utc()
+    await add_deploy_event(fleet, DEVICE_ID, "requested", cmd_id="cmd-a", at=same_instant)
+    await add_deploy_event(fleet, DEVICE_ID, "staging", cmd_id="cmd-a", at=same_instant)
+
+    assert (await deploy_of(admin_app))["state"] == "staging"
+
+
+async def test_a_requested_rows_sha256_does_not_leak_into_the_api_detail(
+    admin_app: FastAPI, fleet: AsyncSession
+) -> None:
+    """`requested.detail` carries the digest and the size. That is not what `detail` means."""
+    await add_device(fleet)
+    await add_deploy_event(
+        fleet,
+        DEVICE_ID,
+        "requested",
+        cmd_id="cmd-a",
+        detail={"sha256": "a" * 64, "size_bytes": 220000, "target": "esp32c6", "apply": "auto"},
+    )
+
+    deploy = await deploy_of(admin_app)
+
+    assert deploy["state"] == "requested"
+    assert deploy["detail"] is None
+    assert deploy["pct"] is None
+
+
+async def test_a_state_this_server_has_never_heard_of_is_reported_as_itself(
+    admin_app: FastAPI, fleet: AsyncSession
+) -> None:
+    """`DeployState` is advisory; the column is TEXT with no CHECK, and so is this field."""
+    await add_device(fleet)
+    await add_deploy_event(fleet, DEVICE_ID, "defragmenting", cmd_id="cmd-a")
+
+    deploy = await deploy_of(admin_app)
+
+    assert deploy["state"] == "defragmenting"
+    assert deploy["is_terminal"] is False
+
+
+async def test_each_board_gets_its_own_newest_state(
+    admin_app: FastAPI, fleet: AsyncSession
+) -> None:
+    """`DISTINCT ON (device_id)` — one row per board, never another board's."""
+    await add_device(fleet, "a4cf12b3de30")
+    await add_device(fleet, "a4cf12b3de31")
+    await add_device(fleet, "a4cf12b3de32")
+    await add_deploy_event(fleet, "a4cf12b3de30", "confirmed", cmd_id="cmd-a", is_terminal=True)
+    await add_deploy_event(fleet, "a4cf12b3de31", "awaiting_safe_window", cmd_id="cmd-b")
+
+    body = await list_devices(admin_app, await login_admin(admin_app))
+    states = {
+        row["device_id"]: None if row["deploy"] is None else row["deploy"]["state"]
+        for row in body["devices"]
+    }
+
+    assert states == {
+        "a4cf12b3de30": "confirmed",
+        "a4cf12b3de31": "awaiting_safe_window",
+        "a4cf12b3de32": None,
+    }
+
+
+async def test_a_decommissioned_board_with_deploy_history_stays_out_of_the_list(
+    admin_app: FastAPI, fleet: AsyncSession
+) -> None:
+    """Regression: the deploy read must not resurrect a soft-deleted board."""
+    await add_device(fleet, "a4cf12b3de33")
+    await add_device(fleet, "a4cf12b3de34", decommissioned_at=now_utc())
+    await add_deploy_event(fleet, "a4cf12b3de34", "confirmed", cmd_id="cmd-a", is_terminal=True)
+
+    body = await list_devices(admin_app, await login_admin(admin_app))
+
+    assert [row["device_id"] for row in body["devices"]] == ["a4cf12b3de33"]

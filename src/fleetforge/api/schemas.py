@@ -231,6 +231,53 @@ class DeviceSummary(BaseModel):
     # works from (`WHERE broker_provisioned_at IS NULL`).
     broker_provisioned_at: dt.datetime | None
     online: bool
+    # The newest deploy transaction's current state, or `None` for a board that has
+    # never been deployed to. Rides on this response for the same reason `arrivals`
+    # does — see `DeploySummary` and `routers/devices.py`.
+    #
+    # **Last, and defaulted**: `frontend/src/api.ts` mirrors this model "field for field
+    # and in its order", and *Evolution rules* say an added field must not break a
+    # client built before it existed.
+    deploy: "DeploySummary | None" = None
+
+
+class DeploySummary(BaseModel):
+    """A board's newest deploy state, as the fleet view sees it. R1-fe-1.
+
+    Built from `fleetforge.deploys.latest_deploys` — the module that owns
+    `deploy_events` — and carried on `GET /v1/devices` rather than on an endpoint of
+    its own, because the dashboard already re-reads that envelope on every `ff_events`
+    hint (`DeviceList.arrivals`, same argument).
+
+    `state` and `detail` are **device-controlled strings**. `DeployState` is advisory —
+    `deploy_events.state` is TEXT with no CHECK, so an agent newer than this server can
+    report a state nobody here has heard of and it is recorded and returned as itself.
+    A renderer treats both as text and never switches exhaustively on `state`.
+
+    `is_terminal` is the **server's** answer, stored at write time from
+    `TERMINAL_DEPLOY_STATES`. It is sent precisely so no client keeps a second copy of
+    that vocabulary; two definitions of "terminal" is the failure `deploys.py` warns
+    about, and it would surface as a KPI that disagrees with the dashboard.
+
+    `pct` is **not a progress feed.** `deploy_events` is a log of transitions and the
+    writer keeps the first `pct` it saw for a repeated state, so an agent that publishes
+    `downloading` once (ours does) reports one number for the whole download. Render it
+    as text; a bar driven by it would sit still and read as a hang.
+    """
+
+    # NULL only for a row written before `cmd_id` was known — the column is nullable, so
+    # the field is too rather than the API pretending otherwise.
+    cmd_id: str | None
+    state: str
+    at: dt.datetime
+    is_terminal: bool
+    # The version this transaction intends to install, and the one it replaces. Copied
+    # off the `requested` row by the writer; both NULL for a transaction this server has
+    # no `requested` row for (a board replaying a command from before a DB rebuild).
+    artifact_version: str | None
+    from_version: str | None
+    pct: int | None
+    detail: str | None
 
 
 class ArrivalSummary(BaseModel):
@@ -354,6 +401,40 @@ class ArtifactUploaded(BaseModel):
     version: str
     partition_layout: str
     created: bool
+
+
+class ArtifactSummary(BaseModel):
+    """One deployable label — a row of `GET /v1/artifact`. R1-fe-1.
+
+    A label over a digest, joined to the digest's metadata: `(target, version)` comes
+    from `artifact_versions`, `size_bytes`/`partition_layout`/`kind` from `artifacts`.
+    Two labels over one blob are two rows with one `sha256`, which is the shape a
+    content-addressed store makes ordinary and a `version` column would have made a
+    primary-key collision (`db/models.py::ArtifactVersion`).
+
+    **There is no `url`, for the same reason `ArtifactUploaded` has none.** A download
+    link is a short-lived bearer credential minted per deploy, and a list endpoint that
+    handed one out would mint credentials nobody asked for.
+
+    `created_at` is the label's, not the blob's: re-tagging old bytes under a new
+    version is a new thing to deploy, and the list is ordered by it.
+    """
+
+    target: str
+    version: str
+    sha256: str
+    size_bytes: int
+    # Both NULL-able on `artifacts`: bytes can be target-independent, and an old row
+    # may predate the layout column. A user upload always has both.
+    partition_layout: str | None
+    kind: str
+    created_at: dt.datetime
+
+
+class ArtifactList(BaseModel):
+    """An envelope, not a bare array — the `DeviceList` rule, so a cursor can be added."""
+
+    artifacts: list[ArtifactSummary]
 
 
 # ---------------------------------------------------------------------------
