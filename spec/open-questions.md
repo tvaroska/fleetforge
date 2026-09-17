@@ -31,3 +31,23 @@ debugging aid into an API and a data-retention question. Deliberately deferred.
 identical to board #1 — re-enter Wi-Fi, re-detect chip, re-flash. Remembered profiles
 and batch flashing are listed under Post-v1, but if the first fleet is realistically
 more than a handful of boards, that is a v1 concern rather than a later one.
+
+---
+
+## ota-deploy — one artifact size limit, written twice
+
+**`prd.md`'s "Artifact size ≤ 1.9 MB" is the rounded form of `ota_slot_size`, and the
+two should not read as independent caps.** `spec/device-protocol.md` fixes
+`ota_slot_size` at **1966080** bytes, which is 1.875 MiB — "1.9 MB" to two significant
+figures. They are one number. Read as two, they invite an implementation with two
+thresholds a few kilobytes apart and a rejection nobody can explain from the message.
+
+R1-be-1 implements the authoritative one only: `firmware/manifest.py::SUPPORTED_LAYOUTS`,
+because that is the mapping tied to the partition table a board actually carries, and it
+is already what agent-bundle validation uses — so an upload and a bundle cannot disagree
+about how big a slot is.
+
+Proposed: `prd.md` → *Requirements & targets* should either say "≤ the target layout's
+`ota_slot_size` (1966080 B for `ab-4m-v1`)" or drop the line and cite
+`device-protocol.md`. Not applied here — `spec/` is protected during `/implement`.
+Filed 2026-09-16 (R1-be-1).

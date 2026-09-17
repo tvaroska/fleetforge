@@ -1,8 +1,9 @@
-"""The fleetforge registry schema — R0-db-1, plus `device_progress` (S0-fw-1) and the
-content-addressed artifact tables (S0-infra-4).
+"""The fleetforge registry schema — R0-db-1, plus `device_progress` (S0-fw-1), the
+content-addressed artifact tables (S0-infra-4) and the version labels over them
+(R1-be-1).
 
-Eight tables: `device_groups`, `devices`, `enrollment_tokens`, `admin_tokens`,
-`deploy_events`, `device_progress`, `artifacts`, `builds`. Two of them
+Nine tables: `device_groups`, `devices`, `enrollment_tokens`, `admin_tokens`,
+`deploy_events`, `device_progress`, `artifacts`, `artifact_versions`, `builds`. Two of them
 (`enrollment_tokens`, `admin_tokens`) are CRITICAL.md paths; read their docstrings
 before changing anything.
 
@@ -544,6 +545,64 @@ class Artifact(Base):
     # and a user upload has none of it; the precedent is `deploy_events.detail`.
     provenance: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     # Server receipt time — see the module docstring.
+    created_at: Mapped[dt.datetime] = mapped_column(
+        TimestampTZ, nullable=False, server_default=text("now()")
+    )
+
+
+class ArtifactVersion(Base):
+    """A human version label pointing at a digest — `(target, version) → sha256`. R1-be-1.
+
+    **Why this is a table and not a column on `artifacts`.** `artifacts` is
+    content-addressed: the digest is the primary key, so a `version` column would make
+    one digest carry exactly one label, and re-tagging byte-identical firmware would be
+    a primary-key collision rather than the ordinary thing it is. Labels are mutable
+    pointers over immutable bytes — the same split S0-infra-6 chose for the agent
+    catalog, where `agent/index.json` is the one mutable key over `blobs/sha256/…`.
+    `artifacts` therefore stays exactly as S0-infra-4 froze it.
+
+    **The label has a real FK to `artifacts.sha256`.** Migration `0003` has no foreign
+    keys, but that was forced rather than chosen: `builds.outputs` names artifacts
+    inside JSONB and PostgreSQL cannot FK into JSONB (see `Build`). Here it can, so it
+    does — and the constraint is what stops R2's pruner deleting bytes a label still
+    points at. Deletes are `RESTRICT`: the pruner must drop the label first, which is
+    the order that leaves the fleet able to explain itself.
+
+    **`version` is TEXT with no DB CHECK, and validated at the edge instead.** The
+    vocabulary is the user's — semver, a date, a CI build number — so a CHECK here
+    would be this project deciding what a customer may call their firmware. What the
+    API *does* enforce is that the label is safe to carry: it reaches a `dn/cmd` JSON
+    payload (`spec/device-protocol.md`) and a dashboard list, and it is **rejected,
+    never normalised** (`identity.py`'s rule) so that `1.5.0` and `1.5.0 ` cannot
+    become two spellings of one release.
+
+    `(target, version)` is the PK rather than a surrogate id: "which bytes is
+    `esp32`/`1.5.0`?" is the only question this table answers, and the uniqueness it
+    needs is exactly the uniqueness the PK gives. `spec/prd.md` → *Retention* ("20
+    stored versions per platform, oldest pruned") is then one indexed scan of
+    `(target, created_at)`, read backwards.
+    """
+
+    __tablename__ = "artifact_versions"
+    __table_args__ = (
+        # Mirrors `artifacts.sha256_format`. The FK already guarantees the row exists;
+        # this guarantees the value names a key `blobs.blob_key` will agree to build.
+        CheckConstraint("sha256 ~ '^[0-9a-f]{64}$'", name="sha256_format"),
+        # "The 20 newest versions for this platform" — the R2 pruner's only query.
+        # Ascending: PostgreSQL scans a b-tree backwards at the same cost, so a DESC
+        # index would buy nothing and be one more thing for the migration to match.
+        Index("ix_artifact_versions_target_created_at", "target", "created_at"),
+    )
+
+    # Chip target (`esp32`), `releases.md`'s "platform_type". NOT NULL here even though
+    # `artifacts.target` is nullable: a label with no platform cannot answer "20 versions
+    # per platform", and every upload knows its target.
+    target: Mapped[str] = mapped_column(Text, primary_key=True)
+    version: Mapped[str] = mapped_column(Text, primary_key=True)
+    sha256: Mapped[str] = mapped_column(
+        Text, ForeignKey("artifacts.sha256", ondelete="RESTRICT"), nullable=False
+    )
+    # Server receipt time — convention 3 above. Also the prune order.
     created_at: Mapped[dt.datetime] = mapped_column(
         TimestampTZ, nullable=False, server_default=text("now()")
     )

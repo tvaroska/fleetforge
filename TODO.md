@@ -2,7 +2,7 @@
 
 **Goal:** Self-hosted OTA firmware management for embedded fleets (ESP32 first) — a bad
 build is caught before the fleet, and any device that gets one recovers itself.
-**Updated:** 2026-09-15
+**Updated:** 2026-09-16
 
 ## Where this stands
 
@@ -11,7 +11,7 @@ release is done. What is left is five tasks, and **all five need a physical boar
 R0's remaining risk is not code, it is that nothing has yet proven the product works on
 metal. R0 cannot close until R0-test-2 passes.
 
-The whole backlog is therefore one bench session. Its running order is:
+**R0's** remaining backlog is therefore one bench session. Its running order is:
 
 1. **S0-fw-3** (`- [!]`, below) — flash v0.2.0 and see whether the board escapes the
    brownout loop. Everything else assumes a board that reaches the fleet.
@@ -26,6 +26,18 @@ TX-power ladder), shipped in v0.3.5. That is step 1 of the S0-fw-3 bench order, 
 flashed from `bingo.tvaroska.sk` now tests the untried lever *by default* rather than the
 160 MHz `-Og` build that every recorded brownout came from. No special build is needed —
 just a flash.
+
+**R1 is open alongside R0, from 2026-09-16.** This file normally carries Sprint 0 plus
+*one* release; it now carries two, because R0 is not in progress — it is parked on
+hardware, and waiting for a board is not a reason to stop building. R1's blocker closed
+on 2026-09-15 (`R1-BE-0`, impersonation + verified `signBlob`), and **seven of its eight
+tasks need no board** — the first of them, `R1-be-1`, landed the same day R1 opened:
+the four backend tasks and the dashboard button are server-side,
+and the two firmware tasks run in QEMU (`docs/runbooks/agent-qemu.md` boots the real
+`agent/dist/esp32` bundle against the dev stack over the emulated NIC, so
+stage → download → apply → reboot → report-version is exercisable at a desk). Only
+`R1-test-1` is bench-gated, and it is deliberately written as the *hardware* E2E rather
+than renamed to something QEMU can pass. See `DECISIONS.md` 2026-09-16.
 
 **Completed work is archived**, not lost: R0 and the closed Sprint 0 tasks are written up
 in [docs/features/](docs/features/) — chiefly `enrollment.md` (the R0 flow end to end,
@@ -47,6 +59,7 @@ Two results worth carrying forward, because they retired earlier conclusions:
 
 <!-- Counters: spec=1 infra=7 db=1 be=6 fe=7 sec=1 fw=4 test=3 -->
 <!-- Sprint 0 counters: fe=7 fw=4 infra=7 test=3 -->
+<!-- R1 counters: be=3 fe=1 fw=2 test=1 -->
 
 Live status lives ONLY here. States: `- [ ]` open · `- [x]` done · `- [!]`
 attempted-but-failed. `spec/` and `design/` are status-free.
@@ -236,5 +249,111 @@ off-box** (the ESP-IDF builder is 2–3 G against 5.5 G of free disk on `prod`).
 
 ---
 
+## R1: Upload new code (OTA deploy)
+
+**Goal:** *I can push new firmware to a registered board and watch its version change.*
+**Risk retired:** the OTA transport works end-to-end.
+**Done when:** a `.bin` uploaded from the dashboard reaches a device and the version it
+reports afterwards is the one that was uploaded.
+
+⚠️ **Not yet safe.** A broken build stays broken until R2 — there is no checksum gate
+before apply, no A/B discipline beyond what the partition table already enforces, and no
+confirm timer. Do not deploy anything to a board you cannot physically reach.
+
+**What is already built, and must not be rebuilt here.** `fleetforge.storage` is the
+`put`/`get`/`signed_url`/`delete` seam (`R0-be-6`), production reads it keylessly by
+impersonation with `signBlob` measured rather than assumed (`S0-infra-5`), the
+content-addressed key scheme is frozen (`storage/blobs.py`, `S0-infra-4`), and the
+`artifacts` table exists and is empty (`alembic/versions/0003`). `firmware/publish.py`
+already writes *blobs* — the agent bundles S0-infra-6 moved into the store. What R1 is
+first to write is the **`artifacts` table**, and the user-facing half of the same
+storage model.
+
+Three constraints from documents that outrank this file:
+[prd.md](spec/prd.md) → *Requirements & targets* caps an artifact at **1.9 MB** and a
+healthy-link deploy at **5 min**; [spec/device-protocol.md](spec/device-protocol.md)
+fixes the `dn/cmd` `stage` payload and the `up/status` state machine, and is near-frozen
+(`CRITICAL.md`); `ota_slot_size` is **1966080** and is a three-way contract with
+`agent/partitions.csv`.
+
+### Backend
+
+- [ ] **R1-be-3**: Artifact download endpoint — signed-URL verification + HTTP range (P0, 1d)
+      The endpoint is **public** ([prd.md](spec/prd.md) → public exposure): the signature
+      *is* the authorization, which is why `CRITICAL.md` lists signed-URL generation.
+      Range support is not optional — it is what R5's resumable download is built on, and
+      a device that loses Wi-Fi at 80% of 1.9 MB over a marginal link is the normal case,
+      not the edge case.
+      Watch the latency budget: `signed_url` is an IAM round trip now, not local CPU
+      (`S0-infra-5`). **Do not sign per range request** — cache the URL for its lifetime,
+      or a resumed download turns into N Google API calls and can rate-limit.
+      Acceptance: a valid signature serves the bytes, an expired or tampered one is
+      refused, `Range:` returns 206 with the right slice, and the signing call count for
+      a 10-range download is 1.
+
+- [ ] **R1-be-2**: Deploy orchestration `stage → apply`, per device (P0, 1.5d)
+      Publish `dn/cmd` carrying the short-lived signed URL, exactly the payload shape in
+      `spec/device-protocol.md` — near-frozen, so this task **conforms to** the spec and
+      does not extend it. Every command carries `id` and the device deduplicates on it,
+      so the server must mint one and reuse it across a retry rather than per publish.
+      The server orchestrates and never knows *how* nor *when*: `awaiting_safe_window` is
+      an honest terminal-ish state the device may sit in indefinitely, and nothing here
+      may time it out. Rollback authority is the device's and is not in R1 at all.
+      Acceptance: a staged deploy against the simulator walks
+      `staging → downloading → verifying → staged → applying → rebooting`, a duplicated
+      publish produces one download, and `awaiting_safe_window` never expires server-side.
+
+- [ ] **R1-be-4**: Write every deploy outcome to `deploy_events` (P0, 0.5d)
+      The KPI history R5 computes from, and the one table
+      [prd.md](spec/prd.md) → *Retention* keeps **forever**. "Every outcome" includes the
+      failures and the abandoned ones — a table that only records successes cannot answer
+      the question the product exists to answer.
+      Acceptance: success, failure and cancel each write a row; the row survives a
+      restart; nothing else in R1 writes this table from two places.
+
+### Firmware — verifiable in QEMU, no board
+
+- [ ] **R1-fw-1**: Agent gains `esp_https_ota` + an "update" command handler (P0, 2d)
+      Handle `stage` from `dn/cmd`, download through the signed URL, write the inactive
+      OTA slot, and report `up/status` transitions as it goes. The reboot is the device's
+      to schedule.
+      Test in QEMU per `docs/runbooks/agent-qemu.md` — the emulated board has a NIC and a
+      real flash image, so the whole transaction runs at the desk. What QEMU does **not**
+      cover: the radio, the power draw of a sustained download, and chip-revision
+      behaviour. Those belong to `R1-test-1`, not here.
+      Acceptance: `just agent-qemu` boots the bundle, it stages an artifact from the dev
+      stack end to end, and the `up/status` sequence matches the spec's state machine.
+
+- [ ] **R1-fw-2**: Agent reports firmware version after reboot (P0, 0.5d)
+      `fw_version` in `up/announce` and `up/hb` must be the version that is *running*,
+      read from the running app's own description — not the version it was told to
+      install. Those two disagree exactly when something went wrong, which is the moment
+      the field has to be right.
+      Acceptance: after a staged-and-applied update in QEMU, the reported version changes
+      to the uploaded one; after a failed apply, it does not.
+
+### Frontend
+
+- [ ] **R1-fe-1**: Per-device Deploy button + version-change feedback (P0, 1d)
+      Pick an artifact, deploy to one device, watch the `up/status` states arrive over the
+      existing SSE stream. [prd.md](spec/prd.md) → *Timing* gives the dashboard **≤ 2 s**
+      from server receipt to reflect a state change.
+      The honest-feedback bar from *Unaided onboarding* applies here too: a device sitting
+      in `awaiting_safe_window` is not a hung UI and must not look like one.
+      Acceptance: deploy from the dashboard, the state sequence renders live, and the
+      device's version changes in the list without a reload.
+
+### Test
+
+- [ ] **R1-test-1**: E2E: push firmware → board version changes in dashboard (P0, 1d)
+      **Bench-gated, deliberately.** QEMU proves the transport; this proves the product.
+      Kept as a hardware task rather than redefined to something the emulator can pass,
+      for the same reason `R0-test-2` is: the release's claim is about a board.
+      Depends on `R0-test-2` in practice — a board that cannot enroll cannot be deployed
+      to.
+
+---
+
 **Parallel spike (de-risks R2):** throwaway OTA + auto-rollback spike on real flaky
 Wi-Fi. Tracked in [docs/features/ota-deploy.md](docs/features/ota-deploy.md).
+Needs hardware — a spike about a flaky radio cannot run on an emulator that has none.

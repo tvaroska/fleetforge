@@ -17,6 +17,7 @@ from tests.conftest import (
 EXPECTED_TABLES = {
     "admin_tokens",
     "alembic_version",
+    "artifact_versions",
     "artifacts",
     "builds",
     "deploy_events",

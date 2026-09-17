@@ -325,3 +325,32 @@ class ProgressReport(BaseModel):
         if any(ch < " " or ch == "\x7f" for ch in value):
             raise ValueError("detail must not contain control characters")
         return value
+
+
+# ---------------------------------------------------------------------------
+# Artifact upload (R1-be-1)
+# ---------------------------------------------------------------------------
+
+
+class ArtifactUploaded(BaseModel):
+    """What `POST /v1/artifact` returns — the digest is the artifact's identity.
+
+    `sha256` is what the caller needs and the one field it cannot compute a second
+    spelling of: R1-be-2 puts it in the `stage` payload and R1-be-3 serves the bytes
+    from it. There is deliberately **no `url` and no `storage_key`** here. The key is
+    `blob_key(sha256)`, a pure function of this field (`storage/blobs.py`), and a URL
+    is a short-lived signed credential that belongs to the deploy that needs it, not
+    to a successful upload.
+
+    `created` distinguishes the two success cases a content-addressed store collapses:
+    `True` is a new label, `False` is an idempotent re-upload of bytes already stored
+    under this exact `(target, version)`. The status code says the same thing (201 vs
+    200); the field is here so a client does not have to parse it out of one.
+    """
+
+    sha256: str
+    size_bytes: int
+    target: str
+    version: str
+    partition_layout: str
+    created: bool

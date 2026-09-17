@@ -6,6 +6,80 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-16 — Version labels live in their own table, and the artifact size cap is one number
+
+**R1-be-1.** Three decisions, all forced by things that were already frozen.
+
+**1. `artifact_versions`, not a `version` column on `artifacts`.** S0-infra-4 froze
+`artifacts` content-addressed — `sha256` is the primary key — and left no `version`
+column, while `spec/device-protocol.md` and `spec/prd.md` → *Retention* both need one. A
+column could not work: one digest would carry exactly one label, so re-tagging
+byte-identical firmware would be a PK collision rather than the ordinary thing it is.
+Migration `0004` adds a small mutable label layer over the immutable blobs —
+`(target, version)` PK, a real FK to `artifacts.sha256` with `ON DELETE RESTRICT`, and an
+index on `(target, created_at)`. Same shape as S0-infra-6's index-as-pointer decision.
+`artifacts` is untouched.
+
+*Gotcha for R2's pruner:* `RESTRICT` means the label must be deleted before the blob. That
+is the intended order — it is what stops the pruner deleting bytes a release still names —
+but a pruner written blob-first will simply fail.
+
+*Gotcha for the next migration:* unlike `0003`, `0004` carries a foreign key. `0003`'s
+absence of FKs was forced (PostgreSQL cannot FK into the JSONB `builds.outputs`), not a
+project-wide principle. Use one where the column is plain.
+
+**2. Three statuses, because a content-addressed store collapses two success cases.** New
+label → 201. Same bytes under the same `(target, version)` → 200 `created: false`, since a
+re-`put` of the same key is a no-op by construction. Same label over *different* bytes →
+409, label unchanged: a version is a promise about which image it is, and silently
+re-pointing it would make every `deploy_events` row that mentions it ambiguous. Re-tagging
+the same bytes under a second label is free — both labels name one object.
+
+**3. `prd.md`'s "1.9 MB" and `ota_slot_size` 1966080 are one number, not two.** 1966080 B
+is 1.875 MiB, which rounds to 1.9 MB. The task as filed asked for two rejections with two
+error messages; implementing that would have produced a second, slightly different cap and
+a rejection nobody could explain. The endpoint enforces the authoritative one only —
+`firmware/manifest.py::SUPPORTED_LAYOUTS`, already what agent-bundle validation reads, so
+an upload and a bundle cannot disagree about how big a slot is. `spec/` is protected during
+`/implement`, so the clarification is **proposed** in `spec/open-questions.md`, not applied.
+
+Detail and T2 evidence: `docs/features/ota-deploy.md` → *Artifact upload (R1-be-1)*.
+
+---
+
+## 2026-09-16 — R1 opens while R0 stays open, because R0 is parked and not in progress
+
+`TODO.md` carries Sprint 0 plus **one** release, and from today it carries two. That is a
+deliberate exception, not drift, so it is written down rather than left for the next
+`/replan` to discover.
+
+- **The rule assumes the active release is being worked on.** R0 is not. Every desk-bound
+  task in it is done and archived; all five open tasks need a physical board, and the
+  gating one (`S0-fw-3`) needs the board *and* a bench session. "One active release" is a
+  focus rule, and there is nothing left to focus on — the alternative to opening R1 is not
+  finishing R0 sooner, it is not building anything until hardware appears.
+- **R1 was unblocked the day before.** `R1-BE-0` closed on 2026-09-15: the GCS credential
+  is an impersonation, `signBlob` is measured rather than assumed, and containment is
+  verified through the adapter. R1-be-3's signed-URL delivery therefore rests on a
+  mechanism that has been round-tripped, which is what made R1 startable at all.
+- **Seven of R1's eight tasks need no board, and that includes the firmware half.** The
+  non-obvious part: `docs/runbooks/agent-qemu.md` boots the real unmodified
+  `agent/dist/esp32` bundle against the dev stack over the emulated `openeth` NIC, so
+  `stage → download → apply → reboot → report-version` is exercisable at a desk. R1's
+  firmware work is not hardware work.
+- **`R1-test-1` stays bench-gated and keeps its name.** The tempting move is to redefine
+  the E2E as "passes in QEMU" and close the release. Refused: QEMU has no radio, no power
+  behaviour and no chip revision, and R1's claim is about a board. The same reasoning that
+  keeps `R0-test-2` open keeps this one honest.
+
+**What this obliges.** R0 does not lose priority — the bench session runs the moment a
+board is in hand, in the order `TODO.md` gives, and `R0-test-2` still closes R0 before R1
+can close. When R0 does close, `/replan` archives both R0's and R1's completed tasks and
+the file returns to one release. Until then, two release sections coexist and the R0 one
+is the one that gets picked up first when hardware exists.
+
+---
+
 ## 2026-09-15 — the agent catalog is a pointer object, not a bucket listing (S0-infra-6)
 
 **Closes** the 2026-09-11 entry *agent bundles are artifacts, not image contents*, whose

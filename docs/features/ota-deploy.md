@@ -105,7 +105,7 @@ ESP32 adapter: write OTA1 partition → broker reconnect + self-test → switch 
 
 | ID | Task | Priority | Effort |
 |----|------|----------|--------|
-| R1-BE-1 | Artifact upload `POST /v1/artifact` (opaque blob + version + platform_type); reject over the target's `ota_slot_size` and over the SPEC size limit | P0 | 1d |
+| R1-BE-1 | Artifact upload `POST /v1/artifact` (opaque blob + version + platform_type); reject anything over the target layout's `ota_slot_size` | P0 | 1d |
 | R1-BE-2 | Deploy orchestration: `stage → apply` (per-device), carrying a short-lived signed artifact URL | P0 | 1.5d |
 | R1-BE-3 | Artifact download endpoint: signed-URL verification + HTTP range support | P0 | 1d |
 | R1-BE-4 | Write every deploy outcome to `deploy_events` — the KPI history R5 computes from | P0 | 0.5d |
@@ -174,6 +174,102 @@ on it. *(Resolved: `signBlob` verified 2026-09-15 under `devserver@btvaroska`, w
 the same grant. See the summary above.)* Details:
 [docs/runbooks/artifact-storage.md](../runbooks/artifact-storage.md) →
 *Verified against real GCS*.
+
+### Artifact upload — `POST /v1/artifact` (R1-be-1) — **LANDED 2026-09-16**
+
+**What shipped.** The endpoint that gets a user's `.bin` into the system, so R1-BE-2 has
+something to hand a device a URL to. Admin-authenticated, raw body (not multipart), with
+`target`, `version` and an optional `partition_layout` as query parameters; it returns
+the digest, the size and a `created` flag. It is the **first writer of the `artifacts`
+table** — `firmware/publish.py` already wrote *blobs* for the agent bundles S0-infra-6
+moved into the store, so this is the user-facing half of a storage model that already
+existed rather than a new one.
+
+**`artifact_versions`: a label layer, because `artifacts` had nowhere to put a version.**
+S0-infra-4 froze `artifacts` with `sha256` as the primary key and no `version` column,
+while `spec/device-protocol.md` (`artifact.version` in the `stage` payload) and
+`spec/prd.md` → *Retention* ("20 stored versions per platform") both need one. A column
+was not available: one digest would then carry exactly one label, and re-tagging
+byte-identical firmware would be a primary-key collision rather than the ordinary thing
+it is. So migration `0004` adds `artifact_versions` — `(target, version)` PK, `sha256`
+with a **real FK** to `artifacts.sha256` `ON DELETE RESTRICT`, `created_at`, and an index
+on `(target, created_at)` for the R2 pruner's only query. Mutable pointers over immutable
+bytes, the same split S0-infra-6 chose when it made `agent/index.json` the one mutable key
+over `blobs/sha256/…`. `artifacts` stays exactly as frozen.
+
+`0003` has no foreign keys, but that was forced rather than chosen — `builds.outputs`
+names artifacts inside JSONB and PostgreSQL cannot FK into JSONB. Here the reference is a
+plain column, so the constraint is available, and `RESTRICT` is what will stop R2's pruner
+deleting bytes a label still points at.
+
+**Three statuses, because a content-addressed store collapses two success cases.** A new
+label is **201**; re-uploading identical bytes under the same `(target, version)` is
+**200** with `created: false`, since a re-`put` of the same key is a no-op by
+construction; the same label over *different* bytes is **409** and the label keeps
+pointing at the original digest — a version is a promise about which image it is, so
+silently re-pointing it would make every `deploy_events` row that mentions it ambiguous.
+Re-tagging the same bytes under a second label is fine and costs no storage: both labels
+name one object.
+
+**One size limit, not two.** The task as filed called for two rejections — the target's
+`ota_slot_size` and "the SPEC cap" — but `prd.md`'s **1.9 MB** *is* `ota_slot_size`
+**1966080** rounded (1966080 B = 1.875 MiB). They are one number written twice. The
+implementation uses the authoritative one, `firmware/manifest.py::SUPPORTED_LAYOUTS`,
+because that is the mapping tied to the partition table a board actually carries and it
+is already what agent-bundle validation reads — so an upload and a bundle cannot disagree
+about how big a slot is. A second, slightly different cap would have been a rejection
+nobody could explain. Filed as a spec clarification in `spec/open-questions.md` rather
+than resolved by inventing a number.
+
+**Nothing reaches the store until it is known to be acceptable.** `Content-Length` is
+required (411 without it) and checked before the body is read at all; the stream read is
+then capped again so a lying header cannot spend memory either. An upload that writes
+3 MB and then apologises has already paid for the object. Writes go **blob first, then
+rows**, matching `publish.py`'s crash posture: a failure between them leaves an
+unreferenced content-addressed blob, which is inert and re-`put`-able, where the reverse
+order would leave a row naming bytes that do not exist.
+
+**The label is rejected, never normalised** (`identity.py`'s rule):
+`^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$`, no semver requirement — the vocabulary is the
+user's, and a date or a CI number is fine. But it travels into a `dn/cmd` JSON payload and
+a dashboard list, so `1.5.0` and `1.5.0 ` must not become two spellings of one release.
+There is deliberately **no DB CHECK** on `version`: a constraint there would be this
+project deciding what a customer may call their firmware.
+
+**The bytes stay opaque.** No ELF check, no image-header validation, no "is this really an
+ESP32 app?" — users build with their own toolchain, and a server that understood the
+format would be a server with opinions about which toolchains are allowed.
+
+**Verification.** T1: `ruff` + `ruff format` + type-check green, 728 tests pass, including
+`alembic check` (model and migration cannot drift) and `test_migration_downgrades_cleanly`.
+
+T2 ran against the **rebuilt dev container**, which applied `0003 → 0004` on start, using
+the real 993696-byte `agent/dist/esp32/app.bin`:
+
+* Upload → **201**, `sha256` equal to the local `sha256sum`, and the object is at
+  `blobs/sha256/2484cb76…` in MinIO. `mc cat` of the stored object re-digests to the same
+  value — key, contents and response all agree — and `mc stat` shows
+  `Cache-Control: public, max-age=31536000, immutable`.
+* `artifacts` holds one row: digest, 993696, `kind=user_firmware`, `target=esp32`,
+  `partition_layout=ab-4m-v1`.
+* Same bytes, same label → **200** `created: false`, still one blob and one row.
+* Same label, different bytes → **409** naming the digest it already points at; the label
+  is unchanged.
+* Second label `1.5.1`, same bytes → **201**, two `artifact_versions` rows pointing at one
+  digest and one object.
+* 2 MB body → **413** naming both numbers, and the bucket gained no object. Empty → 400;
+  `partition_layout=ab-16m-v9` → 400 naming `ab-4m-v1`; `version=1.5.0␠` → 400;
+  unauthenticated → 401.
+
+The test module (`tests/test_api_artifact_upload.py`) asserts the oversize and malformed
+cases on `store.puts == []`, not merely on the status code — "rejected" and "rejected
+before it cost anything" are different promises and only the second is the one this
+endpoint makes.
+
+**Decisions & gotchas.** See `DECISIONS.md` 2026-09-16. Two for whoever writes R1-be-2/3:
+the 411-on-missing-`Content-Length` rule means a chunked upload is refused by design, and
+since S0-infra-5 `signed_url` is a network round trip, so handing out a URL per range
+request needs a cache.
 
 ## Phase 2: R2 — Safe deploy: verify + auto-rollback ⭐
 

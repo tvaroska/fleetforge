@@ -11,6 +11,8 @@ seam (`ObjectStoreDep`). R0-infra-2 added the prebuilt agent images (`/v1/agent/
 S0-infra-6 moved them into that same store: `app.state.agent_catalog` is a lazy
 `CatalogCache`, not a directory scan, so the object store is now what **onboarding**
 depends on as well as R1 — hence the startup WARNING when neither backend is configured.
+R1-be-1 added `POST /v1/artifact`, the first endpoint that **writes** to that store and
+the first writer of the `artifacts` table.
 
 **The lifespan owns one background task**: the `ff_events` `LISTEN` connection
 (`api/eventstream.py::PostgresEventListener`), one per API process, feeding the
@@ -46,6 +48,7 @@ from fleetforge.api.deps import dynsec_configured
 from fleetforge.api.eventstream import EventHub, PostgresEventListener
 from fleetforge.api.routers import (
     agent,
+    artifacts,
     auth,
     devices,
     enroll,
@@ -217,6 +220,7 @@ def create_app() -> FastAPI:
     app.include_router(devices.router)
     app.include_router(agent.router)
     app.include_router(progress.router)
+    app.include_router(artifacts.router)
 
     @app.get("/v1/healthz", tags=["health"])
     async def healthz() -> dict[str, str]:
