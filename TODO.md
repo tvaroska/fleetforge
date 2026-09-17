@@ -307,13 +307,14 @@ fixes the `dn/cmd` `stage` payload and the `up/status` state machine, and is nea
       `staging → downloading → verifying → staged → applying → rebooting`, a duplicated
       publish produces one download, and `awaiting_safe_window` never expires server-side.
 
-- [ ] **R1-be-4**: Write every deploy outcome to `deploy_events` (P0, 0.5d)
+- [x] **R1-be-4**: Write every deploy outcome to `deploy_events` (P0, 0.5d)
       The KPI history R5 computes from, and the one table
       [prd.md](spec/prd.md) → *Retention* keeps **forever**. "Every outcome" includes the
       failures and the abandoned ones — a table that only records successes cannot answer
       the question the product exists to answer.
       Acceptance: success, failure and cancel each write a row; the row survives a
       restart; nothing else in R1 writes this table from two places.
+      _(done 2026-09-17; see docs/features/ota-deploy.md)_
 
 ### Firmware — verifiable in QEMU, no board
 

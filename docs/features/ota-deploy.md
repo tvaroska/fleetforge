@@ -502,6 +502,94 @@ touched.
 
 **Decisions & gotchas.** See `DECISIONS.md` 2026-09-17 (newest entry).
 
+### Deploy outcomes from `up/status` (R1-be-4) — **LANDED 2026-09-17**
+
+**What shipped.** The device half of the story R1-be-2 started: every state a board
+reports on `up/status` becomes a `deploy_events` row. One new function,
+`deploys.record_observed_status`, which is still the table's **only** writer
+(`tests/test_invariants.py` holds that tripwire); a `StatusPayload` in
+`ingestor/protocol.py`; a `STATUS` branch in `ingestor/handlers.py`; and
+`EventType.DEVICE_DEPLOY` on the SSE channel, emitted only when a row was written. No
+migration — `deploy_events` already had the shape.
+
+**The retained topic is the whole design.** `up/status` is retained and the ingestor
+re-`subscribe`s on every connect, so every reconnect replays the last status of every
+board. Retained status is still **ingested** (unlike telemetry and log, which are
+dropped when retained) — it is how an outcome published while the ingestor was down
+arrives at all — so the duplicate is the writer's problem: `record_observed_status`
+deduplicates on `(device_id, cmd_id, state)`. No unique index, deliberately: a repeated
+state is legal data inside a retry. A replay records its state and does **not** move
+`last_seen`.
+
+**The row's shape is the KPI.** `is_terminal` comes from `TERMINAL_DEPLOY_STATES`, never
+a literal; `artifact_version` and `from_version` are copied off the transaction's
+`requested` row; `at` is the server's receipt time, never the device `ts`. A `cmd_id`
+with no `requested` row is still recorded (versions NULL, INFO line). A state nobody has
+heard of is recorded and is not terminal. A status with **no `cmd_id`** writes nothing
+and only proves liveness — otherwise a booting board adds a row per boot to a table kept
+forever. A board claiming `requested` gets a WARNING and no row.
+
+**`detail` is sanitised.** `{"pct", "detail"}` — the wire's own key names — with control
+characters stripped, 200 chars max, and `https?://\S+` redacted to `<url>`: the signed
+link is a bearer credential and this table is kept forever. The wire model **coerces**
+instead of raising (a non-int `pct` is dropped, a non-string `detail` is stringified),
+because a `ValidationError` on a retained topic loses the same outcome on every single
+reconnect.
+
+**Cancel.** R1 ships no `cancel` command, so "cancel" here is the device's own
+`rolled_back`/`failed`. A superseded in-flight deploy gets **no** server-authored
+terminal row — see `DECISIONS.md` 2026-09-17 (R1-be-4), decision 4.
+
+**Verification.** T1: `just test` — ruff, `ruff format --check`, mypy and **906 tests**
+green, including the deliberately updated `is_terminal=` source tripwire in
+`tests/test_api_deploy.py` (now three assignments: `False`, the server's
+`publish_failed`, and the device's `state in TERMINAL_DEPLOY_STATES`) and
+`test_only_deploys_py_writes_deploy_events`.
+
+T2 against the live dev stack, `app.bin` uploaded as `1.5.0/esp32c6`
+(`sha256 2484cb76…`), simulated board `92a9cd2d4251`,
+`cmd 5ba290af0ae9463eac4f1ef92fe9d47e`:
+
+```
+SELECT state,is_terminal,artifact_version,from_version FROM deploy_events WHERE cmd_id=$CMD
+ requested   | f | 1.5.0 | 1.4.2
+ staging     | f | 1.5.0 | 1.4.2
+ downloading | f | 1.5.0 | 1.4.2
+ verifying   | f | 1.5.0 | 1.4.2
+ staged      | f | 1.5.0 | 1.4.2
+ applying    | f | 1.5.0 | 1.4.2
+ rebooting   | f | 1.5.0 | 1.4.2      <- each state exactly once, none terminal
+```
+
+* **Success:** publishing `{"state":"confirmed","pct":100}` as the board added exactly
+  one row — `confirmed | t | 1.5.0 | 1.4.2 | {"pct": 100}`.
+* **Replay:** `count(deploy_events)` = 26 before `docker compose restart ingestor`, 26
+  after, and 26 after a second restart. The logs show the retained status arriving
+  (`retain=True`) and being ingested as `device.seen` — the deduped event type.
+* **Failure:** a second deploy minted a **new** `cmd_id` (`reused: false`, the terminal
+  row closed the reuse window); `{"state":"failed","detail":"sha256 mismatch"}` →
+  `failed | t | detail='sha256 mismatch'`.
+* **Cancel/abandon:** `{"cmd_id":"cmd-abandon-1","state":"rolled_back"}` →
+  `rolled_back | t`, versions NULL (unmapped `cmd_id`, recorded anyway). An
+  `awaiting_safe_window` row published by hand still had **0** terminal rows minutes
+  later — nothing server-side expires it.
+* **Forgery:** `{"state":"requested"}` from the board → row count unchanged (35 → 35),
+  one ingestor WARNING: `device 92a9cd2d4251 reported the server-authored state
+  'requested' … ignoring`.
+* **Hygiene:** a status whose `detail` was
+  `GET https://host/v1/artifact/abc/bin?exp=1&sig=SECRETSIG failed` stored
+  `GET <url> failed`, and
+  `SELECT count(*) FROM deploy_events WHERE detail::text LIKE '%http%'` → **0**.
+
+**Spec proposal (not applied — `spec/` is protected).** `spec/device-protocol.md`
+should say that `up/status` `cmd_id` is **required** for a state belonging to a
+transaction (a status with no `cmd_id` is unrecordable and only proves liveness), and
+that a server may record device-reported states **idempotently** — a device
+republishing the same `(cmd_id, state)` is a no-op, which is what makes the retained
+topic safe to replay.
+
+**Decisions & gotchas.** See `DECISIONS.md` 2026-09-17 (R1-be-4, newest entry).
+
 ## Phase 2: R2 — Safe deploy: verify + auto-rollback ⭐
 
 | ID | Task | Priority | Effort |

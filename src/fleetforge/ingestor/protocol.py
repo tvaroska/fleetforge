@@ -16,7 +16,7 @@ import logging
 from dataclasses import dataclass
 from enum import StrEnum
 
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
 
 from fleetforge.identity import DEVICE_ID_RE
 
@@ -111,6 +111,42 @@ class HeartbeatPayload(_TolerantPayload):
     """`up/hb` — the liveness beat. Its health fields (`uptime_s`, `rssi`, …) are R3."""
 
     fw_version: str | None = None
+
+
+class StatusPayload(_TolerantPayload):
+    """`up/status` — the update transaction, QoS 1 and **retained**.
+
+    Tolerance matters more here than on any other channel. A `ValidationError` makes
+    `decode` return `None` and the message is dropped — and because the value is
+    retained, the same drop repeats on every reconnect, so the outcome is lost forever
+    rather than for one delivery. `pct` and `detail` therefore **coerce** instead of
+    raising: a future agent's richer `detail`, or a `pct` sent as a string, must not
+    cost us the `state` that is the whole point of the message.
+
+    `cmd_id` and `state` stay strictly `str | None`: a non-string there is a broken
+    board and there is nothing honest to record.
+    """
+
+    cmd_id: str | None = None
+    state: str | None = None
+    pct: int | None = None
+    detail: str | None = None
+
+    @field_validator("pct", mode="before")
+    @classmethod
+    def _plausible_pct(cls, value: object) -> int | None:
+        """A percentage or nothing. `bool` is an `int` in Python and is not one here."""
+        if isinstance(value, bool) or not isinstance(value, int):
+            return None
+        return value if 0 <= value <= 100 else None
+
+    @field_validator("detail", mode="before")
+    @classmethod
+    def _detail_as_text(cls, value: object) -> str | None:
+        """Anything the board sent, rendered as text. The writer sanitises and truncates."""
+        if value is None or isinstance(value, str):
+            return value
+        return str(value)
 
 
 def decode[T: _TolerantPayload](model: type[T], topic: str, payload: bytes) -> T | None:

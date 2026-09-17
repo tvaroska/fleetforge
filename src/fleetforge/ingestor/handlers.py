@@ -15,6 +15,14 @@ about *not* believing something is alive:
   everywhere — catastrophic for `sleepy`, where "the LWT fires on every normal sleep
   and means nothing" and a bricked e-paper frame would stay online forever.
 
+* **Retained `up/status` is still ingested** — unlike telemetry and log, which are
+  dropped when retained. The retained value is exactly how an outcome published while
+  the ingestor was down gets delivered at all, and there is no manual ack: a dropped
+  status is an outcome lost forever. It proves no liveness, though, so the state is
+  recorded and `last_seen` stays where it was. The duplicate a replay would otherwise
+  create is the writer's problem, and `deploys.record_observed_status` deduplicates on
+  `(device_id, cmd_id, state)`.
+
 Together: **`last_seen` advances only on a live (`retain=False`) message that is not
 `presence{online:false}`.**
 
@@ -27,12 +35,14 @@ import logging
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from fleetforge.deploys import record_observed_status
 from fleetforge.events import DeviceEvent, EventType, emit
 from fleetforge.ingestor import store
 from fleetforge.ingestor.protocol import (
     AnnouncePayload,
     HeartbeatPayload,
     PresencePayload,
+    StatusPayload,
     UpChannel,
     decode,
     parse_up_topic,
@@ -72,6 +82,7 @@ async def handle_up_message(
     device_id = parsed.device_id
     row = None
     event_type = EventType.DEVICE_SEEN
+    status: StatusPayload | None = None
 
     if parsed.channel == UpChannel.ANNOUNCE:
         announce = decode(AnnouncePayload, topic, payload)
@@ -121,11 +132,26 @@ async def handle_up_message(
         )
         event_type = EventType.DEVICE_HEARTBEAT
 
+    elif parsed.channel == UpChannel.STATUS:
+        status = decode(StatusPayload, topic, payload)
+        if status is None:
+            return None
+        # The one channel whose retained replay is ingested rather than dropped: it is
+        # how an outcome published while the ingestor was down arrives at all. A replay
+        # is still not a sign of life, so only a live status moves `last_seen`. Either
+        # way the row has to be looked up — an insert for an unregistered device would
+        # hit `deploy_events`' `ON DELETE RESTRICT` FK and be swallowed as "ingest
+        # failed", losing the write — so the unregistered case keeps one drop path.
+        row = (
+            await store.fetch_live_device(session, device_id)
+            if retained
+            else await store.touch_last_seen(session, device_id, received_at)
+        )
+
     else:
-        # `up/status` → `deploy_events` in **R1**; `up/telemetry` → **R3**; `up/log` →
-        # R3 and still an open item in the protocol doc. An unknown channel from a
-        # future agent lands here too. At R0 all of them only prove the board is
-        # alive: **no `deploy_events` row is written in this task.**
+        # `up/telemetry` → **R3**; `up/log` → R3 and still an open item in the protocol
+        # doc. An unknown channel from a future agent lands here too. All of them only
+        # prove the board is alive: **no `deploy_events` row is written for them.**
         if retained:
             logger.debug("ignoring retained replay on %s", topic)
             return None
@@ -134,6 +160,23 @@ async def handle_up_message(
     if row is None:
         logger.info("ignoring message from unregistered or decommissioned device %s", device_id)
         return None
+
+    if status is not None and status.cmd_id and status.state:
+        # A status with no `cmd_id` (or no `state`) belongs to no transaction — `idle`
+        # with a null `cmd_id` is a board saying "nothing in flight" — and recording it
+        # would add a row per boot to a table kept forever. The event is upgraded only
+        # when a row was actually written: a deduped replay is not news.
+        written = await record_observed_status(
+            session,
+            device_id=device_id,
+            cmd_id=status.cmd_id,
+            state=status.state,
+            at=received_at,
+            pct=status.pct,
+            detail=status.detail,
+        )
+        if written is not None:
+            event_type = EventType.DEVICE_DEPLOY
 
     event = DeviceEvent(
         type=event_type,

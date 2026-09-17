@@ -64,8 +64,14 @@ async def _apply(session: AsyncSession, device_id: str, values: dict[str, Any]) 
     return (await session.scalars(stmt)).one_or_none()
 
 
-async def _fetch(session: AsyncSession, device_id: str) -> Device | None:
-    """Read the row without writing it — for a message that changes nothing."""
+async def fetch_live_device(session: AsyncSession, device_id: str) -> Device | None:
+    """Read the row without writing it — for a message that changes nothing.
+
+    Public because `handlers.py` needs it for a **retained** `up/status`: the state is
+    ingested but proves no liveness, so there is nothing to UPDATE and the caller still
+    needs the "registered and not decommissioned" answer this module owns. A read does
+    not break the module's "UPDATE only, never INSERT" rule.
+    """
     return (await session.scalars(select(Device).where(*_live_device(device_id)))).one_or_none()
 
 
@@ -110,7 +116,7 @@ async def apply_announce(
     if not values:
         # A retained announce carrying nothing we map changes nothing; `UPDATE … SET`
         # needs at least one column, so read the row instead of writing a no-op.
-        return await _fetch(session, device_id)
+        return await fetch_live_device(session, device_id)
     return await _apply(session, device_id, values)
 
 
@@ -202,5 +208,5 @@ async def apply_heartbeat(
     if fw_version is not None:
         values["fw_version"] = fw_version
     if not values:
-        return await _fetch(session, device_id)
+        return await fetch_live_device(session, device_id)
     return await _apply(session, device_id, values)

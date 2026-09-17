@@ -1,20 +1,20 @@
-"""`deploy_events` — the single writer. R1-be-2.
+"""`deploy_events` — the single writer. R1-be-2, R1-be-4.
 
 `spec/prd.md` → *Retention*: this table is kept **forever**; "the metric history is the
 product's evidence". Both v1 KPIs (delivery success, fleet safety) are computed over the
 terminal event of each `(device_id, cmd_id)` transaction, so a row written in the wrong
 shape is not a bug that shows up today — it is a KPI that is quietly wrong in R5.
 
-**Everything that inserts into `deploy_events` goes through this module.** R1-be-4's
-ingestor path adds its `up/status` writer *here*, rather than growing its own SQL in
-`ingestor/handlers.py`; `tests/test_invariants.py` holds the tripwire that no other
-module under `src/` mentions the table in SQL. One writer is what keeps "what does
-`is_terminal` mean" a single answer.
+**Everything that inserts into `deploy_events` goes through this module.** The
+ingestor's `up/status` writer lives *here* (`record_observed_status`), rather than
+growing its own SQL in `ingestor/handlers.py`; `tests/test_invariants.py` holds the
+tripwire that no other module under `src/` mentions the table in SQL. One writer is
+what keeps "what does `is_terminal` mean" a single answer.
 
 Transport-agnostic like `fleetforge.progress` and `fleetforge.presence`: no FastAPI
 import and no settings object — the caller passes the session and the numbers.
 
-## The two rules this module owns
+## The three rules this module owns
 
 **1. The server authors exactly one state, and one exception to it.**
 
@@ -51,12 +51,33 @@ A *different* artifact is always a new transaction. The TTL bound is deliberate:
 it the first URL has expired, so a board that never acted on the first command cannot
 act on it now, and a fresh intent is the honest record.
 
+**3. A device-reported state is recorded at most once per `(device_id, cmd_id, state)`.**
+
+`up/status` is **retained** (`spec/device-protocol.md`) and the ingestor re-`subscribe`s
+on every connect, so every broker blip, container restart or stack deploy replays the
+last status of every board. Ingesting the replay is mandatory — it is how an outcome
+published while the ingestor was down is delivered at all — so the deduplication has to
+live in the writer: `record_observed_status` returns `None` when the triple is already
+on record.
+
+The consequence, deliberate: a genuinely repeated state inside one transaction (a
+`downloading → failed → downloading` retry) collapses to its first occurrence, and the
+`pct` stored is the first one seen. This table is a log of **transitions**, not a
+progress feed — live progress is the SSE stream's job. For the same reason there is no
+unique index: a repeated state is legal data, so this is a writer rule and not a
+database invariant.
+
 **Nothing secret goes in `detail`.** The signed URL is a bearer credential: it is never
-persisted here, never logged and never echoed in an API response.
+persisted here, never logged and never echoed in an API response. Device-reported
+detail is control-stripped, truncated and URL-redacted before it is stored, because it
+is device-controlled text landing in a table kept forever.
 """
 
+import datetime as dt
 import logging
+import re
 from dataclasses import dataclass
+from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -64,6 +85,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from fleetforge.db.models import TERMINAL_DEPLOY_STATES, DeployEvent, DeployState
 
 logger = logging.getLogger(__name__)
+
+# Same bound as `api/schemas.py::MAX_PROGRESS_DETAIL`, restated rather than imported:
+# this module is transport-agnostic and must not reach into the FastAPI side.
+MAX_OBSERVED_DETAIL = 200
+
+# The signed download URL is a bearer credential. Our agent does not echo it, but a
+# third-party one might, and `deploy_events` is kept forever — so redact by
+# construction rather than trusting the fleet.
+_URL_RE = re.compile(r"https?://\S+")
 
 # The newest `requested` row for this device, inside the reuse window, whose
 # transaction has no terminal event. `NOT EXISTS` rather than a join so a transaction
@@ -213,4 +243,148 @@ async def record_publish_failure(
     logger.warning(
         "deploy %s for %s recorded as failed: the command was not published", cmd_id, device_id
     )
+    return row
+
+
+# Has this exact transition already been recorded? Covered by `ix_deploy_events_cmd_id`.
+# Safe without a unique index because the ingestor is the only MQTT subscriber and
+# processes messages sequentially, one session per message (`design/production.md`).
+_ALREADY_RECORDED_SQL = text(
+    """
+    SELECT 1
+      FROM deploy_events
+     WHERE device_id = :device_id
+       AND cmd_id = :cmd_id
+       AND state = :state
+     LIMIT 1
+    """
+)
+
+# The intent this observed state belongs to. Copying the two version columns off the
+# `requested` row is the whole reason R1-be-2 invented that state: without it a
+# terminal row cannot say which version was intended and "delivery success" is
+# uncomputable.
+_INTENT_SQL = text(
+    """
+    SELECT artifact_version, from_version
+      FROM deploy_events
+     WHERE device_id = :device_id
+       AND cmd_id = :cmd_id
+       AND state = :requested_state
+     ORDER BY at DESC, id DESC
+     LIMIT 1
+    """
+)
+
+
+def _sanitise_detail(value: str) -> str:
+    """Make device-controlled text safe to keep forever.
+
+    Three rules, each with a precedent: no control characters (a device that can inject
+    a newline can forge a log line — `api/schemas.py::_printable_detail`), no URLs (the
+    signed link is a credential), and bounded length (`MAX_PROGRESS_DETAIL`).
+    Redaction happens before truncation so a URL cannot be half-kept.
+    """
+    redacted = _URL_RE.sub("<url>", value)
+    stripped = "".join(ch for ch in redacted if ch >= " " and ch != "\x7f")
+    return stripped[:MAX_OBSERVED_DETAIL]
+
+
+def _observed_detail(pct: int | None, detail: str | None) -> dict[str, Any] | None:
+    """The JSONB blob for an observed state: what the device sent, and nothing else.
+
+    The key names are the wire's own (`spec/device-protocol.md` → `up/status`), so a
+    reader of the protocol can read the column. `None` when the device said neither.
+    """
+    blob: dict[str, Any] = {}
+    if pct is not None:
+        blob["pct"] = pct
+    if detail is not None:
+        text_detail = _sanitise_detail(detail)
+        if text_detail:
+            blob["detail"] = text_detail
+    return blob or None
+
+
+async def record_observed_status(
+    session: AsyncSession,
+    *,
+    device_id: str,
+    cmd_id: str,
+    state: str,
+    at: dt.datetime,
+    pct: int | None = None,
+    detail: str | None = None,
+) -> DeployEvent | None:
+    """Record a state the **device** reported on `up/status`, or `None` if nothing was.
+
+    Every outcome a board reports becomes a row — the successes, the failures and the
+    abandoned ones — because both v1 KPIs are computed over the terminal event of each
+    transaction. Three reasons this returns `None` instead of writing:
+
+    * the wire claimed `requested`, which is the server's own state and no device's to
+      report (`db/models.py`): a firmware bug or a forgery, logged at WARNING;
+    * the `(device_id, cmd_id, state)` transition is already on record — the retained
+      replay rule in the module docstring;
+    * (the caller's business) the status carried no `cmd_id`, so it belongs to no
+      transaction and there is nothing to record.
+
+    A `cmd_id` with no `requested` row — a board replaying a transaction from before a
+    database rebuild, a command issued by another server — is still recorded, with both
+    version columns NULL. "Every outcome" means every outcome, including the ones we
+    cannot explain.
+
+    `at` is the server's receipt time, threaded in by the caller and never the device's
+    `ts` (`spec/device-protocol.md` → *Clock*): a reconnect can drain a backlog long
+    after the board wrote it.
+    """
+    if state == DeployState.REQUESTED.value:
+        logger.warning(
+            "device %s reported the server-authored state %r for %s; ignoring",
+            device_id,
+            state,
+            cmd_id,
+        )
+        return None
+
+    keys = {"device_id": device_id, "cmd_id": cmd_id, "state": state}
+    if (await session.execute(_ALREADY_RECORDED_SQL, keys)).first() is not None:
+        logger.debug("deploy %s for %s already recorded state %s", cmd_id, device_id, state)
+        return None
+
+    intent = (
+        await session.execute(
+            _INTENT_SQL,
+            {
+                "device_id": device_id,
+                "cmd_id": cmd_id,
+                "requested_state": DeployState.REQUESTED.value,
+            },
+        )
+    ).first()
+    if intent is None:
+        logger.info(
+            "recording state %s for %s with no requested row for cmd %s", state, device_id, cmd_id
+        )
+
+    row = DeployEvent(
+        device_id=device_id,
+        cmd_id=cmd_id,
+        state=state,
+        # From the set, never a literal: the terminal vocabulary lives in `db/models.py`
+        # and this row has to agree with the KPI queries' definition. A state nobody has
+        # heard of is recorded and is not terminal.
+        is_terminal=state in TERMINAL_DEPLOY_STATES,
+        # The server's receipt time, not the column default: a reconnect can drain a
+        # backlog of retained statuses long after the message was received.
+        at=at,
+        from_version=intent.from_version if intent is not None else None,
+        artifact_version=intent.artifact_version if intent is not None else None,
+        detail=_observed_detail(pct, detail),
+    )
+    session.add(row)
+    await session.flush()
+    if row.is_terminal:
+        # The ops line that answers "did it land?". Never the `detail` text.
+        logger.info("deploy %s for %s ended: %s", cmd_id, device_id, state)
     return row

@@ -6,6 +6,67 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-17 — Every device-reported deploy state is a row, recorded once, and the server still authors no cancel
+
+**R1-be-4.** `up/status` now writes `deploy_events` through the table's one writer,
+`deploys.record_observed_status`. Five decisions.
+
+**1. The retained topic forces deduplication on `(device_id, cmd_id, state)`.**
+`up/status` is retained and the ingestor re-`subscribe`s on every connect, so a broker
+blip, a container restart or a stack deploy replays the last status of every board.
+Retained status is nevertheless **ingested** — unlike telemetry and log, which are
+dropped when retained — because the retained value is exactly how an outcome published
+while the ingestor was down is delivered at all, and there is no manual ack: a dropped
+status is an outcome lost forever. So the duplicate is handled in the writer, not by
+dropping the message. It is a **writer rule, not a unique index**: a repeated state is
+legal data (`downloading → failed → downloading` inside one retry), so the database must
+still accept it. The deliberate consequence is that a repeated state inside one
+transaction collapses to its first occurrence and the stored `pct` is the first one seen
+— `deploy_events` is a log of transitions, not a progress feed.
+
+**2. A replay proves nothing about liveness.** A retained status records its state but
+does not move `last_seen`, so an ingestor restart cannot mark a dead fleet alive. It
+still resolves the device through `store.fetch_live_device` (the old private `_fetch`,
+now public), which keeps **one** drop path for the unregistered/decommissioned case:
+`deploy_events.device_id` is an FK with `ON DELETE RESTRICT`, and an insert for an
+unknown device would raise `IntegrityError` that the message loop swallows as "ingest
+failed", losing the write.
+
+**3. The wire may not author `requested`, and an unmapped `cmd_id` is recorded anyway.**
+A board reporting the server's own state is a firmware bug or a forgery: WARNING, no
+row. Conversely a `cmd_id` with no `requested` row — a transaction from before a
+database rebuild, a command from another server — **is** recorded, with both version
+columns NULL and an INFO line. "Every outcome" means every outcome, including the ones
+we cannot explain. Everything else is copied off the `requested` row, which is the whole
+reason R1-be-2 invented that state: without `artifact_version` on the terminal row, R5's
+delivery-success KPI is uncomputable.
+
+**4. There is no server-authored cancel, and TODO's "cancel" is the device's rollback.**
+R1 ships no `cancel` command — `broker/commands.py` publishes `stage` only. So: success
+→ `confirmed`; failure → device-reported `failed` (plus the server's `publish_failed`);
+cancel/abandon → the device's own `rolled_back` or `failed`, because the device owns the
+reboot and the rollback. When a new deploy supersedes an in-flight one the server writes
+**nothing**: that would be authoring a state for a command the device provably did
+receive, which the 2026-09-17 R1-be-2 entry forbids. The superseded intent stays an open
+transaction with no terminal event — which is precisely what "fleet safety loss" means
+in R5, and is the truthful record. Do not "fix" this.
+
+**5. Device-reported `detail` is sanitised before it is stored forever.** Control
+characters stripped (a device that can inject a newline can forge a log line — the
+`api/schemas.py::_printable_detail` precedent), truncated to 200 chars
+(`MAX_PROGRESS_DETAIL`, restated locally because `deploys.py` is transport-agnostic and
+must not import the FastAPI side), and `https?://\S+` redacted to `<url>` — the signed
+download URL is a bearer credential, our agent does not echo it but a third party's
+might, and R1-be-3's evidence asserts no stored `detail` contains `http`. Kept true by
+construction. The wire model coerces rather than raises (`pct` that is not an int in
+0..100 → dropped, a non-string `detail` → `str(...)`): a `ValidationError` on a
+*retained* topic loses the same outcome on every reconnect.
+
+`EventType.DEVICE_DEPLOY` is emitted only when a row was actually written — a deduped
+replay is not news — and the SSE envelope gains no field: the consumer re-reads.
+
+---
+
 ## 2026-09-17 — Firmware downloads go through our own signed URL, and the API redirects rather than proxies
 
 **R1-be-3.** The device is handed a link on **our** origin —
