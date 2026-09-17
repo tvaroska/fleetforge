@@ -93,15 +93,15 @@ are the real domain.
 The board runs one image and stages another, so build twice and keep them apart:
 
 ```bash
-just agent-build esp32 && cp -r agent/dist/esp32 /tmp/ff-A     # A: the board
-printf '0.3.1\n' > agent/version.txt
-just agent-build esp32 && cp -r agent/dist/esp32 /tmp/ff-B     # B: the artifact
-printf '0.3.0\n' > agent/version.txt                            # restore; commit 0.3.0
+just agent-build esp32 && rm -rf /tmp/ff-A && cp -r agent/dist/esp32 /tmp/ff-A  # A: the board
+printf '0.3.2\n' > agent/version.txt
+just agent-build esp32 && rm -rf /tmp/ff-B && cp -r agent/dist/esp32 /tmp/ff-B  # B: the artifact
+printf '0.3.1\n' > agent/version.txt                            # restore; commit 0.3.1
 cp -r /tmp/ff-A/. agent/dist/esp32/                             # `--fresh` flashes dist/
 ```
 
-Upload B (`POST /v1/artifact?target=esp32&version=0.3.1`, 201), boot A, then
-`POST /v1/devices/000000000000/deploy -d '{"version":"0.3.1"}'` → **202**. A **409** there
+Upload B (`POST /v1/artifact?target=esp32&version=0.3.2`, 201), boot A, then
+`POST /v1/devices/000000000000/deploy -d '{"version":"0.3.2"}'` → **202**. A **409** there
 means the announce still carries `capabilities: []`. Watch the transaction with
 `PYTHONUNBUFFERED=1 just mqtt-sub 'ff/v1/d/+/up/status' | tee /tmp/status.log` — without
 `PYTHONUNBUFFERED` Python block-buffers into the pipe and the file stays empty for
@@ -132,12 +132,15 @@ cleanly from power-on minutes earlier — panics at the identical PC, and killin
 starting it again (a POWERON reset) boots either slot fine. Same family as the panic
 recorded below: a peripheral that QEMU does not reset with the CPU.
 
-Workaround for an OTA acceptance run, which is what proves the *applied* image boots:
+Workaround for an OTA acceptance run, which is what proves the *applied* image boots — ask
+for `apply: "on_command"`, so the agent stages the slot and **parks** instead of rebooting
+itself (`ff_ota.c`: "apply=on_command — staged and waiting"), then power-cycle it yourself:
 
 ```bash
-# kill the machine the moment the digest matches, BEFORE it reboots itself
-until grep -q 'is staged and bootable' /tmp/qemu.log; do sleep 0.2; done
-docker kill ff-qemu-esp32
+curl -sS -X POST "$BASE/v1/devices/000000000000/deploy" -H "Authorization: Bearer $TOKEN" \
+     -H 'content-type: application/json' -d '{"version":"0.3.2","apply":"on_command"}'
+until grep -q 'is staged and bootable' /tmp/qemu.log; do sleep 0.5; done
+just agent-qemu-stop esp32     # SIGKILL == pulling the power
 just agent-qemu esp32          # cold start: the bootloader takes the NEW slot
 ```
 
@@ -146,6 +149,38 @@ as `PENDING_VERIFY` exactly as the self-reboot would have, and the agent confirm
 `this image was written by OTA and is now CONFIRMED`. Do **not** let it panic first — one
 panic in `PENDING_VERIFY` is what the bootloader's rollback is for, and it will (correctly)
 put the old slot back.
+
+**Racing `apply: "auto"` does not work** (R1-fw-2): `staged and bootable` and
+`esp_restart()` are **40 ms** apart in the log, so a `sleep 0.2` poll loses every time. The
+board then soft-resets into the new slot, panics as above, and the bootloader retires the
+`PENDING_VERIFY` image — you end up back on the old slot with `otadata` marked `aborted`
+and nothing wrong with the image you were trying to prove. `apply: "on_command"` removes
+the race instead of trying to win it.
+
+### Reading the version back (R1-fw-2)
+
+Every boot prints which image is executing and what the bootloader thinks of it:
+
+```
+I ff-agent: running partition: ota_1 type=0 subtype=17 offset=0x200000 size=1966080
+I ff-agent: running image: fw_version 0.3.2, ota state pending_verify — this is what
+            up/announce and up/hb report
+```
+
+`ota state` is the whole diagnostic: `pending_verify` on the first boot of an OTA'd slot,
+`valid` once `ff_mqtt.c` confirms it, `none (serially flashed)` on a board that has never
+been written by OTA, and `aborted` on the slot the bootloader has just given up on. Assert
+the server agrees — the field an operator actually reads:
+
+```bash
+dev() { curl -sS -H "Authorization: Bearer $TOKEN" "$BASE/v1/devices" \
+        | jq -r '.devices[] | select(.device_id=="000000000000") | .fw_version'; }
+dev                                    # => 0.3.2 after an applied update
+```
+
+After a **failed** apply (a hand-published `stage` with a corrupted digest) the same three
+readings must all still say the old version — board log, `up/hb`, and `dev`. That is the
+half worth running first, because it is the one nobody checks.
 
 ## What a first boot looks like
 

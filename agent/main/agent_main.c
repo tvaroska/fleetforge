@@ -100,6 +100,19 @@ static void log_power_fault(void)
                   "is marginal for this board even if this boot succeeds.");
 }
 
+static const char *ota_state_name(esp_ota_img_states_t state)
+{
+    switch (state) {
+    case ESP_OTA_IMG_NEW:            return "new";
+    case ESP_OTA_IMG_PENDING_VERIFY: return "pending_verify";
+    case ESP_OTA_IMG_VALID:          return "valid";
+    case ESP_OTA_IMG_INVALID:        return "invalid";
+    case ESP_OTA_IMG_ABORTED:        return "aborted";
+    case ESP_OTA_IMG_UNDEFINED:      return "undefined";
+    default:                         return "?";
+    }
+}
+
 static void log_boot_facts(void)
 {
     const esp_app_desc_t *app = esp_app_get_description();
@@ -120,6 +133,17 @@ static void log_boot_facts(void)
                       " size=%" PRIu32,
                  running->label, (int)running->type, (int)running->subtype, running->address,
                  running->size);
+
+        /* R1-fw-2. READ-ONLY: this line observes the image state, it never changes it.
+         * The confirm/rollback decision belongs to ff_mqtt.c and to nothing else
+         * (CRITICAL.md: "Device-side confirm timer / rollback path"). A serially flashed
+         * board has no otadata entry at all, which is not an error here. */
+        esp_ota_img_states_t state = ESP_OTA_IMG_UNDEFINED;
+        esp_err_t state_err = esp_ota_get_state_partition(running, &state);
+        ESP_LOGI(TAG, "running image: fw_version %s, ota state %s — this is what "
+                      "up/announce and up/hb report",
+                 ff_identity_fw_version(),
+                 state_err == ESP_OK ? ota_state_name(state) : "none (serially flashed)");
     } else {
         ESP_LOGE(TAG, "no running partition: this image was not flashed into an OTA slot");
     }

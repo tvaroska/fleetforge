@@ -48,6 +48,17 @@ const char *ff_device_id(void);
  * ff_identity.c). Reported honestly rather than papered over. */
 bool ff_identity_mac_is_blank(void);
 
+/* The version this board is RUNNING, taken from the running image's own `esp_app_desc_t`
+ * (R1-fw-2). This is the ONLY source for `fw_version` in up/announce and up/hb: after an
+ * OTA the descriptor is the new slot's, and after a bootloader rollback it is the old
+ * slot's again — with no state of ours to get wrong. It must never come from a `stage`
+ * command (`ff_ota_cmd_t::version` is the version we were TOLD to install), from NVS, or
+ * from a compile-time macro: those disagree with reality exactly when something went
+ * wrong, which is the moment the field has to be right.
+ *
+ * Never NULL, and valid before ff_identity_init() — it reads no eFuse. */
+const char *ff_identity_fw_version(void);
+
 /*
  * The three payloads. Each returns a heap string the caller must free() — cJSON's own
  * allocation, printed unformatted (compact), exactly as the simulator's `encode()` does.

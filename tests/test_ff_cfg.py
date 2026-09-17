@@ -41,7 +41,9 @@ FF_CFG_PY = AGENT_DIR / "tools" / "ff_cfg.py"
 FF_CFG_C = AGENT_DIR / "main" / "ff_cfg.c"
 FF_CFG_H = AGENT_DIR / "main" / "ff_cfg.h"
 FF_IDENTITY_C = AGENT_DIR / "main" / "ff_identity.c"
+FF_IDENTITY_H = AGENT_DIR / "main" / "ff_identity.h"
 FF_MQTT_H = AGENT_DIR / "main" / "ff_mqtt.h"
+FF_OTA_C = AGENT_DIR / "main" / "ff_ota.c"
 # The third implementation and the vector both writers are pinned to (R0-fe-3).
 FF_CFG_TS = REPO_ROOT / "frontend" / "src" / "ffcfg.ts"
 FF_CFG_VECTOR = REPO_ROOT / "frontend" / "src" / "ffcfg.vector.json"
@@ -342,6 +344,36 @@ class TestAnnounceMatchesTheSpec:
         source = _code(FF_IDENTITY_C)
         assert '"capabilities"' in source
         assert '"ota"' in source, "ff_identity.c no longer claims the ota capability"
+
+
+class TestTheReportedVersionIsTheRunningOne:
+    """R1-fw-2. `fw_version` is what BOOTED, never what a command asked for.
+
+    A board that reports the version it was told to install reports the right answer on
+    every deploy that worked and the wrong one on every deploy that did not — i.e. it is
+    silent exactly when the fleet needs it. Nothing at runtime would say so, and the fix
+    ships by OTA to a board whose OTA reporting is the thing that is broken.
+    """
+
+    def test_the_running_version_has_one_source(self) -> None:
+        source = _code(FF_IDENTITY_C)
+        assert "ff_identity_fw_version(void)" in source
+        assert "esp_app_get_description()->version" in source
+        assert "const char *ff_identity_fw_version(void);" in _code(FF_IDENTITY_H)
+
+    def test_announce_and_heartbeat_both_use_it(self) -> None:
+        source = _code(FF_IDENTITY_C)
+        assert (
+            source.count('cJSON_AddStringToObject(root, "fw_version", ff_identity_fw_version());')
+            == 2
+        ), "up/announce and up/hb must both take fw_version from the running image"
+
+    def test_the_ota_path_cannot_report_a_version(self) -> None:
+        """`ff_ota_cmd_t::version` is the version the SERVER asked for. It reaches one log
+        line and dies there: ff_ota.c neither builds an identity payload nor knows how."""
+        source = _code(FF_OTA_C)
+        assert '"fw_version"' not in source
+        assert "ff_identity" not in source
 
 
 class TestStatusStatesMatchTheSpec:

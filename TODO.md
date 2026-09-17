@@ -330,13 +330,14 @@ fixes the `dn/cmd` `stage` payload and the `up/status` state machine, and is nea
       stack end to end, and the `up/status` sequence matches the spec's state machine.
       _(done 2026-09-17; reviewed; see docs/features/ota-deploy.md)_
 
-- [ ] **R1-fw-2**: Agent reports firmware version after reboot (P0, 0.5d)
+- [x] **R1-fw-2**: Agent reports firmware version after reboot (P0, 0.5d)
       `fw_version` in `up/announce` and `up/hb` must be the version that is *running*,
       read from the running app's own description — not the version it was told to
       install. Those two disagree exactly when something went wrong, which is the moment
       the field has to be right.
       Acceptance: after a staged-and-applied update in QEMU, the reported version changes
       to the uploaded one; after a failed apply, it does not.
+      _(done 2026-09-17; reviewed; see docs/features/ota-deploy.md)_
 
 ### Frontend
 

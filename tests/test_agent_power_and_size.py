@@ -86,8 +86,13 @@ FORBIDDEN_OPTIONS = [
 # image nobody measured is a budget that guards nothing, and each number is a ceiling for
 # its own target. The real limit is MAX_SLOT_FRACTION below: 1,010,912 B is 51% of the
 # 1,966,080-byte slot, so the image can still download its own replacement.
+#
+# Raised 2026-09-17 (R1-fw-2) for **esp32 only**, again to the exact measured byte:
+# 1,010,912 -> 1,011,216, i.e. +304 B of .rodata for the boot line that names the running
+# image's version and OTA state (`ota_state_name()` plus its strings). No other target was
+# rebuilt, so no other number moved.
 APP_SIZE_BUDGET_BYTES = {
-    "esp32": 1_010_912,
+    "esp32": 1_011_216,
     "esp32s3": 973_136,
     "esp32c3": 1_028_336,
     "esp32c6": 1_077_840,

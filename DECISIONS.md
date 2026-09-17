@@ -6,6 +6,49 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-17 — `fw_version` is the version that BOOTED, and there is now exactly one way to say it
+
+**R1-fw-2.** The behaviour was already right; nothing kept it right.
+
+**1. The fix was a seam, not a behaviour change.** `esp_app_get_description()` already
+returned the *running* image's descriptor — the new slot's after an OTA, the old slot's
+again after a rollback — but two call sites read it and a third plausible source existed:
+`ff_ota_cmd_t::version`, the version the server asked us to install. Reporting that is
+correct on every deploy that worked and wrong on every deploy that did not, i.e. silent
+exactly when the fleet needs the field. So `ff_identity_fw_version()` is now the only way a
+version reaches the wire, and three tripwires in `tests/test_ff_cfg.py` pin it: one source,
+both payloads, and `ff_ota.c` neither emitting `"fw_version"` nor including `ff_identity`.
+Tripwires rather than a runtime check because no host test can execute this code and the
+fix would ship by OTA to a board whose OTA reporting is what is broken.
+
+**2. The boot line now names the image state.** `running image: fw_version 0.3.2, ota state
+pending_verify` is what distinguishes an applied update from a rolled-back one in a serial
+log with no server attached. It is read-only (`esp_ota_get_state_partition()` and nothing
+else) and deliberately **not** merged with `ff_mqtt.c`'s reader of the same otadata: two
+small readers of one state is the cheap outcome, one shared helper that someone later
+improves is a bricked fleet.
+
+**3. No cross-reboot state.** Still nothing persisted — the announce from the image that
+booted is the whole report. Restates R1-fw-1 §1; supersedes nothing.
+
+**4. T2 ran the negative before the positive**, because the negative needs the board still
+on the old image and is the half nobody checks: told `0.3.2`, failed on a corrupted digest,
+and `up/hb` plus `devices.fw_version` still read `0.3.1` afterwards. Only then the applied
+update, `0.3.1 → 0.3.2`.
+
+**5. `apply: "on_command"` is how you drive a QEMU acceptance run**, not a race against
+`esp_restart()`. R1-fw-1's workaround (poll for `staged and bootable`, kill before the
+reboot) has a **40 ms** window and loses: the board soft-resets, hits the emulator's known
+`esp_timer_impl_init` panic, and the bootloader retires the `PENDING_VERIFY` image exactly
+as designed — leaving the old slot running and `otadata` `aborted`, which reads like a
+firmware fault and is not one. Staging without applying and then power-cycling removes the
+race instead of trying to win it (`docs/runbooks/agent-qemu.md`).
+
+`agent/version.txt` → `0.3.1`. `spec/device-protocol.md`'s example `agent_version` string
+is now stale — a proposal only; `spec/` is protected.
+
+---
+
 ## 2026-09-17 — The agent applies an update: verified against flash, undone on mismatch, and finished at `rebooting`
 
 **R1-fw-1.** `ff_ota.c` is the first code in this product that moves a boot partition, so

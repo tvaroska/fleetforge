@@ -687,6 +687,91 @@ under `apply: "on_command"` stops at `staged`.
 
 **Decisions & gotchas.** See `DECISIONS.md` 2026-09-17 (R1-fw-1, newest entry).
 
+### The reported version is the one that BOOTED (R1-fw-2) — **LANDED 2026-09-17**
+
+**What shipped.** `ff_identity_fw_version()` — one accessor, returning
+`esp_app_get_description()->version`, i.e. the descriptor embedded in the image that is
+*executing*. `up/announce` and `up/hb` both take `fw_version` from it and from nothing
+else; `agent_version` stays a separate expression, because from R1 the agent can be a
+component inside a user firmware and only `fw_version` moves. `log_boot_facts()` now also
+prints the running image's version **and its OTA state**, and
+`tests/test_ff_cfg.py::TestTheReportedVersionIsTheRunningOne` pins all of it.
+`agent/version.txt` → `0.3.1`; the esp32 app grew 1,010,912 → 1,011,216 B (+304 B of
+`.rodata`), ratcheted in `tests/test_agent_power_and_size.py`.
+
+**This was a seam, not a behaviour change.** The happy path already read the running
+descriptor. What did not exist was anything stopping the *plausible* refactor — reporting
+`ff_ota_cmd_t::version`, the version the server asked for — which is right on every deploy
+that worked and wrong on every deploy that did not. The failure is invisible at runtime
+(the board reports confidently, just falsely) and the fix would ship by OTA to a fleet
+whose OTA reporting is the broken thing. Hence three text tripwires: one source for the
+version, both payloads using it, and `ff_ota.c` neither emitting `"fw_version"` nor
+including `ff_identity` — the command seam stays one-directional.
+
+**The new boot line**, which is what tells an applied update from a rolled-back one in a
+serial log with no server attached:
+
+```
+I ff-agent: running partition: ota_1 type=0 subtype=17 offset=0x200000 size=1966080
+I ff-agent: running image: fw_version 0.3.2, ota state pending_verify — this is what
+            up/announce and up/hb report
+```
+
+Read-only, and deliberately **not** merged with `ff_mqtt.c`'s reader of the same otadata:
+two small readers is the cheap outcome, a shared helper someone later "improves" is a
+bricked fleet (CRITICAL.md → *Device-side confirm timer / rollback path*).
+
+**Verification.** T1: `just test` — ruff, `ruff format --check`, mypy, **912 tests** green;
+`just agent-build esp32` → `BUNDLE OK` (the component is `-Wall -Wextra -Werror`, and
+dropping the now-unused `app` local in the heartbeat builder is part of why) and
+`just agent-verify esp32`.
+
+T2 on the QEMU board `000000000000`, dev stack with guest-reachable origins, board A
+`0.3.1`, artifact B `0.3.2` (`sha256 c5cf59a6…`, 1,011,216 B). **Negative first**, because
+it needs the board still on A:
+
+```
+# told 0.3.2, digest corrupted by hand, published as the commander role
+E ff-ota: sha256 MISMATCH, flash holds c5cf59a6…8f6e, the command says c5cf59a6…dead
+E ff-ota: boot partition put back to ota_0: the staged image was rejected and will NOT be booted
+up/status (retained)  {"state":"failed","detail":"sha256 mismatch"}
+up/hb                 {"fw_version":"0.3.1", …}      <- after the failure, repeatedly
+GET /v1/devices       000000000000 -> 0.3.1          <- the load-bearing assertion
+```
+
+and after a cold restart: `running image: fw_version 0.3.1, ota state pending_verify`
+(the undo re-wrote otadata, so the old slot re-confirms itself), `CONFIRMED`, row `0.3.1`.
+
+**Positive**, the same artifact deployed properly:
+
+```
+I ff-ota: sha256 c5cf59a6… matches; ota_1 is staged and bootable
+I boot: Loaded app from partition at offset 0x200000     (cold start)
+I ff-agent: running partition: ota_1 …
+I ff-agent: running image: fw_version 0.3.2, ota state pending_verify
+W ff-mqtt: this image was written by OTA and is now CONFIRMED
+up/announce (retained) {"fw_version":"0.3.2","agent_version":"0.3.2", …}
+up/hb                  {"fw_version":"0.3.2", …}
+GET /v1/devices        000000000000 -> 0.3.2
+```
+
+The dashboard row moved `0.3.1 → 0.3.2` with **no code anywhere that writes a commanded
+version into an identity payload**. That is the whole claim.
+
+**QEMU note (runbook updated).** The positive half was driven with
+`apply: "on_command"` + a power-cycle rather than `apply: "auto"`. R1-fw-1's workaround —
+poll for `staged and bootable`, then `docker kill` before the agent reboots itself — loses
+a **40 ms** race: the board soft-resets into ota_1, hits the emulator's known
+`esp_timer_impl_init` panic, and the bootloader correctly retires the `PENDING_VERIFY`
+image, leaving you on the old slot with `otadata` `aborted`. That run is itself a fourth
+data point for this task: a board that ran `0.3.2` for a few hundred milliseconds and was
+rolled back reports `0.3.1` again, with no state of ours involved.
+
+**Spec proposal (not applied — `spec/` is protected).** `spec/device-protocol.md:104`'s
+example payload shows `"agent_version": "0.3.0"`, now two releases stale. Cosmetic, an
+example rather than a contract, and worth a refresh the next time that file is opened for
+a real reason.
+
 ## Phase 2: R2 — Safe deploy: verify + auto-rollback ⭐
 
 | ID | Task | Priority | Effort |

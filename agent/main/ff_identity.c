@@ -106,6 +106,15 @@ static bool boot_ok(void)
     return state != ESP_OTA_IMG_PENDING_VERIFY;
 }
 
+/* R1-fw-2. The one place a version becomes a thing this board says about itself. The
+ * descriptor belongs to the image that is EXECUTING: after an OTA it is the new slot's,
+ * after a bootloader rollback it is the old slot's again. See ff_identity.h for why no
+ * other source is allowed. */
+const char *ff_identity_fw_version(void)
+{
+    return esp_app_get_description()->version;
+}
+
 /* One announce object, keys in the order spec/device-protocol.md prints them. There is no
  * `ts` field, here or anywhere: "the server timestamps by its own receipt time". */
 static cJSON *announce_object(const ff_cfg_t *cfg)
@@ -123,7 +132,7 @@ static cJSON *announce_object(const ff_cfg_t *cfg)
     /* At R0 the agent IS the application, so the two versions are the same string. They
      * are separate fields because from R1 the agent is a component inside a user firmware
      * and only `fw_version` moves. */
-    cJSON_AddStringToObject(root, "fw_version", app->version);
+    cJSON_AddStringToObject(root, "fw_version", ff_identity_fw_version());
     cJSON_AddStringToObject(root, "agent_version", app->version);
     cJSON_AddStringToObject(root, "link_type", ff_cfg_link_name(cfg->link));
     cJSON_AddStringToObject(root, "power_class", cfg->power);
@@ -179,12 +188,11 @@ char *ff_identity_enroll_body(const ff_cfg_t *cfg)
 
 char *ff_identity_heartbeat_json(uint32_t uptime_s)
 {
-    const esp_app_desc_t *app = esp_app_get_description();
     cJSON *root = cJSON_CreateObject();
     if (root == NULL) {
         return NULL;
     }
-    cJSON_AddStringToObject(root, "fw_version", app->version);
+    cJSON_AddStringToObject(root, "fw_version", ff_identity_fw_version());
     cJSON_AddNumberToObject(root, "uptime_s", uptime_s);
 
     /* An Ethernet (or, later, a cellular) board has no RSSI. It reports **null** rather
