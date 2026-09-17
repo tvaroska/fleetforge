@@ -68,23 +68,84 @@ The same gateway rule applies to firmware downloads, and it bites in two places 
 there are two hops. Export both **before `just up`**:
 
 ```bash
-FF_PUBLIC_BASE_URL=http://10.0.2.2:8080 just up
-# and, on the api service, S3_PUBLIC_ENDPOINT_URL=http://10.0.2.2:9000
+FF_PUBLIC_BASE_URL=http://10.0.2.2:8080 FF_S3_PUBLIC_ENDPOINT_URL=http://10.0.2.2:9000 just up
+docker compose exec -T api env | grep -E 'PUBLIC_BASE_URL|S3_PUBLIC'   # both must say 10.0.2.2
 ```
 
 * `PUBLIC_BASE_URL` (compose reads `FF_PUBLIC_BASE_URL`, default
   `http://localhost:8080`) is the origin the **device** is told to fetch from; it goes
   into the `stage` command's `artifact.url`. A guest cannot resolve the host's
   `localhost`.
-* `S3_PUBLIC_ENDPOINT_URL` (default `http://localhost:${FF_MINIO_PORT:-9000}`) is the
-  origin the API's **307 redirect** points at. Getting the first one right and leaving
-  this one at `localhost` fails one hop later, which looks like a working deploy and a
-  board that cannot download — the log line is an `esp_https_ota` connect failure against
-  `127.0.0.1`, and nothing server-side is wrong.
+* `S3_PUBLIC_ENDPOINT_URL` (compose reads `FF_S3_PUBLIC_ENDPOINT_URL`, default
+  `http://localhost:${FF_MINIO_PORT:-9000}`) is the origin the API's **307 redirect**
+  points at. Getting the first one right and leaving this one at `localhost` fails one hop
+  later, which looks like a working deploy and a board that cannot download — the log line
+  is an `esp_https_ota` connect failure against `127.0.0.1`, and nothing server-side is
+  wrong. A presigned URL **signs the Host header**, so this cannot be patched up after the
+  fact: it has to be right before the URL is minted.
 
-Symptom either way: `staging → downloading` and then `download_failed`, with the API log
+Symptom either way: `staging → downloading` and then `failed`, with the API log
 showing a 307 (or nothing at all). Neither value affects production, where both origins
 are the real domain.
+
+### Two builds, because a deploy needs a second image (R1-fw-1)
+
+The board runs one image and stages another, so build twice and keep them apart:
+
+```bash
+just agent-build esp32 && cp -r agent/dist/esp32 /tmp/ff-A     # A: the board
+printf '0.3.1\n' > agent/version.txt
+just agent-build esp32 && cp -r agent/dist/esp32 /tmp/ff-B     # B: the artifact
+printf '0.3.0\n' > agent/version.txt                            # restore; commit 0.3.0
+cp -r /tmp/ff-A/. agent/dist/esp32/                             # `--fresh` flashes dist/
+```
+
+Upload B (`POST /v1/artifact?target=esp32&version=0.3.1`, 201), boot A, then
+`POST /v1/devices/000000000000/deploy -d '{"version":"0.3.1"}'` → **202**. A **409** there
+means the announce still carries `capabilities: []`. Watch the transaction with
+`PYTHONUNBUFFERED=1 just mqtt-sub 'ff/v1/d/+/up/status' | tee /tmp/status.log` — without
+`PYTHONUNBUFFERED` Python block-buffers into the pipe and the file stays empty for
+minutes.
+
+Hand-built commands (a corrupted `sha256`, a duplicate `id`) must be published as the
+**commander**, not as the dynsec admin: `mosquitto/acl` grants `publishClientSend
+ff/v1/d/+/dn/#` to that role alone, and a denied publish is silent —
+`just mqtt-pub 'ff/v1/d/000000000000/dn/cmd' "$(cat cmd.json)" 0 "$MQTT_COMMAND_USERNAME"
+"$MQTT_COMMAND_PASSWORD"`.
+
+### The emulator cannot survive `esp_restart()`
+
+**Everything up to the reboot works; the reboot itself does not.** After the agent applies
+an update and calls `esp_restart()`, the next boot panics before `app_main`:
+
+```
+rst:0xc (SW_CPU_RESET) … I spi_flash: flash io: dio
+Guru Meditation Error: Core 0 panic'ed (InstrFetchProhibited).  PC : 0x00000000
+  _xt_lowint1 ← vPortExitCritical ← esp_intr_alloc_intrstatus_bind
+  ← esp_timer_impl_init (esp_timer_impl_lac.c:263) ← do_system_init_fn ← call_start_cpu0
+```
+
+An interrupt is already pending when `esp_timer` installs its LAC handler, so the first
+`rsil` after `esp_intr_alloc` dispatches it to a handler slot that is still zero. This is
+the machine, not the image: the **rolled-back `0.3.0`** — the same bytes that booted
+cleanly from power-on minutes earlier — panics at the identical PC, and killing QEMU and
+starting it again (a POWERON reset) boots either slot fine. Same family as the panic
+recorded below: a peripheral that QEMU does not reset with the CPU.
+
+Workaround for an OTA acceptance run, which is what proves the *applied* image boots:
+
+```bash
+# kill the machine the moment the digest matches, BEFORE it reboots itself
+until grep -q 'is staged and bootable' /tmp/qemu.log; do sleep 0.2; done
+docker kill ff-qemu-esp32
+just agent-qemu esp32          # cold start: the bootloader takes the NEW slot
+```
+
+`esp_ota_set_boot_partition()` has already marked the slot `NEW`, so the cold boot runs it
+as `PENDING_VERIFY` exactly as the self-reboot would have, and the agent confirms it:
+`this image was written by OTA and is now CONFIRMED`. Do **not** let it panic first — one
+panic in `PENDING_VERIFY` is what the bootloader's rollback is for, and it will (correctly)
+put the old slot back.
 
 ## What a first boot looks like
 

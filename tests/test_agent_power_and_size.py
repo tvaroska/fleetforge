@@ -77,8 +77,17 @@ FORBIDDEN_OPTIONS = [
 # and taking the cached RF calibration with it. sha256 came for free (mbedtls is already
 # linked by esp-tls); the cost is the function, its three long log strings, and nothing
 # else.
+#
+# Raised 2026-09-17 (R1-fw-1) for **esp32 only**, to the exact measured byte of the rebuilt
+# bundle: 993,696 -> 1,010,912, i.e. +17,216 B for `esp_https_ota` plus ff_ota.c (the
+# download loop, the read-back sha256 over the staged slot, the manual one-hop redirect
+# resolution, and the boot-partition undo).
+# The other three are untouched because they were not rebuilt — a budget raised for an
+# image nobody measured is a budget that guards nothing, and each number is a ceiling for
+# its own target. The real limit is MAX_SLOT_FRACTION below: 1,010,912 B is 51% of the
+# 1,966,080-byte slot, so the image can still download its own replacement.
 APP_SIZE_BUDGET_BYTES = {
-    "esp32": 993_696,
+    "esp32": 1_010_912,
     "esp32s3": 973_136,
     "esp32c3": 1_028_336,
     "esp32c6": 1_077_840,

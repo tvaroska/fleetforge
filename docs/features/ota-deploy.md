@@ -590,6 +590,103 @@ topic safe to replay.
 
 **Decisions & gotchas.** See `DECISIONS.md` 2026-09-17 (R1-be-4, newest entry).
 
+### The device half — `esp_https_ota` + the `stage` handler (R1-fw-1) — **LANDED 2026-09-17**
+
+**What shipped.** `agent/main/ff_ota.{c,h}`: a board that receives `stage` on `dn/cmd`
+downloads the artifact through the signed link, writes the inactive A/B slot, verifies
+the digest against flash, switches the boot partition and reboots into it — walking
+`staging → downloading → verifying → staged → applying → rebooting` on `up/status`, the
+same walk `simulator/device.py` has been publishing all along. Around it: seven
+`FF_STATUS_*` constants and `ff_mqtt_publish_status()` in `ff_mqtt.{c,h}` (QoS 1,
+**retained**, `{cmd_id,state,pct,detail}`), an `on_stage()` parser next to the existing
+`on_command()`, `capabilities: ["ota"]` in `ff_identity.c`, and `esp_https_ota` in the
+component's REQUIRES. `agent/version.txt` → `0.3.0`.
+
+**Four properties that are silent wrong answers if you get them backwards** (the file's
+own header says the same thing to the next editor):
+
+1. **`downloading` is published once, not per chunk.** `deploy_events` is a log of
+   transitions and `record_observed_status` dedups on `(device_id, cmd_id, state)`, so a
+   per-chunk publish writes nothing and costs the broker a message per 4 KB. Progress is
+   a serial log line every 10 %.
+2. **The digest is taken by reading the partition BACK, after `esp_https_ota_finish()`.**
+   Hashing the stream would hash bytes that were never on flash: `esp_ota_write` withholds
+   the image header's first 16 bytes until the write completes. Reading the slot back is
+   the only check that covers the flash write itself.
+3. **A mismatch puts the boot partition back.** `finish()` has already called
+   `esp_ota_set_boot_partition()` by the time we hash, so the undo is not tidiness —
+   without it a board with a rejected image boots into it at the next power cut.
+4. **The URL never appears in a log line or a `detail`.** It is the authorization
+   (R1-be-3), so failures are described without it: "cannot open the artifact", not the
+   link that could not be opened.
+
+**One IDF defect had to be worked around** (`resolve_artifact_url()` in `ff_ota.c`).
+`esp_https_ota` follows our `/v1/artifact/{sha}/bin` **307** by itself, but IDF v5.5.5
+rebuilds the `Host` header wrong on a redirect: `esp_http_client_init()` uses
+`_get_host_header(host, port)` (with `:port`), while the redirect path,
+`esp_http_client_set_url()`, sets `Host` to the bare host **and only when the host string
+changed** — so a redirect that keeps the host and changes only the port keeps hop one's
+`Host` verbatim. An S3-compatible presigned URL signs `host`, so the store answers
+**403 SignatureDoesNotMatch**, which surfaces as `esp_https_ota: File not found(403)`. The
+agent therefore resolves the single hop itself — one header-only `GET` with
+`disable_auto_redirect`, capturing `Location` from `HTTP_EVENT_ON_HEADER` — and hands the
+final URL to `esp_https_ota_begin()`. Production (GCS on :443, which signs a portless
+Host) never saw this; a self-hosted MinIO on :9000 — V2's shape — fails every deploy.
+
+**Scope.** This stops at `rebooting` → `esp_restart()`. No `confirming`/`confirmed`, no
+`cmd_id` persisted across the reboot: the image that comes back simply announces, and the
+confirm/rollback pair already in `ff_mqtt.c` (dormant since R0) goes live as a consequence.
+`apply: "on_command"` stages and stops — deliberately **not** `awaiting_safe_window`, which
+an always-on board would never leave. A second `stage` while one runs is refused and
+reported `failed` on the new `cmd_id`; `confirm_timeout_s` is parsed, logged if it differs
+from the firmware's own 300 s, and otherwise ignored until R2.
+
+**Verification.** T1: `just test` — ruff, `ruff format --check`, mypy and **909 tests**
+green (two new tripwires in `tests/test_ff_cfg.py`: every state the firmware can publish
+exists in the spec's machine, and the walk it performs is exactly the seven declared
+states), plus `just agent-build esp32` → `BUNDLE OK`. The esp32 app grew 993,696 →
+1,010,912 B, ratcheted in `tests/test_agent_power_and_size.py`; that is 51 % of the
+1,966,080-byte slot, so the image can still download its own replacement.
+
+T2 was a real OTA on the QEMU board (`000000000000`) against the dev stack, board running
+`0.3.0`, artifact `0.3.1` (`sha256 7b2a5868…`, 1,010,912 B), `cmd
+4bff6498068d4c83872fa3c72375f9fd`:
+
+```
+ff/v1/d/000000000000/up/status  staging(0) downloading(0) verifying staged(100) applying(100) rebooting(100)
+deploy_events: requested staging downloading verifying staged applying rebooting   <- one row per state
+```
+
+* `POST /v1/devices/000000000000/deploy` → **202** (it is 409 until the announce carries
+  `ota`).
+* The log shows the 307 followed (`artifact link redirected (307) to the object store`),
+  progress 0→100 %, and `sha256 7b2a5868… matches; ota_1 is staged and bootable`.
+* `grep -c 'sig=' /tmp/qemu*.log` → **0**.
+* The board booted `ota_1`, announced `fw_version 0.3.1` (the server row agrees) and the
+  pre-existing confirm path fired: *"this image was written by OTA and is now CONFIRMED"*.
+  No rollback.
+* **Negative:** the same artifact staged under a deliberately wrong `sha256` →
+  `sha256 MISMATCH, flash holds 7b2a5868…ee8c, the command says …dead`, `boot partition
+  put back to ota_1`, `failed` with `detail: "sha256 mismatch"` — and a cold restart still
+  came up on the old image.
+* **Duplicate:** re-publishing the identical `dn/cmd` → `duplicate command id=… — ignored
+  (QoS 1 redelivery)`, no second download.
+
+**The one thing QEMU cannot show:** `esp_restart()` itself. The emulator panics on the
+next boot, in IDF's own `esp_timer_impl_init → esp_intr_alloc`, *before* `app_main` and in
+whichever image it lands on — including the pre-OTA `0.3.0` that boots fine from power-on.
+It is a soft-reset defect of the machine, not of the firmware; the runbook has the decoded
+backtrace and the cold-restart workaround used above.
+
+**Spec proposal (not applied — `spec/` is protected).** `spec/device-protocol.md` lists
+`artifact.sig` and `broker/commands.py::stage_payload()` never emits it. Either the spec
+drops the field or R2 implements it; until then the agent parses it as
+optional-and-ignored. Second, smaller: the spec's machine should say that
+`awaiting_safe_window` is for boards that *have* a window — an always-on agent staging
+under `apply: "on_command"` stops at `staged`.
+
+**Decisions & gotchas.** See `DECISIONS.md` 2026-09-17 (R1-fw-1, newest entry).
+
 ## Phase 2: R2 — Safe deploy: verify + auto-rollback ⭐
 
 | ID | Task | Priority | Effort |

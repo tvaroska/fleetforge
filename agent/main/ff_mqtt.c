@@ -33,6 +33,7 @@
 #include "esp_ota_ops.h"
 #include "esp_timer.h"
 #include "ff_identity.h"
+#include "ff_ota.h"
 #include "ff_progress.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -63,6 +64,7 @@ typedef struct {
     char topic_announce[TOPIC_MAX];
     char topic_presence[TOPIC_MAX];
     char topic_hb[TOPIC_MAX];
+    char topic_status[TOPIC_MAX];
     char topic_dn[TOPIC_MAX];
     int announce_msg_id;   /* the id whose PUBACK means "this board did its job" */
     bool session_confirmed; /* the announce has been acknowledged at least once */
@@ -217,9 +219,167 @@ static void on_connected(ff_mqtt_ctx_t *ctx)
     }
 }
 
-/* R0 is connect-only: a command is acknowledged in the log and executed by nobody. Saying
- * so on every message is the point — an operator who sends a command must be able to see
- * that it arrived and that this agent will not act on it, rather than watching it vanish. */
+void ff_mqtt_publish_status(const char *cmd_id, const char *state, int pct, const char *detail)
+{
+    if (s_ctx.client == NULL) {
+        /* Before ff_mqtt_run() there is no session to publish on. Cannot happen today —
+         * the only caller is ff_ota, and a command can only arrive over a live session —
+         * but a dropped status is an outcome lost forever, so it says so. */
+        ESP_LOGE(TAG, "cannot report %s for %s: there is no mqtt session yet", state, cmd_id);
+        return;
+    }
+
+    cJSON *root = cJSON_CreateObject();
+    if (root == NULL) {
+        ESP_LOGE(TAG, "out of memory building a status payload (%s)", state);
+        return;
+    }
+    /* Key for key as `simulator/device.py::_status()` builds it and
+     * `ingestor/protocol.py::StatusPayload` parses it — including the explicit nulls. */
+    cJSON_AddStringToObject(root, "cmd_id", cmd_id);
+    cJSON_AddStringToObject(root, "state", state);
+    if (pct < 0) {
+        cJSON_AddNullToObject(root, "pct");
+    } else {
+        cJSON_AddNumberToObject(root, "pct", pct);
+    }
+    if (detail != NULL) {
+        cJSON_AddStringToObject(root, "detail", detail);
+    } else {
+        cJSON_AddNullToObject(root, "detail");
+    }
+
+    char *payload = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (payload == NULL) {
+        ESP_LOGE(TAG, "out of memory serialising a status payload (%s)", state);
+        return;
+    }
+
+    /* retain = 1, and this is the third publish with a retain flag that is load-bearing:
+     * the ingestor re-subscribes on every connect, so the retained status is how an
+     * outcome published while it was down is delivered at all. */
+    int msg_id = esp_mqtt_client_publish(s_ctx.client, s_ctx.topic_status, payload, 0, QOS, 1);
+    /* `state` and `pct` only. `detail` is not logged: it is the one field a future caller
+     * could put a signed URL in, and the serial console is read by people. */
+    ESP_LOGI(TAG, "publish %s (qos 1, retain, msg_id %d) cmd_id=%s state=%s pct=%d",
+             s_ctx.topic_status, msg_id, cmd_id, state, pct);
+    free(payload);
+}
+
+/* ── commands ─────────────────────────────────────────────────────────────────────── */
+
+/* Copy one string field into a fixed buffer, distinguishing "absent" from "would be
+ * truncated". The distinction is the point: a silently truncated URL is a fetch of a
+ * mangled link whose failure looks like a network fault, and a silently truncated digest
+ * matches nothing. Both are reported as what they are. */
+typedef enum {
+    FIELD_OK,
+    FIELD_MISSING,
+    FIELD_TOO_LONG,
+} field_result_t;
+
+static field_result_t take_string(const cJSON *obj, const char *key, char *out, size_t len)
+{
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(obj, key);
+    if (!cJSON_IsString(item) || item->valuestring[0] == '\0') {
+        return FIELD_MISSING;
+    }
+    if (strlcpy(out, item->valuestring, len) >= len) {
+        out[0] = '\0';
+        return FIELD_TOO_LONG;
+    }
+    return FIELD_OK;
+}
+
+/* Parse a `stage` and hand it to ff_ota. This function is the command seam: it is the only
+ * place the `dn/cmd` JSON is interpreted, and what leaves it is a plain C struct — ff_ota.c
+ * never sees a cJSON object and never builds a topic string. */
+static void on_stage(const cJSON *root, const char *id)
+{
+    ff_ota_cmd_t cmd;
+    memset(&cmd, 0, sizeof(cmd));
+
+    if (strlcpy(cmd.cmd_id, id, sizeof(cmd.cmd_id)) >= sizeof(cmd.cmd_id)) {
+        /* No `failed` publish: it could only carry the TRUNCATED id, which maps to no
+         * transaction the server knows about, and the ingestor would file an outcome
+         * against a command nobody issued. */
+        ESP_LOGE(TAG, "stage command id is longer than this firmware's %u-byte buffer — "
+                      "ignored; no status can be reported against an id we cannot echo",
+                 (unsigned)sizeof(cmd.cmd_id));
+        return;
+    }
+
+    const cJSON *artifact = cJSON_GetObjectItemCaseSensitive(root, "artifact");
+    if (!cJSON_IsObject(artifact)) {
+        ff_mqtt_publish_status(cmd.cmd_id, FF_STATUS_FAILED, FF_STATUS_PCT_NONE,
+                               "no artifact in command");
+        return;
+    }
+
+    switch (take_string(artifact, "url", cmd.url, sizeof(cmd.url))) {
+    case FIELD_OK:
+        break;
+    case FIELD_MISSING:
+        ff_mqtt_publish_status(cmd.cmd_id, FF_STATUS_FAILED, FF_STATUS_PCT_NONE,
+                               "artifact url missing");
+        return;
+    case FIELD_TOO_LONG:
+        ff_mqtt_publish_status(cmd.cmd_id, FF_STATUS_FAILED, FF_STATUS_PCT_NONE,
+                               "artifact url too long");
+        return;
+    }
+    if (take_string(artifact, "sha256", cmd.sha256, sizeof(cmd.sha256)) != FIELD_OK) {
+        /* Unverified bytes are never applied, so a command with no usable digest is not a
+         * command this agent can carry out at all. */
+        ff_mqtt_publish_status(cmd.cmd_id, FF_STATUS_FAILED, FF_STATUS_PCT_NONE,
+                               "artifact sha256 missing");
+        return;
+    }
+    /* Optional, and only ever logged. */
+    (void)take_string(artifact, "version", cmd.version, sizeof(cmd.version));
+
+    const cJSON *size = cJSON_GetObjectItemCaseSensitive(artifact, "size");
+    if (cJSON_IsNumber(size) && size->valuedouble > 0) {
+        cmd.size = (size_t)size->valuedouble;
+    }
+
+    /* `artifact.sig` is parsed by nobody and required by nobody: spec/device-protocol.md
+     * shows the field, `broker/commands.py::stage_payload()` deliberately never emits it
+     * (R1 has no artifact signer, and an empty `sig` would teach a device to accept one),
+     * and the signed URL IS the authorization at R1. Ignored, not rejected. */
+
+    /* `apply`: anything other than the explicit `on_command` means apply now. The default
+     * is "auto" (api/schemas.py), and an unknown value erring towards applying matches the
+     * simulator — a board that stages and then sits there is the failure nobody notices. */
+    cmd.apply_now = true;
+    const cJSON *apply = cJSON_GetObjectItemCaseSensitive(root, "apply");
+    if (cJSON_IsString(apply) && strcmp(apply->valuestring, "on_command") == 0) {
+        cmd.apply_now = false;
+    }
+
+    /* `confirm_timeout_s` is parsed and IGNORED at R1: the compile-time CONFIRM_TIMEOUT_S
+     * above is already the spec's 300 s, and the confirm timer is armed at boot, long
+     * before any command arrives. R2-fw-3 makes it dynamic. */
+    const cJSON *confirm = cJSON_GetObjectItemCaseSensitive(root, "confirm_timeout_s");
+    if (cJSON_IsNumber(confirm) && (int)confirm->valuedouble != CONFIRM_TIMEOUT_S) {
+        ESP_LOGW(TAG, "command asks for a %d s confirm timeout; this firmware uses %d s",
+                 (int)confirm->valuedouble, CONFIRM_TIMEOUT_S);
+    }
+
+    esp_err_t err = ff_ota_start(&cmd);
+    if (err == ESP_ERR_INVALID_STATE) {
+        /* Reported against the NEW cmd_id, which is the honest answer and keeps
+         * deploy_events truthful: this command was received and will not be carried out. */
+        ff_mqtt_publish_status(cmd.cmd_id, FF_STATUS_FAILED, FF_STATUS_PCT_NONE,
+                               "another update is already in progress");
+    } else if (err != ESP_OK) {
+        ff_mqtt_publish_status(cmd.cmd_id, FF_STATUS_FAILED, FF_STATUS_PCT_NONE,
+                               "cannot start the update");
+        ESP_LOGE(TAG, "ff_ota_start: %s", esp_err_to_name(err));
+    }
+}
+
 static void on_command(ff_mqtt_ctx_t *ctx, const char *topic, int topic_len, const char *data,
                        int data_len)
 {
@@ -248,8 +408,24 @@ static void on_command(ff_mqtt_ctx_t *ctx, const char *topic, int topic_len, con
         strlcpy(ctx->last_command_id, id, sizeof(ctx->last_command_id));
     }
 
-    ESP_LOGI(TAG, "%.*s id=%s type=%s — logged, not executed (R0 is connect-only)", topic_len,
-             topic, id != NULL ? id : "?", type);
+    ESP_LOGI(TAG, "%.*s id=%s type=%s", topic_len, topic, id != NULL ? id : "?", type);
+
+    if (strcmp(type, "stage") == 0) {
+        if (id == NULL) {
+            /* A status with no cmd_id is dropped by the ingestor by design, so there is
+             * nothing to report against — say so on the console instead. */
+            ESP_LOGE(TAG, "a stage command with no id cannot be deduplicated or reported "
+                          "against — ignored");
+        } else {
+            on_stage(root, id);
+        }
+    } else {
+        /* Every other type in spec/device-protocol.md — apply, cancel, rollback, identify,
+         * reboot, set_cfg — is unimplemented at R1. NOT reported as `failed`: an unknown
+         * type is not a failed deploy, it has no cmd_id the server is tracking as one, and
+         * MQTT 3.1.1 gives the broker no way to deny it anyway. */
+        ESP_LOGW(TAG, "command type=%s is not implemented by this agent — ignored", type);
+    }
     cJSON_Delete(root);
 }
 
@@ -325,6 +501,7 @@ esp_err_t ff_mqtt_run(const ff_cfg_t *cfg, const ff_cred_t *cred)
     snprintf(s_ctx.topic_announce, sizeof(s_ctx.topic_announce), TOPIC_ROOT "/%s/up/announce", id);
     snprintf(s_ctx.topic_presence, sizeof(s_ctx.topic_presence), TOPIC_ROOT "/%s/up/presence", id);
     snprintf(s_ctx.topic_hb, sizeof(s_ctx.topic_hb), TOPIC_ROOT "/%s/up/hb", id);
+    snprintf(s_ctx.topic_status, sizeof(s_ctx.topic_status), TOPIC_ROOT "/%s/up/status", id);
     snprintf(s_ctx.topic_dn, sizeof(s_ctx.topic_dn), TOPIC_ROOT "/%s/dn/#", id);
 
     const esp_mqtt_client_config_t config = {

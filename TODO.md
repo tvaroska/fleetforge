@@ -318,7 +318,7 @@ fixes the `dn/cmd` `stage` payload and the `up/status` state machine, and is nea
 
 ### Firmware — verifiable in QEMU, no board
 
-- [ ] **R1-fw-1**: Agent gains `esp_https_ota` + an "update" command handler (P0, 2d)
+- [x] **R1-fw-1**: Agent gains `esp_https_ota` + an "update" command handler (P0, 2d)
       Handle `stage` from `dn/cmd`, download through the signed URL, write the inactive
       OTA slot, and report `up/status` transitions as it goes. The reboot is the device's
       to schedule.
@@ -328,6 +328,7 @@ fixes the `dn/cmd` `stage` payload and the `up/status` state machine, and is nea
       behaviour. Those belong to `R1-test-1`, not here.
       Acceptance: `just agent-qemu` boots the bundle, it stages an artifact from the dev
       stack end to end, and the `up/status` sequence matches the spec's state machine.
+      _(done 2026-09-17; reviewed; see docs/features/ota-deploy.md)_
 
 - [ ] **R1-fw-2**: Agent reports firmware version after reboot (P0, 0.5d)
       `fw_version` in `up/announce` and `up/hb` must be the version that is *running*,

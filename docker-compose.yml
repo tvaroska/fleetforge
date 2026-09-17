@@ -306,7 +306,12 @@ services:
       # published MinIO port in dev. Rewriting the host after signing invalidates the
       # signature, and the failure only shows up on a real board: from inside the
       # compose network `http://minio:9000` works perfectly.
-      S3_PUBLIC_ENDPOINT_URL: http://localhost:${FF_MINIO_PORT:-9000}
+      # Overridable for exactly the same reason as PUBLIC_BASE_URL above, and in exactly
+      # the same shape: the QEMU guest reaches the host at 10.0.2.2, so an OTA run against
+      # the emulator exports FF_S3_PUBLIC_ENDPOINT_URL=http://10.0.2.2:9000 alongside
+      # FF_PUBLIC_BASE_URL. It was hard-coded until R1-fw-1, and the failure that cost was
+      # a deploy that looked perfect server-side and a board that could not reach hop two.
+      S3_PUBLIC_ENDPOINT_URL: ${FF_S3_PUBLIC_ENDPOINT_URL:-http://localhost:${FF_MINIO_PORT:-9000}}
       # NOT wired: production (R0-infra-3 / R1) selects the GCS backend instead, with
       #     GCS_BUCKET: btvaroska
       #     GCS_PREFIX: fleetforge/            # gs://btvaroska is SHARED — see below

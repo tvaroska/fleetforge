@@ -6,6 +6,85 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-17 — The agent applies an update: verified against flash, undone on mismatch, and finished at `rebooting`
+
+**R1-fw-1.** `ff_ota.c` is the first code in this product that moves a boot partition, so
+the decisions are mostly about what it refuses to do.
+
+**1. R1 stops at `rebooting`, and nothing is persisted across the reboot.** The agent
+publishes `staging → downloading → verifying → staged → applying → rebooting` and calls
+`esp_restart()`. No `confirming`/`confirmed`, no `cmd_id` in NVS: the image that comes back
+announces itself and that announce is the whole report. Half a cross-reboot state machine
+— a stored `cmd_id` nobody drives to a terminal state — is worse than none. R2-fw-3 owns
+the confirm timer as a shipped feature; the confirm/rollback pair that has been dormant in
+`ff_mqtt.c` since R0 goes **live** as a consequence of this task and was deliberately left
+untouched (verified in T2: the OTA'd image logged `CONFIRMED` after its announce PUBACK).
+
+**2. The sha256 is taken by reading the partition back, after `esp_https_ota_finish()`,
+and a mismatch restores the boot partition.** Hashing the stream as it arrives is the
+obvious design and it is wrong twice over: `esp_ota_write` withholds the image header's
+first 16 bytes until the write completes, so the stream hash covers bytes that were never
+on flash, and it cannot detect a bad flash write — which is the failure that matters. The
+undo (`esp_ota_set_boot_partition(esp_ota_get_running_partition())`) is mandatory because
+`finish()` has *already* switched the boot pointer by the time we can hash: without it a
+board with a rejected image boots into it at the next power cut, and for this product that
+is a van and a screwdriver. Proven in T2 with a hand-published `stage` carrying a corrupted
+digest: `boot partition put back to ota_1`, `failed`/`sha256 mismatch`, and a cold restart
+still on the old image.
+
+**3. The OTA runs on its own task.** A QoS-1 publish from the esp-mqtt event handler
+deadlocks the client, and a multi-minute download inside the handler stops the keepalive.
+One task, `s_running` as a flag rather than a mutex: a second `stage` while one runs is
+**refused and reported** `failed` on the new `cmd_id`, never queued — two writers to one
+slot corrupt it, and a deploy silently waiting behind another is a deploy the server cannot
+explain. Duplicate `dn/cmd` ids are dropped by the pre-existing dedup, not by this task.
+
+**4. `CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP` was NOT added** (the plan called for it; this is the
+deviation). Read in the pinned image's sources: `esp_https_ota` gates on
+`is_server_verification_enabled()`, which is true whenever `crt_bundle_attach` is set — and
+we set it, for the same Mozilla bundle `ff_enroll.c` uses. A plaintext `http://` URL never
+reaches the TLS layer, so the option is inert for us. It is also a line in
+`agent/sdkconfig.defaults`, a CRITICAL flash-time file, that would have relaxed a security
+posture to no effect. The QEMU lab downloads over plain HTTP today with the option absent.
+
+**5. The agent resolves the artifact link's 307 itself.** IDF v5.5.5 rebuilds the `Host`
+header wrong on a redirect — `esp_http_client_init()` uses `_get_host_header(host, port)`,
+while `esp_http_client_set_url()` sets the bare host and only when the host *string*
+changed — and an S3-compatible presigned URL signs `host`. Redirect a board from
+`:8080` to an object store on `:9000` and it presents a Host that was never signed:
+**403 SignatureDoesNotMatch**, reported by IDF as "File not found(403)". So
+`resolve_artifact_url()` does one header-only `GET` with `disable_auto_redirect`, captures
+`Location` from `HTTP_EVENT_ON_HEADER`, and hands the final URL to `esp_https_ota_begin()`.
+Production (GCS on :443) never hit this; a self-hosted MinIO — V2's entire shape — fails
+every deploy. The cost is one extra round trip whose body is empty anyway.
+
+**6. The board announces `capabilities: ["ota"]`,** because `POST /v1/devices/{id}/deploy`
+answers 409 without it. It stays as short as the truth: it was `[]` at R0 for the same
+reason.
+
+**7. `confirm_timeout_s` is parsed and ignored at R1** (a WARNING if it differs from the
+firmware's own `CONFIRM_TIMEOUT_S`), and `artifact.sig` is parsed-and-ignored:
+`spec/device-protocol.md` lists it, `broker/commands.py::stage_payload()` never emits it.
+**Spec proposal, not applied** (`spec/` is protected): either the spec drops `sig` or R2
+implements it.
+
+**8. `apply: "on_command"` stages and stops at `staged`,** not at `awaiting_safe_window`.
+An always-on agent has no window to wait for, so reporting one would be a state nothing
+ever leaves. R1 ships no `apply` command, so the board simply waits where the simulator
+waits.
+
+**Known limitation of the lab, not of the firmware:** QEMU panics on the boot that follows
+`esp_restart()`, inside IDF's `esp_timer_impl_init → esp_intr_alloc`, before `app_main`,
+in whichever image it lands on — including the pre-OTA `0.3.0` that boots fine from
+power-on. A peripheral interrupt survives the soft reset that the CPU does not. The OTA'd
+image was proven to boot, announce `0.3.1` and confirm itself by cold-starting the
+emulator instead; `docs/runbooks/agent-qemu.md` has the decoded backtrace and the recipe.
+
+Details: `docs/features/ota-deploy.md` → *The device half (R1-fw-1)*;
+`.claude/plans/R1-fw-1-esp-https-ota-update-command.md`.
+
+---
+
 ## 2026-09-17 — Every device-reported deploy state is a row, recorded once, and the server still authors no cancel
 
 **R1-be-4.** `up/status` now writes `deploy_events` through the table's one writer,

@@ -136,9 +136,18 @@ static cJSON *announce_object(const ff_cfg_t *cfg)
     cJSON_AddNullToObject(root, "parent_device_id");
     cJSON_AddStringToObject(root, "partition_layout", FF_PARTITION_LAYOUT);
     cJSON_AddNumberToObject(root, "ota_slot_size", running_slot_size());
-    /* EMPTY at R0, and that is the honest answer: this agent is connect-only. Claiming
-     * `ota` here would make the server offer it a deployment it cannot perform. */
-    cJSON_AddItemToObject(root, "capabilities", cJSON_CreateArray());
+    /* `["ota"]` since R1-fw-1: this agent downloads through the signed URL, writes the
+     * inactive slot, verifies the digest and reboots into it (ff_ota.c). The list is a
+     * claim about what the board can be asked to DO, so it stays as short as the truth —
+     * it was empty at R0 for exactly the same reason.
+     *
+     * It is also load-bearing server-side: `POST /v1/devices/{id}/deploy` answers 409 to a
+     * device whose `capabilities` does not contain `ota`, so an agent that performs OTA
+     * but does not announce it is a fleet that cannot be deployed to, with no error
+     * anywhere near the cause. */
+    cJSON *capabilities = cJSON_CreateArray();
+    cJSON_AddItemToArray(capabilities, cJSON_CreateString("ota"));
+    cJSON_AddItemToObject(root, "capabilities", capabilities);
     return root;
 }
 

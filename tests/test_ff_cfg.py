@@ -41,6 +41,7 @@ FF_CFG_PY = AGENT_DIR / "tools" / "ff_cfg.py"
 FF_CFG_C = AGENT_DIR / "main" / "ff_cfg.c"
 FF_CFG_H = AGENT_DIR / "main" / "ff_cfg.h"
 FF_IDENTITY_C = AGENT_DIR / "main" / "ff_identity.c"
+FF_MQTT_H = AGENT_DIR / "main" / "ff_mqtt.h"
 # The third implementation and the vector both writers are pinned to (R0-fe-3).
 FF_CFG_TS = REPO_ROOT / "frontend" / "src" / "ffcfg.ts"
 FF_CFG_VECTOR = REPO_ROOT / "frontend" / "src" / "ffcfg.vector.json"
@@ -328,3 +329,57 @@ class TestAnnounceMatchesTheSpec:
         source = _code(FF_IDENTITY_C)
         for key in ("fw_version", "uptime_s", "rssi", "free_heap", "boot_ok"):
             assert f'"{key}"' in source
+
+    def test_the_announce_claims_the_ota_capability(self) -> None:
+        """R1-fw-1. The agent stages and applies, so it must say so.
+
+        `POST /v1/devices/{id}/deploy` answers **409** to a device whose `capabilities`
+        does not contain `ota` (`api/routers/deploys.py`), and an empty array is exactly
+        what this file shipped at R0. The failure is silent and remote: firmware that can
+        perform an update, in a fleet the server refuses to deploy to, with the error
+        appearing nowhere near the cause.
+        """
+        source = _code(FF_IDENTITY_C)
+        assert '"capabilities"' in source
+        assert '"ota"' in source, "ff_identity.c no longer claims the ota capability"
+
+
+class TestStatusStatesMatchTheSpec:
+    """`up/status` may only carry a state the spec's machine contains.
+
+    `ff_mqtt.h` spells the states once for both publishers (ff_mqtt.c's `failed` paths and
+    ff_ota.c's walk). A state the spec does not print is a state
+    `ingestor/protocol.py` will file and no dashboard can explain — and, being firmware,
+    it cannot be corrected without an OTA of the thing that is broken.
+    """
+
+    def _spec_states(self) -> set[str]:
+        text = DEVICE_PROTOCOL.read_text()
+        start = text.index("### `up/status` — the update transaction")
+        # The second fenced block in that section is the state machine; the first is the
+        # JSON example.
+        fence = text.index("```", text.index("```", text.index("```json", start) + 7) + 3)
+        block = text[fence : text.index("```", fence + 3)]
+        return set(re.findall(r"[a-z_]{4,}", block))
+
+    def test_every_state_the_firmware_can_publish_is_in_the_machine(self) -> None:
+        declared = set(re.findall(r'#define FF_STATUS_[A-Z_]+ "([a-z_]+)"', FF_MQTT_H.read_text()))
+        assert declared, "ff_mqtt.h declares no FF_STATUS_* states"
+        spec_states = self._spec_states()
+        assert spec_states, "the spec's up/status machine could not be parsed"
+        assert declared <= spec_states, f"not in spec/device-protocol.md: {declared - spec_states}"
+
+    def test_the_walk_the_agent_performs_is_declared(self) -> None:
+        """R1 ends at `rebooting`; `confirming`/`confirmed`/`rolling_back`/`rolled_back`
+        are R2's (the agent confirms silently, at the announce PUBACK) and
+        `awaiting_safe_window` belongs to a board with a window to wait for."""
+        declared = set(re.findall(r'#define FF_STATUS_[A-Z_]+ "([a-z_]+)"', FF_MQTT_H.read_text()))
+        assert declared == {
+            "staging",
+            "downloading",
+            "verifying",
+            "staged",
+            "applying",
+            "rebooting",
+            "failed",
+        }

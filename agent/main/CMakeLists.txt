@@ -14,6 +14,7 @@ idf_component_register(SRCS "agent_main.c"
                             "ff_net.c"
                             "ff_net_openeth.c"
                             "ff_net_wifi.c"
+                            "ff_ota.c"
                             "ff_progress.c"
                             "ff_store.c"
                             "ff_time.c"
@@ -24,6 +25,7 @@ idf_component_register(SRCS "agent_main.c"
                                 esp_wifi
                                 esp-tls
                                 esp_http_client
+                                esp_https_ota
                                 esp_partition
                                 app_update
                                 mqtt
