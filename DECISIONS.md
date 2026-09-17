@@ -6,6 +6,68 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-17 — The API commands over MQTT as its own credential, and a retry is the same transaction
+
+**R1-be-2.** Four decisions, all about who may say what and what gets written down.
+
+**1. A fourth broker credential, `commander`, that can only send on `dn/`.**
+`mosquitto/bootstrap.sh` creates a dynsec role with exactly one ACL —
+`publishClientSend 'ff/v1/d/+/dn/#' allow` — and one client holding it. Not the dynsec
+admin, which is broker-root over `$CONTROL` and needs none of this to publish a deploy;
+not the ingestor, which must stay read-only. The role has **no** `subscribePattern` and
+**no** `publishClientReceive`, so a leaked deploy credential cannot forge `up/status` or
+read the fleet, and the ingestor stays the only subscriber. The `device` role is still
+empty — the fleet's authz is the two `%u` pattern rules in `mosquitto/acl`, and adding a
+`+` rule to `device` to "make commands work" would be a confidentiality breach. It does
+work because **both ACL backends are consulted and allow wins**: the pattern file's
+`pattern read ff/v1/d/%u/dn/#` grants delivery over dynsec's default receive-deny. That
+is now asserted live by `just broker-check` (`_check_command_delivery`: A receives, B
+does not, and the commander is dropped on `up/`).
+
+*Gotcha, and it cost the most time to learn in R0:* MQTT 3.1.1 has **no deny feedback**.
+A refused publish looks exactly like a delivered one — no PUBACK reason code, no error.
+Every negative broker assertion has to be "nothing arrived at a subscriber", never "the
+publish raised". Reason codes exist only over MQTT 5 from inside the container.
+
+**2. `requested` is a server-authored state, and the only one.** It records *"we
+published a command"*, which no device can report; without it an abandoned deploy is
+invisible to the KPIs and R1-be-4 cannot map an incoming `cmd_id` to the version that was
+intended. The single exception is the one **terminal** state the server may write:
+`failed` with `detail={"reason": "publish_failed"}`, honest because the broker refused, so
+the board provably never saw the command and the transaction the `requested` row opened is
+closed rather than left open forever. Beyond that the server never writes a state for a
+transaction the device did receive, and **never expires `awaiting_safe_window`** — a
+vehicle in motion may sit there indefinitely (`design/architecture.md` principle 5). There
+is no sweeper, no timeout task and no `asyncio.sleep` on this path, and
+`tests/test_api_deploy.py` asserts their absence in the source.
+
+**3. A retry inside the URL's TTL is the same transaction, and writes no second row.**
+The device deduplicates on the command `id`, so a retried `stage` must carry the id the
+first attempt used or the board downloads the same firmware twice. A POST for
+`(device_id, sha256)` matching the newest `requested` row for that device — younger than
+`SIGNED_URL_TTL_S` and with no terminal event — reuses that row's `cmd_id`, signs a
+**fresh** URL, republishes, and answers `reused: true`. A different artifact is always a
+new intent. The TTL bound is what makes it safe: past it the first URL has expired, so a
+board that never acted on the first command cannot act on it now.
+
+**4. The signed URL is a bearer credential and is never persisted.** It is not in the 202
+body, not in `deploy_events.detail` (which carries only sha256/size/target/apply), and not
+in any log line — the publisher logs `id` and `type` only. One URL is signed per accepted
+deploy; signing is an IAM round trip on GCS since S0-infra-5, so it is not free.
+
+`deploy_events` now has exactly one writer, `src/fleetforge/deploys.py`, enforced by a
+tripwire in `tests/test_invariants.py`. R1-be-4's `up/status` ingestion adds its writer
+there rather than growing SQL in `ingestor/handlers.py`.
+
+**Production prerequisite:** `services/prod/.env` needs `MQTT_COMMAND_USERNAME` /
+`MQTT_COMMAND_PASSWORD` before the next prod deploy, or `mosquitto-init` refuses to start
+(`:?` on both) and every `POST /v1/devices/{id}/deploy` answers 503. `services/` is a
+different repo and prod env is never edited without asking, so this is filed, not done.
+
+Detail and T2 evidence: `docs/features/ota-deploy.md` → *Deploy orchestration (R1-be-2)*.
+
+---
+
 ## 2026-09-16 — Version labels live in their own table, and the artifact size cap is one number
 
 **R1-be-1.** Three decisions, all forced by things that were already frozen.

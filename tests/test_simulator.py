@@ -19,6 +19,7 @@ pass:
 
 import ast
 import asyncio
+import hashlib
 import json
 import os
 import stat
@@ -29,7 +30,7 @@ from typing import Any
 import pytest
 
 from fleetforge.api.schemas import EnrollRequest
-from fleetforge.db.models import PowerClass
+from fleetforge.db.models import DeployState, PowerClass
 from fleetforge.identity import DEVICE_ID_RE
 from fleetforge.ingestor.protocol import AnnouncePayload, PresencePayload, parse_up_topic
 from fleetforge.simulator import __main__ as cli
@@ -43,13 +44,28 @@ from fleetforge.simulator.device import (
     PRESENCE_OFFLINE,
     PRESENCE_ONLINE,
     QOS,
+    SAFE_WINDOW_AUTO,
+    SAFE_WINDOW_HOLD,
     SLOW_MAX_DELAY_S,
     SLOW_MIN_DELAY_S,
+    STAGE_WALK,
+    STATE_APPLYING,
+    STATE_AWAITING_SAFE_WINDOW,
+    STATE_DOWNLOADING,
+    STATE_FAILED,
+    STATE_REBOOTING,
+    STATE_STAGED,
+    STATE_STAGING,
+    STATE_VERIFYING,
+    STATUS,
     DeviceIdentity,
     LinkProfile,
+    StageRunner,
     derive_device_id,
     dn_filter,
     mqtt_client_factory,
+    redact_url,
+    redacted_command,
     run_session,
     up_topic,
     will_for,
@@ -396,9 +412,289 @@ async def test_queued_commands_are_logged_once_and_duplicates_dropped() -> None:
     await drive_session(device, awake_s=0.15, step=step, client=fake)
 
     commands = [line for line in lines if line.startswith("command ")]
-    assert len(commands) == 2
-    assert "DUPLICATE" in commands[1]
-    assert "not executed" in commands[0]
+    assert any("id=cmd-1 type=ping" in line for line in commands)
+    assert any("DUPLICATE" in line for line in commands)
+    # R1-be-2 executes `stage` and nothing else; the rest of the vocabulary is R2.
+    assert any("not implemented" in line for line in commands)
+
+
+async def test_an_undecodable_command_does_not_kill_the_session() -> None:
+    device = DeviceIdentity(device_id="a4cf12b3de90")
+    fake = FakeClient()
+    fake.inbox.put_nowait(FakeMessage(f"ff/v1/d/{device.device_id}/dn/cmd", b"\xff not json"))
+    lines, step = transcript()
+
+    await drive_session(device, awake_s=0.15, step=step, client=fake)
+
+    assert any("undecodable" in line for line in lines)
+    assert any(line.startswith("goodbye") for line in lines)
+
+
+# ---------------------------------------------------------------------------
+# Executing a `stage` (R1-be-2)
+# ---------------------------------------------------------------------------
+
+FIRMWARE = b"\xe9\x06\x02\x20" + b"firmware bytes, opaque to the board" * 29
+FIRMWARE_SHA256 = hashlib.sha256(FIRMWARE).hexdigest()
+# Shaped like a real signed URL: the redaction test is only meaningful if there is a
+# query string that must not survive it.
+SIGNED_URL = (
+    f"https://storage.invalid/blobs/sha256/{FIRMWARE_SHA256}"
+    "?X-Goog-Signature=deadbeefdeadbeef&X-Goog-Expires=1800"
+)
+
+
+def stage_command(
+    *,
+    cmd_id: str = "cmd-stage-1",
+    url: str = SIGNED_URL,
+    sha256: str = FIRMWARE_SHA256,
+    version: str = "1.5.0",
+    apply: str = "auto",
+) -> bytes:
+    """The `stage` body exactly as `api/routers/deploys.py` publishes it.
+
+    Retyped rather than imported: import purity forbids `fleetforge.broker` here, and a
+    simulator test that built its input with the server's builder would prove nothing
+    about the two agreeing.
+    """
+    return json.dumps(
+        {
+            "id": cmd_id,
+            "type": "stage",
+            "artifact": {
+                "url": url,
+                "sha256": sha256,
+                "size": len(FIRMWARE),
+                "version": version,
+            },
+            "apply": apply,
+            "confirm_timeout_s": 300,
+        }
+    ).encode()
+
+
+class FakeHttpResponse:
+    """The three things `_fetch` uses: a context manager and a chunked `read`."""
+
+    def __init__(self, data: bytes) -> None:
+        self._data = data
+        self._offset = 0
+
+    def __enter__(self) -> "FakeHttpResponse":
+        return self
+
+    def __exit__(self, *_exc: object) -> bool:
+        return False
+
+    def read(self, size: int = -1) -> bytes:
+        chunk = self._data[self._offset :] if size < 0 else self._data[self._offset :][:size]
+        self._offset += len(chunk)
+        return chunk
+
+
+@pytest.fixture
+def downloads(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Record every URL fetched and serve `FIRMWARE`. One entry per real download."""
+    fetched: list[str] = []
+
+    def fake_urlopen(url: str, timeout: float | None = None) -> FakeHttpResponse:
+        fetched.append(url)
+        return FakeHttpResponse(FIRMWARE)
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    return fetched
+
+
+async def run_stage(
+    body: bytes,
+    *,
+    safe_window: str = SAFE_WINDOW_AUTO,
+    device: DeviceIdentity | None = None,
+    repeats: int = 1,
+    awake_s: float = 0.3,
+) -> tuple[StageRunner, FakeClient, list[str]]:
+    """Deliver `body` (`repeats` times) to one session and return what happened."""
+    identity = device or DeviceIdentity(device_id="a4cf12b3de90", fw_version="1.4.2")
+    fake = FakeClient()
+    for _ in range(repeats):
+        fake.inbox.put_nowait(FakeMessage(f"ff/v1/d/{identity.device_id}/dn/cmd", body))
+    stage = StageRunner(identity=identity, link=LinkProfile(LINK_FAST), safe_window=safe_window)
+    lines, step = transcript()
+    await run_session(
+        identity,
+        credential_for(identity.device_id),
+        client_factory=lambda: fake,  # type: ignore[arg-type,return-value]
+        link=LinkProfile(LINK_FAST),
+        heartbeat_interval_s=10.0,
+        awake_s=awake_s,
+        stage=stage,
+        step=step,
+    )
+    return stage, fake, lines
+
+
+def statuses(fake: FakeClient, device_id: str = "a4cf12b3de90") -> list[dict[str, Any]]:
+    return [
+        json.loads(payload)
+        for topic, payload, _, _ in fake.published
+        if topic == up_topic(device_id, STATUS)
+    ]
+
+
+def test_the_retyped_states_are_the_servers_states() -> None:
+    """Import purity means these are copies; `DeployState` is the original."""
+    values = {state.value for state in DeployState}
+    for state in (*STAGE_WALK, STATE_AWAITING_SAFE_WINDOW, STATE_FAILED):
+        assert state in values, f"{state} is not a DeployState"
+    assert STATE_STAGED in values and STATE_VERIFYING in values
+
+
+def test_the_stage_walk_is_the_spec_order_and_does_not_assume_a_safe_window() -> None:
+    """`awaiting_safe_window` is conditional, so it is not part of the straight-line walk."""
+    assert STAGE_WALK == (
+        STATE_STAGING,
+        STATE_DOWNLOADING,
+        STATE_VERIFYING,
+        STATE_STAGED,
+        STATE_APPLYING,
+        STATE_REBOOTING,
+    )
+    assert STATE_AWAITING_SAFE_WINDOW not in STAGE_WALK
+
+
+async def test_a_stage_walks_the_states_and_every_status_is_retained(
+    downloads: list[str],
+) -> None:
+    """Retained because `spec/device-protocol.md` says so: the transaction must survive."""
+    _, fake, _ = await run_stage(stage_command())
+
+    reports = statuses(fake)
+    assert [report["state"] for report in reports] == list(STAGE_WALK)
+    assert all(report["cmd_id"] == "cmd-stage-1" for report in reports)
+    status_publishes = [
+        (qos, retain)
+        for topic, _, qos, retain in fake.published
+        if topic == up_topic("a4cf12b3de90", STATUS)
+    ]
+    assert status_publishes == [(1, True)] * len(STAGE_WALK)
+
+
+async def test_the_bytes_are_downloaded_once_and_verified(downloads: list[str]) -> None:
+    _, _, lines = await run_stage(stage_command())
+
+    assert downloads == [SIGNED_URL]
+    assert any(f"{len(FIRMWARE)} bytes" in line for line in lines)
+    assert any(FIRMWARE_SHA256 in line and "matches" in line for line in lines)
+
+
+async def test_a_duplicated_command_produces_exactly_one_download(
+    downloads: list[str],
+) -> None:
+    """The dedup rule with teeth: two publishes of one intent, one flash write."""
+    _, fake, lines = await run_stage(stage_command(), repeats=2)
+
+    assert len(downloads) == 1
+    assert [report["state"] for report in statuses(fake)] == list(STAGE_WALK)
+    assert any("DUPLICATE" in line for line in lines)
+
+
+async def test_a_sha256_mismatch_fails_and_never_applies(downloads: list[str]) -> None:
+    """Unverified bytes are never applied — the point of putting the digest in the command."""
+    _, fake, lines = await run_stage(stage_command(sha256="b" * 64))
+
+    states = [report["state"] for report in statuses(fake)]
+    assert states == [STATE_STAGING, STATE_DOWNLOADING, STATE_VERIFYING, STATE_FAILED]
+    assert STATE_APPLYING not in states and STATE_REBOOTING not in states
+    assert statuses(fake)[-1]["detail"] == "sha256 mismatch"
+    assert any("MISMATCH" in line for line in lines)
+
+
+async def test_a_download_failure_is_reported_not_retried_silently(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def explode(url: str, timeout: float | None = None) -> FakeHttpResponse:
+        raise OSError("connection reset")
+
+    monkeypatch.setattr("urllib.request.urlopen", explode)
+    _, fake, _ = await run_stage(stage_command())
+
+    states = [report["state"] for report in statuses(fake)]
+    assert states == [STATE_STAGING, STATE_DOWNLOADING, STATE_FAILED]
+    assert "download failed" in statuses(fake)[-1]["detail"]
+
+
+async def test_safe_window_hold_parks_and_never_expires(downloads: list[str]) -> None:
+    """Nothing server-side may end this: a vehicle in motion reports honestly, for days."""
+    _, fake, lines = await run_stage(stage_command(), safe_window=SAFE_WINDOW_HOLD, awake_s=0.4)
+
+    states = [report["state"] for report in statuses(fake)]
+    assert states == [
+        STATE_STAGING,
+        STATE_DOWNLOADING,
+        STATE_VERIFYING,
+        STATE_STAGED,
+        STATE_AWAITING_SAFE_WINDOW,
+    ]
+    assert STATE_APPLYING not in states
+    assert STATE_FAILED not in states, "parking is not a failure and must not look like one"
+    assert any("indefinitely" in line for line in lines)
+
+
+async def test_apply_on_command_stops_at_staged(downloads: list[str]) -> None:
+    """The `apply` command is R2; until then the board sits staged rather than guessing."""
+    _, fake, _ = await run_stage(stage_command(apply="on_command"))
+
+    states = [report["state"] for report in statuses(fake)]
+    assert states[-1] == STATE_STAGED
+    assert STATE_APPLYING not in states
+
+
+async def test_the_board_comes_back_running_the_new_version(downloads: list[str]) -> None:
+    stage, _, _ = await run_stage(stage_command(version="1.5.0"))
+
+    assert stage.identity.fw_version == "1.5.0"
+    assert stage.downloads == 1
+
+
+async def test_the_transcript_prints_the_command_with_the_url_redacted(
+    downloads: list[str],
+) -> None:
+    """The only place a human can see a `dn/` payload — and it is a bearer credential."""
+    _, _, lines = await run_stage(stage_command())
+
+    joined = "\n".join(lines)
+    assert "X-Goog-Signature" not in joined
+    assert SIGNED_URL not in joined
+    assert "https://storage.invalid/…" in joined
+    # Everything else about the command is printed, or the line would be useless.
+    assert '"type": "stage"' in joined
+    assert FIRMWARE_SHA256 in joined
+
+
+def test_redact_url_keeps_the_origin_and_drops_everything_else() -> None:
+    assert redact_url(SIGNED_URL) == "https://storage.invalid/…"
+    assert redact_url("not a url") == "<unparseable url>"
+
+
+def test_redacted_command_leaves_a_command_without_an_artifact_alone() -> None:
+    body = {"id": "x", "type": "reboot"}
+    assert redacted_command(body) == body
+
+
+def test_an_unknown_safe_window_mode_is_refused_before_any_io() -> None:
+    with pytest.raises(SimulatorError):
+        StageRunner(
+            identity=DeviceIdentity(device_id="a4cf12b3de90"),
+            link=LinkProfile(LINK_FAST),
+            safe_window="whenever",
+        )
+
+
+def test_the_cli_offers_both_safe_window_modes() -> None:
+    args = cli.build_parser().parse_args(["run", "--safe-window", "hold"])
+    assert args.safe_window == SAFE_WINDOW_HOLD
+    assert cli.build_parser().parse_args(["run"]).safe_window == SAFE_WINDOW_AUTO
 
 
 # ---------------------------------------------------------------------------

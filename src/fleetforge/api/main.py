@@ -12,7 +12,10 @@ S0-infra-6 moved them into that same store: `app.state.agent_catalog` is a lazy
 `CatalogCache`, not a directory scan, so the object store is now what **onboarding**
 depends on as well as R1 — hence the startup WARNING when neither backend is configured.
 R1-be-1 added `POST /v1/artifact`, the first endpoint that **writes** to that store and
-the first writer of the `artifacts` table.
+the first writer of the `artifacts` table. R1-be-2 added
+`POST /v1/devices/{device_id}/deploy` — the first endpoint that **publishes** to the
+broker (`CommandPublisherDep`) and the only writer of `deploy_events` (`deploys.py`),
+hence the fourth startup WARNING.
 
 **The lifespan owns one background task**: the `ff_events` `LISTEN` connection
 (`api/eventstream.py::PostgresEventListener`), one per API process, feeding the
@@ -44,12 +47,13 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from fleetforge import __version__
-from fleetforge.api.deps import dynsec_configured
+from fleetforge.api.deps import dynsec_configured, mqtt_command_configured
 from fleetforge.api.eventstream import EventHub, PostgresEventListener
 from fleetforge.api.routers import (
     agent,
     artifacts,
     auth,
+    deploys,
     devices,
     enroll,
     enrollment,
@@ -205,6 +209,13 @@ def create_app() -> FastAPI:
             "S3_* on the api service; production sets GCS_BUCKET + "
             "GCS_IMPERSONATE_SERVICE_ACCOUNT. Round-trip it with `just storage-check`."
         )
+    if settings is not None and not mqtt_command_configured(settings):
+        logger.warning(
+            "MQTT_COMMAND_USERNAME/_PASSWORD are not set: POST /v1/devices/{id}/deploy "
+            "will answer 503, because nothing may publish dn/cmd without the `commander` "
+            "broker credential. The dev stack sets both on the api service; the broker "
+            "side is `mosquitto/bootstrap.sh`. Prove the path with `just broker-check`."
+        )
     if settings is not None and not dynsec_configured(settings):
         logger.warning(
             "MQTT_DYNSEC_USERNAME/_PASSWORD are not set: enrolled devices get a broker "
@@ -221,6 +232,7 @@ def create_app() -> FastAPI:
     app.include_router(agent.router)
     app.include_router(progress.router)
     app.include_router(artifacts.router)
+    app.include_router(deploys.router)
 
     @app.get("/v1/healthz", tags=["health"])
     async def healthz() -> dict[str, str]:

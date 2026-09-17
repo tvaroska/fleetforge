@@ -50,14 +50,20 @@ The ACL rules are **not** in a dynsec role: Mosquitto 2.0's plugin has no `%u`
 substitution (DECISIONS.md 2026-09-08). The `device` role exists and is deliberately
 empty — `createClient` requires a role name and nothing more.
 
-Three credentials exist before any board enrolls, all created by
+Four credentials exist before any board enrolls, all created by
 `mosquitto/bootstrap.sh` in the `mosquitto-init` one-shot:
 
 | Username (`.env`) | Role | May |
 |---|---|---|
 | `MQTT_DYNSEC_USERNAME` (`ff-admin`) | dynsec `admin` | create clients, read `$SYS` — the API and the healthcheck |
 | `MQTT_INGESTOR_USERNAME` (`ff-ingestor`) | `ingestor` | subscribe/receive `ff/v1/d/+/up/#`, nothing else |
+| `MQTT_COMMAND_USERNAME` (`ff-commander`) | `commander` | send `ff/v1/d/+/dn/#` and nothing else — the API's deploy publisher (R1-be-2) |
 | a device id | `device` (empty) | write `ff/v1/d/<its own id>/up/#`, read `…/dn/#` |
+
+The commander may **not** subscribe or receive anything: the ingestor is the only
+subscriber, and a leaked deploy credential must not be able to forge `up/status`. It is
+also a separate credential from `ff-admin` on purpose — the dynsec admin is broker-root
+over `$CONTROL`, which is not a privilege the deploy path needs.
 
 Prove the whole matrix against the running broker at any time:
 
@@ -84,6 +90,14 @@ docker compose logs -f ingestor    # the ingestor is the only subscriber
 **The admin credential cannot publish a device's `up/*`.** The `%u` patterns bind to
 the *username*, and `ff-admin` is not a device id — so `just mqtt-pub` without the
 last two arguments connects fine and is then **silently dropped**. See failure 5.
+
+To hand-send a command the way the API does, use the commander credential — the admin
+cannot do this either, and its publish is dropped just as silently:
+
+```bash
+just mqtt-pub "ff/v1/d/a4cf12b3de90/dn/cmd" '{"id":"spike","type":"noop"}' 1 \
+  "$MQTT_COMMAND_USERNAME" "$MQTT_COMMAND_PASSWORD"
+```
 
 **Do not reach for `mosquitto_pub`/`mosquitto_sub` here.** The mosquitto CLI clients
 switch to TLS whenever the port is 8883 and offer no flag to turn it off, so against

@@ -9,7 +9,10 @@ docker compose exec -T api python -m fleetforge.broker selftest
 Both the T2 harness for `R0-sec-1` and the ops answer to "is broker authz still what
 we think it is?". It provisions two throwaway devices through the **real**
 `DynsecProvisioner` and then proves, against the running broker, the property
-`CRITICAL.md` names: *a device can only ever be itself*.
+`CRITICAL.md` names: *a device can only ever be itself* — and, since R1-be-2, that the
+API's `commander` credential can command exactly one board at a time and can forge no
+telemetry (`MQTT_COMMAND_USERNAME`/`_PASSWORD` must be set, or the run fails: an unset
+pair is the configuration in which every deploy answers 503).
 
 Three things about how the assertions are written, all of which are the difference
 between a test that proves something and one that does not:
@@ -210,6 +213,74 @@ async def _check_delivery_confidentiality(
         )
 
 
+async def _check_command_delivery(
+    settings: Settings, device_a: str, pw_a: str, device_b: str, pw_b: str
+) -> None:
+    """The `commander` credential (R1-be-2): may send a `dn/` command, to one board only.
+
+    Three properties in one block, because they only mean anything together:
+
+    * a command published by the API's credential **reaches** the addressed device —
+      which also proves `mosquitto/acl`'s `pattern read ff/v1/d/%u/dn/#` wins over
+      dynsec's default deny on receive, the single fact the whole deploy path rests on;
+    * the *other* device, subscribed to `#` at the same moment, receives nothing, so
+      `publishClientSend ff/v1/d/+/dn/#` is not a broadcast;
+    * the commander itself cannot publish to `up/`, so a credential that leaks out of
+      the API cannot forge device telemetry or a fake `up/status` for a deploy.
+
+    Both subscribers are watched with `#` on purpose (property 1 in the module
+    docstring): the SUBACK proves nothing, only delivery does.
+    """
+    if not (settings.mqtt_command_username and settings.mqtt_command_password):
+        raise RuntimeError(
+            "MQTT_COMMAND_USERNAME / MQTT_COMMAND_PASSWORD are unset, so the deploy "
+            "publisher's ACLs cannot be checked — the API would answer 503 to every "
+            "deploy in this configuration"
+        )
+    commander = settings.mqtt_command_username
+    commander_pw = settings.mqtt_command_password
+
+    async with (
+        aiomqtt.Client(
+            hostname=settings.mqtt_host,
+            port=settings.mqtt_port,
+            identifier=_identifier("dev-a"),
+            username=device_a,
+            password=pw_a,
+        ) as a_client,
+        _watching(a_client, "#") as a_seen,
+        aiomqtt.Client(
+            hostname=settings.mqtt_host,
+            port=settings.mqtt_port,
+            identifier=_identifier("dev-b"),
+            username=device_b,
+            password=pw_b,
+        ) as b_client,
+        _watching(b_client, "#") as b_seen,
+    ):
+        command_topic = f"ff/v1/d/{device_a}/dn/cmd"
+        await _publish(settings, username=commander, password=commander_pw, topic=command_topic)
+        await _settle(a_seen, command_topic, expected=True)
+        _step(f"allow    {commander} -> {command_topic} delivered to {device_a}")
+        await _settle(b_seen, command_topic, expected=False)
+        _step(f"deny     {device_b} received nothing while {device_a} was commanded")
+
+    async with (
+        aiomqtt.Client(
+            hostname=settings.mqtt_host,
+            port=settings.mqtt_port,
+            identifier=_identifier("watch"),
+            username=settings.mqtt_dynsec_username,
+            password=settings.mqtt_dynsec_password,
+        ) as watcher,
+        _watching(watcher, "#") as seen,
+    ):
+        forged_up = f"ff/v1/d/{device_a}/up/status"
+        await _publish(settings, username=commander, password=commander_pw, topic=forged_up)
+        await _settle(seen, forged_up, expected=False)
+        _step(f"deny     {commander} -> {forged_up} dropped (the commander is write-dn only)")
+
+
 async def _check_no_fleet_takeover(settings: Settings, device_a: str, pw_a: str) -> None:
     """A device publishing a real `createClient` must not create a client."""
     impostor_password = generate_broker_password()
@@ -255,6 +326,10 @@ async def _run(args: argparse.Namespace) -> int:
         f"role     {settings.mqtt_dynsec_role} — must exist and is deliberately EMPTY; "
         "the two %u pattern ACLs live in mosquitto/acl"
     )
+    _step(
+        f"command  {settings.mqtt_command_username or '<unset>'} — the deploy publisher "
+        "(role `commander`, write-only on ff/v1/d/+/dn/#)"
+    )
 
     provisioner = DynsecProvisioner(
         lambda: mqtt_dynsec_session(settings),
@@ -272,6 +347,7 @@ async def _run(args: argparse.Namespace) -> int:
 
     await _check_publish_acl(settings, device_a, pw_a, device_b)
     await _check_delivery_confidentiality(settings, device_a, pw_a, device_b, pw_b)
+    await _check_command_delivery(settings, device_a, pw_a, device_b, pw_b)
     await _check_no_fleet_takeover(settings, device_a, pw_a)
 
     reason = await _refused(settings, username=None, password=None)

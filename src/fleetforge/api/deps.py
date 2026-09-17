@@ -27,7 +27,12 @@ from fleetforge.auth.cache import VerifiedSecretCache
 from fleetforge.auth.hashing import averify_secret, dummy_verify
 from fleetforge.auth.ratelimit import FixedWindowLimiter
 from fleetforge.auth.tokens import ADMIN_TOKEN_PREFIX, parse_token
-from fleetforge.broker import BrokerProvisioner, NullProvisioner
+from fleetforge.broker import (
+    BrokerProvisioner,
+    CommandPublisher,
+    NullCommandPublisher,
+    NullProvisioner,
+)
 from fleetforge.clock import now_utc
 from fleetforge.config import Settings, get_settings
 from fleetforge.db.base import get_sessionmaker
@@ -207,6 +212,38 @@ def get_broker_provisioner(settings: SettingsDep) -> BrokerProvisioner:
 
 
 BrokerDep = Annotated[BrokerProvisioner, Depends(get_broker_provisioner)]
+
+
+def mqtt_command_configured(settings: Settings) -> bool:
+    """Is the `commander` broker credential configured?
+
+    Empty strings count as unset, for the reason `dynsec_configured` spells out.
+    """
+    return bool(settings.mqtt_command_username) and bool(settings.mqtt_command_password)
+
+
+def get_command_publisher(settings: SettingsDep) -> CommandPublisher:
+    """`MqttCommandPublisher` when the commander credential is configured, Null otherwise.
+
+    The Null one **raises** rather than succeeding quietly (`broker/commands.py`), so an
+    unconfigured API answers 503 on a deploy instead of recording an intent no board can
+    ever receive. `create_app()` logs one WARNING at startup when this path is selected.
+
+    `broker.publisher` is imported here rather than at module scope, so the Null path
+    does not pay for `aiomqtt` — the same shape as `get_broker_provisioner`.
+    """
+    if not mqtt_command_configured(settings):
+        return NullCommandPublisher()
+
+    from fleetforge.broker.publisher import MqttCommandPublisher, mqtt_command_client
+
+    return MqttCommandPublisher(
+        lambda: mqtt_command_client(settings),
+        timeout_s=settings.broker_command_timeout_s,
+    )
+
+
+CommandPublisherDep = Annotated[CommandPublisher, Depends(get_command_publisher)]
 
 
 def get_object_store(settings: SettingsDep) -> ObjectStore:

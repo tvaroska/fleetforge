@@ -138,6 +138,39 @@ class TestBootstrap:
         )
         assert "addRoleACL ingestor publishClientSend" not in text
 
+    def test_the_commander_role_may_only_send_on_dn(self) -> None:
+        """R1-be-2: the API's deploy credential. One rule, `publishClientSend`, `dn/` only.
+
+        A `subscribePattern` or a `publishClientReceive` here would make the API a second
+        MQTT subscriber — the ingestor being the only one is load bearing — and a `up/`
+        rule would let a leaked API credential forge telemetry and fake `up/status`.
+        """
+        text = BOOTSTRAP.read_text()
+        assert "createRole commander\n" in text
+        assert re.search(
+            r"addRoleACL commander\s+publishClientSend\s+'ff/v1/d/\+/dn/#' allow", text
+        )
+        assert len(re.findall(r"addRoleACL commander\s+", text)) == 1
+        assert "addRoleACL commander subscribePattern" not in text
+        assert "addRoleACL commander publishClientReceive" not in text
+
+    def test_the_commander_role_is_never_granted_to_a_device(self) -> None:
+        """Every board holds `device`; one client holds `commander`."""
+        text = BOOTSTRAP.read_text()
+        assert re.findall(r"addClientRole\s+\S+\s+commander", text) == [
+            'addClientRole   "$MOSQUITTO_COMMANDER_USERNAME" commander'
+        ]
+
+    def test_the_commander_credential_is_mandatory(self) -> None:
+        """An unset variable must fail the bootstrap, not create a passwordless client."""
+        text = BOOTSTRAP.read_text()
+        assert "${MOSQUITTO_COMMANDER_USERNAME:?" in text
+        assert "${MOSQUITTO_COMMANDER_PASSWORD:?" in text
+
+    def test_the_device_role_grants_nothing_on_dn(self) -> None:
+        """Both ACL backends are OR-combined, so a `+` rule on `device` would be a breach."""
+        assert "addRoleACL device" not in BOOTSTRAP.read_text()
+
     def test_is_executable(self) -> None:
         """Bind-mounted and run through `sh`, but a non-executable script is a foot-gun."""
         assert os.access(BOOTSTRAP, os.X_OK)
@@ -175,6 +208,23 @@ class TestComposeWiring:
         text = COMPOSE.read_text()
         assert "MQTT_USERNAME: ${MQTT_INGESTOR_USERNAME:?" in text
         assert "MQTT_PASSWORD: ${MQTT_INGESTOR_PASSWORD:?" in text
+
+    def test_the_api_gets_a_mandatory_command_credential(self) -> None:
+        """Unset silently selects `NullCommandPublisher` — every deploy answers 503."""
+        text = COMPOSE.read_text()
+        assert "MQTT_COMMAND_USERNAME: ${MQTT_COMMAND_USERNAME:?" in text
+        assert "MQTT_COMMAND_PASSWORD: ${MQTT_COMMAND_PASSWORD:?" in text
+
+    def test_the_bootstrap_is_given_the_commander_credential(self) -> None:
+        """The same pair, under the names `bootstrap.sh` reads."""
+        text = COMPOSE.read_text()
+        assert "MOSQUITTO_COMMANDER_USERNAME: ${MQTT_COMMAND_USERNAME:?" in text
+        assert "MOSQUITTO_COMMANDER_PASSWORD: ${MQTT_COMMAND_PASSWORD:?" in text
+
+    def test_the_ingestor_is_not_given_the_command_credential(self) -> None:
+        """One privilege per service: the ingestor subscribes, the API commands."""
+        ingestor_block = COMPOSE.read_text().split("ingestor:")[1].split("\n  frontend:")[0]
+        assert "MQTT_COMMAND_" not in ingestor_block
 
     def test_the_broker_waits_for_the_bootstrap(self) -> None:
         """Without this the plugin starts with no store and refuses every client."""

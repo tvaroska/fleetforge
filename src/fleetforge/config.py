@@ -146,6 +146,24 @@ class Settings(BaseSettings):
     # One dynsec round-trip must not hold an API worker forever.
     broker_command_timeout_s: float = 5.0
 
+    # --- Deploy commands on dn/cmd (R1-be-2) ----------------------------------
+    # The API's THIRD broker credential, and the only one that may publish into
+    # `ff/v1/d/+/dn/#`. Distinct from `mqtt_dynsec_*` (broker-root over $CONTROL,
+    # which grants nothing over ff/v1) and from `mqtt_username` (the ingestor's
+    # read-only client): three privileges, rotated separately. `mosquitto/bootstrap.sh`
+    # creates the `commander` role and this client. BOTH unset selects
+    # `broker.NullCommandPublisher`, which REFUSES to publish — unlike
+    # `NullProvisioner`, because a deploy that publishes nothing and answers 202 is a
+    # lie the dashboard would repeat. Empty strings count as unset
+    # (`api/deps.py::mqtt_command_configured`). Reuses `broker_command_timeout_s`.
+    mqtt_command_username: str | None = None
+    mqtt_command_password: str | None = None
+    # How long the device arms its own confirm timer for after an apply, carried in
+    # the `stage` payload (`spec/device-protocol.md` → `dn/cmd`). 300 s is
+    # `spec/prd.md` → *Requirements & targets* ("Confirm timeout, device-armed").
+    # One number, one place: the payload builder never types a literal.
+    confirm_timeout_s: int = 300
+
     # --- SSE event stream (R0-be-5) ------------------------------------------
     # A comment frame every 15 s. Idle proxies and load balancers close silent
     # connections, and a client with no traffic cannot tell "quiet fleet" from

@@ -93,8 +93,19 @@ class DeployState(StrEnum):
 
     **Advisory** — `deploy_events.state` is TEXT with no CHECK, for the same reason
     as `LinkType`.
+
+    One member is **not** in the spec's machine: `REQUESTED`. `deploy_events.state`
+    records what the *server* knows as well as what the device reported, and "we
+    published a command" is a server-side fact with no device state to match it. See
+    its comment below and `deploys.py`, the table's single writer.
     """
 
+    # Server-authored, and it never arrives on the wire: no device publishes
+    # `up/status {"state":"requested"}`, and `ingestor/handlers.py` must never accept
+    # one. Written by `deploys.py::record_requested` the moment a `stage` command is
+    # about to be published, so that an abandoned deploy is visible to the KPIs and
+    # R1-be-4 can map a `cmd_id` back to the version that was intended.
+    REQUESTED = "requested"
     IDLE = "idle"
     STAGING = "staging"
     DOWNLOADING = "downloading"

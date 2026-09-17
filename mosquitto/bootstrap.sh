@@ -10,6 +10,7 @@ CONFIG=/mosquitto/data/dynamic-security.json
 PORT=1884
 : "${MOSQUITTO_ADMIN_USERNAME:?}" ; : "${MOSQUITTO_ADMIN_PASSWORD:?}"
 : "${MOSQUITTO_INGESTOR_USERNAME:?}" ; : "${MOSQUITTO_INGESTOR_PASSWORD:?}"
+: "${MOSQUITTO_COMMANDER_USERNAME:?}" ; : "${MOSQUITTO_COMMANDER_PASSWORD:?}"
 
 if [ ! -f "$CONFIG" ]; then
   echo "bootstrap: creating $CONFIG"
@@ -61,6 +62,23 @@ ctrl addRoleACL ingestor publishClientReceive 'ff/v1/d/+/up/#' allow
 ctrl createClient    "$MOSQUITTO_INGESTOR_USERNAME" -p "$MOSQUITTO_INGESTOR_PASSWORD"
 ctrl setClientPassword "$MOSQUITTO_INGESTOR_USERNAME" "$MOSQUITTO_INGESTOR_PASSWORD"
 ctrl addClientRole   "$MOSQUITTO_INGESTOR_USERNAME" ingestor
+
+# The API's deploy publisher (R1-be-2). WRITE-ONLY and dn/-ONLY: no
+# subscribePattern and no publishClientReceive, because the ingestor is the sole
+# MQTT subscriber and that invariant is load bearing. Nothing else in the estate
+# may publish a command — the dynsec ADMIN's rights are over $CONTROL, not over
+# ff/v1, and a device is denied its own dn/cmd (`just broker-check` proves both).
+#
+# The `+` is safe here and a `+` on the `device` role would not be: both ACL
+# backends are consulted and ALLOW WINS, so a dn/ rule on `device` would let every
+# board receive every other board's commands. This rule grants a CLASS of topics to
+# a role that holds exactly one client. Per-device dynsec ACLs would cost a control
+# -plane call per enrolment and contain nothing extra (the API already holds admin).
+ctrl createRole commander
+ctrl addRoleACL commander publishClientSend 'ff/v1/d/+/dn/#' allow
+ctrl createClient    "$MOSQUITTO_COMMANDER_USERNAME" -p "$MOSQUITTO_COMMANDER_PASSWORD"
+ctrl setClientPassword "$MOSQUITTO_COMMANDER_USERNAME" "$MOSQUITTO_COMMANDER_PASSWORD"
+ctrl addClientRole   "$MOSQUITTO_COMMANDER_USERNAME" commander
 
 # Deny by default. `dynsec init` leaves publishClientReceive=true.
 ctrl setDefaultACLAccess publishClientSend    deny

@@ -271,6 +271,134 @@ the 411-on-missing-`Content-Length` rule means a chunked upload is refused by de
 since S0-infra-5 `signed_url` is a network round trip, so handing out a URL per range
 request needs a cache.
 
+### Deploy orchestration — `POST /v1/devices/{id}/deploy` (R1-be-2) — **LANDED 2026-09-17**
+
+**What shipped.** The first command the server ever sends a board: `stage`, carrying a
+short-lived signed URL for the artifact R1-be-1 uploaded, published to
+`ff/v1/d/<device>/dn/cmd`. Admin-authenticated, body `{"version": "1.5.0"}` plus an
+optional `apply`, answered **202** with `cmd_id`, `sha256`, `size_bytes`, `apply`,
+`reused` and `device_online`. Plus the two things that make it auditable: `deploy_events`
+gets its first writer, and the simulator gained a real stage executor so the whole path
+can be exercised without a board.
+
+**A fourth broker credential, `commander`, and why the `device` role stayed empty.**
+`mosquitto/bootstrap.sh` now creates a dynsec role with exactly one ACL,
+`publishClientSend 'ff/v1/d/+/dn/#' allow`, and one client holding it
+(`MQTT_COMMAND_USERNAME`, `ff-commander` in dev). It deliberately has no
+`subscribePattern` and no `publishClientReceive`: the ingestor must remain the only
+subscriber, and a leaked deploy credential must not be able to forge `up/status`. It is
+also not the dynsec admin — that credential is broker-root over `$CONTROL`, a privilege
+publishing a command does not need.
+
+Delivery works because **both ACL backends are consulted and allow wins**: dynsec denies
+`publishClientReceive` by default, and `mosquitto/acl`'s `pattern read ff/v1/d/%u/dn/#`
+grants the board its own downlink. So no change to `mosquitto/acl` and no rule on the
+`device` role — a `+` rule there would let every board read every other board's commands,
+which is the breach `CRITICAL.md` names. `just broker-check` now proves the matrix live:
+the commander publishes to A, **A receives it and B does not**, and the commander's
+publish to `ff/v1/d/A/up/status` is dropped.
+
+**MQTT 3.1.1 has no deny feedback — a limitation, not a bug.** A refused publish is
+indistinguishable from a delivered one: no PUBACK reason code, no error, nothing in the
+publisher's logs. Every negative assertion in the selftest is therefore "nothing arrived
+at a subscriber watching `#`", never "the publish raised". If a command silently never
+arrives, the reason code is obtainable only over MQTT 5 from inside the container
+(`docs/runbooks/dev-stack.md` → failure 5).
+
+**`deploy_events` has exactly one writer.** Everything that inserts goes through
+`src/fleetforge/deploys.py`; `tests/test_invariants.py` fails the build if any other
+module under `src/` mentions `DeployEvent(` or the table in SQL. The table is retained
+forever and both v1 KPIs are computed over the terminal event of each
+`(device_id, cmd_id)` transaction, so a row in the wrong shape is not a bug that shows up
+today — it is a KPI that is quietly wrong in R5. R1-be-4's `up/status` ingestion adds its
+writer *there*, not in `ingestor/handlers.py`.
+
+**The server authors one state, `requested`, and one terminal exception.** `requested`
+records "we published a command", which no device can report; without it an abandoned
+deploy is invisible and R1-be-4 cannot map an incoming `cmd_id` back to the intended
+version. The exception is `failed` with `detail={"reason": "publish_failed"}` — the
+broker refused, so the board provably never saw the command, and the transaction gets
+closed instead of hanging open forever (the API answers 503). Beyond that the server
+never writes a state for a command a device received, and **never expires
+`awaiting_safe_window`**: the device owns the reboot, and a vehicle in motion may park
+there indefinitely. There is no sweeper, no timeout task and no `asyncio.sleep` on this
+path, and the test module asserts their absence in the source rather than trusting a
+review.
+
+**A retry inside the URL's TTL is the same transaction.** The device deduplicates on the
+command `id`, so a retried `stage` must reuse it or the board downloads the same firmware
+twice. A POST for the same `(device_id, sha256)` matching the newest `requested` row for
+that device — younger than `SIGNED_URL_TTL_S` and with no terminal event — reuses that
+`cmd_id`, signs a **fresh** URL, republishes and answers `reused: true`, writing **no
+second row**. A different artifact is always a new intent. Past the TTL the first URL has
+expired, so a board that never acted on it cannot act on it now, and a new intent is the
+honest record.
+
+**The signed URL is a bearer credential.** It appears in exactly one place: the `stage`
+payload on the wire. Never in the 202 body, never in `deploy_events.detail` (sha256, size,
+target, apply — that is all), never in a log line; the publisher logs `id` and `type`
+only, and the simulator's transcript prints it redacted. Exactly one URL is signed per
+accepted deploy — since S0-infra-5 signing is an IAM round trip on GCS, so it is not free.
+
+**Refusals are specific, and none of them write an event.** 400 malformed version (the
+regex is imported from `api/routers/artifacts.py`, not retyped); 404 unknown device; 404
+no artifact under that label **for this device's chip** — the target is the board's chip,
+not a choice; 409 if the device never announced the `ota` capability; 409 if the artifact
+row or blob is missing. A device being offline is **reported, not enforced**: `dn/cmd` is
+never retained (a retained command re-stages on every reconnect, forever) — durability
+comes from the board's persistent session, so the deploy is accepted and `device_online`
+tells the operator what to expect.
+
+**The simulator can now execute a deploy** (`--safe-window auto|hold`): decode, dedup on
+`id`, then `staging → downloading → verifying → staged → applying → rebooting`, adopting
+the new `fw_version`, publishing each state retained on `up/status`. `hold` stops at
+`awaiting_safe_window` and stays there; `apply: on_command` stops at `staged`. It stays
+import-pure (stdlib `urllib`, never the API's httpx client) and re-types every protocol
+constant, both enforced by existing tripwires.
+
+**Verification.** T1: `ruff` + `ruff format` + `mypy` green, **811 tests pass**,
+`just stack-check` clean.
+
+T2 ran against the live dev stack with the real 993696-byte `agent/dist/esp32/app.bin`:
+
+* `just up` healthy; `docker compose logs mosquitto-init | grep -i commander` shows
+  `createRole` / `addRoleACL` / `createClient` / `addClientRole` for `ff-commander` on the
+  **pre-existing** dynsec store, with 13 "already exists" lines and `bootstrap: done` — the
+  bootstrap is still idempotent.
+* `just broker-check` → `SELFTEST OK`, including
+  `allow ff-commander -> ff/v1/d/ffff00000001/dn/cmd delivered to ffff00000001`,
+  `deny ffff00000002 received nothing while ffff00000001 was commanded`, and
+  `deny ff-commander -> ff/v1/d/ffff00000001/up/status dropped`; the R0 deny cases
+  unchanged.
+* Upload → **201** (993696 bytes, `sha256 2484cb76…`). Deploy → **202**
+  `reused: false`; the immediate repeat → **202** with the **same** `cmd_id` and
+  `reused: true`, and `deploy_events` holds **one** row.
+* The simulator printed the redacted payload — exactly the spec keys, `type: "stage"`,
+  `confirm_timeout_s: 300`, `artifact.size` equal to the uploaded byte count — then walked
+  `staging → downloading (993696 bytes) → verifying (sha256 matches) → staged → applying →
+  rebooting → fw 1.5.0`, and dropped the duplicate command.
+* `--safe-window hold` parked in `awaiting_safe_window` and was still parked minutes
+  later, with one `requested` row and nothing server-side expiring it.
+* Hygiene: no row in `deploy_events.detail` contains `http`, and 20 minutes of API logs
+  contain no signature or endpoint string.
+* Refusals live: wrong-chip label → 404, no `ota` capability → 409, unknown version →
+  404, unknown device → 404, `version=../etc` → 400.
+
+**Production prerequisite (not done — `services/` is a different repo and prod env is
+never edited without asking):** `services/prod/.env` must gain `MQTT_COMMAND_USERNAME` and
+`MQTT_COMMAND_PASSWORD` before the next prod deploy. Both are `:?`-mandatory in compose, so
+without them `mosquitto-init` refuses to start; if the API alone lacks them it selects
+`NullCommandPublisher` and every deploy answers 503 (with one startup WARNING).
+
+**Spec proposals (filed, not applied — `spec/` is protected):** `spec/device-protocol.md`
+says nothing about a server-authored `requested` marker, nor about a retried `stage`
+having to reuse `id`, though both follow from "the device deduplicates on `id`". Propose
+one sentence making the reuse rule explicit, a note that `deploy_events.state` may carry
+server-authored values outside the device state machine, and confirmation that
+`artifact.sig` is optional while R1 has no signer.
+
+**Decisions & gotchas.** See `DECISIONS.md` 2026-09-17.
+
 ## Phase 2: R2 — Safe deploy: verify + auto-rollback ⭐
 
 | ID | Task | Priority | Effort |

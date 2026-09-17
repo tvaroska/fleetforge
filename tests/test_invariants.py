@@ -8,6 +8,7 @@ evidence with it.
 
 import asyncio
 import datetime as dt
+from pathlib import Path
 
 import pytest
 from sqlalchemy import inspect, select, text
@@ -278,3 +279,42 @@ def test_secret_hash_is_not_plaintext_column() -> None:
         columns = {c.name for c in inspect(model).columns}
         assert "secret_hash" in columns
         assert not (columns & forbidden), f"{model.__tablename__} must not store a plaintext secret"
+
+
+# ---------------------------------------------------------------------------
+# `deploy_events` has exactly one writer (R1-be-2)
+# ---------------------------------------------------------------------------
+
+SRC_DIR = Path(__file__).resolve().parent.parent / "src" / "fleetforge"
+# The one module allowed to insert into the KPI table, plus the models that define it.
+DEPLOY_EVENT_WRITERS = {"deploys.py", "db/models.py"}
+
+
+def test_only_deploys_py_writes_deploy_events() -> None:
+    """`spec/prd.md` → *Retention*: this table is the product's evidence, kept forever.
+
+    Both v1 KPIs are computed over the terminal event of each `(device_id, cmd_id)`
+    transaction, so a second writer with its own idea of `is_terminal` is not a bug that
+    shows up today — it is a KPI that is quietly wrong in R5. R1-be-4's ingestor path
+    adds its `up/status` writer **inside `deploys.py`**, not next to its handler.
+    """
+    offenders = []
+    for path in SRC_DIR.rglob("*.py"):
+        relative = path.relative_to(SRC_DIR).as_posix()
+        if relative in DEPLOY_EVENT_WRITERS:
+            continue
+        source = path.read_text(encoding="utf-8")
+        code = "\n".join(
+            line.split("#", 1)[0]
+            for line in source.splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        if "DeployEvent(" in code or "INSERT INTO deploy_events" in code.upper():
+            offenders.append(relative)
+    assert offenders == [], f"these modules write deploy_events directly: {offenders}"
+
+
+def test_the_writer_module_exists_and_is_the_one_named() -> None:
+    """Non-vacuity: the rule above is worthless if the writer moved and nothing noticed."""
+    source = (SRC_DIR / "deploys.py").read_text(encoding="utf-8")
+    assert "DeployEvent(" in source

@@ -7,7 +7,7 @@ schema section inside each router.
 import datetime as dt
 import re
 import uuid
-from typing import Self
+from typing import Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -354,3 +354,61 @@ class ArtifactUploaded(BaseModel):
     version: str
     partition_layout: str
     created: bool
+
+
+# ---------------------------------------------------------------------------
+# Deploy orchestration (R1-be-2)
+# ---------------------------------------------------------------------------
+
+
+class DeployRequest(BaseModel):
+    """Deploy one labelled version to one device. Two fields, and both are choices.
+
+    There is deliberately **no `target`**: the chip is the device's own
+    `platform_type` (`spec/flows.md` Flow 2 → "reject on chip mismatch"). Making it a
+    request field would let an operator flash an esp32 image onto an esp32c6, which is
+    a brick, not a typo.
+
+    There is also no `url`, no `sha256` and no `force`. The artifact is resolved from
+    `(platform_type, version)` server-side, so the command can never carry bytes the
+    server has not stored and checked.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: str = Field(min_length=1, max_length=64, description="the label, e.g. 1.5.0")
+    # `spec/device-protocol.md`: `auto` lets the device apply as soon as *it* judges the
+    # window safe; `on_command` stages and waits. R1 ships no `apply` command, so an
+    # `on_command` deploy parks the board in `staged` until R2 — accepted on purpose,
+    # because the wire field exists and refusing it would be inventing a restriction.
+    apply: Literal["auto", "on_command"] = "auto"
+
+
+class DeployAccepted(BaseModel):
+    """What `POST /v1/devices/{device_id}/deploy` returns with 202.
+
+    202 and not 201: the command was handed to the broker, and under MQTT 3.1.1 that is
+    the *most* the server can honestly claim (`broker/commands.py` — a denied publish is
+    invisible). Whether the device staged it arrives later, as `up/status`.
+
+    **No URL here, ever.** The signed URL is a bearer credential; it goes to the device
+    in the command and nowhere else — not into this body, not into the log, not into
+    `deploy_events.detail`.
+
+    `reused` is `True` when this POST re-published an in-flight intent instead of
+    minting a new one, which is how a caller can tell a retry from a fresh deploy: the
+    device deduplicates on `cmd_id`, so a reused id means "no second download".
+
+    `device_online` is reported and **never** blocking: the broker queues the QoS-1
+    command in the device's persistent session, which is the entire point of
+    `clean_session=false` for a sleepy board.
+    """
+
+    cmd_id: str
+    device_id: str
+    version: str
+    sha256: str
+    size_bytes: int
+    apply: str
+    reused: bool
+    device_online: bool

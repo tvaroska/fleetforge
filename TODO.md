@@ -291,7 +291,8 @@ fixes the `dn/cmd` `stage` payload and the `up/status` state machine, and is nea
       refused, `Range:` returns 206 with the right slice, and the signing call count for
       a 10-range download is 1.
 
-- [ ] **R1-be-2**: Deploy orchestration `stage → apply`, per device (P0, 1.5d)
+- [x] **R1-be-2**: Deploy orchestration `stage → apply`, per device (P0, 1.5d)
+      _(done 2026-09-17; reviewed; see docs/features/ota-deploy.md)_
       Publish `dn/cmd` carrying the short-lived signed URL, exactly the payload shape in
       `spec/device-protocol.md` — near-frozen, so this task **conforms to** the spec and
       does not extend it. Every command carries `id` and the device deduplicates on it,

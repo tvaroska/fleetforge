@@ -21,6 +21,7 @@ import logging
 import os
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
+from typing import Any
 
 import httpx
 import pytest
@@ -369,3 +370,29 @@ class MemoryObjectStore:
     async def delete(self, key: str) -> None:
         self._maybe_fail()
         self.objects.pop(key, None)
+
+
+class FakeCommandPublisher:
+    """An in-memory `CommandPublisher`: records what was published, or refuses. R1-be-2.
+
+    Structural, like `MemoryObjectStore` — no base class, because the real adapter has
+    none either. It records the **whole** payload so a test can assert the exact wire
+    shape against `spec/device-protocol.md`, and `fail_with` makes the
+    `CommandPublishError` → `failed` row → 503 path reachable with no broker running.
+    """
+
+    def __init__(self) -> None:
+        # (device_id, payload) per publish, in order.
+        self.published: list[tuple[str, dict[str, Any]]] = []
+        self.fail_with: Exception | None = None
+
+    async def publish(self, device_id: str, payload: dict[str, Any]) -> None:
+        if self.fail_with is not None:
+            raise self.fail_with
+        self.published.append((device_id, payload))
+
+    @property
+    def last(self) -> dict[str, Any]:
+        """The most recent payload; fails the test loudly if nothing was published."""
+        assert self.published, "nothing was published"  # noqa: S101 - a test helper
+        return self.published[-1][1]

@@ -119,6 +119,11 @@ services:
       MOSQUITTO_ADMIN_PASSWORD: ${MQTT_DYNSEC_PASSWORD:?set MQTT_DYNSEC_PASSWORD in .env}
       MOSQUITTO_INGESTOR_USERNAME: ${MQTT_INGESTOR_USERNAME:?set MQTT_INGESTOR_USERNAME in .env}
       MOSQUITTO_INGESTOR_PASSWORD: ${MQTT_INGESTOR_PASSWORD:?set MQTT_INGESTOR_PASSWORD in .env}
+      # The API's deploy publisher (R1-be-2) — the `commander` role, write-only on
+      # `ff/v1/d/+/dn/#`. Mandatory for the same reason as the pair above: with it
+      # unset the API selects `NullCommandPublisher` and every deploy answers 503.
+      MOSQUITTO_COMMANDER_USERNAME: ${MQTT_COMMAND_USERNAME:?set MQTT_COMMAND_USERNAME in .env}
+      MOSQUITTO_COMMANDER_PASSWORD: ${MQTT_COMMAND_PASSWORD:?set MQTT_COMMAND_PASSWORD in .env}
     volumes:
       - ./mosquitto/bootstrap.sh:/bootstrap.sh:ro
       - fleetforge_mosquitto:/mosquitto/data
@@ -268,6 +273,14 @@ services:
       # stored, and the only symptom is `broker_provisioned_at IS NULL`.
       MQTT_DYNSEC_USERNAME: ${MQTT_DYNSEC_USERNAME:?set MQTT_DYNSEC_USERNAME in .env}
       MQTT_DYNSEC_PASSWORD: ${MQTT_DYNSEC_PASSWORD:?set MQTT_DYNSEC_PASSWORD in .env}
+      # The API's SECOND broker credential (R1-be-2): the `commander` client, the
+      # only one in the estate allowed to publish `ff/v1/d/+/dn/#`. Separate from
+      # the dynsec admin on purpose — broker-root is a control-plane credential and
+      # a deploy is a data-plane publish. Mandatory (`${VAR:?}`): with it unset the
+      # API selects `NullCommandPublisher` and every deploy answers 503, because a
+      # deploy that publishes nothing and returns 202 is a lie.
+      MQTT_COMMAND_USERNAME: ${MQTT_COMMAND_USERNAME:?set MQTT_COMMAND_USERNAME in .env}
+      MQTT_COMMAND_PASSWORD: ${MQTT_COMMAND_PASSWORD:?set MQTT_COMMAND_PASSWORD in .env}
       #
       # Pre-wired for R0-be-6 so the object-store adapter is pure code.
       S3_ENDPOINT_URL: http://minio:9000

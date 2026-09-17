@@ -52,6 +52,8 @@ from fleetforge.simulator.device import (
     LINK_FAST,
     LINK_PROFILES,
     POWER_CLASSES,
+    SAFE_WINDOW_AUTO,
+    SAFE_WINDOW_MODES,
     DeviceIdentity,
     LinkProfile,
     Step,
@@ -193,6 +195,7 @@ async def _run_board(
             awake_s=args.awake_s,
             stop=stop,
             endpoint=endpoint,
+            safe_window=args.safe_window,
             step=step,
         )
         return
@@ -205,6 +208,7 @@ async def _run_board(
         heartbeat_interval_s=args.heartbeat_interval,
         stop=stop,
         endpoint=endpoint,
+        safe_window=args.safe_window,
         step=step,
     )
 
@@ -380,6 +384,16 @@ def _shared(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--awake-s", type=float, default=DEFAULT_AWAKE_S)
     parser.add_argument("--capabilities", action="append", default=[])
+    parser.add_argument(
+        "--safe-window",
+        default=SAFE_WINDOW_AUTO,
+        choices=sorted(SAFE_WINDOW_MODES),
+        help=(
+            "what this board does with a staged image: `auto` applies immediately, "
+            "`hold` parks in awaiting_safe_window indefinitely (a vehicle in motion). "
+            "Nothing server-side ends a hold — that is the point of the flag"
+        ),
+    )
     parser.add_argument("--link", default=LINK_FAST, choices=LINK_PROFILES)
     parser.add_argument("--seed", type=int, default=0, help="makes --link slow reproducible")
     parser.add_argument(
