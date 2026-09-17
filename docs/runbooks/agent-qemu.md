@@ -62,6 +62,30 @@ comes back **404 from Traefik**, having never reached the API, and it reads exac
 firmware bug. If you see `enroll 404` with an empty api log, that router is what is
 missing.
 
+### For an OTA run, the download URLs must be `10.0.2.2` too (R1-be-3)
+
+The same gateway rule applies to firmware downloads, and it bites in two places because
+there are two hops. Export both **before `just up`**:
+
+```bash
+FF_PUBLIC_BASE_URL=http://10.0.2.2:8080 just up
+# and, on the api service, S3_PUBLIC_ENDPOINT_URL=http://10.0.2.2:9000
+```
+
+* `PUBLIC_BASE_URL` (compose reads `FF_PUBLIC_BASE_URL`, default
+  `http://localhost:8080`) is the origin the **device** is told to fetch from; it goes
+  into the `stage` command's `artifact.url`. A guest cannot resolve the host's
+  `localhost`.
+* `S3_PUBLIC_ENDPOINT_URL` (default `http://localhost:${FF_MINIO_PORT:-9000}`) is the
+  origin the API's **307 redirect** points at. Getting the first one right and leaving
+  this one at `localhost` fails one hop later, which looks like a working deploy and a
+  board that cannot download — the log line is an `esp_https_ota` connect failure against
+  `127.0.0.1`, and nothing server-side is wrong.
+
+Symptom either way: `staging → downloading` and then `download_failed`, with the API log
+showing a 307 (or nothing at all). Neither value affects production, where both origins
+are the real domain.
+
 ## What a first boot looks like
 
 Recorded from the R0-fw-1 acceptance run, trimmed to the agent's own lines:

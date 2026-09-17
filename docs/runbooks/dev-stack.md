@@ -392,6 +392,40 @@ Five failed logins in 60 s from one client IP (or 30 across all of them) return 
 until the window passes; the counter is per API process, so `docker compose restart
 api` clears it.
 
+### Setting the artifact download secret (R1-be-3)
+
+`ARTIFACT_URL_SECRET` is mandatory in compose, so on an existing `.env` that predates
+R1-be-3 **`just up`, `just minio-up` and `just stack-check` all fail** with:
+
+```
+error while interpolating services.api.environment.ARTIFACT_URL_SECRET:
+required variable ARTIFACT_URL_SECRET is missing a value
+```
+
+Fix it once:
+
+```bash
+just artifact-secret        # prints 32 bytes of hex; paste into .env
+# ARTIFACT_URL_SECRET=<the hex>
+# PUBLIC_BASE_URL=http://localhost:8080
+```
+
+`.env.example` ships an obviously-fake value that works for dev. The secret is the HMAC
+key behind the **public** `GET /v1/artifact/{sha256}/bin` endpoint — the signature in the
+link is the board's only credential — so there is deliberately no default in compose.
+`PUBLIC_BASE_URL` is the origin a *device* must reach; the host copy in `.env` is what
+`just artifact-url <sha256>` signs with, and the container's copy comes from
+`FF_PUBLIC_BASE_URL` (default `http://localhost:${FF_HTTP_PORT}`). Rotating the secret
+invalidates every link in flight — at most `SIGNED_URL_TTL_S` of staged deploys, which
+simply re-deploy.
+
+```bash
+SHA=$(curl -sb /tmp/ff.jar http://localhost:8080/v1/artifact/... )   # or from the 201
+URL=$(just artifact-url "$SHA")          # the whole link, nothing else, on stdout
+curl -sSL -o /tmp/fw.bin "$URL"          # 307 from the API, 200 from MinIO
+just artifact-url "$SHA" --ttl 1         # a link that expires while you watch -> 403
+```
+
 ## Object storage
 
 The dev stack runs MinIO with a `fleetforge` bucket created at startup by the

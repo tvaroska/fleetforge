@@ -92,6 +92,23 @@ migrate:
 admin-password:
     PYTHONPATH=src uv run python -m fleetforge.auth hash-password
 
+# Mint an ARTIFACT_URL_SECRET (R1-be-3) — the HMAC key the PUBLIC download endpoint
+# authorizes with. Paste it into .env; the stack refuses to start without one
+# (`${ARTIFACT_URL_SECRET:?}`). Rotating it kills every link in flight, which is at
+# most SIGNED_URL_TTL_S of staged deploys — they simply re-deploy.
+artifact-secret:
+    @uv run python -c 'import secrets; print(secrets.token_hex(32))'
+
+# Sign a public download URL for one artifact digest, by hand. stdout is the URL and
+# nothing else, so `URL=$(just artifact-url $SHA)` works; the secret is never printed.
+# Reads ARTIFACT_URL_SECRET and PUBLIC_BASE_URL from .env — the HOST values, so the
+# URL points at the published port, not at `api:8000`.
+#     just artifact-url $SHA                    # SIGNED_URL_TTL_S (30 min)
+#     just artifact-url $SHA --ttl 1            # expires while you watch
+#     just artifact-url $SHA --base-url http://10.0.2.2:8080   # for a QEMU guest
+artifact-url sha256 *args:
+    @PYTHONPATH=src uv run python -m fleetforge.artifact_urls mint {{sha256}} {{args}}
+
 # MinIO on its own. `just up` starts it too; this is the short path for the
 # object-store tests and `just storage-check`, which need nothing else running.
 minio-up:

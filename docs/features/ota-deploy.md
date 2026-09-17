@@ -399,6 +399,109 @@ server-authored values outside the device state machine, and confirmation that
 
 **Decisions & gotchas.** See `DECISIONS.md` 2026-09-17.
 
+### Artifact download — `GET /v1/artifact/{sha256}/bin` (R1-be-3) — **LANDED 2026-09-17**
+
+**What shipped.** The link R1-be-2 puts in the `stage` command is now **ours**:
+`GET /v1/artifact/<sha256>/bin?exp=<unix-seconds>&sig=<base64url>`, the exact shape
+`spec/device-protocol.md` already fixed, on `PUBLIC_BASE_URL` instead of the object
+store's host. The endpoint is **public** — the second unauthenticated one in the app
+after `POST /v1/enroll` — verifies the signature, and answers **307** to a short-lived
+store URL. Three new modules: `artifact_urls.py` (mint/verify + the `mint` CLI behind
+`just artifact-url`), `storage/urlcache.py` (`SignedUrlCache`), and
+`api/routers/artifact_download.py`.
+
+**The signature is the authorization.** HMAC-SHA256 over `v1\n<sha256>\n<exp>`, keyed by
+`ARTIFACT_URL_SECRET`. `hmac.compare_digest`, never `==`; the MAC is checked **before**
+`exp` so "expired" and "forged" are not an oracle (both are one 403 body,
+`this download link is not valid`); the digest is rejected, never normalised; `exp` has
+one spelling only. Nothing above the signature check touches the object store, so an
+anonymous caller cannot drive an IAM `signBlob` call or learn which digests exist — and
+`store.signed_urls == []` is asserted next to every refusal in the unit suite, because
+"refused" and "refused before it cost anything" are different promises.
+
+**Redirect, not proxy.** `design/production.md` promises artifacts are served without
+touching the API process; a proxy would put an HTTP client in the production image
+(`httpx` is a dev dependency) and hold a uvicorn threadpool slot per board for a 1.9 MB
+transfer. So `Range`, `Content-Range`, suffix ranges and 416 — the R5 resume path — are
+the **store's** RFC-correct implementation, proven against real MinIO in
+`tests/test_artifact_download_minio.py`. `Cache-Control: no-store` on the redirect: its
+target is a credential with minutes of life.
+
+**One upstream signature per artifact per cache lifetime.** `SignedUrlCache` (modelled on
+`CatalogCache`: per app, I/O-free to construct, one `asyncio.Lock`, `time.monotonic()`) is
+now the **only** caller of `ObjectStore.signed_url` in the application — the tripwire in
+`tests/test_api_deploy.py` was retargeted rather than deleted. A URL is reused only while
+it still has `ARTIFACT_URL_REFRESH_MARGIN_S` (300 s) of life left, so no board is handed a
+link that dies mid-transfer; failures are never cached.
+
+**No database, and 404 never 422.** The download path issues no query at all: it keeps
+working while Postgres is degraded, and the signature already carries the authorization. A
+validly signed digest with nothing behind it ends as the store's own 404 after the
+redirect. A malformed digest is 404 — a validation-error body is an oracle.
+
+**A deploy no longer fails fast on a store outage (behaviour change).** `deploys.py` mints
+locally and no longer touches the store, so the old `ObjectStoreError → 503` branch is
+gone. It gained a **503 when `ARTIFACT_URL_SECRET` or `PUBLIC_BASE_URL` is unset**, before
+any row exists: a 202 whose URL no board can redeem is the lie `NullCommandPublisher`
+refuses to tell. `create_app()` emits a fifth startup WARNING for the same condition.
+
+**Verification.** T1: `ruff` + `ruff format --check` + `mypy` green, **888 tests pass**
+with MinIO up, `just stack-check` clean.
+
+T2 ran against the live dev stack with a 204800-byte random artifact
+(`sha256 db7370c9…`, uploaded 201):
+
+```
+URL=$(just artifact-url "$SHA")
+curl -sSL -D /tmp/h -o /tmp/got.bin "$URL"   -> HTTP/1.1 307, then HTTP/1.1 200
+sha256sum /tmp/got.bin                        -> db7370c9…  (matches)
+```
+
+* **Range:** `Range: bytes=1000-1099` → 307 then **206**,
+  `Content-Range: bytes 1000-1099/204800`, and the body `cmp`-equal to
+  `dd skip=1000 count=100` (SLICE-OK). Suffix `bytes=-64` equals `tail -c 64`
+  (SUFFIX-OK). `bytes=999999999-` → **416**.
+* **Refusals:** a `--ttl 1` link after `sleep 2` → **403**; the last signature character
+  flipped → **403**; no `exp`/`sig` at all → **403**; `/v1/artifact/NOPE/bin` → **404**.
+  The API log records `refused: the link expired` / `refused: signature does not match` /
+  `refused: no signature` with the digest and never the signature.
+* **Signing budget:** after `docker compose restart api`, ten sequential ranged `curl`s
+  (all **206**) produced exactly **1** `signed a fresh artifact URL` line.
+* **End to end:** `just sim-fleet 1 --capabilities ota` + `POST /v1/devices/{id}/deploy`
+  → **202** (no `url` key in the body). The simulator walked
+  `staging → downloading (204800 bytes, download #1) → verifying (sha256 matches) →
+  staged → applying → rebooting`, printing the URL redacted as `http://localhost:8080/…`.
+  `select detail from deploy_events` contains no `http`.
+* **Hygiene:** no application log line contains `sig=`. See the residual below.
+
+**Residual (recorded, not fixed): uvicorn's access log prints the signature.** The
+application never logs a URL, a signature or the secret, but the access line
+(`GET /v1/artifact/<sha>/bin?exp=…&sig=… 307`) contains the full request target, so anyone
+who can read container logs can replay a link for its remaining life. Acceptable at v1 —
+log access already implies host access, and the link expires — and the fix (an access-log
+formatter that strips the query string, or turning `--access-log` off in prod) belongs
+with the observability work.
+
+**Production prerequisite (not done — `services/` is a different repo and prod env is
+never edited without asking):** before the next prod deploy, `services/prod/.env` needs a
+fresh `ARTIFACT_URL_SECRET` (`just artifact-secret`, 32-byte hex, **not** the dev value)
+and `PUBLIC_BASE_URL=https://bingo.tvaroska.sk`, and the prod compose must pass both to
+the `api` service. Without them every deploy answers 503 (with one startup WARNING) and
+no board can download firmware. Rotating the secret later invalidates every link in
+flight — at most `SIGNED_URL_TTL_S` of staged deploys, which simply re-deploy.
+
+**QEMU (R1-fw-1 will need this):** a QEMU guest cannot reach `localhost` on the host — its
+gateway is `10.0.2.2`. Export `FF_PUBLIC_BASE_URL=http://10.0.2.2:8080` (and
+`S3_PUBLIC_ENDPOINT_URL=http://10.0.2.2:9000`, since the 307 target is a `localhost` URL
+too) before `just up`, or the board gets a link it cannot resolve.
+`docs/runbooks/agent-qemu.md` carries the detail.
+
+**Spec proposals: none.** The URL shape, `exp`/`sig` query parameters and the 403/404
+answers all conform to `spec/device-protocol.md` as written; nothing under `spec/` was
+touched.
+
+**Decisions & gotchas.** See `DECISIONS.md` 2026-09-17 (newest entry).
+
 ## Phase 2: R2 — Safe deploy: verify + auto-rollback ⭐
 
 | ID | Task | Priority | Effort |

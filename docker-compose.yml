@@ -281,6 +281,20 @@ services:
       # deploy that publishes nothing and returns 202 is a lie.
       MQTT_COMMAND_USERNAME: ${MQTT_COMMAND_USERNAME:?set MQTT_COMMAND_USERNAME in .env}
       MQTT_COMMAND_PASSWORD: ${MQTT_COMMAND_PASSWORD:?set MQTT_COMMAND_PASSWORD in .env}
+      # The HMAC key behind the PUBLIC download endpoint (R1-be-3): every
+      # `GET /v1/artifact/{sha}/bin?exp=…&sig=…` is authorized by this and nothing else,
+      # and every deploy mints a link with it. Mandatory (`${VAR:?}`, no default) for the
+      # reason ADMIN_PASSWORD_HASH is: a shipped default here would be a forgeable link
+      # on every install, and a stack that starts unconfigured just answers 503s nobody
+      # diagnoses. Mint one with `just artifact-secret`.
+      ARTIFACT_URL_SECRET: ${ARTIFACT_URL_SECRET:?set ARTIFACT_URL_SECRET in .env — see `just artifact-secret`}
+      # The origin a DEVICE must be able to reach, which is what the link in a `stage`
+      # command is built on — the same trap as S3_PUBLIC_ENDPOINT_URL below: a board
+      # cannot resolve `api:8000`. Defaults to the host's published port, which is right
+      # for the dev stack and for the simulator. A QEMU guest reaches the host at
+      # 10.0.2.2, not localhost: export FF_PUBLIC_BASE_URL=http://10.0.2.2:8080 for an
+      # OTA run against the emulator (docs/runbooks/agent-qemu.md).
+      PUBLIC_BASE_URL: ${FF_PUBLIC_BASE_URL:-http://localhost:${FF_HTTP_PORT:-8080}}
       #
       # Pre-wired for R0-be-6 so the object-store adapter is pure code.
       S3_ENDPOINT_URL: http://minio:9000

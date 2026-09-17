@@ -1,9 +1,14 @@
 """Artifact object storage — the seam between the API and the bytes.
 
 `R0-be-6` created this package. Nothing in R0 calls it: `R1-BE-1` (`POST /v1/artifact`)
-puts, `R1-BE-2` signs a URL into the `stage` command, `R1-BE-3` gets, and R2's version
-pruning deletes. The cheapest place to get artifact-URL authorization wrong is here, so
-it ships whole rather than as a stub.
+puts, `R1-BE-3`'s public download endpoint redirects a device to a signed URL, and R2's
+version pruning deletes. The cheapest place to get artifact-URL authorization wrong is
+here, so it ships whole rather than as a stub.
+
+Since R1-be-3 **`storage/urlcache.py::SignedUrlCache` is the only caller of
+`signed_url`** in the application: signing is an IAM round trip on GCS (S0-infra-5), and
+one place to sign is also one place to cache. `R1-BE-2`'s `stage` command now carries a
+URL on *our* origin, signed by `fleetforge/artifact_urls.py`, not a store URL.
 
 Import the Protocol, the errors and the key rules from here — including the frozen
 content-addressed scheme in `storage/blobs.py` (`blob_key`, `parse_blob_key`,
@@ -39,6 +44,7 @@ from fleetforge.storage.objectstore import (
     validate_prefix,
     validate_ttl,
 )
+from fleetforge.storage.urlcache import SignedUrlCache
 
 __all__ = [
     "BLOB_CACHE_CONTROL",
@@ -51,6 +57,7 @@ __all__ = [
     "ObjectStoreConfigError",
     "ObjectStoreError",
     "ObjectTooLarge",
+    "SignedUrlCache",
     "blob_key",
     "digest_bytes",
     "parse_blob_key",

@@ -6,6 +6,79 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-17 — Firmware downloads go through our own signed URL, and the API redirects rather than proxies
+
+**R1-be-3.** The device is handed a link on **our** origin —
+`GET /v1/artifact/{sha256}/bin?exp=…&sig=…`, the shape `spec/device-protocol.md` already
+fixed — instead of the object store's presigned URL. Six decisions.
+
+**1. The signature is the authorization, and it is ours.** One HMAC-SHA256 over
+`v1\n<sha256>\n<exp>`, keyed by `ARTIFACT_URL_SECRET`, minted in
+`api/routers/deploys.py` and verified in `api/routers/artifact_download.py`
+(`src/fleetforge/artifact_urls.py` is both). This is the **second unauthenticated
+endpoint** after `POST /v1/enroll`: a board has no admin token and never will. What it
+buys over handing out the store's URL: the URL shape and the authorization are backend-
+independent (S3 today, GCS in prod, neither visible to the board), the store URL's short
+life is decoupled from the command's life, and rotating the secret kills every link in
+flight — at most `SIGNED_URL_TTL_S` of staged deploys, which simply re-deploy. There is
+deliberately **no key rollover**; one key, one rotation story.
+
+*The three rules a reviewer should check, each a way this is normally wrong:*
+`hmac.compare_digest`, never `==`; the MAC is verified **before** `exp` and **before**
+any store call, so "expired" vs "forged" is not an oracle and an anonymous caller cannot
+drive an IAM `signBlob` call; the digest is **rejected, never normalised**, and `exp` has
+exactly one spelling (digits, no leading zero, no sign, no underscores — `int()` accepts
+three of those four).
+
+**2. 307 redirect, not a proxy.** `design/production.md` promises artifacts are "served
+without touching the API process". A proxy would need an HTTP client in the production
+image (`httpx` is a dev dependency) and would hold a uvicorn threadpool slot per board
+for a 1.9 MB transfer on a 256 M container. It also means `Range`, `Content-Range`,
+suffix ranges and 416 are the **store's** RFC-correct implementation rather than a
+hand-rolled parser on the OTA critical path — which matters because R5 resume is exactly
+a `Range:` request. Verified for real against MinIO in
+`tests/test_artifact_download_minio.py`.
+
+**3. One upstream signature per artifact per cache lifetime.** `storage/urlcache.py`
+(`SignedUrlCache`, modelled on `CatalogCache`) is now the **only** module in the app that
+calls `ObjectStore.signed_url` — a tripwire in `tests/test_api_deploy.py` holds it there.
+A URL is reused only while `monotonic() < signed_at + ttl - ARTIFACT_URL_REFRESH_MARGIN_S`
+(default 300 s), so no board is ever handed a link that dies mid-transfer; failures are
+never cached. Measured: ten ranged downloads of one artifact cost one signing call.
+
+**4. The download path touches no database.** A download keeps working while Postgres is
+degraded, and the signature already carries the authorization — membership in `artifacts`
+tells a signature-holder nothing new. A validly signed digest with no object behind it
+ends as the store's own 404 after the redirect. A malformed digest is **404, never 422**:
+a schema-error body is an oracle, and the only useful answer to an unsigned caller is one
+uniform "no".
+
+**5. A deploy no longer fails fast when the object store is unreachable — deliberate.**
+`POST /v1/devices/{id}/deploy` used to sign through the store and answer 503 when that
+failed. It now mints locally and never touches the store, so that check is gone: nothing
+in the four-verb seam can test existence cheaply (`get` downloads the whole image), the
+`artifacts` row is already the evidence the bytes were stored, and the download endpoint
+answers the outage honestly at the moment it is true. In exchange the deploy path gained
+a **503 when `ARTIFACT_URL_SECRET` or `PUBLIC_BASE_URL` is unset** — a 202 carrying a URL
+no board can redeem is the lie `NullCommandPublisher` refuses to tell.
+
+**6. Residual, recorded rather than fixed: uvicorn's access log prints the signature.**
+The application never logs a URL, a signature or the secret (asserted in three suites),
+but the access line contains the full request target, so anyone who can read container
+logs can replay a link for its remaining life. Acceptable at v1 — reading the logs
+already implies host access, and the link expires — and the fix (a `--access-log`
+formatter that strips the query) belongs with the observability work, not here.
+
+**Production prerequisite — filed, not applied.** `services/prod/.env` needs a fresh
+`ARTIFACT_URL_SECRET` (32-byte hex, `just artifact-secret`) and
+`PUBLIC_BASE_URL=https://bingo.tvaroska.sk`, and the prod compose must pass both to the
+`api` service, **before the next prod deploy** — otherwise every deploy answers 503.
+`services/` is a different repo and root `CLAUDE.md` forbids changing prod env without
+asking, so this is written down in `docs/features/ota-deploy.md` the way R1-be-2 filed
+its `MQTT_COMMAND_*` prerequisite.
+
+---
+
 ## 2026-09-17 — The API commands over MQTT as its own credential, and a retry is the same transaction
 
 **R1-be-2.** Four decisions, all about who may say what and what gets written down.

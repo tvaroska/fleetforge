@@ -253,6 +253,29 @@ class Settings(BaseSettings):
     object_get_max_bytes: int = 8 * 1024 * 1024
     object_store_timeout_s: float = 30.0
 
+    # --- Artifact download (R1-be-3) ------------------------------------------
+    # The HMAC key behind `GET /v1/artifact/{sha256}/bin?exp=…&sig=…`. The signature IS
+    # the authorization on that endpoint (CRITICAL.md), so this is a real secret: 32
+    # bytes of hex from `just artifact-secret`, never a value from a tracked file.
+    # Unset means the download endpoint answers 503 AND every
+    # `POST /v1/devices/{id}/deploy` answers 503 — a deploy that published a URL no board
+    # could redeem would be the same lie `NullCommandPublisher` refuses to tell. Optional
+    # here for the reason `admin_password_hash` is (`create_app()` must stay
+    # constructible with no environment); mandatory in docker-compose.yml (`${VAR:?}`).
+    # Rotating it invalidates every URL in flight — at most `signed_url_ttl_s` of staged
+    # deploys, which simply re-deploy. Production value lives in services/prod/.env.
+    artifact_url_secret: str | None = None
+    # The origin a DEVICE reaches, e.g. https://bingo.tvaroska.sk — NOT the
+    # container-internal one. It is what the `stage` command's URL is built on, so a
+    # wrong value here is a fleet that cannot download and a symptom that only appears on
+    # a real board. Unset has the same effect as an unset secret: 503 on deploy.
+    public_base_url: str | None = None
+    # How much of a signed upstream URL's life is reserved for the device's transfer.
+    # `storage/urlcache.py` stops reusing a cached URL this long before it expires, so a
+    # board is never handed a credential that dies mid-download. 300 s against the 1800 s
+    # `signed_url_ttl_s` — one TTL for both layers, one number, one place.
+    artifact_url_refresh_margin_s: int = 300
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

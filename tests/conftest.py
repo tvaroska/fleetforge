@@ -53,6 +53,13 @@ DEFAULT_DEV_URL = "postgresql+asyncpg://fleetforge:fleetforge@localhost:5433/fle
 TEST_PASSWORD = "correct-horse-battery-staple"
 TEST_PASSWORD_HASH = hash_secret(TEST_PASSWORD)
 
+# R1-be-3. The HMAC key `settings_for_tests` signs artifact download links with, and
+# the origin it mints them for. Constants, not random values: a test that asserts on a
+# URL needs the same secret the app used, and a fixed secret makes a failure diff
+# readable. Nothing here is a credential — the app under test is the only verifier.
+TEST_ARTIFACT_URL_SECRET = "test-artifact-url-secret"  # noqa: S105 - test fixture, not a credential
+TEST_PUBLIC_BASE_URL = "https://downloads.test"
+
 
 def database_url_for(db_name: str) -> str:
     """Return the configured dev/test URL with its database name replaced."""
@@ -271,6 +278,13 @@ def settings_for_tests(**overrides: object) -> Settings:
         "gcs_bucket": None,
         "gcs_credentials_file": None,
         "gcs_impersonate_service_account": None,
+        # R1-be-3: the download endpoint's HMAC key and the host it mints links for.
+        # Fixed here for the same reason as the store fields — `.env.example` ships an
+        # `ARTIFACT_URL_SECRET`, and a suite whose signatures depend on the developer's
+        # `.env` is a suite that passes on one box and fails on the next. Tests that
+        # exercise "no secret configured → 503" pass `artifact_url_secret=None`.
+        "artifact_url_secret": TEST_ARTIFACT_URL_SECRET,
+        "public_base_url": TEST_PUBLIC_BASE_URL,
     }
     values.update(overrides)
     return Settings(**values)  # type: ignore[arg-type]
@@ -337,6 +351,10 @@ class MemoryObjectStore:
         # (key, data, content_type, cache_control) per put, in order.
         self.puts: list[tuple[str, bytes, str, str | None]] = []
         self.gets: list[str] = []
+        # (key, ttl_s) per signed_url, in order. R1-be-3 asserts on the *count*: a
+        # tampered link must cost zero signing calls, and ten range requests for one
+        # artifact must cost one — on GCS every call here is a signBlob round trip.
+        self.signed_urls: list[tuple[str, int | None]] = []
         self.fail_with: Exception | None = None
 
     def _maybe_fail(self) -> None:
@@ -365,6 +383,7 @@ class MemoryObjectStore:
 
     async def signed_url(self, key: str, *, ttl_s: int | None = None) -> str:
         self._maybe_fail()
+        self.signed_urls.append((key, ttl_s))
         return f"https://memory.invalid/{key}?ttl={ttl_s}"
 
     async def delete(self, key: str) -> None:

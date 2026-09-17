@@ -2,7 +2,7 @@
 
 **Goal:** Self-hosted OTA firmware management for embedded fleets (ESP32 first) — a bad
 build is caught before the fleet, and any device that gets one recovers itself.
-**Updated:** 2026-09-16
+**Updated:** 2026-09-17
 
 ## Where this stands
 
@@ -31,8 +31,10 @@ just a flash.
 *one* release; it now carries two, because R0 is not in progress — it is parked on
 hardware, and waiting for a board is not a reason to stop building. R1's blocker closed
 on 2026-09-15 (`R1-BE-0`, impersonation + verified `signBlob`), and **seven of its eight
-tasks need no board** — the first of them, `R1-be-1`, landed the same day R1 opened:
-the four backend tasks and the dashboard button are server-side,
+tasks need no board** — three have landed: `R1-be-1` the same day R1 opened, then
+`R1-be-2` and `R1-be-3` on 2026-09-17, so a deploy now mints a link on our own origin and
+`GET /v1/artifact/{sha256}/bin` serves it with range support. The remaining backend task
+and the dashboard button are server-side,
 and the two firmware tasks run in QEMU (`docs/runbooks/agent-qemu.md` boots the real
 `agent/dist/esp32` bundle against the dev stack over the emulated NIC, so
 stage → download → apply → reboot → report-version is exercisable at a desk). Only
@@ -278,7 +280,8 @@ fixes the `dn/cmd` `stage` payload and the `up/status` state machine, and is nea
 
 ### Backend
 
-- [ ] **R1-be-3**: Artifact download endpoint — signed-URL verification + HTTP range (P0, 1d)
+- [x] **R1-be-3**: Artifact download endpoint — signed-URL verification + HTTP range (P0, 1d)
+      _(done 2026-09-17; reviewed; see docs/features/ota-deploy.md)_
       The endpoint is **public** ([prd.md](spec/prd.md) → public exposure): the signature
       *is* the authorization, which is why `CRITICAL.md` lists signed-URL generation.
       Range support is not optional — it is what R5's resumable download is built on, and

@@ -1,7 +1,7 @@
 """`POST /v1/devices/{device_id}/deploy` — stage a version onto one board. R1-be-2.
 
 `spec/flows.md` Flow 2 in one endpoint: resolve the label against the *device's* chip,
-sign a short-lived URL for the bytes, record the intent, publish one `stage` command.
+mint a short-lived URL for the bytes, record the intent, publish one `stage` command.
 Everything after that belongs to the device.
 
 **The server orchestrates; it never knows how or when.** There is no scheduler here, no
@@ -11,16 +11,28 @@ principle 5; `deploys.py` spells out the invariant). The only server-authored te
 state is a publish that failed, and `tests/test_api_deploy.py` has a source tripwire
 that keeps it that way.
 
-**Write order: sign → INSERT `requested` + commit → publish.** Record the intent, then
+**Write order: mint → INSERT `requested` + commit → publish.** Record the intent, then
 act — the same posture as enrolment's "commit, then provision". A crash between the two
 leaves an honest "requested, never observed" transaction; the reverse would leave a board
-downloading firmware nothing recorded. Signing comes first because it is a network call
-on GCS (IAM `signBlob`) and a failure there must cost no row at all.
+downloading firmware nothing recorded.
 
-**The signed URL is a bearer credential.** It exists in exactly one place — the command
+**The URL in the command is ours now, and it is minted locally (R1-be-3).** It points at
+`GET /v1/artifact/{sha256}/bin?exp=…&sig=…` on this server — the shape
+`spec/device-protocol.md` already fixed — and carries an HMAC from
+`fleetforge/artifact_urls.py`, no object store involved. Signing an *upstream* store URL
+(an IAM `signBlob` network call on GCS) moved to the download path, where it is cached
+per artifact instead of paid per deploy.
+
+*Consequence, deliberate:* a deploy no longer fails fast when the object store is
+unreachable. Nothing in the four-verb seam can check existence cheaply (`get` downloads
+the whole artifact), the `artifacts` row is the evidence the bytes were stored, and the
+download endpoint answers a store outage honestly and retriably. A deploy with no URL
+*configuration* is still refused — see the 503 below — because answering 202 with a URL
+no board can redeem is the same lie `NullCommandPublisher` refuses to tell.
+
+**The minted URL is a bearer credential.** It exists in exactly one place — the command
 payload on the wire — and is never persisted, never logged, never in the response body.
-`_artifact_url()` is the single call site, so R1-be-3's range-serving endpoint is one
-function to swap.
+`_artifact_url()` is the single mint site.
 
 **`detail` is lifted verbatim into the dashboard banner** (`api.ts::detailOf`), so every
 rejection below names the number or the value that failed and none of them contains a
@@ -28,7 +40,7 @@ bucket, a key, a URL or a traceback.
 
 Validation order is deliberate: cheap and caller-fixable first (bad version), then
 existence (device, artifact), then compatibility (layout, size, capability). A board
-that cannot take this image must be refused before anything is signed or recorded.
+that cannot take this image must be refused before anything is minted or recorded.
 """
 
 import logging
@@ -42,22 +54,20 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from fleetforge.api.deps import (
     AdminDep,
     CommandPublisherDep,
-    ObjectStoreDep,
     SessionMakerDep,
     SettingsDep,
     bearer_scheme,
     cookie_scheme,
 )
-from fleetforge.api.routers.artifacts import STORE_UNAVAILABLE, VERSION_PATTERN
+from fleetforge.api.routers.artifacts import VERSION_PATTERN
 from fleetforge.api.schemas import DeployAccepted, DeployRequest
+from fleetforge.artifact_urls import mint_artifact_url
 from fleetforge.broker import CommandPublisher, CommandPublishError, new_command_id, stage_payload
 from fleetforge.clock import now_utc
 from fleetforge.config import Settings
 from fleetforge.db.models import Device
 from fleetforge.deploys import latest_open_transaction, record_publish_failure, record_requested
 from fleetforge.presence import is_online
-from fleetforge.storage.blobs import blob_key
-from fleetforge.storage.objectstore import ObjectStore, ObjectStoreError
 
 logger = logging.getLogger(__name__)
 
@@ -91,16 +101,58 @@ class _ResolvedArtifact:
     partition_layout: str | None
 
 
-async def _artifact_url(store: ObjectStore, sha256: str, settings: Settings) -> str:
-    """Sign a short-lived GET URL for this artifact's blob. **The only signing call.**
+URL_NOT_CONFIGURED = (
+    "this server cannot hand out firmware download links, so no board could fetch the "
+    "image; the server log names what is missing. Nothing was deployed."
+)
 
-    A network call on GCS (IAM `signBlob`), local CPU on S3/MinIO — so it can fail, and
-    it fails before any row is written. `blob_key` is the one key scheme
-    (`storage/blobs.py`); nothing here builds a path by hand.
+
+def _artifact_url(sha256: str, settings: Settings) -> str:
+    """Mint the public download URL for this artifact. **The only mint site.**
+
+    Local HMAC, no I/O and nothing to fail transiently (R1-be-3): the URL points at this
+    server's `GET /v1/artifact/{sha256}/bin`, and the object store is only reached when a
+    device redeems it. `artifact_urls.py` owns the shape and the signing rules; nothing
+    here builds a path or a query string by hand.
 
     The return value is a credential. It goes into the command payload and nowhere else.
     """
-    return await store.signed_url(blob_key(sha256), ttl_s=settings.signed_url_ttl_s)
+    return mint_artifact_url(
+        _public_base_url(settings),
+        sha256,
+        secret=_url_secret(settings),
+        ttl_s=settings.signed_url_ttl_s,
+    )
+
+
+def _url_secret(settings: Settings) -> str:
+    """`artifact_url_secret`, or a 503 that names neither setting in the body."""
+    if not settings.artifact_url_secret:
+        logger.error(
+            "ARTIFACT_URL_SECRET is not set: a deploy cannot mint a download URL, so "
+            "POST /v1/devices/{id}/deploy answers 503. Mint one with `just artifact-secret`."
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=URL_NOT_CONFIGURED
+        )
+    return settings.artifact_url_secret
+
+
+def _public_base_url(settings: Settings) -> str:
+    """`public_base_url`, or the same 503.
+
+    Separate from the secret because the operator's fix is different — one is minted,
+    the other is the origin a board can reach — and the log line has to say which.
+    """
+    if not settings.public_base_url:
+        logger.error(
+            "PUBLIC_BASE_URL is not set: a deploy cannot build an absolute download URL, "
+            "so POST /v1/devices/{id}/deploy answers 503. Set the origin a DEVICE reaches."
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=URL_NOT_CONFIGURED
+        )
+    return settings.public_base_url
 
 
 @router.post(
@@ -115,7 +167,6 @@ async def deploy_device(
     admin: AdminDep,
     settings: SettingsDep,
     sessionmaker: SessionMakerDep,
-    store: ObjectStoreDep,
     publisher: CommandPublisherDep,
 ) -> DeployAccepted:
     """Publish one `stage` command and return 202 with the transaction's `cmd_id`.
@@ -169,7 +220,7 @@ async def deploy_device(
 
         _check_compatible(device, artifact, version=body.version)
 
-        # The reuse window is the signed URL's lifetime: past it the first URL has
+        # The reuse window is the minted URL's lifetime: past it the first URL has
         # expired, so a board that never acted on the first command cannot act on it
         # now and a fresh intent is the honest record (`deploys.py`).
         open_transaction = await latest_open_transaction(
@@ -178,15 +229,8 @@ async def deploy_device(
         reused = open_transaction is not None and open_transaction.sha256 == artifact.sha256
         cmd_id = open_transaction.cmd_id if reused and open_transaction else new_command_id()
 
-        try:
-            url = await _artifact_url(store, artifact.sha256, settings)
-        except ObjectStoreError:
-            # Before any row exists: a deploy that could not be signed never happened.
-            # Never the bucket, the key or the exception text — `detail` is banner text.
-            logger.exception("deploy for %s failed: could not sign the artifact URL", device_id)
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=STORE_UNAVAILABLE
-            ) from None
+        # Before any row exists: a deploy that could not mint a URL never happened.
+        url = _artifact_url(artifact.sha256, settings)
 
         if not reused:
             await record_requested(
@@ -253,7 +297,7 @@ async def deploy_device(
 def _check_compatible(device: Device, artifact: _ResolvedArtifact, *, version: str) -> None:
     """Refuse an image this board cannot take, naming what did not match.
 
-    Three independent reasons, all 409, all checked before anything is signed:
+    Three independent reasons, all 409, all checked before anything is minted:
     the partition layout, the OTA slot size, and the announced `ota` capability. The
     layout and the slot size are only checked when both sides are known — an R0 board
     that announced neither is not refused for being old.

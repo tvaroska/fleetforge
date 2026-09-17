@@ -108,6 +108,13 @@ adapter boundary is what keeps that a configuration change.
 device downloads do not consume the VM's bandwidth. This meaningfully de-risks the
 capacity problem below.
 
+Since **R1-be-3** the device is not handed the store's URL directly: it gets
+`GET /v1/artifact/{sha256}/bin?exp=…&sig=…` on **our** origin, whose HMAC signature is its
+authorization, and the API answers **307** to a cached store URL rather than proxying the
+bytes — so the backend stays invisible to the fleet while "served without touching the API
+process" remains true, and range/resume stays the store's own RFC-correct implementation.
+It needs `ARTIFACT_URL_SECRET` and `PUBLIC_BASE_URL` in the production environment.
+
 ## Retiring bingo
 
 Bingo is unfinished and is being retired to make room. Removing it frees **384 MB** of

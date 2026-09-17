@@ -32,13 +32,15 @@ from fastapi import FastAPI
 from sqlalchemy import delete, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
-from fleetforge.api.deps import get_command_publisher, get_object_store
+from fleetforge.api.deps import get_command_publisher, get_object_store, get_settings
+from fleetforge.artifact_urls import verify_artifact_url
 from fleetforge.broker import CommandPublishError
 from fleetforge.clock import now_utc
 from fleetforge.db.models import TERMINAL_DEPLOY_STATES, DeployEvent, DeployState, Device
 from fleetforge.storage.blobs import blob_key
 from fleetforge.storage.objectstore import ObjectStoreError
 from tests.conftest import (
+    TEST_ARTIFACT_URL_SECRET,
     FakeCommandPublisher,
     MemoryObjectStore,
     capture_logs,
@@ -60,6 +62,8 @@ LAYOUT = "ab-4m-v1"
 # window, and a literal here would keep passing while the setting drifted.
 TTL_S = settings_for_tests().signed_url_ttl_s
 CONFIRM_TIMEOUT_S = settings_for_tests().confirm_timeout_s
+# R1-be-3: the origin a device is told to fetch from. Ours now, not the store's.
+PUBLIC_BASE_URL = settings_for_tests().public_base_url
 
 
 @pytest.fixture
@@ -217,12 +221,14 @@ class TestTheCommandOnTheWire:
 
         (device_id, payload) = publisher.published[0]
         assert device_id == DEVICE_ID
+        # The URL is minted here and varies by `exp`, so it is checked by shape below
+        # and compared out of the payload equality.
+        url = payload["artifact"].pop("url")
         # Exactly the spec's keys — an extra one reaches a flash-baked agent.
         assert payload == {
             "id": body["cmd_id"],
             "type": "stage",
             "artifact": {
-                "url": f"https://memory.invalid/{blob_key(SHA256)}?ttl={TTL_S}",
                 "sha256": SHA256,
                 "size": len(IMAGE),
                 "version": VERSION,
@@ -230,6 +236,10 @@ class TestTheCommandOnTheWire:
             "apply": "auto",
             "confirm_timeout_s": CONFIRM_TIMEOUT_S,
         }
+        # R1-be-3: our origin and our signature, not the store's presigned URL.
+        assert url.startswith(f"{PUBLIC_BASE_URL}/v1/artifact/{SHA256}/bin?")
+        assert "exp=" in url
+        assert "sig=" in url
 
     async def test_apply_on_command_is_passed_through(
         self,
@@ -263,21 +273,62 @@ class TestTheCommandOnTheWire:
         assert response.status_code == 422
         assert publisher.published == []
 
-    async def test_the_url_is_signed_once_from_the_blob_key(
+    async def test_the_url_is_ours_and_verifies_against_our_secret(
         self,
         admin_app: FastAPI,
         db: AsyncSession,
         store: MemoryObjectStore,
         publisher: FakeCommandPublisher,
     ) -> None:
-        """One signing call site, and the key is a function of the bytes."""
+        """R1-be-3: the deploy path mints the link; it does not ask the store for one.
+
+        Verified rather than pattern-matched — a URL the download endpoint would refuse
+        is a board that reports `download_failed` an hour after the deploy looked fine.
+        """
         await add_device(db)
         await add_artifact(db)
         token = await login_admin(admin_app)
 
         await deploy(admin_app, token)
 
-        assert blob_key(SHA256) in publisher.last["artifact"]["url"]
+        url = publisher.last["artifact"]["url"]
+        assert url.startswith(f"{PUBLIC_BASE_URL}/v1/artifact/{SHA256}/bin?")
+        fields = dict(pair.split("=", 1) for pair in url.split("?", 1)[1].split("&"))
+        assert verify_artifact_url(
+            SHA256, exp=fields["exp"], sig=fields["sig"], secret=TEST_ARTIFACT_URL_SECRET
+        ) == pytest.approx(int(now_utc().timestamp()) + TTL_S, abs=5)
+
+        # The store is never asked to sign anything on the deploy path any more.
+        assert store.signed_urls == []
+        # And the blob key stays an implementation detail of the download side.
+        assert blob_key(SHA256) not in url
+
+    async def test_a_deploy_without_a_url_secret_is_503_and_costs_no_row(
+        self,
+        admin_app: FastAPI,
+        db: AsyncSession,
+        store: MemoryObjectStore,
+        publisher: FakeCommandPublisher,
+    ) -> None:
+        """R1-be-3. Replaces "the store cannot sign" — the mint is local now.
+
+        A 202 whose URL no board can redeem is the lie `NullCommandPublisher` refuses to
+        tell, so the refusal happens before any row exists.
+        """
+        await add_device(db)
+        await add_artifact(db)
+        token = await login_admin(admin_app)
+        admin_app.dependency_overrides[get_settings] = lambda: settings_for_tests(
+            artifact_url_secret=None
+        )
+
+        response = await deploy(admin_app, token)
+
+        assert response.status_code == 503
+        assert publisher.published == []
+        assert await events(db) == [], "a deploy that could not mint a URL never happened"
+        # Neither the missing setting nor the secret is named to the caller.
+        assert "ARTIFACT_URL_SECRET" not in response.text
 
 
 class TestTheUrlIsACredential:
@@ -334,8 +385,13 @@ class TestTheUrlIsACredential:
             await deploy(admin_app, token)
 
         messages = [record.getMessage() for record in records]
-        assert messages, "capture_logs caught nothing — the assertion below would be vacuous"
-        assert not any("memory.invalid" in message for message in messages)
+        assert messages, "capture_logs caught nothing — the assertions below would be vacuous"
+        # The whole URL, and the signature on its own: R1-be-3 made the URL ours, so a
+        # search for the *store's* hostname would now pass while leaking everything.
+        url = publisher.last["artifact"]["url"]
+        sig = url.split("sig=", 1)[1]
+        assert not any(url in message or sig in message for message in messages)
+        assert not any("/v1/artifact/" in message for message in messages)
 
 
 class TestRecordsTheIntent:
@@ -622,13 +678,23 @@ class TestRefusals:
 
 
 class TestFailuresDownstream:
-    async def test_a_store_that_cannot_sign_is_503_and_costs_no_row(
+    async def test_an_unreachable_store_no_longer_blocks_a_deploy(
         self,
         admin_app: FastAPI,
         db: AsyncSession,
         store: MemoryObjectStore,
         publisher: FakeCommandPublisher,
     ) -> None:
+        """R1-be-3 changed this, deliberately — it used to be a 503. DECISIONS.md.
+
+        The deploy path no longer talks to the object store at all: the URL is minted
+        locally and signed upstream only when a board actually asks for the bytes. So a
+        store outage is no longer detected here. That is the honest trade: nothing in
+        the four-verb seam can check existence cheaply (`get` downloads 1.9 MB), the
+        `artifacts` row is already the evidence the bytes were stored, and
+        `GET /v1/artifact/{sha}/bin` answers the outage with its own 503 at the moment
+        it is true rather than at the moment the operator clicked deploy.
+        """
         await add_device(db)
         await add_artifact(db)
         token = await login_admin(admin_app)
@@ -636,11 +702,9 @@ class TestFailuresDownstream:
 
         response = await deploy(admin_app, token)
 
-        assert response.status_code == 503
-        assert await events(db) == []
-        assert publisher.published == []
-        # Never the bucket, the key or the exception text: `detail` is banner text.
-        assert "bucket" not in response.json()["detail"]
+        assert response.status_code == 202
+        assert publisher.published, "the command still goes out"
+        assert store.signed_urls == []
 
     async def test_a_broker_that_refuses_is_503_and_closes_the_transaction(
         self,
@@ -751,5 +815,18 @@ class TestNoSchedulerLivesHere:
         """`deploys.py` is the single writer — `test_invariants.py` holds the estate-wide rule."""
         assert "DeployEvent(" not in self._source("api/routers/deploys.py")
 
-    def test_the_router_signs_exactly_one_url(self) -> None:
-        assert self._source("api/routers/deploys.py").count("store.signed_url(") == 1
+    def test_upstream_urls_are_signed_in_exactly_one_place(self) -> None:
+        """R1-be-3 moved the call; the invariant it protects is unchanged.
+
+        `CRITICAL.md` → *Artifact signing keys & `signed_url` generation*. The deploy
+        router used to hold the only `store.signed_url(` call; now `SignedUrlCache` does,
+        and the deploy path has none at all. A second call site anywhere is a second
+        place where a URL's lifetime, its caching and its logging can drift apart — and,
+        on GCS, a second source of `signBlob` traffic nobody is counting.
+        """
+        assert self._source("api/routers/deploys.py").count("store.signed_url(") == 0
+        assert self._source("storage/urlcache.py").count("store.signed_url(") == 1
+
+    def test_the_deploy_router_mints_exactly_one_url(self) -> None:
+        """And the mint has one call site too, for the same reason."""
+        assert self._source("api/routers/deploys.py").count("mint_artifact_url(") == 1

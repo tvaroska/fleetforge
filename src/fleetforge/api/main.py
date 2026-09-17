@@ -15,7 +15,11 @@ R1-be-1 added `POST /v1/artifact`, the first endpoint that **writes** to that st
 the first writer of the `artifacts` table. R1-be-2 added
 `POST /v1/devices/{device_id}/deploy` — the first endpoint that **publishes** to the
 broker (`CommandPublisherDep`) and the only writer of `deploy_events` (`deploys.py`),
-hence the fourth startup WARNING.
+hence the fourth startup WARNING. R1-be-3 added `GET /v1/artifact/{sha256}/bin`, the
+**second unauthenticated endpoint** after `POST /v1/enroll` — its credential is the
+signature in its own query string (`artifact_urls.py`), and it redirects a board to an
+upstream store URL held in the per-app `app.state.artifact_url_cache`, hence the fifth
+startup WARNING.
 
 **The lifespan owns one background task**: the `ff_events` `LISTEN` connection
 (`api/eventstream.py::PostgresEventListener`), one per API process, feeding the
@@ -51,6 +55,7 @@ from fleetforge.api.deps import dynsec_configured, mqtt_command_configured
 from fleetforge.api.eventstream import EventHub, PostgresEventListener
 from fleetforge.api.routers import (
     agent,
+    artifact_download,
     artifacts,
     auth,
     deploys,
@@ -65,6 +70,7 @@ from fleetforge.auth.ratelimit import FixedWindowLimiter
 from fleetforge.config import Settings, get_settings
 from fleetforge.db.base import asyncpg_dsn, get_sessionmaker
 from fleetforge.firmware import DEFAULT_INDEX_KEY, CatalogCache
+from fleetforge.storage import SignedUrlCache
 from fleetforge.storage.factory import object_store_configured
 
 logger = logging.getLogger(__name__)
@@ -196,6 +202,14 @@ def create_app() -> FastAPI:
         ttl_s=settings.agent_catalog_ttl_s if settings else 60.0,
         index_key=settings.agent_index_key if settings else DEFAULT_INDEX_KEY,
     )
+    # The upstream signed URLs `GET /v1/artifact/{sha}/bin` redirects to (R1-be-3). Lazy
+    # and per app for the same reasons as the catalog above — **no I/O to construct** —
+    # and it is the ONLY caller of `ObjectStore.signed_url`, which is an IAM `signBlob`
+    # round trip on GCS. One signing call per artifact per lifetime, whole fleet.
+    app.state.artifact_url_cache = SignedUrlCache(
+        ttl_s=settings.signed_url_ttl_s if settings else 1800,
+        refresh_margin_s=settings.artifact_url_refresh_margin_s if settings else 300,
+    )
     if settings is not None and settings.admin_password_hash is None:
         logger.warning(
             "ADMIN_PASSWORD_HASH is not set: /v1/auth/login will answer 503. "
@@ -216,6 +230,14 @@ def create_app() -> FastAPI:
             "broker credential. The dev stack sets both on the api service; the broker "
             "side is `mosquitto/bootstrap.sh`. Prove the path with `just broker-check`."
         )
+    if settings is not None and not (settings.artifact_url_secret and settings.public_base_url):
+        logger.warning(
+            "ARTIFACT_URL_SECRET or PUBLIC_BASE_URL is not set: POST /v1/devices/{id}/deploy "
+            "will answer 503 and no board can download firmware, because the download link "
+            "in a stage command is signed with the first and built on the second. Mint a "
+            "secret with `just artifact-secret`; PUBLIC_BASE_URL is the origin a DEVICE "
+            "reaches (http://localhost:8080 in dev), never the container-internal one."
+        )
     if settings is not None and not dynsec_configured(settings):
         logger.warning(
             "MQTT_DYNSEC_USERNAME/_PASSWORD are not set: enrolled devices get a broker "
@@ -232,6 +254,11 @@ def create_app() -> FastAPI:
     app.include_router(agent.router)
     app.include_router(progress.router)
     app.include_router(artifacts.router)
+    # Public, unauthenticated, signature-as-authorization. Registered after
+    # `artifacts.router` (which owns `POST ""` under the same prefix, admin-only) — two
+    # modules on purpose: a shared router would make the auth dependency a per-route
+    # opt-out, which is how a public endpoint gets created by accident.
+    app.include_router(artifact_download.router)
     app.include_router(deploys.router)
 
     @app.get("/v1/healthz", tags=["health"])
