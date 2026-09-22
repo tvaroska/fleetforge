@@ -321,19 +321,6 @@ release's own subject, and the first thing in this project a CUJ has ever descri
 
 ### Firmware
 
-- [ ] **R3-fw-1**: Spike — where does a library user's config live? (P1, 0.5d)
-      **Blocks every other task in this release; do not estimate them until it lands.**
-      The agent keeps broker URL, Wi-Fi creds and the enrollment token in the `ff_cfg`
-      flash partition (`design/partitions.md` §3). An Arduino IDE build has no such
-      partition, and a partition cannot be added by OTA.
-      Measure what an Arduino-ESP32 build actually does to the partition table, whether a
-      custom `partitions.csv` survives a board-definition change, and what it costs to
-      read config from NVS instead. Output is a recommendation — (a) packaged partition
-      table, or (b) NVS-backed config — appended to `spec/open-questions.md` and promoted
-      into `spec/` if it settles.
-      Acceptance: the question in `open-questions.md` is answered with evidence, not
-      opinion, and the answer names which of (a)/(b) the release implements.
-
 - [ ] **R3-fw-2**: Extract the protocol into an ESP-IDF component (P1, 2d)
       `agent/main/` already separates protocol from demo app: `ff_ota`, `ff_mqtt`,
       `ff_enroll`, `ff_cfg`, `ff_store`, `ff_identity`, `ff_net`, `ff_time`. Move them to
@@ -347,12 +334,17 @@ release's own subject, and the first thing in this project a CUJ has ever descri
       headers are a strict subset of what `agent_main.c` uses.
 
 - [ ] **R3-fw-3**: Arduino library wrapping the same C (P1, 2d)
-      Depends on `R3-fw-1` and `R3-fw-2`. The persona writes Arduino or PlatformIO and
-      does not use ESP-IDF (`docs/personas/PERSONAS.md` §1); if adopting Fleetforge means
-      porting their project, they will not adopt it.
-      Ships whatever `R3-fw-1` chose: a packaged partition table + board definition, or
-      an NVS config path. Either way the safety posture is not optional — A/B layout and
-      `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y` are flash-time immutables, so a
+      Depends on `R3-fw-2`. The persona writes Arduino or PlatformIO and does not use
+      ESP-IDF (`docs/personas/PERSONAS.md` §1); if adopting Fleetforge means porting their
+      project, they will not adopt it.
+      Ships what `R3-fw-1` chose: layout **`ab-4m-arduino-v1`** as a sketch-local
+      `partitions.csv`, config still in a flashable `ff_cfg`
+      (`design/decisions/arduino-gets-its-own-layout-id.md`). Two measured constraints:
+      the table must travel with the **example**, because the prebuild hook only reads the
+      sketch folder and never a library directory; and the new layout id has to reach
+      `device-protocol.md` + `SUPPORTED_LAYOUTS` first, which is a spec proposal, not this
+      task. The safety posture needs no custom bootloader — the stock core is already
+      `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y` — but it is still not optional: a
       configuration that cannot roll back must fail at build or enroll, not warn.
       Acceptance: a stock Arduino IDE install plus this library compiles the example for
       esp32 and esp32s3, and a board flashed from it enrolls.
@@ -366,10 +358,13 @@ release's own subject, and the first thing in this project a CUJ has ever descri
       the README quickstart is exactly the steps a reader follows.
 
 - [ ] **R3-fw-5**: Reject a wrong flash layout loudly (P1, 1d)
-      A build that does not reproduce `ab-4m-v1` exactly must announce a different
-      `partition_layout`. The server already accepts exactly one
-      (`firmware/manifest.py::SUPPORTED_LAYOUTS`), so the deploy is rejected — but today
-      the message does not tell a library user what to fix.
+      A build that does not reproduce a supported layout exactly must announce a different
+      `partition_layout`. The server accepts one today
+      (`firmware/manifest.py::SUPPORTED_LAYOUTS`) and two once `ab-4m-arduino-v1` lands, so
+      the deploy is rejected — but today the message does not tell a library user what to
+      fix. **Do not use the IDE's `Maximum is N bytes` line as the check**: `R3-fw-1`
+      measured it reading the board menu's `upload.maximum_size` rather than the built
+      table, reporting 1310720 for a build whose slots were 1966080.
       Acceptance: a deliberately mismatched layout is refused at deploy time with a
       message naming the expected layout and slot size; no board is ever flashed into a
       state where the library is running without a rollback-capable bootloader.

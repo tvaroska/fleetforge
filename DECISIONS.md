@@ -6,6 +6,72 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-22 — The Arduino library gets its own layout id; config stays in flash
+
+**R3-fw-1**, a spike. Details in
+[`design/decisions/arduino-gets-its-own-layout-id.md`](design/decisions/arduino-gets-its-own-layout-id.md);
+evidence in `spec/open-questions.md` → *ota-library*; reproduction in
+[`docs/runbooks/arduino-partition-measurement.md`](docs/runbooks/arduino-partition-measurement.md).
+
+**Decided: (a), a packaged partition table shipped as a sketch-local `partitions.csv`,
+under a new layout id `ab-4m-arduino-v1` — not `ab-4m-v1`, and not NVS.** Same
+`ota_slot_size` (1966080), different map: `nvs` 20K@`0x9000`, `otadata`@`0xe000`,
+`ota_0`/`ota_1` `0x1E0000` @ `0x10000`/`0x1F0000`, `ff_cfg` 4K@`0x3D0000`,
+`coredump`@`0x3F0000`.
+
+**1. The reason is not packaging taste, and it is invisible without compiling.** The
+Arduino upload and merge recipes hardcode `0xe000` for `boot_app0.bin` and `0x10000` for
+the app, *independently of the table being flashed*. A sketch-local `ab-4m-v1` builds
+green and emits a byte-correct `ab-4m-v1` partition binary — then the upload writes
+`boot_app0` across the tail of `nvs` and the app at `0x10000`, which is the second half of
+`otadata`, from where it runs on over `phy_init`, `ff_cfg` and the alignment gap; `ota_0`
+does not start until `0x20000`. Unbootable, and unfixable by OTA. Stock `min_spiffs` already carries
+two 1966080 B slots at the offsets the recipe actually writes; `ab-4m-arduino-v1` is that
+map with a 4 KB `ff_cfg` carved out of the SPIFFS region.
+
+**2. NVS lost on provisioning, not on size.** Measured: +7460 B flash for an NVS config
+read, +324 B for a partition read, against a 1920 KB slot — the cost argument decides
+nothing. What decides it is that the upload writes four offsets and nothing else, so no
+credential can reach NVS before first boot; (b) would need a serial handshake or Improv.
+And *Erase All Flash Before Sketch Upload* is a one-click IDE menu that wipes NVS with the
+device credential in it, leaving a board that must re-enrol with a single-use token that
+is already burnt.
+
+**3. A sketch-local file, because the board menu does not exist on every board.**
+`platform.txt` resolves the table `build.partitions` < variant < sketch folder, last
+winning — verified against the default menu, an explicit `PartitionScheme=min_spiffs`, and
+a variant table. **52 of 409 boards have no `PartitionScheme` menu at all**, 35 of them
+hardwired to `default`, including `esp32doit-devkit-v1`. "Select this scheme" is advice
+that does not exist on their board; a file in the sketch folder works everywhere and
+travels across a board change.
+
+**Gotchas banked for the rest of R3.**
+
+- **The IDE's `Maximum is N bytes` is not a layout check.** It reads the board menu's
+  `upload.maximum_size`, not the built table — reported `1310720` for a build whose slots
+  were `1966080`. `R3-fw-5` must get the layout from what the firmware announces.
+- **A library cannot ship the table.** The prebuild hook reads the *sketch* folder, so a
+  `partitions.csv` under `libraries/` is never consulted — it has to arrive with the
+  example (`R3-fw-4`), and the override is silent when it happens.
+- **No custom bootloader is needed.** The core's prebuilt bootloader is already
+  `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y` with anti-rollback, Secure Boot and flash
+  encryption off — exactly `design/partitions.md` §2 — and `esp_https_ota.h`,
+  `esp_ota_ops.h`, `nvs.h`, `mqtt_client.h` all ship in the core.
+- **Everything above is a property of `esp32:esp32@3.3.12`.** The hardcoded `0x10000` is a
+  convention, not a contract. Re-run the runbook on every core bump.
+
+**PROPOSED, not applied** (`spec/` is protected during `/implement`): add
+`ab-4m-arduino-v1` to `spec/device-protocol.md` and to
+`firmware/manifest.py::SUPPORTED_LAYOUTS`, which is a single-entry dict built from two
+constants today and becomes a real table with a second layout in the fleet.
+
+**On method.** The spike installed a ~7.8 GB toolchain on a box that runs above 90% disk.
+It went into a scratch tree with `arduino-cli`'s data dirs redirected out of `$HOME`,
+was pruned to 2.1 GB once the target set was known, and was deleted at the end. A spike
+that leaves a toolchain behind is a spike that breaks the next build.
+
+---
+
 ## 2026-09-22 — The first CUJ is the maker's journey, and its Driver is segmented
 
 **R3-spec-1.** `spec/cujs.md` now exists. The project has had acceptance criteria written

@@ -16,6 +16,69 @@ becomes a board in the field that fixes itself" — this release *is* that journ
 
 ## Completed Work
 
+### Where a library user's config lives (R3-fw-1) — **LANDED 2026-09-22**
+
+**What shipped.** A measurement and a decision, no firmware. The open question filed with
+the release — `ff_cfg` is a flash partition the agent can rely on and an Arduino sketch
+cannot — is answered **(a): a packaged partition table, shipped as a sketch-local
+`partitions.csv`, under a new layout id `ab-4m-arduino-v1`.** Config stays in a flashable
+`ff_cfg`; NVS is not where it lives. Written up in `spec/open-questions.md` →
+*ota-library* (the section is now ANSWERED), reasoned in
+[`design/decisions/arduino-gets-its-own-layout-id.md`](../../design/decisions/arduino-gets-its-own-layout-id.md),
+reproducible from
+[`docs/runbooks/arduino-partition-measurement.md`](../runbooks/arduino-partition-measurement.md).
+
+**Key approach — compile it, then decode what the build actually produced.** The question
+had been open since the release was written because it could only be answered by running
+the toolchain, and the honest failure mode of a spike like this is a well-argued guess.
+So: `arduino-cli` 1.5.2 + `esp32:esp32@3.3.12` into a scratch tree, real compiles for
+`esp32`, `esp32s3` and `esp32doit-devkit-v1`, every table read back out of the built
+`partitions.bin` with the core's own `gen_esp32part.py` rather than from the csv that was
+its input — and `flash_args` read alongside it, which is where the decisive finding was.
+
+**The finding that chose the answer.** A sketch-local `partitions.csv` *does* override
+everything (`platform.txt` prebuild hooks: `build.partitions` < variant < sketch folder),
+so shipping `ab-4m-v1` looked like pure packaging. It is not: the Arduino upload and merge
+recipes hardcode `0xe000` for `boot_app0.bin` and `0x10000` for the app regardless of the
+table being flashed. Under `ab-4m-v1` those land in the tail of `nvs` and in the second
+half of `otadata`, with the app running on over `phy_init`, `ff_cfg` and the 64 KB
+alignment gap — `ota_0` starts at `0x20000`. The build is green, the partition binary is a
+correct `ab-4m-v1`, and the board never boots its sketch. Stock `min_spiffs` already has
+two slots of exactly **1966080** B at the offsets the recipe writes to, so
+`ab-4m-arduino-v1` is that map plus a 4 KB `ff_cfg` at `0x3D0000`: same `ota_slot_size` as
+`ab-4m-v1`, different offsets, new id per `design/partitions.md` §6.
+
+**Why not NVS.** Flash cost turned out to decide nothing — +7460 B for an NVS read vs
++324 B for a partition read, against a 1920 KB slot. Provisioning decides it: the upload
+writes four offsets and nothing else, so no credential can reach NVS before first boot,
+and *Erase All Flash Before Sketch Upload* is a one-click menu that wipes it along with
+the device credential — after which re-enrolling needs an already-burnt single-use token.
+
+**T2 acceptance evidence** — *"the question in `open-questions.md` is answered with
+evidence, not opinion, and the answer names which of (a)/(b) the release implements."*
+The section names (a) in its first line and carries six numbered measurements, each a
+decoded table, an offset list or a byte count from a real build:
+
+| Measured | Result |
+|---|---|
+| Stock default table, `esp32` + `esp32s3` | `app0`/`app1` **1310720** B @ `0x10000`/`0x150000`, `nvs` 20K, no `ff_cfg`; `0x12000` is inside `app0` |
+| All 49 stock csvs | 29 have two equal OTA slots; `min_spiffs` and `rainmaker` are **1966080** — our number |
+| Sketch-local override | wins over default menu, over explicit `PartitionScheme=min_spiffs`, and on a board with no menu; survives `esp32`→`esp32s3` |
+| `ab-4m-v1` as a sketch table | builds exactly; `flash_args` writes `0xe000`/`0x10000` anyway → unbootable |
+| `ab-4m-arduino-v1` candidate | compiled and decoded on three boards; `flash_args` matches the table |
+| Board coverage | **52 of 409** boards expose no `PartitionScheme` menu (35 hardwired `default`), incl. `esp32doit-devkit-v1` |
+| Bootloader posture | `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`, anti-rollback / Secure Boot / flash-enc off, both targets |
+| Config read cost | baseline 268588 B → NVS **+7460 B**, `ff_cfg` partition **+324 B** |
+
+Scratch toolchain (~7.8 GB installed, pruned to 2.1 GB) was deleted afterwards; the box
+was left at the free space it started with. Nothing was installed into `~/.arduino15`.
+
+**Unblocks the release.** `R3-fw-3` now knows what it ships and `R3-fw-5` knows it cannot
+lean on the IDE's size guard — that line reads the board menu's `upload.maximum_size`, not
+the table, and reported `Maximum is 1310720 bytes` for a build whose slots were 1966080.
+One PROPOSAL left for `spec/`: `ab-4m-arduino-v1` needs adding to `device-protocol.md` and
+to `firmware/manifest.py::SUPPORTED_LAYOUTS`, which is a one-entry dict today.
+
 ### The project's first written CUJ (R3-spec-1) — **LANDED 2026-09-22**
 
 **What shipped.** [`spec/cujs.md`](../../spec/cujs.md), and with it the end of an
@@ -130,8 +193,12 @@ overwriting a custom partition table is the classic Arduino-IDE failure. Two can
   Works for far more users, but is a real change to `ff_cfg` and the enrollment flow, and
   touches a `CRITICAL.md` path.
 
-`R3-fw-1` answers this on metal-or-QEMU before the rest is estimated. The question is
-recorded in [`spec/open-questions.md`](../../spec/open-questions.md).
+**Answered 2026-09-22 by `R3-fw-1`: (a), with a correction.** The packaged table cannot be
+`ab-4m-v1` — the Arduino upload recipe hardcodes offsets that layout does not use — so the
+library ships `ab-4m-arduino-v1`, a second layout id with the same `ota_slot_size`, as a
+sketch-local `partitions.csv`. Config stays in a flashable `ff_cfg`. See the Completed Work
+entry above and
+[`design/decisions/arduino-gets-its-own-layout-id.md`](../../design/decisions/arduino-gets-its-own-layout-id.md).
 
 **What the release contains**
 
