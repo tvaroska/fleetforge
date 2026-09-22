@@ -30,8 +30,8 @@ ordered to retire the biggest risk (bricking) first. Contents in [releases.md](r
 
 | Release | Theme | Risk retired | Status | Feature area |
 |---------|-------|--------------|--------|--------------|
-| **R0** ⭐ | Enroll a board (UI + recognition + flash + connect) | Onboarding, recognition, device↔server connection | 🔨 Active — **bench-gated** | [enrollment](features/enrollment.md) |
-| R1 | Upload new code (OTA deploy) | OTA transport works end-to-end | 📋 Planned — **unblocked** | [ota-deploy](features/ota-deploy.md) |
+| **R0** ⭐ | Enroll a board (UI + recognition + flash + connect) | Onboarding, recognition, device↔server connection | 🔨 Active — all tasks done, gated on `S0-test-3` | [enrollment](features/enrollment.md) |
+| R1 | Upload new code (OTA deploy) | OTA transport works end-to-end | 🔨 Active — 7/8 done, `R1-test-1` **unblocked** | [ota-deploy](features/ota-deploy.md) |
 | R2 ⭐ | Safe deploy: verify + auto-rollback | **Bricking** (the whole gamble) | 📋 Planned | [ota-deploy](features/ota-deploy.md) |
 | R3 | Thin OTA library + first CUJ | Hobbyists can only update the demo agent, not their own firmware | 📋 Planned | [ota-library](features/ota-library.md) |
 | R4 | Health & telemetry view | Fleet visibility | 📋 Planned | [health-telemetry](features/health-telemetry.md) |
@@ -45,12 +45,21 @@ ordered to retire the biggest risk (bricking) first. Contents in [releases.md](r
 > green in the fleet list, or learns from the product what is wrong and what to do.
 > Requirements in [standards.md](../spec/standards.md).
 >
-> **R0 status, 2026-09-15.** Built, deployed and live at `bingo.tvaroska.sk`; every
-> desk-bound task is done and archived in [enrollment](features/enrollment.md) +
-> [infrastructure](features/infrastructure.md). The release does not close on code —
-> it closes on `R0-test-2`, E2E on real hardware, and that plus the four other open
-> tasks all need a board. The gating fault is `S0-fw-3`: the one board on hand cannot
-> get through RF calibration to enroll. See [TODO.md](../TODO.md) for the bench order.
+> **R0 status, 2026-09-22 — proven on metal; one gate left.** `R0-test-2` **passed** on
+> 2026-09-19: device `94a990dd09a4`, an **ESP32-S3** flashed from `bingo.tvaroska.sk`, ran
+> `link_up → time_synced → enrolling → enrolled → mqtt_connected` in 13 s and stayed live
+> 66 s past enrolment. R0's stated risk — onboarding, recognition, device↔server
+> connection — is retired, and all 20 of its tasks are done. The run used a **different**
+> board from the one stuck in RF calibration, which dissolved the `S0-fw-3` dependency
+> instead of meeting it; `S0-fw-3` is consequently **no longer release-blocking**, though
+> it stays open at P1 as a recovery defect — and, being an S3 rather than a DevKit v1, the
+> pass is *not* evidence about the brownout. The S3 also **unblocks `S0-test-2`**.
+> What still holds R0 open is the P0 above: **`S0-test-3`, the unaided run**. A flash
+> performed by the person who built the flasher is not evidence about onboarding.
+> See [TODO.md](../TODO.md) for the bench order.
+>
+> *(Supersedes the 2026-09-15 status, which had R0 closing on `R0-test-2` with `S0-fw-3`
+> as the gating fault.)*
 >
 > **R1 is no longer blocked, 2026-09-15.** The artifact-store blocker open since
 > `R0-be-6` — `constraints/iam.disableServiceAccountKeyCreation` makes a GCS key file

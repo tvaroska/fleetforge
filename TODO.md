@@ -6,26 +6,49 @@ build is caught before the fleet, and any device that gets one recovers itself.
 
 ## Where this stands
 
-**R0 is built, deployed and live at `bingo.tvaroska.sk`.** Every desk-bound task in the
-release is done. What is left is five tasks, and **all five need a physical board** —
-R0's remaining risk is not code, it is that nothing has yet proven the product works on
-metal. R0 cannot close until R0-test-2 passes.
+**R0-test-2 passed on 2026-09-19 — the product works on metal.** Confirmed against the
+prod database on 2026-09-22. Device `94a990dd09a4`, an **ESP32-S3**, flashed from
+`bingo.tvaroska.sk` with agent 0.2.0, layout `ab-4m-v1`, `ota_slot_size` 1966080. The
+whole ladder is in `device_progress`, 13 seconds end to end:
+`link_up(wifi) → time_synced → enrolling → enrolled → mqtt_connected`, and `last_seen`
+runs 66 s past enrolment. That is R0's stated risk, and it is retired.
 
-**R0's** remaining backlog is therefore one bench session. Its running order is:
+Three details the DB settles that the bench recollection did not:
 
-1. **S0-fw-3** (`- [!]`, below) — flash v0.2.0 and see whether the board escapes the
-   brownout loop. Everything else assumes a board that reaches the fleet.
-2. **R0-test-2** — the P0 that closes R0.
+- **It is an ESP32-S3** — not the classic DevKit v1 that the brownout work is about, and
+  not the board from the 2026-09-14 ESPHome comparison. Different silicon, different
+  regulator, almost certainly a different supply.
+- **So it also unblocks `S0-test-2`**, which has been parked since 2026-09-11 on "no C3,
+  C6 or S3 on hand". One is on hand, and it enumerates.
+- **The board has been unplugged since**: `presence_reported = f`, `last_seen`
+  2026-09-19T20:19Z. The pass was a real live connection, not a durable fleet member.
+  Nothing is online right now.
+
+**R0 is not closed, though: `S0-test-3` is its other gate.** `docs/roadmap.md`
+(2026-09-11) made *unaided onboarding* a P0 that gates the release — R0's risk is
+onboarding, and "it works when the person flashing it wrote it" is not the claim. So R0
+now needs one more bench item, not four.
+
+**What the pass changed, beyond R0.** `R0-test-2` was the practical dependency under
+`R1-test-1`; a board that could not enroll could not be deployed to. An enrollable board
+now exists, so **R1's last task is unblocked** and R1 can close on the same bench session
+that closes R0. And S0-fw-3 is **no longer release-blocking** — it is a recovery defect on
+one DevKit v1 rather than the thing standing between us and a fleet.
+
+Remaining bench order — all of it starts with re-plugging the S3, which is offline:
+
+1. **R1-test-1** — newly unblocked, and a P0 that closes a whole release. Deploy to the
+   S3 once it re-announces.
+2. **S0-test-3** — the unaided run, R0's remaining gate.
 3. **S0-test-1** — the four serial-console properties that only a USB bridge chip can prove.
-4. **S0-test-3** — the unaided run, which decides *Unaided onboarding*.
+4. **S0-test-2** — newly unblocked by the S3 above; the native-USB re-acquire path.
+5. **S0-fw-3** (`- [!]`, below) — flash v0.2.0 to the *stuck* DevKit v1. No longer urgent,
+   but still the clean single-variable experiment, and still a real defect.
 
-S0-test-2 is not in that order: it needs a C3/C6/S3, and no such board is on hand.
-
-**Prod now serves the v0.2.0 agent** (`d705652` — `-Os`, 80 MHz, max modem sleep, the
-TX-power ladder), shipped in v0.3.5. That is step 1 of the S0-fw-3 bench order, so a board
-flashed from `bingo.tvaroska.sk` now tests the untried lever *by default* rather than the
-160 MHz `-Og` build that every recorded brownout came from. No special build is needed —
-just a flash.
+**Prod serves the v0.2.0 agent** (`d705652` — `-Os`, 80 MHz, max modem sleep, the
+TX-power ladder), shipped in v0.3.5. That is what the S3 was flashed with, and it
+is also step 1 of the S0-fw-3 bench order — so retrying the stuck board needs no special
+build, just a flash.
 
 **R1 is open alongside R0, from 2026-09-16.** This file normally carries Sprint 0 plus
 *one* release; it now carries two, because R0 is not in progress — it is parked on
@@ -172,8 +195,26 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       criterion (recovery visible on the dashboard) is reachable from any of them. S0-fw-4
       has landed, so that result is now durable: the flasher erases nothing and a reflash
       no longer throws a survived calibration away.
+
+      **2026-09-19 — de-escalated, but on weaker evidence than it first looked.**
+      `R0-test-2` passed on a different board, so this **no longer blocks a release**: it
+      is one board's recovery defect, not a gate.
+      **It says almost nothing about the firmware, though.** The board that passed is an
+      **ESP32-S3** (`94a990dd09a4`), not the classic DevKit v1 this entry is about —
+      different silicon, different regulator, different supply. The tempting read, "our
+      agent survived a cold full calibration so our startup draw is fine", does **not**
+      follow: the S3 never ran the experiment this entry describes. The 2026-09-14
+      conclusion — the supply carries a cold calibration and our startup draws more than it
+      needs to — therefore **stands unchallenged**, and the open question is still
+      whichever of the three levers below moves the DevKit v1.
+      Kept at P1, because the defect it names is a fleet property, not one board's: *any*
+      board that browns out during calibration is permanently stuck, and a product whose
+      pitch is "any device that gets a bad one recovers itself" cannot ship that. The
+      acceptance criterion is unchanged, and step 1 of the bench order above — v0.2.0 onto
+      the stuck DevKit v1 — is still the untried single-variable experiment.
       _(attempted 2026-09-12; negative result recorded 2026-09-13; second lever staged
-      2026-09-13; hardware cause ruled out 2026-09-14, awaiting bench)_
+      2026-09-13; hardware cause ruled out 2026-09-14; de-escalated 2026-09-22 when
+      R0-test-2 passed on a different board; awaiting bench)_
 
 - [ ] **S0-test-1**: Bench-verify the serial console on real hardware (P1, 0.5d)
       Filed 2026-09-10, when S0-fe-1 shipped. Its software half is proven in jsdom against
@@ -217,9 +258,17 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       that come back as a **different** `SerialPort`, and nothing has ever tested it on
       metal — a too-short window shows "No board is available to watch" on a board that
       is merely rebooting, which is the exact false negative the console exists to
-      remove. **Blocked on acquiring a C3, C6 or S3.**
-      Acceptance: on the Mac, `hard_reset` from the console on a native-USB board
+      remove. ~~**Blocked on acquiring a C3, C6 or S3.**~~
+      **Unblocked 2026-09-22.** An **ESP32-S3** is on hand and has already enrolled against
+      prod — device `94a990dd09a4`, the board that passed `R0-test-2` on 2026-09-19. This
+      task's premise ("the only board on hand is an ESP32-DevKit v1") is simply out of
+      date. Cheap to run now, since the board is already flashed and known-good.
+      Acceptance: on the bench, `hard_reset` from the console on a native-USB board
       reconnects inside the window and streams the boot log without operator action.
+      ⚠️ This entry and `S0-test-1` both say the bench is **the Mac**. The S3 enrolled from
+      a **Windows + Chrome** bench with native USB on COM3. Confirm which host before
+      running either — the re-acquire window is an OS-and-driver property, so a result on
+      one host is not a result on the other.
 
 ---
 
@@ -230,10 +279,15 @@ Bricking risks, broker auth and security issues get filed here as they surface.
 **Done when:** plug in a board, flash & register it from the browser, watch it come
 online — no toolchain, no CLI.
 
-**19 of 20 tasks are done and archived** in
+**All 20 tasks are done**, and archived in
 [docs/features/enrollment.md](docs/features/enrollment.md) (the flow end to end) and
 [docs/features/infrastructure.md](docs/features/infrastructure.md) (the stack and the
-prod hand-off). One remains, and it is the one that defines the release.
+prod hand-off).
+
+**The release still does not close**, because R0's gate is not only its task list.
+`docs/roadmap.md` (2026-09-11) put *unaided onboarding* — `S0-test-3`, in Sprint 0 above —
+in front of R0 as a P0, on the grounds that R0's risk is onboarding and a flash performed
+by the person who wrote the flasher does not test it. R0 closes when S0-test-3 passes.
 
 Two non-obvious rules from [design/production.md](design/production.md) that survive into
 every later release: the **ingestor is the only MQTT subscriber** (N API workers would
@@ -242,11 +296,17 @@ off-box** (the ESP-IDF builder is 2–3 G against 5.5 G of free disk on `prod`).
 
 ### Test
 
-- [ ] **R0-test-2**: E2E on real hardware (P0, 1d)
+- [x] **R0-test-2**: E2E on real hardware (P0, 1d) — passed 2026-09-19
       Flash → enroll → appears online in the dashboard. **This is R0's "Done when",
-      restated as a task** — the release's whole risk is onboarding, and nothing has yet
-      proven it on metal. Depends in practice on S0-fw-3: the one board on hand cannot
-      currently get past RF calibration to enroll at all.
+      restated as a task** — the release's whole risk is onboarding, and nothing had
+      proven it on metal.
+      **Passed on an ESP32-S3** (`94a990dd09a4`), flashed from `bingo.tvaroska.sk` with the
+      v0.2.0 agent prod has served since v0.3.5. `device_progress` records the full ladder
+      in 13 s — `link_up(wifi) → time_synced → enrolling → enrolled → mqtt_connected` —
+      and `last_seen` runs 66 s past enrolment. The stated dependency on S0-fw-3 was
+      dissolved rather than met: a different board removed the need for the stuck DevKit v1
+      to recover. Verified against the prod DB 2026-09-22.
+      Write-up in `docs/features/enrollment.md`.
 
 ---
 
@@ -290,8 +350,13 @@ fixes the `dn/cmd` `stage` payload and the `up/status` state machine, and is nea
       **Bench-gated, deliberately.** QEMU proves the transport; this proves the product.
       Kept as a hardware task rather than redefined to something the emulator can pass,
       for the same reason `R0-test-2` is: the release's claim is about a board.
-      Depends on `R0-test-2` in practice — a board that cannot enroll cannot be deployed
-      to.
+      **Unblocked 2026-09-22.** The dependency was `R0-test-2` in practice — a board that
+      cannot enroll cannot be deployed to — and that board is now enrolled and online.
+      This is the cheapest P0 left: the target is already on the fleet, so the run is a
+      deploy from the dashboard and a version check, and it closes R1.
+      ⚠️ Re-read R1's "Not yet safe" warning above first: there is no checksum gate and no
+      confirm timer until R2, so deploy only to a board you can physically reach — which,
+      on a bench, is the point.
 
 ---
 

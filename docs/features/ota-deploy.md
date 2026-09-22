@@ -116,6 +116,17 @@ ESP32 adapter: write OTA1 partition → broker reconnect + self-test → switch 
 
 > ⚠️ Not yet safe — a broken build stays broken until R2.
 
+> **R1-TEST-1 unblocked, 2026-09-22.** It depended in practice on `R0-test-2` — a board
+> that cannot enroll cannot be deployed to — and that passed on 2026-09-19: device
+> `94a990dd09a4`, an ESP32-S3 running agent 0.2.0 (see [enrollment.md](enrollment.md) →
+> *E2E on real hardware*). Every other R1 task has landed, so this is the only thing
+> between R1 and done.
+> Two practical notes. The board is **not currently online** — `presence_reported = f`,
+> `last_seen` 2026-09-19 — so re-plug and let it re-announce before deploying. And its
+> `ota_slot_size` is 1966080 with layout `ab-4m-v1`, matching the frozen contract, so the
+> 1.9 MB artifact cap applies as written. Deploy only to a board you can physically reach:
+> there is no checksum gate and no confirm timer until R2.
+
 ### R1-BE-0 — a production GCS credential that is not a key file — **LANDED 2026-09-15**
 
 **Delivered by S0-infra-5.** R1 no longer needs to solve this; read the answers below

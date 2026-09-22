@@ -6,6 +6,53 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-22 — R0-test-2 passed on an S3; S0-fw-3 is a defect, not a gate
+
+**The product works on metal.** On 2026-09-19, device `94a990dd09a4` — an **ESP32-S3** —
+flashed from `bingo.tvaroska.sk` with the v0.2.0 agent (`d705652`) ran the full ladder in
+13 s (`link_up → time_synced → enrolling → enrolled → mqtt_connected`) and stayed live
+66 s past enrolment. That is R0's "Done when" verbatim, and it retires the release's
+stated risk. Confirmed against the prod database on 2026-09-22; write-up in
+[`docs/features/enrollment.md`](docs/features/enrollment.md) → *E2E on real hardware*.
+
+**Decided: prove the release on the new board rather than wait for the stuck one to
+recover.** `R0-test-2` had been blocked on `S0-fw-3` since it was written, on the
+reasoning that the only board on hand could not get through RF calibration to enroll.
+That framing tied a release gate to one board's regulator. Using a second board
+**dissolves the dependency instead of meeting it**, and the dependency was never actually
+part of the acceptance criterion — "flash → enroll → online" says nothing about *which*
+board.
+
+**Consequences, in order of how much they change.**
+
+1. **`S0-fw-3` is no longer release-blocking, and stays open at P1 anyway.** It is now a
+   recovery defect rather than a gate. Kept open because what it names is a fleet
+   property, not this board's: any board that browns out during calibration is
+   permanently stuck, and the product's pitch is that any device that gets a bad one
+   recovers itself. Shipping V1 with that unfixed is a decision to take later, on
+   purpose — not something to let lapse because the blocker stopped hurting.
+2. **The 2026-09-14 conclusion is untouched — resist the tempting read.** It is natural to
+   conclude "our agent survived a cold full RF calibration, so our startup draw is fine
+   after all." **It does not follow.** The board that passed is an S3; the brownout work
+   is about a classic ESP32-DevKit v1, with different silicon, a different regulator and a
+   different supply, and its `device_progress` shows no `brownout` stage at all. The S3
+   never ran that experiment. "This supply carries a cold calibration and our startup
+   draws more than it needs to" therefore still stands, and the single-variable test —
+   v0.2.0 onto the stuck DevKit v1 — is still untried in the bench order in
+   [`TODO.md`](TODO.md).
+3. **R1 is unblocked.** `R1-test-1` depended on `R0-test-2` in practice; an enrollable
+   board now exists. R1's other seven tasks landed 2026-09-17, so one bench run closes the
+   release. Caveat: `presence_reported = f` and `last_seen` is 2026-09-19 — the board has
+   been unplugged since, so it must be re-plugged first.
+4. **`S0-test-2` is unblocked too.** It had been parked since 2026-09-11 on "no C3, C6 or
+   S3 on hand". The board that passed *is* an S3, so the native-USB re-acquire path is now
+   testable on the hardware it was written for.
+
+**R0 does not close on this.** Its other gate is `S0-test-3`, the unaided onboarding run,
+put in front of the release on 2026-09-11 (`docs/roadmap.md`) because R0's risk is
+onboarding. This run's operator wrote the flasher, which measures the stack rather than
+the on-ramp. R0 closes when someone who has not seen the code onboards a board.
+
 ## 2026-09-22 — The Arduino library gets its own layout id; config stays in flash
 
 **R3-fw-1**, a spike. Details in

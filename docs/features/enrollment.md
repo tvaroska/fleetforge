@@ -49,6 +49,66 @@ decisions behind all of it. No counts here — they go stale the moment a task l
 
 **Done when:** plug in a board, flash & register from the browser, watch it come online.
 
+### E2E on real hardware — the "Done when", met (R0-test-2)
+
+**2026-09-19. Flash → enroll → online, on a physical board, against production.**
+Everything below this section is a component of that sentence; this is the first time the
+sentence itself has been true. R0's stated risk — onboarding, board recognition,
+device↔server connection — is retired. Verified against the prod database 2026-09-22.
+
+**The board.** Device `94a990dd09a4`, an **ESP32-S3**, flashed from `bingo.tvaroska.sk`
+with the v0.2.0 agent (`d705652` — `-Os`, 80 MHz, max modem sleep, TX-power ladder) that
+prod has served since v0.3.5. `partition_layout` `ab-4m-v1`, `ota_slot_size` 1966080 — the
+contract value, so the three-way agreement with `agent/partitions.csv` held on real
+silicon. No toolchain and no CLI, which is the claim.
+
+**The ladder, from `device_progress` — 13 seconds, no retries:**
+
+| at (UTC) | stage |
+|---|---|
+| 20:18:01.8 | `link_up` (`wifi`) |
+| 20:18:03.8 | `time_synced` |
+| 20:18:05.9 | `enrolling` |
+| 20:18:10.4 | `enrolled` |
+| 20:18:14.1 | `mqtt_connected` |
+
+`last_seen` is 20:19:14 — 66 s past enrolment — so the board was genuinely live on the
+broker, not merely registered. Note what is *absent*: no `brownout` stage, so this board
+never entered the fault `S0-fw-3` describes.
+
+**It was a different board from the one in the brownout loop, and that is the whole reason
+the run happened.** `R0-test-2` had carried a practical dependency on `S0-fw-3` since it
+was written: the only board on hand could not get through RF calibration, so it could not
+enroll, so the release could not be proven. A second board **dissolved that dependency
+instead of meeting it**.
+
+**What the S3 does and does not tell us.** It de-escalates `S0-fw-3`: that task no longer
+blocks a release, and is now a recovery defect held open at P1 because the flaw it names
+is a fleet property — any board that browns out during calibration is permanently stuck,
+against a product that promises self-recovery. But it is **not** evidence about our
+startup current. The tempting inference — "our agent survived a cold full calibration, so
+the 2026-09-14 reading was wrong" — does not hold: the S3 is different silicon with a
+different regulator and supply from the DevKit v1, and never ran that experiment. The
+2026-09-14 conclusion stands, and v0.2.0 onto the stuck DevKit v1 is still the untried
+single-variable test.
+
+**It also unblocked `S0-test-2`**, parked since 2026-09-11 on "no C3, C6 or S3 on hand".
+One is on hand, already flashed and known-good.
+
+**Current state: nothing is online.** `presence_reported = f` and `last_seen` is
+2026-09-19; the board has been unplugged since. The pass was a live connection, not a
+standing fleet member — re-plug it before `R1-test-1`.
+
+**What this does not prove, and what R0 still waits on.** The operator was the person who
+wrote the flasher. That is exactly the evidence `S0-test-3` exists to collect and the
+reason [roadmap.md](../roadmap.md) put *unaided onboarding* in front of the release on
+2026-09-11: R0's risk is onboarding, and a successful flash by its author measures the
+stack, not the on-ramp. R0 closes on `S0-test-3`, not here.
+
+**It also unblocked R1.** `R1-test-1` depended on this in practice — a board that cannot
+enroll cannot be deployed to — so R1's last task became runnable the moment the board came
+online. See [ota-deploy.md](ota-deploy.md).
+
 ### Device protocol v1 (R0-spec-1)
 
 Done 2026-09-08, the first R0 task — everything else in this phase is written against it.
@@ -1090,7 +1150,9 @@ from firmware, stays open in `spec/open-questions.md`.
      click is the thing that did not exist on 2026-09-11.
 - **Status:** In progress — all three layers (S0-fe-4, S0-fe-5, S0-fe-6, S0-fe-7) landed
   2026-09-11; see *Escalation is one click* above. Remaining: the unaided run (S0-test-3),
-  which is what actually decides this feature.
+  which is what actually decides this feature. **As of 2026-09-22 it is also the only
+  thing holding R0 open** — `R0-test-2` passed, so every other R0 task is done and this
+  P0 is the release's last gate.
 - **Added:** 2026-09-11
 - **Tasks:** ~~S0-fe-4 (diagnosis)~~ done, ~~S0-fe-5 (never miss the boot)~~ done,
   ~~S0-fe-6 (recovery actions)~~ done, ~~S0-fe-7 (diagnostic bundle)~~ done,
