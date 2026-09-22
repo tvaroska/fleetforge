@@ -30,10 +30,10 @@ is "not public" in the product sense — no signup, one admin — which SPEC alr
 | **Ingress** | shared Traefik v3.6 | needs a new entrypoint — see *Port 8883* |
 | **Migrations** | Alembic, `RUN_MIGRATIONS=true` | bingo's pattern |
 | **Agent build** | pinned ESP-IDF container | `R0-INFRA-2`; images served by the API |
-| **Tests** | pytest, pytest-asyncio; `pytest-embedded` from R4 | plus the Python device simulator (`R0-TEST-1`) |
+| **Tests** | pytest, pytest-asyncio; `pytest-embedded` from R5 | plus the Python device simulator (`R0-TEST-1`) |
 
 **TimescaleDB is already preloaded on the shared Postgres** (`shared_preload_libraries=timescaledb`).
-R3 telemetry is a hypertable and SPEC's 30-day retention is a Timescale retention policy —
+R4 telemetry is a hypertable and SPEC's 30-day retention is a Timescale retention policy —
 not a cron job. This is free and was not previously noticed.
 
 ## The single-subscriber rule
@@ -55,7 +55,7 @@ This mirrors the existing `content-api` / `content-worker` split already running
 host. Commands flow the other way: API publishes to the broker directly (publishing is
 stateless and safe from any worker).
 
-*Cost of getting this wrong:* it is cheap now and a rewrite after R3, once telemetry
+*Cost of getting this wrong:* it is cheap now and a rewrite after R4, once telemetry
 volume forces a second worker.
 
 ## Same origin, two backends

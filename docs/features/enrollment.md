@@ -132,7 +132,7 @@ that disagrees with the topic is an impersonation attempt and is dropped: the to
 what the `%u` pattern ACL binds to the broker username.
 
 `up/status`, `up/telemetry` and `up/log` are accepted and only move `last_seen`;
-persisting them is R1 (`deploy_events`) and R3 (telemetry) respectively.
+persisting them is R1 (`deploy_events`) and R4 (telemetry) respectively.
 
 ### Device enrollment (R0-be-4)
 

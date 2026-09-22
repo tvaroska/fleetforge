@@ -6,7 +6,7 @@ survives the 307 and comes back as a correct 206 from the object store, with 416
 unsatisfiable range — because we deliberately do not implement RFC 7233 ourselves, this
 is the only place that behaviour is observable at all.
 
-`esp_https_ota` resumes with `Range:` on a flaky link (R5), so a broken slice here is a
+`esp_https_ota` resumes with `Range:` on a flaky link (R6), so a broken slice here is a
 board that flashes corrupt firmware and A/B-rolls back. Worth the integration cost.
 
 The redirect is followed by hand with `urllib` rather than by an httpx transport: the

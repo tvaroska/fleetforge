@@ -2,7 +2,7 @@
 
 **Status:** Planned
 **Priority:** P0
-**Target:** R5 (→ v1 complete)
+**Target:** R6 (→ v1 complete)
 **Depends on:** OTA Deploy & Auto-Rollback (ota-deploy.md) — R2
 
 ## Overview
@@ -12,22 +12,22 @@ Make it production-grade: **app-level firmware signature verification** before a
 
 **App-level signing, not Secure Boot v2.** Secure Boot v2 burns a key digest to eFuse and
 needs a re-signed bootloader, so it can never be enabled on an already-deployed board —
-it is post-v1 and new-devices-only. What R5 ships is pure software the agent can receive
+it is post-v1 and new-devices-only. What R6 ships is pure software the agent can receive
 over OTA. The two are not interchangeable; see [design/architecture.md](../../design/architecture.md) →
 *Flash-time immutables*. This closes v1: auto-rollback (per-device) + verified, signed, resumable transport.
-The simulation pre-flight gate is V2 (R8), so v1's defense in depth is one layer deep
+The simulation pre-flight gate is V2 (R9), so v1's defense in depth is one layer deep
 by design — see [releases.md](../releases.md).
 
-## Phase 1: R5 — Signed OTA + resumable hardening
+## Phase 1: R6 — Signed OTA + resumable hardening
 
 | ID | Task | Priority | Effort |
 |----|------|----------|--------|
-| R5-SEC-1 | Firmware signing: sign artifacts server-side; agent verifies signature before apply | P0 | 2d |
-| R5-SEC-2 | Signing-key management: generation, storage, rotation, docs + defaults | P1 | 1d |
-| R5-FW-1 | Resumable download (range/offset), retry + backoff | P0 | 1.5d |
-| R5-BE-1 | Surface both KPIs from the deploy-event history recorded since R1 | P0 | 1d |
-| R5-FE-1 | Dashboard KPI view (delivery success vs fleet safety, with the gap) | P0 | 1d |
-| R5-TEST-1 | E2E: unsigned/tampered artifact rejected; interrupted download resumes | P0 | 1d |
+| R6-SEC-1 | Firmware signing: sign artifacts server-side; agent verifies signature before apply | P0 | 2d |
+| R6-SEC-2 | Signing-key management: generation, storage, rotation, docs + defaults | P1 | 1d |
+| R6-FW-1 | Resumable download (range/offset), retry + backoff | P0 | 1.5d |
+| R6-BE-1 | Surface both KPIs from the deploy-event history recorded since R1 | P0 | 1d |
+| R6-FE-1 | Dashboard KPI view (delivery success vs fleet safety, with the gap) | P0 | 1d |
+| R6-TEST-1 | E2E: unsigned/tampered artifact rejected; interrupted download resumes | P0 | 1d |
 
 **Done when:** you can run it in earnest — production-grade safety + security. **v1 complete.**
 
@@ -37,7 +37,7 @@ Definitions and targets: [prd.md](../../spec/prd.md) → *Success criteria*. The
 two numbers tells you *which stage* to fix.
 
 **Recording starts at R1, not here.** The `deploy_events` table is in the R0 schema and
-every deploy outcome is written from R1 onward — otherwise R5 arrives with two metrics
+every deploy outcome is written from R1 onward — otherwise R6 arrives with two metrics
 and no history to compute them from.
 
 ## Post-v1 hardening

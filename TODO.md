@@ -2,7 +2,7 @@
 
 **Goal:** Self-hosted OTA firmware management for embedded fleets (ESP32 first) — a bad
 build is caught before the fleet, and any device that gets one recovers itself.
-**Updated:** 2026-09-17
+**Updated:** 2026-09-22
 
 ## Where this stands
 
@@ -30,16 +30,14 @@ just a flash.
 **R1 is open alongside R0, from 2026-09-16.** This file normally carries Sprint 0 plus
 *one* release; it now carries two, because R0 is not in progress — it is parked on
 hardware, and waiting for a board is not a reason to stop building. R1's blocker closed
-on 2026-09-15 (`R1-BE-0`, impersonation + verified `signBlob`), and **seven of its eight
-tasks need no board** — three have landed: `R1-be-1` the same day R1 opened, then
-`R1-be-2` and `R1-be-3` on 2026-09-17, so a deploy now mints a link on our own origin and
-`GET /v1/artifact/{sha256}/bin` serves it with range support. The remaining backend task
-and the dashboard button are server-side,
-and the two firmware tasks run in QEMU (`docs/runbooks/agent-qemu.md` boots the real
-`agent/dist/esp32` bundle against the dev stack over the emulated NIC, so
-stage → download → apply → reboot → report-version is exercisable at a desk). Only
-`R1-test-1` is bench-gated, and it is deliberately written as the *hardware* E2E rather
-than renamed to something QEMU can pass. See `DECISIONS.md` 2026-09-16.
+on 2026-09-15 (`R1-BE-0`, impersonation + verified `signBlob`), and **all seven of its
+desk-bound tasks have landed** — `R1-be-1` the day R1 opened, then `R1-be-2`, `R1-be-3`,
+`R1-be-4`, `R1-fw-1`, `R1-fw-2` and `R1-fe-1` on 2026-09-17. A deploy mints a link on our
+own origin, `GET /v1/artifact/{sha256}/bin` serves it with range support, the agent
+stages and applies it in QEMU (`docs/runbooks/agent-qemu.md`) and reports the version
+that actually booted, and the dashboard drives the whole thing. Only `R1-test-1` is
+left: it is bench-gated, and deliberately written as the *hardware* E2E rather than
+renamed to something QEMU can pass. See `DECISIONS.md` 2026-09-16.
 
 **Completed work is archived**, not lost: R0 and the closed Sprint 0 tasks are written up
 in [docs/features/](docs/features/) — chiefly `enrollment.md` (the R0 flow end to end,
@@ -57,11 +55,12 @@ Two results worth carrying forward, because they retired earlier conclusions:
   exemption — `constraints/iam.disableServiceAccountKeyCreation` makes a GCS key file
   impossible, and the answer was impersonation. Prod reads the store keylessly, verified
   from inside the container, and `signBlob` is measured rather than assumed. All five
-  artifact tasks are done; the build engine itself stays R9, only its cache key changed.
+  artifact tasks are done; the build engine itself stays R10, only its cache key changed.
 
 <!-- Counters: spec=1 infra=7 db=1 be=6 fe=7 sec=1 fw=4 test=3 -->
 <!-- Sprint 0 counters: fe=7 fw=4 infra=7 test=3 -->
 <!-- R1 counters: be=3 fe=1 fw=2 test=1 -->
+<!-- R3 counters: spec=1 fw=4 test=1 -->
 
 Live status lives ONLY here. States: `- [ ]` open · `- [x]` done · `- [!]`
 attempted-but-failed. `spec/` and `design/` are status-free.
@@ -79,7 +78,7 @@ attempted-but-failed. `spec/` and `design/` are status-free.
 
 **Deployment (v1):** single hosted instance at `bingo.tvaroska.sk` (domain reused from
 the retired bingo app), single-tenant, **not a public product until V3**.
-**Versions:** V1 = R0–R5 (safe OTA, ~5 boards) · V2 = R6–R10 (VCS + compile + simulation)
+**Versions:** V1 = R0–R6 (safe OTA, ~5 boards) · V2 = R7–R11 (VCS + compile + simulation)
 · V3 = robotic swarm (gateway + drones).
 
 ---
@@ -278,78 +277,12 @@ fixes the `dn/cmd` `stage` payload and the `up/status` state machine, and is nea
 (`CRITICAL.md`); `ota_slot_size` is **1966080** and is a three-way contract with
 `agent/partitions.csv`.
 
-### Backend
-
-- [x] **R1-be-3**: Artifact download endpoint — signed-URL verification + HTTP range (P0, 1d)
-      _(done 2026-09-17; reviewed; see docs/features/ota-deploy.md)_
-      The endpoint is **public** ([prd.md](spec/prd.md) → public exposure): the signature
-      *is* the authorization, which is why `CRITICAL.md` lists signed-URL generation.
-      Range support is not optional — it is what R5's resumable download is built on, and
-      a device that loses Wi-Fi at 80% of 1.9 MB over a marginal link is the normal case,
-      not the edge case.
-      Watch the latency budget: `signed_url` is an IAM round trip now, not local CPU
-      (`S0-infra-5`). **Do not sign per range request** — cache the URL for its lifetime,
-      or a resumed download turns into N Google API calls and can rate-limit.
-      Acceptance: a valid signature serves the bytes, an expired or tampered one is
-      refused, `Range:` returns 206 with the right slice, and the signing call count for
-      a 10-range download is 1.
-
-- [x] **R1-be-2**: Deploy orchestration `stage → apply`, per device (P0, 1.5d)
-      _(done 2026-09-17; reviewed; see docs/features/ota-deploy.md)_
-      Publish `dn/cmd` carrying the short-lived signed URL, exactly the payload shape in
-      `spec/device-protocol.md` — near-frozen, so this task **conforms to** the spec and
-      does not extend it. Every command carries `id` and the device deduplicates on it,
-      so the server must mint one and reuse it across a retry rather than per publish.
-      The server orchestrates and never knows *how* nor *when*: `awaiting_safe_window` is
-      an honest terminal-ish state the device may sit in indefinitely, and nothing here
-      may time it out. Rollback authority is the device's and is not in R1 at all.
-      Acceptance: a staged deploy against the simulator walks
-      `staging → downloading → verifying → staged → applying → rebooting`, a duplicated
-      publish produces one download, and `awaiting_safe_window` never expires server-side.
-
-- [x] **R1-be-4**: Write every deploy outcome to `deploy_events` (P0, 0.5d)
-      The KPI history R5 computes from, and the one table
-      [prd.md](spec/prd.md) → *Retention* keeps **forever**. "Every outcome" includes the
-      failures and the abandoned ones — a table that only records successes cannot answer
-      the question the product exists to answer.
-      Acceptance: success, failure and cancel each write a row; the row survives a
-      restart; nothing else in R1 writes this table from two places.
-      _(done 2026-09-17; see docs/features/ota-deploy.md)_
-
-### Firmware — verifiable in QEMU, no board
-
-- [x] **R1-fw-1**: Agent gains `esp_https_ota` + an "update" command handler (P0, 2d)
-      Handle `stage` from `dn/cmd`, download through the signed URL, write the inactive
-      OTA slot, and report `up/status` transitions as it goes. The reboot is the device's
-      to schedule.
-      Test in QEMU per `docs/runbooks/agent-qemu.md` — the emulated board has a NIC and a
-      real flash image, so the whole transaction runs at the desk. What QEMU does **not**
-      cover: the radio, the power draw of a sustained download, and chip-revision
-      behaviour. Those belong to `R1-test-1`, not here.
-      Acceptance: `just agent-qemu` boots the bundle, it stages an artifact from the dev
-      stack end to end, and the `up/status` sequence matches the spec's state machine.
-      _(done 2026-09-17; reviewed; see docs/features/ota-deploy.md)_
-
-- [x] **R1-fw-2**: Agent reports firmware version after reboot (P0, 0.5d)
-      `fw_version` in `up/announce` and `up/hb` must be the version that is *running*,
-      read from the running app's own description — not the version it was told to
-      install. Those two disagree exactly when something went wrong, which is the moment
-      the field has to be right.
-      Acceptance: after a staged-and-applied update in QEMU, the reported version changes
-      to the uploaded one; after a failed apply, it does not.
-      _(done 2026-09-17; reviewed; see docs/features/ota-deploy.md)_
-
-### Frontend
-
-- [x] **R1-fe-1**: Per-device Deploy button + version-change feedback (P0, 1d)
-      Pick an artifact, deploy to one device, watch the `up/status` states arrive over the
-      existing SSE stream. [prd.md](spec/prd.md) → *Timing* gives the dashboard **≤ 2 s**
-      from server receipt to reflect a state change.
-      The honest-feedback bar from *Unaided onboarding* applies here too: a device sitting
-      in `awaiting_safe_window` is not a hung UI and must not look like one.
-      Acceptance: deploy from the dashboard, the state sequence renders live, and the
-      device's version changes in the list without a reload.
-      _(done 2026-09-17; see docs/features/ota-deploy.md)_
+**Seven of eight tasks are done and archived** in
+[docs/features/ota-deploy.md](docs/features/ota-deploy.md) — the deploy orchestration
+(`R1-be-2`), the public artifact endpoint (`R1-be-3`), the `deploy_events` writer
+(`R1-be-4`), the agent's `esp_https_ota` handler and running-version accessor
+(`R1-fw-1`, `R1-fw-2`) and the dashboard Deploy button (`R1-fe-1`). Reasoning is in
+`DECISIONS.md` 2026-09-17. One remains, and it is bench-gated.
 
 ### Test
 
@@ -365,3 +298,90 @@ fixes the `dn/cmd` `stage` payload and the `up/status` state machine, and is nea
 **Parallel spike (de-risks R2):** throwaway OTA + auto-rollback spike on real flaky
 Wi-Fi. Tracked in [docs/features/ota-deploy.md](docs/features/ota-deploy.md).
 Needs hardware — a spike about a flaky radio cannot run on an emulator that has none.
+
+---
+
+## R3: Thin OTA library — the four verbs in the user's own firmware
+
+**Not started, and deliberately not next.** R3 sits behind R2 because a library is a
+multiplier on however safe deploy currently is
+(`DECISIONS.md` 2026-09-22, `design/decisions/ota-library-ships-after-safe-deploy.md`).
+It is written down now because `prd.md` has promised it since the beginning and it had no
+plan; nothing here should be picked up before R0 closes on metal and R2 lands.
+
+**This file now carries three releases.** R0 is parked on hardware, R1 is one bench task
+from done, and R3 is a plan rather than work in flight. If that becomes confusing, R3 is
+the one to move back out to `docs/features/ota-library.md`.
+
+Requirements: [spec/standards.md](spec/standards.md) → *ota-library*. Release contents:
+[docs/releases.md](docs/releases.md) → R3. Feature file:
+[docs/features/ota-library.md](docs/features/ota-library.md). Journey:
+[spec/cujs.md](spec/cujs.md) → *CUJ-1*, written by `R3-spec-1` on 2026-09-22 — the
+release's own subject, and the first thing in this project a CUJ has ever described.
+
+### Firmware
+
+- [ ] **R3-fw-1**: Spike — where does a library user's config live? (P1, 0.5d)
+      **Blocks every other task in this release; do not estimate them until it lands.**
+      The agent keeps broker URL, Wi-Fi creds and the enrollment token in the `ff_cfg`
+      flash partition (`design/partitions.md` §3). An Arduino IDE build has no such
+      partition, and a partition cannot be added by OTA.
+      Measure what an Arduino-ESP32 build actually does to the partition table, whether a
+      custom `partitions.csv` survives a board-definition change, and what it costs to
+      read config from NVS instead. Output is a recommendation — (a) packaged partition
+      table, or (b) NVS-backed config — appended to `spec/open-questions.md` and promoted
+      into `spec/` if it settles.
+      Acceptance: the question in `open-questions.md` is answered with evidence, not
+      opinion, and the answer names which of (a)/(b) the release implements.
+
+- [ ] **R3-fw-2**: Extract the protocol into an ESP-IDF component (P1, 2d)
+      `agent/main/` already separates protocol from demo app: `ff_ota`, `ff_mqtt`,
+      `ff_enroll`, `ff_cfg`, `ff_store`, `ff_identity`, `ff_net`, `ff_time`. Move them to
+      a component with an `idf_component.yml`; the agent becomes its first consumer and
+      must keep passing `just agent-verify` and the QEMU E2E unchanged.
+      The real work is deciding the **public** surface — whatever ships is additive-only
+      from then on, exactly like the wire protocol. Keep it to the four verbs, enroll,
+      announce/heartbeat, and a version accessor.
+      Acceptance: the agent builds from the component with no behaviour change, the QEMU
+      run in `docs/runbooks/agent-qemu.md` still passes, and the component's public
+      headers are a strict subset of what `agent_main.c` uses.
+
+- [ ] **R3-fw-3**: Arduino library wrapping the same C (P1, 2d)
+      Depends on `R3-fw-1` and `R3-fw-2`. The persona writes Arduino or PlatformIO and
+      does not use ESP-IDF (`docs/personas/PERSONAS.md` §1); if adopting Fleetforge means
+      porting their project, they will not adopt it.
+      Ships whatever `R3-fw-1` chose: a packaged partition table + board definition, or
+      an NVS config path. Either way the safety posture is not optional — A/B layout and
+      `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y` are flash-time immutables, so a
+      configuration that cannot roll back must fail at build or enroll, not warn.
+      Acceptance: a stock Arduino IDE install plus this library compiles the example for
+      esp32 and esp32s3, and a board flashed from it enrolls.
+
+- [ ] **R3-fw-4**: The worked example — enroll → heartbeat → stage → report version (P1, 1d)
+      Small enough to read in one screen. The PRD's Morse-code blinker is the documented
+      sample, so the example and the product claim are the same artifact: the blinker
+      changes its message between two builds, which makes "the OTA worked" visible from
+      across the room rather than only in the dashboard.
+      Acceptance: builds unmodified from a clean checkout on both ESP-IDF and Arduino, and
+      the README quickstart is exactly the steps a reader follows.
+
+- [ ] **R3-fw-5**: Reject a wrong flash layout loudly (P1, 1d)
+      A build that does not reproduce `ab-4m-v1` exactly must announce a different
+      `partition_layout`. The server already accepts exactly one
+      (`firmware/manifest.py::SUPPORTED_LAYOUTS`), so the deploy is rejected — but today
+      the message does not tell a library user what to fix.
+      Acceptance: a deliberately mismatched layout is refused at deploy time with a
+      message naming the expected layout and slot size; no board is ever flashed into a
+      state where the library is running without a rollback-capable bootloader.
+
+### Test
+
+- [ ] **R3-test-1**: E2E in QEMU — example firmware enrols, updates, rolls back (P1, 1d)
+      The library's claim is the same as the agent's, so it gets the same proof:
+      `docs/runbooks/agent-qemu.md` boots the real bundle against the dev stack, and the
+      example must run that path rather than a stubbed one.
+      Three runs: a clean enroll, an OTA to a second build whose visible behaviour
+      differs, and a deliberately broken build that rolls back unaided and reports
+      `rolled-back`.
+      Acceptance: all three pass with no board, and the rollback run fails the test if the
+      device reports `confirmed`.

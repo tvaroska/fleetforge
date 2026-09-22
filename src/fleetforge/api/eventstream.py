@@ -78,7 +78,7 @@ class EventHub:
 
     Created per app in `create_app()` (never module-level, so no state leaks between
     test apps) and reached through `api/deps.py::event_hub`. R1's deploy-status
-    events and R3's telemetry publish into this same hub rather than inventing a
+    events and R4's telemetry publish into this same hub rather than inventing a
     second one.
     """
 

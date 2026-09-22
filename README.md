@@ -82,6 +82,6 @@ just test           # ruff + mypy + pytest against the real database
 
 ## Releases
 
-**V1 (R0–R5)** — safe OTA on ~5 heterogeneous boards.
-**V2 (R6–R10)** — source to artifact: VCS ingestion, server-side compile, simulation gate.
+**V1 (R0–R6)** — safe OTA on ~5 heterogeneous boards.
+**V2 (R7–R11)** — source to artifact: VCS ingestion, server-side compile, simulation gate.
 **V3** — robotic swarm: one ground vehicle as gateway plus many flying drones.

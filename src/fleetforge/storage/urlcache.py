@@ -29,7 +29,7 @@ Three rules copied from that cache for the same reasons:
   403 in the middle of the device's download. An entry is reusable only while
   `monotonic() < signed_at + ttl_s - refresh_margin_s`, so every URL handed out has at
   least the margin left. A device unlucky enough to straddle the edge gets an upstream
-  403, fails the download and retries — honest, and exactly the R5 resume path.
+  403, fails the download and retries — honest, and exactly the R6 resume path.
 
 Never log the URL: it is a credential. The one INFO line here is the *observable* for the
 "signing call count for a 10-range download is 1" acceptance criterion, so it is emitted

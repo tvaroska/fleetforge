@@ -301,6 +301,9 @@ field keep the old one — so:
 
 ## Changing the partition table — read this first
 
+*Design and rationale for the layout itself: [`design/partitions.md`](../../design/partitions.md).
+What follows is the build-side procedure.*
+
 `agent/partitions.csv` is in `CRITICAL.md` for a reason: **a partition table cannot be
 changed by OTA.** A board already in the field keeps the layout it was flashed with
 forever, so a change here means a physical recall.

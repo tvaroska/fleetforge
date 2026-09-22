@@ -75,7 +75,7 @@ async def handle_message(
     """Handle one inbound device message; never raise.
 
     Payload *length* is logged, never the payload body: logs are not a data store, and
-    telemetry bodies get large from R3.
+    telemetry bodies get large from R4.
 
     One message must not kill the process, and neither must a database outage — the
     heartbeat file is therefore touched even when the write failed. Liveness here

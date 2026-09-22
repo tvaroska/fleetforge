@@ -6,6 +6,90 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-22 — The first CUJ is the maker's journey, and its Driver is segmented
+
+**R3-spec-1.** `spec/cujs.md` now exists. The project has had acceptance criteria written
+against journeys nobody had written down since 2026-09-11; CUJ-1 is that journey — Alex
+and a DevKit, from a working sketch to a board in the field that fixes itself.
+
+**1. One CUJ, and it goes through the library rather than the agent.** The tempting first
+CUJ was the one R0 already built: flasher page → board online. It was not chosen. The
+product's claim is that *your* firmware becomes updatable, and a CUJ describing the
+prebuilt agent would have described the demo instead of the product — the agent connects,
+heartbeats and blinks, so a journey about it is a journey about updating a device that
+does nothing its owner cares about (`docs/HOBBYIST.md` §4.1, and the R3 ADR). The agent
+path is a legitimate *second* CUJ and is proposed in `spec/open-questions.md`.
+
+**2. The Driver is segmented, against the template.** `spec-cujs-template.md` gives a CUJ
+one `Driver:` — a single harness command or scenario id. CUJ-1 crosses R0, R1, R2 and R3,
+so a single Driver could only name a harness that does not exist until `R3-test-1`. That
+is not merely unsatisfying: `/replan`'s T3 gate reads these Drivers at sprint close, so a
+CUJ ungradeable until R3 would have kept fleetforge's gate red for every sprint in
+between, including ones with no connection to this release. CUJ-1 therefore names a
+harness **per segment** and says which are gradeable — today, steps 3 and 5 on the agent
+path (`just agent-qemu`, `just sim-fleet` + `POST …/deploy`, `pytest tests/test_enroll.py`);
+steps 1–2 and 6 when R3 lands.
+
+**A segment with no harness is not graded and is not a pass.** Written explicitly into the
+file, because the obvious way to get this wrong is to grade the half that is easy and call
+the CUJ green.
+
+**3. Every harness named was verified to resolve before it was written down.** `just --show`
+for each recipe, `pytest --collect-only` for the test module. A spec that cites
+`just cuj-1` because it sounds plausible is worse than one that cites nothing — it makes
+T3 fail for a reason that has nothing to do with the product.
+
+**4. Success Criteria cite numbers, they do not invent them.** 5 min for a healthy deploy,
+2 s for the dashboard, Fleet safety 100% — all from `prd.md` → *Requirements & targets*.
+`spec/` disagreeing with itself about a target is the failure mode `prd.md`'s own header
+warns about.
+
+**Gotcha: this task edited `spec/`, which `CRITICAL.md` forbids `/implement` from doing.**
+The exception is narrow and worth stating, because the next `spec`-category task will hit
+it too: a filed, prioritised `spec` task whose deliverable *is* a spec file is the
+sanctioned route for changing `spec/`, and it still carries the CRITICAL escalation —
+strongest model, and a mandatory review of the diff before commit. Scope was held to one
+new file, two additive `Supported By` blocks and one deleted stale paragraph; no
+requirement, target or acceptance criterion was reworded.
+
+Details and T2 evidence: `docs/features/ota-library.md` → *The project's first written CUJ*.
+
+---
+
+## 2026-09-22 — The thin OTA library becomes R3, and the v1 ladder shifts by one
+
+**`/new-feature`, from [docs/HOBBYIST.md](docs/HOBBYIST.md) §4.1.** `prd.md` has always
+promised two device-side deliverables — a prebuilt agent *and* a thin OTA library to
+embed in custom firmware. Only the agent was ever planned. The library now has a feature
+file, requirements and a release.
+
+**It ships after auto-rollback, not before.** A library is a multiplier on however safe
+deploy currently is, and today's Deploy button has no checksum, no device-armed confirm
+and no rollback until R2. Shipping the four verbs into other people's `setup()`/`loop()`
+first would put the unsafe path inside custom firmware on boards chosen because they are
+hard to reach. Full reasoning:
+[design/decisions/ota-library-ships-after-safe-deploy.md](design/decisions/ota-library-ships-after-safe-deploy.md).
+
+**The renumber.** Library = R3; health & telemetry R3→R4, self-test R4→R5, signed OTA
+R5→R6, V2 R6–R10 → R7–R11. Affordable because **no R3+ task IDs existed** — R0 and R1 are
+the only releases with tasks, so nothing archived changed. The 23 forward-looking release
+references in `src/`, `tests/` and `agent/sdkconfig.defaults` were swept in the same
+change; comment-only, no config lines touched in the CRITICAL file. **Entries below this
+one were not rewritten** — they are accurate about what was true when written, so a
+pre-2026-09-22 entry saying "R5" means what is now R6.
+
+**The release opens with a spike.** Where a library user's config lives is undecided: the
+agent uses the `ff_cfg` flash partition, which an Arduino IDE build does not have, and a
+partition cannot be added by OTA. Recorded in
+[spec/open-questions.md](spec/open-questions.md); `R3-fw-1` measures what an Arduino build
+actually does to the table before anything else is estimated.
+
+**`spec/cujs.md` gets written here too.** *Unaided onboarding* has had acceptance criteria
+with no journey to hang from since 2026-09-11. "I have a sketch and a DevKit on the desk"
+is that journey, and it is this release's subject.
+
+---
+
 ## 2026-09-17 — Deploy state is a column of the fleet read model, not a feature with its own wiring
 
 **R1-fe-1.** The dashboard can now deploy a version to one board and watch it land. Almost

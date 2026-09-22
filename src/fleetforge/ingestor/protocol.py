@@ -85,7 +85,7 @@ class AnnouncePayload(_TolerantPayload):
 
     `parent_device_id` is deliberately **not** mapped: parentage is an enrollment-time
     fact (R0-be-4), and letting a board reparent itself over MQTT is a V3 authz
-    question. `boot_ok` / `uptime_s` / `rssi` / `free_heap` are R3 telemetry.
+    question. `boot_ok` / `uptime_s` / `rssi` / `free_heap` are R4 telemetry.
     """
 
     proto: int | None = None
@@ -108,7 +108,7 @@ class PresencePayload(_TolerantPayload):
 
 
 class HeartbeatPayload(_TolerantPayload):
-    """`up/hb` — the liveness beat. Its health fields (`uptime_s`, `rssi`, …) are R3."""
+    """`up/hb` — the liveness beat. Its health fields (`uptime_s`, `rssi`, …) are R4."""
 
     fw_version: str | None = None
 
@@ -155,7 +155,7 @@ def decode[T: _TolerantPayload](model: type[T], topic: str, payload: bytes) -> T
     Malformed JSON, non-UTF-8 bytes, a JSON array where an object belongs and a
     wrong-typed field all land here — none of them may reach the caller as an
     exception. Only the topic and the payload **length** are logged: logs are not a
-    data store, and R3 telemetry bodies get large.
+    data store, and R4 telemetry bodies get large.
     """
     try:
         data = json.loads(payload)

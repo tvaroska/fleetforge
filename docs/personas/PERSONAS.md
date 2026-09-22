@@ -126,7 +126,7 @@ naturally fit the system without distorting its core boundaries:
 - **Key Needs:**
   - Single-tenant hosted or turnkey self-hosted cloud instance.
   - Granular deployment rings (Alpha / Customer Beta / Production Fleet).
-  - Cryptographic artifact signing (R5) so compromised endpoints cannot flash rogue binaries.
+  - Cryptographic artifact signing (R6) so compromised endpoints cannot flash rogue binaries.
   - Zero-touch factory provisioning: flashing an enrollment token at assembly, shipping
     the box to a customer who plugs it in, and having it auto-register.
 - **Distinction from Hobbyist:** Cannot accept Chromium-only Web Serial flashing; needs a
@@ -144,9 +144,9 @@ naturally fit the system without distorting its core boundaries:
   GitLab CI, and automated scripts.
 - **Key Needs:**
   - Provenance tracking (linking a deployed binary to commit SHA, build container digest,
-    and CI run ID — planned for V2 / R6).
+    and CI run ID — planned for V2 / R7).
   - Headless CLI / REST API authentication via long-lived, scoped machine tokens (not cookies).
-  - Pre-flight simulation gate (R8) running Espressif QEMU in headless CI to reject crashing
+  - Pre-flight simulation gate (R9) running Espressif QEMU in headless CI to reject crashing
     builds before touching hardware benches.
   - Software Bill of Materials (SBOM) and artifact signature verification.
 - **Distinction from Swarm Operator:** Doesn't care about field gateways or airframe deferral;
@@ -164,7 +164,7 @@ naturally fit the system without distorting its core boundaries:
   OTA updates over Wi-Fi/Ethernet are significantly faster and more reliable for daily test runs.
 - **Key Needs:**
   - High-throughput OTA updates (multiple test builds flashed per hour).
-  - Custom confirm hook (R4 self-test): Run an automated regression suite on the board;
+  - Custom confirm hook (R5 self-test): Run an automated regression suite on the board;
     if tests fail, auto-rollback and report failure back to the test harness.
   - Device health telemetry: Free heap, crash counts, assert logs, and reset reasons.
   - Fast forced reboot / re-flash endpoints to recover hung boards.
@@ -188,14 +188,14 @@ naturally fit the system without distorting its core boundaries:
 | **Safe-Window Deferral**| P1 (Sleepy) | **P0 (Flight)** | P1 (In-use) | P3 | P3 |
 | **Delta Updates** | P2 | **P0** | P1 (Cellular) | P3 | P2 |
 | **CI / Provenance (V2)** | P3 | P1 | **P0** | **P0 (Blocker)**| P1 |
-| **Custom Confirm (R4)** | P1 | **P0** | **P0** | P1 | **P0** |
+| **Custom Confirm (R5)** | P1 | **P0** | **P0** | P1 | **P0** |
 
 ### Strategic Recommendation for Fleetforge
 
 1. **V1 Horizon (Current):** Focus exclusively on **Alex (Hobbyist)** and the shared foundation
-   with **Sarah (HIL Lab)**. The embeddable library (R1.5) and rock-solid auto-rollback (R2)
+   with **Sarah (HIL Lab)**. The embeddable library (R3) and rock-solid auto-rollback (R2)
    are the common denominators that unlock real usage on hardware.
-2. **V2 Horizon:** Attracts **Marcus (OEM)** and **Siddharth (CI/Ops)** through provenance (R6),
-   CLI automation (R7), and simulation gating (R8).
+2. **V2 Horizon:** Attracts **Marcus (OEM)** and **Siddharth (CI/Ops)** through provenance (R7),
+   CLI automation (R8), and simulation gating (R9).
 3. **V3 Horizon:** Delivers the disconnected gateway, airtime scheduling, and hierarchy required
    by **Elena (Swarm Operator)**.

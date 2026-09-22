@@ -20,6 +20,10 @@ The boundary is deliberate. Onboarding starts when the operator is on the flashe
 with a board plugged in, and ends when that board appears online in the fleet list.
 Getting an account, minting a token and reaching the page are separate concerns.
 
+**Supported By:** [`cujs.md`](cujs.md) → *CUJ-1*, step 3 — the one flash that turns a
+board on the desk into a board in the fleet list. The criteria below are that step's
+parts; CUJ-1 is what they add up to.
+
 **The standard the product is held to:** a board's own log is the only source of truth
 about what happened to it before it reaches the broker, and the browser is the only
 thing that can read it. So the console panel — not the server — is the diagnostic
@@ -98,3 +102,55 @@ stays attached to the bundle.
       that cannot be flashed must say why.
 - [ ] **Self-hosting is unaffected.** The dev and self-host stacks serve bundles through
       the same interface against MinIO, with no GCS dependency.
+
+---
+
+## ota-library
+
+### Embeddable OTA: the four verbs in the user's own firmware
+
+**Requirement:** A maker must be able to add Fleetforge OTA to firmware **they wrote**,
+without adopting the prebuilt agent and without migrating their project to ESP-IDF. The
+device-facing contract — enroll, announce, heartbeat, and the four verbs
+`stage → apply → confirm → rollback` — must be consumable as a library from both ESP-IDF
+and Arduino, and the library must carry the same safety posture as the agent: A/B slots,
+a bootloader with rollback enabled, and a device-armed confirm.
+
+**One protocol, two consumers.** The library and the prebuilt agent speak the same
+`spec/device-protocol.md` and are built from the same C. A behaviour that exists in one
+and not the other is a defect, not a feature tier — the agent is the library's first
+consumer, not its privileged sibling.
+
+**The safety posture is not optional.** A board running the library must be as
+recoverable as a board running the agent. A library configuration that produces a device
+which cannot roll back is a configuration the library must refuse to build or refuse to
+enroll, not one it warns about — the whole product claim is that a bad push comes back
+by itself.
+
+**Honest capability reporting.** A build that does not reproduce `ab-4m-v1` exactly must
+announce a different `partition_layout`, and be rejected by the server's capability
+check. A rejected deploy is the intended failure; a silent brick is not.
+
+**Supported By:** [`cujs.md`](cujs.md) → *CUJ-1* — the journey this standard exists to
+make possible, end to end: Alex's own sketch becomes a fleet member (steps 1–3), updates
+itself (step 5), and recovers from a bad build unaided (step 6).
+
+**Acceptance Criteria:**
+
+- [ ] **A sketch becomes a fleet member.** Starting from an ordinary Arduino sketch that
+      does something visible, a maker adds the library, flashes once over USB, and the
+      board appears in the fleet list — with no Fleetforge agent involved.
+- [ ] **Their own firmware updates itself.** A second build of *that* sketch, with a
+      visible behaviour change, is deployed from the dashboard and the board runs the new
+      behaviour and reports the new version.
+- [ ] **A bad build of their own firmware recovers itself.** A deliberately broken build
+      is deployed to a library-based board; it rolls back unaided and reports
+      `rolled-back`.
+- [ ] **The example is the documentation.** A worked example — enroll → heartbeat →
+      handle `stage` → report version — builds unmodified from a clean checkout on both
+      ESP-IDF and Arduino, and is short enough to read in one screen.
+- [ ] **A wrong flash layout fails loudly.** A build whose partition table does not match
+      the layout it announces is rejected at deploy time with a message that names what
+      is wrong, rather than being flashed and bricked.
+- [ ] **Written as a journey.** `spec/cujs.md` exists and carries the "sketch and a
+      DevKit on the desk" CUJ, and *Unaided onboarding* above references it.

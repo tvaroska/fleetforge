@@ -161,7 +161,7 @@ not a feature file. It is a placeholder with the right nouns.
 
 **v1 topology fights the field.** The supported v1 deploy is a hosted public
 domain. Devices need Let’s Encrypt and a public broker. The swarm’s defining
-requirement is that the vehicle is *out of range*. Hosted-first makes R0–R5
+requirement is that the vehicle is *out of range*. Hosted-first makes R0–R6
 demoable; it does not make V3 a configuration change. The gateway is a second
 product that happens to speak the same four verbs — the PRD already says this
 about non-IP radios, and it is also true of the IP gateway.
@@ -279,7 +279,7 @@ The embeddable OTA library from [`HOBBYIST.md`](HOBBYIST.md) is a
 **prerequisite, not a top-3 item here.** You do not fly the stock agent. The
 four verbs have to live inside the flight controller and the vehicle
 computer. Without that extraction, everything below is a feature of a
-firmware that cannot leave the ground. Treat R1.5 (library + CUJ) as a gate
+firmware that cannot leave the ground. Treat R3 (library + CUJ) as a gate
 on this persona the same way R2 is a gate on any unreachable board.
 
 ### 1. The field gateway — disconnected hierarchy, plus a sibling bus
@@ -339,7 +339,7 @@ waits; `apply: "auto"` lets the device pick the window. What this persona
 needs is that primitive as a *fleet action*, with policy:
 
 1. **Canary first.** One airframe, on the ground, at the vehicle. Self-test
-   (R4) plus “it armed, it hovered, it landed” as the custom confirm — that
+   (R5) plus “it armed, it hovered, it landed” as the custom confirm — that
    last part is the builder’s firmware, not Fleetforge. The rest of the
    group does not leave `staged` until the canary is `confirmed`.
    `groups-deploy.md` parks canary in “Post.” At flock size it is the
@@ -416,9 +416,9 @@ promised in `flows.md` and is the thing that makes mixed fleets survivable.
 | **OTA library (IDF + Arduino + a C API a Pi agent can speak)** | Prerequisite, see above. Hobbyist #1. | Before any of this flies. |
 | **CLI / batch enroll** | Desk problem, not a field problem. | Factory: 40 airframes, not 40 Web Serial clicks. Chromium-only is a non-starter. |
 | **Self-host Compose on the vehicle** | Subsumed by the gateway image. TLS-without-DNS is the unsolved piece; a local CA the drones and the operator laptop both trust. | The moment the hosted domain is unreachable, which is takeoff. |
-| **Custom self-test (R4)** | The confirm hook canary needs. | “Boots and reconnects” is not “safe to arm.” |
-| **Simulation (R8) + hardware canary (LAVA)** | Earns its keep when CI pushes and the flock is too big to watch. | After coordinated apply is boring. |
-| **Signing (R5)** | A field cache serving unsigned bytes is a supply-chain attack on the flock. | Before the vehicle is allowed to stage without an uplink to the mothership. |
+| **Custom self-test (R5)** | The confirm hook canary needs. | “Boots and reconnects” is not “safe to arm.” |
+| **Simulation (R9) + hardware canary (LAVA)** | Earns its keep when CI pushes and the flock is too big to watch. | After coordinated apply is boring. |
+| **Signing (R6)** | A field cache serving unsigned bytes is a supply-chain attack on the flock. | Before the vehicle is allowed to stage without an uplink to the mothership. |
 | **`up/telemetry` as a data plane** | Refused, correctly, as a product-shape. | Use the sibling bus / MAVLink. Do not grow a second GCS inside Fleetforge. |
 | **Groups UI** | Tags already exist on tokens. Checkboxes-to-deploy is phase 1. | After canary policy, or groups become “brick these.” |
 
@@ -437,7 +437,7 @@ promised in `flows.md` and is the thing that makes mixed fleets survivable.
 - **Hosted-multitenant swarm-as-a-service.** V3 as “public product” and V3
   as “vehicle in a valley” do not want the same deployment. The field
   gateway is single-operator infrastructure.
-- **Per-device compile (R9 aimed at N airframes).** The ESPHome failure
+- **Per-device compile (R10 aimed at N airframes).** The ESPHome failure
   mode. One artifact per *role* (vehicle image, drone image), N devices.
   Content-addressed cache keyed on the build, not on the node.
 - **Hobbyist #3 (Improv) as a swarm P0.** Useful at the bench. In the field
@@ -455,13 +455,13 @@ group-granularity policy. Use that:
 
 ```
 R0 / R1 close on metal     ← do not skip
-R1.5  OTA library          ← you do not fly the stock agent
+R3    OTA library          ← you do not fly the stock agent (renumbered 2026-09-22)
 R2    auto-rollback
       + airborne confirm rule (safe-window owns rollback too)
       + safe_mode           ← a double-fault in the air is a crash
 R2.5  Coordinated apply    ← canary, stage-in-air, stagger, skew view
       (needs groups fan-out, so a thin slice of V3 phase 1)
-R3    health / version-skew dashboard that a GCS operator can read
+R4    health / version-skew dashboard that a GCS operator can read
 V3a   Field gateway        ← local broker, cache, time source, sibling bus
       + Pi adapter for the vehicle
 V3b   Deltas + airtime budget
@@ -494,4 +494,4 @@ gateway instead of a bullet list.
 - [`design/artifacts.md`](../design/artifacts.md) — deltas as version pairs
 - [`docs/features/groups-deploy.md`](features/groups-deploy.md) — V3 as written
 - [`docs/roadmap.md`](roadmap.md) — V3 and the Thread scale question
-- [`docs/releases.md`](releases.md) — V2 ⊥ V3 except R10 group policy
+- [`docs/releases.md`](releases.md) — V2 ⊥ V3 except R11 group policy

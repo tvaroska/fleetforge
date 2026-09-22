@@ -315,7 +315,7 @@ async def test_last_seen_is_monotonic(session: AsyncSession) -> None:
 
 @pytest.mark.parametrize("channel", ["telemetry", "log", "some-future-channel"])
 async def test_other_channels_only_prove_liveness(session: AsyncSession, channel: str) -> None:
-    """R3 owns telemetry and log; an unknown channel is a future agent's.
+    """R4 owns telemetry and log; an unknown channel is a future agent's.
 
     `status` is deliberately **not** in this list any more: R1-be-4 made it the one
     channel that writes `deploy_events`.
@@ -402,7 +402,7 @@ async def test_the_whole_walk_is_recorded_as_transitions(session: AsyncSession) 
 async def test_confirmed_is_terminal_and_carries_the_intended_versions(
     session: AsyncSession,
 ) -> None:
-    """Without the versions off the `requested` row, R5's delivery-success KPI is uncomputable."""
+    """Without the versions off the `requested` row, R6's delivery-success KPI is uncomputable."""
     await seed_device(session)
     await seed_intent(session)
 

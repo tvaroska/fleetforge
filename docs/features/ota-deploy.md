@@ -108,7 +108,7 @@ ESP32 adapter: write OTA1 partition → broker reconnect + self-test → switch 
 | R1-BE-1 | Artifact upload `POST /v1/artifact` (opaque blob + version + platform_type); reject anything over the target layout's `ota_slot_size` | P0 | 1d |
 | R1-BE-2 | Deploy orchestration: `stage → apply` (per-device), carrying a short-lived signed artifact URL | P0 | 1.5d |
 | R1-BE-3 | Artifact download endpoint: signed-URL verification + HTTP range support | P0 | 1d |
-| R1-BE-4 | Write every deploy outcome to `deploy_events` — the KPI history R5 computes from | P0 | 0.5d |
+| R1-BE-4 | Write every deploy outcome to `deploy_events` — the KPI history R6 computes from | P0 | 0.5d |
 | R1-FW-1 | Agent gains `esp_https_ota` + "update" command handler | P0 | 2d |
 | R1-FW-2 | Agent reports firmware version after reboot | P0 | 0.5d |
 | R1-FE-1 | Per-device Deploy button + version-change feedback | P0 | 1d |
@@ -310,7 +310,7 @@ arrives, the reason code is obtainable only over MQTT 5 from inside the containe
 module under `src/` mentions `DeployEvent(` or the table in SQL. The table is retained
 forever and both v1 KPIs are computed over the terminal event of each
 `(device_id, cmd_id)` transaction, so a row in the wrong shape is not a bug that shows up
-today — it is a KPI that is quietly wrong in R5. R1-be-4's `up/status` ingestion adds its
+today — it is a KPI that is quietly wrong in R6. R1-be-4's `up/status` ingestion adds its
 writer *there*, not in `ingestor/handlers.py`.
 
 **The server authors one state, `requested`, and one terminal exception.** `requested`
@@ -422,7 +422,7 @@ anonymous caller cannot drive an IAM `signBlob` call or learn which digests exis
 **Redirect, not proxy.** `design/production.md` promises artifacts are served without
 touching the API process; a proxy would put an HTTP client in the production image
 (`httpx` is a dev dependency) and hold a uvicorn threadpool slot per board for a 1.9 MB
-transfer. So `Range`, `Content-Range`, suffix ranges and 416 — the R5 resume path — are
+transfer. So `Range`, `Content-Range`, suffix ranges and 416 — the R6 resume path — are
 the **store's** RFC-correct implementation, proven against real MinIO in
 `tests/test_artifact_download_minio.py`. `Cache-Control: no-store` on the redirect: its
 target is a credential with minutes of life.

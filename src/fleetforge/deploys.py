@@ -3,7 +3,7 @@
 `spec/prd.md` → *Retention*: this table is kept **forever**; "the metric history is the
 product's evidence". Both v1 KPIs (delivery success, fleet safety) are computed over the
 terminal event of each `(device_id, cmd_id)` transaction, so a row written in the wrong
-shape is not a bug that shows up today — it is a KPI that is quietly wrong in R5.
+shape is not a bug that shows up today — it is a KPI that is quietly wrong in R6.
 
 **Everything that inserts into `deploy_events` goes through this module.** The
 ingestor's `up/status` writer lives *here* (`record_observed_status`), rather than

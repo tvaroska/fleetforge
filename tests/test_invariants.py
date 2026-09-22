@@ -295,7 +295,7 @@ def test_only_deploys_py_writes_deploy_events() -> None:
 
     Both v1 KPIs are computed over the terminal event of each `(device_id, cmd_id)`
     transaction, so a second writer with its own idea of `is_terminal` is not a bug that
-    shows up today — it is a KPI that is quietly wrong in R5. R1-be-4's ingestor path
+    shows up today — it is a KPI that is quietly wrong in R6. R1-be-4's ingestor path
     adds its `up/status` writer **inside `deploys.py`**, not next to its handler.
     """
     offenders = []

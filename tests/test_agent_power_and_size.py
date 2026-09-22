@@ -99,7 +99,7 @@ APP_SIZE_BUDGET_BYTES = {
 }
 
 # An app may occupy at most this much of an OTA slot. Not a style rule: R2 downloads the
-# next image into the *other* slot while running from this one, and R5 adds signature
+# next image into the *other* slot while running from this one, and R6 adds signature
 # verification on top. An image at 90% of its slot is an image that cannot be replaced.
 MAX_SLOT_FRACTION = 0.70
 

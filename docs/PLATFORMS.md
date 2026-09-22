@@ -236,7 +236,7 @@ is stable and matches `%u`.
 secondary pending + reboot (device-owned). Confirm =
 `boot_write_img_confirmed()`. Rollback = unconfirmed reboot, MCUBoot
 reverts. This is R2’s ESP-IDF `esp_ota_mark_app_valid_cancel_rollback`
-under another name. The self-test entrypoint (R4) ports as a function
+under another name. The self-test entrypoint (R5) ports as a function
 the agent calls after MQTT is up.
 
 **Enroll.** Not Web Serial esptool. Options, in decreasing fantasy:
@@ -288,7 +288,7 @@ is an ESP slot, not a law of the product. A bitstream layout with a
 32 MB cap is a `SUPPORTED_LAYOUTS` row, plus Range download (already in
 R1) and probably deltas (V3, and actually load-bearing here).
 
-**Sim.** Verilator/cocotb as named. That is the R8 sim-runner for this
+**Sim.** Verilator/cocotb as named. That is the R9 sim-runner for this
 adapter, not QEMU. Do not wait for it: a bitstream that enumerates and
 passes a fabric ID is a confirm; HDL sim is the V2 gate.
 
@@ -416,8 +416,8 @@ must not take the agent down with it.
 | **RP2040 / 2350** | Hobbyist-popular, weak OTA story on 2040, no on-die IP. | After STM32; do not let it queue-jump. |
 | **WebDFU / OpenOCD-in-the-browser** | Enrollment theatre. CLI is enough for v1-of-STM32. | If unaided-onboarding is ever an STM32 standard. It should not be, yet. |
 | **Partial reconfiguration** | A third artifact type on the FPGA companion. | After full-bitstream cargo is boring. |
-| **Renode / Verilator in R8** | Sim is a gate, not a port. | After there is an artifact the gate could reject. |
-| **Vivado/IceStorm as R9 builders** | Producers behind the same upload API. | After cargo `type` exists; otherwise R9 only knows `idf.py`. |
+| **Renode / Verilator in R9** | Sim is a gate, not a port. | After there is an artifact the gate could reject. |
+| **Vivado/IceStorm as R10 builders** | Producers behind the same upload API. | After cargo `type` exists; otherwise R10 only knows `idf.py`. |
 
 ---
 
@@ -460,7 +460,7 @@ with swarm   Pi agent (SWARM #3)
 
 later        nRF/Thread via the Zephyr port
              Zynq as Pi-class agent + bitstream cargo
-             Renode/Verilator as R8 backends
+             Renode/Verilator as R9 backends
 ```
 
 The architecture can carry STM32 and FPGA — opaque blobs, four verbs,

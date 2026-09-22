@@ -32,7 +32,7 @@ CONFIG_APP_PROJECT_VER_FROM_CONFIG=n
 # CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK  — burns a monotonic counter that blocks R2's
 #                                        rollback-to-previous. Off in v1.
 # CONFIG_SECURE_BOOT / _V2_ENABLED     — burns a key digest to eFuse; new-devices-only,
-#                                        post-v1. R5 ships app-level signature
+#                                        post-v1. R6 ships app-level signature
 #                                        verification instead. Not interchangeable.
 # CONFIG_SECURE_FLASH_ENC_ENABLED      — flash encryption off in v1; spec/prd.md ->
 #                                        Security & data posture already promises this.
@@ -112,7 +112,7 @@ CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_80=y
 
 # ── Size: -Os, not IDF's default -Og ────────────────────────────────────────────────
 # The connect-only agent builds to ~1.08 MB of a 1,966,080-byte OTA slot — 55% full
-# before R2 adds OTA and R5 adds signature verification. IDF defaults new projects to
+# before R2 adds OTA and R6 adds signature verification. IDF defaults new projects to
 # `COMPILER_OPTIMIZATION_DEBUG` (-Og), which is the right default for a project being
 # stepped through in a debugger and the wrong one for an image that has to fit a slot it
 # also has to be able to download a replacement into.

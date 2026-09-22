@@ -56,7 +56,7 @@ VCS integration and the server-side compiler are **automated artifact producers*
 1. git tag / release in the user's repo
 2. CI builds the .bin and PUSHes it to Fleetforge's upload API,
    with PROVENANCE: repo + commit SHA + tag + build URL     [push model]
-   (or Fleetforge builds it itself from the repo ref — R9)
+   (or Fleetforge builds it itself from the repo ref — R10)
 3. Fleetforge registers it as a deployable version
 4. Per-group DEPLOY POLICY decides:
      • manual   → appears as deployable, human clicks deploy

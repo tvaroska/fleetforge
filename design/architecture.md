@@ -30,18 +30,20 @@ Wi-Fi, Ethernet and cellular are therefore all covered with no core change; **Th
 The agent keeps its network setup behind `esp_netif` rather than calling `esp_wifi` directly. That is the entire cost of the abstraction in v1.
 
 ## Flash-time immutables — decide these at R0 or recall the fleet
+*The concrete map, the `ff_cfg` format and the rules for changing them: [partitions.md](partitions.md).*
+
 An OTA image writes *into* an existing partition; it cannot rewrite the partition table, and updating the bootloader is the one operation with no rollback path. Three things are therefore fixed at first USB flash and unchangeable remotely — get them wrong and every deployed board needs physical retrieval, which is exactly the intervention this product exists to remove.
 
 1. **Partition table.** Ship the full A/B layout — `nvs`, `otadata`, `phy_init`, `ota_0`, `ota_1` — from the very first flash at R0, even though nothing writes the second slot until R2. A `factory`-only board can never OTA its way to A/B. Budget **4 MB flash minimum** (~1.9 MB per slot; universal on ESP32/S3/C6 devkits). Watch 2 MB ESP32-H2 variants if the Thread path is ever taken: ~900 KB per slot likely will not hold Thread + mbedTLS.
 2. **Bootloader.** `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y` is a *bootloader* build-time option, so R2's auto-rollback depends on a decision made at R0.
 3. **eFuse — one-way burns.** v1 posture, chosen deliberately:
-   - **Secure Boot v2: off.** Its key digest is burned to eFuse and needs a re-signed bootloader, so it can never be enabled on already-deployed devices. **R5 therefore ships app-level signature verification** — the agent verifies a signature over the artifact before apply, pure software, deliverable over OTA. Secure Boot v2 is post-v1 and explicitly *new-devices-only*. The two are not interchangeable and must not be conflated.
+   - **Secure Boot v2: off.** Its key digest is burned to eFuse and needs a re-signed bootloader, so it can never be enabled on already-deployed devices. **R6 therefore ships app-level signature verification** — the agent verifies a signature over the artifact before apply, pure software, deliverable over OTA. Secure Boot v2 is post-v1 and explicitly *new-devices-only*. The two are not interchangeable and must not be conflated.
    - **Anti-rollback: off.** `CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK` burns a monotonic version counter that would directly block R2's rollback-to-previous.
    - **Flash encryption: off.** Accepted consequence: credentials in NVS are readable with physical access. The user-facing form of that promise is in [prd.md](../spec/prd.md) → *Security & data posture*.
 
 **Capability reporting.** The announce payload carries `ota_slot_size` and a **partition-layout version**, without which the server cannot perform the capability check [flows.md](../spec/flows.md) promises ("reject on chip / partition-size mismatch"). The layout version also lets the server detect and quarantine any board flashed with a superseded layout.
 
-## Simulation backend *(V2 — R8)*
+## Simulation backend *(V2 — R9)*
 Simulation is pluggable behind a `sim-runner` contract (`boot artifact + run self-test → pass/fail`), since no single engine spans the ladder.
 
 - **Harness:** `pytest-embedded` — the abstraction across backends and real hardware. Its key power: run the *same* self-test on host, in sim, and on a real board — so one test is the sim gate, the on-device confirm, *and* the canary check.

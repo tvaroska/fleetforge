@@ -3,7 +3,7 @@
 **Area:** infrastructure · **Status:** design, partly implemented ·
 **the key scheme below is FROZEN** (S0-infra-4 — `src/fleetforge/storage/blobs.py`)
 **Scope:** every sequence of bytes the product ever writes to a device — agent bundles
-today, user firmware from R1, compiled artifacts from R9, delta images in V3.
+today, user firmware from R1, compiled artifacts from R10, delta images in V3.
 
 This document exists because fleetforge currently has **two** firmware distribution
 paths with different rules, and because the number of distinct images the product must
@@ -13,7 +13,7 @@ the question of whether images are fixed artifacts or built on demand.
 
 Related: [decisions/infrastructure-agent-bundles-are-artifacts.md](decisions/infrastructure-agent-bundles-are-artifacts.md)
 (the decision to unify the two paths) · [architecture.md](architecture.md) (the
-device-facing thin waist) · [../docs/features/build-pipeline.md](../docs/features/build-pipeline.md) (R9).
+device-facing thin waist) · [../docs/features/build-pipeline.md](../docs/features/build-pipeline.md) (R10).
 
 ## Where we are
 
@@ -231,10 +231,10 @@ Three tiers, cheapest first:
 2. **Warm toolchain** — ccache plus an IDF build directory keyed on
    `(idf_image_digest, target)`. Order-of-magnitude faster than cold, and the tier that
    matters most in practice because most rebuilds change one component.
-3. **Cold build** in the R9 sandbox.
+3. **Cold build** in the R10 sandbox.
 
 Tier 1 is a Postgres lookup and belongs with the artifact work. Tiers 2 and 3 are the
-R9 build runner and stay in V2; what changes in R9 is only the key.
+R10 build runner and stay in V2; what changes in R10 is only the key.
 
 ## Sequencing
 
@@ -243,7 +243,7 @@ scheme and expensive afterwards, which is why the key scheme and the two tables 
 taken first, empty and unread. Filed in Sprint 0 as S0-infra-3 (build identity),
 S0-infra-4 (the frozen key scheme — `storage/blobs.py`, migration `0003`), S0-infra-5 (a
 credential that is not a key file), S0-infra-6 (bundles served from the store) and
-S0-infra-7 (catalog keyed by target *and* layout). The build engine itself stays R9.
+S0-infra-7 (catalog keyed by target *and* layout). The build engine itself stays R10.
 
 `just storage-check --blob` proves the frozen scheme against whichever backend is
 configured: it writes at `blobs/sha256/<digest of the payload>` and reads the

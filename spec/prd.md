@@ -99,7 +99,7 @@ Every deployment passes gates; each catches what the previous can't (**defense i
 | Revoked/expired tokens | **90 days**, then purged |
 
 ### Success criteria
-Both metrics are recorded from R1 and surfaced in the dashboard at R5.
+Both metrics are recorded from R1 and surfaced in the dashboard at R6.
 
 - **Delivery success** = healthy AND running the intended new version (rollback counts as a *miss*; drives build quality + simulation). **Target ≥ 90%.**
 - **Fleet safety** = device ends healthy on *some* version (rollback counts as a *save*; drives robustness). **Target 100% — a bricked board is a product failure, not a missed percentage.**

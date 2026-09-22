@@ -2,7 +2,7 @@
 
 **Status:** Planned — **V3, not v1**
 **Priority:** P1
-**Target:** V3 — robotic swarm (was R3)
+**Target:** V3 — robotic swarm (was R4)
 **Depends on:** OTA Deploy & Auto-Rollback (ota-deploy.md) — R2
 **Scope:** [prd.md](../../spec/prd.md) → *Scope* · [releases.md](../releases.md) → *V3 — robotic swarm*
 
@@ -59,4 +59,4 @@ device in the registry and the parent of its drones.
 ## Post-v1
 
 Staged / canary rollout — deploy to a canary subset, gate the rest on canary health.
-Unlocks *safe* auto-deploy (see vcs-integration.md, R10).
+Unlocks *safe* auto-deploy (see vcs-integration.md, R11).

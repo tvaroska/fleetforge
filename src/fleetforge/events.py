@@ -49,7 +49,7 @@ class EventType(StrEnum):
     DEVICE_ANNOUNCE = "device.announce"
     DEVICE_PRESENCE = "device.presence"
     DEVICE_HEARTBEAT = "device.heartbeat"
-    # Any `up/` channel that only moves `last_seen`: telemetry (R3), log (R3), an
+    # Any `up/` channel that only moves `last_seen`: telemetry (R4), log (R4), an
     # unknown channel from a future agent — and an `up/status` that recorded no row
     # (no `cmd_id`, or a retained replay of a transition already on file).
     DEVICE_SEEN = "device.seen"

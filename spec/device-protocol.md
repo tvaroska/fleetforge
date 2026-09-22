@@ -54,7 +54,7 @@ bake hierarchy into the namespace and break the moment a drone is reassigned. Se
 | `up/presence` | 1 | **yes** | `{"online":true}`; the LWT publishes `{"online":false}` |
 | `up/hb` | 1 | no | heartbeat |
 | `up/status` | 1 | **yes** | current update-transaction state |
-| `up/telemetry` | 0 | no | user-defined metrics (R3) |
+| `up/telemetry` | 0 | no | user-defined metrics (R4) |
 | `up/log` | 0 | no | optional diagnostics |
 
 ### Server → device (`dn/`)
@@ -242,7 +242,7 @@ later is additive; letting `dn/cfg` sprawl into one is not reversible.
 
 ## Open items for R0
 
-- Whether `up/log` ships in R0 or waits for R3.
+- Whether `up/log` ships in R0 or waits for R4.
 - Mosquitto dynamic-security vs. an HTTP auth hook, once the credential-provisioning
   volume is known. Dynsec is the recommended start.
 

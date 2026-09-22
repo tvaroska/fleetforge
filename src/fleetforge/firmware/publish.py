@@ -13,7 +13,7 @@ per part-set:
    mutable object in the scheme.
 
 Deliberately **database-free**: the `artifacts`/`builds` tables stay empty and unread
-until R1/R9. Publishing an agent bundle needs no Postgres, and the store stays the single
+until R1/R10. Publishing an agent bundle needs no Postgres, and the store stays the single
 source of truth for what is flashable.
 
 Nothing here deploys anything. The API notices a new bundle within

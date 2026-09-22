@@ -309,7 +309,7 @@ class DeviceIdentity:
         return {"token": token, **self.announce()}
 
     def heartbeat(self, uptime_s: int) -> dict[str, object]:
-        """`up/hb`, verbatim from the spec. The health fields are R3 and are constants."""
+        """`up/hb`, verbatim from the spec. The health fields are R4 and are constants."""
         return {
             "fw_version": self.fw_version,
             "uptime_s": uptime_s,

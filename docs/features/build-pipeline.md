@@ -2,9 +2,9 @@
 
 **Status:** Planned — **V2, not v1**
 **Priority:** P1
-**Target:** R9 (V2)
-**Depends on:** Artifact API + provenance (vcs-integration.md) — R6
-**Related:** [simulation.md](simulation.md) — R8 · [releases.md](../releases.md) → V2
+**Target:** R10 (V2)
+**Depends on:** Artifact API + provenance (vcs-integration.md) — R7
+**Related:** [simulation.md](simulation.md) — R9 · [releases.md](../releases.md) → V2
 
 ## Overview
 
@@ -12,7 +12,7 @@ The server clones a repo at a ref and **builds the artifact itself**, so a user 
 neither a local toolchain nor a CI provider. Point Fleetforge at a repo, get a
 deployable version.
 
-Together with VCS ingestion (R6–R7) and the simulation gate (R8), this completes V2's
+Together with VCS ingestion (R7–R8) and the simulation gate (R9), this completes V2's
 theme: **source → build → verify → deploy**, with nothing hand-carried.
 
 ## This reverses a v1 non-goal — deliberately
@@ -46,7 +46,7 @@ must be treated as such **from the first commit**, not hardened later:
 
 - **Pinned ESP-IDF toolchain containers per target** (esp32 / S3 / C3 / C6), version
   pinned *per project* — an unpinned IDF makes builds irreproducible, which destroys
-  the provenance guarantee R6 exists to provide.
+  the provenance guarantee R7 exists to provide.
 - Record the toolchain version in the artifact's provenance alongside repo/commit/tag.
 - Build cache keyed on
   `H(idf_image_digest, target, partition_layout, source_tree_digest, config_digest)` so
@@ -62,20 +62,20 @@ Native **`idf.py` projects first** — it is the toolchain the agent and partiti
 tooling already assume. **PlatformIO second** (the recommended-but-optional multi-board
 producer of design/architecture.md principle 2). Arduino CLI later, if asked for.
 
-## Phase 1: R9 — Build from source
+## Phase 1: R10 — Build from source
 
 | ID | Task | Priority | Effort |
 |----|------|----------|--------|
-| R9-INFRA-1 | Pinned ESP-IDF builder images per target (esp32/S3/C3/C6) | P0 | 1.5d |
-| R9-INFRA-2 | Sandboxed ephemeral build runner: no host mounts, resource + wall-clock caps | P0 | 2d |
-| R9-BE-1 | Repo/ref registration + scoped clone credentials for private repos | P0 | 1.5d |
-| R9-BE-2 | Build job queue + status state machine | P0 | 1.5d |
-| R9-BE-3 | Emit artifact into the R6 upload API with full provenance incl. toolchain version | P0 | 1d |
-| R9-BE-4 | Build cache: exact-key hit + warm toolchain tier (ccache / IDF build dir keyed on `(idf_image_digest, target)`) | P1 | 1d |
-| R9-FE-1 | Repo config UI + build list | P0 | 1.5d |
-| R9-FE-2 | Streamed build logs | P0 | 1d |
-| R9-TEST-1 | E2E: register repo → build at a tag → artifact appears, deployable | P0 | 1d |
-| R9-SEC-1 | Sandbox escape / resource-exhaustion test suite | P0 | 1d |
+| R10-INFRA-1 | Pinned ESP-IDF builder images per target (esp32/S3/C3/C6) | P0 | 1.5d |
+| R10-INFRA-2 | Sandboxed ephemeral build runner: no host mounts, resource + wall-clock caps | P0 | 2d |
+| R10-BE-1 | Repo/ref registration + scoped clone credentials for private repos | P0 | 1.5d |
+| R10-BE-2 | Build job queue + status state machine | P0 | 1.5d |
+| R10-BE-3 | Emit artifact into the R7 upload API with full provenance incl. toolchain version | P0 | 1d |
+| R10-BE-4 | Build cache: exact-key hit + warm toolchain tier (ccache / IDF build dir keyed on `(idf_image_digest, target)`) | P1 | 1d |
+| R10-FE-1 | Repo config UI + build list | P0 | 1.5d |
+| R10-FE-2 | Streamed build logs | P0 | 1d |
+| R10-TEST-1 | E2E: register repo → build at a tag → artifact appears, deployable | P0 | 1d |
+| R10-SEC-1 | Sandbox escape / resource-exhaustion test suite | P0 | 1d |
 
 **Done when:** you point Fleetforge at a repo and a tag, and a deployable, fully
 attributed artifact appears — with no toolchain on your machine.

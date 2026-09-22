@@ -149,7 +149,7 @@ async def handle_up_message(
         )
 
     else:
-        # `up/telemetry` → **R3**; `up/log` → R3 and still an open item in the protocol
+        # `up/telemetry` → **R4**; `up/log` → R4 and still an open item in the protocol
         # doc. An unknown channel from a future agent lands here too. All of them only
         # prove the board is alive: **no `deploy_events` row is written for them.**
         if retained:

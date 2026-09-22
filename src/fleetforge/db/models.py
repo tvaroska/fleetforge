@@ -29,9 +29,9 @@ obvious from the code:
    and only fix it after SNTP).
 
 Deliberately deferred, all additive — they are not oversights:
-`boot_ok` and heartbeat health fields (`uptime_s`, `rssi`, `free_heap`) → R3
+`boot_ok` and heartbeat health fields (`uptime_s`, `rssi`, `free_heap`) → R4
 telemetry, which is where the hypertable lives; the current `up/status` transaction
-state and the `deploys` table → R1; per-device deploy policy → R10. (`artifacts` is
+state and the `deploys` table → R1; per-device deploy policy → R11. (`artifacts` is
 no longer on that list — S0-infra-4 landed it early and empty, on purpose: freezing a
 key scheme is free before the first object exists and a data migration afterwards.)
 """
@@ -407,7 +407,7 @@ class DeployEvent(Base):
     """Append-only log of observed deploy state transitions — the KPI source.
 
     `spec/prd.md` → *Retention*: kept **forever**; "the metric history is the
-    product's evidence". `TODO.md` R0-db-1: "KPI-ready from R1 — R5 needs the
+    product's evidence". `TODO.md` R0-db-1: "KPI-ready from R1 — R6 needs the
     history, not just the table." So rows are inserted, never updated in place, and
     `device_id` is a real FK with **ON DELETE RESTRICT**: no future code can destroy
     KPI history by removing a device. The supported removal path is
@@ -429,7 +429,7 @@ class DeployEvent(Base):
 
     This is **not** a Timescale hypertable and must not become one: forever
     retention, tiny volume (<= 25 devices in v1), and an outgoing FK that hypertables
-    only complicate. R3's telemetry table is the hypertable case.
+    only complicate. R4's telemetry table is the hypertable case.
     """
 
     __tablename__ = "deploy_events"
@@ -623,7 +623,7 @@ class Build(Base):
     """A build-cache entry: cache key → the artifacts that build produced. S0-infra-4.
 
     `design/artifacts.md` → *Dynamic build: a cache miss, not a mode*. Tier 1 of that
-    document's three tiers is exactly one lookup in this table; tiers 2 and 3 are the R9
+    document's three tiers is exactly one lookup in this table; tiers 2 and 3 are the R10
     build runner and are not here. Lands empty with no readers, like `artifacts`.
 
     `cache_key` is `H(idf_image_digest, target, partition_layout, source_tree_digest,

@@ -33,9 +33,10 @@ ordered to retire the biggest risk (bricking) first. Contents in [releases.md](r
 | **R0** ⭐ | Enroll a board (UI + recognition + flash + connect) | Onboarding, recognition, device↔server connection | 🔨 Active — **bench-gated** | [enrollment](features/enrollment.md) |
 | R1 | Upload new code (OTA deploy) | OTA transport works end-to-end | 📋 Planned — **unblocked** | [ota-deploy](features/ota-deploy.md) |
 | R2 ⭐ | Safe deploy: verify + auto-rollback | **Bricking** (the whole gamble) | 📋 Planned | [ota-deploy](features/ota-deploy.md) |
-| R3 | Health & telemetry view | Fleet visibility | 📋 Planned | [health-telemetry](features/health-telemetry.md) |
-| R4 | Custom self-test confirm | "boots but app logic broken" | 📋 Planned | [self-test](features/self-test.md) |
-| R5 | Signed OTA + resumable hardening → **v1** | Production-grade safety + security | 📋 Planned | [security-hardening](features/security-hardening.md) |
+| R3 | Thin OTA library + first CUJ | Hobbyists can only update the demo agent, not their own firmware | 📋 Planned | [ota-library](features/ota-library.md) |
+| R4 | Health & telemetry view | Fleet visibility | 📋 Planned | [health-telemetry](features/health-telemetry.md) |
+| R5 | Custom self-test confirm | "boots but app logic broken" | 📋 Planned | [self-test](features/self-test.md) |
+| R6 | Signed OTA + resumable hardening → **v1** | Production-grade safety + security | 📋 Planned | [security-hardening](features/security-hardening.md) |
 
 > **R0 priority, 2026-09-11.** The first hardware bench showed every R0 component
 > working and the board still not onboarded — and, worse, the product unable to say why.
@@ -62,11 +63,11 @@ ordered to retire the biggest risk (bricking) first. Contents in [releases.md](r
 
 | Release | Theme | Status | Feature area |
 |---------|-------|--------|--------------|
-| R6 | Artifact API + provenance | 📋 Planned | [vcs-integration](features/vcs-integration.md) |
-| R7 | Push ingestion (GitHub Action + templates) | 📋 Planned | [vcs-integration](features/vcs-integration.md) |
-| R8 | Advisory simulation gate *(moved out of v1)* | 📋 Planned | [simulation](features/simulation.md) |
-| R9 | Build from source (server-side compile) | 📋 Planned | [build-pipeline](features/build-pipeline.md) |
-| R10 | Deploy policy → **v2** | 📋 Planned | [vcs-integration](features/vcs-integration.md) |
+| R7 | Artifact API + provenance | 📋 Planned | [vcs-integration](features/vcs-integration.md) |
+| R8 | Push ingestion (GitHub Action + templates) | 📋 Planned | [vcs-integration](features/vcs-integration.md) |
+| R9 | Advisory simulation gate *(moved out of v1)* | 📋 Planned | [simulation](features/simulation.md) |
+| R10 | Build from source (server-side compile) | 📋 Planned | [build-pipeline](features/build-pipeline.md) |
+| R11 | Deploy policy → **v2** | 📋 Planned | [vcs-integration](features/vcs-integration.md) |
 
 ### V3 — robotic swarm
 
@@ -84,12 +85,12 @@ airtime-aware scheduling, delta updates. Full treatment in
 | Enrollment & provisioning | [enrollment.md](features/enrollment.md) | R0 |
 | Dashboard (cross-cutting UI: theme, typography, a11y) | [dashboard.md](features/dashboard.md) | R0 → |
 | OTA deploy & auto-rollback | [ota-deploy.md](features/ota-deploy.md) | R1, R2 |
-| Health & telemetry | [health-telemetry.md](features/health-telemetry.md) | R3 |
-| Self-test (sim gate + device confirm) | [self-test.md](features/self-test.md) | R4 (defined R0) |
-| Signing & resumable hardening | [security-hardening.md](features/security-hardening.md) | R5 → **v1** |
-| VCS integration & deploy policy | [vcs-integration.md](features/vcs-integration.md) | R6, R7, R10 |
-| Simulation backend | [simulation.md](features/simulation.md) | R8 (V2) |
-| Build pipeline (server-side compile) | [build-pipeline.md](features/build-pipeline.md) | R9 (V2) |
+| Health & telemetry | [health-telemetry.md](features/health-telemetry.md) | R4 |
+| Self-test (sim gate + device confirm) | [self-test.md](features/self-test.md) | R5 (defined R0) |
+| Signing & resumable hardening | [security-hardening.md](features/security-hardening.md) | R6 → **v1** |
+| VCS integration & deploy policy | [vcs-integration.md](features/vcs-integration.md) | R7, R8, R11 |
+| Simulation backend | [simulation.md](features/simulation.md) | R9 (V2) |
+| Build pipeline (server-side compile) | [build-pipeline.md](features/build-pipeline.md) | R10 (V2) |
 | Groups, gateway, hierarchy, delta | [groups-deploy.md](features/groups-deploy.md) | V3 (swarm) |
 
 ---
@@ -125,11 +126,11 @@ and S3 have no 802.15.4 at all. A Thread path is a new-hardware path.
    bandwidth makes full-image OTA energetically expensive. Mitigated in advance by
    keeping the link abstract (`esp_netif`, `link_type`) so Thread and delta updates stay
    additive rather than a rewrite.
-2. **Sim ≠ reality** *(V2/R8)* — simulation reduces logic and boot bugs but not
+2. **Sim ≠ reality** *(V2/R9)* — simulation reduces logic and boot bugs but not
    hardware, RF or timing bugs; hence advisory-only, with canary as the next layer.
-3. **Sim-engine lock-in / licensing** *(V2/R8)* — mitigate by keeping simulation
+3. **Sim-engine lock-in / licensing** *(V2/R9)* — mitigate by keeping simulation
    pluggable behind the `sim-runner` contract. See [design/architecture.md](../design/architecture.md).
-4. **Server-side build is arbitrary code execution** *(V2/R9)* — single-tenant keeps the
+4. **Server-side build is arbitrary code execution** *(V2/R10)* — single-tenant keeps the
    blast radius to your own code; multi-tenant hosting would change the threat model
    entirely. See [build-pipeline.md](features/build-pipeline.md).
 5. **Self-host onboarding returns at V2** — TLS without public DNS is the unsolved part,

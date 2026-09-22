@@ -167,9 +167,13 @@ unproven on metal.
 | Release | What a hobbyist gets | Why it matters |
 |---|---|---|
 | **R2** ⭐ | Checksum + A/B auto-rollback, device-armed confirm | The reason to OTA a board in the attic |
-| R3 | Heartbeat metrics, last-seen, boot-ok | “Is it alive?” |
-| R4 | Custom self-test at confirm | “Boots but the display is garbage” |
-| R5 | App-level signing, resumable download, two KPIs | Production-grade, still one layer of defense |
+| R4 | Heartbeat metrics, last-seen, boot-ok | “Is it alive?” |
+| R5 | Custom self-test at confirm | “Boots but the display is garbage” |
+| R6 | App-level signing, resumable download, two KPIs | Production-grade, still one layer of defense |
+
+*(Numbering as of the 2026-09-22 renumber: R3 is now the OTA library this review
+recommends, and the rest of the v1 ladder shifted by one. `docs/releases.md` is the
+current ladder.)*
 
 R2 is correctly identified as the whole gamble. Until it ships, the dashboard’s
 Deploy button is a brick factory. `TODO.md` already warns this; a hobbyist will
@@ -225,19 +229,31 @@ agent proves the wire. It does not water the plants, drive the frame, or fly
 the quad. Until the four-verb contract is a library they drop into *their*
 firmware, Fleetforge is a very good demo of itself.
 
-What to ship, in this order:
+**Prerequisite, not a step: where does a library user's config live?** The agent
+keeps broker URL, Wi-Fi creds and enrollment token in a dedicated flash
+partition (`ff_cfg, data, 0x40, 0x12000, 0x1000` in `agent/partitions.csv`),
+written by the browser flasher. A hobbyist who drops the library into a sketch
+and flashes from the Arduino IDE **has no `ff_cfg` partition** — the config has
+nowhere to land, and overwriting a custom partition table is the classic
+Arduino-IDE failure. So the release opens with a decision, not with extraction:
+
+- **(a) Ship a packaged partition table + board definition** and make it
+  mandatory (A/B, `APP_ROLLBACK_ENABLE`, 4 MB minimum). Cheapest, but the
+  library only works for users who adopt our flash layout, and flash-time
+  immutables mean getting it wrong is unrecoverable.
+- **(b) Add an NVS-backed config path** so the library works on a stock Arduino
+  partition scheme. This is a real agent change and touches `ff_cfg` +
+  enrollment — not packaging.
+
+Pick one before estimating. Then:
 
 1. **ESP-IDF component** (`idf_component.yml`) — the agent already has the
    modules (`ff_ota`, `ff_mqtt`, `ff_enroll`, `ff_cfg`). Split “the protocol”
-   from “the demo app.” This is mostly extraction.
+   from “the demo app.” This part really is mostly extraction.
 2. **Arduino library** wrapping the same C — this is the actual hobbyist
    population. If they have to migrate a project to ESP-IDF to get OTA, they
    will not.
-3. **A partition-table + bootloader recipe** they cannot get wrong (A/B,
-   `APP_ROLLBACK_ENABLE`, 4 MB minimum) — because flash-time immutables still
-   apply, and a library user will flash from Arduino IDE, not from the
-   dashboard, the first time.
-4. **A 30-line example:** enroll → heartbeat → handle `stage` → report version.
+3. **A 30-line example:** enroll → heartbeat → handle `stage` → report version.
    Morse blinker as the documented sample, matching the PRD.
 
 Why this beats everything else: R1–R5 are features *of the agent*. Without the
@@ -259,12 +275,24 @@ Ship R2 as planned (checksum, device-armed confirm,
 `esp_ota_mark_app_valid_cancel_rollback`, dashboard `good` vs `rolled-back`).
 Then add the layer ESPHome has and Fleetforge does not:
 
-**`safe_mode` — both slots are bad, or the app bricks itself.** A/B covers “the
-new image is broken.” It does not cover “the new image is broken *and* the
-previous image is also broken,” or “the app loops before MQTT.” Safe-mode is a
-reduced boot: serial + net + OTA only, held open for a few minutes, enterable
-by mashing reset. New `up/status` state: reachable, degraded, still updatable.
-Today that board looks dead.
+**`safe_mode`** — but it is *two* features with very different costs, and they
+must not be scoped as one:
+
+- **(a) The app bricks itself** — boots, then loops or crashes before MQTT. A/B
+  does not cover this, and it is the common case. ESPHome's answer needs no new
+  partition: an NVS flag plus a boot counter reboots **the same image** into a
+  reduced mode — serial + net + OTA only, held open for a few minutes,
+  enterable by mashing reset. New `up/status` state: reachable, degraded, still
+  updatable. Today that board looks dead. **Cheap, touches no flash-time
+  immutable — ship it with R2.**
+- **(b) Both slots are bad** — cannot be solved inside the image, by
+  definition. It needs a recovery app partition, and `ab-4m-v1` refuses one on
+  purpose (`agent/partitions.csv`: *“No `factory` partition on purpose: a
+  factory-only board can never OTA its way to A/B”*). The map is also full:
+  `0x20000 + 2 × 0x1E0000 = 0x3E0000`, ~128 KB spare on a 4 MB part. Per
+  `CRITICAL.md` a layout change is **a new layout id, never an edit** — so every
+  board already flashed as `ab-4m-v1` can never gain this. That makes it an
+  `ab-8m-v2` / next-layout decision for `DECISIONS.md`, **not an R2 scope-add.**
 
 Two spec fixes that belong in the same release, cheap now, recall-level later:
 
@@ -297,8 +325,20 @@ What a hobbyist should be able to do:
 
 1. Phone or Chromium talks to the board over BLE (or the serial console already
    on the flash page).
-2. New SSID/PSK in; enrollment token already in NVS, not re-typed.
+2. New SSID/PSK in. Nothing about the device's identity is re-typed — note this
+   is **not** the enrollment token: that lives in the `ff_cfg` flash partition
+   and is *burned* at enrollment. What must survive a re-provision is the broker
+   credential returned by `POST /v1/enroll`.
 3. Board reconnects, appears green. No ladder, no USB.
+
+**The design question this opens:** Wi-Fi creds live in `ff_cfg`, a flash
+partition the browser flasher writes. Improv means the running app rewrites
+them — so either the agent gains a `ff_cfg` write path, or credentials move to
+NVS. Settle that before scoping.
+
+**Split serial from BLE.** Serial Improv reuses the Web Serial code already on
+the flash page and is nearly free; BLE is the larger, separate half and is what
+buys the phone-in-the-garden story. They are two tasks, not one.
 
 Remembered flash profiles (SSID + token scope, not the PSK in the browser) are
 the cheap sibling for board #2…#N on the bench —
@@ -345,23 +385,39 @@ community already knows.
 ## Suggested sequencing
 
 The current plan (close R0 on metal → finish R1 E2E → R2) is right **for the
-stack**. For the *hobbyist*, insert one release and pull one item forward:
+stack**. For the *hobbyist*, add two releases after R2 — and note the ladder is
+integer-numbered (`R{N}-{cat}-{n}` task IDs, `roadmap.md` and `releases.md` both
+key off it), so these are a renumber, not `R1.5`/`R2.5`:
 
 ```
-R0 close on metal          ← do not skip; onboarding is still the stated risk
-R1 E2E on metal            ← Deploy is already in the UI
-R1.5  OTA library + CUJ    ← NEW. Arduino example is the demo from here on
-R2    auto-rollback        ← now they will use it on a real project
-      + safe_mode
+R0  close on metal         ← do not skip; onboarding is still the stated risk
+R1  E2E on metal           ← Deploy is already in the UI
+R2  auto-rollback          ← the gamble; nothing safe to embed before it exists
+      + safe_mode (a) in-image only
       + sleepy confirm rule
-R2.5  Improv reprovision   ← NEW-ish (ESPHome review already suggested it for R0)
-R3    health view
-then HA, then self-host, then V2 source-to-artifact
+R3  OTA library + CUJ      ← NEW. Arduino example is the demo from here on
+R4  health view            (was R3)
+R5  custom self-test       (was R4)
+R6  signed OTA → v1        (was R5)
+then Improv reprovision, HA, self-host, V2 source-to-artifact
 ```
 
-Until the library exists, every later release is features of a firmware the
-hobbyist did not write. Until R2 exists, they should not push to anything they
-cannot unplug. Until Improv exists, “can’t easily reach” is only true for the
+**Landed 2026-09-22:** R3 is now the OTA library on the real ladder
+([`releases.md`](releases.md)), and the v1 tail shifted by one. Improv is not yet
+slotted — it remains a recommendation, not a release.
+
+**Why the library comes after R2, not before it.** Section 3 calls today's
+Deploy button a brick factory, and that is the argument against shipping the
+four-verb contract into other people's `setup()`/`loop()` first: a library is a
+multiplier on however safe deploy currently is. Handing it out before
+auto-rollback exists spreads the unsafe path across custom firmware on boards
+nobody can reach — the exact failure the product exists to prevent. If the
+library must ship earlier for momentum, gate its documentation on rollback being
+live, and say so in the release.
+
+Until R2 exists, hobbyists should not push to anything they cannot unplug. Until
+the library exists, every later release is features of a firmware the hobbyist
+did not write. Until Improv exists, “can’t easily reach” is only true for the
 first flash.
 
 The architecture can carry all of this — opaque artifacts, four verbs,

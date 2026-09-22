@@ -21,7 +21,7 @@ exists to remove. The first two rows below are that class of mistake.
 | Mosquitto ACL configuration (`mosquitto/acl`) / dynsec provisioning (`mosquitto/bootstrap.sh`, `dynamic-security.json`) | Two pattern rules in `mosquitto/acl` are the entire fleet authz — a wrong pattern lets any device impersonate any other. Dynsec is authentication only (it has no `%u`), so the `device` role must stay empty; `just broker-check` is the proof. |
 | Enrolment token issuance & burn (`R0-be-2`, `R0-be-4`) | A token that fails to burn lets anyone with one board enrol arbitrary devices into the fleet. |
 | Admin auth (token table, login, cookie flags) | Single admin credential on a public-facing API. Bypass = full fleet control. |
-| Artifact signing keys & `signed_url` generation | Signature *is* the authorization for artifact download; signing keys are what make R5's verification meaningful. |
+| Artifact signing keys & `signed_url` generation | Signature *is* the authorization for artifact download; signing keys are what make R6's verification meaningful. |
 | Alembic migrations (`alembic/versions/`) | Irreversible schema/data changes. |
 | Traefik entrypoints / TCP router (in the `services` repo) | Shared ingress. A change here affects every other app on the host, not just fleetforge. |
 | Secrets / env (`.env*`, GCS service-account key, broker credentials) | Never commit real values. Prod env lives in `services/prod/.env` — confirm before changing. |
