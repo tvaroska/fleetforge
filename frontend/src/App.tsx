@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api, type Health } from './api'
+import { UNKNOWN, buildInfo, describeBuild } from './buildInfo'
 import { EnrollBoard } from './EnrollBoard'
 import { FlashBoard } from './FlashBoard'
 import { FleetView } from './FleetView'
@@ -26,9 +27,22 @@ function Diagnostics() {
     }
   }, [])
 
+  // Both halves, always, and each labelled. A single "version" on a page cannot say
+  // whether a stale cached bundle is talking to a fresh API, which is the state that
+  // makes a deploy look like it did nothing.
+  const ui = describeBuild(buildInfo.version, buildInfo.commit)
+  const server =
+    health === null
+      ? 'unreachable'
+      : describeBuild(health.version, health.commit ?? UNKNOWN)
+
   return (
     <footer className="muted">
-      API {health === null ? 'unreachable' : `ok · ${health.version}`} · Web Serial{' '}
+      <span title={`built ${buildInfo.builtAt}`}>UI {ui}</span> ·{' '}
+      <span title={health?.built_at ? `built ${health.built_at}` : undefined}>
+        API {server}
+      </span>{' '}
+      · Web Serial{' '}
       {'serial' in navigator ? 'available' : 'unavailable (use Chrome or Edge to flash)'}
     </footer>
   )

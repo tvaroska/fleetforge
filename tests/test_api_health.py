@@ -35,7 +35,23 @@ async def test_healthz_ok(app_no_db: FastAPI) -> None:
     async with client_for(app_no_db) as client:
         response = await client.get("/v1/healthz")
     assert response.status_code == 200
-    assert response.json() == {"status": "ok", "version": __version__}
+    body = response.json()
+    assert body["status"] == "ok"
+    assert body["version"] == __version__
+
+
+async def test_healthz_carries_build_provenance(app_no_db: FastAPI) -> None:
+    """The dashboard footer renders these beside its own build; both keys always exist.
+
+    A missing key would render as an empty gap in the footer, which reads as "same
+    build" — the one conclusion the line exists to prevent. Unbaked builds say
+    `unknown` instead.
+    """
+    async with client_for(app_no_db) as client:
+        response = await client.get("/v1/healthz")
+    body = response.json()
+    assert set(body) == {"status", "version", "commit", "built_at"}
+    assert body["commit"] and body["built_at"]
 
 
 async def test_readyz_ok(app_with_db: FastAPI) -> None:

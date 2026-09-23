@@ -67,6 +67,7 @@ from fleetforge.api.routers import (
 )
 from fleetforge.auth.cache import VerifiedSecretCache
 from fleetforge.auth.ratelimit import FixedWindowLimiter
+from fleetforge.buildinfo import build_info
 from fleetforge.config import Settings, get_settings
 from fleetforge.db.base import asyncpg_dsn, get_sessionmaker
 from fleetforge.firmware import DEFAULT_INDEX_KEY, CatalogCache
@@ -268,8 +269,14 @@ def create_app() -> FastAPI:
         **No I/O.** A liveness probe that touches the database restarts the API
         every time the database blips, which turns a recoverable outage into a
         crash loop. Readiness is what depends on the database — see `/v1/readyz`.
+
+        Also carries build provenance (`commit`, `built_at`), which the dashboard
+        footer renders beside its own. It rides on the probe rather than a new
+        `/v1/version` endpoint because the footer already fetches this and one
+        request is cheaper than two; the fields are additive, so old clients that
+        only read `version` are unaffected.
         """
-        return {"status": "ok", "version": __version__}
+        return {"status": "ok", **build_info().as_dict()}
 
     @app.get("/v1/readyz", tags=["health"])
     async def readyz(sessionmaker: SessionMaker) -> Any:

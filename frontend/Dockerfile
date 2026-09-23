@@ -24,7 +24,14 @@ COPY package.json package-lock.json ./
 RUN npm ci
 
 COPY . .
-RUN npm run build
+
+# Build provenance, frozen into the bundle by vite's `define` (see vite.config.ts) and
+# rendered in the footer next to the API's. Declared after `npm ci` so a new commit
+# does not invalidate the dependency layer. Unset builds say "unknown" rather than
+# guessing; `just build` passes both.
+ARG SOURCE_COMMIT=""
+ARG BUILT_AT=""
+RUN SOURCE_COMMIT="$SOURCE_COMMIT" BUILT_AT="$BUILT_AT" npm run build
 
 # ============================================
 # Stage 3: Production — nginx serving the SPA and proxying /v1 to api:8000

@@ -77,6 +77,16 @@ COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN groupadd -r appuser && useradd -r -g appuser appuser
 USER appuser
 
+# Build provenance, surfaced by `GET /v1/healthz` and the dashboard footer. Declared
+# LAST so a new commit invalidates nothing above it — otherwise every build would
+# reinstall the dependency layer. Unset is fine and reports "unknown"; `just build`
+# passes both. There is no checkout in this image, so this is the only way the running
+# process can know which commit it came from.
+ARG SOURCE_COMMIT=""
+ARG BUILT_AT=""
+ENV FF_SOURCE_COMMIT=$SOURCE_COMMIT \
+    FF_BUILT_AT=$BUILT_AT
+
 EXPOSE 8000
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

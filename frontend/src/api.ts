@@ -7,7 +7,15 @@
 // (design/production.md -> "Same origin, two backends") and the repair someone
 // reaches for is CORS middleware on the API, which is the wrong repair.
 
-export type Health = { status: string; version: string }
+// `commit` and `built_at` are additive (R1: build provenance in the footer) and an
+// older API omits them — optional, not defaulted, so the footer can say "unknown"
+// rather than assert something it was not told.
+export type Health = {
+  status: string
+  version: string
+  commit?: string
+  built_at?: string
+}
 
 export type Me = {
   token_id: string

@@ -232,15 +232,24 @@ build: test frontend-build frontend-test _build-images _verify-images _push-imag
     @echo "✓ {{ registry }}/fleetforge:{{ latest_tag }}"
     @echo "✓ {{ registry }}/fleetforge-frontend:{{ latest_tag }}"
 
+# Both images carry the commit and build time they were made from, which is what
+# `/v1/healthz` and the dashboard footer report. Without these a deployed image can
+# only say "0.4.0", and two different builds of 0.4.0 are indistinguishable from the
+# outside — the state that had us reflashing a board to fix a publish that never
+# reached prod's store.
 _build-images:
     @echo "Building images for tag: {{ latest_tag }}"
     DOCKER_BUILDKIT=1 docker build \
         --target=production \
+        --build-arg SOURCE_COMMIT=$(git rev-parse HEAD) \
+        --build-arg BUILT_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
         -t {{ registry }}/fleetforge:{{ latest_tag }} \
         -t {{ registry }}/fleetforge:latest \
         -f Dockerfile .
     DOCKER_BUILDKIT=1 docker build \
         --target=production \
+        --build-arg SOURCE_COMMIT=$(git rev-parse HEAD) \
+        --build-arg BUILT_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
         -t {{ registry }}/fleetforge-frontend:{{ latest_tag }} \
         -t {{ registry }}/fleetforge-frontend:latest \
         frontend
