@@ -93,7 +93,12 @@ FORBIDDEN_OPTIONS = [
 # rebuilt, so no other number moved.
 APP_SIZE_BUDGET_BYTES = {
     "esp32": 1_011_216,
-    "esp32s3": 973_136,
+    # Raised from 973_136 for the OTA-capable agent (R1-fw-1/R1-fw-2), which cost every
+    # target ~18 KB. Only esp32 was raised at the time: this gate reads whatever is in
+    # `agent/dist/`, so a target nobody had built locally is not checked and does not
+    # fail. The other two are still carrying 0.2.0-era numbers and will need the same
+    # raise the first time they are built — that is a gap in the gate, not slack here.
+    "esp32s3": 991_344,
     "esp32c3": 1_028_336,
     "esp32c6": 1_077_840,
 }
