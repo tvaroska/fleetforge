@@ -200,7 +200,68 @@ class TestDownload:
         assert response.content == expected
         assert response.headers["content-type"] == "application/octet-stream"
         assert response.headers["etag"] == f'"sha256-{hashlib.sha256(expected).hexdigest()}"'
-        assert response.headers["cache-control"] == "private, max-age=3600"
+        # `no-cache`, never `max-age`: this path is the same for every version of a
+        # target and `agent-publish` changes the bytes behind it. See the next two tests.
+        assert response.headers["cache-control"] == "private, no-cache"
+
+    async def test_parts_are_never_served_without_revalidation(
+        self, agent_app: FastAPI, bundles: Path
+    ) -> None:
+        """A freshness lifetime on this URL hands the flasher a mismatched bundle.
+
+        `/v1/agent/{target}/{part}` is mutable — publishing a new bundle replaces the
+        bytes at the same path. Under `max-age=3600` a browser skipped revalidation for
+        an hour, so a publish mid-hour left it combining a new manifest with cached old
+        parts; the flash then aborted on a sha256 mismatch that looked like a corrupt
+        download. Any directive granting a freshness lifetime reintroduces that.
+        """
+        token = await login_admin(agent_app)
+        async with client_for(agent_app) as client:
+            response = await client.get(
+                "/v1/agent/esp32/bootloader", headers={"Authorization": f"Bearer {token}"}
+            )
+
+        cache_control = response.headers["cache-control"]
+        assert "no-cache" in cache_control
+        assert "max-age" not in cache_control
+
+    async def test_revalidation_is_a_304_and_reads_no_blob(
+        self, agent_app: FastAPI, bundles: Path
+    ) -> None:
+        """Revalidating an unchanged part costs a header exchange, not a megabyte.
+
+        This is what makes `no-cache` affordable: the ETag is the manifest's sha256, so a
+        match is decided from the catalog and the object store is never touched.
+        """
+        token = await login_admin(agent_app)
+        headers = {"Authorization": f"Bearer {token}"}
+        async with client_for(agent_app) as client:
+            first = await client.get("/v1/agent/esp32/app", headers=headers)
+            again = await client.get(
+                "/v1/agent/esp32/app",
+                headers={**headers, "If-None-Match": first.headers["etag"]},
+            )
+
+        assert first.status_code == 200
+        assert again.status_code == 304
+        assert again.content == b""
+        # The validators a 200 carries, so the *next* revalidation still has one to send.
+        assert again.headers["etag"] == first.headers["etag"]
+        assert again.headers["cache-control"] == "private, no-cache"
+
+    async def test_a_stale_etag_gets_the_new_bytes(self, agent_app: FastAPI, bundles: Path) -> None:
+        """The case that was broken: holding a previous version's part must refetch."""
+        token = await login_admin(agent_app)
+        headers = {"Authorization": f"Bearer {token}"}
+        async with client_for(agent_app) as client:
+            response = await client.get(
+                "/v1/agent/esp32/bootloader",
+                headers={**headers, "If-None-Match": '"sha256-' + "0" * 64 + '"'},
+            )
+
+        assert response.status_code == 200
+        expected = (bundles / "esp32" / PART_FILES["bootloader"]).read_bytes()
+        assert response.content == expected
 
     async def test_the_two_targets_do_not_serve_each_others_bytes(
         self, agent_app: FastAPI, bundles: Path

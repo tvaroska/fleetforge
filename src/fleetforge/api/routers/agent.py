@@ -29,7 +29,7 @@ a bucket, a key or a traceback.
 import logging
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response, status
 
 from fleetforge.api.deps import AdminDep, ObjectStoreDep, bearer_scheme, cookie_scheme
 from fleetforge.firmware import (
@@ -51,9 +51,22 @@ router = APIRouter(
     dependencies=[Depends(bearer_scheme), Depends(cookie_scheme)],
 )
 
-# Downloaded once per flash and immutable for the life of an app image, but private:
-# it is behind the admin credential, so no shared cache may keep a copy.
-CACHE_CONTROL = "private, max-age=3600"
+# `no-cache` means "store it, but revalidate every time" — NOT "do not cache".
+#
+# This URL is mutable: `/v1/agent/{target}/{part}` is the same path for every version of
+# a target, and `just agent-publish` changes the bytes behind it. The previous value,
+# `max-age=3600`, told the browser it could skip revalidation for an hour, so a publish
+# mid-hour left a flasher holding one version's manifest and the previous version's
+# parts. That is exactly what happened on 2026-09-23: a board was flashed with 0.2.0,
+# esp32s3 0.3.2 was published minutes later, and the next flash aborted on a bootloader
+# whose sha256 did not match the manifest. The image was not corrupt; it was the cached
+# 0.2.0 bootloader. The flasher's integrity check caught it and wrote nothing.
+#
+# Revalidation is nearly free: `If-None-Match` is answered from the catalog with a 304
+# before the object store is touched, so an unchanged part costs one conditional request
+# and no blob read. `private` because the response is behind the admin credential and no
+# shared cache may keep a copy.
+CACHE_CONTROL = "private, no-cache"
 
 # What an operator reads when the store is down. Named, retriable, and about the store —
 # not about a bucket, a key or an exception class.
@@ -165,6 +178,7 @@ async def agent_part(
     target: SafeSegment,
     part: SafeSegment,
     layout: SafeSegment | None = None,
+    if_none_match: Annotated[str | None, Header()] = None,
 ) -> Response:
     """The raw bytes of one part, with the manifest's sha256 as a strong ETag.
 
@@ -189,6 +203,21 @@ async def agent_part(
     if entry is None:
         logger.info("agent image not found: target=%s part=%s layout=%s", target, part, layout)
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
+
+    # Answered from the catalog, BEFORE the object store is touched: the ETag is the
+    # part's sha256 out of the manifest, so a match means the caller already holds these
+    # exact bytes and reading the blob to say so would be the whole cost of the request.
+    # Weak comparison is not needed — these validators are only ever strong — but a `W/`
+    # prefix is stripped so a proxy that weakened one does not force a pointless body.
+    if if_none_match is not None:
+        offered = {tag.strip().removeprefix("W/") for tag in if_none_match.split(",")}
+        if entry.etag in offered or "*" in offered:
+            # 304 must carry the same validators a 200 would, or the next revalidation
+            # has nothing to send back.
+            return Response(
+                status_code=status.HTTP_304_NOT_MODIFIED,
+                headers={"ETag": entry.etag, "Cache-Control": CACHE_CONTROL},
+            )
 
     try:
         data = await store.get(entry.blob_key)
