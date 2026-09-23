@@ -2,7 +2,7 @@
 
 **Goal:** Self-hosted OTA firmware management for embedded fleets (ESP32 first) — a bad
 build is caught before the fleet, and any device that gets one recovers itself.
-**Updated:** 2026-09-22
+**Updated:** 2026-09-23
 
 ## Where this stands
 
@@ -33,13 +33,36 @@ now exists, so **R1's last task is unblocked** and R1 can close on the same benc
 that closes R0. And S0-fw-3 is **no longer release-blocking** — it is a recovery defect on
 one DevKit v1 rather than the thing standing between us and a fleet.
 
-Remaining bench order — all of it starts with re-plugging the S3, which is offline:
+**R1-test-1 passed on 2026-09-23 — R1 is closed and OTA works on metal.** Device
+`94a990dd09a4` went `0.3.2 → 0.3.1` on a dashboard-driven deploy in ~25 s. Details on the
+task below.
 
-1. **R1-test-1** — newly unblocked, and a P0 that closes a whole release. Deploy to the
-   S3 once it re-announces.
-2. **S0-test-1** — the four serial-console properties that only a USB bridge chip can prove.
-3. **S0-test-2** — newly unblocked by the S3 above; the native-USB re-acquire path.
-4. **S0-fw-3** (`- [!]`, below) — flash v0.2.0 to the *stuck* DevKit v1. No longer urgent,
+**It took three production fixes to get there, and that is the real story of the session.**
+The E2E test was the only thing in the system exercising the deploy chain, and the chain
+was broken in two places that every other signal reported as healthy:
+
+- **Deploy had never worked on prod.** `ARTIFACT_URL_SECRET` and `PUBLIC_BASE_URL` were
+  never wired into the prod compose, though `config.py` documents them as mandatory there.
+  Both are `None`-defaulted so `create_app()` stays constructible, so the API booted,
+  `/v1/healthz` was green, and the Deploy button rendered. Fixed in services `90205ed`.
+- **`mosquitto-init` has never once reached the running broker.** It bootstraps the dynsec
+  file via a throwaway broker and writes the JSON underneath a live `fleetforge-mosquitto`
+  that read its config at startup and never reloads. The `commander` client and role did
+  not exist in the broker's memory at all. Structural, still **OPEN** — per-device
+  enrolment works because the API uses the live control topic, which is exactly what
+  `mosquitto-init` should be doing.
+- **A mutable URL served `max-age=3600`** aborted a flash on a bogus sha256 mismatch.
+  Fixed in `c4fa7d2`, **not yet deployed**.
+
+All three are written up in `../docs/ops-log.md` as F-2026-09-23-001/002/003. They are the
+same shape as F-2026-09-20-004/005/007: a component reporting healthy because nothing
+exercises the one path that is broken.
+
+Remaining bench order:
+
+1. **S0-test-1** — the four serial-console properties that only a USB bridge chip can prove.
+2. **S0-test-2** — unblocked by the S3 above; the native-USB re-acquire path.
+3. **S0-fw-3** (`- [!]`, below) — flash v0.2.0 to the *stuck* DevKit v1. No longer urgent,
    but still the clean single-variable experiment, and still a real defect.
 
 **Prod serves the v0.2.0 agent** (`d705652` — `-Os`, 80 MHz, max modem sleep, the
@@ -55,9 +78,10 @@ desk-bound tasks have landed** — `R1-be-1` the day R1 opened, then `R1-be-2`, 
 `R1-be-4`, `R1-fw-1`, `R1-fw-2` and `R1-fe-1` on 2026-09-17. A deploy mints a link on our
 own origin, `GET /v1/artifact/{sha256}/bin` serves it with range support, the agent
 stages and applies it in QEMU (`docs/runbooks/agent-qemu.md`) and reports the version
-that actually booted, and the dashboard drives the whole thing. Only `R1-test-1` is
-left: it is bench-gated, and deliberately written as the *hardware* E2E rather than
-renamed to something QEMU can pass. See `DECISIONS.md` 2026-09-16.
+that actually booted, and the dashboard drives the whole thing. `R1-test-1` closed this
+out on 2026-09-23 on real hardware. Keeping it bench-gated rather than renaming it to
+something QEMU could pass (`DECISIONS.md` 2026-09-16) is what surfaced two prod defects
+that had made deploy impossible — QEMU would have passed against a broken production.
 
 **Completed work is archived**, not lost: R0 and the closed Sprint 0 tasks are written up
 in [docs/features/](docs/features/) — chiefly `enrollment.md` (the R0 flow end to end,
@@ -343,17 +367,28 @@ fixes the `dn/cmd` `stage` payload and the `up/status` state machine, and is nea
 
 ### Test
 
-- [ ] **R1-test-1**: E2E: push firmware → board version changes in dashboard (P0, 1d)
-      **Bench-gated, deliberately.** QEMU proves the transport; this proves the product.
-      Kept as a hardware task rather than redefined to something the emulator can pass,
-      for the same reason `R0-test-2` is: the release's claim is about a board.
-      **Unblocked 2026-09-22.** The dependency was `R0-test-2` in practice — a board that
-      cannot enroll cannot be deployed to — and that board is now enrolled and online.
-      This is the cheapest P0 left: the target is already on the fleet, so the run is a
-      deploy from the dashboard and a version check, and it closes R1.
-      ⚠️ Re-read R1's "Not yet safe" warning above first: there is no checksum gate and no
-      confirm timer until R2, so deploy only to a board you can physically reach — which,
-      on a bench, is the point.
+- [x] **R1-test-1**: E2E: push firmware → board version changes in dashboard (P0, 1d)
+      **PASSED 2026-09-23.** Device `94a990dd09a4` (ESP32-S3) walked `0.3.2 → 0.3.1` on a
+      deploy driven from the dashboard API: `202 Accepted`, then `downloading` (pct 0) →
+      `rebooting` (pct 100) → back online reporting `agent_version` and `fw_version` 0.3.1,
+      about 25 s end to end. `cmd_id a1d8ed965208447fb9cbce4bb4dd6504`, artifact
+      `4c8529eb…` (991344 bytes, layout `ab-4m-v1`). R1 closes.
+      **`rebooting` is the last state reported, and that is correct**, not a stuck deploy:
+      `ff_ota.h:8-9` scopes the R1 agent's walk to end at `rebooting` → `esp_restart()`,
+      with `confirming`/`confirmed` deferred to R2. The device still *performs* the
+      validation — `ff_mqtt.c:109` calls `esp_ota_mark_app_valid_cancel_rollback()` on
+      announce-ack — so the slot is marked valid and there is no rollback exposure. The
+      consequence is cosmetic and belongs to R2: `is_terminal` stays `false` forever, so
+      the dashboard shows a perpetually in-flight deploy for every successful one.
+      **The written definition of this task was wrong, and the gap is the finding.** It
+      said "the target is already on the fleet, so the run is a deploy from the dashboard
+      and a version check". In practice the run required a bootstrap USB re-flash *first*
+      (the fleet board was on 0.2.0, which predates the OTA capability), and then exposed
+      three production defects that nothing else could have caught — see
+      `../docs/ops-log.md` F-2026-09-23-001/002/003. Two of them meant deploy had **never**
+      worked on prod. Any future "E2E on hardware" task should be written as
+      bootstrap-flash *then* deploy, and should be treated as the only thing that
+      exercises the deploy chain at all.
 
 ---
 

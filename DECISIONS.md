@@ -6,6 +6,61 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-23 — R1 closed on hardware; bootstrap must drive the live broker, not its file
+
+**OTA works on metal.** `R1-test-1` passed: device `94a990dd09a4` (ESP32-S3) went
+`0.3.2 → 0.3.1` on a deploy driven from the dashboard API — `downloading` → `rebooting` →
+back online on the new version in ~25 s. R1 is closed. Write-up in
+[`docs/features/ota-deploy.md`](docs/features/ota-deploy.md).
+
+**Reaching that took three production fixes, and the pattern in them matters more than
+any one of them.** Full detail in `../docs/ops-log.md` F-2026-09-23-001/002/003.
+
+**Decided: `mosquitto-init` is wrong by construction and must be rewritten to use the
+live control topic.** It currently stands up a *throwaway* broker on port 1884, applies
+its dynsec commands there, writes `dynamic-security.json` into the shared volume and
+exits. But `fleetforge-mosquitto` is `restart: always`, reads that file **once at
+startup**, and is authoritative in memory thereafter — so on any established deployment
+the bootstrap writes underneath a broker that will never read it. Confirmed empirically:
+`listClients` on the live broker returned only `94a990dd09a4`, `ff-admin` and
+`ff-ingestor`, with no `commander` client and no `commander` role, while the on-disk file
+contained both with a password hash that verifies correctly against `prod/.env`. The
+bootstrap has, as far as we can tell, never once taken effect on prod.
+
+Two consequences that make this worse than inert:
+
+1. **It is silently destructive.** The live broker rewrites that file from its own memory
+   on any dynsec change — and per-device enrolment causes one. So a bootstrapped entry is
+   not merely ignored, it is scheduled for deletion.
+2. **Restarting the broker is not the fix.** Shutdown may persist stale state over the
+   good file first, which would make the bootstrap's write disappear rather than take.
+
+The interface to use already exists and is already proven: the API creates per-device
+credentials over `$CONTROL/dynamic-security/v1` on the running broker, which is why
+enrolment has always worked while bootstrap never has. `mosquitto-init` should do the
+same, and should be idempotent against a broker that already holds the entries. Tracked
+as services `S0-infra` work; the immediate unblock was `createRole`/`addRoleACL`/
+`createClient`/`addClientRole` issued live, which converges memory and file with no
+outage.
+
+**Learning: the hardware E2E is not a checkbox, it is the only integration test of the
+deploy chain.** Two of the three defects meant `POST /v1/devices/{id}/deploy` had **never**
+succeeded in production, and nothing else in the system could have revealed that —
+`/v1/healthz` was green, the dashboard rendered a working Deploy button, unit and QEMU
+coverage all passed. Keeping `R1-test-1` bench-gated rather than redefining it to
+something the emulator could pass (decided 2026-09-16) is precisely what caught this;
+a QEMU version of the test would have passed against a broken production. This is the
+same shape as ops-log F-2026-09-20-004/005/007 — a component reporting healthy because
+nothing exercises the one path that is broken — now four times in four days.
+
+**Corollary for how these tasks get written.** `R1-test-1` said "the target is already on
+the fleet, so the run is a deploy from the dashboard and a version check". That was
+wrong: the enrolled board was on agent 0.2.0, which predates the OTA capability, so a
+bootstrap USB re-flash was mandatory first. Future hardware E2E tasks should be written
+as *bootstrap-flash then deploy*, and should not be costed as cheap.
+
+---
+
 ## 2026-09-22 — R0-test-2 passed on an S3; S0-fw-3 is a defect, not a gate
 
 **The product works on metal.** On 2026-09-19, device `94a990dd09a4` — an **ESP32-S3** —
