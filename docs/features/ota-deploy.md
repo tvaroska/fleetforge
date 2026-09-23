@@ -888,6 +888,15 @@ changing back; the server never sees `rolling_back`/`rolled_back` and the deploy
 non-terminal. R2-FE-1's `good` vs `rolled-back` column has nothing to read until BE-1
 lands.
 
+**A fourth failure mode surfaced alongside it: a board that was never protected.** Rollback
+needs a bootloader that supports it, and Fleetforge OTA replaces the app, not the
+bootloader — so a device flashed from an old bootloader can never gain the safety net from
+us, and announces identically to one that has it. Step 1 of
+[board-profiles.md](board-profiles.md) adds the `rollback_capable` field to `up/announce`
+that makes the difference visible, together with a measured partition-table fingerprint to
+cross-check the `partition_layout` name `_check_compatible()` currently takes on trust.
+Both are R2-sized and belong with the safe-deploy work.
+
 ## De-risking
 
 Run a **throwaway OTA + auto-rollback spike during R0–R1** on real flaky Wi-Fi —

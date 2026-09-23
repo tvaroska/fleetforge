@@ -224,6 +224,12 @@ entry above and
 additive, no implicit dashboard coupling — which is what the device-facing thin waist
 claimed to be but has never been tested against a second consumer.
 
+**Depends on board profiles.** R3 is the release that produces the second and third real
+partition layouts, and the first user who brings a `partitions.csv` we have never seen. A
+code-resident `SUPPORTED_LAYOUTS` cannot serve that, so step 2 of
+[board-profiles.md](board-profiles.md) — the profile table with user-defined entries — is
+gated on this release and should be scheduled with it.
+
 **Out of scope for R3:** Improv reprovisioning (HOBBYIST §4.3, unslotted), PlatformIO
 registry publication beyond a working `platformio.ini` recipe, and any application-config
 channel — `dn/cfg` stays agent-only by design.

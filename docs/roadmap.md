@@ -94,6 +94,7 @@ airtime-aware scheduling, delta updates. Full treatment in
 | Enrollment & provisioning | [enrollment.md](features/enrollment.md) | R0 |
 | Dashboard (cross-cutting UI: theme, typography, a11y) | [dashboard.md](features/dashboard.md) | R0 → |
 | OTA deploy & auto-rollback | [ota-deploy.md](features/ota-deploy.md) | R1, R2 |
+| Board profiles (layout catalog + measured attestation) | [board-profiles.md](features/board-profiles.md) | R2, R3 |
 | Health & telemetry | [health-telemetry.md](features/health-telemetry.md) | R4 |
 | Self-test (sim gate + device confirm) | [self-test.md](features/self-test.md) | R5 (defined R0) |
 | Signing & resumable hardening | [security-hardening.md](features/security-hardening.md) | R6 → **v1** |
