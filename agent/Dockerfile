@@ -33,6 +33,11 @@ SHELL ["/bin/bash", "-c"]
 ARG IDF_TARGET=esp32
 ARG SOURCE_COMMIT=unknown
 ARG IDF_IMAGE
+# OFF unless explicitly asked for. `=1` builds a deliberately broken agent for the live
+# confirm/rollback test — see the FF_ROLLBACK_TEST block in CMakeLists.txt. Such a build
+# renames itself to <version>-rbtest and must only ever be uploaded as a deployable
+# ARTIFACT, never published to the flasher catalog with `just agent-publish`.
+ARG FF_ROLLBACK_TEST=0
 
 WORKDIR /project
 COPY . /project
@@ -42,6 +47,7 @@ COPY . /project
 RUN . $IDF_PATH/export.sh \
  && idf.py -B build -DIDF_TARGET=${IDF_TARGET} \
       -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.${IDF_TARGET}" \
+      -DFF_ROLLBACK_TEST=${FF_ROLLBACK_TEST} \
       build \
  && python3 tools/make_manifest.py \
       --build-dir build --out /out --partitions partitions.csv \

@@ -40,3 +40,10 @@ idf_component_register(SRCS "agent_main.c"
 # mismatch in the agent stops the build instead of shipping to a fleet. Firmware has no
 # `try:` — a truncated snprintf is a corrupted MQTT topic on a thousand boards.
 target_compile_options(${COMPONENT_LIB} PRIVATE -Wall -Wextra -Werror)
+
+# See the FF_ROLLBACK_TEST block in ../CMakeLists.txt. Compiled in only when asked for,
+# so the guarded code in ff_mqtt.c is absent from every normal build rather than merely
+# unreached.
+if(FF_ROLLBACK_TEST)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE FF_ROLLBACK_TEST=1)
+endif()

@@ -53,7 +53,14 @@ static const char *TAG = "ff-mqtt";
 #define KEEPALIVE_S 30
 
 /* spec/prd.md -> Requirements & targets -> Timing: "confirm timeout 300 s". */
+#if FF_ROLLBACK_TEST
+/* 60 s in a rollback-test build. Shortening this does NOT weaken the test: the timer
+ * under test is the one compiled into the NEW image, which is this one, so the
+ * mechanism exercised is identical and only the wait is shorter. */
+#define CONFIRM_TIMEOUT_S 60
+#else
 #define CONFIRM_TIMEOUT_S 300
+#endif
 
 static const char PRESENCE_ONLINE[] = "{\"online\":true}";
 static const char PRESENCE_OFFLINE[] = "{\"online\":false}";
@@ -196,6 +203,19 @@ static void on_connected(ff_mqtt_ctx_t *ctx)
             esp_mqtt_client_publish(ctx->client, ctx->topic_announce, announce, 0, QOS, 1);
         ESP_LOGI(TAG, "publish %s (qos 1, retain, msg_id %d)", ctx->topic_announce,
                  ctx->announce_msg_id);
+#if FF_ROLLBACK_TEST
+        /* The single injected fault. The announce IS published and IS retained, so the
+         * board really does appear in the fleet on this version — that is what makes the
+         * rollback observable from the dashboard rather than only from a serial console.
+         * What we throw away is the msg_id, so the PUBACK can never match and
+         * `session_confirmed` stays false forever. That is precisely the state
+         * `confirm_timeout_cb()` exists to rescue a board from, and the only branch of
+         * the confirm/rollback pair that has never run on hardware. */
+        ctx->announce_msg_id = -1;
+        ESP_LOGE(TAG, "FF_ROLLBACK_TEST: ignoring the announce ack on purpose — this "
+                      "image must roll back in %d s",
+                 CONFIRM_TIMEOUT_S);
+#endif
         free(announce);
     } else {
         ESP_LOGE(TAG, "out of memory building the announce payload");
