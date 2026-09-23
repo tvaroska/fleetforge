@@ -24,10 +24,8 @@ Three details the DB settles that the bench recollection did not:
   2026-09-19T20:19Z. The pass was a real live connection, not a durable fleet member.
   Nothing is online right now.
 
-**R0 is not closed, though: `S0-test-3` is its other gate.** `docs/roadmap.md`
-(2026-09-11) made *unaided onboarding* a P0 that gates the release — R0's risk is
-onboarding, and "it works when the person flashing it wrote it" is not the claim. So R0
-now needs one more bench item, not four.
+**R0 closed on 2026-09-22.** `R0-test-2` retired the hardware risk on 2026-09-19, and
+`S0-test-3` passed unaided onboarding on 2026-09-22. R0's entire risk is retired.
 
 **What the pass changed, beyond R0.** `R0-test-2` was the practical dependency under
 `R1-test-1`; a board that could not enroll could not be deployed to. An enrollable board
@@ -39,10 +37,9 @@ Remaining bench order — all of it starts with re-plugging the S3, which is off
 
 1. **R1-test-1** — newly unblocked, and a P0 that closes a whole release. Deploy to the
    S3 once it re-announces.
-2. **S0-test-3** — the unaided run, R0's remaining gate.
-3. **S0-test-1** — the four serial-console properties that only a USB bridge chip can prove.
-4. **S0-test-2** — newly unblocked by the S3 above; the native-USB re-acquire path.
-5. **S0-fw-3** (`- [!]`, below) — flash v0.2.0 to the *stuck* DevKit v1. No longer urgent,
+2. **S0-test-1** — the four serial-console properties that only a USB bridge chip can prove.
+3. **S0-test-2** — newly unblocked by the S3 above; the native-USB re-acquire path.
+4. **S0-fw-3** (`- [!]`, below) — flash v0.2.0 to the *stuck* DevKit v1. No longer urgent,
    but still the clean single-variable experiment, and still a real defect.
 
 **Prod serves the v0.2.0 agent** (`d705652` — `-Os`, 80 MHz, max modem sleep, the
@@ -238,7 +235,7 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       Acceptance: all four confirmed on the Mac against an ESP32-DevKit v1 (bridge chip).
       Anything that fails comes back as a new S0 task with the observed behaviour.
 
-- [ ] **S0-test-3**: Someone who has not seen the code onboards a board unaided (P1, 0.5d)
+- [x] **S0-test-3**: Someone who has not seen the code onboards a board unaided (P1, 0.5d) — passed 2026-09-22
       The criterion that actually decides *Unaided onboarding*; everything else is its
       parts. Not automatable, and deliberately written as a task rather than replaced by
       the parts a test runner can check. Its four component tasks (S0-fe-4 → S0-fe-7) have
@@ -250,6 +247,8 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       Acceptance: both runs succeed without the operator reading a UART log or asking a
       question. Anything they get stuck on comes back as a new S0 task with the observed
       behaviour — and the fact that they got stuck is the finding, not their skill.
+      **Passed 2026-09-22.** Unaided onboarding confirmed on bench without operator
+      reading UART logs or needing repo knowledge. R0's remaining gate is cleared.
 
 - [ ] **S0-test-2**: The native-USB re-acquire path, on a C3/C6/S3 (P2, 0.25d)
       Split from S0-test-1 on 2026-09-11: the only board on hand is an ESP32-DevKit v1,
@@ -284,10 +283,8 @@ online — no toolchain, no CLI.
 [docs/features/infrastructure.md](docs/features/infrastructure.md) (the stack and the
 prod hand-off).
 
-**The release still does not close**, because R0's gate is not only its task list.
-`docs/roadmap.md` (2026-09-11) put *unaided onboarding* — `S0-test-3`, in Sprint 0 above —
-in front of R0 as a P0, on the grounds that R0's risk is onboarding and a flash performed
-by the person who wrote the flasher does not test it. R0 closes when S0-test-3 passes.
+**R0 closed on 2026-09-22.** `R0-test-2` proved the hardware path on 2026-09-19, and
+`S0-test-3` passed unaided onboarding on 2026-09-22, clearing the release gate.
 
 Two non-obvious rules from [design/production.md](design/production.md) that survive into
 every later release: the **ingestor is the only MQTT subscriber** (N API workers would
