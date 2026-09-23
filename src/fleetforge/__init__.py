@@ -12,4 +12,4 @@ plane) and `fleetforge.ingestor.main` (the single MQTT subscriber).
 # the place the value matters. The test is what makes one source of truth out of three
 # literals; before it existed this string sat at "0.1.0" while the project shipped
 # 0.4.0, and `/v1/healthz` reported the stale value to anyone asking what was deployed.
-__version__ = "0.4.0"
+__version__ = "0.4.1"
