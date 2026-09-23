@@ -138,7 +138,7 @@ Two results worth carrying forward, because they retired earlier conclusions:
   artifact tasks are done; the build engine itself stays R10, only its cache key changed.
 
 <!-- Counters: spec=1 infra=7 db=1 be=6 fe=7 sec=1 fw=4 test=3 -->
-<!-- Sprint 0 counters: fe=7 fw=4 infra=8 test=4 -->
+<!-- Sprint 0 counters: fe=8 fw=4 infra=8 test=4 -->
 <!-- R1 counters: be=3 fe=1 fw=2 test=1 -->
 <!-- R3 counters: spec=1 fw=4 test=1 -->
 
@@ -325,6 +325,31 @@ Bricking risks, broker auth and security issues get filed here as they surface.
         must open. If it reports "Resource busy", `port.close()` is not being reached.
       Acceptance: all four confirmed on the Mac against an ESP32-DevKit v1 (bridge chip).
       Anything that fails comes back as a new S0 task with the observed behaviour.
+
+- [ ] **S0-fe-8**: A board with no COM port leaves the operator at a dead end (P1, <2h)
+      Added: 2026-09-23
+      Observed at the bench, on the way into `S0-fw-3`. Windows 11 + Chrome, an
+      ESP32-DevKit v1 (CP2102, `10c4:ea60`). The board enumerates as a USB device and
+      Windows names it correctly, but no VCP driver is bound, so **no COM port exists**.
+      The flash page's port chooser therefore opens and lists exactly one entry — the
+      motherboard's legacy `COM1` — and nothing else. Nothing on screen says why, names
+      the missing driver, or distinguishes "no driver" from "wrong cable", "dead board"
+      or "wrong port". The operator's only route out is knowing to open Device Manager,
+      spot a yellow bang, and find the Silicon Labs driver; Windows Update did not
+      supply it.
+      This is the failure shape `S0-test-3` asks to be filed: the operator got stuck and
+      *that* is the finding. Note S0-test-3 passed on the ESP32-S3, which is native USB
+      and needs no driver — so the passing run never touched this path. **Every
+      bridge-chip board does**, and CP2102/CH340 is what the cheap DevKits ship.
+      Not a code defect: `esptoolFlasher.ts:113` and `serialConsole.ts:113` both call
+      `requestPort()` with no filters, so Chrome is already offering everything the OS
+      has. The gap is entirely in what the page says when what the OS has is nothing.
+      Fix (small): a "my board isn't listed" affordance on the flash page naming the two
+      common bridges (CP210x, CH340), linking the drivers, and saying that macOS needs
+      no install while Windows usually does. If a chosen port is plainly not an ESP32,
+      say so rather than failing later in the handshake.
+      Acceptance: an operator who has never installed a VCP driver reaches a working COM
+      port using only what the page tells them — no Device Manager spelunking, no asking.
 
 - [x] **S0-test-3**: Someone who has not seen the code onboards a board unaided (P1, 0.5d) — passed 2026-09-22
       The criterion that actually decides *Unaided onboarding*; everything else is its
