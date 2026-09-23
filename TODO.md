@@ -58,6 +58,42 @@ All three are written up in `../docs/ops-log.md` as F-2026-09-23-001/002/003. Th
 same shape as F-2026-09-20-004/005/007: a component reporting healthy because nothing
 exercises the one path that is broken.
 
+**The R1→R2 transition is BLOCKED by the T3 gate (2026-09-23).** `/replan` ran the CUJ-1
+verification suite; CUJ-1's driver is segmented and only the segments with a harness are
+graded. Result:
+
+| Steps | Segment | Result |
+|---|---|---|
+| 1–2 | Sketch compiles with the library | not graded — R3, no harness yet |
+| 3 | One flash → board on the fleet | **pass** — `agent-qemu-smoke` OK, `pytest tests/test_enroll.py` 29 passed, board online in `GET /v1/devices` |
+| 5 | OTA a changed build → new version reported | **FAIL** — `fw_version` never converges. `S0-test-4` |
+| 6 | A bad build recovers itself | not graded — no QEMU harness; proved on metal 2026-09-23, not by a runner |
+| — | A wrong flash layout is refused | not graded — R3 (`R3-fw-5`) |
+
+**Re-run later the same day: unchanged, and now reproduced twice.** A second `/replan`
+re-executed the gradeable segments rather than trusting the first result. Segment 3 passed
+again (`pytest tests/test_enroll.py` 29 passed; fresh board `92a9cd2d4251` enrolled and
+showed `online: true` in `GET /v1/devices`). Segment 5 failed again, identically: deploy
+`8d5902010bb64025aca05f8d283ccbc1` → 202, the sim walked to `rebooting` and logged
+`apply now running fw_version 1.6.0 (announced on the next connect)`, and a minute of
+heartbeats later `GET /v1/devices` still reported `fw_version: 1.4.2` with
+`is_terminal: false`. Nothing under `src/fleetforge/simulator/` has changed since the
+first run (last touching commit `2493302`), so this is the same defect, not a flake.
+The run also re-confirmed `S0-infra-8` causally: `fleetforge-ingestor` sat `unhealthy`
+with `FailingStreak` 3292 while the stack was idle, and flipped to `healthy`
+(`FailingStreak` 0) within seconds of the simulated board publishing.
+
+So **R1 stays open and R2 is not opened** until `S0-test-4` lands and segment 5 passes.
+Two findings came out of the run and are filed in Sprint 0 above: `S0-test-4` (the
+simulator never reconnects after `apply`) and `S0-infra-8` (the ingestor's liveness probe
+measures traffic, and prod has no probe at all). Neither was visible from the code review
+that prompted the run; both needed the harness actually executed.
+
+Two things the run also confirmed, which are R2 content rather than regressions: the
+deploy parked at `rebooting` with `is_terminal: false` permanently — nothing writes
+`CONFIRMED`, because confirm reporting is `R2-be-1`/`R2-fw-3` and does not exist — and
+every row in `GET /v1/devices` still has `name: null`.
+
 Remaining bench order:
 
 1. **S0-test-1** — the four serial-console properties that only a USB bridge chip can prove.
@@ -102,7 +138,7 @@ Two results worth carrying forward, because they retired earlier conclusions:
   artifact tasks are done; the build engine itself stays R10, only its cache key changed.
 
 <!-- Counters: spec=1 infra=7 db=1 be=6 fe=7 sec=1 fw=4 test=3 -->
-<!-- Sprint 0 counters: fe=7 fw=4 infra=7 test=3 -->
+<!-- Sprint 0 counters: fe=7 fw=4 infra=8 test=4 -->
 <!-- R1 counters: be=3 fe=1 fw=2 test=1 -->
 <!-- R3 counters: spec=1 fw=4 test=1 -->
 
@@ -233,9 +269,40 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       pitch is "any device that gets a bad one recovers itself" cannot ship that. The
       acceptance criterion is unchanged, and step 1 of the bench order above — v0.2.0 onto
       the stuck DevKit v1 — is still the untried single-variable experiment.
+      **2026-09-23 — desk pass. Nothing left to prepare; this is now purely a flash.**
+      A `/implement` run with no board attached (`/dev/ttyUSB*`, `/dev/ttyACM*` both
+      absent on the dev box) did the parts of the bench order that do not need hardware:
+      * **Step 1 confirmed flash-ready.** `agent/dist/esp32/sdkconfig.resolved` — the
+        build output, not the input — carries all three levers:
+        `CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_80=y`, `CONFIG_COMPILER_OPTIMIZATION_SIZE=y`,
+        `CONFIG_ESP_PHY_REDUCE_TX_POWER=y`. The bundle is agent `0.3.1` /
+        `25374e2` / 2026-09-17. So the experiment really is one flash of the stock
+        esp32 bundle, with no special build and no source change. (Prod's own
+        `/v1/agent/manifest` needs credentials, so what `bingo.tvaroska.sk` currently
+        serves was not re-checked from here — flash from the catalog and read the
+        version it reports.)
+      * **Step 2, our half, recorded** so the bench only has to produce ESPHome's file:
+        `ESPTOOLPY_FLASHMODE=dio`, `FLASHFREQ=40m`, `SPIRAM_SUPPORT` not set,
+        `PM_ENABLE` not set, `ESP_WIFI_STATIC_RX_BUFFER_NUM=10`,
+        `DYNAMIC_RX/TX_BUFFER_NUM=32` (IDF defaults), `XTAL_FREQ=40`.
+      * **Step 3 halves, and the cheap half is a dead end.** `ESP_BROWNOUT_DET_LVL=0`
+        is already 2.43 V, the **lowest** of the eight levels (`boardConsole.ts:307`
+        documents the same number) — there is no threshold headroom left to buy, so
+        that lever does not exist. What remains is only the mechanism question:
+        the resolved config does show `ESP32_REV_MIN_0=y` *and*
+        `ESP_BROWNOUT_USE_INTR=y` together, consistent with the rev-0 `select`, so if
+        the board is rev ≥1 and ESPHome builds for a higher min revision the two
+        images are using different detectors. Needs the revision from a boot banner.
+      * **The reporting half re-verified end to end**, so a successful escape will be
+        visible without further work: `FF_PROGRESS_BROWNOUT` (`ff_progress.h:73`) →
+        `agent_main.c:268` → `DeviceProgressStage.BROWNOUT` (`db/models.py:152`) →
+        `FleetView.tsx:106` "recovered from a power fault", plus the console's
+        calibration-specific hint and its two tests (`BoardConsole.test.tsx:180,423`).
+      Net: the only unexecuted step is putting the stuck DevKit v1 on a cable and
+      flashing it. Nothing further can move this at the desk.
       _(attempted 2026-09-12; negative result recorded 2026-09-13; second lever staged
       2026-09-13; hardware cause ruled out 2026-09-14; de-escalated 2026-09-22 when
-      R0-test-2 passed on a different board; awaiting bench)_
+      R0-test-2 passed on a different board; desk pass 2026-09-23; awaiting bench)_
 
 - [ ] **S0-test-1**: Bench-verify the serial console on real hardware (P1, 0.5d)
       Filed 2026-09-10, when S0-fe-1 shipped. Its software half is proven in jsdom against
@@ -292,6 +359,67 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       a **Windows + Chrome** bench with native USB on COM3. Confirm which host before
       running either — the re-acquire window is an OS-and-driver property, so a result on
       one host is not a result on the other.
+
+- [ ] **S0-test-4**: The simulator never reconnects after `apply`, so CUJ-1 step 5 cannot pass (P1, 0.5d)
+      Found 2026-09-23 running the T3 gate for the R1→R2 transition. **This blocks the
+      sprint close**, and it is the reason it blocks: the harness `spec/cujs.md` names for
+      CUJ-1 segment 5 cannot satisfy its own deterministic judge.
+      Reproduction, against the dev stack: `just sim-fleet 1 --capabilities ota` enrolled
+      `9e417ad42ca4` (esp32c6, `fw_version` 1.4.2), then
+      `POST /v1/devices/9e417ad42ca4/deploy {"version":"1.6.0"}` → 202. The simulator walked
+      the whole chain correctly — `staging → downloading → verifying` (sha256 matched) →
+      `staged → applying → rebooting` — and logged
+      `apply now running fw_version 1.6.0 (announced on the next connect)`. Five minutes
+      later `GET /v1/devices` still reported **`fw_version: 1.4.2`**.
+      **The server is not at fault** and neither is `apply_heartbeat`
+      (`ingestor/store.py:191-212` takes `fw_version` from every heartbeat that carries
+      one). The fault is in the simulator and it is a **fidelity** fault, not a typo:
+      `StageRunner` rebinds `self.identity = replace(self.identity, fw_version=version)`
+      (`simulator/device.py:560`), but `session()` captured the *old* frozen `Identity` as
+      its local `device` and the heartbeat loop keeps publishing from it
+      (`device.py:406`). `session()`'s own docstring is honest about the design — the new
+      version is announced "on the next connect" (`device.py:651`) — but the simulated
+      apply **never drops the MQTT session**, so on an `always_on` board the next connect
+      never comes and the version never converges. A real board reboots, the TCP session
+      dies, and it re-announces; that is why `R1-test-1` passed on metal (0.3.2 → 0.3.1)
+      while this path silently does not.
+      **Why this matters beyond the gate:** the sim is the only hardware-free check of
+      R1's central claim — "version reported back after reboot" — and it has never once
+      checked it. Same shape as F-2026-09-23-001/002 in `../docs/ops-log.md`: the one
+      thing that would have caught the defect was not exercising the path.
+      Fix: make `apply` end the session the way a reboot does (drop the client and let
+      `run_always_on`'s reconnect loop rebuild it from `stage.identity`), so the board
+      re-announces the new version under its own power.
+      Acceptance: the reproduction above ends with `fw_version` equal to the deployed
+      version, asserted by a test rather than read by hand — and a `sleepy` board reaches
+      the same end state on its next wake.
+
+- [ ] **S0-infra-8**: The ingestor's liveness probe measures device traffic, not liveness (P1, 0.5d)
+      Found 2026-09-23 while running the T3 gate. The dev stack's `fleetforge-ingestor`
+      had been **unhealthy for 27 hours** — `FailingStreak` 3292 — with a live, connected,
+      perfectly functional process.
+      Mechanism: the healthcheck is `test $(( $(date +%s) - $(stat -c %Y
+      /tmp/ingestor-alive) )) -lt 120` (`docker-compose.yml:391`), and
+      `touch_heartbeat()` is called from exactly two places — on connect and per inbound
+      message (`ingestor/main.py:120,156`). Nothing touches the file on a timer. So with
+      no board publishing, the file goes stale in 120 s and the sole MQTT subscriber
+      reports unhealthy forever. The `main.py:87` docstring assumes the gap is covered
+      because "heartbeats repeat every 60 s" — true only while a board is online, which
+      for a 3–15 board hobbyist fleet is not the normal state. Confirmed causally: the
+      flag flipped to `healthy` within seconds of `S0-test-4`'s simulated board
+      publishing, and nothing else changed.
+      **Prod is worse, in the other direction.** `services/prod/docker-compose.yml:520`
+      defines `fleetforge-ingestor` with **no `healthcheck` at all** — the single point of
+      failure for every device telemetry row, the service whose own comment says "EXACTLY
+      ONE INSTANCE, AND NEVER `docker rollout`", is entirely unmonitored in production.
+      This is the ops-log's recurring shape (F-2026-09-20-004/005/007, F-2026-09-23-001)
+      with an extra turn of the screw: dev's only red light is a false positive, which
+      trains the operator to ignore it, and prod has no light.
+      Fix: touch the heartbeat on a timer while the broker connection is up, so the probe
+      measures "connected and consuming" as its comment claims rather than "a device
+      spoke recently"; then give prod the same healthcheck.
+      Acceptance: an idle stack with zero devices online stays `healthy`; killing the
+      broker turns it `unhealthy` inside the window; prod reports a health state at all.
 
 ---
 
