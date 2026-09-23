@@ -776,6 +776,14 @@ describe('FlashBoard — capability branches', () => {
     const targets = await screen.findByTestId('agent-targets')
     expect(targets).toHaveTextContent('esp32 (ESP32, 0.1.0)')
     expect(targets).toHaveTextContent('esp32c6 (ESP32-C6, 0.0.9)')
+
+    // And no headline version at all. The API hoists `bundles[0].agent_version`, which
+    // once targets disagree is just whichever sorted first — naming it "Agent 0.1.0"
+    // here would assert the C6 is on 0.1.0 when it is on 0.0.9. A real bench session
+    // read that headline, concluded a freshly flashed board had not taken the new
+    // firmware, and reflashed it. There is no single answer, so it offers none.
+    expect(targets).toHaveTextContent('Agent per target')
+    expect(targets).not.toHaveTextContent('Agent 0.1.0')
   })
 })
 

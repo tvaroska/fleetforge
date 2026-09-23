@@ -113,9 +113,12 @@ def _require_catalog(catalog: FirmwareCatalog) -> FirmwareCatalog:
 async def agent_manifest(admin: AdminDep, catalog: CatalogDep) -> AgentManifest:
     """Every flashable target, with the byte offsets the flasher writes them at.
 
-    `agent_version` is hoisted to the top level because one build of the agent produces
-    every target: a response whose targets disagreed about it would mean a partial
-    `just agent-publish-all`, and the per-build copy is still there to show which.
+    `agent_version` is hoisted to the top level from `bundles[0]` and is kept only for
+    compatibility. It was true when one build produced every target; since S0-infra-6
+    made publishing per-target it names whichever target happens to sort first, which is
+    NOT necessarily the one being flashed. Read `builds[].agent_version` — the flasher
+    does, matching on `chip_family`. The dashboard stops showing the hoisted value
+    entirely once the targets disagree.
     """
     _require_catalog(catalog)
     return AgentManifest(

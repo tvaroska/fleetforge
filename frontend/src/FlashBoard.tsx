@@ -242,7 +242,13 @@ export function FlashBoard({
       )}
       {manifest !== null && (
         <p className="muted" data-testid="agent-targets">
-          Agent {manifest.agent_version} ·{' '}
+          {/* The hoisted `agent_version` is `bundles[0]` — an arbitrary target once
+              publishing went per-target (S0-infra-6). Printing it as THE agent version
+              is how a bench session concluded a freshly flashed S3 was on 0.2.0 when
+              the S3 build was 0.3.2: the headline named a different chip's build. When
+              they disagree there is no single answer, so don't invent one — the
+              per-target list below is the whole truth. */}
+          {mixedVersions ? 'Agent per target · ' : `Agent ${manifest.agent_version} · `}
           {manifest.builds
             .map((b) =>
               // Targets are published one at a time (S0-infra-6), so two of them may now
