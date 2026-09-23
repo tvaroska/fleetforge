@@ -873,8 +873,28 @@ the behaviour on both sides; the spec only implies it by listing examples.
 **Done when:** a deliberately broken build deploys → the board auto-recovers to the
 previous version.
 
+**R2-FW-3 and most of R2-TEST-1 landed early, in R1.** The device-side confirm timer
+shipped with the R1 agent (`ff_mqtt.c`, `confirm_timeout_cb` →
+`esp_ota_mark_app_invalid_rollback_and_reboot`), and on 2026-09-23 it was exercised on
+real hardware for the first time: `94a990dd09a4` was deployed a deliberately broken
+`0.3.2-rbtest` image, joined the fleet on it, and returned on 0.3.1 71 s later unattended.
+Procedure and its limits: [`../runbooks/rollback-test.md`](../runbooks/rollback-test.md).
+What remains of R2-TEST-1 is the *other* failure modes — boot loop, brownout mid-write,
+flaky radio — none of which that test covers.
+
+What that result does **not** do is retire R2-BE-1. The R1 agent's reported walk ends at
+`rebooting` (`ff_ota.h`), so the rollback is only inferable from the announced version
+changing back; the server never sees `rolling_back`/`rolled_back` and the deploy row stays
+non-terminal. R2-FE-1's `good` vs `rolled-back` column has nothing to read until BE-1
+lands.
+
 ## De-risking
 
 Run a **throwaway OTA + auto-rollback spike during R0–R1** on real flaky Wi-Fi —
 prove auto-rollback saves a bad build before relying on it. (Tracked as parallel work
 in TODO.md.)
+
+**Partly discharged 2026-09-23** by the rollback test above — but on a bench-adjacent
+link, not "real flaky Wi-Fi". The spike's actual question (does a marginal radio break
+the mechanism, e.g. by stalling the download past the confirm timer?) is still open, and
+is the reason remote deploys are still one board at a time rather than fleet-wide.

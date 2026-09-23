@@ -338,9 +338,33 @@ off-box** (the ESP-IDF builder is 2–3 G against 5.5 G of free disk on `prod`).
 **Done when:** a `.bin` uploaded from the dashboard reaches a device and the version it
 reports afterwards is the one that was uploaded.
 
-⚠️ **Not yet safe.** A broken build stays broken until R2 — there is no checksum gate
-before apply, no A/B discipline beyond what the partition table already enforces, and no
-confirm timer. Do not deploy anything to a board you cannot physically reach.
+⚠️ **Partly safe as of 2026-09-23 — read which part.** The blanket "do not deploy
+anything to a board you cannot physically reach" is now too strong in one direction and
+still exactly right in another.
+
+**Proven on hardware (2026-09-23):** a board that takes a bad image, boots it, joins the
+fleet and then never gets its announce acked **recovers itself**. Device `94a990dd09a4`
+was deployed a deliberately broken `0.3.2-rbtest` build and came back on 0.3.1 71 s
+later, unattended — `confirm_timeout_cb()` → `esp_ota_mark_app_invalid_rollback_and_reboot()`
+executing on metal for the first time. Procedure and rationale in
+[docs/runbooks/rollback-test.md](docs/runbooks/rollback-test.md); the flag that builds
+such an image is `FF_ROLLBACK_TEST`, off by default.
+
+**Three failure modes, and only one is still a gamble:**
+
+1. *Image fails to boot* — the bootloader's own rollback handles it
+   (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`, confirmed on in every bundle by
+   `verify_bundle.py`). Standard ESP-IDF, not exercised by us.
+2. *Boots, joins, never confirms* — **proven recoverable**, see above.
+3. *Boots, announce IS acked, but the image is broken in some other way* — it confirms
+   itself and **there is no automatic recovery**. This is the residual gamble, and it is
+   the one R2 narrows with a checksum gate before apply plus server-side observation of
+   the confirm outcome (`R2-BE-1`, `R2-FW-3`).
+
+So: deploying to a remote board is now a reasonable risk rather than a reckless one, and
+firmware iteration no longer has to be bench-bound. It is still not *safe* — case 3 is
+real, and there is still no checksum gate before apply and no A/B discipline beyond what
+the partition table enforces. Do not roll anything to more than one board at a time.
 
 **What is already built, and must not be rebuilt here.** `fleetforge.storage` is the
 `put`/`get`/`signed_url`/`delete` seam (`R0-be-6`), production reads it keylessly by

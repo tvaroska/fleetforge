@@ -6,6 +6,46 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-23 — auto-rollback proven on metal; remote firmware work is unblocked
+
+**The board saved itself.** Device `94a990dd09a4` was deployed a deliberately broken
+`0.3.2-rbtest` image, booted it, joined the fleet on it, and 71 s later returned on 0.3.1
+with nobody touching it. That is `confirm_timeout_cb()` →
+`esp_ota_mark_app_invalid_rollback_and_reboot()` running on real hardware for the first
+time in the product's life. CRITICAL.md calls this path *"the whole bricking gamble... the
+one failure the product must never have"*; it is no longer untested.
+Procedure: [`docs/runbooks/rollback-test.md`](docs/runbooks/rollback-test.md).
+
+**Decided: test it with a build flag, not a throwaway patch.** `FF_ROLLBACK_TEST` is off
+by default and compiled out of normal builds entirely. It injects exactly one fault — the
+announce's `msg_id` is discarded so its PUBACK can never match and `session_confirmed`
+stays false — and shortens `CONFIRM_TIMEOUT_S` to 60 s. The announce is still published
+and still retained, so the board genuinely joins the fleet on the bad version, which is
+what makes the rollback observable in the dashboard rather than only on a console. The
+flag renames the build to `<version>-rbtest`, which travels into every announce.
+
+Two properties make the result transferable rather than a curiosity. The resolved
+sdkconfig is **byte-identical** to a normal build (`config_sha256 d10f52d6…`), so the
+bootloader posture under test is production's. And a default build of the same commit
+produces `0.3.2` with zero `rbtest` strings, so the flag cannot leak into a shipped image.
+The one rule in the runbook: build to a scratch dir and upload as an **artifact** only —
+never `agent-publish`, which writes the USB flasher catalog.
+
+**Consequence: the blanket "deploy only to a board you can physically reach" is
+retired, and replaced with a per-failure-mode rule.** Of the three modes, a non-booting
+image is the bootloader's job (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`, on everywhere),
+"boots but never confirms" is now proven recoverable, and the residual gamble is an image
+that *does* get its announce acked and is broken in some other way — it confirms itself
+and nothing rescues it. That third case is what R2's checksum gate (`R2-FW-3`) and
+server-side confirm observation (`R2-BE-1`) are for. Until then: remote deploys are a
+reasonable risk, one board at a time, never a fleet-wide roll.
+
+This is what actually unblocks remote work. Before today the only enrolled board was one
+bad push away from needing a bench visit, so all firmware iteration was bench-bound; now
+R2 development and radio-dependent testing can be driven remotely.
+
+---
+
 ## 2026-09-23 — R1 closed on hardware; bootstrap must drive the live broker, not its file
 
 **OTA works on metal.** `R1-test-1` passed: device `94a990dd09a4` (ESP32-S3) went
