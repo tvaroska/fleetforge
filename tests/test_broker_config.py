@@ -33,6 +33,7 @@ MOSQUITTO_DIR = REPO_ROOT / "mosquitto"
 ACL_FILE = MOSQUITTO_DIR / "acl"
 DYNSEC_CONF = MOSQUITTO_DIR / "conf.d" / "20-dynsec.conf"
 BOOTSTRAP = MOSQUITTO_DIR / "bootstrap.sh"
+CONFIGURE = MOSQUITTO_DIR / "configure.sh"
 COMPOSE = REPO_ROOT / "docker-compose.yml"
 
 # Verbatim from spec/device-protocol.md → "Why the up/dn split". Retyped here on
@@ -41,6 +42,19 @@ EXPECTED_ACL_RULES = [
     "pattern write ff/v1/d/%u/up/#",
     "pattern read ff/v1/d/%u/dn/#",
 ]
+
+
+def _code(path: Path) -> str:
+    """A shell script with its comments stripped.
+
+    The two scripts carry long comments explaining F-2026-09-23-002 — including the
+    `1884` throwaway broker and the `|| true` that used to swallow every refusal. A
+    check for "this script no longer does X" that reads the comments finds the
+    warning *about* X and fails. Assert against what runs.
+    """
+    return "\n".join(
+        line for line in path.read_text().splitlines() if not line.lstrip().startswith("#")
+    )
 
 
 def _directives(path: Path) -> list[str]:
@@ -107,22 +121,44 @@ class TestNothingGrantsAnonymousAccess:
         assert not (MOSQUITTO_DIR / "conf.d" / "10-dev-anonymous.conf").exists()
 
 
-class TestBootstrap:
-    """`mosquitto/bootstrap.sh` — what exists in the store before any device enrolls."""
+class TestBootstrapTouchesOnlyTheFile:
+    """`mosquitto/bootstrap.sh` — phase 1, and it must stay as small as it now is.
 
-    def test_creates_a_role_named_exactly_device_role(self) -> None:
-        """A name mismatch answers 503 on every enrollment. Import it, never retype it."""
-        assert f"createRole {DEVICE_ROLE}\n" in BOOTSTRAP.read_text()
+    These are regression guards for ops-log **F-2026-09-23-002**, in which this script
+    applied the whole estate to a *throwaway* broker on 127.0.0.1:1884 and wrote the
+    result into the shared volume. The dynsec plugin reads that file once at broker
+    startup and rewrites it from memory thereafter, so on any broker that was already
+    running the bootstrap was invisible AND its entries were scheduled for deletion.
+    Prod's `commander` client never existed; every OTA deploy answered `Not authorized`
+    while this script logged a clean run on every deploy.
 
-    def test_the_device_role_is_left_empty(self) -> None:
-        """The two `%u` patterns cannot live in a dynsec role — it has no substitution."""
-        assert f"addRoleACL {DEVICE_ROLE} " not in BOOTSTRAP.read_text()
+    The only thing that genuinely has to happen before the broker starts is creating
+    the file, because the plugin will not load without one. Everything else belongs to
+    `configure.sh`, against the live broker.
+    """
 
-    def test_denies_by_default(self) -> None:
-        """`dynsec init` leaves publishClientReceive allowed."""
+    def test_creates_no_role_and_no_client(self) -> None:
+        """The whole finding, as one assertion. A role here reaches no running broker."""
+        for command in ("createRole", "createClient", "addRoleACL", "addClientRole"):
+            assert not re.search(
+                rf"^\s*(mosquitto_ctrl|ctrl|grant).*\b{command}\b", _code(BOOTSTRAP), re.M
+            )
+
+    def test_starts_no_throwaway_broker(self) -> None:
+        """The 1884 broker is the mechanism of the finding, not an implementation detail."""
+        code = _code(BOOTSTRAP)
+        assert "1884" not in code
+        assert not re.search(r"^\s*mosquitto\s+-c", code, re.M)
+
+    def test_is_given_no_service_credential(self) -> None:
+        """A service credential passed here is one written to a file the broker overwrites."""
         text = BOOTSTRAP.read_text()
-        for acltype in ("publishClientSend", "publishClientReceive", "subscribe"):
-            assert re.search(rf"setDefaultACLAccess\s+{acltype}\s+deny", text)
+        assert "MOSQUITTO_COMMANDER_PASSWORD" not in text
+        assert "MOSQUITTO_INGESTOR_PASSWORD" not in text
+
+    def test_still_creates_the_store(self) -> None:
+        """`dynsec init` is the only subcommand that works on a file, and must stay here."""
+        assert "dynsec init" in BOOTSTRAP.read_text()
 
     def test_fixes_ownership_of_the_mutable_store(self) -> None:
         """Root-owned = "not writable", applied in memory, and lost on the next restart."""
@@ -130,8 +166,47 @@ class TestBootstrap:
         assert "chown mosquitto:mosquitto" in text
         assert "chmod 0600" in text
 
+    def test_is_executable(self) -> None:
+        """Bind-mounted and run through `sh`, but a non-executable script is a foot-gun."""
+        assert os.access(BOOTSTRAP, os.X_OK)
+
+
+class TestConfigure:
+    """`mosquitto/configure.sh` — phase 2, the estate, applied to the RUNNING broker.
+
+    Every assertion that used to be made about `bootstrap.sh` lives here now, because
+    this is where the roles and clients moved. The new ones are about *where* it
+    applies them: a live broker over `$CONTROL/dynamic-security/v1`, never the file.
+    """
+
+    def test_targets_the_running_broker_and_not_a_throwaway(self) -> None:
+        """The point of the split. `MOSQUITTO_HOST` is the real broker; 1884 is gone."""
+        code = _code(CONFIGURE)
+        assert "1884" not in code
+        assert not re.search(r"^\s*mosquitto\s+-c", code, re.M)
+        assert "HOST=${MOSQUITTO_HOST:-mosquitto}" in code
+        assert '-h "$HOST"' in code
+
+    def test_never_touches_the_dynsec_file(self) -> None:
+        """If it cannot be done over $CONTROL it does not belong in this script."""
+        assert "dynamic-security.json" not in _code(CONFIGURE)
+
+    def test_creates_a_role_named_exactly_device_role(self) -> None:
+        """A name mismatch answers 503 on every enrollment. Import it, never retype it."""
+        assert f"createRole {DEVICE_ROLE}\n" in CONFIGURE.read_text()
+
+    def test_the_device_role_is_left_empty(self) -> None:
+        """The two `%u` patterns cannot live in a dynsec role — it has no substitution."""
+        assert f"addRoleACL {DEVICE_ROLE} " not in CONFIGURE.read_text()
+
+    def test_denies_by_default(self) -> None:
+        """`dynsec init` leaves publishClientReceive allowed."""
+        text = CONFIGURE.read_text()
+        for acltype in ("publishClientSend", "publishClientReceive", "subscribe"):
+            assert re.search(rf"setDefaultACLAccess\s+{acltype}\s+deny", text)
+
     def test_the_ingestor_role_is_read_only_and_scoped_to_up(self) -> None:
-        text = BOOTSTRAP.read_text()
+        text = CONFIGURE.read_text()
         assert re.search(r"addRoleACL ingestor\s+subscribePattern\s+'ff/v1/d/\+/up/#' allow", text)
         assert re.search(
             r"addRoleACL ingestor\s+publishClientReceive\s+'ff/v1/d/\+/up/#' allow", text
@@ -145,7 +220,7 @@ class TestBootstrap:
         MQTT subscriber — the ingestor being the only one is load bearing — and a `up/`
         rule would let a leaked API credential forge telemetry and fake `up/status`.
         """
-        text = BOOTSTRAP.read_text()
+        text = CONFIGURE.read_text()
         assert "createRole commander\n" in text
         assert re.search(
             r"addRoleACL commander\s+publishClientSend\s+'ff/v1/d/\+/dn/#' allow", text
@@ -156,24 +231,52 @@ class TestBootstrap:
 
     def test_the_commander_role_is_never_granted_to_a_device(self) -> None:
         """Every board holds `device`; one client holds `commander`."""
-        text = BOOTSTRAP.read_text()
-        assert re.findall(r"addClientRole\s+\S+\s+commander", text) == [
-            'addClientRole   "$MOSQUITTO_COMMANDER_USERNAME" commander'
+        text = CONFIGURE.read_text()
+        assert re.findall(r"^\s*grant\s+\S+\s+commander", text, re.M) == [
+            'grant "$MOSQUITTO_COMMANDER_USERNAME" commander'
         ]
 
+    def test_role_grants_go_through_the_read_first_helper(self) -> None:
+        """A bare `addClientRole` is not idempotent: on a duplicate mosquitto 2.0.22
+        answers "Error: Internal error" and exits 0, which cannot be told apart from a
+        real failure. `grant` reads the client's roles first instead.
+
+        `grant` itself ends in `ctrl addClientRole`, which is the point — what must not
+        come back is a *caller* reaching past it."""
+        assert not re.search(r"^\s*ctrl\s+addClientRole\s+\"?\$MOSQUITTO", _code(CONFIGURE), re.M)
+
     def test_the_commander_credential_is_mandatory(self) -> None:
-        """An unset variable must fail the bootstrap, not create a passwordless client."""
-        text = BOOTSTRAP.read_text()
+        """An unset variable must fail the run, not create a passwordless client."""
+        text = CONFIGURE.read_text()
         assert "${MOSQUITTO_COMMANDER_USERNAME:?" in text
         assert "${MOSQUITTO_COMMANDER_PASSWORD:?" in text
 
+    def test_a_refused_command_is_fatal(self) -> None:
+        """The old script ended its `ctrl` helper with `|| true`, so a broker that had
+        never been configured still logged a clean run. The only `|| true` left may be
+        the one that keeps a no-match `grep` from killing the script under `set -e`."""
+        survivors = [
+            line
+            for line in _code(CONFIGURE).splitlines()
+            if "|| true" in line and "grep -v" not in line
+        ]
+        assert survivors == []
+
+    def test_verifies_the_estate_against_the_broker(self) -> None:
+        """Read it back out of memory rather than trusting a silent success — this is
+        the assertion F-2026-09-23-002 got past for months."""
+        text = CONFIGURE.read_text()
+        assert "verify Role   commander" in text
+        assert 'verify Client "$MOSQUITTO_COMMANDER_USERNAME"' in text
+        assert 'verify Client "$MOSQUITTO_INGESTOR_USERNAME"' in text
+
     def test_the_device_role_grants_nothing_on_dn(self) -> None:
         """Both ACL backends are OR-combined, so a `+` rule on `device` would be a breach."""
-        assert "addRoleACL device" not in BOOTSTRAP.read_text()
+        assert "addRoleACL device" not in _code(CONFIGURE)
 
     def test_is_executable(self) -> None:
         """Bind-mounted and run through `sh`, but a non-executable script is a foot-gun."""
-        assert os.access(BOOTSTRAP, os.X_OK)
+        assert os.access(CONFIGURE, os.X_OK)
 
 
 class TestComposeWiring:
@@ -215,11 +318,28 @@ class TestComposeWiring:
         assert "MQTT_COMMAND_USERNAME: ${MQTT_COMMAND_USERNAME:?" in text
         assert "MQTT_COMMAND_PASSWORD: ${MQTT_COMMAND_PASSWORD:?" in text
 
-    def test_the_bootstrap_is_given_the_commander_credential(self) -> None:
-        """The same pair, under the names `bootstrap.sh` reads."""
+    def test_the_configure_phase_is_given_the_commander_credential(self) -> None:
+        """The same pair, under the names `configure.sh` reads."""
         text = COMPOSE.read_text()
         assert "MOSQUITTO_COMMANDER_USERNAME: ${MQTT_COMMAND_USERNAME:?" in text
         assert "MOSQUITTO_COMMANDER_PASSWORD: ${MQTT_COMMAND_PASSWORD:?" in text
+
+    def test_the_two_broker_phases_both_exist(self) -> None:
+        """One-phase configuration is F-2026-09-23-002. Both containers, or neither works."""
+        text = COMPOSE.read_text()
+        assert "mosquitto-init:" in text
+        assert "mosquitto-config:" in text
+
+    def test_the_configure_phase_waits_for_a_HEALTHY_broker(self) -> None:
+        """`service_completed_successfully` on the init phase would put it back before
+        the broker, which is the whole defect. It must run against a live one."""
+        block = COMPOSE.read_text().split("mosquitto-config:")[1].split("\n  mosquitto:")[0]
+        assert re.search(r"depends_on:\s*\n\s*mosquitto:\s*\n\s*condition: service_healthy", block)
+
+    def test_the_configure_phase_cannot_reach_the_dynsec_file(self) -> None:
+        """No data volume: a phase-2 script that can write the file will eventually try."""
+        block = COMPOSE.read_text().split("mosquitto-config:")[1].split("\n  mosquitto:")[0]
+        assert "/mosquitto/data" not in block
 
     def test_the_ingestor_is_not_given_the_command_credential(self) -> None:
         """One privilege per service: the ingestor subscribes, the API commands."""

@@ -233,16 +233,37 @@ denies the whole fleet.
 
 ### What the bootstrap creates
 
-A one-shot `mosquitto-init` container runs `mosquitto/bootstrap.sh`, which is idempotent
-and runs on every `up`; the broker `depends_on` it with
-`service_completed_successfully`. `mosquitto_ctrl dynsec init` is the only file-mode
-subcommand, so the script starts a throwaway broker on `127.0.0.1:1884` for everything
-else. It creates the empty `device` role, a read-only `ingestor` role
-(`subscribePattern` + `publishClientReceive` on `ff/v1/d/+/up/#` — no `$SYS`, no write),
-the `ff-ingestor` client, and sets all three default ACL accesses to `deny`. The API
-gets the dynsec `admin` credential; the broker healthcheck authenticates as the same
-admin against `'$SYS/broker/uptime'`, because an anonymous probe is now a permanently
-unhealthy broker (and, per R0-infra-1, an unhealthy container is a Traefik 404).
+**Rewritten 2026-09-23 into two phases** — see ops-log F-2026-09-23-002 and the
+superseding entry below; what follows describes the current shape.
+
+A one-shot `mosquitto-init` container runs `mosquitto/bootstrap.sh` *before* the broker,
+and does exactly one thing: `mosquitto_ctrl dynsec init` to create
+`dynamic-security.json` if it is absent, plus the uid-1883 ownership fix. The plugin
+will not load without that file, and `dynsec init` is the only file-mode subcommand.
+The broker `depends_on` it with `service_completed_successfully`.
+
+A second one-shot, `mosquitto-config`, runs `mosquitto/configure.sh` *after* the broker
+reports healthy and applies the estate over `$CONTROL/dynamic-security/v1` — the same
+live control interface the API uses for per-device enrolment. It creates the empty
+`device` role, a read-only `ingestor` role (`subscribePattern` +
+`publishClientReceive` on `ff/v1/d/+/up/#` — no `$SYS`, no write), the `ff-ingestor`
+client, the write-only `commander` role and `ff-commander` client, and sets all three
+default ACL accesses to `deny`. It is idempotent, runs on every `up` and every deploy,
+and reads the estate back out of the broker before exiting. The API gets the dynsec
+`admin` credential; the broker healthcheck authenticates as the same admin against
+`'$SYS/broker/uptime'`, because an anonymous probe is now a permanently unhealthy
+broker (and, per R0-infra-1, an unhealthy container is a Traefik 404).
+
+**The phases cannot be merged, and the reason is the most expensive thing learned about
+this broker.** Until 2026-09-23 there was one phase, which stood up a *throwaway* broker
+on `127.0.0.1:1884`, applied everything to that, and wrote the resulting JSON into the
+shared volume. The dynsec plugin reads that file once at broker startup and is
+authoritative in memory thereafter — rewriting the file from its own state whenever a
+device enrols. So on any deployment whose broker was already running, the bootstrap was
+not merely ignored, its entries were scheduled for deletion. It worked in dev only
+because `just nuke` means the broker is always starting fresh. On prod it had **never
+once taken effect**: `ff-commander` did not exist on the broker at all, every OTA deploy
+answered `Not authorized`, and `mosquitto-init` logged a clean run each time.
 
 ### Gotchas learned
 

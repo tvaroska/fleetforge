@@ -106,15 +106,50 @@ services:
   # Broker. Reachable ONLY through Traefik's `mqtt` entrypoint — no host port.
   # That is deliberate: it makes the dev path and the prod path the same path.
   # ---------------------------------------------------------------------------
-  # One-shot: creates dynamic-security.json + the roles/clients the services
-  # need, before the broker starts. Idempotent; safe on every `up`.
-  # `mosquitto_ctrl dynsec init` is the only subcommand that works on a file, so
-  # the script runs a throwaway broker on 127.0.0.1:1884 to apply the rest.
+  # THE BROKER IS CONFIGURED IN TWO PHASES, AND THEY CANNOT BE MERGED.
+  #
+  # The dynamic-security plugin reads its JSON file exactly once, at broker startup,
+  # and owns it in memory from then on — rewriting it on every enrolment. So a role
+  # or client written to that file underneath a running broker is invisible to it AND
+  # scheduled to be erased. Only `$CONTROL/dynamic-security/v1` reaches a live broker.
+  # Until 2026-09-23 there was one phase, applying the whole estate to a throwaway
+  # broker on 127.0.0.1:1884. That happens to work here, where `just nuke` means the
+  # broker is always starting fresh, and it had NEVER once reached production, where
+  # the broker is `restart: always`. ops-log F-2026-09-23-002.
+  #
+  # Phase 1, before the broker: create the file, because the plugin will not load
+  # without it. `mosquitto_ctrl dynsec init` is the only subcommand that works on a
+  # file, and creating the admin is the only thing it does here.
   mosquitto-init:
     image: eclipse-mosquitto:2.0.22
     container_name: fleetforge-mosquitto-init
     entrypoint: ["sh", "/bootstrap.sh"]
     environment:
+      # The admin and NOTHING ELSE. A service credential passed to this phase is a
+      # credential written to a file the running broker will overwrite.
+      MOSQUITTO_ADMIN_USERNAME: ${MQTT_DYNSEC_USERNAME:?set MQTT_DYNSEC_USERNAME in .env}
+      MOSQUITTO_ADMIN_PASSWORD: ${MQTT_DYNSEC_PASSWORD:?set MQTT_DYNSEC_PASSWORD in .env}
+    volumes:
+      - ./mosquitto/bootstrap.sh:/bootstrap.sh:ro
+      - fleetforge_mosquitto:/mosquitto/data
+    networks: [backend]        # not strictly needed; keeps `docker compose config` uniform
+    restart: "no"
+
+  # Phase 2, after the broker is healthy: the roles and clients, over the live
+  # control topic. Idempotent, and re-run on every `up` — it converges the broker's
+  # memory and its file, so it is also the repair for a broker that drifted.
+  # No /mosquitto/data mount, deliberately: if it cannot be done over $CONTROL it
+  # does not belong in this script.
+  mosquitto-config:
+    image: eclipse-mosquitto:2.0.22
+    container_name: fleetforge-mosquitto-config
+    entrypoint: ["sh", "/configure.sh"]
+    depends_on:
+      mosquitto:
+        condition: service_healthy
+    environment:
+      MOSQUITTO_HOST: mosquitto
+      MOSQUITTO_PORT: "1883"
       MOSQUITTO_ADMIN_USERNAME: ${MQTT_DYNSEC_USERNAME:?set MQTT_DYNSEC_USERNAME in .env}
       MOSQUITTO_ADMIN_PASSWORD: ${MQTT_DYNSEC_PASSWORD:?set MQTT_DYNSEC_PASSWORD in .env}
       MOSQUITTO_INGESTOR_USERNAME: ${MQTT_INGESTOR_USERNAME:?set MQTT_INGESTOR_USERNAME in .env}
@@ -125,9 +160,8 @@ services:
       MOSQUITTO_COMMANDER_USERNAME: ${MQTT_COMMAND_USERNAME:?set MQTT_COMMAND_USERNAME in .env}
       MOSQUITTO_COMMANDER_PASSWORD: ${MQTT_COMMAND_PASSWORD:?set MQTT_COMMAND_PASSWORD in .env}
     volumes:
-      - ./mosquitto/bootstrap.sh:/bootstrap.sh:ro
-      - fleetforge_mosquitto:/mosquitto/data
-    networks: [backend]        # not strictly needed; keeps `docker compose config` uniform
+      - ./mosquitto/configure.sh:/configure.sh:ro
+    networks: [backend]
     restart: "no"
 
   mosquitto:
@@ -372,6 +406,13 @@ services:
         condition: service_healthy
       mosquitto:
         condition: service_healthy
+      # The ingestor's own client is created in phase 2, not in the file, so on a
+      # fresh stack this is a real race: without it the sole subscriber spends its
+      # first backoff rounds being told "Not authorized". The API is deliberately
+      # NOT given this dependency — it authenticates as the dynsec admin, which
+      # phase 1 creates, and adding it would put a one-shot in `docker rollout`'s way.
+      mosquitto-config:
+        condition: service_completed_successfully
     environment:
       DATABASE_URL: postgresql+asyncpg://fleetforge:fleetforge@postgres:5432/fleetforge
       MQTT_HOST: mosquitto

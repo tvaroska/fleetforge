@@ -8,7 +8,7 @@ builders and the Null adapter live here with **no aiomqtt import**; the real ada
 **Who is allowed to publish this.** Nothing in the estate could publish `dn/cmd` before
 this task: dynsec default-denies `publishClientSend`, the `device` role is empty and the
 dynsec *admin* credential is broker-root over `$CONTROL/...` only, which grants nothing
-over `ff/v1/#`. `mosquitto/bootstrap.sh` therefore creates a third client — the
+over `ff/v1/#`. `mosquitto/configure.sh` therefore creates a third client — the
 `commander` role, `publishClientSend ff/v1/d/+/dn/#` and **nothing else**: no
 `subscribePattern`, no `publishClientReceive`, because the ingestor is the sole MQTT
 subscriber and that invariant is load bearing. The device receives its own command

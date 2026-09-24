@@ -50,7 +50,7 @@ def mqtt_command_client(settings: Settings) -> aiomqtt.Client:
     """A fresh publishing client — properties 1, 2 and 3 of the module docstring.
 
     The credential is the `commander` one (`MQTT_COMMAND_USERNAME`/`_PASSWORD`), which
-    `mosquitto/bootstrap.sh` grants `publishClientSend ff/v1/d/+/dn/#` and nothing else.
+    `mosquitto/configure.sh` grants `publishClientSend ff/v1/d/+/dn/#` and nothing else.
     Deliberately **not** the dynsec admin: broker-root is a control-plane credential
     whose rights are over `$CONTROL/...`, and reusing it here would both fail (it has no
     `ff/v1` rights) and blur two privileges that rotate separately.

@@ -1,88 +1,40 @@
 #!/bin/sh
-# Bootstrap the Mosquitto dynamic-security store. Idempotent; runs before the
+# Create the Mosquitto dynamic-security store, and do NOTHING else. Runs before the
 # broker starts (docker-compose.yml: mosquitto depends_on mosquitto-init).
 #
-# Why a throwaway broker: `mosquitto_ctrl dynsec init` is the only subcommand
-# that works on a file; every other command needs a live broker to talk to.
+# THIS SCRIPT MUST NEVER CREATE A ROLE OR A CLIENT, and must never be given a
+# credential other than the dynsec admin's. Roles and clients are configure.sh's
+# job, applied to the RUNNING broker after it is healthy.
+#
+# Why (ops-log F-2026-09-23-002): the dynamic-security plugin reads this file exactly
+# once, at broker startup, and is the sole authority on its contents thereafter —
+# rewriting the file from its own memory on every change a device enrolment makes. So
+# anything written here underneath a live broker is not merely inert, it is scheduled
+# to be erased. Until 2026-09-23 this script stood up a throwaway broker on
+# 127.0.0.1:1884 and applied the whole estate to *that*, which works on a stack whose
+# broker is about to start for the first time (dev, after `just nuke`) and has never
+# once reached prod, whose broker is `restart: always` and was never recreated. The
+# `commander` client did not exist on prod's broker at all, and every deploy answered
+# `Not authorized`.
+#
+# `mosquitto_ctrl dynsec init` is the only subcommand that works on a file, and the
+# only thing that genuinely has to happen before startup: the plugin refuses to load
+# when its config file is absent. That is the whole remit of this script.
 set -eu
 
 CONFIG=/mosquitto/data/dynamic-security.json
-PORT=1884
 : "${MOSQUITTO_ADMIN_USERNAME:?}" ; : "${MOSQUITTO_ADMIN_PASSWORD:?}"
-: "${MOSQUITTO_INGESTOR_USERNAME:?}" ; : "${MOSQUITTO_INGESTOR_PASSWORD:?}"
-: "${MOSQUITTO_COMMANDER_USERNAME:?}" ; : "${MOSQUITTO_COMMANDER_PASSWORD:?}"
 
 if [ ! -f "$CONFIG" ]; then
   echo "bootstrap: creating $CONFIG"
   mosquitto_ctrl dynsec init "$CONFIG" "$MOSQUITTO_ADMIN_USERNAME" "$MOSQUITTO_ADMIN_PASSWORD"
+else
+  echo "bootstrap: $CONFIG exists — leaving it alone, the broker owns it now"
 fi
+
 # The plugin rewrites this file on every enrolment. Root-owned = every device
 # credential is lost on the next restart, and nothing fails loudly.
 chown mosquitto:mosquitto "$CONFIG"
 chmod 0600 "$CONFIG"
 
-cat > /tmp/bootstrap.conf <<EOF
-listener $PORT 127.0.0.1
-allow_anonymous false
-plugin /usr/lib/mosquitto_dynamic_security.so
-plugin_opt_config_file $CONFIG
-EOF
-mosquitto -c /tmp/bootstrap.conf &
-trap 'kill %1 2>/dev/null || true' EXIT
-
-i=0
-until mosquitto_sub -h 127.0.0.1 -p $PORT -u "$MOSQUITTO_ADMIN_USERNAME" \
-        -P "$MOSQUITTO_ADMIN_PASSWORD" -t '$SYS/broker/uptime' -C 1 -W 2 >/dev/null 2>&1; do
-  i=$((i+1))
-  [ "$i" -gt 10 ] && {
-    echo "bootstrap: cannot authenticate as $MOSQUITTO_ADMIN_USERNAME." >&2
-    echo "bootstrap: MQTT_DYNSEC_PASSWORD was probably changed after the store was created." >&2
-    echo "bootstrap: rotate with 'mosquitto_ctrl … dynsec setClientPassword', or 'just nuke'." >&2
-    exit 1
-  }
-  sleep 1
-done
-
-# "already exists" is the second-run path, not a failure.
-ctrl() {
-  mosquitto_ctrl -h 127.0.0.1 -p $PORT -u "$MOSQUITTO_ADMIN_USERNAME" \
-    -P "$MOSQUITTO_ADMIN_PASSWORD" dynsec "$@" 2>&1 |
-    grep -v -i 'encryption\|visible on the network' || true
-}
-
-# The device role MUST exist and MUST be named exactly broker.DEVICE_ROLE —
-# createClient names it, so a mismatch answers 503 on every enrolment. It is
-# EMPTY on purpose: the fleet ACL is mosquitto/acl (dynsec has no %u).
-ctrl createRole device
-
-# The ingestor is the sole MQTT subscriber. Read-only, up/ only, no $SYS.
-ctrl createRole ingestor
-ctrl addRoleACL ingestor subscribePattern     'ff/v1/d/+/up/#' allow
-ctrl addRoleACL ingestor publishClientReceive 'ff/v1/d/+/up/#' allow
-ctrl createClient    "$MOSQUITTO_INGESTOR_USERNAME" -p "$MOSQUITTO_INGESTOR_PASSWORD"
-ctrl setClientPassword "$MOSQUITTO_INGESTOR_USERNAME" "$MOSQUITTO_INGESTOR_PASSWORD"
-ctrl addClientRole   "$MOSQUITTO_INGESTOR_USERNAME" ingestor
-
-# The API's deploy publisher (R1-be-2). WRITE-ONLY and dn/-ONLY: no
-# subscribePattern and no publishClientReceive, because the ingestor is the sole
-# MQTT subscriber and that invariant is load bearing. Nothing else in the estate
-# may publish a command — the dynsec ADMIN's rights are over $CONTROL, not over
-# ff/v1, and a device is denied its own dn/cmd (`just broker-check` proves both).
-#
-# The `+` is safe here and a `+` on the `device` role would not be: both ACL
-# backends are consulted and ALLOW WINS, so a dn/ rule on `device` would let every
-# board receive every other board's commands. This rule grants a CLASS of topics to
-# a role that holds exactly one client. Per-device dynsec ACLs would cost a control
-# -plane call per enrolment and contain nothing extra (the API already holds admin).
-ctrl createRole commander
-ctrl addRoleACL commander publishClientSend 'ff/v1/d/+/dn/#' allow
-ctrl createClient    "$MOSQUITTO_COMMANDER_USERNAME" -p "$MOSQUITTO_COMMANDER_PASSWORD"
-ctrl setClientPassword "$MOSQUITTO_COMMANDER_USERNAME" "$MOSQUITTO_COMMANDER_PASSWORD"
-ctrl addClientRole   "$MOSQUITTO_COMMANDER_USERNAME" commander
-
-# Deny by default. `dynsec init` leaves publishClientReceive=true.
-ctrl setDefaultACLAccess publishClientSend    deny
-ctrl setDefaultACLAccess publishClientReceive deny
-ctrl setDefaultACLAccess subscribe            deny
-
-echo "bootstrap: done"
+echo "bootstrap: done — roles and clients are configure.sh's job, once the broker is up"

@@ -137,7 +137,7 @@ class Settings(BaseSettings):
     # file, and never logged.
     mqtt_dynsec_username: str | None = None
     mqtt_dynsec_password: str | None = None
-    # The dynsec role a device's client is created with. `mosquitto/bootstrap.sh`
+    # The dynsec role a device's client is created with. `mosquitto/configure.sh`
     # creates a role with THIS EXACT NAME; if the two disagree, `createClient`
     # fails and every enrollment answers 503. The role is deliberately EMPTY — the
     # two `%u` pattern ACLs live in `mosquitto/acl`, because Mosquitto 2.0's dynsec
@@ -150,7 +150,7 @@ class Settings(BaseSettings):
     # The API's THIRD broker credential, and the only one that may publish into
     # `ff/v1/d/+/dn/#`. Distinct from `mqtt_dynsec_*` (broker-root over $CONTROL,
     # which grants nothing over ff/v1) and from `mqtt_username` (the ingestor's
-    # read-only client): three privileges, rotated separately. `mosquitto/bootstrap.sh`
+    # read-only client): three privileges, rotated separately. `mosquitto/configure.sh`
     # creates the `commander` role and this client. BOTH unset selects
     # `broker.NullCommandPublisher`, which REFUSES to publish — unlike
     # `NullProvisioner`, because a deploy that publishes nothing and answers 202 is a

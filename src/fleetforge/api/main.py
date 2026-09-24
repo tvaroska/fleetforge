@@ -229,7 +229,7 @@ def create_app() -> FastAPI:
             "MQTT_COMMAND_USERNAME/_PASSWORD are not set: POST /v1/devices/{id}/deploy "
             "will answer 503, because nothing may publish dn/cmd without the `commander` "
             "broker credential. The dev stack sets both on the api service; the broker "
-            "side is `mosquitto/bootstrap.sh`. Prove the path with `just broker-check`."
+            "side is `mosquitto/configure.sh`. Prove the path with `just broker-check`."
         )
     if settings is not None and not (settings.artifact_url_secret and settings.public_base_url):
         logger.warning(

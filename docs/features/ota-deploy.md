@@ -293,7 +293,7 @@ gets its first writer, and the simulator gained a real stage executor so the who
 can be exercised without a board.
 
 **A fourth broker credential, `commander`, and why the `device` role stayed empty.**
-`mosquitto/bootstrap.sh` now creates a dynsec role with exactly one ACL,
+`mosquitto/configure.sh` creates a dynsec role with exactly one ACL,
 `publishClientSend 'ff/v1/d/+/dn/#' allow`, and one client holding it
 (`MQTT_COMMAND_USERNAME`, `ff-commander` in dev). It deliberately has no
 `subscribePattern` and no `publishClientReceive`: the ingestor must remain the only
@@ -376,6 +376,15 @@ T2 ran against the live dev stack with the real 993696-byte `agent/dist/esp32/ap
   `createRole` / `addRoleACL` / `createClient` / `addClientRole` for `ff-commander` on the
   **pre-existing** dynsec store, with 13 "already exists" lines and `bootstrap: done` — the
   bootstrap is still idempotent.
+
+  > **This bullet is the one that lied, and it is left here as the lesson.** Those log
+  > lines came from the throwaway broker on `127.0.0.1:1884` that `bootstrap.sh` stood
+  > up for itself, not from `fleetforge-mosquitto`. The commander was created, correctly,
+  > on a broker that then exited. Reading a bootstrap's own log is not evidence that a
+  > running broker received anything; only `listClients` against the live broker — or
+  > `just broker-check`, which connects *as* the commander — is. On prod this credential
+  > never existed and every deploy answered `Not authorized` for five days.
+  > Fixed 2026-09-23 by splitting the bootstrap in two; ops-log F-2026-09-23-002.
 * `just broker-check` → `SELFTEST OK`, including
   `allow ff-commander -> ff/v1/d/ffff00000001/dn/cmd delivered to ffff00000001`,
   `deny ffff00000002 received nothing while ffff00000001 was commanded`, and
@@ -398,7 +407,7 @@ T2 ran against the live dev stack with the real 993696-byte `agent/dist/esp32/ap
 **Production prerequisite (not done — `services/` is a different repo and prod env is
 never edited without asking):** `services/prod/.env` must gain `MQTT_COMMAND_USERNAME` and
 `MQTT_COMMAND_PASSWORD` before the next prod deploy. Both are `:?`-mandatory in compose, so
-without them `mosquitto-init` refuses to start; if the API alone lacks them it selects
+without them `mosquitto-config` refuses to start; if the API alone lacks them it selects
 `NullCommandPublisher` and every deploy answers 503 (with one startup WARNING).
 
 **Spec proposals (filed, not applied — `spec/` is protected):** `spec/device-protocol.md`

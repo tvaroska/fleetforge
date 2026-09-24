@@ -87,6 +87,63 @@ R2 development and radio-dependent testing can be driven remotely.
 
 ---
 
+## 2026-09-23 — the broker bootstrap is two phases, and they must not be merged
+
+**Implements the decision below**, which called for `mosquitto-init` to be rewritten
+against the live control topic. Shipped as *two* one-shot containers rather than one
+rewritten container, because the two jobs have opposite ordering requirements and that
+is the whole point:
+
+* **`mosquitto-init` → `mosquitto/bootstrap.sh`, before the broker.** Creates
+  `dynamic-security.json` with `dynsec init` if absent, fixes uid-1883 ownership, and
+  stops. It has to run first, because the dynsec plugin refuses to load without the
+  file, and `dynsec init` is the only `mosquitto_ctrl` subcommand that works on one.
+  It is no longer given the ingestor or commander credentials at all — a service
+  credential handed to this phase is a credential written to a file the running broker
+  will overwrite.
+* **`mosquitto-config` → `mosquitto/configure.sh`, after the broker is healthy.** Every
+  role, client and default-ACL, applied over `$CONTROL/dynamic-security/v1`. It has to
+  run second, because that interface needs a live broker.
+
+**Why not one container that waits for the broker.** The broker `depends_on` the file
+existing, so a single container would have to be both before and after it. Splitting is
+the only shape that is not a cycle.
+
+**The idempotency this design turns on, and three ways the old script faked it.**
+`configure.sh` re-runs on every `up` and every deploy, so it converges the broker's
+memory with its file — which is why deploying it is also the *repair* for a broker that
+has already drifted, with no restart. That only holds if every command is honestly
+idempotent:
+
+1. The old `ctrl` helper ended in `|| true`. It swallowed every refusal, which is how a
+   bootstrap that had configured nothing still logged a clean run. Any unexpected output
+   is now fatal — and the *output* is what is checked, never the exit status, because
+   `mosquitto_ctrl` **exits 0 on a refused command** (verified against 2.0.22).
+2. `addClientRole` has no idempotent form. On a client that already holds the role it
+   answers `Error: Internal error`, which cannot be told apart from a real internal
+   error, so it cannot go in a tolerated-error branch. Role grants read the client's
+   roles back first instead. `createRole`, `createClient` and `addRoleACL` do all answer
+   "already exists" and are handled that way.
+3. Nothing ever read the result back. The script now ends by fetching all five roles and
+   clients out of the broker's memory and failing if any is missing — the assertion
+   F-2026-09-23-002 got past for five days.
+
+**`deploy.sh` must list `mosquitto-config` in `INFRA_SERVICES` explicitly.** It depends
+*on* mosquitto rather than the other way round, so `docker compose up -d mosquitto` does
+not pull it in. Only the ingestor `depends_on` it, and deliberately not the API: the API
+authenticates as the dynsec admin, which phase 1 creates, and a one-shot in
+`docker rollout`'s path buys nothing.
+
+**Verification.** The dev broker was put into prod's exact state — `deleteClient
+ff-commander` + `deleteRole commander` against the *running* broker — and reproduced the
+symptom (`mosquitto_pub -u ff-commander` → CONNACK 135, while the on-disk file was
+irrelevant to it). Re-running `mosquitto-config` restored it to CONNACK 0 with no broker
+restart, and `just broker-check` returned `SELFTEST OK` across the full ACL matrix.
+Separately: a fresh volume configures correctly from both phases, the estate survives a
+broker restart, a wrong admin password exits 1 with the rotation hint, and a re-run
+against a fully configured broker is silent. `tests/test_broker_config.py` guards the
+split in both directions.
+
 ## 2026-09-23 — R1 closed on hardware; bootstrap must drive the live broker, not its file
 
 **OTA works on metal.** `R1-test-1` passed: device `94a990dd09a4` (ESP32-S3) went

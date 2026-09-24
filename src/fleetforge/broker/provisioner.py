@@ -38,7 +38,7 @@ from typing import Protocol
 logger = logging.getLogger(__name__)
 
 # The dynsec role every device's client is created with. The default for
-# `Settings.mqtt_dynsec_role`; `mosquitto/bootstrap.sh` creates a role with EXACTLY
+# `Settings.mqtt_dynsec_role`; `mosquitto/configure.sh` creates a role with EXACTLY
 # this name, or every `createClient` fails and every enrollment answers 503.
 #
 # THAT ROLE IS INTENTIONALLY EMPTY, and it must stay empty. The two `%u` pattern ACLs
