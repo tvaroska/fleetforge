@@ -50,13 +50,15 @@ was broken in two places that every other signal reported as healthy:
   that read its config at startup and never reloads. The `commander` client and role did
   not exist in the broker's memory at all. Per-device enrolment works because the API uses
   the live control topic, which is exactly what `mosquitto-init` should be doing.
-  **Fixed structurally 2026-09-23 — FIX PENDING, awaiting a prod deploy.** The bootstrap
+  **Fixed structurally and DEPLOYED 2026-09-23.** The bootstrap
   is now two one-shots: `mosquitto-init` creates only the file, before the broker;
   `mosquitto-config` applies every role and client over `$CONTROL` after the broker is
   healthy. It is idempotent and re-runs on every deploy, so **deploying it is also the
   repair** — it converges prod's broker with no restart, and there is nothing to hand-run
   first. Reproduced and fixed on the dev broker (deleted `commander` from the live broker
   → CONNACK 135 → re-ran the container → CONNACK 0 → `just broker-check` `SELFTEST OK`).
+  On prod it converged on the hand-made `commander` rather than duplicating it, and
+  `broker selftest` in the prod API container passes end-to-end *as* the commander.
   Reasoning in `DECISIONS.md`; the two phases must not be merged back.
 - **A mutable URL served `max-age=3600`** aborted a flash on a bogus sha256 mismatch.
   Fixed in `c4fa7d2`, **not yet deployed**.
