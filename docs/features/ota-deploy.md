@@ -850,6 +850,13 @@ heartbeat payload does not carry the field, and `device.py` says as much ("annou
 the next connect"). The version flip is observed by making the board reconnect
 (`docker compose restart mosquitto`), which is what a rebooting board does anyway.
 
+> **Superseded 2026-09-23 by S0-test-4, and half of it was never true.** The heartbeat
+> *does* carry `fw_version` (`DeviceIdentity.heartbeat`, and `ingestor/store.py` reads it
+> from there) — it carried the **stale** one, which is a different thing and is the whole
+> defect. And the manual `docker compose restart mosquitto` is no longer needed: the
+> simulator now ends its own session on apply, so the version converges unaided. See
+> *The simulator never reconnected after `apply`* below.
+
 **Deliberately not in R1:** an upload UI (curl only), a deploy history/timeline, group
 deploy, cancel (there is no server-authored cancel), and a rollback button (R2).
 
@@ -858,6 +865,82 @@ say outright that `up/status.state` is an **open** vocabulary: the server stores
 with no CHECK, `DeployState` is advisory, and both the server and this dashboard treat an
 unrecognised value as a legitimate state to record and render verbatim. That is already
 the behaviour on both sides; the spec only implies it by listing examples.
+
+### The simulator never reconnected after `apply` (S0-test-4) — **LANDED 2026-09-23**
+
+**Why this is filed under OTA deploy rather than under the simulator.** The simulator is
+the only hardware-free check of R1's central claim — "the version the board reports
+afterwards is the one that was uploaded" — and it had never once checked it. CUJ-1
+segment 5 is graded by exactly this harness, so the defect is what blocked the R1→R2
+transition at the T3 gate, twice on 2026-09-23.
+
+**What was wrong.** `StageRunner._stage` finished the walk, rebound
+`self.identity = replace(self.identity, fw_version=version)` and logged *"apply now
+running fw_version 1.6.0 (announced on the next connect)"*. Every word of that is true
+and none of it is observable: `run_session` had captured the **old frozen**
+`DeviceIdentity` as its local `device`, and its heartbeat loop kept publishing from it.
+On an `always_on` board nothing ever ends the MQTT session, so the promised next connect
+never came and `GET /v1/devices` reported the pre-deploy version indefinitely. The server
+was never at fault. A real board reboots — the TCP session dies and it re-announces under
+its own power — which is exactly why `R1-test-1` passed on metal (0.3.2 → 0.3.1) while
+this path silently did not.
+
+**What shipped.** `StageRunner` grew a `reboot: asyncio.Event`, set unconditionally once
+the walk publishes `rebooting` (the reboot is a consequence of the apply, not of the
+payload naming a version). `run_session` races it alongside `stop` as a second exit
+condition and skips the goodbye when it fires — a restarting board stops mid-sentence, it
+does not report itself offline. `run_always_on` treats that return as a **third kind of
+session end**, distinct from a broker error and from the broker closing the stream: it
+clears the flag, resets `boot_monotonic` so uptime restarts, waits `REBOOT_DELAY_S`
+(2.0 s, standing in for bootloader + Wi-Fi + CONNECT) and reconnects with
+`stage.identity`, which is how the new version legitimately reaches the server.
+`run_sleepy` does the same minus the delay and re-announces on its next wake.
+
+**The one deviation that remains, recorded rather than fixed.** `aiomqtt` has no public
+API for dropping a connection (module docstring, property 5), so the reboot still exits
+through a clean DISCONNECT and the LWT does not fire. Retained presence therefore stays
+`{"online":true}` across the reboot instead of flapping offline for the length of a boot
+— the benign direction, and the same class of limitation already recorded for sleepy mode.
+
+**A stale note corrected.** The R1-fe-1 write-up above told the next reader that the
+heartbeat does not carry `fw_version`. It does; it was carrying the stale one.
+
+**Verification.** T1: `just lint` (ruff + `ruff format --check`), `just typecheck`
+(mypy, 71 source files) and `just test` — **941 tests pass**.
+
+T2, both halves of the acceptance criterion:
+
+1. *Asserted by a test, not read by hand.* Four new tests in `tests/test_simulator.py`,
+   and the first ones in the suite to drive the reconnect loops at all:
+   `test_an_apply_ends_the_session_and_the_next_one_reports_the_new_version` (the
+   reproduction — announce **and** heartbeat carry `1.6.0` in the second session, the
+   first carried `1.4.2`, the first published no goodbye), the `sleepy` twin, an apply
+   with no version (still reboots), and a tripwire that a session which applies nothing is
+   not cut short and still owes its goodbye. Confirmed discriminating: with
+   `self.reboot.set()` removed, the reproduction test fails on its 5 s deadline.
+2. *The literal reproduction from the T3 gate*, dev stack, same board the second `/replan`
+   run used:
+
+```
+just sim-fleet 1 --capabilities ota   → sim-01 -> 92a9cd2d4251, fw_version 1.4.2, online
+POST /v1/devices/92a9cd2d4251/deploy {"version":"1.6.0"}
+                                      → 202, cmd_id 1068a68bea70410da823598188885012,
+                                        sha256 5c0e4851…, 230000 bytes
+transcript                            staging → downloading → verifying (sha256 matches)
+                                        → staged → applying → rebooting
+                                      → reboot   restarting into fw_version 1.6.0
+                                      → boot     back in 2s on 1.6.0
+                                      → connect / announce / presence / hb
+GET /v1/devices (≈20 s later)         {"device_id":"92a9cd2d4251","fw_version":"1.6.0",
+                                       "online":true}
+```
+
+   This is the exact check that returned `fw_version: 1.4.2` on both gate runs.
+
+**Still true after this, and still R2:** the deploy parks at `rebooting` with
+`is_terminal: false` forever, because nothing writes `CONFIRMED` — confirm reporting is
+`R2-BE-1`/`R2-FW-3`. The simulator's stage walk deliberately ends where the R1 agent's
+does.
 
 ## Phase 2: R2 — Safe deploy: verify + auto-rollback ⭐
 

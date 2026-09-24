@@ -445,6 +445,8 @@ class StageRunner:
       download" is an acceptance criterion and needs to be observable.
     * `identity` — adopted after a successful apply, so later `up/announce` publishes
       carry the **new** `fw_version`, exactly as a rebooted board would.
+    * `reboot` — set when an apply has happened, and the only way the new `identity`
+      ever reaches the server. See `_stage` and `run_session`.
     """
 
     identity: DeviceIdentity
@@ -452,6 +454,9 @@ class StageRunner:
     safe_window: str = SAFE_WINDOW_AUTO
     seen: set[str] = field(default_factory=set)
     downloads: int = 0
+    # Not an argument: a caller passing in a pre-set event would start a board that
+    # reboots before it has applied anything.
+    reboot: asyncio.Event = field(default_factory=asyncio.Event, init=False)
 
     def __post_init__(self) -> None:
         if self.safe_window not in SAFE_WINDOW_MODES:
@@ -559,6 +564,15 @@ class StageRunner:
             # say so, which is what makes "delivery success" checkable end to end.
             self.identity = replace(self.identity, fw_version=version)
             step(f"apply    now running fw_version {version} (announced on the next connect)")
+        # **And the next connect has to actually happen.** Rebinding `identity` above
+        # changes nothing the server can see: `run_session` captured the old frozen
+        # identity and its heartbeat loop keeps publishing from it, so a board that never
+        # drops its session never reports the version it just applied (S0-test-4 — the
+        # defect that made CUJ-1 segment 5 unpassable). A real board reboots here, which
+        # is what ends the session; this is the simulator's reboot. Unconditional,
+        # because the reboot is the consequence of the apply and not of the payload
+        # carrying a version.
+        self.reboot.set()
 
     async def _status(
         self,
@@ -634,9 +648,11 @@ async def run_session(
     5. on a clean exit, the **goodbye** — retained `{"online":false}` — and only then
        the DISCONNECT the context manager sends.
 
-    Ends when `stop` is set, when `awake_s` elapses (the sleepy duty cycle), or when a
-    child task raises — an `aiomqtt.MqttError` from the heartbeat loop propagates so
-    the caller's reconnect logic can see it. `stop` rather than task cancellation is
+    Ends when `stop` is set, when `stage.reboot` is set (an apply happened — the session
+    dies the way a restarting board's does, and the caller's loop brings it back on the
+    new image), when `awake_s` elapses (the sleepy duty cycle), or when a child task
+    raises — an `aiomqtt.MqttError` from the heartbeat loop propagates so the caller's
+    reconnect logic can see it. `stop` rather than task cancellation is
     deliberate: publishing the goodbye needs a live event loop and an uncancelled
     task, and a `finally:` that awaits inside a cancelled task cannot have one.
 
@@ -689,23 +705,33 @@ async def run_session(
             ),
             asyncio.create_task(_command_loop(client, stage, step)),
         ]
-        waiter = asyncio.create_task(stop.wait())
+        # Two ways to be asked to leave, and they are not the same event: `stop` is the
+        # operator, `stage.reboot` is the board restarting into the image it just applied.
+        sentinels = [asyncio.create_task(stop.wait()), asyncio.create_task(stage.reboot.wait())]
         try:
             done, _ = await asyncio.wait(
-                [*workers, waiter], timeout=awake_s, return_when=asyncio.FIRST_COMPLETED
+                [*workers, *sentinels], timeout=awake_s, return_when=asyncio.FIRST_COMPLETED
             )
             for task in done:
-                if task is not waiter:
+                if task not in sentinels:
                     # Re-raises MqttError from a worker; a worker returning normally
                     # means the broker closed the message stream, which is the same
                     # thing the caller must react to.
                     task.result()
         finally:
-            for task in [*workers, waiter]:
+            for task in [*workers, *sentinels]:
                 task.cancel()
-            await asyncio.gather(*workers, waiter, return_exceptions=True)
+            await asyncio.gather(*workers, *sentinels, return_exceptions=True)
 
-        if goodbye:
+        if stage.reboot.is_set():
+            # A rebooting board says nothing on its way out — it is gone mid-sentence.
+            # The one thing this cannot reproduce is the ungraceful drop: `aiomqtt` has
+            # no public API for it (property 4), so the context manager below still sends
+            # a DISCONNECT and the LWT does not fire. Server-visible difference is that
+            # retained presence stays `{"online":true}` across the reboot rather than
+            # flapping offline for the length of a boot, which is the benign direction.
+            step(f"reboot   restarting into fw_version {stage.identity.fw_version}")
+        elif goodbye:
             # A clean DISCONNECT does not fire the LWT — property 4. Without this the
             # dashboard shows a board that is not running until it comes back.
             await client.publish(
@@ -721,6 +747,13 @@ async def run_session(
 # is not a useful simulator, and neither is one that hammers a down broker.
 RECONNECT_INITIAL_DELAY_S = 1.0
 RECONNECT_MAX_DELAY_S = 30.0
+
+# How long the simulated board is "down" between an apply and the session that announces
+# the new version. It stands in for a real ESP32's restart — bootloader, app start, Wi-Fi
+# association, broker CONNECT — which `R1-test-1` measured at a few seconds on metal. Not
+# part of the backoff: a reboot is a scheduled absence, not a broker problem, so it
+# neither grows nor resets the reconnect delay.
+REBOOT_DELAY_S = 2.0
 
 
 async def run_always_on(
@@ -745,6 +778,12 @@ async def run_always_on(
 
     The `StageRunner` is built **here**, outside the reconnect loop, so dedup and the
     applied firmware version survive a reconnect.
+
+    **A reboot is a third kind of session end**, distinct from the two in the paragraph
+    above: not an error and not a broker closing the stream, but the board deliberately
+    restarting into an image it just applied. It is the only path by which a new
+    `fw_version` reaches the server, so it is handled here rather than swept into the
+    generic reconnect — see `REBOOT_DELAY_S`.
     """
     boot_monotonic = time.monotonic()
     connected = asyncio.Event()
@@ -772,6 +811,17 @@ async def run_always_on(
         else:
             if stop.is_set():
                 return
+            if stage.reboot.is_set():
+                # The session ended because the board applied an update. Come back as a
+                # freshly booted board: uptime restarts, and the next `run_session` is
+                # handed `stage.identity`, so the announce and every heartbeat after it
+                # carry the version that is now running.
+                stage.reboot.clear()
+                boot_monotonic = time.monotonic()
+                step(f"boot     back in {REBOOT_DELAY_S:.0f}s on {stage.identity.fw_version}")
+                await _sleep_until(stop, REBOOT_DELAY_S)
+                delay = RECONNECT_INITIAL_DELAY_S
+                continue
             step(f"reconnect the broker closed the session; retrying in {delay:.0f}s")
             delay = RECONNECT_INITIAL_DELAY_S
         await _sleep_until(stop, delay)
@@ -820,6 +870,13 @@ async def run_sleepy(
         )
         if stop.is_set():
             return
+        if stage.reboot.is_set():
+            # An apply cut the wake short. A sleepy board boots into the new image and
+            # then goes back to its duty cycle, so it re-announces on its next wake
+            # rather than immediately — the same convergence, one wake interval later.
+            stage.reboot.clear()
+            boot_monotonic = time.monotonic()
+            step(f"boot     rebooted onto {stage.identity.fw_version}")
         step(f"sleep    {wake_interval_s:.0f}s until the next wake")
         await _sleep_until(stop, wake_interval_s)
 

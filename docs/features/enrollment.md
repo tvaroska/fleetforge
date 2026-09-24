@@ -335,6 +335,11 @@ test in `tests/test_simulator.py` that fails when it regresses:
   enforces it). A simulator that shares the server's parsing agrees with the server by
   construction and proves nothing; `fleetforge.config` in particular would make
   `DATABASE_URL` mandatory to run a fake board.
+- **An apply ends the session, because that is what a reboot does** (S0-test-4,
+  2026-09-23). Adopting the new `fw_version` into `StageRunner.identity` is invisible on
+  its own: the running session captured the old frozen identity, so an `always_on` board
+  announced the version it had applied only if something else happened to disconnect it.
+  Write-up in `ota-deploy.md`.
 - **A single-use token is never spent by accident.** Everything checkable is validated
   before the token is presented, and a credential already on disk means *no*
   enrollment — never a silent re-enroll. `mqtt_password` reaches exactly one place:

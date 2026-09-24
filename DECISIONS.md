@@ -6,6 +6,47 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-09-23 — a simulated apply ends the session, because that is what a reboot is
+
+**Decided: fix CUJ-1 segment 5 by giving the simulator a reboot, not by making the live
+session tell the truth about its identity.** The tempting one-liner was to let the
+heartbeat loop read `stage.identity` on every beat, so the new `fw_version` appears
+without a reconnect. Rejected: it would make the gate pass while modelling a board that
+does not exist. A real ESP32 cannot change the version it is reporting without restarting
+— the announce/reconnect boundary is the *only* place a version legitimately changes, and
+`ingestor` presence, `last_seen` and the deploy timeline are all shaped around a board
+that goes away for a few seconds. Fidelity here is the product: the simulator's whole
+value is that a pass against it means something about metal, and `R1-test-1` passed on
+metal through exactly this path (0.3.2 → 0.3.1) while the sim silently did not.
+
+**The defect is worth remembering more than the fix is.** `_stage` rebound
+`StageRunner.identity` and logged "announced on the next connect". True, honest, and
+never checked — on an `always_on` board the next connect never comes, because nothing
+ended the session. The write-up is in `docs/features/ota-deploy.md`; the shape is
+F-2026-09-23-001/002 again (`../docs/ops-log.md`): *a component reporting healthy because
+nothing exercises the one path that is broken*. Two signals were pointing at it and
+neither was believed — the R1-fe-1 acceptance script already carried a note that the
+version only flips if you `docker compose restart mosquitto`, and that note also contained
+a wrong explanation (that heartbeats do not carry `fw_version`; they do, they were
+carrying the stale one). **A manual step in an acceptance script that stands in for
+something the product is supposed to do by itself is a bug report.**
+
+**Learnings for whoever touches the simulator next.**
+
+* A reboot is a *third* kind of session end, and it is worth keeping distinct from the
+  other two. Not an error, not the broker closing the stream: a scheduled absence. It
+  neither grows nor resets the reconnect backoff, and it resets `boot_monotonic` because
+  a rebooted board's uptime starts over.
+* `tests/test_simulator.py` had never driven `run_always_on` or `run_sleepy` at all —
+  every test called `run_session` directly, which is precisely the layer that cannot
+  observe a reconnect. The four new tests are the first to hold a reconnect loop.
+* The remaining infidelity is recorded, not hidden: the reboot exits through a clean
+  DISCONNECT, so the LWT does not fire and retained presence stays `online` across the
+  boot. `aiomqtt` has no public API for an ungraceful drop (property 5), and `--crash-after`
+  remains the only honest way to exercise a real will.
+
+---
+
 ## 2026-09-23 — auto-rollback proven on metal; remote firmware work is unblocked
 
 **The board saved itself.** Device `94a990dd09a4` was deployed a deliberately broken

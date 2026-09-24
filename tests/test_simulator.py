@@ -23,6 +23,7 @@ import hashlib
 import json
 import os
 import stat
+import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -66,7 +67,9 @@ from fleetforge.simulator.device import (
     mqtt_client_factory,
     redact_url,
     redacted_command,
+    run_always_on,
     run_session,
+    run_sleepy,
     up_topic,
     will_for,
 )
@@ -670,6 +673,191 @@ async def test_the_transcript_prints_the_command_with_the_url_redacted(
     # Everything else about the command is printed, or the line would be useless.
     assert '"type": "stage"' in joined
     assert FIRMWARE_SHA256 in joined
+
+
+# ---------------------------------------------------------------------------
+# The reboot after an apply (S0-test-4)
+#
+# The defect these cover is the reason CUJ-1 segment 5 could not pass: `_stage`
+# rebound `StageRunner.identity` and stopped there, but `run_session` had captured the
+# old frozen identity and its heartbeat loop kept publishing from it. An `always_on`
+# board never dropped the session, so the "next connect" the apply line promises never
+# came and `GET /v1/devices` reported the old `fw_version` forever. Everything below
+# asserts convergence rather than the rebind — the rebind was always correct and always
+# invisible.
+#
+# These are also the only tests that drive the reconnect loops at all.
+# ---------------------------------------------------------------------------
+
+
+def channel_payloads(fake: FakeClient, device_id: str, channel: str) -> list[dict[str, Any]]:
+    """Every JSON body this session published on one `up/` channel, in order."""
+    return [
+        json.loads(payload)
+        for topic, payload, _, _ in fake.published
+        if topic == up_topic(device_id, channel)
+    ]
+
+
+def session_factory(
+    device_id: str, first_command: bytes | None = None
+) -> tuple[list[FakeClient], Any]:
+    """A `client_factory` handing out a **fresh** `FakeClient` per session.
+
+    Fresh because the real one is (property 5), and because "the board reconnected" is
+    otherwise unobservable: the list of clients *is* the list of sessions. Only the
+    first session receives the command, exactly like a broker that delivered a `stage`
+    once.
+    """
+    clients: list[FakeClient] = []
+
+    def factory() -> FakeClient:
+        fake = FakeClient()
+        if not clients and first_command is not None:
+            fake.inbox.put_nowait(FakeMessage(f"ff/v1/d/{device_id}/dn/cmd", first_command))
+        clients.append(fake)
+        return fake
+
+    return clients, factory
+
+
+async def wait_until(predicate: Any, timeout: float = 5.0) -> None:
+    """Poll until `predicate()`, or fail the test rather than hang the suite."""
+    deadline = time.monotonic() + timeout
+    while not predicate():
+        if time.monotonic() > deadline:
+            raise AssertionError("the simulator never reached the expected state")
+        await asyncio.sleep(0.01)
+
+
+async def drive_until(runner: Any, predicate: Any, stop: asyncio.Event) -> None:
+    """Run a forever-loop (`run_always_on` / `run_sleepy`) until `predicate`, then stop."""
+    task = asyncio.create_task(runner)
+    try:
+        await wait_until(predicate)
+    finally:
+        stop.set()
+        await asyncio.wait_for(task, timeout=5.0)
+
+
+async def test_an_apply_ends_the_session_and_the_next_one_reports_the_new_version(
+    downloads: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """S0-test-4, the whole of it: `fw_version` converges without anyone touching it."""
+    monkeypatch.setattr("fleetforge.simulator.device.REBOOT_DELAY_S", 0.0)
+    identity = DeviceIdentity(device_id="a4cf12b3de90", fw_version="1.4.2", capabilities=("ota",))
+    clients, factory = session_factory(identity.device_id, stage_command(version="1.6.0"))
+    stop = asyncio.Event()
+    lines, step = transcript()
+
+    await drive_until(
+        run_always_on(
+            identity,
+            credential_for(identity.device_id),
+            client_factory=factory,
+            link=LinkProfile(LINK_FAST),
+            heartbeat_interval_s=0.01,
+            stop=stop,
+            step=step,
+        ),
+        lambda: (
+            len(clients) == 2 and channel_payloads(clients[1], identity.device_id, HEARTBEAT) != []
+        ),
+        stop,
+    )
+
+    assert len(clients) == 2, "the apply did not end the session, so no new version is announced"
+    before, after = clients
+    device_id = identity.device_id
+    assert channel_payloads(before, device_id, ANNOUNCE)[0]["fw_version"] == "1.4.2"
+    # Both, deliberately: the ingestor reads `fw_version` off the **heartbeat**
+    # (`ingestor/store.py`), which is the message that carried the stale version for as
+    # long as this defect was open, and the announce is what a dashboard row is built from.
+    assert channel_payloads(after, device_id, ANNOUNCE)[0]["fw_version"] == "1.6.0"
+    assert channel_payloads(after, device_id, HEARTBEAT)[0]["fw_version"] == "1.6.0"
+    # The last thing the old session said was `rebooting`, and it did not say goodbye:
+    # a restarting board stops mid-sentence, it does not report itself offline.
+    assert [report["state"] for report in statuses(before)] == list(STAGE_WALK)
+    assert PRESENCE_OFFLINE not in [payload for _, payload, _, _ in before.published]
+    assert any(line.startswith("reboot") for line in lines)
+
+
+async def test_an_apply_with_no_version_still_reboots(
+    downloads: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reboot is the consequence of the apply, not of the payload naming a version."""
+    monkeypatch.setattr("fleetforge.simulator.device.REBOOT_DELAY_S", 0.0)
+    identity = DeviceIdentity(device_id="a4cf12b3de90", fw_version="1.4.2")
+    clients, factory = session_factory(identity.device_id, stage_command(version=""))
+    stop = asyncio.Event()
+
+    await drive_until(
+        run_always_on(
+            identity,
+            credential_for(identity.device_id),
+            client_factory=factory,
+            link=LinkProfile(LINK_FAST),
+            heartbeat_interval_s=0.01,
+            stop=stop,
+        ),
+        lambda: len(clients) == 2,
+        stop,
+    )
+
+    assert channel_payloads(clients[1], identity.device_id, ANNOUNCE)[0]["fw_version"] == "1.4.2"
+
+
+async def test_a_sleepy_board_reports_the_new_version_on_its_next_wake(
+    downloads: list[str],
+) -> None:
+    """Same convergence, one duty cycle later — the acceptance criterion's second half.
+
+    Honest about what it proves: a sleepy board ends its session every `awake_s`
+    regardless, so this one **passes even with the reboot removed**. It is a regression
+    guard for the half of the fleet that was accidentally fine, not a reproduction of
+    the defect — `test_an_apply_ends_the_session_…` is the test that fails without the
+    fix.
+    """
+    identity = DeviceIdentity(
+        device_id="a4cf12b3de90",
+        fw_version="1.4.2",
+        power_class="sleepy",
+        expected_wake_interval_s=60,
+        capabilities=("ota",),
+    )
+    clients, factory = session_factory(identity.device_id, stage_command(version="1.6.0"))
+    stop = asyncio.Event()
+
+    await drive_until(
+        run_sleepy(
+            identity,
+            credential_for(identity.device_id),
+            client_factory=factory,
+            link=LinkProfile(LINK_FAST),
+            heartbeat_interval_s=0.01,
+            wake_interval_s=0.02,
+            awake_s=0.3,
+            stop=stop,
+        ),
+        lambda: (
+            len(clients) == 2 and channel_payloads(clients[1], identity.device_id, HEARTBEAT) != []
+        ),
+        stop,
+    )
+
+    assert channel_payloads(clients[1], identity.device_id, ANNOUNCE)[0]["fw_version"] == "1.6.0"
+    assert channel_payloads(clients[1], identity.device_id, HEARTBEAT)[0]["fw_version"] == "1.6.0"
+
+
+async def test_a_session_that_applies_nothing_is_not_cut_short(downloads: list[str]) -> None:
+    """The tripwire for the obvious wrong fix: reconnecting on every command."""
+    # `apply=on_command` stages and waits for R2; no apply, so no reboot.
+    _, fake, _ = await run_stage(stage_command(apply="on_command"), awake_s=0.15)
+
+    assert fake.enters == 1
+    assert any(payload == PRESENCE_OFFLINE for _, payload, _, _ in fake.published), (
+        "a session that ended without applying anything still owes its goodbye"
+    )
 
 
 def test_redact_url_keeps_the_origin_and_drops_everything_else() -> None:

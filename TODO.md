@@ -66,7 +66,7 @@ graded. Result:
 |---|---|---|
 | 1–2 | Sketch compiles with the library | not graded — R3, no harness yet |
 | 3 | One flash → board on the fleet | **pass** — `agent-qemu-smoke` OK, `pytest tests/test_enroll.py` 29 passed, board online in `GET /v1/devices` |
-| 5 | OTA a changed build → new version reported | **FAIL** — `fw_version` never converges. `S0-test-4` |
+| 5 | OTA a changed build → new version reported | **FAIL** — `fw_version` never converges. `S0-test-4` (fixed 2026-09-23, gate not yet re-run) |
 | 6 | A bad build recovers itself | not graded — no QEMU harness; proved on metal 2026-09-23, not by a runner |
 | — | A wrong flash layout is refused | not graded — R3 (`R3-fw-5`) |
 
@@ -89,22 +89,33 @@ simulator never reconnects after `apply`) and `S0-infra-8` (the ingestor's liven
 measures traffic, and prod has no probe at all). Neither was visible from the code review
 that prompted the run; both needed the harness actually executed.
 
+**`S0-test-4` landed 2026-09-23, and segment 5's defect is gone.** The simulated apply now
+ends the session the way a reboot does, so the board re-announces under its own power. The
+gate's own reproduction was re-run afterwards and converged: board `92a9cd2d4251`, deploy
+`1068a68b…` → 202, `fw_version` **1.6.0** in `GET /v1/devices` about 20 s later, where both
+gate runs had reported 1.4.2. Write-up in `docs/features/ota-deploy.md`, reasoning in
+`DECISIONS.md`. **The gate itself has not been re-run** — that is `/replan`'s job, and
+segment 5 is only one of its segments. `S0-infra-8` remains open.
+
 Two things the run also confirmed, which are R2 content rather than regressions: the
 deploy parked at `rebooting` with `is_terminal: false` permanently — nothing writes
 `CONFIRMED`, because confirm reporting is `R2-be-1`/`R2-fw-3` and does not exist — and
 every row in `GET /v1/devices` still has `name: null`.
 
+**The DevKit v1 is out of consideration (2026-09-23).** It is an old board, and the S3
+carries every path that matters. `S0-fw-3` is closed unfixed as a result — see the entry
+for the two findings that survive it. Bridge-chip boards as a *class* stay in scope:
+cheap DevKits ship CP2102/CH340, so `S0-fe-8` (no VCP driver, no COM port) and
+`S0-test-1` (the console's bridge-chip half) remain P1 and just need some bridge-chip
+board, not that one.
+
 Remaining bench order:
 
 1. **S0-test-1** — the four serial-console properties that only a USB bridge chip can prove.
 2. **S0-test-2** — unblocked by the S3 above; the native-USB re-acquire path.
-3. **S0-fw-3** (`- [!]`, below) — flash v0.2.0 to the *stuck* DevKit v1. No longer urgent,
-   but still the clean single-variable experiment, and still a real defect.
 
 **Prod serves the v0.2.0 agent** (`d705652` — `-Os`, 80 MHz, max modem sleep, the
-TX-power ladder), shipped in v0.3.5. That is what the S3 was flashed with, and it
-is also step 1 of the S0-fw-3 bench order — so retrying the stuck board needs no special
-build, just a flash.
+TX-power ladder), shipped in v0.3.5. That is what the S3 was flashed with.
 
 **R1 is open alongside R0, from 2026-09-16.** This file normally carries Sprint 0 plus
 *one* release; it now carries two, because R0 is not in progress — it is parked on
@@ -167,7 +178,22 @@ the retired bingo app), single-tenant, **not a public product until V3**.
 
 Bricking risks, broker auth and security issues get filed here as they surface.
 
-- [!] **S0-fw-3**: A board that browns out during RF calibration cannot escape it (P1, 0.5d)
+- [x] **S0-fw-3**: A board that browns out during RF calibration cannot escape it (P1, 0.5d)
+      — **withdrawn 2026-09-23, not fixed.** The board this entry is about is the classic
+      ESP32-DevKit v1, and that board is out of consideration: it is old, an ESP32-S3
+      (`94a990dd09a4`) carries every bench path that matters, and the one remaining
+      experiment needs the *stuck* DevKit v1 specifically. Closed rather than parked
+      because there is no session in which it gets picked up.
+      **Two results survive the closure and must not be re-derived:** (1) the 2026-09-14
+      finding that the fault is *ours*, not the supply's — a brand-new board on the same
+      cable and port ran a cold full RF calibration under ESPHome and survived, so our
+      startup draws more than it needs to; (2) the reporting half shipped in v0.3.3 and
+      is correct and inert on healthy boards — `FF_PROGRESS_BROWNOUT` → `BROWNOUT` stage →
+      "recovered from a power fault" on the dashboard. Keep both.
+      **What is unproven and stays unproven:** whether any board that browns out during
+      calibration can escape it. That is a fleet property, not one board's, and if it
+      resurfaces on a board we care about it comes back as a new S0 task — with the
+      80 MHz / `-Os` flash (step 1 below) as the first untried lever. Detail preserved:
       Found 2026-09-12 from an operator's diagnostic bundle: six boots, each one
       `phy_init: failed to load RF calibration data (0x1102), falling back to full
       calibration` and then `E BOD: Brownout detector was triggered`. Self-sustaining —
@@ -323,8 +349,12 @@ Bricking risks, broker auth and security issues get filed here as they surface.
         mode and prints `waiting for download` forever.
       * **Release really releases.** After the button, `screen /dev/tty.usbserial-… 115200`
         must open. If it reports "Resource busy", `port.close()` is not being reached.
-      Acceptance: all four confirmed on the Mac against an ESP32-DevKit v1 (bridge chip).
-      Anything that fails comes back as a new S0 task with the observed behaviour.
+      Acceptance: all four confirmed against **any** bridge-chip board (CP2102 or CH340) —
+      retargeted 2026-09-23, since the DevKit v1 is out of consideration and this task
+      tests the bridge-chip *path*, not that board. Anything that fails comes back as a
+      new S0 task with the observed behaviour.
+      ⚠️ The bench host is unsettled: this entry says the Mac, but `S0-fe-8` was observed
+      on Windows + Chrome. Re-acquire is an OS-and-driver property — record which host.
 
 - [ ] **S0-fe-8**: A board with no COM port leaves the operator at a dead end (P1, <2h)
       Added: 2026-09-23
@@ -384,40 +414,6 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       a **Windows + Chrome** bench with native USB on COM3. Confirm which host before
       running either — the re-acquire window is an OS-and-driver property, so a result on
       one host is not a result on the other.
-
-- [ ] **S0-test-4**: The simulator never reconnects after `apply`, so CUJ-1 step 5 cannot pass (P1, 0.5d)
-      Found 2026-09-23 running the T3 gate for the R1→R2 transition. **This blocks the
-      sprint close**, and it is the reason it blocks: the harness `spec/cujs.md` names for
-      CUJ-1 segment 5 cannot satisfy its own deterministic judge.
-      Reproduction, against the dev stack: `just sim-fleet 1 --capabilities ota` enrolled
-      `9e417ad42ca4` (esp32c6, `fw_version` 1.4.2), then
-      `POST /v1/devices/9e417ad42ca4/deploy {"version":"1.6.0"}` → 202. The simulator walked
-      the whole chain correctly — `staging → downloading → verifying` (sha256 matched) →
-      `staged → applying → rebooting` — and logged
-      `apply now running fw_version 1.6.0 (announced on the next connect)`. Five minutes
-      later `GET /v1/devices` still reported **`fw_version: 1.4.2`**.
-      **The server is not at fault** and neither is `apply_heartbeat`
-      (`ingestor/store.py:191-212` takes `fw_version` from every heartbeat that carries
-      one). The fault is in the simulator and it is a **fidelity** fault, not a typo:
-      `StageRunner` rebinds `self.identity = replace(self.identity, fw_version=version)`
-      (`simulator/device.py:560`), but `session()` captured the *old* frozen `Identity` as
-      its local `device` and the heartbeat loop keeps publishing from it
-      (`device.py:406`). `session()`'s own docstring is honest about the design — the new
-      version is announced "on the next connect" (`device.py:651`) — but the simulated
-      apply **never drops the MQTT session**, so on an `always_on` board the next connect
-      never comes and the version never converges. A real board reboots, the TCP session
-      dies, and it re-announces; that is why `R1-test-1` passed on metal (0.3.2 → 0.3.1)
-      while this path silently does not.
-      **Why this matters beyond the gate:** the sim is the only hardware-free check of
-      R1's central claim — "version reported back after reboot" — and it has never once
-      checked it. Same shape as F-2026-09-23-001/002 in `../docs/ops-log.md`: the one
-      thing that would have caught the defect was not exercising the path.
-      Fix: make `apply` end the session the way a reboot does (drop the client and let
-      `run_always_on`'s reconnect loop rebuild it from `stage.identity`), so the board
-      re-announces the new version under its own power.
-      Acceptance: the reproduction above ends with `fw_version` equal to the deployed
-      version, asserted by a test rather than read by hand — and a `sleepy` board reaches
-      the same end state on its next wake.
 
 - [ ] **S0-infra-8**: The ingestor's liveness probe measures device traffic, not liveness (P1, 0.5d)
       Found 2026-09-23 while running the T3 gate. The dev stack's `fleetforge-ingestor`
