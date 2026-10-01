@@ -432,7 +432,10 @@ services:
       - backend
     healthcheck:
       # No HTTP server to probe, so liveness is the heartbeat file the ingestor
-      # touches on connect and after every message. R0-be-3 inherits this.
+      # touches every 30 s while its broker session is up and no message has been
+      # stuck > 60 s — "connected and consuming", NOT "a device spoke recently"
+      # (S0-infra-8: keyed on traffic, an idle stack sat red for 27 hours).
+      # A dead broker ends the session, so this goes red within 120 s + retries.
       test: ["CMD-SHELL", "test $$(( $$(date +%s) - $$(stat -c %Y /tmp/ingestor-alive) )) -lt 120"]
       interval: 30s
       timeout: 5s

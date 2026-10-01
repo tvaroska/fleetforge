@@ -6,6 +6,32 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-01 — the ingestor's heartbeat is a timer inside the session, with a stall guard (S0-infra-8)
+
+**Decided: touch the liveness file on a 30 s timer that lives only as long as the broker
+session, and stop the ticks while a single message has been in flight for more than
+60 s.** Liveness means "connected and consuming", not "a device spoke recently". A
+3–15 board fleet is idle most of the time, and the traffic-keyed probe sat red for 27
+hours over a healthy process. That false positive is the worse failure, because it
+trains the operator to ignore the one red light.
+
+- **Why not a free-running timer:** it would stay green through a dead broker connection
+  and through a wedged consumer. Scoping it to the session handles the first. The stall
+  guard handles the second, because a hung write keeps the session up.
+- **A failed write still counts as alive.** `handle_message` swallows DB errors and
+  returns, so the ticks continue. That is deliberate: restarting the ingestor does not
+  fix Postgres.
+- **Rejected: probing the broker from the healthcheck** (e.g. `mosquitto_sub` in the
+  container). It would need a credential in the probe and would test the broker, not this
+  process.
+
+**Gotchas.** The prod healthcheck (services `prod/docker-compose.yml`) reads red when idle
+on any image older than this change. Ship it together with the digest bump. Nothing on
+prod acts on container health yet: `healthcheck.sh` is HTTPS-only. Details:
+`docs/features/infrastructure.md`.
+
+---
+
 ## 2026-10-01 — readiness means "can deploy", and the release gate walks the board's path
 
 **Decided: `/v1/readyz` (and so the API healthcheck, dev and prod) is 503 when any

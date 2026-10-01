@@ -51,8 +51,18 @@ UP_TOPIC_QOS = 1
 CLIENT_ID = "fleetforge-ingestor"
 
 # Liveness for a process with no HTTP server: touch a file, and let the container
-# healthcheck compare its mtime against now.
+# healthcheck compare its mtime against now (stale after 120 s).
 HEARTBEAT_PATH = Path(os.environ.get("INGESTOR_HEARTBEAT_FILE", "/tmp/ingestor-alive"))  # noqa: S108
+
+# The file is touched on a timer while the broker session is up, NOT only when a
+# device speaks (S0-infra-8): a 3-15 board hobbyist fleet is idle most of the time,
+# and a probe keyed on traffic sat red for 27 hours over a healthy process. Four
+# ticks per probe window, so one late tick cannot flip it.
+HEARTBEAT_INTERVAL = 30.0
+# ...but a timer alone would stay green over a consumer wedged inside one message
+# (a hung database write keeps the broker session up). A message in flight longer
+# than this stops the ticks; nothing legitimate takes a minute at 25 devices.
+STALL_LIMIT = 60.0
 
 RECONNECT_INITIAL_DELAY = 1.0
 RECONNECT_MAX_DELAY = 30.0
@@ -67,6 +77,31 @@ def touch_heartbeat() -> None:
         logger.warning("heartbeat: cannot touch %s: %s", HEARTBEAT_PATH, exc)
 
 
+class Consumer:
+    """When the message currently being handled started, if any (monotonic clock)."""
+
+    def __init__(self) -> None:
+        self.busy_since: float | None = None
+
+    def stalled(self, now: float) -> bool:
+        return self.busy_since is not None and now - self.busy_since > STALL_LIMIT
+
+
+async def keep_alive(consumer: Consumer) -> None:
+    """Touch the heartbeat every `HEARTBEAT_INTERVAL` until cancelled, unless stalled.
+
+    Runs only inside a broker session, so liveness means "connected and consuming":
+    a dropped connection ends the session and cancels this, and a wedged consumer
+    stops the ticks; either way the file goes stale and the probe turns red.
+    """
+    while True:
+        if consumer.stalled(time.monotonic()):
+            logger.warning("heartbeat: one message in flight > %.0fs; not touching", STALL_LIMIT)
+        else:
+            touch_heartbeat()
+        await asyncio.sleep(HEARTBEAT_INTERVAL)
+
+
 async def handle_message(
     message: aiomqtt.Message,
     sessionmaker: async_sessionmaker[AsyncSession],
@@ -77,10 +112,11 @@ async def handle_message(
     Payload *length* is logged, never the payload body: logs are not a data store, and
     telemetry bodies get large from R4.
 
-    One message must not kill the process, and neither must a database outage — the
-    heartbeat file is therefore touched even when the write failed. Liveness here
-    means "connected to the broker and consuming"; restarting the container does not
-    fix Postgres, and a crash-loop would only add reconnect churn to the outage.
+    One message must not kill the process, and neither must a database outage — a
+    failed write returns normally, so the session's `keep_alive` keeps ticking.
+    Liveness here means "connected to the broker and consuming"; restarting the
+    container does not fix Postgres, and a crash-loop would only add reconnect churn
+    to the outage.
     There is no manual ack (paho acks a QoS-1 message when it reaches the callback and
     aiomqtt exposes no way to defer that), so a failed write is lost — which is why
     the retained `announce`/`presence` state re-syncs on the next reconnect and
@@ -116,8 +152,6 @@ async def handle_message(
             )
     except (SQLAlchemyError, OSError, ValueError) as exc:
         logger.error("ingest failed for topic %s: %s", topic, exc)
-    finally:
-        touch_heartbeat()
 
 
 async def run_once(
@@ -153,9 +187,19 @@ async def run_once(
         )
         await client.subscribe(UP_TOPIC_FILTER, qos=UP_TOPIC_QOS)
         logger.info("subscribed to %s (qos %d)", UP_TOPIC_FILTER, UP_TOPIC_QOS)
-        touch_heartbeat()
-        async for message in client.messages:
-            await handle_message(message, sessionmaker, tolerance)
+        consumer = Consumer()
+        ticker = asyncio.create_task(keep_alive(consumer))
+        try:
+            async for message in client.messages:
+                consumer.busy_since = time.monotonic()
+                try:
+                    await handle_message(message, sessionmaker, tolerance)
+                finally:
+                    consumer.busy_since = None
+        finally:
+            ticker.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await ticker
 
 
 async def run(

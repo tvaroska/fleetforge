@@ -1751,3 +1751,60 @@ desk, not a gate.
   back to exit 0.
 - `just test`: 968 passed (+ the new deploycheck tests), ruff and mypy clean.
   `test_healthz_ok` still runs with no database.
+
+## The ingestor's liveness file means "connected and consuming" (S0-infra-8, closed 2026-10-01)
+
+**Problem.** The ingestor healthcheck compares `/tmp/ingestor-alive`'s mtime against
+120 s, but the file was touched only on connect and per inbound message. With no board
+publishing, the fleet's sole MQTT subscriber read `unhealthy` forever. The dev stack sat
+red for 27 hours (`FailingStreak` 3292) over a working process. It went green within
+seconds of a simulated board publishing. Prod had no ingestor healthcheck at all, so the
+dev light was a false positive and prod had no light.
+
+### What shipped
+
+- **`ingestor/main.py::keep_alive`**: a task started inside each broker session (after
+  `subscribe`). It touches the file every `HEARTBEAT_INTERVAL` (30 s, four ticks per
+  probe window) and is cancelled when the session ends. A dead broker therefore stops
+  the heartbeat.
+- **Stall guard (`Consumer`, `STALL_LIMIT` 60 s)**: `run_once` records when the current
+  message started. If one message has been in flight for over 60 s, the ticks stop. A
+  timer alone would stay green over a hung database write, because the broker session
+  stays up. A *failed* write still returns normally, so a Postgres outage does not turn
+  the ingestor red: restarting it does not fix Postgres.
+- The per-message `touch_heartbeat()` in `handle_message` is gone. The timer is the only
+  writer.
+- **services `prod/docker-compose.yml`**: `fleetforge-ingestor` gets the same healthcheck
+  as dev (120 s, interval 30 s, retries 3, start 30 s). Dev's comment is corrected.
+- `tests/test_ingestor_liveness.py` (fake client, no broker or DB) covers four cases: an
+  idle session stays fresh, a dropped session goes stale, a wedged consumer goes stale and
+  recovers without a restart, and a failed write keeps it fresh. Against the old
+  `main.py`, three of the four fail.
+
+### Gotchas learned
+
+- **The prod healthcheck needs an image that contains this change.** An older image
+  touches the file only on traffic, so on prod's mostly idle fleet it would read
+  `unhealthy`. Ship the compose change and the digest bump in the same release.
+- Nothing on prod acts on container health yet. `scripts/healthcheck.sh` polls HTTPS
+  endpoints only, and nothing restarts an `unhealthy` container. This task makes the state
+  exist. Alerting on it is separate work.
+
+### Verification (T2, 2026-10-01, dev stack, zero devices online)
+
+- Before: `fleetforge-ingestor Up 2 hours (unhealthy)`.
+- Rebuilt and recreated only the ingestor. The last inbound message was the retained
+  replay at connect (14:46:00 UTC, every board `online=False`). Four idle minutes later
+  it was `healthy streak=0`. All five probe runs exited 0, and the file's mtime of
+  14:49:59 came from the timer alone.
+- `docker stop fleetforge-mosquitto` at 14:50:23: the file was never touched again
+  (mtime stayed 14:49:59). The ingestor logged `Temporary failure in name resolution;
+  reconnecting` and went **`unhealthy` after 162 s**. The worst case is 120 s plus three
+  30 s probes, about 210 s. After `docker start` it reconnected and was `healthy` again
+  21 s later.
+- Prod before release: `prod-fleetforge-ingestor-1 running health=none`. The prod
+  compose renders the healthcheck (`docker compose config`). **Prod will only report a
+  health state after the next release deploys an image that contains this change.**
+  Verify with `ssh prod docker inspect prod-fleetforge-ingestor-1 --format
+  '{{.State.Health.Status}}'`.
+- `just test`: 973 passed, ruff and mypy clean.

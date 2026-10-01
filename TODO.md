@@ -104,7 +104,8 @@ gate's own reproduction was re-run afterwards and converged: board `92a9cd2d4251
 `1068a68b…` → 202, `fw_version` **1.6.0** in `GET /v1/devices` about 20 s later, where both
 gate runs had reported 1.4.2. Write-up in `docs/features/ota-deploy.md`, reasoning in
 `DECISIONS.md`. **The gate itself has not been re-run** — that is `/replan`'s job, and
-segment 5 is only one of its segments. `S0-infra-8` remains open.
+segment 5 is only one of its segments. `S0-infra-8` closed 2026-10-01 (see
+`docs/features/infrastructure.md`).
 
 Two things the run also confirmed, which are R2 content rather than regressions: the
 deploy parked at `rebooting` with `is_terminal: false` permanently — nothing writes
@@ -186,34 +187,6 @@ the retired bingo app), single-tenant, **not a public product until V3**.
 ## Sprint 0: Critical Issues
 
 Bricking risks, broker auth and security issues get filed here as they surface.
-
-- [ ] **S0-infra-8**: The ingestor's liveness probe measures device traffic, not liveness (P0, 0.5d)
-      Found 2026-09-23 while running the T3 gate. Escalated to P0 on 2026-09-27:
-      same class as `S0-infra-9` (a probe that is green while the path is dead).
-      The dev stack's `fleetforge-ingestor` had been **unhealthy for 27 hours** —
-      `FailingStreak` 3292 — with a live, connected, perfectly functional process.
-      Mechanism: the healthcheck is `test $(( $(date +%s) - $(stat -c %Y
-      /tmp/ingestor-alive) )) -lt 120` (`docker-compose.yml:391`), and
-      `touch_heartbeat()` is called from exactly two places — on connect and per inbound
-      message (`ingestor/main.py:120,156`). Nothing touches the file on a timer. So with
-      no board publishing, the file goes stale in 120 s and the sole MQTT subscriber
-      reports unhealthy forever. The `main.py:87` docstring assumes the gap is covered
-      because "heartbeats repeat every 60 s" — true only while a board is online, which
-      for a 3–15 board hobbyist fleet is not the normal state. Confirmed causally: the
-      flag flipped to `healthy` within seconds of `S0-test-4`'s simulated board
-      publishing, and nothing else changed.
-      **Prod is worse, in the other direction.** `services/prod/docker-compose.yml:520`
-      defines `fleetforge-ingestor` with **no `healthcheck` at all** — the single point of
-      failure for every device telemetry row, the service whose own comment says "EXACTLY
-      ONE INSTANCE, AND NEVER `docker rollout`", is entirely unmonitored in production.
-      This is the ops-log's recurring shape (F-2026-09-20-004/005/007, F-2026-09-23-001)
-      with an extra turn of the screw: dev's only red light is a false positive, which
-      trains the operator to ignore it, and prod has no light.
-      Fix: touch the heartbeat on a timer while the broker connection is up, so the probe
-      measures "connected and consuming" as its comment claims rather than "a device
-      spoke recently"; then give prod the same healthcheck.
-      Acceptance: an idle stack with zero devices online stays `healthy`; killing the
-      broker turns it `unhealthy` inside the window; prod reports a health state at all.
 
 - [ ] **S0-ops-1**: Status lives in five places and they disagree — README is a lie (P0, 0.5d)
       Added: 2026-09-27
