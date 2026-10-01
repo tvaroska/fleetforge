@@ -1,6 +1,5 @@
 # OTA Deploy & Auto-Rollback
 
-**Status:** Planned
 **Priority:** P0
 **Target:** R1 (deploy), R2 (safe deploy ⭐)
 **Depends on:** Enrollment (enrollment.md) — R0
@@ -874,6 +873,73 @@ say outright that `up/status.state` is an **open** vocabulary: the server stores
 with no CHECK, `DeployState` is advisory, and both the server and this dashboard treat an
 unrecognised value as a legitimate state to record and render verbatim. That is already
 the behaviour on both sides; the spec only implies it by listing examples.
+
+### E2E on real hardware — push firmware, board version changes (R1-test-1) — **PASSED 2026-09-23**
+
+**R1's "Done when", met on metal.** Device `94a990dd09a4` (ESP32-S3) went `0.3.2 → 0.3.1`
+on a deploy driven from the dashboard API. The walk was `202 Accepted`, then `downloading`
+(pct 0), `rebooting` (pct 100), and back online reporting `agent_version` and `fw_version`
+0.3.1. About 25 s end to end. `cmd_id a1d8ed965208447fb9cbce4bb4dd6504`, artifact
+`4c8529eb…` (991344 bytes, layout `ab-4m-v1`). R1 closes.
+
+**`rebooting` as the last reported state is correct, not a stuck deploy.** `ff_ota.h:8-9`
+ends the R1 agent's walk at `rebooting` → `esp_restart()`. `confirming`/`confirmed` are R2.
+The device still *performs* the validation: `ff_mqtt.c:109` calls
+`esp_ota_mark_app_valid_cancel_rollback()` on announce-ack. So the slot is marked valid and
+there is no rollback exposure. The cost is cosmetic and belongs to R2: `is_terminal` stays
+`false` forever, so the dashboard shows every successful deploy as still in flight.
+
+**The written definition of the task was wrong, and the gap is the finding.** It said "the
+target is already on the fleet, so the run is a deploy and a version check". In practice the
+fleet board was on 0.2.0, which predates OTA, so the run needed a bootstrap USB re-flash
+*first*. Then it exposed three production defects that nothing else could have caught
+(`../../../docs/ops-log.md` F-2026-09-23-001/002/003):
+
+- **Deploy had never worked on prod.** `ARTIFACT_URL_SECRET` and `PUBLIC_BASE_URL` were
+  never wired into the prod compose. Both are `None`-defaulted so `create_app()` stays
+  constructible. The API booted, `/v1/healthz` was green and the Deploy button rendered
+  anyway. Fixed in services `90205ed`. `S0-infra-9` later made `readyz` fail on exactly
+  this.
+- **`mosquitto-init` had never reached the running broker.** It wrote dynsec JSON
+  underneath a live broker that never reloads, so the `commander` client did not exist in
+  the broker's memory. Fixed structurally by splitting it into two one-shots,
+  `bootstrap.sh` (before the broker) and `configure.sh` (over `$CONTROL` after it). See
+  `DECISIONS.md` and `CRITICAL.md`.
+- **A mutable URL was served with `max-age=3600`.** That aborted a flash on a bogus sha256
+  mismatch. Fixed in `c4fa7d2`.
+
+All three have the same shape: a component reports healthy because nothing exercises the one
+path that is broken. **Write any future "E2E on hardware" task as bootstrap-flash *then*
+deploy, and treat it as the only thing that exercises the deploy chain at all.** Keeping
+this task bench-gated rather than QEMU-passable (`DECISIONS.md` 2026-09-16) is what surfaced
+the defects.
+
+**What a remote deploy risks, as of R1's close.** There are three failure modes:
+
+1. *Image fails to boot.* The bootloader's own rollback handles it
+   (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`, checked in every bundle by `verify_bundle.py`).
+   This is standard ESP-IDF and we have not exercised it.
+2. *Boots, joins, never confirms.* **Proven recoverable on metal** the same day. See
+   *Phase 2* below and [`../runbooks/rollback-test.md`](../runbooks/rollback-test.md).
+3. *Boots, the announce IS acked, but the image is broken in some other way.* It confirms
+   itself and **nothing recovers it automatically**. That is the residual gamble, which R2
+   narrows. Until then, roll to one board at a time.
+
+**The CUJ-1 gate blocked R1 → R2 the same day.** `/replan` ran the CUJ-1 verification suite.
+CUJ-1's driver is segmented, and only segments with a harness are graded:
+
+| Steps | Segment | Result (2026-09-23, run twice) |
+|---|---|---|
+| 1–2 | Sketch compiles with the library | not graded — R3, no harness |
+| 3 | One flash → board on the fleet | **pass** — `agent-qemu-smoke`, `tests/test_enroll.py` 29 passed, board online |
+| 5 | OTA a changed build → new version reported | **FAIL** — `fw_version` never converged |
+| 6 | A bad build recovers itself | not graded — no QEMU harness; proved on metal instead |
+| — | A wrong flash layout is refused | not graded — R3 (`R3-fw-5`) |
+
+Segment 5 was the simulator, not the server. It was fixed as `S0-test-4` (next entry), and
+the gate's own reproduction converges afterwards. The gate itself still has to be re-run by
+`/replan` before R2 opens. The same run surfaced `S0-infra-8` (the ingestor probe measured
+traffic), which is written up in `infrastructure.md`.
 
 ### The simulator never reconnected after `apply` (S0-test-4) — **LANDED 2026-09-23**
 

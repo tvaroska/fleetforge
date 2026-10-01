@@ -1,12 +1,13 @@
 # Fleetforge — Roadmap
 
-**Last Updated:** 2026-09-15
 **Purpose:** Index of the release ladder and capability areas, plus the growth-stage
 questions that are deliberately not v1's problem.
 **Source specs:** [prd.md](../spec/prd.md) · [design/architecture.md](../design/architecture.md) · [architecture.md](../design/production.md) · [flows.md](../spec/flows.md) · [device-protocol.md](../spec/device-protocol.md) · [releases.md](releases.md)
 
 > This file is an **index**. Requirements and targets live in [prd.md](../spec/prd.md);
-> release contents in [releases.md](releases.md); tasks in `features/*.md`.
+> release contents in [releases.md](releases.md); task history in `features/*.md`.
+> **Where each release stands — closed, active, blocked — lives only in
+> [TODO.md](../TODO.md).** Nothing here carries live state.
 
 ## Strategic vision
 
@@ -28,55 +29,25 @@ ordered to retire the biggest risk (bricking) first. Contents in [releases.md](r
 
 ### V1 — safe OTA on a handful of boards
 
-| Release | Theme | Risk retired | Status | Feature area |
-|---------|-------|--------------|--------|--------------|
-| **R0** ⭐ | Enroll a board (UI + recognition + flash + connect) | Onboarding, recognition, device↔server connection | 🔨 Active — all tasks done, gated on `S0-test-3` | [enrollment](features/enrollment.md) |
-| R1 | Upload new code (OTA deploy) | OTA transport works end-to-end | 🔨 Active — 7/8 done, `R1-test-1` **unblocked** | [ota-deploy](features/ota-deploy.md) |
-| R2 ⭐ | Safe deploy: verify + auto-rollback | **Bricking** (the whole gamble) | 📋 Planned | [ota-deploy](features/ota-deploy.md) |
-| R3 | Thin OTA library + first CUJ | Hobbyists can only update the demo agent, not their own firmware | 📋 Planned | [ota-library](features/ota-library.md) |
-| R4 | Health & telemetry view | Fleet visibility | 📋 Planned | [health-telemetry](features/health-telemetry.md) |
-| R5 | Custom self-test confirm | "boots but app logic broken" | 📋 Planned | [self-test](features/self-test.md) |
-| R6 | Signed OTA + resumable hardening → **v1** | Production-grade safety + security | 📋 Planned | [security-hardening](features/security-hardening.md) |
-
-> **R0 priority, 2026-09-11.** The first hardware bench showed every R0 component
-> working and the board still not onboarded — and, worse, the product unable to say why.
-> R0's risk is onboarding, so **unaided onboarding** (P0, `enrollment`) now gates the
-> release: a technician with no ESP32 knowledge takes a board from the flasher page to
-> green in the fleet list, or learns from the product what is wrong and what to do.
-> Requirements in [standards.md](../spec/standards.md).
->
-> **R0 status, 2026-09-22 — proven on metal; one gate left.** `R0-test-2` **passed** on
-> 2026-09-19: device `94a990dd09a4`, an **ESP32-S3** flashed from `bingo.tvaroska.sk`, ran
-> `link_up → time_synced → enrolling → enrolled → mqtt_connected` in 13 s and stayed live
-> 66 s past enrolment. R0's stated risk — onboarding, recognition, device↔server
-> connection — is retired, and all 20 of its tasks are done. The run used a **different**
-> board from the one stuck in RF calibration, which dissolved the `S0-fw-3` dependency
-> instead of meeting it; `S0-fw-3` is consequently **no longer release-blocking**, though
-> it stays open at P1 as a recovery defect — and, being an S3 rather than a DevKit v1, the
-> pass is *not* evidence about the brownout. The S3 also **unblocks `S0-test-2`**.
-> What still holds R0 open is the P0 above: **`S0-test-3`, the unaided run**. A flash
-> performed by the person who built the flasher is not evidence about onboarding.
-> See [TODO.md](../TODO.md) for the bench order.
->
-> *(Supersedes the 2026-09-15 status, which had R0 closing on `R0-test-2` with `S0-fw-3`
-> as the gating fault.)*
->
-> **R1 is no longer blocked, 2026-09-15.** The artifact-store blocker open since
-> `R0-be-6` — `constraints/iam.disableServiceAccountKeyCreation` makes a GCS key file
-> impossible — was closed by service-account impersonation rather than an org-policy
-> exemption. Prod reads the store keylessly and V4 signing via `signBlob` is measured,
-> not assumed, which is the part R1 depends on. See
-> [runbooks/artifact-storage.md](runbooks/artifact-storage.md).
+| Release | Theme | Risk retired | Feature area |
+|---------|-------|--------------|--------------|
+| **R0** ⭐ | Enroll a board (UI + recognition + flash + connect) | Onboarding, recognition, device↔server connection | [enrollment](features/enrollment.md) |
+| R1 | Upload new code (OTA deploy) | OTA transport works end-to-end | [ota-deploy](features/ota-deploy.md) |
+| R2 ⭐ | Safe deploy: verify + auto-rollback | **Bricking** (the whole gamble) | [ota-deploy](features/ota-deploy.md) |
+| R3 | Thin OTA library + first CUJ | Hobbyists can only update the demo agent, not their own firmware | [ota-library](features/ota-library.md) |
+| R4 | Health & telemetry view | Fleet visibility | [health-telemetry](features/health-telemetry.md) |
+| R5 | Custom self-test confirm | "boots but app logic broken" | [self-test](features/self-test.md) |
+| R6 | Signed OTA + resumable hardening → **v1** | Production-grade safety + security | [security-hardening](features/security-hardening.md) |
 
 ### V2 — source to artifact: build & pre-flight verification
 
-| Release | Theme | Status | Feature area |
-|---------|-------|--------|--------------|
-| R7 | Artifact API + provenance | 📋 Planned | [vcs-integration](features/vcs-integration.md) |
-| R8 | Push ingestion (GitHub Action + templates) | 📋 Planned | [vcs-integration](features/vcs-integration.md) |
-| R9 | Advisory simulation gate *(moved out of v1)* | 📋 Planned | [simulation](features/simulation.md) |
-| R10 | Build from source (server-side compile) | 📋 Planned | [build-pipeline](features/build-pipeline.md) |
-| R11 | Deploy policy → **v2** | 📋 Planned | [vcs-integration](features/vcs-integration.md) |
+| Release | Theme | Feature area |
+|---------|-------|--------------|
+| R7 | Artifact API + provenance | [vcs-integration](features/vcs-integration.md) |
+| R8 | Push ingestion (GitHub Action + templates) | [vcs-integration](features/vcs-integration.md) |
+| R9 | Advisory simulation gate *(moved out of v1)* | [simulation](features/simulation.md) |
+| R10 | Build from source (server-side compile) | [build-pipeline](features/build-pipeline.md) |
+| R11 | Deploy policy → **v2** | [vcs-integration](features/vcs-integration.md) |
 
 ### V3 — robotic swarm
 

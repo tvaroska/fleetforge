@@ -1,6 +1,5 @@
 # Build Pipeline — server-side compile
 
-**Status:** Planned — **V2, not v1**
 **Priority:** P1
 **Target:** R10 (V2)
 **Depends on:** Artifact API + provenance (vcs-integration.md) — R7

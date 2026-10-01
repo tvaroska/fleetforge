@@ -1,6 +1,5 @@
 # Groups, Bulk Deploy & the Swarm Gateway
 
-**Status:** Planned — **V3, not v1**
 **Priority:** P1
 **Target:** V3 — robotic swarm (was R4)
 **Depends on:** OTA Deploy & Auto-Rollback (ota-deploy.md) — R2

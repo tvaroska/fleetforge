@@ -35,7 +35,6 @@ _Tracked in `TODO.md` (live status lives there, not here)._
   size, slot count, or whether the device's bootloader supports rollback — and that last
   one is not recoverable by OTA (see *Why the bootloader field matters* below). There is
   also no list for a user to choose from: the catalog is a one-entry Python dict.
-- **Status:** Planned
 - **Target:** step 1 → R2 · step 2 → R3
 - **Added:** 2026-09-23
 - **Source:** 2026-09-23 competitive review of ElegantOTA (§8.3–8.4, in the orchestration

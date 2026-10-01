@@ -6,157 +6,45 @@ build is caught before the fleet, and any device that gets one recovers itself.
 
 ## Where this stands
 
-**R0-test-2 passed on 2026-09-19 — the product works on metal.** Confirmed against the
-prod database on 2026-09-22. Device `94a990dd09a4`, an **ESP32-S3**, flashed from
-`bingo.tvaroska.sk` with agent 0.2.0, layout `ab-4m-v1`, `ota_slot_size` 1966080. The
-whole ladder is in `device_progress`, 13 seconds end to end:
-`link_up(wifi) → time_synced → enrolling → enrolled → mqtt_connected`, and `last_seen`
-runs 66 s past enrolment. That is R0's stated risk, and it is retired.
+**Works on metal** — device `94a990dd09a4`, an ESP32-S3, against prod (`bingo.tvaroska.sk`):
 
-Three details the DB settles that the bench recollection did not:
+- **Enroll** (R0, closed 2026-09-22). Browser flash → enrolled → live on the broker in
+  13 s, and `S0-test-3` passed an unaided run by someone who had never seen the code.
+  Write-up: [docs/features/enrollment.md](docs/features/enrollment.md).
+- **OTA of the agent** (R1, `R1-test-1` passed 2026-09-23). A dashboard-driven deploy
+  took the board `0.3.2 → 0.3.1` in ~25 s. Getting there fixed three prod defects that had
+  made deploy impossible (`../docs/ops-log.md` F-2026-09-23-001/002/003, all deployed).
+  Write-up: [docs/features/ota-deploy.md](docs/features/ota-deploy.md).
+- **Auto-rollback of "boots, joins, never confirms"** (2026-09-23). A deliberately broken
+  `0.3.2-rbtest` came back on 0.3.1 in 71 s, unattended
+  ([docs/runbooks/rollback-test.md](docs/runbooks/rollback-test.md)).
 
-- **It is an ESP32-S3** — not the classic DevKit v1 that the brownout work is about, and
-  not the board from the 2026-09-14 ESPHome comparison. Different silicon, different
-  regulator, almost certainly a different supply.
-- **So it also unblocks `S0-test-2`**, which has been parked since 2026-09-11 on "no C3,
-  C6 or S3 on hand". One is on hand, and it enumerates.
-- **The board has been unplugged since**: `presence_reported = f`, `last_seen`
-  2026-09-19T20:19Z. The pass was a real live connection, not a durable fleet member.
-  Nothing is online right now.
+**Not yet, and why it matters:**
 
-**R0 closed on 2026-09-22.** `R0-test-2` retired the hardware risk on 2026-09-19, and
-`S0-test-3` passed unaided onboarding on 2026-09-22. R0's entire risk is retired.
+- Nothing reports confirm/rollback: every deploy parks at `rebooting` with
+  `is_terminal: false` (R2-BE-1).
+- An image that boots, gets its announce acked and is broken anyway confirms itself and
+  **nothing recovers it**. Roll to **one board at a time**.
+- No upload form in the dashboard (`docs/runbooks/upload-artifact.sh` is the only way in),
+  and every device has `name: null`. Neither has a task yet.
 
-**What the pass changed, beyond R0.** `R0-test-2` was the practical dependency under
-`R1-test-1`; a board that could not enroll could not be deployed to. An enrollable board
-now exists, so **R1's last task is unblocked** and R1 can close on the same bench session
-that closes R0. And S0-fw-3 is **no longer release-blocking** — it is a recovery defect on
-one DevKit v1 rather than the thing standing between us and a fleet.
+**Next: R2 — safe deploy (verify + auto-rollback).** Not opened yet. The CUJ-1 T3 gate
+blocked R1 → R2 on 2026-09-23 on segment 5; `S0-test-4` fixed the cause the same day and
+the gate's reproduction now converges, but **the gate itself has not been re-run**. First
+step: `/replan`, which re-runs it and, on a pass, opens R2 here. R2's task list is in
+[docs/features/ota-deploy.md](docs/features/ota-deploy.md) → *Phase 2* (R2-FW-3 and most
+of R2-TEST-1 already landed in R1). The flaky-Wi-Fi rollback spike is still open — same
+file, *De-risking*.
 
-**R1-test-1 passed on 2026-09-23 — R1 is closed and OTA works on metal.** Device
-`94a990dd09a4` went `0.3.2 → 0.3.1` on a dashboard-driven deploy in ~25 s. Details on the
-task below.
+**Blocked:**
 
-**It took three production fixes to get there, and that is the real story of the session.**
-The E2E test was the only thing in the system exercising the deploy chain, and the chain
-was broken in two places that every other signal reported as healthy:
-
-- **Deploy had never worked on prod.** `ARTIFACT_URL_SECRET` and `PUBLIC_BASE_URL` were
-  never wired into the prod compose, though `config.py` documents them as mandatory there.
-  Both are `None`-defaulted so `create_app()` stays constructible, so the API booted,
-  `/v1/healthz` was green, and the Deploy button rendered. Fixed in services `90205ed`.
-- **`mosquitto-init` has never once reached the running broker.** It bootstraps the dynsec
-  file via a throwaway broker and writes the JSON underneath a live `fleetforge-mosquitto`
-  that read its config at startup and never reloads. The `commander` client and role did
-  not exist in the broker's memory at all. Per-device enrolment works because the API uses
-  the live control topic, which is exactly what `mosquitto-init` should be doing.
-  **Fixed structurally and DEPLOYED 2026-09-23.** The bootstrap
-  is now two one-shots: `mosquitto-init` creates only the file, before the broker;
-  `mosquitto-config` applies every role and client over `$CONTROL` after the broker is
-  healthy. It is idempotent and re-runs on every deploy, so **deploying it is also the
-  repair** — it converges prod's broker with no restart, and there is nothing to hand-run
-  first. Reproduced and fixed on the dev broker (deleted `commander` from the live broker
-  → CONNACK 135 → re-ran the container → CONNACK 0 → `just broker-check` `SELFTEST OK`).
-  On prod it converged on the hand-made `commander` rather than duplicating it, and
-  `broker selftest` in the prod API container passes end-to-end *as* the commander.
-  Reasoning in `DECISIONS.md`; the two phases must not be merged back.
-- **A mutable URL served `max-age=3600`** aborted a flash on a bogus sha256 mismatch.
-  Fixed in `c4fa7d2`, **not yet deployed**.
-
-All three are written up in `../docs/ops-log.md` as F-2026-09-23-001/002/003. They are the
-same shape as F-2026-09-20-004/005/007: a component reporting healthy because nothing
-exercises the one path that is broken.
-
-**The R1→R2 transition is BLOCKED by the T3 gate (2026-09-23).** `/replan` ran the CUJ-1
-verification suite; CUJ-1's driver is segmented and only the segments with a harness are
-graded. Result:
-
-| Steps | Segment | Result |
-|---|---|---|
-| 1–2 | Sketch compiles with the library | not graded — R3, no harness yet |
-| 3 | One flash → board on the fleet | **pass** — `agent-qemu-smoke` OK, `pytest tests/test_enroll.py` 29 passed, board online in `GET /v1/devices` |
-| 5 | OTA a changed build → new version reported | **FAIL** — `fw_version` never converges. `S0-test-4` (fixed 2026-09-23, gate not yet re-run) |
-| 6 | A bad build recovers itself | not graded — no QEMU harness; proved on metal 2026-09-23, not by a runner |
-| — | A wrong flash layout is refused | not graded — R3 (`R3-fw-5`) |
-
-**Re-run later the same day: unchanged, and now reproduced twice.** A second `/replan`
-re-executed the gradeable segments rather than trusting the first result. Segment 3 passed
-again (`pytest tests/test_enroll.py` 29 passed; fresh board `92a9cd2d4251` enrolled and
-showed `online: true` in `GET /v1/devices`). Segment 5 failed again, identically: deploy
-`8d5902010bb64025aca05f8d283ccbc1` → 202, the sim walked to `rebooting` and logged
-`apply now running fw_version 1.6.0 (announced on the next connect)`, and a minute of
-heartbeats later `GET /v1/devices` still reported `fw_version: 1.4.2` with
-`is_terminal: false`. Nothing under `src/fleetforge/simulator/` has changed since the
-first run (last touching commit `2493302`), so this is the same defect, not a flake.
-The run also re-confirmed `S0-infra-8` causally: `fleetforge-ingestor` sat `unhealthy`
-with `FailingStreak` 3292 while the stack was idle, and flipped to `healthy`
-(`FailingStreak` 0) within seconds of the simulated board publishing.
-
-So **R1 stays open and R2 is not opened** until `S0-test-4` lands and segment 5 passes.
-Two findings came out of the run and are filed in Sprint 0 above: `S0-test-4` (the
-simulator never reconnects after `apply`) and `S0-infra-8` (the ingestor's liveness probe
-measures traffic, and prod has no probe at all). Neither was visible from the code review
-that prompted the run; both needed the harness actually executed.
-
-**`S0-test-4` landed 2026-09-23, and segment 5's defect is gone.** The simulated apply now
-ends the session the way a reboot does, so the board re-announces under its own power. The
-gate's own reproduction was re-run afterwards and converged: board `92a9cd2d4251`, deploy
-`1068a68b…` → 202, `fw_version` **1.6.0** in `GET /v1/devices` about 20 s later, where both
-gate runs had reported 1.4.2. Write-up in `docs/features/ota-deploy.md`, reasoning in
-`DECISIONS.md`. **The gate itself has not been re-run** — that is `/replan`'s job, and
-segment 5 is only one of its segments. `S0-infra-8` closed 2026-10-01 (see
-`docs/features/infrastructure.md`).
-
-Two things the run also confirmed, which are R2 content rather than regressions: the
-deploy parked at `rebooting` with `is_terminal: false` permanently — nothing writes
-`CONFIRMED`, because confirm reporting is `R2-be-1`/`R2-fw-3` and does not exist — and
-every row in `GET /v1/devices` still has `name: null`.
-
-**The DevKit v1 is out of consideration (2026-09-23).** It is an old board, and the S3
-carries every path that matters. `S0-fw-3` is closed unfixed as a result — see the entry
-for the two findings that survive it. Bridge-chip boards as a *class* stay in scope:
-cheap DevKits ship CP2102/CH340, so `S0-fe-8` (no VCP driver, no COM port) and
-`S0-test-1` (the console's bridge-chip half) remain P1 and just need some bridge-chip
-board, not that one.
-
-Remaining bench order:
-
-1. **S0-test-1** — the four serial-console properties that only a USB bridge chip can prove.
-2. **S0-test-2** — unblocked by the S3 above; the native-USB re-acquire path.
-
-**Prod serves the v0.2.0 agent** (`d705652` — `-Os`, 80 MHz, max modem sleep, the
-TX-power ladder), shipped in v0.3.5. That is what the S3 was flashed with.
-
-**R1 is open alongside R0, from 2026-09-16.** This file normally carries Sprint 0 plus
-*one* release; it now carries two, because R0 is not in progress — it is parked on
-hardware, and waiting for a board is not a reason to stop building. R1's blocker closed
-on 2026-09-15 (`R1-BE-0`, impersonation + verified `signBlob`), and **all seven of its
-desk-bound tasks have landed** — `R1-be-1` the day R1 opened, then `R1-be-2`, `R1-be-3`,
-`R1-be-4`, `R1-fw-1`, `R1-fw-2` and `R1-fe-1` on 2026-09-17. A deploy mints a link on our
-own origin, `GET /v1/artifact/{sha256}/bin` serves it with range support, the agent
-stages and applies it in QEMU (`docs/runbooks/agent-qemu.md`) and reports the version
-that actually booted, and the dashboard drives the whole thing. `R1-test-1` closed this
-out on 2026-09-23 on real hardware. Keeping it bench-gated rather than renaming it to
-something QEMU could pass (`DECISIONS.md` 2026-09-16) is what surfaced two prod defects
-that had made deploy impossible — QEMU would have passed against a broken production.
-
-**Completed work is archived**, not lost: R0 and the closed Sprint 0 tasks are written up
-in [docs/features/](docs/features/) — chiefly `enrollment.md` (the R0 flow end to end,
-plus the four *Unaided onboarding* console tasks) and `infrastructure.md` (the stack, the
-prod hand-off, and the five artifact-storage tasks). Reasoning is in `DECISIONS.md`.
-
-Two results worth carrying forward, because they retired earlier conclusions:
-
-- **The brownout is ours, not the supply's** (settled 2026-09-14). A brand-new board on
-  the same cable and port ran ESPHome through a cold full RF calibration and survived.
-  The "marginal supply / add bulk capacitance" reading is retired along with everything
-  built on it. A broader ESPHome comparison — what to reuse, copy, or refuse — is in
-  `products/docs/esphome-review.md`.
-- **The R1 artifact blocker is closed.** Open since R0-be-6, it was never an org-policy
-  exemption — `constraints/iam.disableServiceAccountKeyCreation` makes a GCS key file
-  impossible, and the answer was impersonation. Prod reads the store keylessly, verified
-  from inside the container, and `signBlob` is measured rather than assumed. All five
-  artifact tasks are done; the build engine itself stays R10, only its cache key changed.
+- `S0-test-1` needs a bridge-chip board (CP2102/CH340); `S0-test-2` needs the S3 on the
+  bench. Both are hardware sessions, and the bench host is unsettled (see the ⚠️ notes).
+- **R3 (thin OTA library)** waits on R2 by decision
+  (`design/decisions/ota-library-ships-after-safe-deploy.md`); its task list lives in
+  [docs/features/ota-library.md](docs/features/ota-library.md) until it opens.
+- **A dev box with pruned images cannot `just up`**: `minio/minio` and `minio/mc` no
+  longer pull (`DECISIONS.md` 2026-10-01). No task filed yet.
 
 <!-- Counters: spec=1 infra=7 db=1 be=6 fe=7 sec=1 fw=4 test=3 -->
 <!-- Sprint 0 counters: fe=8 fw=4 infra=9 test=4 ops=1 -->
@@ -187,189 +75,6 @@ the retired bingo app), single-tenant, **not a public product until V3**.
 ## Sprint 0: Critical Issues
 
 Bricking risks, broker auth and security issues get filed here as they surface.
-
-- [ ] **S0-ops-1**: Status lives in five places and they disagree — README is a lie (P0, 0.5d)
-      Added: 2026-09-27
-      The rule "live status lives ONLY in TODO.md" is written everywhere and followed
-      almost nowhere. A stranger (or an agent, or future-you) reading the front door
-      bounces before they find the product:
-      * `README.md` still says "R0 in progress… the agent, the flasher and OTA itself
-        do not exist". R0 closed 2026-09-22; R1 closed on metal 2026-09-23.
-      * `docs/roadmap.md` last updated 2026-09-15; R0 "Active, gated on S0-test-3"
-        (passed), R1 "7/8 done, R1-test-1 unblocked" (passed).
-      * `docs/features/enrollment.md` "Status: In progress (R0)".
-      * `docs/features/ota-deploy.md` "Status: Planned".
-      * This file is a 660-line session journal. Closed `S0-fw-3` still occupies ~200
-        lines of the live list. R3 is in this file labelled "deliberately not next".
-      Fix: one status document, and it is this one.
-      1. Rewrite the README status block to match metal: enroll works, OTA of the
-         *agent* works, auto-rollback of "boots but never confirms" is proven, R2 is
-         next. One paragraph. The dashboard is not a skeleton.
-      2. Strip this file to Sprint 0 + the active release as a checklist. Closed
-         Sprint 0 novels (especially `S0-fw-3`) become one-line `[x]` + a pointer at
-         `docs/features/`. Move the R3 task list back to
-         `docs/features/ota-library.md` — this file already says to, if it gets
-         confusing.
-      3. Remove **Status** headers / status columns from `docs/roadmap.md` and
-         `docs/features/*.md`. They are archives and an index; they do not carry
-         live state. `roadmap.md`'s "Last Updated" goes with them.
-      Do not rewrite `DECISIONS.md`. Do not shrink feature-file *archives* in this
-      task — the P0 is that status is in one place and the front door is true.
-      Acceptance: a reader of `README.md` then this file, and nothing else, can
-      answer what works on metal, what is next, and what is blocked. `rg "Status:"
-      docs/features README.md docs/roadmap.md` is empty (or every hit points here).
-
-- [x] **S0-fw-3**: A board that browns out during RF calibration cannot escape it (P1, 0.5d)
-      — **withdrawn 2026-09-23, not fixed.** The board this entry is about is the classic
-      ESP32-DevKit v1, and that board is out of consideration: it is old, an ESP32-S3
-      (`94a990dd09a4`) carries every bench path that matters, and the one remaining
-      experiment needs the *stuck* DevKit v1 specifically. Closed rather than parked
-      because there is no session in which it gets picked up.
-      **Two results survive the closure and must not be re-derived:** (1) the 2026-09-14
-      finding that the fault is *ours*, not the supply's — a brand-new board on the same
-      cable and port ran a cold full RF calibration under ESPHome and survived, so our
-      startup draws more than it needs to; (2) the reporting half shipped in v0.3.3 and
-      is correct and inert on healthy boards — `FF_PROGRESS_BROWNOUT` → `BROWNOUT` stage →
-      "recovered from a power fault" on the dashboard. Keep both.
-      **What is unproven and stays unproven:** whether any board that browns out during
-      calibration can escape it. That is a fleet property, not one board's, and if it
-      resurfaces on a board we care about it comes back as a new S0 task — with the
-      80 MHz / `-Os` flash (step 1 below) as the first untried lever. Detail preserved:
-      Found 2026-09-12 from an operator's diagnostic bundle: six boots, each one
-      `phy_init: failed to load RF calibration data (0x1102), falling back to full
-      calibration` and then `E BOD: Brownout detector was triggered`. Self-sustaining —
-      the full calibration is the biggest current draw in startup, the rail collapses
-      during it, and the result is only cached once a boot survives it, so every boot is
-      identical. (This entry originally added "the same cable and port run a plain Wi-Fi
-      sketch fine, because that sketch inherits a calibration it never has to re-earn."
-      That reasoning is retired by the 2026-09-14 result below — a board with nothing
-      cached on either side survived.)
-      Fix: `CONFIG_ESP_PHY_REDUCE_TX_POWER=y` — after a brownout reset the PHY comes up
-      at its lowest TX power, which is often enough to get through once; one survived
-      boot caches the calibration and the loop ends. Fleet-wide TX power deliberately
-      left at 20 dBm. Plus `agent_main.c::log_power_fault()` and the `brownout` progress
-      stage, so the boot that escapes SAYS it escaped instead of looking healthy.
-      Acceptance: a board in the loop reaches the fleet, and its recovery is visible on
-      the dashboard and in the flashing console rather than inferred from a UART log.
-
-      **Attempted 2026-09-12, shipped in v0.3.3, and it does not clear the fault.** The
-      reporting half works. The escape does not: on the one board in the loop, reduced-TX
-      calibration dies in exactly the same place as full-power calibration. A bundle from
-      2026-09-13T14:15 contains the A/B in a single log — its first boot follows a
-      non-brownout reset, so the option was inactive and the PHY came up at full power,
-      and boots two through six all print `the previous boot ended in a BROWNOUT`, so it
-      was active. Every one of the six dies at `phy_init … falling back to full
-      calibration` → `E BOD`. The lever is aimed correctly — IDF v5.5.5 `phy_init.c`
-      passes the reduced `init_data` *into* `register_chipv7_phy()` with
-      `calibration_mode == PHY_RF_CAL_FULL`, so it applies during the calibration, not
-      after it — and it simply does not move this board. Whatever dominates the current
-      draw of a cold calibration here, it is not TX power.
-
-      Left open because the acceptance criterion is unmet, not because the code is wrong:
-      the shipped change is a correct, inert-on-healthy-boards improvement and is worth
-      keeping. What was still unknown on 2026-09-13 was whether the remaining fault is
-      this board's regulator or something the agent does. **That is now known.**
-
-      **2026-09-14 — settled: the fault is ours.** A *brand-new* board — same cable, same
-      port — was flashed with ESPHome, associated to Wi-Fi and ran. A new board has no
-      cached calibration, so ESPHome ran the same cold full calibration that kills our
-      image, on the same rail, and survived it. That is the discriminating experiment this
-      entry asked for, arriving on the "it survives" branch: **this supply carries a cold
-      full RF calibration, and our startup draws more than it needs to.** The
-      "marginal supply / bulk capacitance across 3V3/GND" reading is retired, along with
-      every conclusion built on it (see DECISIONS.md 2026-09-14).
-
-      **And the failing image was never the current one.** The 2026-09-13T14:15 bundle is
-      agent `19b0a0b`, which predates `d705652` (`-Os`, 80 MHz, max modem sleep, TX-power
-      ladder). Every brownout on record was therefore produced by a **160 MHz, `-Og`**
-      build. The 80 MHz lever below has still never reached this board.
-
-      **Second lever prepared 2026-09-13, not yet tried on hardware: 80 MHz CPU**
-      (`CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_80`, in `agent/sdkconfig.defaults`). Came out of
-      an agent power/size review. `esp_clk_init()` applies the clock before `app_main`,
-      so it is already in effect during the calibration window — and the CPU is running
-      flat out alongside the calibration at 160 MHz, worth roughly 20-30 mA. The v0.3.3
-      result rules out TX power as the dominant draw; it does not rule this out. Unlike
-      `REDUCE_TX_POWER` it applies on EVERY boot, so it does not need the fault to have
-      already happened in order to help. Free to test: the same board, cable and port,
-      one flash.
-      Bench order for the next session, cheapest first — **rewritten 2026-09-14**, since
-      the hardware branch is now closed and everything below is a firmware question:
-      1. **Flash v0.2.0 (`d705652`) to the board.** 160 → 80 MHz plus `-Os`, one flash,
-         no new hardware. The single most plausible untested lever, and the only one that
-         has already been written. **Since v0.3.5 this is what prod serves**, so it is now
-         the default flash from `bingo.tvaroska.sk` rather than a special build.
-      2. **Diff `agent/dist/esp32/sdkconfig.resolved` against ESPHome's**
-         (`.esphome/build/<node>/.pioenvs/<node>/sdkconfig`). Both files exist; stop
-         reasoning about current draw and read the delta. Fields that move startup current
-         or the trip point: `ESP_DEFAULT_CPU_FREQ_MHZ`, `ESPTOOLPY_FLASHMODE`/`FLASHFREQ`
-         (ours is already the low-power `dio`/`40m`), `SPIRAM`, `ESP_WIFI_*_BUFFER_NUM`.
-      3. **`ESP_BROWNOUT_DET_LVL_SEL` and `ESP32_REV_MIN`.** We are on level 0 and
-         `ESP32_REV_MIN_0`, both IDF defaults. In IDF v5.5
-         `components/esp_hw_support/port/esp32/Kconfig.hw_support`, the rev-0 option
-         carries `select ESP_BROWNOUT_USE_INTR` — *"Brownout on Rev 0 is bugged, must use
-         interrupt"* — so our min-revision choice force-enables the interrupt-based
-         detector that `agent_main.c::log_power_fault()` already documents. If the board
-         is rev 1 or rev 3 and ESPHome builds for a higher min revision, the two images
-         are using **different brownout mechanisms on the same silicon**, which produces
-         this symptom with no difference in current at all. The revision is in the boot
-         banner of the bundles already collected.
-      One survived calibration ends the loop permanently for that board — the result is
-      cached in NVS — so any of these succeeding once is a pass, and the acceptance
-      criterion (recovery visible on the dashboard) is reachable from any of them. S0-fw-4
-      has landed, so that result is now durable: the flasher erases nothing and a reflash
-      no longer throws a survived calibration away.
-
-      **2026-09-19 — de-escalated, but on weaker evidence than it first looked.**
-      `R0-test-2` passed on a different board, so this **no longer blocks a release**: it
-      is one board's recovery defect, not a gate.
-      **It says almost nothing about the firmware, though.** The board that passed is an
-      **ESP32-S3** (`94a990dd09a4`), not the classic DevKit v1 this entry is about —
-      different silicon, different regulator, different supply. The tempting read, "our
-      agent survived a cold full calibration so our startup draw is fine", does **not**
-      follow: the S3 never ran the experiment this entry describes. The 2026-09-14
-      conclusion — the supply carries a cold calibration and our startup draws more than it
-      needs to — therefore **stands unchallenged**, and the open question is still
-      whichever of the three levers below moves the DevKit v1.
-      Kept at P1, because the defect it names is a fleet property, not one board's: *any*
-      board that browns out during calibration is permanently stuck, and a product whose
-      pitch is "any device that gets a bad one recovers itself" cannot ship that. The
-      acceptance criterion is unchanged, and step 1 of the bench order above — v0.2.0 onto
-      the stuck DevKit v1 — is still the untried single-variable experiment.
-      **2026-09-23 — desk pass. Nothing left to prepare; this is now purely a flash.**
-      A `/implement` run with no board attached (`/dev/ttyUSB*`, `/dev/ttyACM*` both
-      absent on the dev box) did the parts of the bench order that do not need hardware:
-      * **Step 1 confirmed flash-ready.** `agent/dist/esp32/sdkconfig.resolved` — the
-        build output, not the input — carries all three levers:
-        `CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_80=y`, `CONFIG_COMPILER_OPTIMIZATION_SIZE=y`,
-        `CONFIG_ESP_PHY_REDUCE_TX_POWER=y`. The bundle is agent `0.3.1` /
-        `25374e2` / 2026-09-17. So the experiment really is one flash of the stock
-        esp32 bundle, with no special build and no source change. (Prod's own
-        `/v1/agent/manifest` needs credentials, so what `bingo.tvaroska.sk` currently
-        serves was not re-checked from here — flash from the catalog and read the
-        version it reports.)
-      * **Step 2, our half, recorded** so the bench only has to produce ESPHome's file:
-        `ESPTOOLPY_FLASHMODE=dio`, `FLASHFREQ=40m`, `SPIRAM_SUPPORT` not set,
-        `PM_ENABLE` not set, `ESP_WIFI_STATIC_RX_BUFFER_NUM=10`,
-        `DYNAMIC_RX/TX_BUFFER_NUM=32` (IDF defaults), `XTAL_FREQ=40`.
-      * **Step 3 halves, and the cheap half is a dead end.** `ESP_BROWNOUT_DET_LVL=0`
-        is already 2.43 V, the **lowest** of the eight levels (`boardConsole.ts:307`
-        documents the same number) — there is no threshold headroom left to buy, so
-        that lever does not exist. What remains is only the mechanism question:
-        the resolved config does show `ESP32_REV_MIN_0=y` *and*
-        `ESP_BROWNOUT_USE_INTR=y` together, consistent with the rev-0 `select`, so if
-        the board is rev ≥1 and ESPHome builds for a higher min revision the two
-        images are using different detectors. Needs the revision from a boot banner.
-      * **The reporting half re-verified end to end**, so a successful escape will be
-        visible without further work: `FF_PROGRESS_BROWNOUT` (`ff_progress.h:73`) →
-        `agent_main.c:268` → `DeviceProgressStage.BROWNOUT` (`db/models.py:152`) →
-        `FleetView.tsx:106` "recovered from a power fault", plus the console's
-        calibration-specific hint and its two tests (`BoardConsole.test.tsx:180,423`).
-      Net: the only unexecuted step is putting the stuck DevKit v1 on a cable and
-      flashing it. Nothing further can move this at the desk.
-      _(attempted 2026-09-12; negative result recorded 2026-09-13; second lever staged
-      2026-09-13; hardware cause ruled out 2026-09-14; de-escalated 2026-09-22 when
-      R0-test-2 passed on a different board; desk pass 2026-09-23; awaiting bench)_
 
 - [ ] **S0-test-1**: Bench-verify the serial console on real hardware (P1, 0.5d)
       Filed 2026-09-10, when S0-fe-1 shipped. Its software half is proven in jsdom against
@@ -422,21 +127,6 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       Acceptance: an operator who has never installed a VCP driver reaches a working COM
       port using only what the page tells them — no Device Manager spelunking, no asking.
 
-- [x] **S0-test-3**: Someone who has not seen the code onboards a board unaided (P1, 0.5d) — passed 2026-09-22
-      The criterion that actually decides *Unaided onboarding*; everything else is its
-      parts. Not automatable, and deliberately written as a task rather than replaced by
-      the parts a test runner can check. Its four component tasks (S0-fe-4 → S0-fe-7) have
-      all landed — see `docs/features/enrollment.md`.
-      Two runs, no assistance and no access to this repo, using only what is on screen:
-      a board onboarded end-to-end, and a deliberately induced fault diagnosed. Induce
-      at least two of: brownout (a thin USB cable through a hub reproduces it), a wrong
-      Wi-Fi passphrase, a spent enrolment token.
-      Acceptance: both runs succeed without the operator reading a UART log or asking a
-      question. Anything they get stuck on comes back as a new S0 task with the observed
-      behaviour — and the fact that they got stuck is the finding, not their skill.
-      **Passed 2026-09-22.** Unaided onboarding confirmed on bench without operator
-      reading UART logs or needing repo knowledge. R0's remaining gate is cleared.
-
 - [ ] **S0-test-2**: The native-USB re-acquire path, on a C3/C6/S3 (P2, 0.25d)
       Split from S0-test-1 on 2026-09-11: the only board on hand is an ESP32-DevKit v1,
       whose bridge chip keeps the port alive across `hard_reset`. That exercises the
@@ -456,211 +146,5 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       running either — the re-acquire window is an OS-and-driver property, so a result on
       one host is not a result on the other.
 
----
-
-## R0: Enroll a board (UI + recognition + flash + connect)
-
-**Goal:** *I can register a board and see it online.* No code-deploy yet.
-**Risk retired:** onboarding · board recognition · device↔server connection.
-**Done when:** plug in a board, flash & register it from the browser, watch it come
-online — no toolchain, no CLI.
-
-**All 20 tasks are done**, and archived in
-[docs/features/enrollment.md](docs/features/enrollment.md) (the flow end to end) and
-[docs/features/infrastructure.md](docs/features/infrastructure.md) (the stack and the
-prod hand-off).
-
-**R0 closed on 2026-09-22.** `R0-test-2` proved the hardware path on 2026-09-19, and
-`S0-test-3` passed unaided onboarding on 2026-09-22, clearing the release gate.
-
-Two non-obvious rules from [design/production.md](design/production.md) that survive into
-every later release: the **ingestor is the only MQTT subscriber** (N API workers would
-otherwise ingest N times and split the SSE audience), and **agent images are built
-off-box** (the ESP-IDF builder is 2–3 G against 5.5 G of free disk on `prod`).
-
-### Test
-
-- [x] **R0-test-2**: E2E on real hardware (P0, 1d) — passed 2026-09-19
-      Flash → enroll → appears online in the dashboard. **This is R0's "Done when",
-      restated as a task** — the release's whole risk is onboarding, and nothing had
-      proven it on metal.
-      **Passed on an ESP32-S3** (`94a990dd09a4`), flashed from `bingo.tvaroska.sk` with the
-      v0.2.0 agent prod has served since v0.3.5. `device_progress` records the full ladder
-      in 13 s — `link_up(wifi) → time_synced → enrolling → enrolled → mqtt_connected` —
-      and `last_seen` runs 66 s past enrolment. The stated dependency on S0-fw-3 was
-      dissolved rather than met: a different board removed the need for the stuck DevKit v1
-      to recover. Verified against the prod DB 2026-09-22.
-      Write-up in `docs/features/enrollment.md`.
-
----
-
-## R1: Upload new code (OTA deploy)
-
-**Goal:** *I can push new firmware to a registered board and watch its version change.*
-**Risk retired:** the OTA transport works end-to-end.
-**Done when:** a `.bin` uploaded from the dashboard reaches a device and the version it
-reports afterwards is the one that was uploaded.
-
-⚠️ **Partly safe as of 2026-09-23 — read which part.** The blanket "do not deploy
-anything to a board you cannot physically reach" is now too strong in one direction and
-still exactly right in another.
-
-**Proven on hardware (2026-09-23):** a board that takes a bad image, boots it, joins the
-fleet and then never gets its announce acked **recovers itself**. Device `94a990dd09a4`
-was deployed a deliberately broken `0.3.2-rbtest` build and came back on 0.3.1 71 s
-later, unattended — `confirm_timeout_cb()` → `esp_ota_mark_app_invalid_rollback_and_reboot()`
-executing on metal for the first time. Procedure and rationale in
-[docs/runbooks/rollback-test.md](docs/runbooks/rollback-test.md); the flag that builds
-such an image is `FF_ROLLBACK_TEST`, off by default.
-
-**Three failure modes, and only one is still a gamble:**
-
-1. *Image fails to boot* — the bootloader's own rollback handles it
-   (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`, confirmed on in every bundle by
-   `verify_bundle.py`). Standard ESP-IDF, not exercised by us.
-2. *Boots, joins, never confirms* — **proven recoverable**, see above.
-3. *Boots, announce IS acked, but the image is broken in some other way* — it confirms
-   itself and **there is no automatic recovery**. This is the residual gamble, and it is
-   the one R2 narrows with a checksum gate before apply plus server-side observation of
-   the confirm outcome (`R2-BE-1`, `R2-FW-3`).
-
-So: deploying to a remote board is now a reasonable risk rather than a reckless one, and
-firmware iteration no longer has to be bench-bound. It is still not *safe* — case 3 is
-real, and there is still no checksum gate before apply and no A/B discipline beyond what
-the partition table enforces. Do not roll anything to more than one board at a time.
-
-**What is already built, and must not be rebuilt here.** `fleetforge.storage` is the
-`put`/`get`/`signed_url`/`delete` seam (`R0-be-6`), production reads it keylessly by
-impersonation with `signBlob` measured rather than assumed (`S0-infra-5`), the
-content-addressed key scheme is frozen (`storage/blobs.py`, `S0-infra-4`), and the
-`artifacts` table exists and is empty (`alembic/versions/0003`). `firmware/publish.py`
-already writes *blobs* — the agent bundles S0-infra-6 moved into the store. What R1 is
-first to write is the **`artifacts` table**, and the user-facing half of the same
-storage model.
-
-Three constraints from documents that outrank this file:
-[prd.md](spec/prd.md) → *Requirements & targets* caps an artifact at **1.9 MB** and a
-healthy-link deploy at **5 min**; [spec/device-protocol.md](spec/device-protocol.md)
-fixes the `dn/cmd` `stage` payload and the `up/status` state machine, and is near-frozen
-(`CRITICAL.md`); `ota_slot_size` is **1966080** and is a three-way contract with
-`agent/partitions.csv`.
-
-**Seven of eight tasks are done and archived** in
-[docs/features/ota-deploy.md](docs/features/ota-deploy.md) — the deploy orchestration
-(`R1-be-2`), the public artifact endpoint (`R1-be-3`), the `deploy_events` writer
-(`R1-be-4`), the agent's `esp_https_ota` handler and running-version accessor
-(`R1-fw-1`, `R1-fw-2`) and the dashboard Deploy button (`R1-fe-1`). Reasoning is in
-`DECISIONS.md` 2026-09-17. One remains, and it is bench-gated.
-
-### Test
-
-- [x] **R1-test-1**: E2E: push firmware → board version changes in dashboard (P0, 1d)
-      **PASSED 2026-09-23.** Device `94a990dd09a4` (ESP32-S3) walked `0.3.2 → 0.3.1` on a
-      deploy driven from the dashboard API: `202 Accepted`, then `downloading` (pct 0) →
-      `rebooting` (pct 100) → back online reporting `agent_version` and `fw_version` 0.3.1,
-      about 25 s end to end. `cmd_id a1d8ed965208447fb9cbce4bb4dd6504`, artifact
-      `4c8529eb…` (991344 bytes, layout `ab-4m-v1`). R1 closes.
-      **`rebooting` is the last state reported, and that is correct**, not a stuck deploy:
-      `ff_ota.h:8-9` scopes the R1 agent's walk to end at `rebooting` → `esp_restart()`,
-      with `confirming`/`confirmed` deferred to R2. The device still *performs* the
-      validation — `ff_mqtt.c:109` calls `esp_ota_mark_app_valid_cancel_rollback()` on
-      announce-ack — so the slot is marked valid and there is no rollback exposure. The
-      consequence is cosmetic and belongs to R2: `is_terminal` stays `false` forever, so
-      the dashboard shows a perpetually in-flight deploy for every successful one.
-      **The written definition of this task was wrong, and the gap is the finding.** It
-      said "the target is already on the fleet, so the run is a deploy from the dashboard
-      and a version check". In practice the run required a bootstrap USB re-flash *first*
-      (the fleet board was on 0.2.0, which predates the OTA capability), and then exposed
-      three production defects that nothing else could have caught — see
-      `../docs/ops-log.md` F-2026-09-23-001/002/003. Two of them meant deploy had **never**
-      worked on prod. Any future "E2E on hardware" task should be written as
-      bootstrap-flash *then* deploy, and should be treated as the only thing that
-      exercises the deploy chain at all.
-
----
-
-**Parallel spike (de-risks R2):** throwaway OTA + auto-rollback spike on real flaky
-Wi-Fi. Tracked in [docs/features/ota-deploy.md](docs/features/ota-deploy.md).
-Needs hardware — a spike about a flaky radio cannot run on an emulator that has none.
-
----
-
-## R3: Thin OTA library — the four verbs in the user's own firmware
-
-**Not started, and deliberately not next.** R3 sits behind R2 because a library is a
-multiplier on however safe deploy currently is
-(`DECISIONS.md` 2026-09-22, `design/decisions/ota-library-ships-after-safe-deploy.md`).
-It is written down now because `prd.md` has promised it since the beginning and it had no
-plan; nothing here should be picked up before R0 closes on metal and R2 lands.
-
-**This file now carries three releases.** R0 is parked on hardware, R1 is one bench task
-from done, and R3 is a plan rather than work in flight. If that becomes confusing, R3 is
-the one to move back out to `docs/features/ota-library.md`.
-
-Requirements: [spec/standards.md](spec/standards.md) → *ota-library*. Release contents:
-[docs/releases.md](docs/releases.md) → R3. Feature file:
-[docs/features/ota-library.md](docs/features/ota-library.md). Journey:
-[spec/cujs.md](spec/cujs.md) → *CUJ-1*, written by `R3-spec-1` on 2026-09-22 — the
-release's own subject, and the first thing in this project a CUJ has ever described.
-
-### Firmware
-
-- [ ] **R3-fw-2**: Extract the protocol into an ESP-IDF component (P1, 2d)
-      `agent/main/` already separates protocol from demo app: `ff_ota`, `ff_mqtt`,
-      `ff_enroll`, `ff_cfg`, `ff_store`, `ff_identity`, `ff_net`, `ff_time`. Move them to
-      a component with an `idf_component.yml`; the agent becomes its first consumer and
-      must keep passing `just agent-verify` and the QEMU E2E unchanged.
-      The real work is deciding the **public** surface — whatever ships is additive-only
-      from then on, exactly like the wire protocol. Keep it to the four verbs, enroll,
-      announce/heartbeat, and a version accessor.
-      Acceptance: the agent builds from the component with no behaviour change, the QEMU
-      run in `docs/runbooks/agent-qemu.md` still passes, and the component's public
-      headers are a strict subset of what `agent_main.c` uses.
-
-- [ ] **R3-fw-3**: Arduino library wrapping the same C (P1, 2d)
-      Depends on `R3-fw-2`. The persona writes Arduino or PlatformIO and does not use
-      ESP-IDF (`docs/personas/PERSONAS.md` §1); if adopting Fleetforge means porting their
-      project, they will not adopt it.
-      Ships what `R3-fw-1` chose: layout **`ab-4m-arduino-v1`** as a sketch-local
-      `partitions.csv`, config still in a flashable `ff_cfg`
-      (`design/decisions/arduino-gets-its-own-layout-id.md`). Two measured constraints:
-      the table must travel with the **example**, because the prebuild hook only reads the
-      sketch folder and never a library directory; and the new layout id has to reach
-      `device-protocol.md` + `SUPPORTED_LAYOUTS` first, which is a spec proposal, not this
-      task. The safety posture needs no custom bootloader — the stock core is already
-      `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y` — but it is still not optional: a
-      configuration that cannot roll back must fail at build or enroll, not warn.
-      Acceptance: a stock Arduino IDE install plus this library compiles the example for
-      esp32 and esp32s3, and a board flashed from it enrolls.
-
-- [ ] **R3-fw-4**: The worked example — enroll → heartbeat → stage → report version (P1, 1d)
-      Small enough to read in one screen. The PRD's Morse-code blinker is the documented
-      sample, so the example and the product claim are the same artifact: the blinker
-      changes its message between two builds, which makes "the OTA worked" visible from
-      across the room rather than only in the dashboard.
-      Acceptance: builds unmodified from a clean checkout on both ESP-IDF and Arduino, and
-      the README quickstart is exactly the steps a reader follows.
-
-- [ ] **R3-fw-5**: Reject a wrong flash layout loudly (P1, 1d)
-      A build that does not reproduce a supported layout exactly must announce a different
-      `partition_layout`. The server accepts one today
-      (`firmware/manifest.py::SUPPORTED_LAYOUTS`) and two once `ab-4m-arduino-v1` lands, so
-      the deploy is rejected — but today the message does not tell a library user what to
-      fix. **Do not use the IDE's `Maximum is N bytes` line as the check**: `R3-fw-1`
-      measured it reading the board menu's `upload.maximum_size` rather than the built
-      table, reporting 1310720 for a build whose slots were 1966080.
-      Acceptance: a deliberately mismatched layout is refused at deploy time with a
-      message naming the expected layout and slot size; no board is ever flashed into a
-      state where the library is running without a rollback-capable bootloader.
-
-### Test
-
-- [ ] **R3-test-1**: E2E in QEMU — example firmware enrols, updates, rolls back (P1, 1d)
-      The library's claim is the same as the agent's, so it gets the same proof:
-      `docs/runbooks/agent-qemu.md` boots the real bundle against the dev stack, and the
-      example must run that path rather than a stubbed one.
-      Three runs: a clean enroll, an OTA to a second build whose visible behaviour
-      differs, and a deliberately broken build that rolls back unaided and reports
-      `rolled-back`.
-      Acceptance: all three pass with no board, and the rollback run fails the test if the
-      device reports `confirmed`.
+- [x] **S0-test-3**: Someone who has not seen the code onboards a board unaided — passed 2026-09-22 → [enrollment.md](docs/features/enrollment.md)
+- [x] **S0-fw-3**: A board that browns out during RF calibration cannot escape it — withdrawn 2026-09-23, not fixed → [enrollment.md](docs/features/enrollment.md)

@@ -1,8 +1,7 @@
 # Self-Test (write once, gate everywhere)
 
-**Status:** Planned (default self-test defined at R0; custom entrypoint at R5; consumed by the V2 sim gate)
 **Priority:** P1
-**Target:** R5
+**Target:** R5 (default self-test defined at R0; custom entrypoint at R5; consumed by the V2 sim gate)
 **Depends on:** OTA Deploy & Auto-Rollback (ota-deploy.md) — R2
 
 ## Overview

@@ -6,15 +6,17 @@ grow to Raspberry Pi and eventually FPGAs.
 **Safe remote firmware updates**, where "safe" means a bad build is caught before the
 fleet, and any device that does get a bad update recovers itself.
 
-> **Status:** R0 in progress. A board can now be enrolled end to end and watched live:
-> the registry schema, the Compose stack, admin auth (`/v1/auth/*`), enrollment token
-> issuance (`/v1/enrollment-tokens`), `POST /v1/enroll` (the device-facing endpoint that
-> redeems a token and returns a broker credential), the ingestor (sole MQTT subscriber —
-> derives presence, writes the device row, emits `ff_events`), and the read side:
-> `GET /v1/events` (SSE, fanned out from Postgres `LISTEN` so it works with N API
-> workers) plus `GET /v1/devices`. The dashboard is still a skeleton, and the agent, the
-> flasher and OTA itself do not exist — nothing runs on a board yet
-> ([runbook](docs/runbooks/dev-stack.md)). See [`TODO.md`](TODO.md).
+> **Where this stands:** enrolment and OTA both work on real hardware, against the hosted
+> instance. A board is flashed and enrolled from the browser — no toolchain, no CLI — and
+> shows up live in the dashboard — fleet list, live event stream, a diagnosing serial
+> console — (R0, closed 2026-09-22, including an unaided run by someone who had never
+> seen the code). The dashboard's per-device Deploy pushes a new agent build to that
+> board and watches its version change (R1, 2026-09-23), and a board that boots a bad
+> image but never confirms it rolls itself back unattended (proven on an ESP32-S3 the same
+> day). **Next is R2, safe deploy:** confirm/rollback reporting and a checksum gate, so the
+> remaining gamble — an image that boots, confirms, and is broken anyway — is narrowed.
+> Until then, deploy to one board at a time. What is open, next and blocked lives in
+> [`TODO.md`](TODO.md) and nowhere else.
 
 ## Why
 
@@ -45,7 +47,7 @@ MQTT is the control plane; HTTPS carries artifact bytes.
 | [`Dockerfile`](Dockerfile) | One image, two commands — `api` and `ingestor` differ only in `command:` |
 | [`docker-compose.yml`](docker-compose.yml) | The standalone stack: the dev loop *and* the V2 self-host artifact |
 | [`frontend/`](frontend/) | Vite + React + TS dashboard; its nginx serves the SPA and `/v1` on one origin |
-| [`mosquitto/`](mosquitto/) | Broker config. All authz lives in `conf.d/` — `R0-sec-1` owns it |
+| [`mosquitto/`](mosquitto/) | Broker config. Fleet authz is the two pattern rules in `acl`; dynsec (authentication only) is provisioned by `bootstrap.sh` then `configure.sh`. A protected path |
 | [`docs/runbooks/`](docs/runbooks/) | Operational procedures, starting with the dev stack |
 | [`spec/prd.md`](spec/prd.md) | Requirements, targets, scope, risks |
 | [`spec/device-protocol.md`](spec/device-protocol.md) | The wire contract — near-frozen |

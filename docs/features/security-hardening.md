@@ -1,6 +1,5 @@
 # Signed OTA + Resumable Hardening (→ v1 complete)
 
-**Status:** Planned
 **Priority:** P0
 **Target:** R6 (→ v1 complete)
 **Depends on:** OTA Deploy & Auto-Rollback (ota-deploy.md) — R2

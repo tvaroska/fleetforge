@@ -1,6 +1,5 @@
 # Simulation Backend (advisory gate)
 
-**Status:** Planned — **V2, not v1**
 **Priority:** P1
 **Target:** R9 (V2)
 **Depends on:** Self-Test (self-test.md) — R5 (v1)

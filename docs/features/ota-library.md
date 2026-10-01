@@ -164,7 +164,6 @@ _Tracked in `TODO.md` (live status lives there, not here)._
   So the product can only update a device that does nothing its owner cares about. Until
   the four verbs are a library that drops into *their* firmware, Fleetforge is a very
   good demo of itself.
-- **Status:** Planned
 - **Target:** R3
 - **Added:** 2026-09-22
 - **Source:** [`docs/HOBBYIST.md`](../HOBBYIST.md) §4.1 — ranked the #1 unlock for the
@@ -233,3 +232,74 @@ gated on this release and should be scheduled with it.
 **Out of scope for R3:** Improv reprovisioning (HOBBYIST §4.3, unslotted), PlatformIO
 registry publication beyond a working `platformio.ini` recipe, and any application-config
 channel — `dn/cfg` stays agent-only by design.
+
+### R3 task list — moves into `TODO.md` when R3 opens
+
+Written 2026-09-22 alongside `R3-spec-1`, and moved here from `TODO.md` on 2026-10-01
+(`S0-ops-1`): `TODO.md` carries Sprint 0 plus the *active* release only, and R3 sits behind
+R2 by decision (`design/decisions/ota-library-ships-after-safe-deploy.md`). Nothing here
+should be picked up before R2 lands. `R3-spec-1` and `R3-fw-1` are done — see *Completed
+Work* above. Release contents: [releases.md](../releases.md) → R3. Journey:
+[`spec/cujs.md`](../../spec/cujs.md) → *CUJ-1*.
+
+#### Firmware
+
+- **R3-fw-2**: Extract the protocol into an ESP-IDF component (P1, 2d)
+      `agent/main/` already separates protocol from demo app: `ff_ota`, `ff_mqtt`,
+      `ff_enroll`, `ff_cfg`, `ff_store`, `ff_identity`, `ff_net`, `ff_time`. Move them to
+      a component with an `idf_component.yml`; the agent becomes its first consumer and
+      must keep passing `just agent-verify` and the QEMU E2E unchanged.
+      The real work is deciding the **public** surface — whatever ships is additive-only
+      from then on, exactly like the wire protocol. Keep it to the four verbs, enroll,
+      announce/heartbeat, and a version accessor.
+      Acceptance: the agent builds from the component with no behaviour change, the QEMU
+      run in `docs/runbooks/agent-qemu.md` still passes, and the component's public
+      headers are a strict subset of what `agent_main.c` uses.
+
+- **R3-fw-3**: Arduino library wrapping the same C (P1, 2d)
+      Depends on `R3-fw-2`. The persona writes Arduino or PlatformIO and does not use
+      ESP-IDF (`docs/personas/PERSONAS.md` §1); if adopting Fleetforge means porting their
+      project, they will not adopt it.
+      Ships what `R3-fw-1` chose: layout **`ab-4m-arduino-v1`** as a sketch-local
+      `partitions.csv`, config still in a flashable `ff_cfg`
+      (`design/decisions/arduino-gets-its-own-layout-id.md`). Two measured constraints:
+      the table must travel with the **example**, because the prebuild hook only reads the
+      sketch folder and never a library directory; and the new layout id has to reach
+      `device-protocol.md` + `SUPPORTED_LAYOUTS` first, which is a spec proposal, not this
+      task. The safety posture needs no custom bootloader — the stock core is already
+      `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y` — but it is still not optional: a
+      configuration that cannot roll back must fail at build or enroll, not warn.
+      Acceptance: a stock Arduino IDE install plus this library compiles the example for
+      esp32 and esp32s3, and a board flashed from it enrolls.
+
+- **R3-fw-4**: The worked example — enroll → heartbeat → stage → report version (P1, 1d)
+      Small enough to read in one screen. The PRD's Morse-code blinker is the documented
+      sample, so the example and the product claim are the same artifact: the blinker
+      changes its message between two builds, which makes "the OTA worked" visible from
+      across the room rather than only in the dashboard.
+      Acceptance: builds unmodified from a clean checkout on both ESP-IDF and Arduino, and
+      the README quickstart is exactly the steps a reader follows.
+
+- **R3-fw-5**: Reject a wrong flash layout loudly (P1, 1d)
+      A build that does not reproduce a supported layout exactly must announce a different
+      `partition_layout`. The server accepts one today
+      (`firmware/manifest.py::SUPPORTED_LAYOUTS`) and two once `ab-4m-arduino-v1` lands, so
+      the deploy is rejected — but today the message does not tell a library user what to
+      fix. **Do not use the IDE's `Maximum is N bytes` line as the check**: `R3-fw-1`
+      measured it reading the board menu's `upload.maximum_size` rather than the built
+      table, reporting 1310720 for a build whose slots were 1966080.
+      Acceptance: a deliberately mismatched layout is refused at deploy time with a
+      message naming the expected layout and slot size; no board is ever flashed into a
+      state where the library is running without a rollback-capable bootloader.
+
+#### Test
+
+- **R3-test-1**: E2E in QEMU — example firmware enrols, updates, rolls back (P1, 1d)
+      The library's claim is the same as the agent's, so it gets the same proof:
+      `docs/runbooks/agent-qemu.md` boots the real bundle against the dev stack, and the
+      example must run that path rather than a stubbed one.
+      Three runs: a clean enroll, an OTA to a second build whose visible behaviour
+      differs, and a deliberately broken build that rolls back unaided and reports
+      `rolled-back`.
+      Acceptance: all three pass with no board, and the rollback run fails the test if the
+      device reports `confirmed`.

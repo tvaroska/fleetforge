@@ -1124,7 +1124,7 @@ section.
 what was measured. The planning material below is kept as the record of why the move was
 taken and of the shape that was agreed before it was built.
 
-**Status:** Closed 2026-09-15 · **Priority:** P2 · **Added:** 2026-09-11
+**Closed:** 2026-09-15 · **Priority:** P2 · **Added:** 2026-09-11
 **Requirements:** [spec/standards.md](../../spec/standards.md) → *infrastructure* →
 *Agent bundles are artifacts, not image contents*
 **Decision:** [design/decisions/infrastructure-agent-bundles-are-artifacts.md](../../design/decisions/infrastructure-agent-bundles-are-artifacts.md)
@@ -1808,3 +1808,46 @@ dev light was a false positive and prod had no light.
   Verify with `ssh prod docker inspect prod-fleetforge-ingestor-1 --format
   '{{.State.Health.Status}}'`.
 - `just test`: 973 passed, ruff and mypy clean.
+
+## One status document, and a true front door (S0-ops-1, closed 2026-10-01)
+
+**Problem.** The rule "live status lives ONLY in `TODO.md`" was written everywhere and
+followed almost nowhere. The README still said "R0 in progress… the agent, the flasher and
+OTA itself do not exist" a week after R0 closed and R1 passed on metal. `docs/roadmap.md`
+(last updated 2026-09-15) and the feature-file headers carried their own Status values,
+all stale. `TODO.md` itself had grown into a 666-line session journal: closed `S0-fw-3`
+took up ~200 lines of the live list, and it carried three releases.
+
+### What shipped
+
+- **`TODO.md`** is now Sprint 0 plus a short *Where this stands*: what works on metal,
+  what does not, what is next (R2, behind a `/replan` re-run of the CUJ-1 gate) and what is
+  blocked. It went from 666 lines to ~150. The closed R0/R1 sections are gone. Closed
+  Sprint 0 tasks are one-line `[x]` entries with pointers.
+- **README** status block rewritten as one paragraph that matches metal. Its `mosquitto/`
+  row now names `acl` and the two dynsec phases instead of a `conf.d/` that holds no authz.
+- **`docs/roadmap.md`**: no `Last Updated`, no Status columns, no dated status
+  blockquotes. One line points at `TODO.md`.
+- **Feature files**: every status header and per-item status bullet removed. The
+  existing `Target` lines carry the release slotting. `self-test.md` folded its
+  parenthetical into `Target`, and `infrastructure.md` uses `**Closed:**` for a closed
+  plan.
+- **The R3 task list** moved word for word to `ota-library.md` → *R3 task list*, without
+  checkboxes. It moves back into `TODO.md` when R3 opens.
+
+**Archive gap closed first.** Three closed tasks existed only in `TODO.md`. Before the
+strip they got write-ups: `S0-test-3` and `S0-fw-3` in `enrollment.md`, and `R1-test-1`
+plus the CUJ-1 gate table in `ota-deploy.md`. Cutting first would have lost the two
+`S0-fw-3` results the task said must never be re-derived.
+
+### Verification (T2, 2026-10-01)
+
+- `rg` for the status-header pattern over `docs/features`, README and roadmap → no matches (exit 1). The same
+  check runs with `git grep` against the committed tree.
+- Every relative markdown link in README, `TODO.md`, roadmap and `docs/features/*.md`
+  resolves (scripted check, 0 broken).
+- A read of README then `TODO.md` alone answers all three questions. **What works:**
+  enroll, agent OTA, and rollback of a board that never confirms, all on the S3 against
+  prod. **What's next:** R2, opened by `/replan` once the gate passes. **What's blocked:**
+  the bench tasks need hardware, R3 waits on R2, and `just up` fails on a pruned dev box.
+- `just lint` clean (no code touched).

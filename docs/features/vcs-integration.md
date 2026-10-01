@@ -1,6 +1,5 @@
 # VCS Integration (v2)
 
-**Status:** Planned
 **Priority:** P2
 **Target:** R7, R8, R11 (V2)
 **Depends on:** v1 complete (R6)

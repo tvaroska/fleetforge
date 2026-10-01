@@ -1,6 +1,5 @@
 # Health & Telemetry
 
-**Status:** Planned
 **Priority:** P1
 **Target:** R4
 **Depends on:** Enrollment (enrollment.md) — R0

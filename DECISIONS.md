@@ -6,6 +6,33 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-01 — status lives in TODO.md; feature files are archives, and a release's tasks wait there (S0-ops-1)
+
+**Decided: `TODO.md` is the only document that says what is open, next or blocked. README
+gets one paragraph, and that paragraph points at `TODO.md`.** `docs/roadmap.md` and
+`docs/features/*.md` carry no Status headers, columns or "Last Updated". A feature file's
+`Target` says which release a thing is *slotted* for, which is a plan, not a state.
+Rejected: keeping the status columns "in sync". They drifted within a week (roadmap still
+said R0 was gated on `S0-test-3` after it passed), and a reader of the front door bounced
+before reaching the product.
+
+- **`TODO.md` carries Sprint 0 plus the *active* release only.** A future release's task
+  list lives in its feature file as a plain list (no checkboxes) and moves into `TODO.md`
+  when the release opens. R3's list is the first example (`ota-library.md` → *R3 task
+  list*). Closed releases leave `TODO.md` entirely. Their substance is in the feature
+  files.
+- **No active release is a legitimate state.** R1 is done on metal, but R2 opens only via
+  `/replan` passing the CUJ-1 gate, and until then `TODO.md` says so in *Where this
+  stands* rather than inventing an R2 section.
+
+**Gotcha.** Archive before you cut. Three closed tasks (`S0-fw-3`, `S0-test-3`,
+`R1-test-1`) had no write-up anywhere but `TODO.md`. A strip-first pass would have deleted
+the two `S0-fw-3` results that must not be re-derived. Grep `docs/features/` for the task
+ID before removing any `TODO.md` entry. Details: `docs/features/infrastructure.md`.
+
+---
+
+
 ## 2026-10-01 — the ingestor's heartbeat is a timer inside the session, with a stall guard (S0-infra-8)
 
 **Decided: touch the liveness file on a 30 s timer that lives only as long as the broker

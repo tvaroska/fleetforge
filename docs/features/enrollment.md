@@ -1,6 +1,5 @@
 # Enrollment & Provisioning
 
-**Status:** In progress (R0)
 **Priority:** P0
 **Target:** R0
 **Flow:** [flows.md](../../spec/flows.md) → Flow 1
@@ -1126,6 +1125,81 @@ all is still only covered by the deadlines, and the remedies are still prose rat
 buttons — that is S0-fe-6. Whether this belongs in a parser at all, versus structured faults
 from firmware, stays open in `spec/open-questions.md`.
 
+### Someone who has not seen the code onboards a board unaided (S0-test-3) — **PASSED 2026-09-22**
+
+**The criterion that actually decides *Unaided onboarding*.** Everything else in this
+feature is a component of it. It was deliberately written as a task rather than replaced by
+the parts a test runner can check, because it is not automatable. Its four component tasks
+(S0-fe-4 → S0-fe-7, above) had all landed before the run.
+
+**The bar.** Two runs, no assistance and no access to the repo, using only what is on
+screen. One run onboards a board end to end. The other diagnoses a deliberately induced
+fault, chosen from brownout (thin cable through a hub), a wrong Wi-Fi passphrase and a spent
+enrolment token. Both pass only if the operator never reads a UART log and never asks a
+question. Anything they get stuck on comes back as a new S0 task, and the fact that they got
+stuck is the finding, not their skill.
+
+**Result.** Passed on the bench on 2026-09-22, with no UART reading and no repo knowledge.
+It was R0's last gate, so **R0 closed the same day**.
+
+**What it did not cover.** The run used the ESP32-S3 (`94a990dd09a4`), which has native USB
+and needs no driver. It never touched the bridge-chip path that every cheap
+CP2102/CH340 DevKit takes. The next bench session found the gap there: on Windows a board
+with no VCP driver has no COM port, and the page says nothing about it. That is `S0-fe-8`.
+
+### A board that browns out during RF calibration cannot escape it (S0-fw-3) — **WITHDRAWN 2026-09-23, not fixed**
+
+**Why withdrawn.** The task is about one classic ESP32-DevKit v1. That board is out of
+consideration: it is old, the ESP32-S3 carries every bench path that matters, and the one
+remaining experiment needs the stuck DevKit v1 specifically. It was closed rather than
+parked because no session would ever pick it up.
+
+**The fault.** Found 2026-09-12 in an operator's diagnostic bundle. There were six boots,
+and each one printed `phy_init: failed to load RF calibration data (0x1102), falling back to
+full calibration` followed by `E BOD: Brownout detector was triggered`. The loop sustains
+itself. Full calibration is the biggest current draw in startup, the rail collapses during
+it, and the result is only cached once a boot survives, so every boot is identical.
+
+**Two results survive the closure and must not be re-derived:**
+
+1. **The fault is ours, not the supply's** (settled 2026-09-14). A brand-new board on the
+   same cable and port ran ESPHome through a cold full RF calibration and survived. So this
+   supply can carry a cold calibration, and our startup draws more current than it needs
+   to. The "marginal supply / add bulk capacitance" reading is retired
+   (`DECISIONS.md` 2026-09-14).
+2. **The reporting half shipped in v0.3.3 and is correct.** `FF_PROGRESS_BROWNOUT`
+   (`ff_progress.h`) → `agent_main.c::log_power_fault()` → `DeviceProgressStage.BROWNOUT`
+   → `FleetView.tsx` "recovered from a power fault". The console also shows a
+   calibration-specific hint. It does nothing on healthy boards. Re-verified end to end on
+   2026-09-23. Keep it.
+
+**What did not work.** `CONFIG_ESP_PHY_REDUCE_TX_POWER=y` (v0.3.3). A 2026-09-13 bundle
+contains the A/B comparison in a single log: boot 1 had the option inactive and boots 2–6
+had it active. All six died at the same `phy_init` line. The lever is aimed correctly (IDF
+v5.5.5 applies the reduced `init_data` *during* the full calibration). It simply does not
+move this board, so TX power is not the dominant draw. Every brownout on record came from a
+160 MHz, `-Og` build (agent `19b0a0b`), which predates `d705652`.
+
+**What stays unproven: whether any board that browns out during calibration can escape.**
+That is a property of the fleet, not of one board. If it shows up again on a board we care
+about, it comes back as a new S0 task. Untried levers, cheapest first:
+
+1. **Flash the stock esp32 bundle** (`-Os`, 80 MHz, `REDUCE_TX_POWER`), confirmed in
+   `agent/dist/esp32/sdkconfig.resolved` on 2026-09-23. At 160 MHz the CPU running flat
+   out during calibration draws roughly 20–30 mA. 80 MHz applies on every boot, before
+   `app_main`.
+2. **Diff our `sdkconfig.resolved` against ESPHome's.** Our half is already recorded:
+   `dio`/`40m` flash, no SPIRAM, no PM, `STATIC_RX_BUFFER_NUM=10`,
+   `DYNAMIC_RX/TX_BUFFER_NUM=32`, `XTAL_FREQ=40`.
+3. **Brownout mechanism, not threshold.** `ESP_BROWNOUT_DET_LVL=0` (2.43 V) is already the
+   lowest level, so there is no headroom to buy. `ESP32_REV_MIN_0` force-selects
+   `ESP_BROWNOUT_USE_INTR`, though. If the board is rev ≥1 and ESPHome builds for a higher
+   minimum revision, the two images use different detectors on the same silicon. The
+   revision is in the boot banner.
+
+Since S0-fw-4 the flasher erases nothing. One survived calibration is therefore cached in
+NVS and ends the loop for good.
+
 ## Planned Work
 
 ### Unaided onboarding: flash → on the fleet (Priority: P0)
@@ -1153,11 +1227,9 @@ from firmware, stays open in `spec/open-questions.md`.
      full log, config summary, chip info, firmware and server versions, the fault — with
      secrets redacted, so a stuck operator can hand it to someone who can help. That
      click is the thing that did not exist on 2026-09-11.
-- **Status:** In progress — all three layers (S0-fe-4, S0-fe-5, S0-fe-6, S0-fe-7) landed
-  2026-09-11; see *Escalation is one click* above. Remaining: the unaided run (S0-test-3),
-  which is what actually decides this feature. **As of 2026-09-22 it is also the only
-  thing holding R0 open** — `R0-test-2` passed, so every other R0 task is done and this
-  P0 is the release's last gate.
+- **Outcome:** all three layers (S0-fe-4, S0-fe-5, S0-fe-6, S0-fe-7) landed 2026-09-11;
+  see *Escalation is one click* above. The unaided run that decides the feature,
+  S0-test-3, **passed 2026-09-22** and closed R0 — see its entry above.
 - **Added:** 2026-09-11
 - **Tasks:** ~~S0-fe-4 (diagnosis)~~ done, ~~S0-fe-5 (never miss the boot)~~ done,
   ~~S0-fe-6 (recovery actions)~~ done, ~~S0-fe-7 (diagnostic bundle)~~ done,
