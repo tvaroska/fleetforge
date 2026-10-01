@@ -101,31 +101,11 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       new S0 task with the observed behaviour.
       ⚠️ The bench host is unsettled: this entry says the Mac, but `S0-fe-8` was observed
       on Windows + Chrome. Re-acquire is an OS-and-driver property — record which host.
-
-- [ ] **S0-fe-8**: A board with no COM port leaves the operator at a dead end (P1, <2h)
-      Added: 2026-09-23
-      Observed at the bench, on the way into `S0-fw-3`. Windows 11 + Chrome, an
-      ESP32-DevKit v1 (CP2102, `10c4:ea60`). The board enumerates as a USB device and
-      Windows names it correctly, but no VCP driver is bound, so **no COM port exists**.
-      The flash page's port chooser therefore opens and lists exactly one entry — the
-      motherboard's legacy `COM1` — and nothing else. Nothing on screen says why, names
-      the missing driver, or distinguishes "no driver" from "wrong cable", "dead board"
-      or "wrong port". The operator's only route out is knowing to open Device Manager,
-      spot a yellow bang, and find the Silicon Labs driver; Windows Update did not
-      supply it.
-      This is the failure shape `S0-test-3` asks to be filed: the operator got stuck and
-      *that* is the finding. Note S0-test-3 passed on the ESP32-S3, which is native USB
-      and needs no driver — so the passing run never touched this path. **Every
-      bridge-chip board does**, and CP2102/CH340 is what the cheap DevKits ship.
-      Not a code defect: `esptoolFlasher.ts:113` and `serialConsole.ts:113` both call
-      `requestPort()` with no filters, so Chrome is already offering everything the OS
-      has. The gap is entirely in what the page says when what the OS has is nothing.
-      Fix (small): a "my board isn't listed" affordance on the flash page naming the two
-      common bridges (CP210x, CH340), linking the drivers, and saying that macOS needs
-      no install while Windows usually does. If a chosen port is plainly not an ESP32,
-      say so rather than failing later in the handshake.
-      Acceptance: an operator who has never installed a VCP driver reaches a working COM
-      port using only what the page tells them — no Device Manager spelunking, no asking.
+      * **Folded in from S0-fe-8 (accepted 2026-10-01 without a bench run).** On Windows,
+        with the board's VCP driver *not* installed, an operator who has never installed one
+        reaches a working COM port using only "My board isn't listed" on the flash page:
+        no Device Manager, no asking. Also confirm that picking COM1 gets refused by name
+        and that the Silicon Labs driver link resolves (the dev box gets a 403 from Akamai).
 
 - [ ] **S0-test-2**: The native-USB re-acquire path, on a C3/C6/S3 (P2, 0.25d)
       Split from S0-test-1 on 2026-09-11: the only board on hand is an ESP32-DevKit v1,

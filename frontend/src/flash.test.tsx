@@ -17,6 +17,7 @@ import { FlashBoard } from './FlashBoard'
 import { planWrite } from './flash'
 import type { AgentBuildInfo, AgentManifest } from './api'
 import type { BoardConsole, ConsoleFactory } from './boardConsole'
+import { BUILT_IN_PORT, checkChosenPort } from './flasher'
 import type { BoardFlasher, ChipInfo, FlashPart, WriteOptions } from './flasher'
 
 const TOKEN_ID = '11111111-1111-4111-8111-111111111111'
@@ -709,6 +710,55 @@ describe('FlashBoard — capability branches', () => {
     // A second click must open the chooser again.
     await userEvent.click(screen.getByRole('button', { name: /select port and detect/i }))
     await waitFor(() => expect(createFlasher).toHaveBeenCalledTimes(2))
+  })
+
+  it('offers "My board isn\'t listed", closed, with both bridge drivers linked (S0-fe-8)', async () => {
+    mockFetch(await defaultRoutes())
+    render(<FlashBoard onSessionExpired={vi.fn()} createFlasher={async () => new FakeFlasher(chipInfo())} />)
+
+    const help = screen.getByTestId('port-help')
+    expect(help).not.toHaveAttribute('open')
+    expect(screen.getByText(/my board isn't listed/i)).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /CP210x driver/i })).toHaveAttribute(
+      'href',
+      expect.stringContaining('silabs.com'),
+    )
+    expect(screen.getByRole('link', { name: /CH340 driver/i })).toHaveAttribute(
+      'href',
+      expect.stringContaining('wch-ic.com'),
+    )
+    expect(help).toHaveTextContent(/COM1 is never your board/)
+    expect(help).toHaveTextContent(/macOS and Linux have both drivers built in; Windows usually does not/)
+  })
+
+  it('opens the help when the operator dismisses the chooser — the stuck operator\'s next move', async () => {
+    mockFetch(await defaultRoutes())
+    const createFlasher = vi.fn(async () => {
+      throw new DOMException(
+        "Failed to execute 'requestPort' on 'Serial': No port selected by the user.",
+        'NotFoundError',
+      )
+    })
+    render(<FlashBoard onSessionExpired={vi.fn()} createFlasher={createFlasher} />)
+
+    await userEvent.click(screen.getByRole('button', { name: /select port and detect/i }))
+    await screen.findByText('No board selected.')
+    await waitFor(() => expect(screen.getByTestId('port-help')).toHaveAttribute('open'))
+  })
+
+  it('refuses COM1 by name and opens the help, instead of blaming the board', async () => {
+    mockFetch(await defaultRoutes())
+    // What the real adapter does when the chooser's only entry is the motherboard port.
+    const createFlasher = vi.fn(async () => {
+      checkChosenPort({}, () => {})
+      return new FakeFlasher(chipInfo())
+    })
+    render(<FlashBoard onSessionExpired={vi.fn()} createFlasher={createFlasher} />)
+
+    await userEvent.click(screen.getByRole('button', { name: /select port and detect/i }))
+    expect(await screen.findByText(BUILT_IN_PORT)).toBeInTheDocument()
+    expect(screen.queryByTestId('chip-info')).not.toBeInTheDocument()
+    await waitFor(() => expect(screen.getByTestId('port-help')).toHaveAttribute('open'))
   })
 
   it('lists the available targets from the manifest', async () => {

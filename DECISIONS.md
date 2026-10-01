@@ -6,6 +6,32 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-01 — "no COM port" is answered with words, and COM1 is refused (S0-fe-8)
+
+**Decided: help text, plus one refusal.** No port filters and no driver detection.
+`requestPort()` stays unfiltered. Filtering by USB vendor id would hide nothing that
+matters (COM1 is the only stray entry) and would hide a board on an unusual bridge, which
+is a worse dead end than the one being fixed. The page cannot detect a missing driver
+either, because Web Serial only ever sees ports the OS created. So the fix is what the page
+*says*: "My board isn't listed" (`PortHelp.tsx`).
+
+- **A port with no USB vendor id is refused before any handshake** (`checkChosenPort`,
+  both chooser call sites). That is exactly the "plainly not an ESP32" case. Anything with
+  a USB id goes through, and an unknown vendor is logged rather than blocked.
+- **No chip identification step.** "Install both drivers, they don't conflict" beats any
+  instruction that needs Device Manager, and the acceptance forbids Device Manager.
+- **The help opens itself on a dismissed chooser.** A stuck operator's next move is
+  closing an empty-looking chooser, so a collapsed `<details>` alone would wait for a click
+  that never comes.
+
+**Gotchas.** The refusal message and the summary must say *the same words*
+(`My board isn't listed`, straight apostrophe), because the message tells the operator to
+look for it. The Silicon Labs driver page returns a 403 from Akamai to the dev box, so
+verify that link from a real browser. Bench acceptance is owed and lives in `S0-test-1`.
+Details: `docs/features/enrollment.md`.
+
+---
+
 ## 2026-10-01 — status lives in TODO.md; feature files are archives, and a release's tasks wait there (S0-ops-1)
 
 **Decided: `TODO.md` is the only document that says what is open, next or blocked. README

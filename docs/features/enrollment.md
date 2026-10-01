@@ -1200,6 +1200,48 @@ about, it comes back as a new S0 task. Untried levers, cheapest first:
 Since S0-fw-4 the flasher erases nothing. One survived calibration is therefore cached in
 NVS and ends the loop for good.
 
+### A board with no COM port is no longer a dead end (S0-fe-8) — 2026-10-01
+
+**The gap.** Found at the bench on 2026-09-23 (Windows 11 + Chrome, a CP2102 DevKit,
+`10c4:ea60`). The board enumerated as a USB device but no VCP driver was bound, so the OS
+had no COM port to offer and the chooser listed only the motherboard's `COM1`. Nothing on
+the page explained it. The code was not at fault: `requestPort()` is called with no
+filters, so Chrome already offers everything the OS has. The gap was what the page says
+when what the OS has is nothing.
+
+**What was built.**
+
+- **"My board isn't listed"** (`frontend/src/PortHelp.tsx`) sits under the port button. It
+  says COM1 is never the board, that boards on the chip's own USB (S3/C3/C6) need no
+  driver, and names the two bridges with their driver links (CP2102/CP2104 → Silicon
+  Labs, CH340/CH9102 → WCH). It says macOS and Linux have both built in while Windows
+  usually does not, then: unplug, replug, *Select port* again, and what the new entry is
+  called. Last come the charge-only cable and Linux `dialout`.
+- **No "identify your chip" step.** That would need Device Manager, which the acceptance
+  rules out. Instead it says: not sure which chip, install both, they do not conflict.
+- **It opens itself at the moment it is needed.** That is when the chooser is dismissed
+  (`NO_BOARD_SELECTED`), because an operator who sees nothing of theirs closes it, and when
+  COM1 is refused. It never closes itself.
+- **COM1 is refused by name** (`checkChosenPort` in `flasher.ts`, called right after
+  `requestPort()` in both `esptoolFlasher.ts` and the console's prompt path). A port with
+  no USB vendor id is built into the computer. Before this, esptool spent its whole sync
+  window on it and then said "the board did not answer", which sends the operator to the
+  BOOT button for a board that was never on the line. Ports with a USB id always go
+  through. Espressif `303a`, Silicon Labs `10c4`, WCH `1a86` and FTDI `0403` are named in
+  the log. Anything else is logged as unrecognised and tried anyway.
+
+**Evidence.** `flasher.test.ts` covers the refusal and the vendor table. Three new
+`flash.test.tsx` cases cover the help starting closed with both links, the help opening on
+a dismissed chooser, and COM1 refused with no chip detected and the help open. The real
+`FlashBoard` was also rendered in headless Chrome with a stubbed chooser, in all three
+states. The CH340 link answers 200. The Silicon Labs page answers 403 from Akamai to the
+dev box (it blocks datacenter IPs), so that link is unverified from here.
+
+**Accepted 2026-10-01 on that evidence, with the bench half still owed.** The criterion
+asks for an operator who has never installed a VCP driver to reach a working COM port using
+only the page. That is a Windows bench run, and it is folded into `S0-test-1`, which needs
+the same bridge-chip board on the same bench.
+
 ## Planned Work
 
 ### Unaided onboarding: flash → on the fleet (Priority: P0)

@@ -63,6 +63,60 @@ export const webSerialSupported = (): boolean =>
   typeof navigator !== 'undefined' && 'serial' in navigator
 
 /**
+ * What a dismissed chooser reads as. Exported because the view treats it as a cue, not
+ * only as a message: an operator whose board has no COM port opens the chooser, sees
+ * nothing that is theirs, and closes it — so this is the moment to open "My board isn't
+ * listed" (S0-fe-8).
+ */
+export const NO_BOARD_SELECTED = 'No board selected.'
+
+/**
+ * USB vendor ids of what an ESP32 board actually presents. Everything an ESP32 can be
+ * reached through is one of these: the chip's own USB (C3/C6/S3) or the bridge chip on
+ * the board. A port with an id outside this table is unusual, not wrong — a board on a
+ * Prolific or CH9102-clone bridge still flashes.
+ */
+/** `checkChosenPort`'s refusal. Exported for the same reason as `NO_BOARD_SELECTED`. */
+export const BUILT_IN_PORT =
+  'That port is built into the computer (COM1 on most Windows PCs), not a USB board. ' +
+  "If it was the only one listed, the board has no port yet — see “My board isn't listed”."
+
+const USB_SERIAL_VENDORS: Record<number, string> = {
+  0x303a: 'Espressif native USB (no driver needed)',
+  0x10c4: 'Silicon Labs CP210x bridge',
+  0x1a86: 'WCH CH340/CH9102 bridge',
+  0x0403: 'FTDI bridge',
+}
+
+const hex4 = (value: number): string => value.toString(16).padStart(4, '0')
+
+/**
+ * Stops the one choice that is plainly not an ESP32, before any handshake. S0-fe-8.
+ *
+ * A port with NO USB vendor id is built into the computer: the motherboard's `COM1` on
+ * Windows, `ttyS0` on Linux. On a Windows box with no bridge driver it is the only entry
+ * the chooser lists, so it is what a stuck operator picks — and esptool would then spend
+ * its whole sync window on it and report "the board did not answer", which sends them to
+ * the BOOT button for a board that was never on the line.
+ *
+ * Anything with a USB id goes through; a known vendor is named in the log so the
+ * bridge chip is on record next to whatever happens next.
+ */
+export function checkChosenPort(info: SerialPortInfo, onLog: (line: string) => void): void {
+  const vendor = info.usbVendorId
+  if (vendor === undefined) {
+    throw new Error(BUILT_IN_PORT)
+  }
+  const product = info.usbProductId === undefined ? '' : `:${hex4(info.usbProductId)}`
+  const known = USB_SERIAL_VENDORS[vendor]
+  onLog(
+    known === undefined
+      ? `port: USB ${hex4(vendor)}${product} — not a USB-serial chip this page recognises; trying it anyway`
+      : `port: ${known} (USB ${hex4(vendor)}${product})`,
+  )
+}
+
+/**
  * Web Serial and esptool-js describe the protocol. This describes the bench.
  *
  * It lives HERE, not in `esptoolFlasher.ts`, because the most common failure of all —
@@ -85,7 +139,7 @@ export function explainFlashError(error: unknown): string {
 
   // Chromium throws NotFoundError both when no port matches and when the operator
   // dismisses the chooser, which is by far the common case.
-  if (name === 'NotFoundError') return 'No board selected.'
+  if (name === 'NotFoundError') return NO_BOARD_SELECTED
   // S0-fe-6. Chromium's wording when the transient user activation window has closed —
   // the recovery click awaits `release()` before `requestPort()`, and a slow release can
   // outlive it. It is not a security misconfiguration, and telling the operator to check

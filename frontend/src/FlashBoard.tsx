@@ -19,7 +19,13 @@ import { uriSecrets, type DiagnosticContext } from './diagnostics'
 import { OTHER_BOARD_ID, shortlist } from './boards'
 import { buildFfCfgFields, validateFfCfg, type FlashConfigInput } from './ffcfg'
 import { formatBytes, predictDeviceId, useFlashBoard } from './flash'
-import { webSerialSupported, type FlasherFactory } from './flasher'
+import {
+  BUILT_IN_PORT,
+  NO_BOARD_SELECTED,
+  webSerialSupported,
+  type FlasherFactory,
+} from './flasher'
+import { PortHelp } from './PortHelp'
 
 /** 921600 first: it is what a CP210x/native-USB board wants. 115200 is the CH340 escape. */
 const BAUD_RATES = [921600, 460800, 115200]
@@ -129,6 +135,7 @@ export function FlashBoard({
   /** S0-fe-7, and a footnote in a bundle rather than anything on this page. */
   const [serverVersion, setServerVersion] = useState<string | null>(null)
   const state = useFlashBoard({ onSessionExpired, createFlasher })
+  const [portHelpOpen, setPortHelpOpen] = useState(false)
 
   const supported = webSerialSupported()
   const secure = typeof window === 'undefined' || window.isSecureContext
@@ -167,6 +174,13 @@ export function FlashBoard({
       live = false
     }
   }, [supported, secure, onSessionExpired])
+
+  // S0-fe-8. A dismissed chooser or a refused COM1 is what an operator with no driver
+  // does next, so that is when the help opens by itself. Only ever opens it: closing is
+  // the operator's call.
+  useEffect(() => {
+    if (state.error === NO_BOARD_SELECTED || state.error === BUILT_IN_PORT) setPortHelpOpen(true)
+  }, [state.error])
 
   if (!supported) return <Unavailable reason="no-web-serial" />
   if (!secure) return <Unavailable reason="insecure" />
@@ -286,6 +300,7 @@ export function FlashBoard({
           {chip === null ? 'Select port and detect' : 'Select a different port'}
         </button>
       </p>
+      <PortHelp open={portHelpOpen} onToggle={setPortHelpOpen} />
 
       {chip !== null && (
         <>

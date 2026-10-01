@@ -3,7 +3,7 @@
 // `navigator.serial` and no board — so everything worth testing lives in `boardConsole.ts`.
 
 import type { BoardConsole, ConsoleAcquire, ConsoleFactory } from './boardConsole'
-import { explainFlashError } from './flasher'
+import { checkChosenPort, explainFlashError } from './flasher'
 
 /**
  * How long to keep trying to open a port after a flash.
@@ -108,9 +108,16 @@ class SerialConsole implements BoardConsole {
  * `'granted'` reuses a permission the operator already gave (which is why nothing ever
  * calls `forget()`), so it can run from an effect after a flash with no gesture at all.
  */
-async function acquirePort(acquire: ConsoleAcquire, baudRate: number): Promise<SerialPort> {
+async function acquirePort(
+  acquire: ConsoleAcquire,
+  baudRate: number,
+  onLog: (line: string) => void,
+): Promise<SerialPort> {
   if (acquire === 'prompt') {
     const port = await navigator.serial.requestPort()
+    // Same refusal as the flasher (S0-fe-8): COM1 would open fine and then print nothing,
+    // which reads as a dead board.
+    checkChosenPort(port.getInfo(), onLog)
     await openWithRetry([port], baudRate)
     return port
   }
@@ -154,6 +161,6 @@ async function openWithRetry(ports: SerialPort[], baudRate: number): Promise<Ser
 }
 
 export const createSerialConsole: ConsoleFactory = async ({ baudRate, acquire, onLog }) => {
-  const port = await acquirePort(acquire, baudRate)
+  const port = await acquirePort(acquire, baudRate, onLog)
   return new SerialConsole(port, onLog)
 }

@@ -23,7 +23,7 @@
 //   image. Expected, harmless, and not something to "fix".
 
 import { ESPLoader, Transport, type FlashSizeValues } from 'esptool-js'
-import { explainFlashError } from './flasher'
+import { checkChosenPort, explainFlashError } from './flasher'
 import type { BoardFlasher, ChipInfo, FlashPart, FlasherFactory, WriteOptions } from './flasher'
 
 class EsptoolFlasher implements BoardFlasher {
@@ -111,6 +111,8 @@ export const createEsptoolFlasher: FlasherFactory = async ({ baudRate, onLog }) 
   // Synchronous, first, inside the click handler's gesture. Anything awaited before this
   // spends the gesture and Chromium then refuses to open the chooser.
   const port = await navigator.serial.requestPort()
+  // Before the Transport exists: nothing is open yet, so a refusal has nothing to release.
+  checkChosenPort(port.getInfo(), onLog)
   // `tracing: false` — tracing dumps every raw SLIP frame into the log panel.
   const transport = new Transport(port, false)
   // No `romBaudrate` here: 0.6.1 fixes it at 115200 internally and `LoaderOptions` has no
