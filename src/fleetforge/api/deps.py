@@ -222,6 +222,29 @@ def mqtt_command_configured(settings: Settings) -> bool:
     return bool(settings.mqtt_command_username) and bool(settings.mqtt_command_password)
 
 
+def deploy_config_gaps(settings: Settings) -> list[str]:
+    """The environment names a deploy needs and this process does not have. **No I/O.**
+
+    S0-infra-9: each of these used to be a startup WARNING and nothing else, so a stack
+    with no way to deploy reported healthy (ops-log F-2026-09-23-001). `/v1/readyz`
+    answers 503 while this is non-empty. Names only, never values — the probe is public.
+    Configuration is checked, reachability is not: that is `just deploy-check`'s job,
+    and a probe that dials GCS every 30 s would be an outage amplifier.
+    """
+    from fleetforge.storage.factory import object_store_configured
+
+    gaps: list[str] = []
+    if not object_store_configured(settings):
+        gaps.append("S3_* or GCS_*")
+    if not settings.artifact_url_secret:
+        gaps.append("ARTIFACT_URL_SECRET")
+    if not settings.public_base_url:
+        gaps.append("PUBLIC_BASE_URL")
+    if not mqtt_command_configured(settings):
+        gaps.append("MQTT_COMMAND_USERNAME/_PASSWORD")
+    return gaps
+
+
 def get_command_publisher(settings: SettingsDep) -> CommandPublisher:
     """`MqttCommandPublisher` when the commander credential is configured, Null otherwise.
 

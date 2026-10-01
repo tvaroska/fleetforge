@@ -1684,3 +1684,70 @@ purpose: the GCS service-account key cannot be minted"*. Replace both with:
 **Order matters:** publish the bundles to GCS *before* deploying an app image that no
 longer carries them, or prod's flasher answers 503 in between. Nothing is mounted and no
 key exists (S0-infra-5).
+
+## Readiness covers deploy, and deploy has a release gate (S0-infra-9, closed 2026-10-01)
+
+**Problem.** Deploy had never worked on prod while every probe was green (ops-log
+F-2026-09-23-001/002/003). `/v1/readyz` pinged only the database, the container
+healthcheck used `/v1/healthz`, and each deploy-mandatory setting was one startup
+WARNING. `just broker-check`, which would have caught F-002, was something you ran at your
+desk, not a gate.
+
+### What shipped
+
+- **`api/deps.py::deploy_config_gaps(settings)`**: no I/O. Lists the env names that are
+  missing: `S3_* or GCS_*`, `ARTIFACT_URL_SECRET`, `PUBLIC_BASE_URL`,
+  `MQTT_COMMAND_USERNAME/_PASSWORD`. Empty strings count as unset (compose interpolation).
+- **`/v1/readyz`**: 503 when the database is unreachable **or** that list is non-empty.
+  Every gap is reported at once:
+  `{"status":"not-ready","detail":"…","missing":[…]}`. Names only, never values, since the
+  probe is public behind nginx. `healthz` is unchanged and still no-I/O.
+- **Healthcheck → `/v1/readyz`** in `docker-compose.yml` and in services
+  `prod/docker-compose.yml`. `docker rollout` waits for healthy, so a misconfigured new
+  API now fails the rollout and the old container keeps serving.
+- **`just deploy-check`** (`python -m fleetforge.deploycheck`, then `just broker-check`):
+  0. `GET {PUBLIC_BASE_URL}/v1/readyz` must be 200. This is the API's view of its own
+     config;
+  1. `put_blob` a fixed 40-byte probe (content-addressed, so re-runs write nothing new);
+  2. mint a signed link with `mint_artifact_url`;
+  3. GET it with no credentials, through the API's download endpoint and its 307 to the
+     store;
+  4. check the sha256 matches.
+
+  Prints no signature or upstream URL. **`just deploy-check-prod`** runs both halves
+  inside `fleetforge-api` on prod.
+- Runbook: `docs/runbooks/dev-stack.md` → *Is deploy actually possible?*
+
+### Gotchas learned
+
+- **The download endpoint never reads `PUBLIC_BASE_URL`.** Only the deploy that mints the
+  link does. A host-side check that signs with the host's own `PUBLIC_BASE_URL` passes
+  against an API that has none. Step 0 exists for this reason. Don't remove it as
+  redundant.
+- **`readyz` green with a broken broker is correct.** It checks presence. Live broker
+  state (F-002) can only be caught by connecting as the commander, so readiness alone is
+  not enough and the gate has to exist too.
+- **A gap now keeps the dashboard down on a fresh `up`.** `frontend` has
+  `depends_on: api: service_healthy` in dev and prod. Traefik routes only to the frontend,
+  so an api that turns unhealthy at runtime does not take a running dashboard down.
+- **`minio/minio` and `minio/mc` can no longer be pulled** (Docker Hub: "repository does
+  not exist"; quay.io: unauthorized). A dev box with pruned images cannot `just up`. T2
+  ran with an uncommitted `/tmp` override using `cgr.dev/chainguard/minio{,-client}:latest-dev`
+  (no `curl` in that image, so the healthcheck used `wget`, plus `user: "0"`). The real
+  fix is its own task.
+
+### Verification (T2, 2026-10-01, production-shaped dev stack)
+
+- Healthy stack: api `Healthy` via `readyz`. `just deploy-check` → readyz 200 → link
+  through `:8088` → `served from localhost:9000` → bytes match → `SELFTEST OK`, then
+  broker matrix `SELFTEST OK` (14 assertions).
+- **F-001 replay** (api env `PUBLIC_BASE_URL=""`, `ARTIFACT_URL_SECRET=""`): `healthz` 200;
+  `readyz` 503 `not configured: ARTIFACT_URL_SECRET, PUBLIC_BASE_URL`; `docker inspect`
+  showed `health=unhealthy streak=5`; `deploy-check` from the host (whose env was fine)
+  → `SELFTEST FAILED … HTTP 503: not configured: …`, exit 1.
+- **F-002 replay** (`dynsec deleteClient ff-commander` on the running broker): download
+  half `SELFTEST OK`, broker half `SELFTEST FAILED: MqttConnectError: [code:135] Not
+  authorized`, gate exit 1. Re-running `mosquitto-config` restored it and the gate went
+  back to exit 0.
+- `just test`: 968 passed (+ the new deploycheck tests), ruff and mypy clean.
+  `test_healthz_ok` still runs with no database.

@@ -49,8 +49,9 @@ class Settings(BaseSettings):
     # `create_app()` must stay constructible with no environment at all (the health
     # tests depend on it), while a deployed stack must refuse to start unconfigured.
     # When it is None, `/v1/auth/login` answers 503 and startup logs one WARNING.
-    # `/v1/readyz` deliberately ignores it — readiness is about the database, and a
-    # login-config problem must not turn into a container restart loop.
+    # `/v1/readyz` deliberately ignores it — compose already refuses to start without
+    # it. Readiness does cover the deploy-mandatory settings since S0-infra-9
+    # (`api/deps.py::deploy_config_gaps`).
     #
     # In `.env` this value MUST be single-quoted: a PHC string is full of `$` and
     # docker compose would otherwise interpolate `$argon2id`/`$v`/`$m` away.

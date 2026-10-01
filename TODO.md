@@ -2,7 +2,7 @@
 
 **Goal:** Self-hosted OTA firmware management for embedded fleets (ESP32 first) — a bad
 build is caught before the fleet, and any device that gets one recovers itself.
-**Updated:** 2026-09-23
+**Updated:** 2026-10-01
 
 ## Where this stands
 
@@ -158,7 +158,7 @@ Two results worth carrying forward, because they retired earlier conclusions:
   artifact tasks are done; the build engine itself stays R10, only its cache key changed.
 
 <!-- Counters: spec=1 infra=7 db=1 be=6 fe=7 sec=1 fw=4 test=3 -->
-<!-- Sprint 0 counters: fe=8 fw=4 infra=8 test=4 -->
+<!-- Sprint 0 counters: fe=8 fw=4 infra=9 test=4 ops=1 -->
 <!-- R1 counters: be=3 fe=1 fw=2 test=1 -->
 <!-- R3 counters: spec=1 fw=4 test=1 -->
 
@@ -174,7 +174,7 @@ attempted-but-failed. `spec/` and `design/` are status-free.
 
 > **Task IDs:** fleetforge is release-driven, so IDs are `R{N}-{category}-{number}`
 > (e.g. `R0-be-1`). Sprint 0 uses `S0-{category}-{number}`.
-> Categories: db, be, fe, test, qa, sec, infra, fw, spec, rel, perf.
+> Categories: db, be, fe, test, qa, sec, infra, fw, spec, rel, perf, ops.
 
 **Deployment (v1):** single hosted instance at `bingo.tvaroska.sk` (domain reused from
 the retired bingo app), single-tenant, **not a public product until V3**.
@@ -186,6 +186,65 @@ the retired bingo app), single-tenant, **not a public product until V3**.
 ## Sprint 0: Critical Issues
 
 Bricking risks, broker auth and security issues get filed here as they surface.
+
+- [ ] **S0-infra-8**: The ingestor's liveness probe measures device traffic, not liveness (P0, 0.5d)
+      Found 2026-09-23 while running the T3 gate. Escalated to P0 on 2026-09-27:
+      same class as `S0-infra-9` (a probe that is green while the path is dead).
+      The dev stack's `fleetforge-ingestor` had been **unhealthy for 27 hours** —
+      `FailingStreak` 3292 — with a live, connected, perfectly functional process.
+      Mechanism: the healthcheck is `test $(( $(date +%s) - $(stat -c %Y
+      /tmp/ingestor-alive) )) -lt 120` (`docker-compose.yml:391`), and
+      `touch_heartbeat()` is called from exactly two places — on connect and per inbound
+      message (`ingestor/main.py:120,156`). Nothing touches the file on a timer. So with
+      no board publishing, the file goes stale in 120 s and the sole MQTT subscriber
+      reports unhealthy forever. The `main.py:87` docstring assumes the gap is covered
+      because "heartbeats repeat every 60 s" — true only while a board is online, which
+      for a 3–15 board hobbyist fleet is not the normal state. Confirmed causally: the
+      flag flipped to `healthy` within seconds of `S0-test-4`'s simulated board
+      publishing, and nothing else changed.
+      **Prod is worse, in the other direction.** `services/prod/docker-compose.yml:520`
+      defines `fleetforge-ingestor` with **no `healthcheck` at all** — the single point of
+      failure for every device telemetry row, the service whose own comment says "EXACTLY
+      ONE INSTANCE, AND NEVER `docker rollout`", is entirely unmonitored in production.
+      This is the ops-log's recurring shape (F-2026-09-20-004/005/007, F-2026-09-23-001)
+      with an extra turn of the screw: dev's only red light is a false positive, which
+      trains the operator to ignore it, and prod has no light.
+      Fix: touch the heartbeat on a timer while the broker connection is up, so the probe
+      measures "connected and consuming" as its comment claims rather than "a device
+      spoke recently"; then give prod the same healthcheck.
+      Acceptance: an idle stack with zero devices online stays `healthy`; killing the
+      broker turns it `unhealthy` inside the window; prod reports a health state at all.
+
+- [ ] **S0-ops-1**: Status lives in five places and they disagree — README is a lie (P0, 0.5d)
+      Added: 2026-09-27
+      The rule "live status lives ONLY in TODO.md" is written everywhere and followed
+      almost nowhere. A stranger (or an agent, or future-you) reading the front door
+      bounces before they find the product:
+      * `README.md` still says "R0 in progress… the agent, the flasher and OTA itself
+        do not exist". R0 closed 2026-09-22; R1 closed on metal 2026-09-23.
+      * `docs/roadmap.md` last updated 2026-09-15; R0 "Active, gated on S0-test-3"
+        (passed), R1 "7/8 done, R1-test-1 unblocked" (passed).
+      * `docs/features/enrollment.md` "Status: In progress (R0)".
+      * `docs/features/ota-deploy.md` "Status: Planned".
+      * This file is a 660-line session journal. Closed `S0-fw-3` still occupies ~200
+        lines of the live list. R3 is in this file labelled "deliberately not next".
+      Fix: one status document, and it is this one.
+      1. Rewrite the README status block to match metal: enroll works, OTA of the
+         *agent* works, auto-rollback of "boots but never confirms" is proven, R2 is
+         next. One paragraph. The dashboard is not a skeleton.
+      2. Strip this file to Sprint 0 + the active release as a checklist. Closed
+         Sprint 0 novels (especially `S0-fw-3`) become one-line `[x]` + a pointer at
+         `docs/features/`. Move the R3 task list back to
+         `docs/features/ota-library.md` — this file already says to, if it gets
+         confusing.
+      3. Remove **Status** headers / status columns from `docs/roadmap.md` and
+         `docs/features/*.md`. They are archives and an index; they do not carry
+         live state. `roadmap.md`'s "Last Updated" goes with them.
+      Do not rewrite `DECISIONS.md`. Do not shrink feature-file *archives* in this
+      task — the P0 is that status is in one place and the front door is true.
+      Acceptance: a reader of `README.md` then this file, and nothing else, can
+      answer what works on metal, what is next, and what is blocked. `rg "Status:"
+      docs/features README.md docs/roadmap.md` is empty (or every hit points here).
 
 - [x] **S0-fw-3**: A board that browns out during RF calibration cannot escape it (P1, 0.5d)
       — **withdrawn 2026-09-23, not fixed.** The board this entry is about is the classic
@@ -423,33 +482,6 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       a **Windows + Chrome** bench with native USB on COM3. Confirm which host before
       running either — the re-acquire window is an OS-and-driver property, so a result on
       one host is not a result on the other.
-
-- [ ] **S0-infra-8**: The ingestor's liveness probe measures device traffic, not liveness (P1, 0.5d)
-      Found 2026-09-23 while running the T3 gate. The dev stack's `fleetforge-ingestor`
-      had been **unhealthy for 27 hours** — `FailingStreak` 3292 — with a live, connected,
-      perfectly functional process.
-      Mechanism: the healthcheck is `test $(( $(date +%s) - $(stat -c %Y
-      /tmp/ingestor-alive) )) -lt 120` (`docker-compose.yml:391`), and
-      `touch_heartbeat()` is called from exactly two places — on connect and per inbound
-      message (`ingestor/main.py:120,156`). Nothing touches the file on a timer. So with
-      no board publishing, the file goes stale in 120 s and the sole MQTT subscriber
-      reports unhealthy forever. The `main.py:87` docstring assumes the gap is covered
-      because "heartbeats repeat every 60 s" — true only while a board is online, which
-      for a 3–15 board hobbyist fleet is not the normal state. Confirmed causally: the
-      flag flipped to `healthy` within seconds of `S0-test-4`'s simulated board
-      publishing, and nothing else changed.
-      **Prod is worse, in the other direction.** `services/prod/docker-compose.yml:520`
-      defines `fleetforge-ingestor` with **no `healthcheck` at all** — the single point of
-      failure for every device telemetry row, the service whose own comment says "EXACTLY
-      ONE INSTANCE, AND NEVER `docker rollout`", is entirely unmonitored in production.
-      This is the ops-log's recurring shape (F-2026-09-20-004/005/007, F-2026-09-23-001)
-      with an extra turn of the screw: dev's only red light is a false positive, which
-      trains the operator to ignore it, and prod has no light.
-      Fix: touch the heartbeat on a timer while the broker connection is up, so the probe
-      measures "connected and consuming" as its comment claims rather than "a device
-      spoke recently"; then give prod the same healthcheck.
-      Acceptance: an idle stack with zero devices online stays `healthy`; killing the
-      broker turns it `unhealthy` inside the window; prod reports a health state at all.
 
 ---
 

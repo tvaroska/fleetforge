@@ -66,6 +66,20 @@ mqtt-sub topic='ff/v1/d/+/up/#' user='' password='':
 broker-check *args:
     PYTHONPATH=src uv run python -m fleetforge.broker selftest {{args}}
 
+# The deploy RELEASE GATE (S0-infra-9): could a board download firmware right now, and
+# may the API command it? A signed link through PUBLIC_BASE_URL → the API → the store,
+# then the broker matrix. Each half prints `SELFTEST OK` or exits non-zero; it is red
+# for both 2026-09-23 findings (ops-log F-2026-09-23-001/002). Needs the stack up, and
+# runs on the HOST in dev — PUBLIC_BASE_URL is the host-side origin, as for a board.
+deploy-check:
+    PYTHONPATH=src uv run python -m fleetforge.deploycheck
+    just broker-check
+
+# The same gate on prod, inside the API container (it has the GCS settings; the host
+# has no checkout). Run it after every fleetforge deploy.
+deploy-check-prod:
+    ssh prod 'cd /opt/boris/prod && docker compose exec -T fleetforge-api python -m fleetforge.deploycheck && docker compose exec -T fleetforge-api python -m fleetforge.broker selftest'
+
 # Cheap syntax gate for both compose files (dev shape and production shape).
 stack-check:
     docker compose config -q

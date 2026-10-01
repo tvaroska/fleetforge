@@ -51,7 +51,12 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from fleetforge import __version__
-from fleetforge.api.deps import dynsec_configured, mqtt_command_configured
+from fleetforge.api.deps import (
+    SettingsDep,
+    deploy_config_gaps,
+    dynsec_configured,
+    mqtt_command_configured,
+)
 from fleetforge.api.eventstream import EventHub, PostgresEventListener
 from fleetforge.api.routers import (
     agent,
@@ -279,20 +284,37 @@ def create_app() -> FastAPI:
         return {"status": "ok", **build_info().as_dict()}
 
     @app.get("/v1/readyz", tags=["health"])
-    async def readyz(sessionmaker: SessionMaker) -> Any:
-        """Readiness: can the process serve traffic (i.e. reach its database)?
+    async def readyz(sessionmaker: SessionMaker, settings: SettingsDep) -> Any:
+        """Readiness: can the process do its job — reach its database AND deploy?
+
+        S0-infra-9: deploy-mandatory configuration is part of readiness, because a
+        stack that cannot deploy is not a working Fleetforge however green its
+        liveness is (ops-log F-2026-09-23-001: Deploy had never worked on prod while
+        `/v1/healthz` said 200). This is the container healthcheck, so a gap here is
+        `unhealthy` in `docker ps` rather than one WARNING at startup.
+
+        Configuration only — `deploy_config_gaps` does no I/O; whether the store and
+        the broker actually answer is `just deploy-check`. `ADMIN_PASSWORD_HASH` stays
+        out: compose already refuses to start without it.
 
         Returns 503 with a reason rather than raising — a bare 500 from a probe
-        tells an operator nothing and looks like an application bug.
+        tells an operator nothing and looks like an application bug. Every gap is
+        reported at once, so one restart fixes all of them.
         """
+        missing = deploy_config_gaps(settings)
+        reasons = [f"not configured: {', '.join(missing)}"] if missing else []
         try:
             async with sessionmaker() as session:
                 await session.execute(text("SELECT 1"))
         except (SQLAlchemyError, OSError) as exc:
             logger.warning("readyz: database unreachable: %s", exc.__class__.__name__)
+            reasons.insert(0, "database unreachable")
+        if reasons:
+            if missing:
+                logger.warning("readyz: deploy is impossible, not configured: %s", missing)
             return JSONResponse(
                 status_code=503,
-                content={"status": "not-ready", "detail": "database unreachable"},
+                content={"status": "not-ready", "detail": "; ".join(reasons), "missing": missing},
             )
         return {"status": "ready"}
 

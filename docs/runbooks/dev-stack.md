@@ -73,6 +73,31 @@ just broker-check          # provisions two ffff… throwaways, prints SELFTEST 
 
 It is deliberately not part of `just test` (that must not need a broker).
 
+## Is deploy actually possible? (S0-infra-9)
+
+The api container's healthcheck is `/v1/readyz`, not `/v1/healthz`. It is `unhealthy`,
+and the body names the gap, while the database is unreachable **or** any
+deploy-mandatory setting is missing: the object store, `ARTIFACT_URL_SECRET`,
+`PUBLIC_BASE_URL`, `MQTT_COMMAND_*`. Because `frontend` waits for a healthy api, a gap
+also means the dashboard never comes up on a fresh `up`. Ask the API directly:
+
+```bash
+curl -s localhost:${FF_HTTP_PORT:-8080}/v1/readyz    # {"status":"not-ready","missing":[…]} on a gap
+```
+
+`readyz` proves the settings are present. The release gate proves they **work**: a
+signed download link through `PUBLIC_BASE_URL` → the API → the store, then the broker
+matrix above. Run it from the host, not inside the container (`PUBLIC_BASE_URL` is a
+host-side origin, the same one a board uses):
+
+```bash
+just deploy-check          # readyz → probe blob → signed link → bytes match, then broker-check
+just deploy-check-prod     # the same, inside fleetforge-api on prod. Run after every deploy
+```
+
+Each half prints `SELFTEST OK` or exits non-zero with a diagnosis. Both 2026-09-23
+findings fail it (ops-log F-2026-09-23-001/002).
+
 ## Publishing a test message
 
 ```bash

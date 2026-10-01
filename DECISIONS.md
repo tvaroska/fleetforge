@@ -6,6 +6,45 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-01 — readiness means "can deploy", and the release gate walks the board's path
+
+**Decided: `/v1/readyz` (and so the API healthcheck, dev and prod) is 503 when any
+deploy-mandatory setting is absent.** That covers object store, `ARTIFACT_URL_SECRET`,
+`PUBLIC_BASE_URL` and the commander pair. Deploy is the product, so an API that cannot
+deploy is not ready. That holds even though the dashboard would render.
+Rejected: keeping the startup WARNING as the only signal. F-2026-09-23-001 showed nobody
+reads it. `create_app()` still constructs with no env, and `healthz` is still no-I/O.
+The settings stay `None`-defaulted. Only the probe's verdict changed (S0-infra-9).
+
+- **Config presence only, no I/O, in the probe.** Readiness runs every 10 s on every
+  replica. Minting and fetching a blob there would bill GCS for a heartbeat and couple
+  rollout to the store's latency. Proof that the path *works* belongs in the release gate
+  (`just deploy-check`), not the probe.
+- **Names, never values.** The probe is public behind nginx. `missing` lists env names.
+- **Consequence, accepted:** `frontend` has `depends_on: api: service_healthy`, so a
+  misconfigured api keeps the dashboard down on a fresh `up`. A dashboard whose one job
+  is dead was the bug. A runtime gap does not take a running frontend down (Traefik routes
+  only to the frontend).
+- **`deploy-check` asks the API's readyz through `PUBLIC_BASE_URL` before anything else.**
+  The download endpoint never reads `PUBLIC_BASE_URL`. Only the deploy that mints the link
+  does. A host-side check signing with the host's env would pass against an API missing
+  it, which is F-001 exactly. Step 0 is the only part of the check that sees the API's own
+  env.
+- **Broker liveness stays out of readyz.** Config present + dynsec missing in memory
+  (F-002) can only be caught by connecting as the commander. The gate chains
+  `broker selftest` after the download check rather than importing it, so each keeps its
+  own transcript.
+
+**Gotchas.** `minio/minio` and `minio/mc` can no longer be pulled (Docker Hub and
+quay.io), so a dev box with pruned images cannot `just up`. T2 ran on Chainguard images
+via an uncommitted override. That needs its own task. Dev's API origin is
+`localhost:8088` (`FF_HTTP_PORT`); `:8080` on the dev box is SearXNG. `just
+deploy-check-prod` runs `python -m fleetforge.deploycheck` inside the prod image, so it
+only works once a build containing this module is deployed. `services/scripts/deploy.sh`
+still smoke-tests `/v1/healthz`. Details: `docs/features/infrastructure.md`.
+
+---
+
 ## 2026-09-23 — a simulated apply ends the session, because that is what a reboot is
 
 **Decided: fix CUJ-1 segment 5 by giving the simulator a reboot, not by making the live
