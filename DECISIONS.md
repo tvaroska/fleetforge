@@ -6,6 +6,22 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-02 — the flashing bench is Windows + Chrome, not the Mac
+
+**Decided: every host reference to "the Mac" as the bench is superseded.** The bench is a
+Windows machine running Chrome on Windows (not WSL), with the ESP32-S3 on native USB as
+COM3. That is where the board enrolled and where `S0-fe-8` was observed.
+
+- Supersedes the "the Mac is the flashing bench" and "The bench is the Mac" lines in the
+  entries on the QEMU `esp_task_wdt_init` panic (S0-infra-1) and on S0-test-1 filing.
+- `S0-test-1` and `S0-test-2` in `TODO.md` now name Windows. The "release really releases"
+  check uses a second terminal on the COM port (e.g. PuTTY, 115200), not `screen`.
+- The Linux dev box still does not enumerate boards over WebSerial; that is unchanged.
+- Re-acquire after `hard_reset` is an OS-and-driver property, so record the driver and COM
+  port with any bench result.
+
+---
+
 ## 2026-10-02 — queued spec proposals applied; `ab-4m-arduino-v1` is a supported layout
 
 **Decided: flush `spec/open-questions.md` before R3.** The answered proposals now live in

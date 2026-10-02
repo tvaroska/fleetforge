@@ -79,8 +79,9 @@ Bricking risks, broker auth and security issues get filed here as they surface.
 - [ ] **S0-test-1**: Bench-verify the serial console on real hardware (P1, 0.5d)
       Filed 2026-09-10, when S0-fe-1 shipped. Its software half is proven in jsdom against
       replays of real `agent/main/*.c` output; these four cannot be, because they are
-      properties of a USB bridge chip and an OS, not of the classifier. The bench is the
-      Mac — the Linux dev box does not enumerate boards over WebSerial.
+      properties of a USB bridge chip and an OS, not of the classifier. The bench is
+      Windows + Chrome (settled 2026-10-02) — the Linux dev box does not enumerate boards
+      over WebSerial.
       * **Re-acquire after `hard_reset`, bridge-chip path.** `serialConsole.ts` re-reads
         `navigator.serial.getPorts()` every 250 ms for 8 s. On a classic esp32 the port
         *survives* the reset, so this must reconnect without ever showing "No board is
@@ -93,14 +94,15 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       * **The EN pulse boots the app, not the ROM loader.** `SerialConsole.reboot()`
         drives RTS high with DTR low. If the wiring inverts, the board lands in download
         mode and prints `waiting for download` forever.
-      * **Release really releases.** After the button, `screen /dev/tty.usbserial-… 115200`
-        must open. If it reports "Resource busy", `port.close()` is not being reached.
+      * **Release really releases.** After the button, the COM port must open in another
+        terminal (e.g. PuTTY, 115200). If it reports "Access denied" / port in use,
+        `port.close()` is not being reached.
       Acceptance: all four confirmed against **any** bridge-chip board (CP2102 or CH340) —
       retargeted 2026-09-23, since the DevKit v1 is out of consideration and this task
       tests the bridge-chip *path*, not that board. Anything that fails comes back as a
       new S0 task with the observed behaviour.
-      ⚠️ The bench host is unsettled: this entry says the Mac, but `S0-fe-8` was observed
-      on Windows + Chrome. Re-acquire is an OS-and-driver property — record which host.
+      The bench host is Windows + Chrome (settled 2026-10-02; earlier entries said the Mac).
+      Re-acquire is an OS-and-driver property — record the driver and COM port used.
       * **Folded in from S0-fe-8 (accepted 2026-10-01 without a bench run).** On Windows,
         with the board's VCP driver *not* installed, an operator who has never installed one
         reaches a working COM port using only "My board isn't listed" on the flash page:
@@ -121,10 +123,9 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       date. Cheap to run now, since the board is already flashed and known-good.
       Acceptance: on the bench, `hard_reset` from the console on a native-USB board
       reconnects inside the window and streams the boot log without operator action.
-      ⚠️ This entry and `S0-test-1` both say the bench is **the Mac**. The S3 enrolled from
-      a **Windows + Chrome** bench with native USB on COM3. Confirm which host before
-      running either — the re-acquire window is an OS-and-driver property, so a result on
-      one host is not a result on the other.
+      The bench is **Windows + Chrome** (settled 2026-10-02): the S3 enrolled from it with
+      native USB on COM3. Earlier entries said the Mac; that is superseded. Record the
+      driver and COM port used — the re-acquire window is an OS-and-driver property.
 
 - [x] **S0-test-3**: Someone who has not seen the code onboards a board unaided — passed 2026-09-22 → [enrollment.md](docs/features/enrollment.md)
 - [x] **S0-fw-3**: A board that browns out during RF calibration cannot escape it — withdrawn 2026-09-23, not fixed → [enrollment.md](docs/features/enrollment.md)

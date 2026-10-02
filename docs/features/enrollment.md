@@ -664,8 +664,8 @@ chooser renders "No board selected." rather than an empty panel.
 Four properties cannot be proven in jsdom because they are properties of a USB bridge chip
 and an OS: `getPorts()` re-acquisition after `hard_reset` on the native-USB parts, clean
 decoding at 115200, the EN pulse landing in the app rather than the ROM loader, and
-`screen` actually getting the device back. Tracked as **S0-test-1**, to be run on the Mac
-(the Linux dev box does not enumerate boards over WebSerial).
+`screen` actually getting the device back. Tracked as **S0-test-1**, to be run on the bench (Windows + Chrome since 2026-10-02; originally the Mac;
+the Linux dev box does not enumerate boards over WebSerial).
 
 ### Boot & enrol stage reports (S0-fw-1)
 
@@ -995,7 +995,7 @@ and reverted: nulling the 409's remedy (no button), removing the `await state.re
 (port still held), forcing `eraseAll` back to the checkbox, and giving the brownout rule a
 `reflash` remedy (the "no button for a brownout" test fails).
 
-**The "on a real board" half is not runnable on this host** — the flashing bench is the Mac,
+**The "on a real board" half is not runnable on this host** — the flashing bench is Windows + Chrome (originally the Mac),
 and ESP32 boards do not enumerate over WebSerial on the Linux dev box. The bench script is in
 the plan (flash a board twice without erase so the baked token is spent on arrival; press the
 button; expect the port chooser once, the console re-opening by itself and the board reaching

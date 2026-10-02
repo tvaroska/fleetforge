@@ -926,7 +926,7 @@ ticket carried a decoded `LoadProhibited` backtrace —
 `main_task → esp_task_wdt_init → esp_task_wdt_impl_timer_allocate → esp_intr_alloc →
 task_wdt_isr` — and named the
 `-global driver=timer.esp32.timg,property=wdt_disable,value=true` flag as the suspect.
-It blocked S0-fw-1 and every firmware acceptance after it, because the Mac is the
+It blocked S0-fw-1 and every firmware acceptance after it, because the Windows machine (originally the Mac) is the
 flashing bench and QEMU is the only way to run agent firmware on this box.
 
 **Closed as: not reproducible, with two real defects found and fixed.**
