@@ -78,6 +78,9 @@ of it: the prebuilt agent is the demo of this, not the substitute for it.
   its safety posture, and honest capability reporting.
 - `standards.md` → *enrollment* → **Unaided onboarding** — step 3: flash to green in the
   fleet list, with no UART log in any path.
+- `standards.md` → *dashboard* → **Getting firmware in is a dashboard operation** —
+  step 5's first half. Alex uploads the `.bin` their IDE just built; today that step is
+  `docs/runbooks/upload-artifact.sh`, which is outside the journey as written.
 - `spec/device-protocol.md` — the wire contract both the library and the agent speak.
 - Releases: R0 (enroll) · R1 (OTA transport) · R2 (auto-rollback) · R3 (the library
   itself). See `docs/releases.md`.

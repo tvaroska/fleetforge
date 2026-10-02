@@ -110,3 +110,29 @@ _Tracked in `TODO.md` (live status lives there, not here)._
 ## Planned Work
 
 _Use `/new-feature` / `/new-task`; requirements land in `spec/`._
+
+### Upload a `.bin` from the dashboard (Priority: P2)
+- **Problem:** Alex's unit of work is a `.bin` that the IDE just produced. The server has
+  accepted uploads since `R1-be-2` (`POST /v1/artifact`, `api/routers/artifacts.py:205`),
+  but `frontend/src/api.ts` has no upload method — it has `listArtifacts` and
+  `deployDevice` only. So the only way to get something deployable into the fleet is
+  `docs/runbooks/upload-artifact.sh`: curl, plus the admin password on stdin. The runbook
+  says as much ("until it grows a form this script is the only way"). The dashboard is
+  meant to *be* the operator manual; a shell script in the middle of the one path that
+  matters is the manual admitting it is not.
+- **Scope note:** this is a frontend surface over an endpoint that already exists and is
+  already authorized, not new backend capability. It retires the runbook.
+- **Added:** 2026-09-23
+
+### Name a board (Priority: P2)
+- **Problem:** `spec/flows.md` Flow 1 step 7 specifies naming, and nothing implements it.
+  `GET /v1/devices` returns `name: null` for every row and `api/routers/devices.py` has
+  exactly one route — a GET; there is no PATCH. Confirmed live 2026-09-23: all 41 rows in
+  the dev fleet have `name: null`. So the fleet table is a list of 12-hex MACs, and the
+  operator has to remember which of `9e417ad42ca4` and `9eeda8084215` is the coop door.
+  That gets worse exactly as the fleet grows toward the persona's 3–15 boards, and it is
+  the difference between deploying to the right board and deploying to a neighbour.
+- **Scope note:** the column exists on `devices`; this is a PATCH route plus an editable
+  cell. Tags and groups are deliberately **out** of scope — `DeviceGroup` already exists
+  for that and conflating the two is how naming turns into a hierarchy feature.
+- **Added:** 2026-09-23

@@ -154,3 +154,49 @@ itself (step 5), and recovers from a bad build unaided (step 6).
       is wrong, rather than being flashed and bricked.
 - [ ] **Written as a journey.** `spec/cujs.md` exists and carries the "sketch and a
       DevKit on the desk" CUJ, and *Unaided onboarding* above references it.
+
+---
+
+## dashboard
+
+### Getting firmware in is a dashboard operation, not a shell operation
+
+**Requirement:** Everything on the path from "the IDE produced a `.bin`" to "a board is
+running it" must be doable from the dashboard, by someone holding only the admin
+password. The persona's unit of work is a file their editor just wrote; the product's
+claim is that the dashboard is the operator manual. A step that drops to curl is that
+manual admitting it is incomplete — and it is the step where a mistake costs a board.
+
+Upload is already a server capability. This is a statement about the *surface*: the
+capability existing behind an endpoint nothing in the UI calls is indistinguishable, for
+the operator, from the capability not existing.
+
+**Acceptance Criteria:**
+- [ ] **A `.bin` can be uploaded from the dashboard**, with the chip target and version
+      it will be listed under, and it appears in the deployable list without a reload.
+- [ ] **A rejected upload says why in plain language** — wrong target, duplicate digest,
+      too large for the slot — and names the next action, never an HTTP status alone.
+- [ ] **The runbook is retired.** `docs/runbooks/upload-artifact.sh` is deleted, not left
+      as a parallel path that drifts.
+- [ ] **No credential reaches a log, a URL, or the terminal scrollback** on any upload
+      path, success or failure.
+
+### A board is identified by what it does, not by its MAC
+
+**Requirement:** An operator must be able to give a board a human name and see that name
+wherever the board appears. A fleet list of 12-hex MACs does not scale to the persona's
+3–15 boards, and the cost of the confusion is not cosmetic: it is deploying the frame's
+firmware to the coop door, which is a brick the product exists to prevent.
+
+The name is a **label**, not a hierarchy. Grouping already has `DeviceGroup`; naming must
+not grow into a second, weaker version of it.
+
+**Acceptance Criteria:**
+- [ ] **A board can be named and renamed from the fleet list**, and the name persists
+      across the board's reboots and re-enrolments.
+- [ ] **The name appears everywhere the device does** — fleet list, deploy confirmation,
+      and any deploy state the dashboard renders — with the device id still reachable,
+      since the id is what the protocol and the logs use.
+- [ ] **An unnamed board is still fully usable.** The name is optional and its absence
+      renders as the device id, never as an empty cell.
+- [ ] **Naming is not addressing.** No API accepts a name where it accepts a device id.
