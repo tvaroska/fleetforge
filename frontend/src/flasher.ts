@@ -70,17 +70,17 @@ export const webSerialSupported = (): boolean =>
  */
 export const NO_BOARD_SELECTED = 'No board selected.'
 
+/** `checkChosenPort`'s refusal. Exported for the same reason as `NO_BOARD_SELECTED`. */
+export const BUILT_IN_PORT =
+  'That port is built into the computer (COM1 on most Windows PCs), not a USB board. ' +
+  "If it was the only one listed, the board has no port yet — see “My board isn't listed”."
+
 /**
  * USB vendor ids of what an ESP32 board actually presents. Everything an ESP32 can be
  * reached through is one of these: the chip's own USB (C3/C6/S3) or the bridge chip on
  * the board. A port with an id outside this table is unusual, not wrong — a board on a
  * Prolific or CH9102-clone bridge still flashes.
  */
-/** `checkChosenPort`'s refusal. Exported for the same reason as `NO_BOARD_SELECTED`. */
-export const BUILT_IN_PORT =
-  'That port is built into the computer (COM1 on most Windows PCs), not a USB board. ' +
-  "If it was the only one listed, the board has no port yet — see “My board isn't listed”."
-
 const USB_SERIAL_VENDORS: Record<number, string> = {
   0x303a: 'Espressif native USB (no driver needed)',
   0x10c4: 'Silicon Labs CP210x bridge',
