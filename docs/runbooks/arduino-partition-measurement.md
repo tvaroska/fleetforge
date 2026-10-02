@@ -3,8 +3,8 @@
 How to reproduce the measurement behind `R3-fw-1`. Run this whenever the Arduino-ESP32
 core is bumped: every finding below is a property of **that core's** `platform.txt` and
 `boards.txt`, not of ESP-IDF, and a core release can change any of them without warning.
-The conclusions it produced are in `spec/open-questions.md` → *ota-library* and
-`design/decisions/arduino-gets-its-own-layout-id.md`.
+The conclusions it produced are in `design/decisions/arduino-gets-its-own-layout-id.md`
+(the decision, and the raw measurements in its *Appendix*).
 
 |  |  |
 |---|---|

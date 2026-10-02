@@ -22,8 +22,7 @@ becomes a board in the field that fixes itself" — this release *is* that journ
 the release — `ff_cfg` is a flash partition the agent can rely on and an Arduino sketch
 cannot — is answered **(a): a packaged partition table, shipped as a sketch-local
 `partitions.csv`, under a new layout id `ab-4m-arduino-v1`.** Config stays in a flashable
-`ff_cfg`; NVS is not where it lives. Written up in `spec/open-questions.md` →
-*ota-library* (the section is now ANSWERED), reasoned in
+`ff_cfg`; NVS is not where it lives. Measured and reasoned in
 [`design/decisions/arduino-gets-its-own-layout-id.md`](../../design/decisions/arduino-gets-its-own-layout-id.md),
 reproducible from
 [`docs/runbooks/arduino-partition-measurement.md`](../runbooks/arduino-partition-measurement.md).
@@ -77,7 +76,7 @@ was left at the free space it started with. Nothing was installed into `~/.ardui
 lean on the IDE's size guard — that line reads the board menu's `upload.maximum_size`, not
 the table, and reported `Maximum is 1310720 bytes` for a build whose slots were 1966080.
 One PROPOSAL left for `spec/`: `ab-4m-arduino-v1` needs adding to `device-protocol.md` and
-to `firmware/manifest.py::SUPPORTED_LAYOUTS`, which is a one-entry dict today.
+to `firmware/manifest.py::SUPPORTED_LAYOUTS`, which is a one-entry dict today. *(Applied 2026-10-02: both are in.)*
 
 ### The project's first written CUJ (R3-spec-1) — **LANDED 2026-09-22**
 
@@ -264,9 +263,8 @@ Work* above. Release contents: [releases.md](../releases.md) → R3. Journey:
       `partitions.csv`, config still in a flashable `ff_cfg`
       (`design/decisions/arduino-gets-its-own-layout-id.md`). Two measured constraints:
       the table must travel with the **example**, because the prebuild hook only reads the
-      sketch folder and never a library directory; and the new layout id has to reach
-      `device-protocol.md` + `SUPPORTED_LAYOUTS` first, which is a spec proposal, not this
-      task. The safety posture needs no custom bootloader — the stock core is already
+      sketch folder and never a library directory; and the new layout id is already in
+      `device-protocol.md` → *Partition layouts* and `SUPPORTED_LAYOUTS` (2026-10-02). The safety posture needs no custom bootloader — the stock core is already
       `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y` — but it is still not optional: a
       configuration that cannot roll back must fail at build or enroll, not warn.
       Acceptance: a stock Arduino IDE install plus this library compiles the example for

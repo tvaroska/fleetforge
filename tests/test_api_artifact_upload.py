@@ -258,6 +258,18 @@ class TestRefusedBeforeItCosts:
         assert "ab-4m-v1" in response.json()["detail"]
         assert store.puts == []
 
+    async def test_the_arduino_layout_is_accepted_under_the_same_slot_cap(
+        self, admin_app: FastAPI, store: MemoryObjectStore
+    ) -> None:
+        """`ab-4m-arduino-v1` moves offsets, not the slot: one cap for both layouts."""
+        token = await login_admin(admin_app)
+        layout = "ab-4m-arduino-v1"
+        fits = await upload(admin_app, token, b"\x00" * EXPECTED_OTA_SLOT_SIZE, layout=layout)
+        assert fits.status_code == 201, fits.text
+        assert fits.json()["partition_layout"] == layout
+        too_big = b"\x00" * (EXPECTED_OTA_SLOT_SIZE + 1)
+        assert (await upload(admin_app, token, too_big, layout=layout)).status_code == 413
+
 
 class TestLabelsAreRejectedNeverNormalised:
     @pytest.mark.parametrize(

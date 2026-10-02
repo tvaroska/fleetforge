@@ -215,20 +215,20 @@ To announce `"partition_layout": "ab-4m-v1"` truthfully, a build must have:
 4. None of the three eFuse options enabled.
 
 Anything short of that is a different layout and must announce a different id. The server
-currently accepts exactly one (`SUPPORTED_LAYOUTS` has a single entry), so a mismatch is
-a rejected deploy, not a silent brick — which is the intended failure.
+accepts only the ids in `SUPPORTED_LAYOUTS`, and a deploy only matches equal ids, so a
+mismatch is a rejected deploy, not a silent brick — which is the intended failure.
 
-**The unsolved part is Arduino.** An Arduino IDE build uses a board definition's own
-partition scheme and has no `ff_cfg` partition, so a library user has nowhere to put the
-config this design puts in flash. Overwriting a custom table from the Arduino IDE is also
-a routine accident. Two ways out, neither yet chosen:
+**Arduino gets its own layout id: `ab-4m-arduino-v1`.** An Arduino IDE build uses a board
+definition's own partition scheme, and its upload recipe cannot reach `ab-4m-v1`'s offsets.
+So the library ships the stock `min_spiffs` map plus a 4 KB `ff_cfg` at `0x3D0000`, under
+a new id rather than an edit to this one. The slot size is the same (1,966,080 B), so the
+upload cap does not change; only offsets differ, and the agent finds `ff_cfg` by subtype
+`0x40`, not by address. The NVS-backed config path was rejected. See
+[`decisions/arduino-gets-its-own-layout-id.md`](decisions/arduino-gets-its-own-layout-id.md)
+(measurements in its Appendix) and `spec/device-protocol.md` → *Partition layouts*.
 
-- **Ship a packaged board definition / `partitions.csv`** and require it. Cheapest, but
-  the library then only works for users who adopt our flash layout exactly.
-- **Add an NVS-backed config path** so the library runs on a stock partition scheme.
-  A real change to `ff_cfg` and the enrollment flow, not packaging.
-
-This is a prerequisite for the OTA-library release, not a detail of it.
+A device on one layout never takes an artifact built for the other: the deploy check
+compares `partition_layout` by equality.
 
 ---
 

@@ -6,6 +6,33 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-02 — queued spec proposals applied; `ab-4m-arduino-v1` is a supported layout
+
+**Decided: flush `spec/open-questions.md` before R3.** The answered proposals now live in
+the spec text. The questions were deleted from the open list rather than marked resolved.
+
+- **`spec/device-protocol.md`** gains a *Partition layouts* table (`ab-4m-v1`,
+  `ab-4m-arduino-v1`). It also states `cmd_id` reuse as the code does it: one id per device
+  and artifact while the signed URL is valid, and a new id once it expires. `cmd_id` is
+  required on transaction states, recording `(cmd_id, state)` is idempotent, and the
+  `state` vocabulary is open. `awaiting_safe_window` applies only to devices that have a
+  window, and `artifact.sig` stays optional until R6.
+- **`spec/prd.md`**: one artifact-size limit, the target layout's `ota_slot_size`
+  (1,966,080 B for both). Also adds the four chip targets, and renames the swarm section
+  to V3.
+- **Code: `SUPPORTED_LAYOUTS` gains `ab-4m-arduino-v1`** at the same slot size. Upload,
+  the catalog and the bundle loader accept it with no other change. Deploy compatibility
+  stays an equality check, so a device on one layout never gets the other's image.
+  `EXPECTED_PARTITION_LAYOUT` is unchanged, because the prebuilt agent still ships
+  `ab-4m-v1`.
+- The ADR (`design/decisions/arduino-gets-its-own-layout-id.md`) absorbed the measurements
+  as an Appendix, so the evidence survives the open-questions entry being deleted.
+
+**Not applied:** the CUJ-2 proposal in `spec/open-questions.md` (enrollment). It needs a
+product call, not a sync.
+
+---
+
 ## 2026-10-01 — "no COM port" is answered with words, and COM1 is refused (S0-fe-8)
 
 **Decided: help text, plus one refusal.** No port filters and no driver detection.

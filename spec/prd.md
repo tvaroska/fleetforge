@@ -42,7 +42,7 @@ Not a homogeneous fleet: **five different projects, five different builds**, one
 
 **Consequence — sleepy is a v1 case, not aspirational.** The e-paper frame sleeps between refreshes, so derived presence and commands queued for next contact are needed in v1. The presence model cannot assume a live socket.
 
-### V2 — robotic swarm
+### V3 — robotic swarm
 **One ground vehicle acting as gateway, plus a large number of flying drones** — a *mobile, in-fleet* node that is simultaneously a managed device and the parent of its drones. Two properties shape it more than radio choice does: **hierarchy** (the server tracks each drone individually but reaches it only via its parent) and **disconnected operation** (the vehicle will be out of internet range in the field).
 
 Full treatment in [features/groups-deploy.md](../docs/features/groups-deploy.md).
@@ -72,8 +72,9 @@ Every deployment passes gates; each catches what the previous can't (**defense i
 | | v1 target |
 |---|---|
 | Devices per instance | **25** (5 in use, headroom for experiments) |
+| Chip targets | **`esp32`, `esp32s3`, `esp32c3`, `esp32c6`** — one prebuilt agent bundle each |
 | Concurrent deploys | **5** — every v1 board at once |
-| Artifact size | **≤ 1.9 MB**, rejected at upload above the target's `ota_slot_size` |
+| Artifact size | **≤ the target layout's `ota_slot_size`** — 1,966,080 B (1.875 MiB) for both v1 layouts ([device-protocol.md](device-protocol.md) → *Partition layouts*). One limit, enforced at upload. |
 | Stored versions per platform | **20**, oldest pruned; the running and previous version are never pruned |
 
 ### Timing

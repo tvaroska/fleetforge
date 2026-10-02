@@ -101,7 +101,7 @@ own receipt time**, never the device's timestamp — see *Clock* below.
   "device_id": "a4cf12b3de90",
   "platform_type": "esp32c6",
   "fw_version": "1.4.2",
-  "agent_version": "0.3.0",
+  "agent_version": "0.3.2",
   "link_type": "wifi",
   "power_class": "always_on",
   "expected_wake_interval_s": null,
@@ -116,6 +116,29 @@ own receipt time**, never the device's timestamp — see *Clock* below.
 [flows.md](flows.md) promises ("reject on chip / partition-size mismatch") — without them that check
 has no data source. `partition_layout` also lets the server detect and quarantine boards
 flashed with a superseded layout.
+
+#### Partition layouts
+
+A layout id names a **whole flash map**, and it is a flash-time immutable: no OTA can
+change it. A new map is a new id, never an edit to an existing row
+([design/partitions.md](../design/partitions.md) §6). Two boards in one fleet may carry
+different layouts, and the server supports every id below for as long as boards carrying
+it exist.
+
+| `partition_layout` | `ota_slot_size` | Who flashes it | Map |
+|---|---|---|---|
+| `ab-4m-v1` | 1966080 | the prebuilt agent (browser flasher) | [design/partitions.md](../design/partitions.md) §1 |
+| `ab-4m-arduino-v1` | 1966080 | the OTA library, as a sketch-local `partitions.csv` | [design/decisions/arduino-gets-its-own-layout-id.md](../design/decisions/arduino-gets-its-own-layout-id.md) |
+
+The two share a slot size and differ in offsets. `ab-4m-v1`'s offsets cannot be reached
+from the Arduino upload recipe, which writes `boot_app0` at `0xe000` and the app at
+`0x10000` whatever table it flashes.
+
+**Flash-time configuration lives in `ff_cfg`**, a 4 KB data partition with subtype `0x40`:
+at `0x12000` on `ab-4m-v1`, and at `0x3D0000` on `ab-4m-arduino-v1`. It carries what the
+board needs before it has ever spoken to the server: API origin, broker URI, link
+credentials and the enrollment token. The flasher writes it per board. A board finds it
+by subtype through the partition table, never by a hardcoded offset.
 
 ### `up/hb` — heartbeat
 
@@ -149,6 +172,14 @@ Types: `stage` · `apply` · `cancel` · `rollback` · `identify` · `reboot` ·
   `apply: "on_command"` — the device stages and waits for an explicit `apply`.
 - **Every command carries `id`, and the device must deduplicate on it.** QoS 1 is
   at-least-once; a duplicated `stage` mid-download would otherwise corrupt the transfer.
+- **A retried command reuses its `id`.** A repeat of the same deploy (same device,
+  same artifact) while the first `artifact.url` is still valid is re-sent with the same
+  `id`, so a device that already has the transaction treats it as a duplicate rather than
+  as a second deploy. Once that URL has expired the first command can no longer be acted
+  on, and a repeat is a new transaction with a new `id`.
+- **`artifact.sig` is optional until R6** (artifact signing). A server without a signer
+  omits it, and a device that receives one it cannot verify ignores it. From R6 it is
+  required on boards that announce signature verification.
 
 ### `up/status` — the update transaction
 
@@ -164,9 +195,22 @@ idle → staging → downloading → verifying → staged
      ↘ failed
 ```
 
+**`cmd_id` is required on every state that belongs to a transaction.** A status without
+one cannot be attributed to a deploy and only proves the device is alive. Recording is
+**idempotent**: a device republishing the same `(cmd_id, state)` is a no-op, which is what
+makes the retained topic safe to replay on every reconnect.
+
+**`state` is an open vocabulary.** The machine above lists the states a device reports.
+A server records any value it receives, including ones it does not recognise, and shows
+it as-is. It may also author states of its own outside the device's machine (for example
+`requested`, written when a deploy is issued and before the device has answered).
+Neither side may treat an unknown state as an error.
+
 `awaiting_safe_window` is not decoration — **the device owns the reboot** ([design/architecture.md](../design/architecture.md)
 principle 5). A vehicle in motion or an airborne drone sits here indefinitely, reporting
 honestly, until it judges the moment safe. A rollback reboot obeys the same rule.
+It is only for devices that *have* a window. An always-on agent staging under
+`apply: "on_command"` stops at `staged` and waits for the `apply` command.
 
 ## Enrolment happens over HTTPS, not MQTT
 

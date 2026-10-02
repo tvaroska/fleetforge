@@ -11,6 +11,8 @@
    → confirm board from a narrowed shortlist (always incl. "enter manually")
 4. Dashboard flashes the matching prebuilt agent + baked config:
    broker URL + Wi-Fi creds + enrollment token          [USB config flash]
+   (config goes into the 4 KB `ff_cfg` partition — device-protocol.md
+    → *Partition layouts*; NVS is never written by the flasher)
 5. Board boots → POSTs /v1/enroll over HTTPS: token + identity
    (device_id from eFuse MAC, platform_type, capabilities, link/power
     class, partition layout, slot size, fw version)
