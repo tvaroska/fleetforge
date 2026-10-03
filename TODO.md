@@ -37,7 +37,8 @@ run could show, so the pass rests on the deterministic judge. Task list below; b
 
 **Blocked:**
 
-- `S0-test-1` needs a bridge-chip board (CP2102/CH340); `S0-test-2` needs the S3 on the
+- `S0-test-1` is waiting on a bench session (the S3's `UART` socket is a bridge-chip
+  path; see the task); `S0-test-2` needs the S3 on the
   bench. Both are hardware sessions, and the bench host is unsettled (see the ⚠️ notes).
 - **R3 (thin OTA library)** waits on R2 by decision
   (`design/decisions/ota-library-ships-after-safe-deploy.md`); its task list lives in
@@ -108,6 +109,10 @@ Bricking risks, broker auth and security issues get filed here as they surface.
         reaches a working COM port using only "My board isn't listed" on the flash page:
         no Device Manager, no asking. Also confirm that picking COM1 gets refused by name
         and that the Silicon Labs driver link resolves (the dev box gets a 403 from Akamai).
+      Bench script: docs/runbooks/serial-console-bench.md (2026-10-03). Proposed board,
+      pending confirmation: the bench S3 DevKitC-1's UART socket (on-board bridge, primary
+      console UART0 @ 115200). Check E re-flashes 94a990dd09a4 and ends its 0.3.1 baseline,
+      so run it last.
 
 - [ ] **S0-test-2**: The native-USB re-acquire path, on a C3/C6/S3 (P2, 0.25d)
       Split from S0-test-1 on 2026-09-11: the only board on hand is an ESP32-DevKit v1,
