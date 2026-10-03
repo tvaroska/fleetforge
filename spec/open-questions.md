@@ -35,3 +35,49 @@ R3 lands. Not written here because `R3-spec-1` scoped itself to the first CUJ.
 Filed 2026-09-22 (R3-spec-1).
 
 ---
+
+## protocol — proposals from the 2026-10-02 spec review
+
+Filed as proposals, not edits: `device-protocol.md` is near-frozen (`CRITICAL.md`).
+
+**`artifact.type` on `dn/cmd` `stage` — document the default now.** `design/artifacts.md`
+carries an advisory `kind`; the wire command has no counterpart. Adding an optional field
+is additive, so it can wait for a platform that needs it. What cannot wait is the
+sentence "absent means `app`", so the meaning of absence is fixed before anyone assigns
+another. FPGA bitstreams and PX4 payloads reach the device through a companion CPU
+(`docs/PLATFORMS.md`), so the type may never need to cross the wire.
+
+**Does `ff_cfg` need room for an optional CA root?** `ff_cfg` carries up to 4080 payload
+bytes and its reader ignores unknown keys (`agent/main/ff_cfg.c`), so an optional `ca`
+key (PEM or DER) is additive with no version bump. One RSA root is ~1.3–2 KB, an ECDSA
+root well under 1 KB, against an `ssid`/`psk`/`token` baseline of a few hundred bytes —
+it fits, tightly for RSA. Open: whether the V3 gateway's device-facing hop is part of the
+`device-protocol.md` contract at all (gateway "republishes, core stays unaware"), in which
+case the CA root and local clock are the gateway's problem and not the agent's. Decide
+in the V3 design (`docs/SWARM.md`), but confirm the 4 KB budget before `ff_cfg` v1 ships
+on more boards.
+
+**`device_id` format — leave the regex, state the rule.** `DEVICE_ID_RE`
+(`^[0-9a-f]{12}$`, `identity.py`) and `FF_DEVICE_ID_LEN` (`ff_identity.h`) are
+trust-boundary validators; widening them now buys V1 nothing. Proposed prose: the server
+treats `device_id` as opaque, the platform defines its derivation, and a non-ESP32
+platform with a different id takes a new tree or a `proto` bump (evolution rule 1). Only
+the server-side regex needs to widen later; no device recall is involved.
+
+**Confirm semantics for sleepy / airborne devices — narrower than reported.** The confirm
+timer is device-armed after the reboot, which only happens inside the safe window, so an
+airborne drone does not roll back for being in the air. The real question is whether a
+sleepy node confirms within its first wake; `confirm_timeout_s` is already per-command.
+Needs a statement in `device-protocol.md`, not new fields.
+
+**Bootloader attestation on the Arduino path.** `verify_bundle.py` proves
+`APP_ROLLBACK_ENABLE=y` for the prebuilt agent only. Boards on `ab-4m-arduino-v1` run
+the Arduino core's precompiled bootloader; `design/decisions/arduino-gets-its-own-layout-id.md`
+records the intended posture, but nothing on the wire confirms it. A `rollback_capable`
+boolean in `up/announce` is additive and would let the server quarantine a board that
+lies. Unverified against a real Arduino-built board.
+
+**Field Wi-Fi change.** `flows.md` accepts re-flash for a credential change. Whether
+that holds once boards are sealed in boxes (CUJ-1) is open; see the *repeat path*
+question above. Candidate: copy `ssid`/`psk` from `ff_cfg` to NVS on enrolment and
+let `dn/cmd` `set_cfg` rewrite them. Not decided.
