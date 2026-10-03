@@ -6,6 +6,77 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-03 — a board never writes a slot the boot pointer names, and never stages over an unconfirmed image (R2-fw-2)
+
+**Decided: `ff_ota.c::choose_target_slot()` chooses the slot once, before any I/O, and
+refuses two stages. One arrives while the running image is `PENDING_VERIFY`. The other
+arrives while the boot pointer names a slot other than the running one, which means an
+earlier staged image is waiting for a reboot. That slot is handed to esp_https_ota as
+`.partition.staging`. `restore_boot_partition()` writes otadata only if the pointer
+actually moved.** Agent 0.4.2. This **resolves** the R2-be-1 entry's *Out of scope,
+noted*, which stays as written.
+
+- **The atomic switch is IDF's, and it is conditional.** otadata is two 4 KB sectors with
+  one `{ota_seq, label, ota_state, crc}` entry each. `esp_rewrite_ota_data()` writes the new
+  entry into the sector that is not active (`next = ~active & 1`). A torn write leaves a
+  bad CRC there, and the bootloader keeps the still-valid active sector. **This holds only
+  while the two sectors name different slots.**
+- **G2, the equal-seq rewrite (IDF v5.5.5 `app_update/esp_ota_ops.c`).** The new seq comes
+  from `while (seq > (id+1)%N + i*N) i++`, and equality stops it. Switching to the slot the
+  active entry ALREADY names therefore returns the same seq and writes it into the other
+  sector, which held the running image's entry. After an `apply: "on_command"` stage
+  (active = `seq n+1 → T`, other = `seq n → R`), a second stage of a different artifact
+  passes every IDF check: T is not running, R is VALID, and `invalidate_inactive` skips a
+  sector that names the running slot. It erases T under the active entry. Its `finish()`
+  then leaves both sectors at `seq n+1 → T`. If T fails to confirm, the rollback boots T
+  again, and the next timeout gets `ESP_ERR_OTA_ROLLBACK_FAILED`. The board is stuck on a
+  broken image. That is the CRITICAL.md failure.
+- **G4, the same mechanism in the undo.** A failed `finish()` (`esp_ota_end` →
+  `ESP_ERR_OTA_VALIDATE_FAILED`) never reaches `esp_ota_set_boot_partition()`. The old undo
+  then called `set_boot_partition(running)` anyway. That wrote a duplicate `seq n → R`
+  entry in state NEW over the previous image's entry. Depending on sector parity, the
+  known-good image then boots `PENDING_VERIFY`. After D2, a failed `finish()` leaves
+  `boot == running` in every non-torn case, and the undo logs `nothing to undo`.
+- **G1.** IDF's own `PENDING_VERIFY` refusal lives in the first `perform()`. That comes
+  after `downloading` and the signed-URL fetch, and it was reported as `"download failed"`.
+  Ours runs first and says `"the running image is not confirmed yet"`. It refuses on exactly
+  `PENDING_VERIFY`. A failed state read (`ESP_ERR_NOT_FOUND`, which every serially flashed
+  board returns) is allowed, and IDF's check stays the backstop.
+- **G3.** `ff_ota.c` and esp_https_ota each picked a slot. They agreed, but nothing enforced
+  it. Now there is one pointer, and `esp_ota_get_next_update_partition(` appears once in the
+  file.
+- **The refusals are read-only.** They make no otadata write and no erase, and they never
+  call `ff_txn`. The earlier stage's record stays valid: its image boots at the next reset
+  and reports against its own cmd_id.
+- **Rejected: supersede** (move otadata back to R, clear the record, write T). It costs two
+  otadata writes and puts the good image into NEW/`PENDING_VERIFY` (G4's problem). It also
+  orphans the earlier cmd_id at `staged`. "Reboot it first" is the honest answer, and R1
+  has no `apply` command.
+- **Accepted gap (liveness, not safety).** `boot != running` also happens when the
+  bootloader rejected a staged image and fell back to R without rewriting otadata. The
+  board refuses stages with the same detail until one reset turns that entry `ABORTED`.
+  That case needs flash damage after both our sha256 check and IDF's validation passed.
+- **Simulator parity** (`simulator/device.py::StageRunner`). It applies the same two
+  refusals, after `staging` and before the size guard, with the same details. `pending`
+  covers the first. A new `staged` field, which nothing in the simulator clears, covers the
+  second, because the simulator has no power cycle and no `apply`.
+- **Spec proposal (not applied).** For `spec/device-protocol.md` → `dn/cmd`: a device
+  refuses a `stage` with `failed`, before downloading anything, while its running image has
+  not yet confirmed, or while an image it staged earlier waits for a reboot.
+
+**Proof status: proven in QEMU (esp32, dev stack).** The negative control on 0.4.1 showed
+both gaps in the otadata decode. After a failed `finish()` (one flipped byte, `image
+validation failed`, `boot partition put back to ota_0`), sector1 held a duplicate
+`seq=1 -> ota_0 NEW` next to sector0's `seq=1 -> ota_0 VALID` (G4). After an
+`on_command` stage of 0.4.5 and a second `on_command` stage of 0.4.3, which re-downloaded
+into ota_1, **both sectors read `seq=2 -> ota_1 NEW`**, and the running ota_0's entry was
+gone (G2). On 0.4.2 the same failed finish logged `nothing to undo` and left otadata
+byte-identical. The second stage was refused with zero artifact GETs and otadata kept two
+distinct seqs (`seq=1 -> ota_0 VALID`, `seq=2 -> ota_1 NEW`). A stage during an rbtest
+image's confirm window was refused with zero GETs, and the rollback still landed on ota_1.
+T2 ran with the api recreated on the `.env.example` dev hash; `.env` untouched. The
+transcripts are in `docs/features/ota-deploy.md` → R2-fw-2.
+
 ## 2026-10-03 — the digest is checked before the boot pointer moves (R2-fw-1)
 
 **Decided: `ff_ota.c::ota_task` reads the slot back and compares the sha256 BEFORE

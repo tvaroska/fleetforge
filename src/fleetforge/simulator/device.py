@@ -491,6 +491,11 @@ class StageRunner:
       because `cmd_id` would otherwise die with the image that received the `stage`.
     * `rolled_back` — the `cmd_id` a rollback still owes a `rolled_back` for. Reported by
       the session on the image the board **returned to**, exactly as on metal.
+    * `staged` — the `cmd_id` of an `apply: "on_command"` stage, whose image the boot
+      pointer now names. While it is set, a further `stage` is refused (R2-fw-2), as the
+      firmware refuses to write a slot the boot pointer names. **Nothing in the simulator
+      clears it**: a real board clears it by rebooting, and this one has no power cycle and
+      no `apply` command.
     """
 
     identity: DeviceIdentity
@@ -505,6 +510,7 @@ class StageRunner:
     reboot: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     pending: PendingConfirm | None = field(default=None, init=False)
     rolled_back: str | None = field(default=None, init=False)
+    staged: str | None = field(default=None, init=False)
     # When the confirm timer of the current boot fires (monotonic). Armed once per boot,
     # like the firmware's esp_timer: a reconnect resumes it rather than restarting it.
     _confirm_deadline: float | None = field(default=None, init=False, repr=False)
@@ -590,6 +596,28 @@ class StageRunner:
 
         await self._status(client, cmd_id, STATE_STAGING, step)
 
+        # The firmware's two read-only refusals (ff_ota.c::choose_target_slot, R2-fw-2),
+        # in its order and with its details: after `staging`, before the slot-size guard
+        # and before any download.
+        if self.pending is not None:
+            step(f"stage    {self.pending.cmd_id} has not confirmed yet — refused, nothing fetched")
+            await self._status(
+                client, cmd_id, STATE_FAILED, step, detail="the running image is not confirmed yet"
+            )
+            return
+        if self.staged is not None:
+            step(
+                f"stage    {self.staged} is staged and waits for a reboot — refused, nothing fetched"
+            )
+            await self._status(
+                client,
+                cmd_id,
+                STATE_FAILED,
+                step,
+                detail="an update is already staged and waits for a reboot",
+            )
+            return
+
         size = artifact.get("size")
         if isinstance(size, int) and size > self.identity.ota_slot_size:
             # The firmware knows the slot only after `staging` (ff_ota.c::ota_task), and
@@ -627,7 +655,9 @@ class StageRunner:
 
         if body.get("apply") == APPLY_ON_COMMAND:
             # `spec/device-protocol.md`: the device stages and waits for an explicit
-            # `apply`. R1 ships no such command, so this board sits here until R2.
+            # `apply`. R1 ships no such command, so this board sits here until R2, and a
+            # further `stage` is refused meanwhile (`staged`).
+            self.staged = cmd_id
             step("stage    apply=on_command — staying staged until an apply arrives (R2)")
             return
 

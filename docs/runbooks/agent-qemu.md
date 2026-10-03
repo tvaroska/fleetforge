@@ -195,6 +195,42 @@ otadata() { dd if=.qemu/flash-esp32.bin bs=4096 skip=15 count=2 status=none | sh
 A `--fresh` board is not all-0xFF. Its first boot marks ota_0 valid, so expect
 `8ba3b110139f4544` both times, not the all-0xFF hash.
 
+Once otadata holds two entries, a hash says only *that* something changed. Decode each
+sector instead (QEMU stopped). otadata is at 0xF000 (sector 0) and 0x10000 (sector 1), one
+32-byte `{seq, label[20], state, crc}` entry each:
+
+```bash
+otadecode() { python3 - "${1:-.qemu/flash-esp32.bin}" <<'EOF'
+import struct, sys, zlib
+S = {0:'NEW',1:'PENDING_VERIFY',2:'VALID',3:'INVALID',4:'ABORTED',0xFFFFFFFF:'UNDEFINED'}
+f = open(sys.argv[1], 'rb')
+for i, off in enumerate((0xF000, 0x10000)):
+    f.seek(off); seq, _label, state, crc = struct.unpack('<I20sII', f.read(32))
+    if seq == 0xFFFFFFFF: print(f'sector{i}: empty'); continue
+    ok = zlib.crc32(struct.pack('<I', seq), 0xFFFFFFFF) == crc
+    print(f'sector{i}: seq={seq} -> ota_{(seq-1)%2} state={S.get(state, hex(state))} crc={"ok" if ok else "BAD"}')
+EOF
+}
+```
+
+A fresh board decodes as `sector0: seq=1 -> ota_0 state=VALID crc=ok` and
+`sector1: empty`. If that first entry says `crc=BAD`, the decoder is wrong, not the board.
+**Two sectors with the same seq is the R2-fw-2 brick.** Both entries then name one slot,
+and a rollback has nowhere to go.
+
+Since agent 0.4.2 (R2-fw-2) a stage is refused before anything is fetched or erased in
+two cases. On the topic each one is exactly `staging, failed "<detail>"`:
+
+| Board log (ERROR) | `detail` |
+|---|---|
+| `update <id>: refused — ota_0 is still pending_verify (it confirms at its announce ack or rolls back); nothing was fetched or erased` | `the running image is not confirmed yet` |
+| `update <id>: refused — the boot partition names ota_1 (ota state new) while ota_0 is running; nothing was fetched or erased; the staged image boots at the next reset` | `an update is already staged and waits for a reboot` |
+
+The second case is every stage that follows an `apply: "on_command"` stage, until the
+board is power-cycled. After a failed `finish()` (for example `image validation failed`),
+0.4.2 logs `boot partition still names ota_0; nothing to undo — otadata was not touched`.
+`boot partition put back` must **not** appear, and otadata must be byte-identical.
+
 ### Driving an outcome: `confirmed` and `rolled_back` (R2-be-1)
 
 Since agent 0.4.0 the board records the transaction at `staged`

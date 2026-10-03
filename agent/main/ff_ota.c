@@ -5,7 +5,7 @@
  * already walks `staging → downloading → verifying → staged → applying → rebooting`, the
  * ingestor parses what it publishes, and this file repeats that walk on real flash. What
  * happens after the reboot (`confirming` → `confirmed` | `rolling_back` → `rolled_back`) is
- * reported by ff_mqtt.c from the record this file writes at `staged` (ff_txn.h). Four
+ * reported by ff_mqtt.c from the record this file writes at `staged` (ff_txn.h). Five
  * properties are worth stating out loud, because each one is a silent wrong answer rather
  * than an error:
  *
@@ -33,6 +33,16 @@
  * 4. **The URL is never logged.** It is the authorization (R1-be-3: "signed URL never
  *    persisted, never logged"), so it does not appear in a log line, in a `detail`, or
  *    truncated "just for debugging". Everything else about a failure is said plainly.
+ * 5. **One slot, chosen once, and never one the boot pointer names** (R2-fw-2).
+ *    choose_target_slot() picks the slot, and the same pointer is handed to esp_https_ota
+ *    (`.partition.staging`), hashed, switched to and recorded. Before any I/O it refuses a
+ *    stage while the running image is still PENDING_VERIFY, and while an earlier staged
+ *    image waits for a reboot (boot != running). The second refusal is the one that matters.
+ *    IDF's esp_rewrite_ota_data() picks the new seq with `while (seq > id+1 + i*N) i++`,
+ *    and equality stops that loop. So switching to the slot the active entry ALREADY names
+ *    rewrites the same seq into the other otadata sector, which is the running image's
+ *    entry. Both sectors then name the staged slot, and a rollback has nowhere to go
+ *    (DECISIONS 2026-10-03, R2-fw-2).
  */
 
 #include "ff_ota.h"
@@ -157,7 +167,15 @@ static esp_err_t partition_digest(const esp_partition_t *part, size_t length, ch
  * here — it is caught before finish() and nothing was moved (property 3) — so this is the
  * belt-and-braces branch for an image IDF itself refused. It is also the only call to
  * esp_ota_set_boot_partition() in this file. Logged at ERROR either way — an operator needs
- * to know a board is carrying a rejected image in its spare slot. */
+ * to know a board is carrying a rejected image in its spare slot.
+ *
+ * It writes otadata ONLY if the pointer actually moved (R2-fw-2). finish() reaches
+ * esp_ota_set_boot_partition() only after esp_ota_end() succeeded, and choose_target_slot()
+ * guarantees boot == running when the stage began. So a failed finish() leaves
+ * boot == running in every case short of a torn otadata write. "Putting it back" anyway is
+ * not a no-op. It is IDF's equal-seq rewrite (property 5): a duplicate entry for the
+ * running slot, in state NEW, written over the previous image's entry, and depending on
+ * sector parity the known-good image then boots PENDING_VERIFY. */
 static void restore_boot_partition(void)
 {
     const esp_partition_t *running = esp_ota_get_running_partition();
@@ -165,6 +183,17 @@ static void restore_boot_partition(void)
         ESP_LOGE(TAG, "cannot read the running partition to undo the boot switch — this "
                       "board may reboot into an image that failed verification");
         return;
+    }
+    const esp_partition_t *boot = esp_ota_get_boot_partition();
+    if (boot == running) {
+        ESP_LOGW(TAG, "boot partition still names %s; nothing to undo — otadata was not "
+                      "touched",
+                 running->label);
+        return;
+    }
+    if (boot == NULL) {
+        ESP_LOGE(TAG, "cannot read the boot partition; putting it back to %s anyway",
+                 running->label);
     }
     esp_err_t err = esp_ota_set_boot_partition(running);
     if (err == ESP_OK) {
@@ -300,6 +329,99 @@ static esp_err_t resolve_artifact_url(const char *url, char *out)
     return ESP_OK;
 }
 
+/* Same spelling as agent_main.c's boot-facts line, so a refusal and the boot log read
+ * alike. */
+static const char *ota_state_name(esp_ota_img_states_t state)
+{
+    switch (state) {
+    case ESP_OTA_IMG_NEW:            return "new";
+    case ESP_OTA_IMG_PENDING_VERIFY: return "pending_verify";
+    case ESP_OTA_IMG_VALID:          return "valid";
+    case ESP_OTA_IMG_INVALID:        return "invalid";
+    case ESP_OTA_IMG_ABORTED:        return "aborted";
+    case ESP_OTA_IMG_UNDEFINED:      return "undefined";
+    default:                         return "?";
+    }
+}
+
+/* The ONE place the slot is chosen (property 5). Returns the slot to write, or NULL after
+ * it has published `failed` itself. Everything here is a read: no otadata write, no erase,
+ * no fetch, and no ff_txn call. A refused stage leaves an earlier stage's transaction
+ * record exactly as it was, because that image still boots at the next reset and reports
+ * against its own cmd_id.
+ *
+ * The order is load-bearing. A confirming image is refused first, then a waiting staged
+ * image, and only then is the next slot computed. */
+static const esp_partition_t *choose_target_slot(const ff_ota_cmd_t *cmd)
+{
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    if (running == NULL) {
+        fail(cmd, "cannot read the running partition");
+        return NULL;
+    }
+
+    /* 1. The running image must be confirmed. IDF's esp_ota_begin() refuses this too, but
+     *    only inside the first esp_https_ota_perform(): after `downloading` was published
+     *    and the signed URL was fetched, and reported as "download failed". Refuse ONLY on
+     *    exactly PENDING_VERIFY. A failed read (ESP_ERR_NOT_FOUND on a serially flashed
+     *    board, whose otadata is all 0xFF) is allowed, or no freshly USB-flashed board could
+     *    ever be deployed to. IDF's own check stays the backstop. */
+    esp_ota_img_states_t running_state;
+    esp_err_t state_err = esp_ota_get_state_partition(running, &running_state);
+    if (state_err != ESP_OK) {
+        ESP_LOGI(TAG, "update %s: %s has no ota state (%s); a serially flashed image counts "
+                      "as confirmed",
+                 cmd->cmd_id, running->label, esp_err_to_name(state_err));
+    } else if (running_state == ESP_OTA_IMG_PENDING_VERIFY) {
+        ESP_LOGE(TAG, "update %s: refused — %s is still pending_verify (it confirms at its "
+                      "announce ack or rolls back); nothing was fetched or erased",
+                 cmd->cmd_id, running->label);
+        fail(cmd, "the running image is not confirmed yet");
+        return NULL;
+    }
+
+    /* 2. Never write a slot the boot pointer names. After an `apply: "on_command"` stage
+     *    the boot pointer names the staged slot, and that slot is also the next update
+     *    slot. Writing it would erase an image otadata already points at, and finish()
+     *    would then rewrite the SAME seq over the running image's entry (property 5). So
+     *    refuse until the board reboots into what it staged. */
+    const esp_partition_t *boot = esp_ota_get_boot_partition();
+    if (boot == NULL) {
+        fail(cmd, "cannot read the boot partition");
+        return NULL;
+    }
+    if (boot != running) {
+        esp_ota_img_states_t boot_state;
+        const char *boot_state_name = esp_ota_get_state_partition(boot, &boot_state) == ESP_OK
+                                          ? ota_state_name(boot_state)
+                                          : "unknown";
+        ESP_LOGE(TAG, "update %s: refused — the boot partition names %s (ota state %s) while "
+                      "%s is running; nothing was fetched or erased; the staged image boots "
+                      "at the next reset",
+                 cmd->cmd_id, boot->label, boot_state_name, running->label);
+        fail(cmd, "an update is already staged and waits for a reboot");
+        return NULL;
+    }
+
+    /* 3. The slot after the running one, sanity-checked. Belt and braces: IDF refuses the
+     *    running slot and non-OTA slots too, but only after this function has returned. */
+    const esp_partition_t *target = esp_ota_get_next_update_partition(NULL);
+    if (target == NULL) {
+        fail(cmd, "no spare ota slot");
+        return NULL;
+    }
+    if (target == running || target->type != ESP_PARTITION_TYPE_APP ||
+        target->subtype < ESP_PARTITION_SUBTYPE_APP_OTA_MIN ||
+        target->subtype >= ESP_PARTITION_SUBTYPE_APP_OTA_MAX) {
+        ESP_LOGE(TAG, "update %s: next update slot %s is the running slot or not an ota slot "
+                      "(type %d, subtype 0x%02x)",
+                 cmd->cmd_id, target->label, (int)target->type, (unsigned)target->subtype);
+        fail(cmd, "no spare ota slot");
+        return NULL;
+    }
+    return target;
+}
+
 static void ota_task(void *arg)
 {
     ff_ota_cmd_t *cmd = (ff_ota_cmd_t *)arg;
@@ -309,16 +431,16 @@ static void ota_task(void *arg)
              cmd->version[0] != '\0' ? cmd->version : "?", (unsigned)cmd->size, cmd->sha256);
     ff_mqtt_publish_status(cmd->cmd_id, FF_STATUS_STAGING, 0, NULL);
 
-    /* The slot the download lands in, read BEFORE finish() moves the boot pointer: after
-     * that call `next_update` is the slot we are running from, and hashing it would
-     * verify the old image and pass. */
-    const esp_partition_t *target = esp_ota_get_next_update_partition(NULL);
+    /* The slot the download lands in, chosen ONCE and before any I/O (property 5). The
+     * same pointer goes to esp_https_ota below, is hashed, switched to and recorded. It is
+     * read BEFORE finish() moves the boot pointer: after that call `next_update` is the slot
+     * we are running from, and hashing it would verify the old image and pass. */
+    const esp_partition_t *target = choose_target_slot(cmd);
     if (target == NULL) {
-        fail(cmd, "no spare ota slot");
         goto done;
     }
-    ESP_LOGI(TAG, "update %s: writing slot %s (%" PRIu32 " bytes)", cmd->cmd_id, target->label,
-             target->size);
+    ESP_LOGI(TAG, "update %s: writing slot %s at 0x%08" PRIx32 " (%" PRIu32 " bytes)",
+             cmd->cmd_id, target->label, target->address, target->size);
     /* An artifact that cannot fit is refused BEFORE anything is fetched or erased.
      * Otherwise it is discovered when esp_ota_write() runs off the end of the slot — after
      * the slot, which holds the previous image, has been erased. `size == 0` means the
@@ -361,6 +483,11 @@ static void ota_task(void *arg)
     };
     esp_https_ota_config_t ota_config = {
         .http_config = &http,
+        /* THE slot, not esp_https_ota's own pick. Left NULL it calls
+         * esp_ota_get_next_update_partition() again, independently, and nothing would
+         * hold that equal to the `target` hashed and recorded here. `.final` stays NULL,
+         * which IDF reads as "same as staging". */
+        .partition = {.staging = target},
     };
 
     esp_https_ota_handle_t handle = NULL;
@@ -497,9 +624,11 @@ static void ota_task(void *arg)
          * principle 5) and R1 ships no `apply` command, so this board stays here — the
          * same place the simulator stops. Deliberately NOT `awaiting_safe_window`: this
          * agent is always-on and has no window to wait for, so reporting one would be a
-         * state nothing will ever leave. */
+         * state nothing will ever leave. Until it reboots, a further `stage` is refused
+         * (choose_target_slot(): the boot pointer no longer names the running slot). */
         ESP_LOGW(TAG, "update %s: apply=on_command — staged and waiting (no apply command "
-                      "exists before R2)",
+                      "exists before R2; a further stage is refused until this board "
+                      "reboots)",
                  cmd->cmd_id);
         goto done;
     }

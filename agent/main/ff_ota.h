@@ -15,6 +15,10 @@
  *
  * Verify before switch (R2-fw-1): the slot is read back and hashed BEFORE the boot pointer
  * moves, so an image that fails the digest is never bootable, not even for a moment.
+ *
+ * One slot, chosen once (R2-fw-2): a stage is refused before any I/O while the running
+ * image is unconfirmed or a staged image waits for a reboot, so no slot the boot pointer
+ * names is ever written.
  */
 
 #pragma once

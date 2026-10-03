@@ -1187,7 +1187,8 @@ client.
 
 **Out of scope.** A `stage` that arrives while the running image is still
 `PENDING_VERIFY` would target the rollback slot. That belongs to R2-fw-2 (see
-`DECISIONS.md`).
+`DECISIONS.md`). Resolved by R2-fw-2 (agent 0.4.2): the board refuses that stage before
+any I/O. See *A/B slot apply and the atomic switch (R2-fw-2)* below.
 
 ### Checksum verify before the boot switch (R2-fw-1)
 
@@ -1281,6 +1282,179 @@ spelling with `failed` before downloading, and refuses an `artifact.size` larger
 
 **Not covered here.** Real hardware. The prod board runs 0.3.1, and this was not deployed
 there. A metal check can be a later bench item.
+
+### A/B slot apply and the atomic switch (R2-fw-2)
+
+**What R1 had (0.4.1, confirmed by reading the code and IDF v5.5.5).** `ota_task` took
+`esp_ota_get_next_update_partition(NULL)` as `target`, checked its size and hashed it.
+`esp_https_ota_begin()` was given no `partition.staging`, so it picked a slot again on its
+own (`esp_https_ota.c` ~l.487-491). The first `perform()` ran `esp_ota_begin()`, which
+refuses the running slot and, with rollback on, a running image in `PENDING_VERIFY`. Both
+checks come before any erase. A failed `finish()` called `restore_boot_partition()`, which
+called `esp_ota_set_boot_partition(running)` unconditionally. The switch itself is atomic
+because of IDF: otadata is two sectors, and `esp_rewrite_ota_data()` writes the inactive
+one. **That holds only while the two sectors name different slots.**
+
+**The gaps.**
+
+- **G1.** A stage during `PENDING_VERIFY` was refused late. It came after `downloading`
+  was published and the signed URL was fetched, and it was reported as
+  `"download failed"`. It is realistic: commands queued in the persistent session drain
+  before the announce whose PUBACK confirms.
+- **G2 (the defect).** A second `stage` after an `apply: "on_command"` stage wrote the slot
+  the boot pointer already named. `esp_rewrite_ota_data()` picks the new seq with
+  `while (seq > (id+1)%N + i*N) i++`, and equality stops that loop. So `finish()` wrote the
+  **same** seq into the other sector, which was the running image's entry. Both sectors
+  then named the staged slot. A rollback booted the broken image again, and the next
+  timeout hit `ESP_ERR_OTA_ROLLBACK_FAILED`. The board was stuck.
+- **G3.** The slot was chosen twice, by `ff_ota.c` and by esp_https_ota, and nothing held
+  the two equal.
+- **G4.** The undo after a failed `finish()` (`ESP_ERR_OTA_VALIDATE_FAILED`) ran although
+  the pointer had never moved. The same equal-seq path wrote a duplicate `seq n → running`
+  entry in state NEW over the previous image's entry.
+
+**What changed (agent 0.4.2).**
+
+- `ff_ota.c::choose_target_slot()` is now the one place the slot is chosen, and it runs
+  before any I/O, right after `staging`. It does four things in this order:
+  1. It refuses on exactly `ESP_OTA_IMG_PENDING_VERIFY` with
+     `failed "the running image is not confirmed yet"`. A failed state read is allowed, so
+     a serially flashed board stays deployable.
+  2. It reads `esp_ota_get_boot_partition()`. If that is not the running slot, it refuses
+     with `failed "an update is already staged and waits for a reboot"`, and logs the boot
+     slot's label and ota state. A NULL boot partition fails closed.
+  3. It takes `esp_ota_get_next_update_partition(NULL)`. This is the only call left in the
+     file.
+  4. It rejects a target that is the running slot or not an OTA app slot, as
+     `"no spare ota slot"`.
+
+  It never touches `ff_txn`, so the waiting stage's record stays valid.
+- `.partition = {.staging = target}` goes to `esp_https_ota_begin()`. The slot that is
+  written, hashed, switched to and recorded is one pointer. The `writing slot` log line now
+  also prints the address.
+- `restore_boot_partition()` reads the boot partition first. If it still names the running
+  slot, the board logs `boot partition still names ota_0; nothing to undo — otadata was not
+  touched` and writes nothing.
+- The simulator (`StageRunner`) refuses the same two stages, after `staging` and before
+  the size guard, with the same details (`pending`, and a new `staged` field that nothing
+  clears).
+
+**T1.** `just test` passed: 1012 tests, ruff, ruff format, and mypy. It includes the new
+`tests/test_agent_ab_slots.py` (6 tripwires) and three simulator tests: a stage over an
+`on_command` stage, a stage during `--confirm never`, and a stage accepted after the
+rollback. `test_agent_verify.py` and `test_agent_txn.py` pass unchanged.
+`just agent-build esp32` and `esp32s3` both ended in `BUNDLE OK`. The app grew by
++1,616 B and +1,664 B, and the budgets were raised to exactly those bytes.
+`just agent-qemu-smoke esp32` gave `HARNESS OK` on 0.4.2. The `otadecode` helper from the
+runbook decodes that fresh board as `sector0: seq=1 -> ota_0 state=VALID crc=ok`,
+`sector1: empty`, hash `8ba3b110139f4544`, so the CRC formula is right.
+
+**T2 (QEMU esp32 against the dev stack on :8088, 2026-10-03).** T2 ran with the api
+recreated on the `.env.example` dev hash; `.env` untouched. Images: old = the saved 0.4.1
+bundle (app sha256 `870004e9…`), A = 0.4.2 (this code, board only), B = this code as
+`0.4.5` (`a236da1e…`), X = B with byte `0x40000` flipped, uploaded as `0.4.5-x`
+(`08547f47…`), R = this code as `0.4.6-rbtest` (`FF_ROLLBACK_TEST=1`, `80699672…`).
+otadata is decoded per sector with the runbook's `otadecode`, always with QEMU stopped.
+
+```
+T2-0  negative control: 0.4.1 (old), --fresh
+  fresh board:  sector0: seq=1 -> ota_0 state=VALID crc=ok / sector1: empty  (hash 8ba3b110139f4544)
+                -> the CRC formula is right
+  G4  deploy 0.4.5-x on_command (reused:false)
+      topic: staging, downloading, verifying, failed "image validation failed"
+      board: (62968) sha256 08547f47… matches what is on flash in ota_1; switching the boot partition
+             (63898) esp_image: Checksum failed. Calculated 0xd3 read 0x2c
+             (63908) esp_ota_ops: New image failed verification
+             (64998) boot partition put back to ota_0: the staged image was rejected …
+      otadecode: sector0: seq=1 -> ota_0 state=VALID crc=ok
+                 sector1: seq=1 -> ota_0 state=NEW crc=ok        <- duplicate entry, the pointer never moved
+  G2  deploy 0.4.5 on_command -> staged (writing slot ota_1; Writing to <ota_1> partition at offset 0x200000)
+      deploy 0.4.3 on_command (reused:false)
+      board: writing slot ota_1 … Writing to <ota_1> partition at offset 0x200000 … staged and bootable
+      topic: staging, downloading, verifying, staged;  GET /v1/artifact since the POST -> 1
+      otadecode: sector0: seq=2 -> ota_1 state=NEW crc=ok
+                 sector1: seq=2 -> ota_1 state=NEW crc=ok        <- both sectors name ota_1; ota_0's entry is gone
+  => G2 and G4 were real on 0.4.1, exactly as the IDF source predicts.
+
+T2-1  0.4.2 (A), --fresh (new token), deploy 0.4.5-x on_command
+  fresh board: running image: fw_version 0.4.2, ota state valid; otahash 8ba3b110139f4544
+  topic: staging, downloading, verifying, failed "image validation failed"   (no staged)
+  board: (27732) writing slot ota_1 at 0x00200000 (1966080 bytes)
+         (28002) esp_https_ota: Writing to <ota_1> partition at offset 0x200000
+         (73792) sha256 08547f47… matches what is on flash in ota_1; switching the boot partition
+         (74882) esp_image: Checksum failed. Calculated 0xd3 read 0x2c
+         (74912) failed: image validation failed
+         (74992) boot partition still names ota_0; nothing to undo — otadata was not touched
+         'boot partition put back' count: 0
+  otadecode: sector0: seq=1 -> ota_0 state=VALID crc=ok / sector1: empty
+  otahash 8ba3b110139f4544 -> 8ba3b110139f4544: BYTE-IDENTICAL
+  cold boot: running partition: ota_0, fw_version 0.4.2, ota state valid
+
+T2-2  stage over a staged image (D2)
+  deploy 0.4.5 on_command (reused:false) -> staged
+  board: (26613) writing slot ota_1 at 0x00200000 (1966080 bytes)
+         (26733) esp_https_ota: Writing to <ota_1> partition at offset 0x200000   <- same slot (D3)
+         (63153) ff-txn: transaction 0925c853… recorded (target slot at 0x00200000)
+  deploy 0.4.3 on_command (reused:false)
+  topic: exactly staging, failed "an update is already staged and waits for a reboot"
+  board: (108643) refused — the boot partition names ota_1 (ota state new) while ota_0 is
+                  running; nothing was fetched or erased; the staged image boots at the next reset
+  GET /v1/artifact since t0 -> 0
+  otadecode: sector0: seq=1 -> ota_0 state=VALID crc=ok
+             sector1: seq=2 -> ota_1 state=NEW crc=ok          <- two distinct seqs (compare T2-0 G2)
+  cold boot: running partition: ota_1, fw_version 0.4.5, ota state pending_verify
+             transaction 0925c853…: confirming on ota_1 -> announce ack -> record cleared
+  rows: 0925c853 requested, staging, downloading, verifying, staged, confirming, confirmed|t
+        575ca5ff requested, staging, failed|t "an update is already staged and waits for a reboot"
+
+T2-3  stage while the running image is unconfirmed (D1), rollback still lands
+  deploy 0.4.6-rbtest on_command -> writing slot ota_0 at 0x00020000; Writing to <ota_0> …
+         0x20000; ff-txn: … recorded (target slot at 0x00020000); staged
+  otadecode (before the boot): sector0: seq=3 -> ota_0 state=NEW / sector1: seq=2 -> ota_1 state=VALID
+  cold boot: fw_version 0.4.6-rbtest, ota state pending_verify; confirming on ota_0;
+             FF_ROLLBACK_TEST: ignoring the announce ack on purpose
+  deploy 1.6.0 on_command (reused:false) at ~9 s into the 60 s window
+  topic: exactly staging, failed "the running image is not confirmed yet"
+  board: (9444) refused — ota_0 is still pending_verify (it confirms at its announce ack or
+                rolls back); nothing was fetched or erased
+         no esp_ota_begin failed, no Writing to <ota_1>
+  GET /v1/artifact since t0 -> 0
+  (68394) no working session 60 s after an OTA boot — … rolling back; rolling_back on the topic
+  The emulator survived this esp_restart (SW_CPU_RESET), so no manual power cycle was needed:
+         running partition: ota_1, fw_version 0.4.5, ota state valid
+         transaction a4d134c5…: rolled_back (returned to ota_1; ota_0 did not confirm)
+  GET /v1/devices: 0.4.5
+  rows: a4d134c5 … staged, confirming, rolling_back, rolled_back|t "returned to ota_1; ota_0 did not confirm"
+        036ebbbd requested, staging, failed|t "the running image is not confirmed yet"
+
+T2-4  after the rollback, the next deploy targets the rejected slot
+  otadecode: sector0: seq=3 -> ota_0 state=INVALID crc=ok / sector1: seq=2 -> ota_1 state=VALID crc=ok
+  deploy 0.4.3 on_command -> reused:true (cmd 6062f183, left open at staged by T2-0's
+         0.4.1 board, which never rebooted; this flash had never seen that id, so it ran)
+  board: (27456) writing slot ota_0 at 0x00020000 (1966080 bytes)
+         (27586) esp_https_ota: Writing to <ota_0> partition at offset 0x20000
+         (62626) ff-txn: transaction 6062f183… recorded (target slot at 0x00020000); staged
+  otadecode: sector0: seq=3 -> ota_0 state=NEW crc=ok          <- INVALID entry replaced, seq above ota_1's 2
+             sector1: seq=2 -> ota_1 state=VALID crc=ok        <- unchanged
+  cold boot: fw_version 0.4.3, ota state pending_verify; confirming on ota_0; record cleared
+  rows: 6062f183 … confirming, confirmed|t
+
+T2-5  simulator against the live stack (api on localhost URLs + dev hash)
+  sim-fleet 1 --capabilities ota (rfw2a-01 = 565e32227121)
+    1.5.0 on_command: staging, downloading, verifying, staged (download #1)
+    1.6.0 on_command: staging, failed "an update is already staged and waits for a reboot"
+                      (stage 315e1ef3… is staged and waits for a reboot — refused, nothing fetched)
+  sim-fleet 1 --confirm never --confirm-timeout 30 (rfw2b-01 = 22a07db944ee)
+    1.5.0 auto: … rebooting, confirming
+    1.6.0 on_command inside the window: staging, failed "the running image is not confirmed yet"
+    then rolling_back, rolled_back|t "returned to 1.4.2; the new image did not confirm"; 1 download total
+```
+
+**Spec proposal (not applied).** For `spec/device-protocol.md` → `dn/cmd` (`stage`): "A
+device refuses a `stage` with `failed`, before downloading anything, while its running
+image has not yet confirmed (`confirming`), or while an image it staged earlier is waiting
+for a reboot. The server may re-issue the deploy once the device reports a terminal state
+or has rebooted."
 
 ## De-risking
 

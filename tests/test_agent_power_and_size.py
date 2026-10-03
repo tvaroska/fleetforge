@@ -104,14 +104,20 @@ FORBIDDEN_OPTIONS = [
 # (+400 B). The added code is the digest check moved ahead of the boot switch (with its
 # split log lines), the slot-size guard before any fetch, and the lowercase-sha256 check
 # at the command seam.
+#
+# Raised 2026-10-03 (R2-fw-2) for **esp32 and esp32s3**, the two targets rebuilt, to the
+# exact measured byte: esp32 1,015,792 -> 1,017,408 (+1,616 B), esp32s3 996,096 -> 997,760
+# (+1,664 B). The added code is choose_target_slot() (the PENDING_VERIFY and boot != running
+# refusals, the slot sanity checks, a local ota_state_name()), the boot-pointer check in
+# restore_boot_partition(), and their log strings.
 APP_SIZE_BUDGET_BYTES = {
-    "esp32": 1_015_792,
+    "esp32": 1_017_408,
     # Raised from 973_136 for the OTA-capable agent (R1-fw-1/R1-fw-2), which cost every
     # target ~18 KB. Only esp32 was raised at the time: this gate reads whatever is in
     # `agent/dist/`, so a target nobody had built locally is not checked and does not
     # fail. The other two are still carrying 0.2.0-era numbers and will need the same
     # raise the first time they are built — that is a gap in the gate, not slack here.
-    "esp32s3": 996_096,
+    "esp32s3": 997_760,
     "esp32c3": 1_028_336,
     "esp32c6": 1_077_840,
 }

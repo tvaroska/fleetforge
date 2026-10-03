@@ -1089,6 +1089,90 @@ async def test_a_reconnect_resumes_the_confirm_timer_rather_than_restarting_it(
     assert stage.reboot.is_set() and stage.rolled_back == "cmd-stage-1"
 
 
+# ---------------------------------------------------------------------------
+# R2-fw-2: a board never writes a slot the boot pointer names, and never stages over an
+# image that has not confirmed. The firmware refuses both before any I/O
+# (`ff_ota.c::choose_target_slot`), after `staging`; the simulator is a device, so it
+# refuses the same commands, in the same order, with the same details.
+# ---------------------------------------------------------------------------
+
+
+def for_cmd(fake: FakeClient, cmd_id: str) -> list[dict[str, Any]]:
+    return [report for report in statuses(fake) if report["cmd_id"] == cmd_id]
+
+
+async def test_a_second_stage_over_an_on_command_stage_is_refused_before_download(
+    downloads: list[str],
+) -> None:
+    stage = StageRunner(
+        identity=DeviceIdentity(device_id="a4cf12b3de90", fw_version="1.4.2"),
+        link=LinkProfile(LINK_FAST),
+    )
+    fake = FakeClient()
+    for body in (
+        stage_command(cmd_id="cmd-1", apply="on_command"),
+        stage_command(cmd_id="cmd-2", version="1.6.0", apply="on_command"),
+    ):
+        fake.inbox.put_nowait(FakeMessage("ff/v1/d/a4cf12b3de90/dn/cmd", body))
+
+    lines = await one_session(stage, fake, awake_s=0.3)
+
+    assert [report["state"] for report in for_cmd(fake, "cmd-1")][-1] == STATE_STAGED
+    refused = for_cmd(fake, "cmd-2")
+    assert [report["state"] for report in refused] == [STATE_STAGING, STATE_FAILED]
+    assert refused[-1]["detail"] == "an update is already staged and waits for a reboot"
+    assert len(downloads) == 1
+    assert stage.staged == "cmd-1", "the refusal must not disturb the staged transaction"
+    assert any("waits for a reboot" in line for line in lines)
+
+
+async def unconfirmed_then_refused() -> tuple[StageRunner, FakeClient]:
+    """A `--confirm never` image whose confirm window receives a new stage (`cmd-2`)."""
+    stage = await applied_stage(confirm=CONFIRM_NEVER, confirm_timeout_s=0.3)
+    second = FakeClient()
+    second.inbox.put_nowait(
+        FakeMessage("ff/v1/d/a4cf12b3de90/dn/cmd", stage_command(cmd_id="cmd-2", version="1.6.0"))
+    )
+    await one_session(stage, second, awake_s=None)  # ends when the confirm timer fires
+    return stage, second
+
+
+async def test_a_stage_while_the_image_is_still_confirming_is_refused(
+    downloads: list[str],
+) -> None:
+    stage, second = await unconfirmed_then_refused()
+
+    refused = for_cmd(second, "cmd-2")
+    assert [report["state"] for report in refused] == [STATE_STAGING, STATE_FAILED]
+    assert refused[-1]["detail"] == "the running image is not confirmed yet"
+    assert len(downloads) == 1, "only the applied image was ever fetched"
+    # The refusal changes nothing about the rollback: the timer still fires.
+    assert [report["state"] for report in for_cmd(second, "cmd-stage-1")] == [
+        STATE_CONFIRMING,
+        STATE_ROLLING_BACK,
+    ]
+    assert stage.reboot.is_set() and stage.rolled_back == "cmd-stage-1"
+
+
+async def test_after_a_rollback_a_new_stage_is_accepted(downloads: list[str]) -> None:
+    stage, _ = await unconfirmed_then_refused()
+    stage.reboot.clear()
+    back = FakeClient()
+    await one_session(stage, back)
+    assert [report["state"] for report in statuses(back)] == [STATE_ROLLED_BACK]
+    assert stage.pending is None and stage.staged is None
+    stage.reboot.clear()
+
+    third = FakeClient()
+    third.inbox.put_nowait(
+        FakeMessage("ff/v1/d/a4cf12b3de90/dn/cmd", stage_command(cmd_id="cmd-3", version="1.6.0"))
+    )
+    await one_session(stage, third, awake_s=None)  # ends at the apply's reboot
+
+    assert [report["state"] for report in for_cmd(third, "cmd-3")] == list(STAGE_WALK)
+    assert len(downloads) == 2
+
+
 async def test_a_session_with_no_transaction_publishes_no_status() -> None:
     fake = await drive_session(DeviceIdentity(device_id="a4cf12b3de90"))
     assert statuses(fake) == []
