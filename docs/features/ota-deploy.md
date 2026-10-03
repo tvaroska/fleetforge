@@ -1045,8 +1045,10 @@ Procedure and its limits: [`../runbooks/rollback-test.md`](../runbooks/rollback-
 What remained of R2-TEST-1 was the *other* failure modes — boot loop, brownout mid-write,
 flaky radio — none of which that test covers. R2-test-1 (2026-10-03) took the first two,
 plus a torn otadata write, in QEMU: all land on the previous image. It also found one that
-does **not** recover: an image that hangs before its broker session (R2-fw-4). The flaky
-radio is R2-test-2. See *Remaining failure modes (R2-test-1)* below.
+did **not** recover: an image that hangs before its broker session. R2-fw-4 (agent 0.4.3)
+fixed it by arming the confirm timer first thing in `app_main`, proven in QEMU. The flaky
+radio is R2-test-2. See *Remaining failure modes (R2-test-1)* and *Arm the confirm timer at
+boot (R2-fw-4)* below.
 
 What that result does **not** do is retire R2-BE-1. The R1 agent's reported walk ends at
 `rebooting` (`ff_ota.h`), so the rollback is only inferable from the announced version
@@ -1528,7 +1530,7 @@ power cut between flash commands, never inside one. That is why the torn otadata
 | F3 | Power cut during the sha256 read-back (`verifying`) | **Recovers.** As F2. | No. The row parks at `verifying`. |
 | F4 | Power cut inside an otadata write (a torn sector, erased or crc-less) | **Lands on the previous VALID image.** One `rst:` banner, no loop. | No. `stale transaction record … discarded`, and the row parks at `staged`. |
 | F4d | The same cut while mark-valid rewrites the confirmed entry | **Silently reverts** to the image that ran before. | No. The server keeps the last thing it heard (`confirmed` here; in a real cut, `confirming`). R2-fe-1's drift line shows the mismatch. |
-| F5 | Hang before the broker session (`FF_FAULT_TEST=hang`) | **DOES NOT RECOVER.** 333 s in `PENDING_VERIFY`, no reset, no rollback. Only the next power cycle rescues it. | Nothing until that power cycle, then `rolled_back` → **R2-fw-4** |
+| F5 | Hang before the broker session (`FF_FAULT_TEST=hang`) | **DOES NOT RECOVER.** 333 s in `PENDING_VERIFY`, no reset, no rollback. Only the next power cycle rescues it. | Nothing until that power cycle, then `rolled_back` → **R2-fw-4** → fixed by R2-fw-4 (0.4.3), see below |
 
 **Liveness gaps, accepted.** F2, F3 and F4 leave the server row non-terminal. No sweeper
 or server-side expiry closes it, because `deploys.py` rule 1 says the server records only
@@ -1667,6 +1669,111 @@ forever, enrollment retries forever, and every `park()` loops forever.
 contradicts `spec/prd.md` Flow 2 step 3 ("must reconnect within a timeout … else
 auto-rollback"). The fix touches the CRITICAL confirm path, so it gets its own task and
 review.
+
+### Arm the confirm timer at boot (R2-fw-4)
+
+**The F5 fix. Proof status: proven in QEMU (esp32, dev stack), bench replay owed**
+(`../runbooks/rollback-test.md` → *Hang before the session*). Decision and rejected
+alternatives: DECISIONS.md 2026-10-03 (R2-fw-4).
+
+**What changed (agent 0.4.3).**
+
+- `ff_mqtt_arm_confirm_timer()` (ff_mqtt.c, the old `arm_confirm_timeout()` made public) is
+  the **first statement of `app_main`**, before `log_power_fault()`, `log_boot_facts()` and
+  the fault hook. `ff_mqtt_run()` no longer arms it. Nothing in app_main can now outwait the
+  timer: network bring-up, enrollment and `park()` all run after it.
+- It needs only esp_timer and otadata, and stays inert unless the running image is
+  `PENDING_VERIFY`. A serially flashed or confirmed board still never reboots on failure.
+- A timeout before `classify_txn()` has run sees `TXN_NONE` and rolls back immediately and
+  unreported. The image the board returns to reports `rolled_back` from the record the
+  previous image wrote at `staged`.
+- Two additions inside the arm: an idempotence guard, and an `ESP_LOGE` when the confirm
+  timer cannot be created (silent before). The boot line now reads `OTA boot: %d s from now
+  to reach the fleet or roll back`. The confirm/rollback decisions themselves are unchanged.
+- **Behaviour change:** the 300 s now counts from the moment the image starts executing. A
+  good image whose AP or broker stays down for more than 300 s after its first boot rolls
+  back (a miss, not a brick). `FF_ROLLBACK_TEST`'s 60 s counts from boot too.
+- `CONFIG_ESP_TASK_WDT_PANIC` was considered and not enabled (DECISIONS). No
+  `sdkconfig.defaults*` changed: `config_sha256` is still `8c8ae96b…3bd49a` (esp32) and
+  `d10f52d6…438e32` (esp32s3). The simulator is deliberately unchanged.
+
+**T1.** `just test` passed (ruff, ruff format, mypy, 1040 tests). New tripwires in
+`tests/test_agent_txn.py`: the arm is the first statement of `app_main` and occurs once;
+`ff_mqtt_run()` no longer arms it and the old name is gone; only `agent_main.c` calls it;
+its body touches no `nvs_`, `ff_txn_`, `esp_mqtt_client_`, `s_ctx.cfg`, `s_ctx.client` or
+`ff_progress_`, and still checks `pending_verify()` before `esp_timer_start_once`; it is
+guarded by `s_confirm_armed`. In `tests/test_agent_fault_injection.py`: the arm comes
+before `#if FF_FAULT_TEST_BOOTLOOP`, which is what makes `-hangtest` the regression image.
+`just agent-build esp32` and `esp32s3` gave `BUNDLE OK`, agent 0.4.3, `-Werror` clean.
+App sizes 1,017,696 B (esp32, +288) and 998,064 B (esp32s3, +304); the budgets were raised
+to those bytes.
+
+**T2 (QEMU esp32 against the dev stack on :8088, 2026-10-03).** The api was recreated on
+the `.env.example` dev hash with the `10.0.2.2` origins, and put back afterwards. All images
+were built from this code: board A `0.4.3` (`--fresh`), H `0.4.31-hangtest` (`09ae896f…`,
+200,064 B), B `0.4.30` (`23bd1316…`), R `0.4.32-rbtest` (`2c7fbca7…`). otadecode =
+`just agent-qemu-otadata esp32`, always with QEMU stopped.
+
+```
+A     fresh: Loaded app … 0x20000; fw 0.4.3, ota state valid; enroll 200; mqtt connected
+      'OTA boot:' count: 0                                         <- inert on a serially flashed board
+
+T2-1  THE FIX. deploy 0.4.31-hangtest on_command (cmd 1a9cac56, reused:false)
+        -> ota_1 is staged and bootable; stop
+      otadecode: sector0: seq=1 -> ota_0 state=VALID / sector1: seq=2 -> ota_1 state=NEW
+      start, then hands off:
+        I (1669)   boot: Loaded app from partition at offset 0x200000
+        W (1993)   ff-mqtt: OTA boot: 300 s from now to reach the fleet or roll back
+        I (2003)   ff-agent: fleetforge agent 0.4.31-hangtest …
+        I (2043)   ff-agent: running image: fw_version 0.4.31-hangtest, ota state pending_verify …
+        E (2053)   ff-agent: FF_FAULT_TEST=hang: app_main is stuck before the mqtt session; …
+        … every 30 s … E (272053) ff-agent: FF_FAULT_TEST=hang: …   (10 lines)
+        E (302053) ff-mqtt: no working session 300 s after an OTA boot — marking this image
+                   invalid and rolling back to the previous slot
+        I (302983) esp_ota_ops: Rollback to previously worked partition.
+        rst:0xc (SW_CPU_RESET)                                     <- no esp_timer_impl_init panic this time
+        I (17391)  boot: Loaded app from partition at offset 0x20000
+        I (17739)  ff-agent: fleetforge agent 0.4.3 … ota state valid
+        W (26179)  ff-mqtt: transaction 1a9cac56…: rolled_back (returned to ota_0; ota_1 did not confirm)
+        I (27129)  ff-txn: transaction 1a9cac56… closed — record cleared
+      stop -> otadecode: sector0: seq=1 -> ota_0 state=VALID crc=ok
+                         sector1: seq=2 -> ota_1 state=INVALID crc=ok  <- INVALID: our timer, not a reset
+      rows: requested, staging, downloading, verifying, staged, rolled_back|t
+            "returned to ota_0; ota_1 did not confirm"            (no confirming, no rolling_back)
+      GET /v1/devices: fw 0.4.3
+
+T2-2  deploy 0.4.30 on_command (cmd 61915e31, reused:false) -> staged into ota_1; stop, start
+        I (1866)   boot: Loaded app from partition at offset 0x200000
+        W (2164)   ff-mqtt: OTA boot: 300 s from now to reach the fleet or roll back
+        I (2214)   … fw_version 0.4.30, ota state pending_verify
+        W (7934)   ff-mqtt: transaction 61915e31…: confirming on ota_1
+        W (8224)   ff-mqtt: this image was written by OTA and is now CONFIRMED …
+        I (8964)   ff-txn: transaction 61915e31… closed — record cleared
+        I (330384) ff-mqtt: publish …/up/hb (… uptime 322 s)      <- past 320 s of log time
+      'no working session': 0;  rst: banners: 1 (the power-on)
+      rows: … staged, confirming, confirmed|t;  GET /v1/devices: 0.4.30, online
+      stop -> otadecode: sector1: seq=2 -> ota_1 state=VALID crc=ok
+
+T2-3  deploy 0.4.32-rbtest on_command (cmd c8623628, reused:false) -> staged into ota_0; stop, start
+        I (2003)   boot: Loaded app from partition at offset 0x20000
+        W (2372)   ff-mqtt: OTA boot: 60 s from now to reach the fleet or roll back
+        I (2432)   … fw_version 0.4.32-rbtest, ota state pending_verify
+        W (10252)  ff-mqtt: transaction c8623628…: confirming on ota_0
+        E (10392)  ff-mqtt: FF_ROLLBACK_TEST: ignoring the announce ack on purpose …
+        E (62412)  ff-mqtt: no working session 60 s after an OTA boot — …
+        I (62422)  ff-mqtt: publish …/up/status (qos 1, retain, queued …) state=rolling_back
+        I (65432)  esp_ota_ops: Rollback to previously worked partition.
+        rst:0xc -> Loaded app … 0x200000 -> esp_timer_impl_init panic loop (the known QEMU limit)
+      topic: … staged, confirming, rolling_back                   <- rolling_back before the reset
+      stop -> otadecode: sector0: seq=3 -> ota_0 state=INVALID crc=ok / sector1: seq=2 -> ota_1 state=VALID
+      start: Loaded app … 0x200000; fw 0.4.30, valid
+        W (9585)   ff-mqtt: transaction c8623628…: rolled_back (returned to ota_1; ota_0 did not confirm)
+      rows: … staged, confirming, rolling_back, rolled_back|t;  GET /v1/devices: 0.4.30
+```
+
+`confirming` still arrived well inside the 60 s (at 10 s), so behaviour change 4 did not
+show. The negative control (T2-4, the pre-0.4.3 `0.4.22-hangtest` sitting in
+`PENDING_VERIFY` past 330 s) was not re-run: it is F5 above.
 
 ## De-risking
 

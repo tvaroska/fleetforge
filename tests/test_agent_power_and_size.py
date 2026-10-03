@@ -110,14 +110,21 @@ FORBIDDEN_OPTIONS = [
 # (+1,664 B). The added code is choose_target_slot() (the PENDING_VERIFY and boot != running
 # refusals, the slot sanity checks, a local ota_state_name()), the boot-pointer check in
 # restore_boot_partition(), and their log strings.
+#
+# Raised 2026-10-03 (R2-fw-4) for **esp32 and esp32s3**, the two targets rebuilt, to the
+# exact measured byte: esp32 1,017,408 -> 1,017,696 (+288 B), esp32s3 997,760 -> 998,064
+# (+304 B). The added code is the confirm timer's idempotence guard, the loud line when the
+# confirm timer cannot be created, and the reworded `OTA boot:` line (the fault hook is
+# not compiled into these builds). The timer itself only moved, from ff_mqtt_run() to the
+# first statement of app_main.
 APP_SIZE_BUDGET_BYTES = {
-    "esp32": 1_017_408,
+    "esp32": 1_017_696,
     # Raised from 973_136 for the OTA-capable agent (R1-fw-1/R1-fw-2), which cost every
     # target ~18 KB. Only esp32 was raised at the time: this gate reads whatever is in
     # `agent/dist/`, so a target nobody had built locally is not checked and does not
     # fail. The other two are still carrying 0.2.0-era numbers and will need the same
     # raise the first time they are built — that is a gap in the gate, not slack here.
-    "esp32s3": 997_760,
+    "esp32s3": 998_064,
     "esp32c3": 1_028_336,
     "esp32c6": 1_077_840,
 }

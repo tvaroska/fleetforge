@@ -6,6 +6,75 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-03 — the confirm timer is armed before anything in app_main can wait forever (R2-fw-4)
+
+**Decided: `ff_mqtt_arm_confirm_timer()` is the first statement of `app_main`, ahead of
+`log_power_fault()`, `log_boot_facts()` and the fault hook. The timer code stays in
+`ff_mqtt.c`, and `ff_mqtt_run()` no longer arms it.** Agent 0.4.3. This fixes F5 of the
+R2-test-1 entry below, which stays as written. Proof status: **proven in QEMU (esp32),
+bench replay owed** (`docs/runbooks/rollback-test.md` → *Hang before the session*).
+Transcripts: `docs/features/ota-deploy.md` → *Arm the confirm timer at boot (R2-fw-4)*.
+
+- **Why arming this early is safe.** Everything the timer needs exists before `app_main`:
+  - esp_timer is initialised by IDF startup;
+  - `pending_verify()` reads otadata only (`esp_ota_get_running_partition()`,
+    `esp_ota_get_state_partition()`), with no NVS and no netif;
+  - `confirm_timeout_cb()` reads `s_ctx.session_confirmed` (static, zero) and `s_txn.kind`
+    (static `TXN_NONE`). A timeout before `classify_txn()` has run therefore takes the
+    **immediate** `esp_ota_mark_app_invalid_rollback_and_reboot()`, which is right: there is
+    no session to report on. The image the board returns to classifies `TXN_ROLLED_BACK`
+    from the record the *previous* image wrote at `staged`, and reports `rolled_back`;
+  - `rollback_report_task()` already copes with no client (`s_ctx.connected`,
+    `enqueue_status()` checks `s_ctx.client`).
+- **Two small additions inside the arm**, logging and bookkeeping only, no decision changed:
+  an idempotence guard (`s_confirm_armed`; a second call would leak a second one-shot
+  timer), and an `ESP_LOGE` when the confirm timer cannot be created, which used to be
+  silent. `confirm_timeout_cb`, `confirm_this_image`, `rollback_now_cb`,
+  `rollback_report_task`, `classify_txn` and `ff_ota.c` are unchanged.
+- **Rejected: moving `classify_txn()` / `ff_txn_init()` ahead of `ff_net_bring_up`** (R2-test-1's
+  suggestion). They need NVS and cannot come before `nvs_ready()`. The grace/report path
+  only helps when a session exists; with none, the immediate rollback is already right.
+- **Rejected: a new `ff_confirm.c`.** It moves CRITICAL code across files for no behavioural
+  gain, and the R2-be-1 tripwires in `tests/test_agent_txn.py` read `ff_mqtt.c`.
+- **Rejected: arming after `log_boot_facts()`.** It breaks the pinned "only whitespace
+  between `log_boot_facts();` and the hook". First statement also makes "before anything"
+  provable by a one-line test.
+- **Considered, NOT enabled: `CONFIG_ESP_TASK_WDT_PANIC=y`.**
+  - It only adds coverage for a wedge that starves IDLE, and the esp_timer path already
+    survives almost all of those: the esp_timer task runs at priority 22, above main (1),
+    mqtt (5) and lwIP (18), so a busy-looping or deadlocked task below 22 does not stop
+    `confirm_timeout_cb`. A wedge with interrupts off is caught by the interrupt WDT, which
+    panics by default.
+  - It would change `agent/sdkconfig.defaults` (CRITICAL) and `config_sha256`.
+  - It makes a *confirmed* image reboot on a starvation event, against agent_main's
+    "nothing here reboots on failure".
+  - It risks false panics on the single-core targets (C3/C6) at 80 MHz during CPU-bound
+    TLS, which has not been measured.
+  - Revisit if the bench ever shows a wedge the esp_timer path misses.
+- **Accepted divergence: the simulator is not changed.** `simulator/device.py` starts
+  `_confirm_deadline` at its first session after the simulated reboot. Its pre-session
+  phase is only a broker connect, and no server-side test depends on the difference.
+- **Accepted behaviour changes.**
+  1. The 300 s budget runs from the moment the image starts executing. Net bring-up
+     (`NET_TIMEOUT_MS` 30 s per attempt), SNTP (≤ 15 s) and the TLS handshakes come out of it.
+  2. A *good* image that boots while its AP or broker is down for more than 300 s now rolls
+     back. Before, it waited in PENDING_VERIFY forever and got 300 s after the network came
+     back. `spec/prd.md`: "rollback counts as a save". The deploy ends `rolled_back`, a miss
+     rather than a brick.
+  3. An OTA'd image that `park()`s now rolls back after 300 s. A serially flashed board
+     (otadata UNDEFINED) and a confirmed one (VALID) still never reboot on failure: the
+     timer is armed only on `pending_verify()`.
+  4. `FF_ROLLBACK_TEST`'s 60 s also counts from boot. QEMU and the bench reach the session
+     well inside it, so the rbtest still logs `confirming` first. If it ever does not, the
+     rollback still happens, without `confirming`/`rolling_back`.
+- **Spec proposal (not applied).** `spec/device-protocol.md` → `dn/cmd` →
+  `confirm_timeout_s`, and `spec/prd.md` → *Requirements & targets* → "Confirm timeout
+  (device-armed, default) 300 s": "Counted from the moment the new image starts executing,
+  not from its first connect attempt. An image that cannot reach its session for any reason
+  rolls back when it expires." This is R2-test-1's proposal, now implemented.
+
+---
+
 ## 2026-10-03 — a boot loop and a power cut both land on the previous image; a hang before the session does not (R2-test-1)
 
 **Decided: the remaining failure modes are proven with real OTA'd fault images and the one

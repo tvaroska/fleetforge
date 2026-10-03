@@ -1,8 +1,9 @@
 """The fault-injection builds (R2-test-1) — firmware tripwires, as text.
 
 `FF_FAULT_TEST=bootloop|hang` builds a DELIBERATELY BROKEN agent: one that aborts on every
-boot, or one that never reaches its broker session. QEMU is what proves the board recovers
-(or, for the hang, does not — R2-fw-4). What this file holds, on every `just test`, is the
+boot, or one that never reaches its broker session. QEMU is what proves the board recovers.
+The hang must now roll back too, because the confirm timer is armed before the hook
+(R2-fw-4). What this file holds, on every `just test`, is the
 property whose violation would be a fleet incident rather than a failed test:
 
 * **the hook is absent from every normal build.** It is compiled in only through a
@@ -153,6 +154,12 @@ class TestTheHook:
         assert facts < hook < nvs
         # Nothing but whitespace between the boot facts and the hook.
         assert body[facts + len("log_boot_facts();") : hook].strip() == ""
+
+    def test_the_confirm_timer_is_armed_before_the_hook(self) -> None:
+        """What makes `-hangtest` a regression image for R2-fw-4: the hang sits after the
+        arm, so an OTA'd hang image must roll itself back."""
+        body = _function_body(_code(AGENT_MAIN_C), "app_main")
+        assert body.index("ff_mqtt_arm_confirm_timer();") < body.index("#if FF_FAULT_TEST_BOOTLOOP")
 
     def test_no_other_agent_source_knows_the_switch(self) -> None:
         sources = sorted(AGENT_MAIN_DIR.glob("*.[ch]"))

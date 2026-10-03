@@ -11,7 +11,10 @@ violation is silent on the bench and expensive in the field:
 * the outcome states are published only by ff_mqtt.c, the session that observed them;
 * ff_ota.c records the transaction only after the digest matched and finish() moved the
   boot pointer, and before `staged`;
-* the record is cleared only for the cmd_id that was reported.
+* the record is cleared only for the cmd_id that was reported;
+* the confirm timer is armed first thing in app_main (R2-fw-4) — before network bring-up,
+  enrollment and park(), any of which can wait forever — and needs nothing app_main has
+  not got yet at that point.
 
 Same idiom as `test_ff_cfg.py` (whose comment-stripper is reused): the comments in these
 files quote the very spellings they forbid, so the greps look at code only.
@@ -26,6 +29,7 @@ AGENT_MAIN = Path(__file__).resolve().parent.parent / "agent" / "main"
 FF_TXN_C = AGENT_MAIN / "ff_txn.c"
 FF_TXN_H = AGENT_MAIN / "ff_txn.h"
 FF_MQTT_C = AGENT_MAIN / "ff_mqtt.c"
+AGENT_MAIN_C = AGENT_MAIN / "agent_main.c"
 FF_OTA_C = AGENT_MAIN / "ff_ota.c"
 CMAKELISTS = AGENT_MAIN / "CMakeLists.txt"
 
@@ -134,3 +138,55 @@ def test_the_record_is_cleared_only_for_the_reported_cmd_id() -> None:
     assert "ff_txn_clear_if(s_txn.cmd_id)" in mqtt
     assert re.search(r"\bff_txn_clear\s*\(", mqtt) is None
     assert "nvs_erase" not in mqtt
+
+
+ARM = "ff_mqtt_arm_confirm_timer"
+
+
+def test_the_confirm_timer_is_armed_first_in_app_main() -> None:
+    """R2-fw-4: an OTA'd image that hangs anywhere in app_main must still roll back. The
+    first statement makes "before anything that can wait forever" trivially true."""
+    body = _function_body(_code(AGENT_MAIN_C), "app_main")
+    assert body.strip().startswith(f"{ARM}();")
+    assert body.count(f"{ARM}(") == 1
+
+
+def test_ff_mqtt_run_no_longer_arms_it() -> None:
+    body = _function_body(_code(FF_MQTT_C), "ff_mqtt_run")
+    assert ARM not in body
+    assert "arm_confirm_timeout" not in body
+    assert "arm_confirm_timeout" not in _code(FF_MQTT_C), "the old name is gone"
+
+
+def test_only_app_main_calls_the_arm() -> None:
+    callers = sorted(path.name for path in AGENT_MAIN.glob("*.c") if f"{ARM}(" in _code(path))
+    assert callers == ["agent_main.c", "ff_mqtt.c"]
+    mqtt = _code(FF_MQTT_C)
+    assert mqtt.count(f"{ARM}(") == 1, "ff_mqtt.c defines it and never calls it"
+    assert f"void {ARM}(void)" in mqtt
+    assert f"void {ARM}(void);" in _code(AGENT_MAIN / "ff_mqtt.h")
+
+
+def test_the_arm_needs_nothing_app_main_has_not_got_yet() -> None:
+    """It runs before nvs_ready(), ff_cfg_load() and the mqtt client: esp_timer and otadata
+    only. It must stay inert on a serially flashed board (pending_verify())."""
+    body = _function_body(_code(FF_MQTT_C), ARM)
+    for forbidden in (
+        "nvs_",
+        "ff_txn_",
+        "esp_mqtt_client_",
+        "s_ctx.cfg",
+        "s_ctx.client",
+        "ff_progress_",
+    ):
+        assert forbidden not in body, forbidden
+    assert "pending_verify()" in body
+    assert "esp_timer_start_once" in body
+    assert body.index("pending_verify()") < body.index("esp_timer_start_once")
+
+
+def test_the_arm_is_idempotent() -> None:
+    """A second call would create a second one-shot timer and leak a handle."""
+    body = _function_body(_code(FF_MQTT_C), ARM)
+    assert "s_confirm_armed" in body
+    assert body.index("s_confirm_armed") < body.index("esp_timer_create")

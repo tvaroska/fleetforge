@@ -10,6 +10,10 @@
  * serially flashed board — read the comments there before changing anything: confirming
  * unconditionally at boot would silently disable auto-rollback on the entire fleet from
  * the moment R2 ships OTA.
+ *
+ * The confirm timer is armed at boot, from app_main, before anything there can wait
+ * forever (R2-fw-4): ff_mqtt_arm_confirm_timer() is the only ff_mqtt function called
+ * before ff_mqtt_run().
  */
 
 #pragma once
@@ -21,6 +25,14 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/* Arm the OTA confirm timer (CRITICAL.md: "Device-side confirm timer / rollback path").
+ * Call ONCE, as the FIRST statement of app_main — before anything that can wait forever
+ * (network bring-up, enrollment, park()). Needs nothing but esp_timer and otadata: no NVS,
+ * no netif, no mqtt client. Inert unless the running image is PENDING_VERIFY, i.e. was
+ * written by OTA and has not confirmed yet; on such an image it guarantees a rollback
+ * CONFIRM_TIMEOUT_S after boot unless the announce PUBACK confirms it first (R2-fw-4). */
+void ff_mqtt_arm_confirm_timer(void);
 
 /* Connect and stay connected. Does not return under normal operation: esp-mqtt owns
  * reconnection (with its own backoff) and this call blocks on the session forever.

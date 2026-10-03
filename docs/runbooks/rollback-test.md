@@ -151,6 +151,39 @@ one that names the running image, is byte-identical. QEMU showed exactly that.
 deploy, which parks at `rebooting` because 0.3.1 never records the transaction (the R2-be-1
 entry in DECISIONS.md). Only the deploys after that one run these procedures.
 
+## Hang before the session (R2-fw-4)
+
+The fourth: an OTA'd image that never reaches its broker session — a network that never
+comes up, an enrollment that retries forever, a `park()`. Since agent 0.4.3 the confirm
+timer is the first thing `app_main` does, so such an image rolls itself back 300 s after it
+started executing, unattended. Proven in QEMU (esp32): the rollback line at a log timestamp
+of 302 s, otadata `INVALID` (our timer, not a reset) and `rolled_back` from the old image
+(`docs/features/ota-deploy.md` → *Arm the confirm timer at boot*). **The bench replay is
+owed.**
+
+Build `FF_FAULT_TEST=hang` to a scratch directory (as for the boot loop, with
+`--build-arg FF_FAULT_TEST=hang`), from code ≥ 0.4.3 — the timer that matters is the one
+compiled into the image being deployed. `verify_bundle.py` must say `agent <ver>-hangtest`.
+Upload it as an artifact only (`firmware/publish.py` refuses `-hangtest`). Deploy it with
+`apply: "on_command"`, and at `staged` power-cycle the board yourself (the QEMU recipe;
+the default `apply: auto` works on the bench too, and adds `applying, rebooting` to the
+rows).
+
+Pass, unattended (no human action after the power cycle):
+
+- the console shows `ff-mqtt: OTA boot: 300 s from now …` **before** `ota state
+  pending_verify`, then `FF_FAULT_TEST=hang` every 30 s;
+- at about 300 s of uptime: `no working session 300 s after an OTA boot — marking this image
+  invalid and rolling back`, then a reset;
+- the next boot is the previous slot and version, and logs `transaction <cmd>: rolled_back
+  (returned to ota_N; ota_M did not confirm)`;
+- the dashboard says `rolled back`; the rows end `… verifying, staged, rolled_back`,
+  with **no** `confirming` and no `rolling_back` (no session ever existed).
+
+Still on `-hangtest` 330 s after the power cycle is the original defect, and a P0. A
+`-hangtest` built from code before 0.4.3 (e.g. the dev catalog's `0.4.22-hangtest`) is the
+negative control: it never rolls back by itself.
+
 ## Known gaps this test does not close
 
 - ~~**The server never learns.**~~ **Closed for R2→R2 deploys (R2-be-1, agent 0.4.0).**
@@ -168,6 +201,10 @@ entry in DECISIONS.md). Only the deploys after that one run these procedures.
   procedure. A **boot loop** and a **power cut mid-download** are the two above: proven in
   QEMU, bench replay owed. A power cut **inside an otadata write** lands on the previous
   image, but it is QEMU-only (an offline tear, `just agent-qemu-otadata`) and the outcome
-  is never reported. **A hang before the broker session is NOT covered: the board does
-  not recover until someone power-cycles it (R2-fw-4, P0).** Until that lands, deploy one
-  board at a time with USB in reach. A flaky radio remains R2-test-2.
+  is never reported. **A hang before the broker session is covered from agent 0.4.3
+  (R2-fw-4): proven in QEMU, bench replay owed** (*Hang before the session* above). Both
+  the image being deployed and the image being replaced must be ≥ 0.4.3 to count on it.
+  Strictly, the hang image must be ≥ 0.4.3 to roll back at all, and the image it returns
+  to must be ≥ 0.4.0 to report `rolled_back`. An image that boots, confirms and is broken
+  anyway is still not covered, and a flaky radio remains R2-test-2: deploy one board at a
+  time with USB in reach.

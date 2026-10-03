@@ -26,9 +26,8 @@ build is caught before the fleet, and any device that gets one recovers itself.
   on every deploy ends `confirmed` or `rolled_back`.
 - An image that boots, gets its announce acked and is broken anyway confirms itself and
   **nothing recovers it**. Roll to **one board at a time**.
-- An OTA'd image that hangs before its broker session never rolls back by itself
-  (R2-fw-4, found by R2-test-1 in QEMU). The advice stays one board at a time, with USB
-  in reach.
+- An OTA'd image that hangs before its broker session rolls back by itself since agent
+  0.4.3 (R2-fw-4): proven in QEMU, bench replay owed.
 - No upload form in the dashboard (`docs/runbooks/upload-artifact.sh` is the only way in),
   and every device has `name: null`. Neither has a task yet.
 
@@ -159,7 +158,8 @@ after the reboot.
 - [x] **R2-test-1**: Remaining failure modes — boot loop, brownout mid-write (P0, 1d)
       _(done 2026-10-03; reviewed; proven in QEMU — boot loop and power cut recover, a hang before the session does not → R2-fw-4; bench replay owed, see docs/runbooks/rollback-test.md; see docs/features/ota-deploy.md)_
       The `0.3.2-rbtest` run covers only "boots, joins, never confirms".
-- [ ] **R2-fw-4**: Arm the confirm timer before anything in `app_main` can wait forever (P0, 1d)
+- [x] **R2-fw-4**: Arm the confirm timer before anything in `app_main` can wait forever (P0, 1d)
+      _(done 2026-10-03; reviewed; agent 0.4.3, proven in QEMU — a hang before the session rolls back unattended at ~300 s; bench replay owed, see docs/runbooks/rollback-test.md; see docs/features/ota-deploy.md)_
       Found by R2-test-1. The timer is armed in `ff_mqtt_run()`, after `ff_net_bring_up`
       (retries forever), enrollment (retries forever) and every `park()`. An OTA'd image
       that never gets there stays PENDING_VERIFY until someone power-cycles it (QEMU:

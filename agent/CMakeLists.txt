@@ -37,8 +37,8 @@ endif()
 #
 #   bootloop  aborts in app_main on every boot, before any of our code runs. Proves the
 #             BOOTLOADER puts the previous slot back (PENDING_VERIFY + reset -> ABORTED).
-#   hang      sits in app_main forever, before the mqtt session and therefore before the
-#             confirm timer is armed. Demonstrates the gap filed as R2-fw-4.
+#   hang      sits in app_main forever, before the mqtt session. The regression image for
+#             R2-fw-4: the confirm timer armed at the top of app_main must roll it back.
 #
 # Same suffix rule as FF_ROLLBACK_TEST (-bltest, -hangtest), so the dashboard and the
 # artifact list say what the image is. Such a build is a deployable ARTIFACT only and is

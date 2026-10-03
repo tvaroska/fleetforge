@@ -65,7 +65,7 @@ static const char *TAG = "ff-mqtt";
 
 /* How long a timed-out image keeps running after the confirm timer fires, so a queued
  * `rolling_back` can leave the wire before the reboot. Bounded by an esp_timer that is
- * created at boot (see arm_confirm_timeout), never by the MQTT client: the rollback must
+ * created at boot (see ff_mqtt_arm_confirm_timer), never by the MQTT client: the rollback must
  * happen whatever the session is doing. 2 s covers one pass of the esp-mqtt task loop. */
 #define ROLLBACK_REPORT_GRACE_MS 2000
 /* cJSON + one log line; the heartbeat task does the same work in the same size. */
@@ -164,7 +164,7 @@ static bool confirm_this_image(void)
     return false;
 }
 
-/* Pre-created at boot by arm_confirm_timeout(), so the timeout path allocates nothing it
+/* Pre-created at boot by ff_mqtt_arm_confirm_timer(), so the timeout path allocates nothing it
  * depends on. When it fires the grace period is over: roll back, reported or not. */
 static esp_timer_handle_t s_rollback_timer;
 
@@ -234,8 +234,22 @@ static void confirm_timeout_cb(void *arg)
     esp_ota_mark_app_invalid_rollback_and_reboot(); /* does not return */
 }
 
-static void arm_confirm_timeout(void)
+/* A second call would create a second one-shot confirm timer and leak its handle. */
+static bool s_confirm_armed;
+
+/* R2-fw-4: called as the first statement of app_main, so the budget counts from the moment
+ * this image starts executing and no wait anywhere in app_main (network bring-up,
+ * enrollment, park()) can outlast it. Everything used here exists before app_main:
+ * esp_timer is started by IDF startup and pending_verify() reads otadata only. No NVS, no
+ * netif, no mqtt client, no transaction record — classify_txn() may run after this. */
+void ff_mqtt_arm_confirm_timer(void)
 {
+    if (s_confirm_armed) {
+        ESP_LOGW(TAG, "the confirm timer is already armed — ignoring the second call");
+        return;
+    }
+    s_confirm_armed = true;
+
     if (!pending_verify()) {
         /* Inert at R0 by design; the line is here so the log tells the truth about which
          * branch a future OTA board took. */
@@ -262,7 +276,11 @@ static void arm_confirm_timeout(void)
     esp_timer_handle_t timer = NULL;
     if (esp_timer_create(&args, &timer) == ESP_OK) {
         ESP_ERROR_CHECK(esp_timer_start_once(timer, (uint64_t)CONFIRM_TIMEOUT_S * 1000000ULL));
-        ESP_LOGW(TAG, "OTA boot: %d s to reach the fleet or roll back", CONFIRM_TIMEOUT_S);
+        ESP_LOGW(TAG, "OTA boot: %d s from now to reach the fleet or roll back",
+                 CONFIRM_TIMEOUT_S);
+    } else {
+        ESP_LOGE(TAG, "cannot create the confirm timer: this OTA image cannot roll itself "
+                      "back — only a reset returns this board to its previous slot");
     }
 }
 
@@ -801,6 +819,8 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base, int32_t event_i
 
 esp_err_t ff_mqtt_run(const ff_cfg_t *cfg, const ff_cred_t *cred)
 {
+    /* confirm_timeout_cb may already be armed and reads s_ctx.session_confirmed: this runs
+     * once, over the static zero-init, so the callback sees the same values either way. */
     memset(&s_ctx, 0, sizeof(s_ctx));
     s_ctx.cfg = cfg;
     s_ctx.announce_msg_id = -1;
@@ -845,13 +865,14 @@ esp_err_t ff_mqtt_run(const ff_cfg_t *cfg, const ff_cred_t *cred)
     ESP_ERROR_CHECK(esp_mqtt_client_register_event(s_ctx.client, ESP_EVENT_ANY_ID,
                                                    mqtt_event_handler, &s_ctx));
 
-    /* What the last reboot left to report, decided before the timer below can fire. */
+    /* What the last reboot left to report. The confirm timer is NOT armed here: it was
+     * armed first thing in app_main (R2-fw-4, ff_mqtt_arm_confirm_timer), so it may fire
+     * before, during or after this classification. That is safe: s_txn.kind starts
+     * TXN_NONE, so a timeout before classification rolls back immediately and unreported;
+     * kind becomes TXN_CONFIRMING only after cmd_id is written; and the report task copes
+     * with no client (s_ctx.connected, enqueue_status). */
     ff_txn_init();
     classify_txn();
-
-    /* Armed before the connect attempt, so an image that can never reach its broker still
-     * rolls back on schedule rather than waiting for a connection that never comes. */
-    arm_confirm_timeout();
 
     ESP_LOGI(TAG, "connecting to %s as %s", cfg->mqtt_uri, id);
     esp_err_t err = esp_mqtt_client_start(s_ctx.client);

@@ -22,6 +22,11 @@
  * revoked token or a wrong password is indistinguishable from a hardware fault, and each
  * reset throws away the serial log that says which one it is. Every failure path either
  * retries on a capped backoff or parks with one line saying what to fix.
+ *
+ * The one exception is an OTA'd image still in PENDING_VERIFY. The confirm timer armed
+ * first in app_main (R2-fw-4) rolls that image back after CONFIRM_TIMEOUT_S, whatever it
+ * is waiting on, because an image that cannot reach its fleet must go back to the one
+ * that could. A serially flashed or confirmed image still never reboots.
  */
 
 #include <inttypes.h>
@@ -64,7 +69,8 @@ static const char *TAG = "ff-agent";
 
 /* Park. Used for the failures no retry can fix: a config partition that does not parse, a
  * token the server has permanently refused. The board stays up, logs its reason every
- * five minutes and waits for someone to re-flash it. */
+ * five minutes and waits for someone to re-flash it. On an unconfirmed OTA image the
+ * confirm timer still rolls back (R2-fw-4). */
 static void park(const char *reason) __attribute__((noreturn));
 static void park(const char *reason)
 {
@@ -208,6 +214,13 @@ static void enroll_until_credentialed(const ff_cfg_t *cfg, ff_cred_t *cred)
 
 void app_main(void)
 {
+    /* R2-fw-4. FIRST, before anything below can wait forever: network bring-up and
+     * enrollment retry forever and park() never returns. On an OTA'd image still in
+     * PENDING_VERIFY this guarantees a rollback CONFIRM_TIMEOUT_S after boot unless the
+     * announce PUBACK confirms it; on any other image it is inert. It needs nothing that
+     * the lines below set up (ff_mqtt.h). */
+    ff_mqtt_arm_confirm_timer();
+
     log_power_fault();
     log_boot_facts();
 
@@ -226,14 +239,15 @@ void app_main(void)
     abort();
 #elif FF_FAULT_TEST_HANG
     /* R2-test-1, FF_FAULT_TEST=hang. A DELIBERATELY BROKEN image that never reaches
-     * ff_mqtt_run(), the only place the confirm timer is armed — as a forever-retrying
-     * ff_net_bring_up() or enrollment would. Demonstrates the gap filed as R2-fw-4: an OTA'd
-     * image stuck here stays PENDING_VERIFY until something resets the board. Not park():
-     * that reports through ff_progress before ff_progress_init(), and the hang must not
-     * depend on it. Never published (firmware/publish.py refuses -hangtest). */
+     * ff_mqtt_run() — as a forever-retrying ff_net_bring_up() or enrollment would. It is
+     * the regression image for R2-fw-4: the confirm timer was armed above, at the top of
+     * app_main, so an OTA'd image stuck here must roll back CONFIRM_TIMEOUT_S after boot,
+     * unattended. Not park(): that reports through ff_progress before ff_progress_init(),
+     * and the hang must not depend on it. Never published (firmware/publish.py refuses
+     * -hangtest). */
     while (true) {
-        ESP_LOGE(TAG, "FF_FAULT_TEST=hang: app_main is stuck before the mqtt session, so no "
-                      "confirm timer is armed. Only a reset gets this board back (R2-fw-4)");
+        ESP_LOGE(TAG, "FF_FAULT_TEST=hang: app_main is stuck before the mqtt session; the "
+                      "confirm timer armed at boot must roll this image back (R2-fw-4)");
         vTaskDelay(pdMS_TO_TICKS(30000));
     }
 #endif
