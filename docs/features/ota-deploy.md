@@ -796,6 +796,8 @@ a real reason.
 
 ### The dashboard half (R1-fe-1) — **LANDED 2026-09-17**
 
+> Superseded 2026-10-03 by R2-fe-1: a finished deploy no longer reads `done — running the new version`. It says `good` or `rolled back` (see *The dashboard shows the outcome*).
+
 R1's user-visible claim — *"push firmware from the dashboard and watch the version
 change"* — closes here. Every piece behind it existed; nothing on screen reached it.
 
@@ -1455,6 +1457,56 @@ device refuses a `stage` with `failed`, before downloading anything, while its r
 image has not yet confirmed (`confirming`), or while an image it staged earlier is waiting
 for a reboot. The server may re-issue the deploy once the device reports a terminal state
 or has rebooted."
+
+### The dashboard shows the outcome (R2-fe-1) — **LANDED 2026-10-03**
+
+Frontend only. `GET /v1/devices` already carried `deploy.state` `confirmed` / `rolled_back`
+with `is_terminal: true` (R2-be-1); the cell said the wrong thing about them.
+
+**Three defects fixed.** (1) A rollback read as a success: `rolled back to the previous
+version → 1.5.0` points at the version that FAILED. (2) A confirm printed `100%`, because the
+agent and simulator publish `pct: 100`. (3) There was no glanceable verdict, and
+`done — running the new version` was printed even when the board's announce said otherwise
+(the CUJ-1 hard-fail trap in `spec/cujs.md`).
+
+**Rendering** (`deploy.ts::deployOutcome`, `DeployCell.tsx::LiveState`), only when the server
+says `is_terminal` and the state has an entry in `DEPLOY_OUTCOMES`:
+
+| Case | `deploy-state` | rest |
+|---|---|---|
+| `confirmed`, `fw_version === artifact_version` | `good` (`ok`) | ` — running {v}`, no arrow, no pct |
+| `rolled_back` | `rolled back` (`bad`) | ` — {v} did not confirm`, plus `; back on {from}` only if the announce equals `from` |
+| `confirmed`, announce differs (drift) | `confirmed by the board` (unstyled) | ` → {v}` and a `deploy-drift` line saying what the board reports now |
+| anything else | label, as before | arrow and pct as before |
+
+**Drift drops the verdict.** `good` is present tense; a board re-flashed over USB is no longer
+running what it confirmed. The client does not turn that into a `rolled back` either, since
+the server authors outcomes. `DEPLOY_STATE_LABELS.confirmed` is now `confirmed by the board`.
+
+**Deliberately not done.** No per-device history, no last outcome kept across a new in-flight
+deploy, no outcome for transition-gap `rebooting` rows (nothing is inferred from `fw_version`
+for a non-terminal deploy), and no verdict word for `failed` (its label already is the word).
+
+**T2 evidence** (dev stack, real Chromium via Playwright, dashboard opened before the deploy and
+not reloaded). Artifact `esp32c6/2.0.0-fe1` (204800 random bytes, 201); `fe1good-01 =
+b26a938324ab`, `fe1bad-01 = ea7905b589a8 --confirm never --confirm-timeout 10`.
+
+```
+{"device_id":"b26a938324ab","fw_version":"2.0.0-fe1","s":"confirmed","t":true,"v":"2.0.0-fe1","from":"1.4.2","pct":100,"detail":null}
+{"device_id":"ea7905b589a8","fw_version":"1.4.2","s":"rolled_back","t":true,"v":"2.0.0-fe1","from":"1.4.2","pct":null,"detail":"returned to 1.4.2; the new image did not confirm"}
+in flight (bad):  confirming the new image → 2.0.0-fe1 (just now)
+good, no reload:  good — running 2.0.0-fe1 (12 s ago)                 class ok,  Firmware 2.0.0-fe1
+bad,  no reload:  rolled back — 2.0.0-fe1 did not confirm; back on 1.4.2 (just now)
+                  returned to 1.4.2; the new image did not confirm    class bad, Firmware 1.4.2
+after F5:         same two verdicts. No progressbar, no null/undefined in any cell.
+drift (good board restarted with --fw-version 1.4.2, no reload, ~15 s):
+                  confirmed by the board → 2.0.0-fe1 (36 s ago)       no class
+                  the board has since reported 1.4.2, so this is not what it runs now; Firmware 1.4.2
+```
+
+Dev-stack note: the `frontend` container had been created from the production nginx image, not
+the Vite dev target, so edits were not served. `docker compose up -d --no-deps --build frontend`
+recreated it on the dev override.
 
 ## De-risking
 

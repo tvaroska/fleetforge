@@ -15,6 +15,8 @@
 //    to rule out.
 // 5. A state this dashboard has never heard of renders as itself. `deploy_events.state`
 //    is TEXT with no CHECK and a newer agent is allowed to say something new.
+// 6. A finished deploy gets a verdict word, and the word is withheld when the board's
+//    announce contradicts it.
 
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -369,10 +371,104 @@ describe('DeployCell — what the board says back', () => {
   })
 
   it('keeps showing the live state while a second deploy is in flight', () => {
-    renderCell({ device: device({ deploy: deploy({ state: 'confirmed', is_terminal: true }) }) })
+    renderCell({
+      device: device({
+        fw_version: '1.5.0',
+        deploy: deploy({ state: 'confirmed', is_terminal: true }),
+      }),
+    })
 
-    expect(screen.getByTestId('deploy-state')).toHaveTextContent('done — running the new version')
+    expect(screen.getByTestId('deploy-state').textContent).toBe('good')
     expect(screen.getByTestId('deploy-state')).toHaveClass('ok')
     expect(screen.getByRole('button', { name: 'Deploy' })).toBeEnabled()
+  })
+
+  it('says good, without an arrow or a percentage, when the board runs the confirmed image', () => {
+    renderCell({
+      device: device({
+        fw_version: '1.5.0',
+        deploy: deploy({ state: 'confirmed', is_terminal: true, pct: 100 }),
+      }),
+    })
+
+    const cell = screen.getByTestId('deploy-cell')
+    expect(screen.getByTestId('deploy-state').textContent).toBe('good')
+    expect(screen.getByTestId('deploy-state')).toHaveClass('ok')
+    expect(cell).toHaveTextContent('running 1.5.0')
+    expect(cell).not.toHaveTextContent('100%')
+    expect(cell).not.toHaveTextContent('→')
+  })
+
+  it('says rolled back, names the failed version and where the board is back', () => {
+    const detail = 'returned to 1.4.2; the new image did not confirm'
+    renderCell({
+      device: device({
+        fw_version: '1.4.2',
+        deploy: deploy({ state: 'rolled_back', is_terminal: true, detail }),
+      }),
+    })
+
+    const cell = screen.getByTestId('deploy-cell')
+    expect(screen.getByTestId('deploy-state').textContent).toBe('rolled back')
+    expect(screen.getByTestId('deploy-state')).toHaveClass('bad')
+    expect(cell).toHaveTextContent('1.5.0 did not confirm')
+    expect(cell).toHaveTextContent('back on 1.4.2')
+    expect(cell).toHaveTextContent(detail)
+    expect(cell).not.toHaveTextContent('→ 1.5.0')
+  })
+
+  it('withholds the verdict when the board has since reported another version', () => {
+    renderCell({
+      device: device({
+        fw_version: '1.4.2',
+        deploy: deploy({ state: 'confirmed', is_terminal: true, pct: 100 }),
+      }),
+    })
+
+    const state = screen.getByTestId('deploy-state')
+    expect(state.textContent).not.toBe('good')
+    expect(state).not.toHaveClass('ok')
+    expect(screen.getByTestId('deploy-drift')).toHaveTextContent('has since reported 1.4.2')
+    expect(screen.getByTestId('deploy-cell')).not.toHaveTextContent('running')
+  })
+
+  it('says the board has not reported when drift has no announce at all', () => {
+    renderCell({
+      device: device({
+        fw_version: null,
+        deploy: deploy({ state: 'confirmed', is_terminal: true }),
+      }),
+    })
+
+    expect(screen.getByTestId('deploy-drift')).toHaveTextContent(
+      'the board has not reported a version since',
+    )
+  })
+
+  it('never prints null or undefined for a rollback with every nullable empty', () => {
+    renderCell({
+      device: device({
+        fw_version: null,
+        deploy: deploy({
+          state: 'rolled_back',
+          is_terminal: true,
+          artifact_version: null,
+          from_version: null,
+          pct: null,
+          detail: null,
+        }),
+      }),
+    })
+
+    const cell = screen.getByTestId('deploy-cell')
+    expect(cell).toHaveTextContent('the new image did not confirm')
+    expect(cell).not.toHaveTextContent('null')
+    expect(cell).not.toHaveTextContent('undefined')
+  })
+
+  it('renders a non-terminal confirming state exactly as before', () => {
+    renderCell({ device: device({ deploy: deploy({ state: 'confirming' }) }) })
+
+    expect(screen.getByTestId('deploy-cell')).toHaveTextContent('confirming the new image → 1.5.0')
   })
 })

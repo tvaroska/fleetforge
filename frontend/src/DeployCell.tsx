@@ -11,6 +11,10 @@
 // browser tab catches up on its own. The only thing held locally is the outcome of THIS
 // operator's last POST, which is a fact about this browser and exists nowhere else.
 //
+// A finished transaction (R2-fe-1) gets a verdict word, `good` or `rolled back`, instead
+// of a label with an arrow and a percentage. The verdict is withheld when the board's own
+// announce contradicts it (`deploy.ts::deployOutcome`).
+//
 // Two things this cell deliberately does not do:
 //
 // * **No progress bar.** `pct` is a transition log, not a feed: our agent publishes
@@ -22,7 +26,7 @@
 
 import { useState } from 'react'
 import { ApiError, api, type ArtifactSummary, type DeployAccepted, type DeviceSummary } from './api'
-import { DEPLOY_BAD_STATES, DEPLOY_STATE_LABELS } from './deploy'
+import { DEPLOY_BAD_STATES, DEPLOY_STATE_LABELS, deployOutcome } from './deploy'
 import { formatAgo, formatWhen } from './format'
 
 /** What the 202 body means, in the operator's terms. Only the two surprising cases. */
@@ -40,6 +44,50 @@ function LiveState({ device, now }: { device: DeviceSummary; now: number }) {
   const deploy = device.deploy
   if (deploy === null) return null
 
+  const outcome = deployOutcome(deploy, device.fw_version)
+
+  const age = (
+    <span className="muted" title={formatWhen(deploy.at)}>
+      ({formatAgo(deploy.at, now)})
+    </span>
+  )
+  const detail = deploy.detail !== null && deploy.detail !== '' && (
+    <>
+      <br />
+      {/* Device-controlled text, sanitised at write time and escaped by React.
+          Nothing here interprets it. */}
+      <span className="muted">{deploy.detail}</span>
+    </>
+  )
+
+  if (outcome?.kind === 'verdict') {
+    return (
+      <p>
+        <span className={outcome.tone} data-testid="deploy-state">
+          {outcome.word}
+        </span>{' '}
+        — {outcome.note} {age}
+        {detail}
+      </p>
+    )
+  }
+
+  if (outcome?.kind === 'drift') {
+    return (
+      <p>
+        <span data-testid="deploy-state">{DEPLOY_STATE_LABELS.confirmed}</span>
+        {deploy.artifact_version !== null && <> → {deploy.artifact_version}</>} {age}
+        <br />
+        <span className="muted" data-testid="deploy-drift">
+          {outcome.reported === null
+            ? 'the board has not reported a version since'
+            : `the board has since reported ${outcome.reported}, so this is not what it runs now`}
+        </span>
+        {detail}
+      </p>
+    )
+  }
+
   // `?? state` is the whole rule: a state this dashboard has never heard of renders as
   // itself rather than as a blank cell (`deploy.ts`).
   const label = DEPLOY_STATE_LABELS[deploy.state] ?? deploy.state
@@ -53,18 +101,8 @@ function LiveState({ device, now }: { device: DeviceSummary; now: number }) {
       </span>
       {deploy.artifact_version !== null && <> → {deploy.artifact_version}</>}
       {/* Text, never a bar — see the header. */}
-      {deploy.pct !== null && <> {deploy.pct}%</>}{' '}
-      <span className="muted" title={formatWhen(deploy.at)}>
-        ({formatAgo(deploy.at, now)})
-      </span>
-      {deploy.detail !== null && deploy.detail !== '' && (
-        <>
-          <br />
-          {/* Device-controlled text, sanitised at write time and escaped by React.
-              Nothing here interprets it. */}
-          <span className="muted">{deploy.detail}</span>
-        </>
-      )}
+      {deploy.pct !== null && <> {deploy.pct}%</>} {age}
+      {detail}
     </p>
   )
 }

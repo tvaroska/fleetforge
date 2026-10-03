@@ -17,7 +17,7 @@
 //    Its label says the wait is legitimate and unbounded, which is the whole point.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ApiError, api, type ArtifactSummary } from './api'
+import { ApiError, api, type ArtifactSummary, type DeploySummary } from './api'
 
 /**
  * Human wording for the states in `spec/device-protocol.md`, plus the server-authored
@@ -39,7 +39,7 @@ export const DEPLOY_STATE_LABELS: Record<string, string> = {
   applying: 'switching to the new image',
   rebooting: 'rebooting',
   confirming: 'confirming the new image',
-  confirmed: 'done — running the new version',
+  confirmed: 'confirmed by the board',
   rolling_back: 'rolling back',
   rolled_back: 'rolled back to the previous version',
   failed: 'failed',
@@ -60,6 +60,54 @@ export const DEPLOY_STATE_LABELS: Record<string, string> = {
  * server on every `DeploySummary`; do not re-derive it from this set.
  */
 export const DEPLOY_BAD_STATES = new Set(['failed', 'rolled_back'])
+
+/**
+ * The verdict words, keyed by the state that earns them. A lookup, like every vocabulary
+ * here, and consulted only when the SERVER says the transaction is terminal (`is_terminal`
+ * is never re-derived from state names).
+ */
+export const DEPLOY_OUTCOMES: Record<string, { word: string; tone: 'ok' | 'bad' }> = {
+  confirmed: { word: 'good', tone: 'ok' },
+  rolled_back: { word: 'rolled back', tone: 'bad' },
+}
+
+export type DeployOutcome =
+  | { kind: 'verdict'; word: string; tone: 'ok' | 'bad'; note: string }
+  // Confirmed, but the board's own announce disagrees: history, not a present-tense verdict.
+  | { kind: 'drift'; reported: string | null }
+
+/**
+ * What a finished transaction should say, or `null` to render the in-flight line as before.
+ *
+ * The drift rule is the CUJ-1 hard-fail trap in `spec/cujs.md` ("a milestone was shown as
+ * reached while it was no longer true"): `good` is claimed only while `fw_version` still
+ * equals the confirmed artifact. Likewise "back on X" is claimed only when the announce
+ * agrees. Neither case lets the client author an outcome the server did not record.
+ */
+export function deployOutcome(
+  deploy: DeploySummary,
+  fwVersion: string | null,
+): DeployOutcome | null {
+  if (!deploy.is_terminal) return null
+  const entry = DEPLOY_OUTCOMES[deploy.state]
+  if (entry === undefined) return null
+  const v = deploy.artifact_version
+  if (deploy.state === 'confirmed') {
+    if (v !== null && fwVersion !== v) return { kind: 'drift', reported: fwVersion }
+    return {
+      kind: 'verdict',
+      ...entry,
+      note: v !== null ? `running ${v}` : 'running the new version',
+    }
+  }
+  if (deploy.state === 'rolled_back') {
+    const from = deploy.from_version
+    let note = v !== null ? `${v} did not confirm` : 'the new image did not confirm'
+    if (from !== null && fwVersion === from) note += `; back on ${from}`
+    return { kind: 'verdict', ...entry, note }
+  }
+  return null
+}
 
 export type Artifacts = {
   /** Deployable versions per chip target, each group already newest-first. */

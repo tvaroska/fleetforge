@@ -238,8 +238,27 @@ describe('FleetView', () => {
     await renderFleet([device({ fw_version: '1.5.0', deploy: deploy({ artifact_version: '1.5.0' }) })])
 
     const row = screen.getAllByTestId('device-row')[0]
-    expect(within(row).getByTestId('deploy-state')).toHaveTextContent('done — running the new version')
+    expect(within(row).getByTestId('deploy-state')).toHaveTextContent('good')
+    expect(row).toHaveTextContent('running 1.5.0')
     expect(row).toHaveTextContent('1.5.0')
+  })
+
+  it('shows good and rolled back per device', async () => {
+    await renderFleet([
+      device({ device_id: 'a4cf12b3de90', fw_version: '1.5.0', deploy: deploy() }),
+      device({
+        device_id: 'b2000000dead',
+        fw_version: '1.4.2',
+        deploy: deploy({ state: 'rolled_back' }),
+      }),
+    ])
+
+    const rows = screen.getAllByTestId('device-row')
+    const good = rows.find((r) => r.getAttribute('data-device-id') === 'a4cf12b3de90')!
+    const bad = rows.find((r) => r.getAttribute('data-device-id') === 'b2000000dead')!
+    expect(within(good).getByTestId('deploy-state').textContent).toBe('good')
+    expect(within(bad).getByTestId('deploy-state').textContent).toBe('rolled back')
+    expect(within(bad).getAllByRole('cell')[3]).toHaveTextContent('1.4.2')
   })
 
   it('bounces a dead session to the login screen instead of showing a page error', async () => {

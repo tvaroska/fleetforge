@@ -6,6 +6,26 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-03 — the dashboard says "good" only while the board's announce agrees (R2-fe-1)
+
+**Decided: a finished deploy gets a verdict word (`good`, `rolled back`), gated on the
+server's `is_terminal` plus a lookup (`deploy.ts::DEPLOY_OUTCOMES`). `good` is shown only
+while `device.fw_version` equals the confirmed artifact; otherwise the cell reads
+`confirmed by the board` with a drift line. `back on {from}` is claimed only when the announce
+equals `from`.** Frontend only, no API change.
+
+- Drift drops the verdict rather than becoming `rolled back`: the CUJ-1 hard-fail trap
+  ("a milestone shown as reached while no longer true"), and the client must not author an
+  outcome the server did not record.
+- **Rejected:** a server-side `last_outcome` that survives a new in-flight deploy. It is an
+  API change for a ~5-board, one-at-a-time fleet. Revisit with group deploys / the KPI view (R6).
+- **Rejected:** inferring an outcome for a `rebooting` row from `fw_version` (the R1-to-R2
+  transition gap). Same rule, applied to the client.
+- **Gotcha:** the dev `frontend` container can exist on the production nginx image, which
+  serves a stale bundle. `docker compose up -d --no-deps --build frontend` restores Vite.
+
+---
+
 ## 2026-10-03 — a board never writes a slot the boot pointer names, and never stages over an unconfirmed image (R2-fw-2)
 
 **Decided: `ff_ota.c::choose_target_slot()` chooses the slot once, before any I/O, and
