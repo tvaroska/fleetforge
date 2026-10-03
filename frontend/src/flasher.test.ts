@@ -4,7 +4,13 @@
 // esptool spends its sync window on it and blames the board.
 
 import { describe, expect, it, vi } from 'vitest'
-import { BUILT_IN_PORT, checkChosenPort, explainFlashError, NO_BOARD_SELECTED } from './flasher'
+import {
+  BUILT_IN_PORT,
+  checkChosenPort,
+  describePort,
+  explainFlashError,
+  NO_BOARD_SELECTED,
+} from './flasher'
 
 describe('checkChosenPort', () => {
   it('refuses a port with no USB vendor id — COM1, ttyS0 — and points at the help', () => {
@@ -38,5 +44,20 @@ describe('checkChosenPort', () => {
     expect(explainFlashError(new DOMException('No port selected by the user.', 'NotFoundError'))).toBe(
       NO_BOARD_SELECTED,
     )
+  })
+})
+
+describe('describePort', () => {
+  it.each([
+    [
+      { usbVendorId: 0x303a, usbProductId: 0x1001 },
+      'Espressif native USB (no driver needed) (USB 303a:1001)',
+    ],
+    [{ usbVendorId: 0x10c4, usbProductId: 0xea60 }, 'Silicon Labs CP210x bridge (USB 10c4:ea60)'],
+    [{ usbVendorId: 0x067b, usbProductId: 0x2303 }, 'USB 067b:2303'],
+    [{ usbVendorId: 0x303a }, 'Espressif native USB (no driver needed) (USB 303a)'],
+    [{}, 'a built-in port (no USB id)'],
+  ])('%j reads as %s', (info, expected) => {
+    expect(describePort(info)).toBe(expected)
   })
 })

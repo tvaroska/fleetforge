@@ -133,6 +133,10 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       The bench is **Windows + Chrome** (settled 2026-10-02): the S3 enrolled from it with
       native USB on COM3. Earlier entries said the Mac; that is superseded. Record the
       driver and COM port used — the re-acquire window is an OS-and-driver property.
+      Bench script: docs/runbooks/serial-console-bench.md → Check F (2026-10-03). Run it right
+      after S0-test-1's Check E: both re-flash `94a990dd09a4`, so the 0.3.1 baseline is given up
+      once. Unplug the `UART` socket first. The panel's `watching …: opened on try N, T ms`
+      notice needs the frontend release after this commit on prod.
 
 - [x] **S0-test-3**: Someone who has not seen the code onboards a board unaided — passed 2026-09-22 → [enrollment.md](docs/features/enrollment.md)
 - [x] **S0-fw-3**: A board that browns out during RF calibration cannot escape it — withdrawn 2026-09-23, not fixed → [enrollment.md](docs/features/enrollment.md)

@@ -90,6 +90,16 @@ const USB_SERIAL_VENDORS: Record<number, string> = {
 
 const hex4 = (value: number): string => value.toString(16).padStart(4, '0')
 
+/** How a port reads in the log: the vendor's name when we know it, always the raw ids. */
+export function describePort(info: SerialPortInfo): string {
+  const vendor = info.usbVendorId
+  if (vendor === undefined) return 'a built-in port (no USB id)'
+  const product = info.usbProductId === undefined ? '' : `:${hex4(info.usbProductId)}`
+  const known = USB_SERIAL_VENDORS[vendor]
+  const ids = `USB ${hex4(vendor)}${product}`
+  return known === undefined ? ids : `${known} (${ids})`
+}
+
 /**
  * Stops the one choice that is plainly not an ESP32, before any handshake. S0-fe-8.
  *
@@ -107,12 +117,10 @@ export function checkChosenPort(info: SerialPortInfo, onLog: (line: string) => v
   if (vendor === undefined) {
     throw new Error(BUILT_IN_PORT)
   }
-  const product = info.usbProductId === undefined ? '' : `:${hex4(info.usbProductId)}`
-  const known = USB_SERIAL_VENDORS[vendor]
   onLog(
-    known === undefined
-      ? `port: USB ${hex4(vendor)}${product} — not a USB-serial chip this page recognises; trying it anyway`
-      : `port: ${known} (USB ${hex4(vendor)}${product})`,
+    USB_SERIAL_VENDORS[vendor] === undefined
+      ? `port: ${describePort(info)} — not a USB-serial chip this page recognises; trying it anyway`
+      : `port: ${describePort(info)}`,
   )
 }
 

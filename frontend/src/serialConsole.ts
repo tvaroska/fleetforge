@@ -3,7 +3,7 @@
 // `navigator.serial` and no board — so everything worth testing lives in `boardConsole.ts`.
 
 import type { BoardConsole, ConsoleAcquire, ConsoleFactory } from './boardConsole'
-import { checkChosenPort, explainFlashError } from './flasher'
+import { checkChosenPort, describePort, explainFlashError } from './flasher'
 
 /**
  * How long to keep trying to open a port after a flash.
@@ -13,6 +13,8 @@ import { checkChosenPort, explainFlashError } from './flasher'
  * `esptoolFlasher.ts:83`. For a second or two `getPorts()` either omits it or lists a
  * handle that throws on `open()`. Giving up in that window would tell the operator their
  * board is dead when it is merely rebooting.
+ *
+ * The "watching ..." notice logged on success exists so the bench (S0-test-2) can read the margin.
  */
 const ACQUIRE_TIMEOUT_MS = 8000
 const ACQUIRE_RETRY_MS = 250
@@ -122,16 +124,25 @@ async function acquirePort(
     return port
   }
 
-  const deadline = Date.now() + ACQUIRE_TIMEOUT_MS
+  const started = Date.now()
+  const deadline = started + ACQUIRE_TIMEOUT_MS
+  let tries = 0
   let last: unknown = null
   for (;;) {
     // Re-read the list every pass: a re-enumerating board appears as a different entry.
     const ports = await navigator.serial.getPorts()
+    tries += 1
     const opened = await openWithRetry(ports, baudRate).catch((err: unknown) => {
       last = err
       return null
     })
-    if (opened !== null) return opened
+    if (opened !== null) {
+      onLog(
+        `watching ${describePort(opened.getInfo())}: opened on try ${tries}, ` +
+          `${Date.now() - started} ms into the ${ACQUIRE_TIMEOUT_MS / 1000} s window`,
+      )
+      return opened
+    }
     if (Date.now() >= deadline) {
       throw last instanceof Error
         ? last

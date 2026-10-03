@@ -1,7 +1,8 @@
 # Bench-verifying the serial console on a bridge-chip board
 
-Run top to bottom at the bench. This is the script for TODO.md `S0-test-1`. Checks A-D
-change nothing on the board. Check E re-flashes it, so it runs last, behind a stop.
+Run top to bottom at the bench. This is the script for TODO.md `S0-test-1` (Checks A-E)
+and `S0-test-2` (Check F). Checks A-D change nothing on the board. Checks E and F re-flash
+it, so they run last, behind a stop. F runs straight after E.
 
 ## Why it needs a bench
 
@@ -112,8 +113,69 @@ board" does not exercise re-acquire. Only a flash does.
 3. Pass: after the write, the console opens by itself (no click, no chooser), streams the
    boot log, and never shows "No board is available to watch". The board reaches *On the
    fleet*. The console polls for 250 ms steps up to 8 s; record the time from `hard_reset`
-   to the first log line if visible.
+   to the first log line if visible. From the frontend release that carries the notice, the
+   panel prints `watching <port>: opened on try N, T ms into the 8 s window`. Record that line.
 4. Record the dashboard version after.
+
+## Check F - native-USB re-acquire after hard_reset (S0-test-2, DESTRUCTIVE)
+
+> **STOP. This re-flashes the prod board `94a990dd09a4`, exactly like Check E** (fresh
+> enrolment token, `ff_cfg` rewritten, `ota-data-initial.bin`). Run it straight after Check
+> E in the same session, so the 0.3.1 baseline is only given up once. If Check E is skipped,
+> the same baseline decision applies here.
+
+Setup:
+
+- **Unplug the `UART` socket cable**, so only the native `USB` socket (COM3) is connected.
+  The console opens the first granted port that will open; the UART grant from Checks A-E
+  would otherwise win.
+- Optionally revoke stale grants: Chrome -> Site settings -> `bingo.tvaroska.sk` -> Serial
+  ports.
+- Record the driver: Device Manager -> Ports -> expected "USB Serial Device (COM3)", driver
+  `usbser.sys` (Microsoft, inbox, no install). Or in PowerShell:
+  `Get-PnpDevice -PresentOnly | Where-Object InstanceId -like 'USB\VID_303A*' | Format-List FriendlyName,InstanceId,Status`
+
+Prerequisite: prod must serve a frontend build with the `watching ...: opened on try N`
+notice (the release after the S0-test-2 commit). On an older build, run anyway with a
+stopwatch from "the write finished" to the first boot line; the port identity then rests on
+the UART cable being unplugged.
+
+Run:
+
+1. Record the dashboard version of `94a990dd09a4`.
+2. Flash from the flash page, picking COM3. The `port:` line must read `Espressif native
+   USB (no driver needed) (USB 303a:1001)`.
+3. After the write, touch nothing.
+4. Record the dashboard version after.
+
+Pass (all of):
+
+- The console opens by itself, with no click and no chooser.
+- The notice names `USB 303a:...`. Record try N and T ms.
+- The boot log streams through to the agent's `fleetforge agent ...` version line, and on to
+  *On the fleet*.
+- "No board is available to watch" never appears.
+- "The board dropped off the USB bus..." never appears.
+
+Fail signatures (each becomes a new S0 task via `/new-task`, with the observed text):
+
+- "No board is available to watch" after ~8 s: the window is too short, or Chrome's grant
+  does not survive re-enumeration. Before closing Chrome, record whether COM3 comes back in
+  Device Manager and roughly when, and whether "Watch a board" -> chooser lists it.
+- Opens, prints "resetting the board so the log starts at its first line", then "The board
+  dropped off the USB bus when it was reset": re-acquire worked, but the post-open RTS
+  pulse (S0-fe-5) re-enumerated the native port again. Predicted by code reading. Fix
+  directions: re-acquire automatically after a commanded-reset drop, or skip the pulse when
+  the port is `303a` and the flasher just hard-reset the board.
+- Notice names `10c4`/`1a86`: the wrong port was opened and the run is invalid. Unplug the
+  UART cable and redo it.
+- Only ROM lines, no app lines: the secondary USB-Serial-JTAG console is off, against
+  `sdkconfig.resolved`.
+- T > 6000 ms: a pass, but with under 2 s of margin. Record it as a finding: the window is
+  too tight for this OS/driver.
+
+Reading the notice: `try 1` at 0-50 ms means the port never left the list, so the
+"different `SerialPort`" path was not exercised. `try N > 1` means the window mattered.
 
 ## Results
 
@@ -124,11 +186,12 @@ board" does not exercise re-acquire. Only a flash does.
 | C EN pulse boots app | | | |
 | D release releases | | | |
 | E re-acquire after hard_reset | | | |
+| F native-USB re-acquire (S0-test-2) | | | |
 
 Anything that fails comes back as a new S0 task with the observed behaviour (`/new-task`).
 On all-pass, `S0-test-1` flips `[x]` and the evidence goes into `docs/features/enrollment.md`
 (the S0-fe-1 *T2 evidence* paragraph and the S0-fe-8 *bench half still owed* paragraph)
 when it is archived.
 
-`S0-test-2` reuses Check E on COM3 (the native `USB` socket), where the port comes back as
-a different `SerialPort`.
+On Check F pass, `S0-test-2` flips `[x]` and the evidence (driver, COM port, `port:` line,
+`watching ...` notice line) goes into `docs/features/enrollment.md` when it is archived.
