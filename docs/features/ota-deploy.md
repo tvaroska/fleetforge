@@ -1042,8 +1042,11 @@ shipped with the R1 agent (`ff_mqtt.c`, `confirm_timeout_cb` →
 real hardware for the first time: `94a990dd09a4` was deployed a deliberately broken
 `0.3.2-rbtest` image, joined the fleet on it, and returned on 0.3.1 71 s later unattended.
 Procedure and its limits: [`../runbooks/rollback-test.md`](../runbooks/rollback-test.md).
-What remains of R2-TEST-1 is the *other* failure modes — boot loop, brownout mid-write,
-flaky radio — none of which that test covers.
+What remained of R2-TEST-1 was the *other* failure modes — boot loop, brownout mid-write,
+flaky radio — none of which that test covers. R2-test-1 (2026-10-03) took the first two,
+plus a torn otadata write, in QEMU: all land on the previous image. It also found one that
+does **not** recover: an image that hangs before its broker session (R2-fw-4). The flaky
+radio is R2-test-2. See *Remaining failure modes (R2-test-1)* below.
 
 What that result does **not** do is retire R2-BE-1. The R1 agent's reported walk ends at
 `rebooting` (`ff_ota.h`), so the rollback is only inferable from the announced version
@@ -1507,6 +1510,163 @@ drift (good board restarted with --fw-version 1.4.2, no reload, ~15 s):
 Dev-stack note: the `frontend` container had been created from the production nginx image, not
 the Vite dev target, so edits were not served. `docker compose up -d --no-deps --build frontend`
 recreated it on the dev override.
+
+
+### Remaining failure modes (R2-test-1)
+
+**A test task: fault-injection builds, a flash-tear tool, tripwires and QEMU evidence. No
+firmware defect is fixed here.** Proof status: **proven in QEMU (esp32, dev stack), bench
+replay owed** (`../runbooks/rollback-test.md` → *Boot loop*, *Pull the plug
+mid-download*). QEMU completes every SPI flash command atomically, so a SIGKILL is a
+power cut between flash commands, never inside one. That is why the torn otadata write
+(F4) is produced offline with `just agent-qemu-otadata`.
+
+| # | Mode | Observed in QEMU | Reported to the server |
+|---|------|------------------|------------------------|
+| F1 | Boot loop: the new image aborts at every boot (`FF_FAULT_TEST=bootloop`) | **Recovers after ONE abort.** The bootloader marks the slot `ABORTED` and loads the old one. | `rolled_back`, terminal |
+| F2 | Power cut mid-download (30 %) | **Recovers.** Same slot, `valid`, no transaction line. | No. The row parks at `downloading`. A repeat POST reuses the cmd_id and runs to `confirmed`. |
+| F3 | Power cut during the sha256 read-back (`verifying`) | **Recovers.** As F2. | No. The row parks at `verifying`. |
+| F4 | Power cut inside an otadata write (a torn sector, erased or crc-less) | **Lands on the previous VALID image.** One `rst:` banner, no loop. | No. `stale transaction record … discarded`, and the row parks at `staged`. |
+| F4d | The same cut while mark-valid rewrites the confirmed entry | **Silently reverts** to the image that ran before. | No. The server keeps the last thing it heard (`confirmed` here; in a real cut, `confirming`). R2-fe-1's drift line shows the mismatch. |
+| F5 | Hang before the broker session (`FF_FAULT_TEST=hang`) | **DOES NOT RECOVER.** 333 s in `PENDING_VERIFY`, no reset, no rollback. Only the next power cycle rescues it. | Nothing until that power cycle, then `rolled_back` → **R2-fw-4** |
+
+**Liveness gaps, accepted.** F2, F3 and F4 leave the server row non-terminal. No sweeper
+or server-side expiry closes it, because `deploys.py` rule 1 says the server records only
+what a board said. The operator sees a row that stopped. A repeat deploy within the
+signed-URL TTL reuses the cmd_id and finishes it (F2). F4d is the uglier one: a board
+that was about to confirm reverts silently. That is safe, but not reported.
+
+**Two IDF facts the run surfaced (v5.5.5).**
+
+- **otadata is rewritten in place more often than not.** `rewrite_ota_seq()` erases a
+  4 KB sector, then programs 32 bytes. `esp_rewrite_ota_data()` (in `finish()`) aims it at
+  the INACTIVE sector. `esp_ota_current_ota_is_workable()`, behind both mark-valid and
+  mark-invalid, aims it at the **ACTIVE** sector. The bootloader's own `write_otadata()`
+  (`bootloader_utility.c`: NEW → PENDING_VERIFY on the active sector, PENDING_VERIFY →
+  ABORTED in place) does the same. A cut inside any of those leaves the other sector, which
+  names the image that ran when the stage happened. F4 proves that is where the board lands.
+- **otadata moves at the START of every stage.** With rollback enabled, `esp_ota_begin()`
+  calls `esp_ota_invalidate_inactive_ota_data_slot()`. That erases the inactive sector
+  whenever it names a slot other than the running one, before the first byte is
+  downloaded. The plan predicted a byte-identical otadata after a mid-download cut. What
+  holds is narrower: the **active** sector is byte-identical (F3: `27d37171903e3637` before
+  and after), and the inactive one is erased (F2: `seq=2 -> ota_1 ABORTED` → empty; F3:
+  `seq=1 -> ota_0 VALID` → empty). It is safe, because the erased entry never names the
+  running image.
+
+**T1.** `just test` passed: ruff, ruff format, mypy and the full pytest. That includes
+`tests/test_agent_fault_injection.py` (9 tripwires: the switch's two values and its
+FATAL_ERRORs, the defines' guards, the Dockerfile default, every `abort()` inside the
+preprocessor region, the hook's position in `app_main`, no other source naming the switch,
+no recipe building a fault image) and `tests/test_agent_otadata_tool.py` (8). The crc test
+pins `0x4743989A`, read off the fresh board's flash (`xxd -s 0xF000 -l 32`:
+`0100 0000 ffff … 0200 0000 9a98 4347`). It also includes the publish guard
+(`TestFaultTestBuildsAreNeverPublished`, one case per suffix with zero store writes, plus
+0.4.2 still publishing). The size budgets in `test_agent_power_and_size.py` passed
+**unchanged**, so the hook is absent from normal builds. `just agent-build esp32` and
+`esp32s3` both gave `BUNDLE OK` (0.4.2). Scratch builds compiled under `-Werror`:
+`bootloop`/`hang` for esp32 (`0.4.21-bltest`, `0.4.22-hangtest`) and for esp32s3
+(`0.4.2-bltest`, `0.4.2-hangtest`). `just agent-qemu-smoke esp32` gave `HARNESS OK`.
+
+**T2-build.** `config_sha256` is `8c8ae96b473a6209…` for `agent/dist/esp32` and for
+every esp32 scratch build (both fault builds, 0.4.20, 0.4.23, 0.4.24). It is `d10f52d642b57435…`
+for `agent/dist/esp32s3` and both s3 fault builds. `FF_FAULT_TEST=bogus` failed with
+`FF_FAULT_TEST must be 'bootloop' or 'hang', got 'bogus'`. `FF_FAULT_TEST=hang` with
+`FF_ROLLBACK_TEST=1` failed with `FF_FAULT_TEST and FF_ROLLBACK_TEST are exclusive: one fault
+per image`. `python -m fleetforge.firmware publish` on the bootloop bundle verified it, then
+refused: `esp32 agent 0.4.21-bltest is a -bltest build: fault-test builds are deployable
+artifacts only, never flasher catalog bundles`. `just agent-list` was unchanged. Both fault
+apps are about 150 KB (151,424 and 151,440 B), not 1 MB. Everything after the hook is dead
+code, and `--gc-sections` drops it.
+
+**T2 (QEMU esp32 against the dev stack on :8088, 2026-10-03).** The api was recreated on
+the `.env.example` dev hash with the `10.0.2.2` origins, and put back afterwards. `.env`
+was not touched. Board A = 0.4.2 of this code, `--fresh`. Artifacts: B `0.4.20`
+(`20360062…`), L `0.4.21-bltest` (`a80d8837…`), H `0.4.22-hangtest` (`60ea55ba…`),
+C `0.4.23` (`b4ecaa4c…`), D `0.4.24` (`50f4898d…`). otadecode = `just agent-qemu-otadata
+esp32`, always with QEMU stopped.
+
+```
+A     fresh: ota_0, fw 0.4.2, ota state valid
+      otadecode: sector0: seq=1 -> ota_0 state=VALID crc=ok / sector1: empty
+
+F1    deploy 0.4.21-bltest on_command (cmd 8660927a) -> staged (ota_1); stop, start
+        boot: Loaded app from partition at offset 0x200000
+        ff-agent: running partition: ota_1 … / fw_version 0.4.21-bltest, ota state pending_verify
+        E ff-agent: FF_FAULT_TEST=bootloop: aborting on purpose, on every boot. …
+        abort() was called at PC 0x400d59eb on core 0
+        rst:0xc (SW_CPU_RESET)
+        boot: Loaded app from partition at offset 0x20000          <- the bootloader put ota_0 back
+        ff-agent: running partition: ota_0 / fw_version 0.4.2, ota state valid
+        W ff-mqtt: transaction 8660927a…: rolled_back (returned to ota_0; ota_1 did not confirm)
+        ff-txn: transaction 8660927a… closed — record cleared
+      (no esp_restart() panic this time, so the first cycle already reported)
+      stop, start: Loaded app … 0x20000, ota_0 valid, no transaction line
+      'FF_FAULT_TEST=bootloop' count: 1;  'no working session': 0
+      every Loaded app after the abort: 0x20000 (2 of 2)
+      otadecode: sector0: seq=1 -> ota_0 state=VALID crc=ok
+                 sector1: seq=2 -> ota_1 state=ABORTED crc=ok     <- ABORTED: the bootloader, not our timer
+      rows: requested, staging, downloading, verifying, staged, rolled_back|t
+            "returned to ota_0; ota_1 did not confirm"           (no confirming)
+      GET /v1/devices: 0.4.2
+
+F2    otadata before: sector1 = seq=2 ota_1 ABORTED (F1)
+      deploy 0.4.20 on_command (cmd 1c5fb04a); stop at "update 1c5fb04a…: 30% (308224 bytes)"
+      otadecode: sector0: seq=1 -> ota_0 state=VALID crc=ok / sector1: empty
+        (sector0 unchanged; sector1 erased by esp_ota_begin before the download, see above)
+      ota_1's first 4096 B == B's app.bin;  full prefix differs at byte 311297  <- a real mid-write cut
+      cold start: Loaded app … 0x20000, ota_0, fw 0.4.2, ota state valid, no transaction line
+      rows: requested, staging, downloading                       <- non-terminal, by design
+      retry: same POST -> reused:true, cmd 1c5fb04a; downloads again -> staged; stop, start
+        ota_1 pending_verify -> confirming on ota_1 -> CONFIRMED -> record cleared
+      rows: requested, staging, downloading, verifying, staged, confirming, confirmed|t (each once)
+      GET /v1/devices: 0.4.20
+
+F3    otadecode before: sector0: seq=1 -> ota_0 VALID / sector1: seq=2 -> ota_1 VALID
+        per-sector hashes 9749381a19fe46e3 / 27d37171903e3637
+      deploy 0.4.23 on_command (cmd 09de97e2); stop the moment up/status says verifying
+      board: last line "update 09de97e2…: 100% (1017408 bytes)"; 'matches what is on flash': 0
+      ota_0 holds all of C: the cut landed inside the read-back
+      otadecode: sector0: empty / sector1: seq=2 -> ota_1 state=VALID crc=ok
+        per-sector hashes f47a8ec3e9aff231 / 27d37171903e3637    <- active sector byte-identical
+      cold start: Loaded app … 0x200000, ota_1, fw 0.4.20, valid, no transaction line
+      rows: requested, staging, downloading, verifying            <- non-terminal
+
+F4    deploy 0.4.24 on_command (cmd be12816f) -> staged into ota_0; stop; snapshot
+      otadecode: sector0: seq=3 -> ota_0 state=NEW crc=ok / sector1: seq=2 -> ota_1 state=VALID crc=ok
+  (a) tear --sector newest --mode erased -> sector0: empty
+      boot: Loaded app … 0x200000; ota_1, fw 0.4.20, valid
+            W ff-mqtt: stale transaction record for be12816f… — discarded;  rst: banners 1
+  (b) restore; tear --sector newest --mode partial -> sector0: seq=3 -> ota_0 state=NEW crc=BAD
+      boot: identical to (a);  rst: banners 1
+  (c) restore untouched (the control)
+      boot: Loaded app … 0x20000; fw 0.4.24, ota state pending_verify
+            confirming on ota_0 -> CONFIRMED -> record cleared
+      rows: … staged, confirming, confirmed|t;  GET /v1/devices: 0.4.24
+      otadecode: sector0: seq=3 -> ota_0 state=VALID crc=ok      <- rewritten IN PLACE
+  (d) tear --sector newest --mode erased (the confirmed entry)
+      boot: Loaded app … 0x200000; ota_1, fw 0.4.20, valid, no transaction line; rst: banners 1
+      GET /v1/devices: 0.4.20, while the row still says confirmed|t   <- silent revert
+
+F5    deploy 0.4.22-hangtest on_command (cmd f0d0e7e8) -> staged into ota_0; stop, start
+        boot: Loaded app … 0x20000; fw 0.4.22-hangtest, ota state pending_verify
+        E (3707) ff-agent: FF_FAULT_TEST=hang: app_main is stuck before the mqtt session, …
+        … every 30 s … E (333707) ff-agent: FF_FAULT_TEST=hang: …   (12 lines)
+      at 333 s: container up, rst: banners 1, 'no working session' / 'Rollback to': 0
+      rows: requested, staging, downloading, verifying, staged    <- nothing more, ever
+      stop -> otadecode: sector0: seq=3 -> ota_0 state=PENDING_VERIFY crc=ok   <- never resolved
+      start (the human rescue): Loaded app … 0x200000; ota_1, fw 0.4.20, valid
+        transaction f0d0e7e8…: rolled_back (returned to ota_1; ota_0 did not confirm)
+      rows: … staged, rolled_back|t
+```
+
+**F5 is filed as R2-fw-4 (P0).** `arm_confirm_timeout()` runs in `ff_mqtt_run()` and
+nowhere else. Before that, `app_main` can wait forever: `ff_net_bring_up` retries
+forever, enrollment retries forever, and every `park()` loops forever.
+`CONFIG_ESP_TASK_WDT_PANIC` is not set, so a wedged task does not reset either. This
+contradicts `spec/prd.md` Flow 2 step 3 ("must reconnect within a timeout … else
+auto-rollback"). The fix touches the CRITICAL confirm path, so it gets its own task and
+review.
 
 ## De-risking
 

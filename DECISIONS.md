@@ -6,6 +6,64 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-03 — a boot loop and a power cut both land on the previous image; a hang before the session does not (R2-test-1)
+
+**Decided: the remaining failure modes are proven with real OTA'd fault images and the one
+state QEMU cannot produce (a torn otadata sector) is written offline. Nothing in the
+confirm/rollback path changes.** Proof status: **proven in QEMU (esp32), bench replay
+owed** (`docs/runbooks/rollback-test.md`). Transcripts: `docs/features/ota-deploy.md` →
+*Remaining failure modes (R2-test-1)*.
+
+- **`FF_FAULT_TEST=bootloop|hang`** (`agent/CMakeLists.txt`, `agent/main/CMakeLists.txt`,
+  `agent/Dockerfile`, empty by default). It follows the `FF_ROLLBACK_TEST` pattern: it renames
+  the build `-bltest` / `-hangtest`, and any other value is a FATAL_ERROR. It is
+  **exclusive with `FF_ROLLBACK_TEST`**: one fault per image, or a result cannot be
+  attributed. sdkconfig is not touched, and `config_sha256` equals the normal build's.
+  Normal builds compile none of it (the size budgets did not move, and version stays 0.4.2).
+- **The hook is in `agent_main.c` only**, between `log_boot_facts()` and `nvs_ready()`.
+  The transcript names the slot and its state first, and then none of our code runs: no
+  NVS write, no network, no `ff_txn` touch. `ff_mqtt.c` and `ff_ota.c` are not edited.
+  `tests/test_agent_fault_injection.py` pins all of this.
+- **`firmware/publish.py` refuses `-rbtest`, `-bltest` and `-hangtest`** before any store
+  write. A serially flashed image boots UNDEFINED with no rollback armed. A `-bltest` from
+  the flasher catalog would therefore abort forever on every new board, and that is far
+  worse than `-rbtest` (which merely never confirms). `POST /v1/artifact` still takes
+  these versions; that is how they are deployed.
+- **IDF v5.5.5 rewrites otadata IN PLACE.** `app_update/esp_ota_ops.c`:
+  `esp_ota_current_ota_is_workable()` (behind mark-valid and mark-invalid) calls
+  `rewrite_ota_seq()` on the **active** sector. That is an erase of the 4 KB sector, then a
+  32-byte program. `bootloader_support/src/bootloader_utility.c` `write_otadata()` does the
+  same for NEW → PENDING_VERIFY (the active sector) and PENDING_VERIFY → ABORTED. Only
+  `esp_rewrite_ota_data()` (`finish()`) aims at the inactive sector. A cut inside an
+  in-place write leaves the other sector, which names the image that ran when the stage
+  happened. F4 proves the board lands there, with one boot and no loop.
+- **And at the start of every stage.** `esp_ota_begin()` calls
+  `esp_ota_invalidate_inactive_ota_data_slot()`, which erases the inactive sector when it
+  names a non-running slot. "otadata byte-identical after a mid-download cut" is therefore
+  true of the **active** sector only. Safe: the erased entry never names the running image.
+- **Accepted liveness gaps.** After F2, F3 or F4 the server row stops at `downloading`,
+  `verifying` or `staged`. F4's record names a slot with no INVALID/ABORTED entry, so
+  `classify_txn` discards it as stale, by design. A cut during mark-valid (F4d) silently
+  reverts a board that was about to confirm. **Rejected: a server-side expiry** that
+  closes stale rows. `deploys.py` rule 1 says the server records only what a board said. A
+  repeat deploy within the URL TTL reuses the cmd_id and finishes the job (shown in F2).
+- **F5, the gap: filed as R2-fw-4 (P0).** The confirm timer is armed only in
+  `ff_mqtt_run()`. An OTA'd image that never gets there (network bring-up and enrollment
+  retry forever, `park()` loops forever, and `CONFIG_ESP_TASK_WDT_PANIC` is off) stays
+  PENDING_VERIFY until a human power-cycles it. In QEMU the `-hangtest` image ran 333 s with
+  no reset, and only the next power cycle rolled it back. Not fixed here: it is the
+  CRITICAL path and needs its own plan and review.
+- **The emulation's limit.** A SIGKILL is a power cut between SPI flash commands, never
+  inside one, so a torn page is never produced live. `just agent-qemu-otadata … tear` writes
+  the two shapes an erase-then-program cut can leave (the sector erased, or the entry
+  without its crc word), and nothing else.
+- **Spec proposal (not applied), for R2-fw-4.** In `spec/device-protocol.md` →
+  `confirm_timeout_s`: "counted from the moment the new image starts executing, not from
+  its first connect attempt; an image that cannot reach its session for any reason rolls
+  back when it expires."
+
+---
+
 ## 2026-10-03 — the dashboard says "good" only while the board's announce agrees (R2-fe-1)
 
 **Decided: a finished deploy gets a verdict word (`good`, `rolled back`), gated on the

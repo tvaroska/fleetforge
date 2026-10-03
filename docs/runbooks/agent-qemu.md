@@ -10,7 +10,7 @@ the one to reach for before blaming a board.
 | Emulator | `qemu-system-xtensa` 9.2.x, shipped **inside** `espressif/idf:v5.5.5` (digest-pinned) |
 | Target | `esp32` only — it is the one with an emulated NIC (`openeth`) |
 | Working dir | `.qemu/` — gitignored, mode 0700, **holds live credentials** |
-| Recipes | `just agent-qemu-smoke`, `just agent-cfg`, `just agent-qemu`, `just agent-qemu-clean` |
+| Recipes | `just agent-qemu-smoke`, `just agent-cfg`, `just agent-qemu`, `just agent-qemu-otadata`, `just agent-qemu-clean` |
 
 **Start with `just agent-qemu-smoke`.** It answers "is the harness alive?" in about
 17 seconds with no enrollment token, no running stack and no board, and it is the first
@@ -196,7 +196,9 @@ A `--fresh` board is not all-0xFF. Its first boot marks ota_0 valid, so expect
 `8ba3b110139f4544` both times, not the all-0xFF hash.
 
 Once otadata holds two entries, a hash says only *that* something changed. Decode each
-sector instead (QEMU stopped). otadata is at 0xF000 (sector 0) and 0x10000 (sector 1), one
+sector instead (QEMU stopped). Since R2-test-1 the recipe is `just agent-qemu-otadata esp32`,
+which prints the same lines from the bundle manifest's offset. The shell function below
+stays, because older transcripts quote it. otadata is at 0xF000 (sector 0) and 0x10000 (sector 1), one
 32-byte `{seq, label[20], state, crc}` entry each:
 
 ```bash
@@ -268,6 +270,63 @@ In that case the `ff-qemu` Traefik router is missing and the board's enroll gets
 that adds only the `ff-qemu` labels, and set `FF_PUBLIC_BASE_URL=http://10.0.2.2:8088
 FF_S3_PUBLIC_ENDPOINT_URL=http://10.0.2.2:9000` on the command. Put both back afterwards
 with the original `-f` set.
+
+
+### Driving a failure: boot loop, power cut, torn otadata, hang (R2-test-1)
+
+Four more outcomes, each from a **real** OTA'd image or a state a power cut really
+produces. Never forge partition state by hand (`rollback-test.md` → *Why it needs a special
+build*). The fault images come from `FF_FAULT_TEST` (`agent/CMakeLists.txt`), built to a
+scratch dir exactly like the rbtest image, with `agent/version.txt` set to an unused
+version for the build and checked out again afterwards:
+
+```bash
+DOCKER_BUILDKIT=1 docker build --target export --output type=local,dest=/tmp/ff-bootloop-esp32 \
+  --build-arg IDF_IMAGE="$(just --evaluate idf_image)" --build-arg IDF_TARGET=esp32 \
+  --build-arg SOURCE_COMMIT=$(git rev-parse HEAD) --build-arg FF_FAULT_TEST=bootloop agent
+python3 agent/tools/verify_bundle.py /tmp/ff-bootloop-esp32     # agent <ver>-bltest
+```
+
+`hang` gives `-hangtest`. Any other value, or `FF_FAULT_TEST` together with
+`FF_ROLLBACK_TEST=1`, fails the build. `config_sha256` equals the normal bundle's. Both
+fault apps are about 150 KB, because everything after the hook is dead code. Upload as
+artifacts only: `just agent-publish` refuses the suffixes.
+
+**Power cut = `just agent-qemu-stop esp32`** (SIGKILL). Flash writes done before the kill
+persist in `.qemu/flash-esp32.bin`. **The limit:** QEMU completes each SPI flash command
+atomically, so a page program torn mid-command is never produced. That is why a torn
+otadata sector is written offline:
+
+```bash
+just agent-qemu-otadata esp32                                     # decode (QEMU stopped)
+just agent-qemu-otadata esp32 tear --sector newest --mode erased  # cut after the erase
+just agent-qemu-otadata esp32 tear --sector newest --mode partial # cut before the crc word
+```
+
+The tool (`agent/tools/otadata.py`) takes the otadata offset from the bundle manifest,
+refuses while the board runs, prints the decode before and after, and touches the 4096
+bytes of one sector and nothing else. It writes only the two shapes IDF's
+erase-then-program can leave. **A torn sector is a state power loss produces. Forging any
+other state is not a test.**
+
+**Assert on the bootloader, not only on the app.** Each boot prints
+`I (…) boot: Loaded app from partition at offset 0x20000` (ota_0) or `0x200000` (ota_1).
+That line is written after the bootloader has made its otadata decision, so a QEMU soft-reset
+panic in the app that follows cannot confound it.
+
+| Mode | Recipe | Pass |
+|---|---|---|
+| Boot loop | Deploy the `-bltest` artifact with `apply: "on_command"`. At `staged`: stop, start, wait ~20 s, stop, start. | `FF_FAULT_TEST=bootloop` appears **once**, after `ota state pending_verify`, then `abort() was called`. Every later `Loaded app` names the old slot. The old image logs `rolled_back (returned to ota_0; ota_1 did not confirm)`. otadecode: the bad slot is `ABORTED` (the bootloader did it, not our timer: that would be `INVALID`). Rows `requested, staging, downloading, verifying, staged, rolled_back`, no `confirming`. |
+| Power cut mid-download | Stop the board when `update <cmd>: 30%` appears. | Cold boot: same slot, `ota state valid`, no `transaction` line. The first 4096 bytes of the target slot are the new `app.bin`, the full prefix is not. Rows end at `downloading`. A repeat POST gets `reused: true` with the same cmd_id, and runs through to `confirmed`. |
+| Power cut during the read-back | Stop the board the moment `verifying` for the cmd reaches `up/status` (there is no serial line at read-back start). | No `matches what is on flash` line (if there is one you were late; repeat). Same cold boot as above. Rows end at `verifying`. |
+| Torn otadata | Stage any normal version with `on_command`, stop, `cp .qemu/flash-esp32.bin /tmp/ff-staged.bin`. Tear `newest` erased, start. Restore, tear `newest` partial, start. Restore untouched, start (the control). | Torn: the previous slot boots `valid` and logs `stale transaction record for <cmd> — discarded`; one `rst:` banner. Control: the new slot boots `pending_verify` and confirms. |
+| Hang before the session | Deploy the `-hangtest` artifact with `on_command`. At `staged`: stop, start, wait **≥ 330 s**. | Documents R2-fw-4: `FF_FAULT_TEST=hang` every 30 s, no `no working session`, no second `rst:`. otadecode: `PENDING_VERIFY`. Only the next stop/start rescues it (`rolled_back`). |
+
+**`otadata` moves at the start of every stage.** IDF's `esp_ota_begin()` erases the
+**inactive** otadata sector when it names a slot other than the running one
+(`esp_ota_invalidate_inactive_ota_data_slot`). A power cut mid-download therefore leaves
+the active sector byte-identical, but not necessarily the whole partition. Compare per
+sector, not one hash over both.
 
 ## What a first boot looks like
 

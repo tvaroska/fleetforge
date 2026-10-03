@@ -48,3 +48,11 @@ target_compile_options(${COMPONENT_LIB} PRIVATE -Wall -Wextra -Werror)
 if(FF_ROLLBACK_TEST)
     target_compile_definitions(${COMPONENT_LIB} PRIVATE FF_ROLLBACK_TEST=1)
 endif()
+
+# See the FF_FAULT_TEST block in ../CMakeLists.txt (which has already refused any other
+# value). The hook in agent_main.c is preprocessor-excluded from every normal build.
+if(FF_FAULT_TEST STREQUAL "bootloop")
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE FF_FAULT_TEST_BOOTLOOP=1)
+elseif(FF_FAULT_TEST STREQUAL "hang")
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE FF_FAULT_TEST_HANG=1)
+endif()

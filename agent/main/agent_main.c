@@ -25,6 +25,7 @@
  */
 
 #include <inttypes.h>
+#include <stdlib.h>
 
 #include "esp_app_desc.h"
 #include "esp_chip_info.h"
@@ -209,6 +210,33 @@ void app_main(void)
 {
     log_power_fault();
     log_boot_facts();
+
+#if FF_FAULT_TEST_BOOTLOOP
+    /* R2-test-1, FF_FAULT_TEST=bootloop (agent/CMakeLists.txt). A DELIBERATELY BROKEN image
+     * that panics on every boot. It proves the one recovery nothing of ours takes part in:
+     * the bootloader turned this OTA'd image NEW -> PENDING_VERIFY, and the reset this
+     * abort() causes makes it mark the slot ABORTED and load the previous one.
+     *
+     * Here, after log_boot_facts() so the transcript names the slot and its state first, and
+     * before nvs_ready() so none of our code runs: no NVS write, no network, no ff_txn touch,
+     * so the returned image still finds its record and reports `rolled_back`. Never
+     * published (firmware/publish.py refuses -bltest): serially flashed, this loops forever. */
+    ESP_LOGE(TAG, "FF_FAULT_TEST=bootloop: aborting on purpose, on every boot. The bootloader "
+                  "must put the previous slot back at the next reset");
+    abort();
+#elif FF_FAULT_TEST_HANG
+    /* R2-test-1, FF_FAULT_TEST=hang. A DELIBERATELY BROKEN image that never reaches
+     * ff_mqtt_run(), the only place the confirm timer is armed — as a forever-retrying
+     * ff_net_bring_up() or enrollment would. Demonstrates the gap filed as R2-fw-4: an OTA'd
+     * image stuck here stays PENDING_VERIFY until something resets the board. Not park():
+     * that reports through ff_progress before ff_progress_init(), and the hang must not
+     * depend on it. Never published (firmware/publish.py refuses -hangtest). */
+    while (true) {
+        ESP_LOGE(TAG, "FF_FAULT_TEST=hang: app_main is stuck before the mqtt session, so no "
+                      "confirm timer is armed. Only a reset gets this board back (R2-fw-4)");
+        vTaskDelay(pdMS_TO_TICKS(30000));
+    }
+#endif
 
     ESP_ERROR_CHECK(nvs_ready());
 

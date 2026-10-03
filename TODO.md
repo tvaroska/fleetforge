@@ -26,6 +26,9 @@ build is caught before the fleet, and any device that gets one recovers itself.
   on every deploy ends `confirmed` or `rolled_back`.
 - An image that boots, gets its announce acked and is broken anyway confirms itself and
   **nothing recovers it**. Roll to **one board at a time**.
+- An OTA'd image that hangs before its broker session never rolls back by itself
+  (R2-fw-4, found by R2-test-1 in QEMU). The advice stays one board at a time, with USB
+  in reach.
 - No upload form in the dashboard (`docs/runbooks/upload-artifact.sh` is the only way in),
   and every device has `name: null`. Neither has a task yet.
 
@@ -49,7 +52,7 @@ run could show, so the pass rests on the deterministic judge. Task list below; b
 <!-- Counters: spec=1 infra=7 db=1 be=6 fe=7 sec=1 fw=4 test=3 -->
 <!-- Sprint 0 counters: fe=8 fw=4 infra=9 test=4 ops=1 -->
 <!-- R1 counters: be=3 fe=1 fw=2 test=1 -->
-<!-- R2 counters: fw=2 be=1 fe=1 test=2 spec=1 -->
+<!-- R2 counters: fw=4 be=1 fe=1 test=2 spec=1 (fw-3 is the R1-landed confirm timer) -->
 <!-- R3 counters: spec=1 fw=4 test=1 -->
 
 Live status lives ONLY here. States: `- [ ]` open · `- [x]` done · `- [!]`
@@ -153,8 +156,16 @@ after the reboot.
 - [x] **R2-fe-1**: Dashboard shows `good` vs `rolled-back` per device (P0, 0.5d) _(done 2026-10-03; see docs/features/ota-deploy.md)_
       Unblocked by R2-be-1: `deploy.state` is now `confirmed`/`rolled_back` with
       `is_terminal: true` (the simulator's `--confirm never` gives you a rolled-back row).
-- [ ] **R2-test-1**: Remaining failure modes — boot loop, brownout mid-write (P0, 1d)
+- [x] **R2-test-1**: Remaining failure modes — boot loop, brownout mid-write (P0, 1d)
+      _(done 2026-10-03; reviewed; proven in QEMU — boot loop and power cut recover, a hang before the session does not → R2-fw-4; bench replay owed, see docs/runbooks/rollback-test.md; see docs/features/ota-deploy.md)_
       The `0.3.2-rbtest` run covers only "boots, joins, never confirms".
+- [ ] **R2-fw-4**: Arm the confirm timer before anything in `app_main` can wait forever (P0, 1d)
+      Found by R2-test-1. The timer is armed in `ff_mqtt_run()`, after `ff_net_bring_up`
+      (retries forever), enrollment (retries forever) and every `park()`. An OTA'd image
+      that never gets there stays PENDING_VERIFY until someone power-cycles it (QEMU:
+      the `-hangtest` image, 330 s, no rollback). CRITICAL path. Replay: `FF_FAULT_TEST=hang`
+      in docs/runbooks/agent-qemu.md. Consider `CONFIG_ESP_TASK_WDT_PANIC` too (a
+      wedged task today warns and never resets).
 - [ ] **R2-test-2**: Flaky-Wi-Fi rollback spike (P1, 0.5d)
       Does a marginal radio stall the download past the confirm timer? Open since R0; the
       reason deploys are still one board at a time.

@@ -38,6 +38,11 @@ ARG IDF_IMAGE
 # renames itself to <version>-rbtest and must only ever be uploaded as a deployable
 # ARTIFACT, never published to the flasher catalog with `just agent-publish`.
 ARG FF_ROLLBACK_TEST=0
+# EMPTY unless explicitly asked for. `bootloop` or `hang` builds a deliberately broken
+# agent for the failure-mode tests (R2-test-1) — see the FF_FAULT_TEST block in
+# CMakeLists.txt. It renames itself to <version>-bltest / -hangtest and, like -rbtest, is
+# an ARTIFACT only: `just agent-publish` refuses it.
+ARG FF_FAULT_TEST=
 
 WORKDIR /project
 COPY . /project
@@ -48,6 +53,7 @@ RUN . $IDF_PATH/export.sh \
  && idf.py -B build -DIDF_TARGET=${IDF_TARGET} \
       -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.${IDF_TARGET}" \
       -DFF_ROLLBACK_TEST=${FF_ROLLBACK_TEST} \
+      -DFF_FAULT_TEST=${FF_FAULT_TEST} \
       build \
  && python3 tools/make_manifest.py \
       --build-dir build --out /out --partitions partitions.csv \

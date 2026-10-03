@@ -45,6 +45,14 @@ INDEX_CONTENT_TYPE = "application/json"
 # The index is a pointer, not content. Everything it points at is immutable; it is not.
 INDEX_CACHE_CONTROL = "no-store"
 
+# Version suffixes of the DELIBERATELY BROKEN agent builds (agent/CMakeLists.txt). Each is a
+# deployable ARTIFACT for a failure test and must never reach the flasher catalog: a
+# serially flashed image boots with no rollback armed, so the fault has no way out.
+#   -rbtest    FF_ROLLBACK_TEST=1   never confirms
+#   -bltest    FF_FAULT_TEST=bootloop   aborts on every boot (flashed: a board that loops forever)
+#   -hangtest  FF_FAULT_TEST=hang       never reaches its broker session
+FAULT_TEST_SUFFIXES = ("-rbtest", "-bltest", "-hangtest")
+
 
 @dataclass(frozen=True, slots=True)
 class PublishResult:
@@ -101,7 +109,17 @@ async def publish_bundle(
     Order matters: **blobs first, index last.** A crash between the two leaves unreferenced
     blobs (harmless, and the next publish re-uses them by digest); the reverse order would
     leave an index promising bytes that are not there.
+
+    A fault-test build (`FAULT_TEST_SUFFIXES`) is refused before anything is written.
     """
+    for suffix in FAULT_TEST_SUFFIXES:
+        if bundle.agent_version.endswith(suffix):
+            raise AgentBundleError(
+                f"{bundle.target} agent {bundle.agent_version} is a {suffix} build: "
+                "fault-test builds are deployable artifacts only, never flasher catalog "
+                "bundles (docs/runbooks/rollback-test.md)"
+            )
+
     part_keys: list[str] = []
     for part in bundle.parts:
         data = part.path.read_bytes()

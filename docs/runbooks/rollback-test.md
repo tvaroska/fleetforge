@@ -92,6 +92,65 @@ Still on `-rbtest` after ~2 minutes means the negative branch did not fire, and 
 is running an image the bootloader was waiting on. Recover over USB and treat it as a P0:
 until it is fixed, no board can be deployed to unless someone can physically reach it.
 
+## Boot loop (R2-test-1)
+
+The second failure mode: an image that panics on **every** boot, before any of our code
+runs. Nothing of ours takes part in this recovery. The bootloader turned the OTA'd image
+NEW → PENDING_VERIFY on its first boot, and the reset the panic causes makes it mark the
+slot ABORTED and load the previous one. Proven in QEMU (esp32): exactly one `abort()`, then
+every bootloader load names the old slot, and the old image reports `rolled_back`
+(`docs/features/ota-deploy.md` → *Remaining failure modes*). **The bench replay is owed.**
+
+Build `FF_FAULT_TEST=bootloop` to a scratch directory (same as above, with
+`--build-arg FF_FAULT_TEST=bootloop` in place of `FF_ROLLBACK_TEST=1`; the two are
+exclusive and the build refuses both together). `verify_bundle.py` must say
+`agent <ver>-bltest`, and `config_sha256` must equal the normal bundle's. The app is about
+150 KB, not 1 MB: everything after the `abort()` is dead code and the linker drops it.
+Upload it as an artifact only, then deploy it with the default `apply: auto`.
+
+> **Never `just agent-publish` a `-bltest` build, and it is worse than `-rbtest`.** A
+> serially flashed image boots UNDEFINED with no rollback armed. A `-rbtest` image flashed
+> over USB merely never confirms, which is harmless when nothing is waiting on it. A
+> `-bltest` image flashed over USB aborts on every boot, **forever**, and the only way out
+> is another serial flash. `firmware/publish.py` refuses all three suffixes (`-rbtest`,
+> `-bltest`, `-hangtest`) before it writes anything.
+
+Pass, unattended:
+
+- the console (PuTTY on COM3, 115200) shows `FF_FAULT_TEST=bootloop` and
+  `abort() was called` **exactly once**, after `ota state pending_verify`;
+- the next boot is the previous slot and version, and logs
+  `transaction <cmd>: rolled_back (returned to ota_N; ota_M did not confirm)`;
+- the dashboard says `rolled back`, and the rows are `… staged, applying, rebooting,
+  rolled_back`. There is **no** `confirming`: the bad image never reached the broker.
+
+A second `abort()` line means the bootloader booted the bad slot twice. That is a P0.
+
+## Pull the plug mid-download (R2-test-1)
+
+The third: power lost while the inactive slot is half-written. Since R2-fw-1 the boot
+pointer moves only after the sha256 read-back, so a cut anywhere before that leaves the
+boot pointer where it was. Proven in QEMU (a SIGKILL at `30%` and again during
+`verifying`). **The bench replay is owed.**
+
+1. PuTTY on COM3 at 115200, then deploy any normal version.
+2. Pull the USB cable when the console prints `update <cmd>: 30%`, then plug it back.
+3. Pass: the board boots the previous slot and version, `ota state valid`, and logs no
+   `transaction` line at all. The server row stays at `downloading` (non-terminal, by
+   design: `deploys.py` rule 1).
+4. Re-deploy the same version. Within the signed-URL TTL (1800 s) the API answers
+   `reused: true` with the **same** `cmd_id`. The board downloads again (its dedupe is RAM
+   only and died with the power), stages, reboots and reports `confirmed`.
+
+`otadata` is not strictly untouched by a stage that dies early: IDF's `esp_ota_begin()`
+erases the **inactive** sector before the first byte when that sector names a slot other
+than the running one (`esp_ota_invalidate_inactive_ota_data_slot`). The active sector, the
+one that names the running image, is byte-identical. QEMU showed exactly that.
+
+**Transition gap.** Prod's board runs 0.3.1. It must first be taken to ≥ 0.4.2 with a normal
+deploy, which parks at `rebooting` because 0.3.1 never records the transaction (the R2-be-1
+entry in DECISIONS.md). Only the deploys after that one run these procedures.
+
 ## Known gaps this test does not close
 
 - ~~**The server never learns.**~~ **Closed for R2→R2 deploys (R2-be-1, agent 0.4.0).**
@@ -105,6 +164,10 @@ until it is fixed, no board can be deployed to unless someone can physically rea
   transaction. A board still running an R1 agent (≤ 0.3.x, e.g. prod's 0.3.1) neither
   records the deploy nor reports a rollback *to* itself. For that board this gap is still
   open, and the rollback is still only inferable from the announced version.
-- **One failure mode, not the family.** This covers "boots, joins, never confirms". It
-  does not cover a boot loop, a brownout mid-write, or a flaky radio — the last of which
-  is the separate R2 spike tracked in `docs/features/ota-deploy.md`.
+- **The family, as of R2-test-1.** "Boots, joins, never confirms" is this runbook's first
+  procedure. A **boot loop** and a **power cut mid-download** are the two above: proven in
+  QEMU, bench replay owed. A power cut **inside an otadata write** lands on the previous
+  image, but it is QEMU-only (an offline tear, `just agent-qemu-otadata`) and the outcome
+  is never reported. **A hang before the broker session is NOT covered: the board does
+  not recover until someone power-cycles it (R2-fw-4, P0).** Until that lands, deploy one
+  board at a time with USB in reach. A flaky radio remains R2-test-2.

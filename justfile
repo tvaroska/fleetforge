@@ -635,6 +635,28 @@ agent-qemu-recfg target="esp32":
         conv=notrunc status=none
     echo "wrote ff_cfg at $(printf 0x%x "$off") — NVS untouched"
 
+# Decode the board's otadata, or tear one sector the way a power cut would (R2-test-1, F4).
+#
+#     just agent-qemu-otadata esp32                                   # decode (default)
+#     just agent-qemu-otadata esp32 tear --sector newest --mode erased
+#
+# Exists because QEMU completes every SPI flash command atomically: a SIGKILL never leaves
+# an otadata write half done, so the one cut that matters most cannot be produced live.
+# A torn sector is a state power loss produces; forging any other state is not a test
+# (docs/runbooks/rollback-test.md -> "Why it needs a special build"). Offsets come from the
+# bundle manifest (agent/tools/otadata.py). Same refusal as agent-qemu-recfg, for the same
+# reason: QEMU owns the image while it runs and writes it back on exit.
+agent-qemu-otadata target="esp32" *args="decode":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if [ -n "$(docker ps -q --filter name='^ff-qemu-{{ target }}$')" ]; then
+        echo "a {{ target }} board is RUNNING and QEMU owns its flash image — stop it first:"
+        echo "  just agent-qemu-stop {{ target }}"
+        exit 1
+    fi
+    python3 agent/tools/otadata.py --bundle agent/dist/{{ target }} \
+        --image .qemu/flash-{{ target }}.bin {{ args }}
+
 # Is the harness alive? One command, no enrollment token, no running stack, no board.
 #
 # This exists because S0-infra-1 — "the emulator boot-loops" — cost a decoded backtrace

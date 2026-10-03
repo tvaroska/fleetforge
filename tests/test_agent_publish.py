@@ -7,6 +7,8 @@ scheme can be got wrong and nobody notice for a year:
 * the index written as a blob (`immutable` metadata on the one mutable object);
 * the manifest re-serialised instead of uploaded verbatim (a digest nothing reproduces);
 * a rollback pointed at bytes that were never published and never verified.
+
+Plus one refusal (R2-test-1): a fault-test build never reaches the flasher catalog.
 """
 
 import json
@@ -22,7 +24,13 @@ from fleetforge.firmware import (
     load_bundle_dir,
     load_catalog,
 )
-from fleetforge.firmware.publish import publish_bundle, read_index, rollback, write_index
+from fleetforge.firmware.publish import (
+    FAULT_TEST_SUFFIXES,
+    publish_bundle,
+    read_index,
+    rollback,
+    write_index,
+)
 from fleetforge.storage.blobs import BLOB_CACHE_CONTROL, BLOB_PREFIX, blob_key, digest_bytes
 from tests.conftest import MemoryObjectStore
 from tests.test_firmware_catalog import PART_FILES, write_bundle
@@ -154,6 +162,38 @@ class TestPublish:
         await store.put(DEFAULT_INDEX_KEY, b"{not json")
         with pytest.raises(AgentBundleError):
             await publish_bundle(store, load_bundle_dir(write_bundle(tmp_path, "esp32")))
+
+
+class TestFaultTestBuildsAreNeverPublished:
+    """`-rbtest`, `-bltest`, `-hangtest` are deliberately broken (agent/CMakeLists.txt).
+
+    Serially flashed, an image boots with no rollback armed: a `-bltest` from the catalog
+    is a board that aborts forever. The refusal must come before ANY store write, so a
+    refused publish leaves not even an orphan blob behind.
+    """
+
+    def test_the_suffixes_are_the_three_fault_builds(self) -> None:
+        assert FAULT_TEST_SUFFIXES == ("-rbtest", "-bltest", "-hangtest")
+
+    @pytest.mark.parametrize("suffix", ["-rbtest", "-bltest", "-hangtest"])
+    async def test_a_fault_build_is_refused_before_any_write(
+        self, tmp_path: Path, suffix: str
+    ) -> None:
+        store = MemoryObjectStore()
+        bundle_dir = bump(write_bundle(tmp_path, "esp32"), f"0.4.21{suffix}")
+        with pytest.raises(AgentBundleError, match="fault-test builds are deployable") as exc:
+            await publish_bundle(store, load_bundle_dir(bundle_dir))
+        assert suffix in str(exc.value)
+        assert store.puts == []
+        assert store.objects == {}
+
+    async def test_a_normal_version_still_publishes(self, tmp_path: Path) -> None:
+        store = MemoryObjectStore()
+        bundle_dir = bump(write_bundle(tmp_path, "esp32"), "0.4.2")
+        result = await publish_bundle(store, load_bundle_dir(bundle_dir))
+        assert result.agent_version == "0.4.2"
+        entry = (await read_index(store)).entry_for("esp32")
+        assert entry is not None and entry.agent_version == "0.4.2"
 
 
 class TestRollback:
