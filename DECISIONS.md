@@ -6,6 +6,73 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-03 — a flaky link cannot outrun the confirm timer; a silent one can hold a download forever (R2-test-2)
+
+**Decided: the flaky-radio question is answered, and the answer is structural. The
+download and the confirm timer never overlap. One defect (D3 → R2-fw-5) and one reporting
+defect (R2-fw-6) are filed, not fixed here.** Proof status: **proven in QEMU (esp32),
+bench replay owed** (`docs/runbooks/rollback-test.md` → *Marginal radio*). Transcripts and
+numbers: `docs/features/ota-deploy.md` → *Flaky link (R2-test-2)*. No firmware changed.
+
+- **Why the timer cannot fire during a download (two-sided).**
+  - The download runs on the running image, which is VALID or UNDEFINED.
+    `ff_mqtt_arm_confirm_timer()` arms only when `pending_verify()` is true (`ff_mqtt.c`),
+    so no timer exists during a download. QEMU D1: a 124.7 s throttled download, no
+    `OTA boot` line, no `no working session`.
+  - R2-fw-2: `ff_ota.c::choose_target_slot()` refuses a `stage` while the running image is
+    `PENDING_VERIFY`, before any I/O. So no download ever runs inside a confirm window.
+- **Where a flaky link does bite: after the reboot.** The new image must reach its broker
+  session within 300 s of its first instruction (R2-fw-4). Measured:
+  - P1: a 200 s outage confirmed ~0.1 s after the link returned.
+  - P2: a 330 s outage fired the timer at 302.2 s and rolled back to `INVALID` +
+    `rolled_back`.
+  - P3: 5 s up / 25 s down confirmed in the first up-window.
+  - esp-mqtt retries every 20–25 s during an outage, and the boot path spends ~10 s in two
+    5 s progress-report timeouts. The threshold is therefore: an outage that ends later than
+    ≈ 300 s minus one retry gap (≈ 285 s) after boot rolls a GOOD image back. That is a
+    miss, not a brick (R2-fw-4 accepted change 2).
+- **D3: a silent peer holds the update slot.** A store connection that stays open and
+  silent for 600 s never ends the download. IDF v5.5.5:
+  - `esp_http_client_read()` turns a transport timeout with nothing read into
+    `-ESP_ERR_HTTP_EAGAIN`;
+  - `esp_https_ota_perform()` turns that into `ESP_ERR_HTTPS_OTA_IN_PROGRESS` with no stall
+    counter, logged at debug only;
+  - `ff_ota.c` loops while IN_PROGRESS with no deadline. `s_running` stays set, so every
+    other stage gets `another update is already in progress`. Only the proxy's reset ended
+    it (D4: `download failed`, board unchanged, next deploy fine).
+  - Real hardware may differ: `keep_alive_enable` (IDF 5 s / 5 s / 3) can close a socket
+    whose radio is really gone and make it D4. QEMU cannot show that (slirp answers the
+    keepalives), so it is the bench question.
+- **Re-POST finding (R2-fw-6).** The agent deduplicates on the last command id only. After
+  any other command, a re-delivered in-flight stage gets `failed` / `another update is
+  already in progress` against **its own** cmd_id. The server then holds a terminal
+  `failed` for a download that is still running, and it drops the real outcome when that
+  arrives (D3: the later `download failed` was dropped).
+- **The tool.** `agent/tools/flaky_link.py` + `just agent-qemu-flaky`, a host-side asyncio
+  proxy with `pass`, `throttle:N`, `blackhole` and `reset`.
+  - **Its limit:** slirp is the guest's TCP peer, so every outage reads "far end alive but
+    silent". No lwIP loss or retransmission, no disassociation, no DHCP, no TX ladder.
+  - **A fidelity rule learned in P1:** a connection the client abandons during a blackhole
+    must never be replayed upstream. The first P1 run replayed eight stale MQTT CONNECTs,
+    which took over the live session and cost ~10 s.
+- **Harness artifact, not filed as product: the openeth panic.** One D2 run of three hit
+  `Cache error` in `emac_opencores_isr_handler` (`esp_eth_mac_openeth.c:66`). The cause is
+  an `ESP_EARLY_LOGW` with a format string in flash, run during an OTA flash write.
+  openeth is QEMU-only. Documented in `docs/runbooks/agent-qemu.md`.
+- **Rejected: fixing D3 here.** `ff_ota.c` is CRITICAL, and the fix needs its own plan and
+  review (R2-fw-5).
+- **Rejected: a server-side expiry for a row stuck at `downloading`.** Rule 1 in
+  `deploys.py` (R2-test-1 rejected it too).
+- **What it changes about one board at a time.** The flaky radio is retired as the reason,
+  in QEMU, with the bench owed. One board at a time **still holds**: an image that boots,
+  confirms and is broken anyway is recovered by nothing. D3 is a second, liveness-only
+  reason to keep USB in reach until R2-fw-5 lands.
+- **Spec proposal (not applied), only because D3 held.** `spec/device-protocol.md` →
+  `dn/cmd` `stage`: "A device that receives no artifact bytes for N s abandons the download
+  and reports `failed`."
+
+---
+
 ## 2026-10-03 — the confirm timer is armed before anything in app_main can wait forever (R2-fw-4)
 
 **Decided: `ff_mqtt_arm_confirm_timer()` is the first statement of `app_main`, ahead of

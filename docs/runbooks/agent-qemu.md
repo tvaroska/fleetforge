@@ -10,7 +10,7 @@ the one to reach for before blaming a board.
 | Emulator | `qemu-system-xtensa` 9.2.x, shipped **inside** `espressif/idf:v5.5.5` (digest-pinned) |
 | Target | `esp32` only — it is the one with an emulated NIC (`openeth`) |
 | Working dir | `.qemu/` — gitignored, mode 0700, **holds live credentials** |
-| Recipes | `just agent-qemu-smoke`, `just agent-cfg`, `just agent-qemu`, `just agent-qemu-otadata`, `just agent-qemu-clean` |
+| Recipes | `just agent-qemu-smoke`, `just agent-cfg`, `just agent-qemu`, `just agent-qemu-otadata`, `just agent-qemu-flaky`, `just agent-qemu-clean` |
 
 **Start with `just agent-qemu-smoke`.** It answers "is the harness alive?" in about
 17 seconds with no enrollment token, no running stack and no board, and it is the first
@@ -327,6 +327,80 @@ panic in the app that follows cannot confound it.
 (`esp_ota_invalidate_inactive_ota_data_slot`). A power cut mid-download therefore leaves
 the active sector byte-identical, but not necessarily the whole partition. Compare per
 sector, not one hash over both.
+
+### Driving a flaky link (R2-test-2)
+
+Slirp has no impairment of its own: no loss, no delay, no outage. `just agent-qemu-flaky`
+puts a host-side TCP proxy (`agent/tools/flaky_link.py`, standard library only) between
+the board and the stack, and changes its behaviour on a schedule. Results:
+`docs/features/ota-deploy.md` → *Flaky link (R2-test-2)*.
+
+**The fidelity limit.** Slirp is the guest's TCP peer. It ACKs the guest's segments and
+answers its keepalive probes whatever the proxy does. An outage made on the host side
+therefore always looks like **"the far end is alive but silent"** to the board. That is
+the worst case for stall detection and right for timing. It does **not** model lwIP
+retransmission and loss, Wi-Fi disassociation, DHCP renewal or `ff_net_wifi.c`'s TX-power
+ladder (openeth has no radio). Proven in QEMU, never "on hardware". The bench procedure is
+`rollback-test.md` → *Marginal radio*, owed.
+
+**Wiring (all of it reversible).** Both download hops and both board endpoints must go
+through the proxy ports:
+
+```bash
+ss -ltn | grep -E ':(18088|18883|19000) '        # must be empty
+FF_PUBLIC_BASE_URL=http://10.0.2.2:18088 FF_S3_PUBLIC_ENDPOINT_URL=http://10.0.2.2:19000 \
+  docker compose up -d --no-deps api             # + ADMIN_PASSWORD_HASH from .env.example if
+docker compose exec -T api env | grep -E 'PUBLIC_BASE_URL|S3_PUBLIC'   # login with the dev one fails
+just agent-qemu-flaky "0=pass" >> /tmp/flaky-pass.log 2>&1 &
+just agent-cfg --api-base http://10.0.2.2:18088 --mqtt-uri mqtt://10.0.2.2:18883 \
+      --link ethernet --hb 10 --ntp pool.ntp.org --token "$FFE"
+```
+
+The default listens are `18088 → 8088` (Traefik `web`; this box's `FF_HTTP_PORT`, use 8080
+on a default box), `18883 → 8883` (Traefik `mqtt`) and `19000 → 9000` (MinIO). A
+presigned URL signs the `Host` header, and the proxy passes `10.0.2.2:19000` through
+unchanged, so the signature holds. Traefik's `ff-qemu` router matches ``Host(`10.0.2.2`)``
+whatever the port. SNTP and DHCP go through slirp directly. Afterwards: stop the board,
+`pkill -f flaky_link.py`, `docker compose up -d --no-deps api` with no override env, and
+check `grep PUBLIC` shows `localhost` again.
+
+**Modes** (every connection, live and new, on every listener of the process):
+
+| Mode | What the board sees |
+|---|---|
+| `pass` | Forward both ways as fast as possible. |
+| `throttle:N` | Forward, each direction capped at N bytes/s. |
+| `blackhole` | Nothing forwarded, nothing closed. The proxy stops reading, so backpressure builds as on a dead radio. A new connection is accepted and held, and its upstream connect waits for the blackhole to end. If the client closes it first, it **never** reaches upstream (its SYN "never got through"). Held bytes on a live connection arrive late, intact and in order. |
+| `reset` | An action: abort every live pair at that instant. The previous mode stays in effect. Slirp turns it into a FIN/RST, and `esp_http_client_read` errors. |
+
+Schedules are `T=MODE,…` in seconds since the proxy started, first entry at `0`;
+`--repeat P` loops them. Listens given after the schedule replace the three defaults, so a
+second process can impair the store alone: `just agent-qemu-flaky "0=throttle:8192"
+19000:127.0.0.1:9000`. **Change a schedule only while the board is stopped.** Killing the
+proxy under a live board is a `reset` of every connection. Write `date +%s.%N` before each
+proxy and each QEMU start. The proxy's `[s]` and the app's `I (ms)` differ by the gap
+between the two starts plus the boot (2-4 s in the R2-test-2 runs).
+
+| # | Scenario | Recipe | Pass |
+|---|---|---|---|
+| D1 | Slow download | api/mqtt `0=pass`; store `0=throttle:8192`. Deploy with `on_command`. | `10%`…`100%` over ≥ 100 s, `staged`. No `OTA boot: 300 s` line and no `no working session` on the running image. Stop/start: `confirmed`. |
+| D2 | Outage mid-download, link returns | store `0=throttle:16384,20=blackhole,110=throttle:16384`. Start the board, deploy **at once** (the download must be running before t=20). | Progress stops ≈ 90 s, resumes, `matches what is on flash`, `staged`. No `failed`. Stop/start: `confirmed`. See the openeth panic below. |
+| D3 | Silent far end | store `0=throttle:16384,20=blackhole,620=reset`. Deploy at once. | The download never ends by itself in the 600 s hold (R2-fw-5). At the reset: `data read -1, errno 128`, `update <cmd> failed: download failed`. The active otadata sector is unchanged, and the next deploy (a **new** cmd_id) runs to `confirmed`. |
+| D4 | Far end closes | the reset at the end of D3. | `failed` / `download failed`, the board stays on its image. |
+| P1 | Outage after the reboot, shorter than the timer | Stage with all-pass, stop, then ONE process: `just agent-qemu-flaky "0=blackhole,200=pass"`, start at once. | `OTA boot: 300 s` and `confirming on …` before the session. `announce acknowledged` < 300 000 ms, `CONFIRMED`, no `no working session`. |
+| P2 | Outage after the reboot, longer than the timer | As P1, `"0=blackhole,330=pass"`. | `no working session 300 s after an OTA boot` at ≈ 300 000 ms, then the reset. After a stop/start past 330 s: the old slot, `rolled_back`. otadecode: the new slot `INVALID`. |
+| P3 | Flapping link after the reboot | As P1, `"0=pass,5=blackhole" --repeat 30`. | Terminal either way (`confirmed` before 300 s, or the P2 shape), never `PENDING_VERIFY` past 302 s. |
+
+**The openeth "RX frame dropped" panic is a harness artifact.** One D2 run in three
+panicked a second or so after the link came back:
+`Guru Meditation Error: Core 0 panic'ed (Cache error)`, decoded as
+`emac_opencores_isr_handler (esp_eth_mac_openeth.c:66)` ← `_xt_lowint1` ←
+`spi_flash_op_block_func`. Line 66 is the driver's `ESP_EARLY_LOGW(… "RX frame dropped"
+…)`. Its format string lives in flash, and the ISR ran while the other core had the cache
+disabled for an OTA flash write. openeth is the QEMU-only NIC (`CONFIG_ETH_USE_OPENETH`,
+esp32 only). No board runs it, so it is not a product finding. The board soft-reset onto
+its VALID image and the row parked at `downloading`. A re-POST (`reused: true`) ran to
+`confirmed`. If you see it, repeat the run.
 
 ## What a first boot looks like
 
@@ -705,6 +779,7 @@ smoke check is red, it already told you which of the four assertions failed.
 | `ff_cfg: crc32 mismatch` | the blob was corrupted or truncated; regenerate it, then `--fresh` |
 | no `link_up` row against an `https://` base, but the later stages are there | the firmware predates S0-fw-2: the report went out at epoch 0 and its TLS handshake failed certificate validity. Re-build the bundle (`just agent-build esp32`) |
 | clock stays 1970 | no DNS or no outbound UDP/123 from this box; every `https://`/`mqtts://` endpoint then fails validation |
+| everything fails with `connection refused` against `10.0.2.2:18088`/`18883` | the flaky-link proxy is not running, and ff_cfg points at it (`just agent-qemu-flaky`, or re-cfg onto 8088/8883) |
 | QEMU exits instantly with an efuse error | delete `.qemu/efuse.bin` and let it be regenerated from the IDF pin |
 
 ## Related

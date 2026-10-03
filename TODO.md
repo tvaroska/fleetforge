@@ -25,7 +25,12 @@ build is caught before the fleet, and any device that gets one recovers itself.
   0.3.1, so the deploy that first carries 0.4.x to it still parks at `rebooting`. From then
   on every deploy ends `confirmed` or `rolled_back`.
 - An image that boots, gets its announce acked and is broken anyway confirms itself and
-  **nothing recovers it**. Roll to **one board at a time**.
+  **nothing recovers it**. Roll to **one board at a time**. (The flaky radio is no longer a
+  reason: R2-test-2 showed in QEMU that the download and the confirm timer never overlap.
+  Bench replay owed.)
+- A store connection that goes silent mid-download holds the board's update slot until a
+  power cycle (R2-test-2 → R2-fw-5). The board is safe on its old image, but no new deploy
+  starts. Keep USB in reach.
 - An OTA'd image that hangs before its broker session rolls back by itself since agent
   0.4.3 (R2-fw-4): proven in QEMU, bench replay owed.
 - No upload form in the dashboard (`docs/runbooks/upload-artifact.sh` is the only way in),
@@ -51,7 +56,7 @@ run could show, so the pass rests on the deterministic judge. Task list below; b
 <!-- Counters: spec=1 infra=7 db=1 be=6 fe=7 sec=1 fw=4 test=3 -->
 <!-- Sprint 0 counters: fe=8 fw=4 infra=9 test=4 ops=1 -->
 <!-- R1 counters: be=3 fe=1 fw=2 test=1 -->
-<!-- R2 counters: fw=4 be=1 fe=1 test=2 spec=1 (fw-3 is the R1-landed confirm timer) -->
+<!-- R2 counters: fw=6 be=1 fe=1 test=2 spec=1 (fw-3 is the R1-landed confirm timer) -->
 <!-- R3 counters: spec=1 fw=4 test=1 -->
 
 Live status lives ONLY here. States: `- [ ]` open · `- [x]` done · `- [!]`
@@ -170,9 +175,25 @@ after the reboot.
       the `-hangtest` image, 330 s, no rollback). CRITICAL path. Replay: `FF_FAULT_TEST=hang`
       in docs/runbooks/agent-qemu.md. Consider `CONFIG_ESP_TASK_WDT_PANIC` too (a
       wedged task today warns and never resets).
-- [ ] **R2-test-2**: Flaky-Wi-Fi rollback spike (P1, 0.5d)
-      Does a marginal radio stall the download past the confirm timer? Open since R0; the
-      reason deploys are still one board at a time.
+- [x] **R2-test-2**: Flaky-Wi-Fi rollback spike (P1, 0.5d)
+      _(done 2026-10-03; proven in QEMU — the download and the confirm timer never overlap; a silent peer mid-download holds the update slot for 600 s+ → R2-fw-5; bench replay owed, see docs/runbooks/rollback-test.md; see docs/features/ota-deploy.md)_
+      Does a marginal radio stall the download past the confirm timer? Open since R0; it
+      was the reason deploys are still one board at a time.
+- [ ] **R2-fw-5**: A download that stops making progress fails instead of holding the update slot forever (P1, 0.5d)
+      Found by R2-test-2. A peer that goes silent mid-download (QEMU: proxy blackhole,
+      held 600 s) never ends `esp_https_ota_perform`: every 20 s read timeout is
+      `-ESP_ERR_HTTP_EAGAIN` → `IN_PROGRESS`. The row parks at `downloading` and every
+      new stage is refused ("another update is already in progress") until a power
+      cycle. Safe (the running image stays VALID), not live. CRITICAL (`ff_ota.c`). Shape:
+      abort after K consecutive empty reads (no bytes for ~60 s) → `failed` /
+      `download stalled`. Replay: docs/runbooks/agent-qemu.md → *Driving a flaky link*, D3.
+- [ ] **R2-fw-6**: A re-delivered in-flight stage must not report `failed` against itself (P2, 0.5d)
+      Found by R2-test-2 (D3). The agent dedupes on the last command id only, so after any
+      other command a re-POST of the running deploy (`reused: true`, same cmd_id) hits
+      `ff_ota_start()` → `ESP_ERR_INVALID_STATE` → `failed` / "another update is already
+      in progress" for the cmd that is running. The server marks it terminal and drops the
+      real outcome when it arrives. CRITICAL (`ff_mqtt.c`/`ff_ota.c`). Shape: if the
+      stage's cmd_id is the one in progress, log and ignore it.
 - [ ] **R2-spec-1**: Propose `rollback_capable` + partition fingerprint in `up/announce` (P1, 0.5d)
       Proposal only (`spec/` is protected). Shape: `docs/features/board-profiles.md` step 1
       and `spec/open-questions.md` → *Bootloader attestation on the Arduino path*.

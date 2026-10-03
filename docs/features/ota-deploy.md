@@ -1047,8 +1047,10 @@ flaky radio — none of which that test covers. R2-test-1 (2026-10-03) took the 
 plus a torn otadata write, in QEMU: all land on the previous image. It also found one that
 did **not** recover: an image that hangs before its broker session. R2-fw-4 (agent 0.4.3)
 fixed it by arming the confirm timer first thing in `app_main`, proven in QEMU. The flaky
-radio is R2-test-2. See *Remaining failure modes (R2-test-1)* and *Arm the confirm timer at
-boot (R2-fw-4)* below.
+radio (R2-test-2) cannot outrun the confirm timer, because the download and the timer
+never overlap. A silent peer mid-download, though, holds the update slot until a power
+cycle (R2-fw-5). Proven in QEMU, bench replay owed. See *Remaining failure modes
+(R2-test-1)*, *Arm the confirm timer at boot (R2-fw-4)* and *Flaky link (R2-test-2)* below.
 
 What that result does **not** do is retire R2-BE-1. The R1 agent's reported walk ends at
 `rebooting` (`ff_ota.h`), so the rollback is only inferable from the announced version
@@ -1775,6 +1777,209 @@ T2-3  deploy 0.4.32-rbtest on_command (cmd c8623628, reused:false) -> staged int
 show. The negative control (T2-4, the pre-0.4.3 `0.4.22-hangtest` sitting in
 `PENDING_VERIFY` past 330 s) was not re-run: it is F5 above.
 
+### Flaky link (R2-test-2)
+
+**A spike: a link impairment tool, QEMU evidence, two new tasks. No firmware changed.**
+Proof status: **proven in QEMU (esp32, dev stack), bench replay owed**
+(`../runbooks/rollback-test.md` → *Marginal radio*). Decision: DECISIONS.md 2026-10-03
+(R2-test-2). Replay: `../runbooks/agent-qemu.md` → *Driving a flaky link*.
+
+**The question as asked has a structural answer: a marginal radio cannot stall the
+download past the confirm timer, because the two never run at the same time.**
+
+1. The download runs on the **running** image, which is VALID (or UNDEFINED, serially
+   flashed). `ff_mqtt_arm_confirm_timer()` arms the 300 s timer only when
+   `pending_verify()` is true, so no timer exists during a download.
+2. R2-fw-2 forbids the overlap from the other side. `ff_ota.c::choose_target_slot()`
+   refuses a `stage` while the running image is `PENDING_VERIFY`, before any I/O.
+3. The timer runs only in the **new** image, from its first instruction (R2-fw-4). There a
+   flaky link matters differently: the image must reach its broker session within 300 s
+   of boot or it rolls back. Download speed plays no part in that.
+
+What a flaky link really does, measured:
+
+| # | Scenario (proxy schedule) | Observed in QEMU | Safety | Liveness |
+|---|---|---|---|---|
+| D1 | Slow download (store `throttle:8192`) | 124.7 s download, `staged`. No `OTA boot` line, no `no working session` on the running image. Confirmed after stop/start. | safe | fine |
+| D2 | Outage mid-download, 90 s (store blackhole 20→110 s) | Progress paused 90 s, resumed, `matches what is on flash`, `staged`, no `failed`. No `esp_transport_read` warning in the stall: the 20 s read timeouts are `-ESP_ERR_HTTP_EAGAIN`, logged at debug. Confirmed. *(1 of 3 runs hit the QEMU-only openeth panic instead. See below. Run 3 also passed: 100 % at 161.3 s, confirmed.)* | safe | fine (slow) |
+| D3 | Silent far end, 600 s (store blackhole 20→620 s, then `reset`) | **The download never ended by itself.** 600 s at 10 %, no `failed`. The update slot stayed taken: a deploy of another version got `failed: another update is already in progress`. Only the reset ended it (D4). → **R2-fw-5** | safe | **lost until something closes the socket** |
+| D4 | Far end closes mid-download (the D3 reset) | `data read -1, errno 128` → `update <cmd> failed: download failed`. Same slot, `ota state valid`, no transaction line. The next deploy (a new cmd_id) ran to `confirmed`. | safe | fine |
+| P1 | New image boots into a 200 s outage | `OTA boot` and `confirming on ota_1` before the session. Announce acked at 196.9 s of log time, ~0.1 s after the link returned. `CONFIRMED`. | safe | fine |
+| P2 | New image boots into a 330 s outage | `no working session 300 s after an OTA boot` at 302 218 ms, `rolling_back … is not reported`, reset. Old slot reports `rolled_back`. otadecode: new slot `INVALID`. | safe | good image rolled back (a miss) |
+| P3 | New image boots into a flapping link (5 s up / 25 s down) | Confirmed in the first up-window: acked at 26 983 ms. | safe | fine |
+
+**The invariant held in every scenario.** The board always ended on a VALID image. No
+image stayed `PENDING_VERIFY` past 302 s, and no human action was needed beyond the
+documented QEMU stop/start.
+
+| # | Final slot (otadecode) | Terminal row | Longest `PENDING_VERIFY` |
+|---|---|---|---|
+| D1 | ota_1 VALID (0.4.50) | `confirmed` | 11.6 s (the confirm boot) |
+| D2 | ota_0 VALID (0.4.51) | `confirmed` | 13.1 s |
+| D3/D4 | ota_0 VALID (0.4.51), then ota_1 VALID (0.4.50) after the recovery deploy | `failed` (see the re-POST finding), recovery `confirmed` | 0 during the hold; 10.9 s for the recovery |
+| P1 | ota_1 VALID (0.4.50) | `confirmed` | 197 s |
+| P2 | ota_1 VALID (0.4.50); ota_0 INVALID | `rolled_back` | 305.3 s (timer at 302.2 s + the reset path) |
+| P3 | ota_0 VALID (0.4.51) | `confirmed` | 27.2 s |
+
+**Measured numbers.**
+
+| What | Value |
+|---|---|
+| Announce ack after an all-pass OTA boot (t_base) | 11.4 s (D1), 12.9 s (D2), 10.7 s (D3 recovery) |
+| D1 download, 1 017 696 B at 8192 B/s | 124.7 s (0 % at 8.6 s, 100 % at 133.3 s) |
+| D2 download, 16 384 B/s with a 90 s hole | 152 s (0 % at 10.2 s, 100 % at 162.5 s); progress resumed ≤ 0.6 s after the link |
+| D3 hold with no progress and no failure | 600 s (until the reset) |
+| Boot path in progress reports during an outage | ~10 s (two 5 s `ff_progress` timeouts before `connecting`) |
+| esp-mqtt retry cadence during an outage | an attempt every 20–25 s (10 s connect timeout + reconnect wait) |
+| P1 reconnect latency after the link returned | ~0.1 s (an attempt was in flight); worst case ≈ one retry gap, ≤ ~15 s |
+| P2 timer fire vs arm | arm 2.18 s, fire 302.22 s (300.04 s), reset at 305.27 s |
+
+So the threshold is plain: an outage after the reboot that ends later than about 300 s
+minus one retry gap (≈ 285 s) after boot rolls a good image back. That is the R2-fw-4
+behaviour change 2, a miss and not a brick.
+
+**Transcripts (trimmed).** Proxy lines are `[s since proxy start]`. App lines are
+`I (ms since boot)`. The two clocks are 2-4 s apart.
+
+```
+D1  store: throttle:8192
+      I (8599)   ff-ota: update 2482a5de…: 0% (1024 bytes)
+      I (133279) ff-ota: update 2482a5de…: 100% (1017696 bytes)
+      I (141549) ff-ota: … sha256 617316…ab71 matches what is on flash in ota_1; switching the boot partition
+      I (144259) ff-ota: … ota_1 is staged and bootable
+      'OTA boot: 300' / 'no working session' in this boot: 0
+    stop, start (all-pass)
+      I (1941)   boot: Loaded app from partition at offset 0x200000
+      W (2261)   ff-mqtt: OTA boot: 300 s from now to reach the fleet or roll back
+      W (11261)  ff-mqtt: transaction 2482a5de…: confirming on ota_1
+      I (11401)  ff-mqtt: announce acknowledged by the broker              <- t_base
+      W (11571)  ff-mqtt: this image was written by OTA and is now CONFIRMED …
+    rows: requested, staging, downloading, verifying, staged, confirming, confirmed|t
+
+D2  store: throttle:16384, 20=blackhole, 110=throttle:16384   (run 2; reused cmd 103a6884)
+      [  14.343] conn 1 open 19000 -> 127.0.0.1:9000
+      [  20.002] mode throttle:16384 -> blackhole
+      I (10231)  ff-ota: update 103a6884…: 0% (1024 bytes)
+      … nine heartbeats, nothing else …
+      [ 110.082] mode blackhole -> throttle:16384
+      I (106571) ff-ota: update 103a6884…: 10% (105021 bytes)
+      I (162501) ff-ota: update 103a6884…: 100% (1017696 bytes)
+      I (170621) ff-ota: … sha256 f939f6…4c8f matches what is on flash in ota_0; …
+      I (173441) ff-ota: … ota_0 is staged and bootable
+      [ 176.097] conn 1 closed (up 420 B, down 1018329 B)
+    stop, start: confirming on ota_0 (12747), announce acknowledged (12917), CONFIRMED
+    rows: … verifying, staged, confirming, confirmed|t
+
+D3  store: throttle:16384, 20=blackhole, 620=reset   (cmd 8dc3771c, 0.4.50)
+      [  12.338] conn 1 upstream connected
+      [  20.003] mode throttle:16384 -> blackhole
+      I (15337)  ff-ota: update 8dc3771c…: 10% (103424 bytes)          <- the last progress line
+    hold +60 s: POST 0.4.24 -> 202, cmd 87760698, reused:false
+      topic: 87760698 failed "another update is already in progress"
+    hold +65 s: POST 0.4.50 -> 202, cmd 8dc3771c, reused:true
+      I (82487)  ff-mqtt: ff/v1/d/000000000000/dn/cmd id=8dc3771c… type=stage
+      topic: 8dc3771c failed "another update is already in progress"   <- NOT deduplicated: see below
+    presence online and up/hb every 10 s throughout (MQTT is not impaired)
+      [ 620.102] reset: aborted 1 connections (mode stays blackhole)
+      W (616747) HTTP_CLIENT: esp_transport_read returned:-1 and errno:128
+      E (616747) esp_https_ota: data read -1, errno 128
+      E (616757) ff-ota: update 8dc3771c… failed: download failed
+      topic: 8dc3771c failed "download failed"                          <- dropped: the row was already terminal
+    stop -> otadecode: sector0: seq=3 -> ota_0 state=VALID crc=ok / sector1: empty
+    start: Loaded app … 0x20000, fw 0.4.51, ota state valid, no transaction line
+    POST 0.4.50 -> cmd dca1527a, reused:false -> staged -> stop/start -> confirmed|t
+
+P1  stage 0.4.50 (cmd 783e76da) all-pass, stop; one proxy "0=blackhole,200=pass"; start
+      W (2262)   ff-mqtt: OTA boot: 300 s from now to reach the fleet or roll back
+      W (17402)  ff-mqtt: transaction 783e76da…: confirming on ota_1
+      [  14.138] conn 1 abandoned by the client during the blackhole (304 B never reached upstream)
+      [  30.730] conn 3 abandoned … (138 B …)    … one per esp-mqtt attempt, every 20-25 s …
+      [ 190.858] conn 10 open 18883 -> 127.0.0.1:8883
+      [ 200.005] mode blackhole -> pass
+      [ 200.007] conn 10 upstream connected
+      I (196892) ff-mqtt: announce acknowledged by the broker
+      W (197042) ff-mqtt: this image was written by OTA and is now CONFIRMED …
+    rows: … staged, confirming, confirmed|t
+
+P2  stage 0.4.51 (cmd c50655fe) all-pass, stop; one proxy "0=blackhole,330=pass"; start
+      otadecode at staged: sector0: seq=7 -> ota_0 state=NEW / sector1: seq=6 -> ota_1 state=VALID
+      I (1852)   boot: Loaded app from partition at offset 0x20000
+      W (2178)   ff-mqtt: OTA boot: 300 s from now to reach the fleet or roll back
+      W (17758)  ff-mqtt: transaction c50655fe…: confirming on ota_0
+      E (302218) ff-mqtt: no working session 300 s after an OTA boot — marking this image invalid and rolling back …
+      W (302228) ff-mqtt: no broker session: rolling_back for c50655fe… is not reported
+      I (305268) esp_ota_ops: Rollback to previously worked partition.
+      rst:0xc -> Loaded app … 0x200000 -> esp_timer_impl_init panic loop (the known QEMU limit)
+      [ 330.031] mode blackhole -> pass
+    stop -> otadecode: sector0: seq=7 -> ota_0 state=INVALID crc=ok   <- our timer, not a reset
+                       sector1: seq=6 -> ota_1 state=VALID crc=ok
+    start: Loaded app … 0x200000, fw 0.4.50, valid
+      W (9018)   ff-mqtt: transaction c50655fe…: rolled_back (returned to ota_1; ota_0 did not confirm)
+    rows: … verifying, staged, rolled_back|t   (no confirming: the new image queued it in RAM,
+          and the reset dropped it; only the old image's report arrived)
+    GET /v1/devices: fw 0.4.50
+
+P3  stage 0.4.51 (cmd acacc9f2), stop; one proxy "0=pass,5=blackhole" --repeat 30; start
+      [   5.006] mode pass -> blackhole
+      W (18113)  ff-mqtt: transaction acacc9f2…: confirming on ota_0
+      [  30.010] mode blackhole -> pass
+      I (26983)  ff-mqtt: announce acknowledged by the broker
+      W (27153)  ff-mqtt: this image was written by OTA and is now CONFIRMED …
+    rows: … staged, confirming, confirmed|t
+```
+
+**Findings.**
+
+- **D3 → R2-fw-5 (P1).** A peer that goes silent mid-download holds the update slot
+  until a power cycle or until something closes the socket. IDF v5.5.5:
+  `esp_http_client_read()` returns `-ESP_ERR_HTTP_EAGAIN` when the transport times out with
+  nothing read. `esp_https_ota_perform()` maps that to `ESP_ERR_HTTPS_OTA_IN_PROGRESS` with
+  no stall counter, and `ff_ota.c` loops while IN_PROGRESS with no deadline. It is safe
+  (the running image stays VALID) but not live. On a real board, TCP keepalive
+  (`keep_alive_enable`, 5 s / 5 s / 3) may close a socket whose radio is really gone and
+  turn it into D4. That is the bench question.
+- **The re-POST of an in-flight deploy can fail it (R2-fw-6, P2).** The agent deduplicates
+  on the **last** command id only (`last_command_id`). After any other command, a
+  re-delivery of the in-flight one reaches `ff_ota_start()`, gets `ESP_ERR_INVALID_STATE`,
+  and publishes `failed` / `another update is already in progress` **against the cmd that
+  is running**. The server marks that row terminal, and drops the real outcome when it
+  arrives (`download failed` here; a `staged` would be lost the same way). The board itself
+  is unaffected. It is a reporting defect in CRITICAL `ff_mqtt.c`.
+- **The QEMU openeth panic (harness, not product).** One D2 run panicked about a second
+  after the link returned: `Cache error`, decoded against the image's ELF (`0e8f70a9a`) to
+  `emac_opencores_isr_handler (esp_eth_mac_openeth.c:66)` ← `_xt_lowint1` ←
+  `spi_flash_op_block_func`. Line 66 is an `ESP_EARLY_LOGW` ("RX frame dropped") whose
+  format string is in flash, run while the other core had the cache off for an OTA flash
+  write. openeth is the QEMU-only NIC, so no board runs this code. The board soft-reset
+  onto its VALID image and the row parked at `downloading`. The re-POST (`reused: true`,
+  same cmd_id; the RAM dedupe died with the reset) is the run quoted above.
+- **A proxy fidelity fix found by P1.** The first P1 run replayed the connections esp-mqtt
+  had already abandoned during the blackhole. At 200 s, eight stale CONNECTs reached the
+  broker at once, a session takeover kicked the live one (`transport_read(): EOF`), and the
+  ack came at 208.4 s, ~10 s after the link. A real SYN into a dead link never arrives, so
+  the proxy now drops a deferred connection whose client closed first. That is the
+  `abandoned` line, and it has a test. The re-run is the transcript above. Both runs
+  confirmed.
+
+**T1.** `just lint` and `just test` green (ruff, ruff format, mypy, full pytest), plus
+`tests/test_flaky_link_tool.py` (22 tests, ~3 s): schedule parsing and refusals, the
+taken port exits 2, `pass` round-trips, a blackhole holds bytes and closes nothing then
+delivers them in order, a connection opened in a blackhole reaches upstream only after it,
+an abandoned one never does, `reset` aborts both sides and keeps the mode (also from inside
+a blackhole), `throttle` slows the stream, and the scheduler switches on time.
+`just --list` shows `agent-qemu-flaky`. No firmware, sdkconfig, partitions, spec/,
+alembic/, mosquitto/ or env file changed.
+
+**T2 setup.** The api was recreated with `FF_PUBLIC_BASE_URL=http://10.0.2.2:18088`,
+`FF_S3_PUBLIC_ENDPOINT_URL=http://10.0.2.2:19000` and the `.env.example` dev hash, and put
+back afterwards. `.env` was not touched. ff_cfg: `--api-base http://10.0.2.2:18088
+--mqtt-uri mqtt://10.0.2.2:18883`. Board A = 0.4.3 (`just agent-build esp32`, `--fresh`),
+enrolled through the proxy (conns on 18088 and 18883), otadecode `sector0: seq=1 -> ota_0
+state=VALID`. Artifacts: B1 `0.4.50` (`61731613…`) and B2 `0.4.51` (`f939f606…`), both
+normal builds of this tree. T2-0, the tool smoke against MinIO with `0=pass,3=blackhole,8=pass`:
+at t≈1 s `200 0.003 s`; at t≈4 s `200 4.09 s`, with `conn 2 open` at 3.9 s and `upstream
+connected` at 8.0 s.
+
 ## De-risking
 
 Run a **throwaway OTA + auto-rollback spike during R0–R1** on real flaky Wi-Fi —
@@ -1785,3 +1990,15 @@ in TODO.md.)
 link, not "real flaky Wi-Fi". The spike's actual question (does a marginal radio break
 the mechanism, e.g. by stalling the download past the confirm timer?) is still open, and
 is the reason remote deploys are still one board at a time rather than fleet-wide.
+
+**Discharged in QEMU 2026-10-03 (R2-test-2).** A marginal radio cannot stall the download
+past the confirm timer, because they never overlap. The download runs on a VALID image,
+which arms no timer (`pending_verify()` gate). The timer runs only in the new image, and a
+stage is refused while one is pending (R2-fw-2). What a flaky link does instead: a slow or
+interrupted download finishes or fails cleanly (D1, D2, D4). An outage right after the
+reboot rolls a good image back once it outlasts ~300 s (P2, a miss). A silent peer
+mid-download holds the update slot until a power cycle (D3 → R2-fw-5). This retires the
+flaky radio as the reason for one board at a time. It does **not** retire one board at a
+time: an image that boots, confirms and is broken anyway is still recovered by nothing.
+Bench replay owed (`../runbooks/rollback-test.md` → *Marginal radio*), above all for the
+question QEMU cannot answer: does a really dead radio end D3 through TCP keepalive?

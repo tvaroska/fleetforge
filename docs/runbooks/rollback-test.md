@@ -184,6 +184,42 @@ Still on `-hangtest` 330 s after the power cycle is the original defect, and a P
 `-hangtest` built from code before 0.4.3 (e.g. the dev catalog's `0.4.22-hangtest`) is the
 negative control: it never rolls back by itself.
 
+## Marginal radio (R2-test-2)
+
+The fifth: a link that is slow, drops out mid-download, or drops out right after the
+reboot. Proven in QEMU through a host-side proxy (`docs/runbooks/agent-qemu.md` →
+*Driving a flaky link*). Results: `docs/features/ota-deploy.md` → *Flaky link
+(R2-test-2)*. **The bench replay is owed.** QEMU's limit is the reason it is owed: slirp
+answers the board's TCP whatever the proxy does, so every QEMU outage is "the far end is
+alive but silent". A real radio that is gone is a different picture.
+
+Set-up: the S3 at the edge of the AP's range, or the AP's TX power turned down, or a phone
+hotspot walked away until the RSSI in `up/hb` is marginal. PuTTY on COM3 at 115200. Use a
+normal artifact, and note the cmd_id of each deploy.
+
+1. **Outage mid-download, short.** Deploy with `apply: "on_command"`. At `update <cmd>:
+   20%`, pull the AP's power for 60 s, then restore it. Pass: progress resumes and reaches
+   `staged`, or the deploy ends `failed` / `download failed` and the board stays on its
+   image. Either way the board is on a VALID image, and a re-deploy works.
+2. **Outage mid-download, long.** As 1, with the AP off for 6 min. Pass: the board ends
+   `failed` / `download failed` (TCP keepalive ended it, the D4 path) and a re-deploy works.
+   **The P0 for R2-fw-5 is the other outcome:** the row parks at `downloading`, no
+   `failed` for ≥ 5 min after the AP is back, and every new deploy gets `another update is
+   already in progress` until a power cycle (the D3 path).
+3. **Outage after the reboot, short.** Deploy with `apply: "auto"`. Kill the AP the moment
+   the console prints `rebooting`, and bring it back after 2 min. Pass: `OTA boot: 300 s …`,
+   then `confirming`, `CONFIRMED`, rows `… confirming, confirmed`.
+4. **Outage after the reboot, long.** As 3, with the AP off for 6 min. Pass: `no working
+   session 300 s after an OTA boot` at ≈ 300 s of uptime, then a reset onto the previous
+   slot. Once the AP is back: `rolled_back`, and the dashboard shows the old version. A good
+   image rolled back is a miss, not a brick (DECISIONS 2026-10-03, R2-fw-4, change 2).
+
+**The one question only metal answers** (step 2): when the radio is really gone, does the
+download end by itself through TCP keepalive (`keep_alive_enable`, IDF defaults 5 s idle,
+5 s interval, 3 probes: `download failed` after ~20 s with no ACKs), or does it sit in the
+EAGAIN loop QEMU showed for 600 s? The answer decides whether R2-fw-5 is a QEMU-only
+"silent peer" fix or a field fix.
+
 ## Known gaps this test does not close
 
 - ~~**The server never learns.**~~ **Closed for R2→R2 deploys (R2-be-1, agent 0.4.0).**
@@ -206,5 +242,10 @@ negative control: it never rolls back by itself.
   the image being deployed and the image being replaced must be ≥ 0.4.3 to count on it.
   Strictly, the hang image must be ≥ 0.4.3 to roll back at all, and the image it returns
   to must be ≥ 0.4.0 to report `rolled_back`. An image that boots, confirms and is broken
-  anyway is still not covered, and a flaky radio remains R2-test-2: deploy one board at a
-  time with USB in reach.
+  anyway is still not covered: deploy one board at a time with USB in reach.
+- **A flaky radio, as of R2-test-2: covered in QEMU, with its limit; bench replay owed**
+  (*Marginal radio* above). The download and the confirm timer never overlap, so a slow or
+  stalled download cannot trip the timer. An outage after the reboot that outlasts the
+  300 s rolls a good image back (a miss). A far end that goes silent mid-download holds the
+  update slot until a power cycle (R2-fw-5). QEMU cannot say whether a really dead radio
+  ends the download by keepalive instead.

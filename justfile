@@ -657,6 +657,40 @@ agent-qemu-otadata target="esp32" *args="decode":
     python3 agent/tools/otadata.py --bundle agent/dist/{{ target }} \
         --image .qemu/flash-{{ target }}.bin {{ args }}
 
+# Put a flaky link between the emulated board and the dev stack, on a schedule (R2-test-2).
+#
+#     just agent-qemu-flaky                                    # all-pass, all three ports
+#     just agent-qemu-flaky "0=throttle:8192" 19000:127.0.0.1:9000
+#     just agent-qemu-flaky "0=pass,5=blackhole" --repeat 30   # 5 s up, 25 s down, looping
+#
+# Arguments after the schedule shaped LPORT:HOST:RPORT are listens and replace the default
+# three; everything else (e.g. `--repeat 30`) passes through to the tool.
+#
+# Proxies 18088 -> Traefik web (8088 here; FF_HTTP_PORT, 8080 on a default box), 18883 ->
+# Traefik mqtt (8883) and 19000 -> MinIO (9000). ff_cfg and the api's FF_PUBLIC_BASE_URL /
+# FF_S3_PUBLIC_ENDPOINT_URL must point at the 1xxxx ports (docs/runbooks/agent-qemu.md ->
+# "Driving a flaky link"). Modes: pass, throttle:N, blackhole, reset (agent/tools/flaky_link.py).
+# Slirp is the guest's TCP peer and ACKs whatever happens here, so an outage always looks
+# like "the far end is alive but silent" to the board. Proven in QEMU; bench replay owed.
+# Flaky link proxy for QEMU runs (R2-test-2)
+agent-qemu-flaky schedule="0=pass" *args="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    listens=(); extra=()
+    for a in {{ args }}; do
+        case "$a" in
+            *:*:*) listens+=(--listen "$a") ;;
+            *) extra+=("$a") ;;
+        esac
+    done
+    if [ ${#listens[@]} -eq 0 ]; then
+        for l in 18088:127.0.0.1:8088 18883:127.0.0.1:8883 19000:127.0.0.1:9000; do
+            listens+=(--listen "$l")
+        done
+    fi
+    exec python3 -u agent/tools/flaky_link.py --schedule "{{ schedule }}" \
+        "${listens[@]}" ${extra[@]+"${extra[@]}"}
+
 # Is the harness alive? One command, no enrollment token, no running stack, no board.
 #
 # This exists because S0-infra-1 — "the emulator boot-loops" — cost a decoded backtrace
