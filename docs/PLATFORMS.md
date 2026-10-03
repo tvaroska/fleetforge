@@ -9,7 +9,7 @@ and eventually FPGAs” and asking what that actually costs.
 This is a reading of the current aim, documentation and feature set against
 one question: *what would it take for a board that is not an ESP32 to be a
 first-class member of the fleet — including the STM32s that actually fly, and
-the FPGAs that cannot run an agent at all?* Requirements stay in `spec/`; live
+the FPGAs that cannot run an agent at all?* Requirements stay in `spec/`. Live
 tasks stay in `TODO.md`. Landing any of the recommendations below is a
 `/new-feature` (or a release), not an edit of this file.
 
@@ -19,11 +19,11 @@ tasks stay in `TODO.md`. Landing any of the recommendations below is a
 
 The claim in [`design/architecture.md`](../design/architecture.md):
 
-> The server is **platform-blind**; every platform difference lives in a
+> The server is **platform-blind**. Every platform difference lives in a
 > swappable adapter, so ESP32 → Pi → FPGA reuse one core.
 
-The contract that is supposed to never change: identity, derived presence,
-four verbs, optional parent, opaque artifact. The table that is supposed to
+The contract that must never change: identity, derived presence,
+four verbs, optional parent, opaque artifact. The table that must
 be the whole adapter:
 
 | Platform | Artifact | Apply | Confirm | Rollback |
@@ -48,10 +48,10 @@ everywhere the device is onboarded, identified, or laid out in flash:
 | `device_id` = eFuse MAC, 12 hex chars | Yes | STM32 has a 96-bit UID, not a MAC. An FPGA fabric has no stable ID. |
 | `partition_layout: "ab-4m-v1"` + `ota_slot_size: 1966080` | Yes | MCUBoot slots, dual-bank STM32, SPI-flash bitstream A/B are not 1.9 MB IDF OTA partitions. |
 | Enrollment flasher = `esptool-js` / Web Serial | Yes | STM32 is DFU / ST-Link / OpenOCD. FPGA is JTAG / `iceprog` / Vivado. |
-| Artifact cap 1.9 MB | Yes (the slot) | STM32H7 images can exceed it; a mid-range FPGA bitstream often does. |
-| SNTP before TLS | Yes (no RTC) | STM32 often *has* an RTC; an FPGA companion in a valley still does not (see [`SWARM.md`](SWARM.md)). |
+| Artifact cap 1.9 MB | Yes (the slot) | STM32H7 images can exceed it. A mid-range FPGA bitstream often does. |
+| SNTP before TLS | Yes (no RTC) | STM32 often *has* an RTC. An FPGA companion in a valley still does not (see [`SWARM.md`](SWARM.md)). |
 | Flash-time immutables = IDF partition table + `APP_ROLLBACK_ENABLE` + eFuse | Yes | Different bootloader, different one-way burns, different recall story. |
-| `platform_type` = `CONFIG_IDF_TARGET` | Yes | Fine as a string; currently the only values that exist are `esp32` / `s3` / `c3` / `c6`. |
+| `platform_type` = `CONFIG_IDF_TARGET` | Yes | Fine as a string. Currently the only values that exist are `esp32` / `s3` / `c3` / `c6`. |
 
 Principle 1 of the design is “the fewer assumptions in the core, the cheaper
 a wrong guess about Pi/FPGA.” The protocol is marked near-frozen. **The
@@ -60,7 +60,7 @@ id, slot size. Additive fields are cheap. Re-typing `device_id` is a recall.
 
 So the chip question is not “can the server store a bitstream.” It can.
 The chip question is: **what must be true of a new platform before it can
-speak v1 without a protocol break**, and **which platforms are agents vs
+speak v1 without a protocol break**, and **which platforms are agents versus
 cargo**.
 
 ---
@@ -78,7 +78,7 @@ the four verbs.
 | Family | In v1 | Notes |
 |---|---|---|
 | ESP32 / S3 / C3 / C6 | **Yes** — bundles, flasher, `platform_type` | The only implemented adapter. |
-| ESP32-S2 / C2 / H2 / P4 | Mapped in `make_manifest.py`, not built | Cheap. H2 is the Thread radio; P4 is the high-end. 2 MB H2 variants may not hold Thread + mbedTLS in `ab-4m-v1`. |
+| ESP32-S2 / C2 / H2 / P4 | Mapped in `make_manifest.py`, not built | Cheap. H2 is the Thread radio. P4 is the high-end. 2 MB H2 variants can not hold Thread + mbedTLS in `ab-4m-v1`. |
 | STM32 (F4/F7/G4/H7/U5, WB/WL) | Absent | Needs an agent port and a *link*. Almost no STM32 has Wi-Fi on die. |
 | nRF52 / 53, RP2040 / 2350 | Absent | Same shape as STM32 if they have IP (nRF usually Thread/BLE, not Wi-Fi). MCUBoot is the portable A/B. |
 | Raspberry Pi / Linux SBC | Named, not built | Different artifact (image/container), still an agent. The swarm vehicle. See [`SWARM.md`](SWARM.md) #3. |
@@ -92,10 +92,10 @@ cargo. Same shape as the V3 drone-behind-gateway and as non-IP radios.
 |---|---|---|
 | Discrete FPGA (iCE40, ECP5, Artix, Tang Nano, Cyclone) | ESP32 / STM32 / Pi on the same board | Bitstream in SPI flash, two slots |
 | SoC FPGA (Zynq, PolarFire SoC, Agilex) | The hard ARM/RISC-V is the agent | Bitstream *and* a Linux image — two artifact types, one device |
-| Radio / sensor die (SX1262, a separate FC STM32, a camera ISP) | The board’s MCU | Vendor image, often via a vendor protocol (MAVLink fw update, etc.) |
+| Radio / sensor die (SX1262, a separate FC STM32, a camera ISP) | The board’s MCU | Vendor image, often via a vendor protocol (MAVLink fw update, and others.) |
 
 [`design/architecture.md`](../design/architecture.md) already says this for
-FPGA: “FPGAs can't run an agent, so they're managed **through their
+FPGA: “FPGAs cannot run an agent. Thus, they are managed **through their
 companion CPU** (real FPGA products are SoCs anyway).” It is the right
 sentence. It is also the sentence that makes a first-class `platform_type:
 fpga` a mistake. The registry row is the companion. The bitstream is a
@@ -105,8 +105,8 @@ insist on tracking fabric identity separately.
 ### C. The ESP32 family itself is already “different chips”
 
 Classic Xtensa, S3 Xtensa, C3/C6 RISC-V, different bootloader offsets
-(`0x1000` vs `0x0` — `firmware/manifest.py` exists so nobody re-derives
-that), native USB vs bridge UART, 4 MB vs 8 MB flash. v1 paid for this
+(`0x1000` versus `0x0` — `firmware/manifest.py` exists so nobody re-derives
+that), native USB versus bridge UART, 4 MB versus 8 MB flash. v1 paid for this
 and it is the proof that `platform_type` + per-target bundles work. It is
 **not** the proof that a different vendor works: every one of those still
 speaks ESP-IDF, still flashes through `esptool-js`, still announces an
@@ -138,7 +138,7 @@ eFuse MAC, still uses `ab-4m-v1`.
 
 **STM32 is not a platform in the product.** Not in the adapter table, not
 in out-of-scope (which lists “Raspberry Pi & FPGA implementations” and
-skips the MCU that would actually show up next), not in the agent, not in
+skips the MCU that would actually appear next), not in the agent, not in
 open questions. A swarm builder with a Pixhawk will assume they are
 unsupported. They are.
 
@@ -156,7 +156,7 @@ namespace is built on it. STM32 UID is 96 bits. A Pi can use a MAC, an
 FPGA cannot. This has to become “opaque identifier, 1–32 safe chars, unique
 per device, announced at enroll” *before* a second silicon vendor, while
 the only agents in the field still *happen* to send a MAC. Additive
-tolerance (server accepts not-a-MAC) is cheap today; a format change after
+tolerance (server accepts not-a-MAC) is cheap today. A format change after
 R0 boards exist is a recall.
 
 **`ota_slot_size` is doing two jobs.** It is the capability check *and* the
@@ -210,7 +210,7 @@ An STM32 can be an **agent**. It cannot use the ESP32 adapter.
 - A Wi-Fi coprocessor (ESP-Hosted, AT, ATWINC, Cypress) — common on maker
   boards, and a second firmware *on the same PCB* (cargo).
 - STM32WB/WL — BLE/sub-GHz on die, not IP. Those are gateway-mediated
-  non-IP, i.e. the second product, not an agent.
+  non-IP, that is,the second product, not an agent.
 - Cellular modem — IP, fine, ugly.
 
 Without a link story, an STM32 agent is a library that cannot enroll.
@@ -219,13 +219,12 @@ Without a link story, an STM32 agent is a library that cannot enroll.
 
 | Hardware | Rollback story |
 |---|---|
-| Dual-bank flash (many G0/G4/H7/U5) | Swap banks; closest to ESP OTA0/OTA1 |
-| Single bank + external SPI flash | MCUBoot slots; portable, also covers nRF |
+| Dual-bank flash (many G0/G4/H7/U5) | Swap banks. Closest to ESP OTA0/OTA1 |
+| Single bank + external SPI flash | MCUBoot slots. Portable, also covers nRF |
 | Single bank, no extra flash | Not safely OTA-able. Do not pretend. |
 
 MCUBoot (Zephyr / NCS / a Cube port) is the adapter worth writing once.
-A Cube-only dual-bank driver is a second adapter the week someone shows
-up with an F4.
+A Cube-only dual-bank driver is a second adapter the week someone appears with an F4.
 
 **Identity.** 96-bit `UID` → a 24-hex `device_id` (or a hash truncated to
 the current 12-hex if you refuse to widen). Spec must stop saying “eFuse
@@ -265,7 +264,7 @@ pattern with a different blob. See top 3.
 
 ### FPGA (named, empty)
 
-An FPGA should **not** be an agent. The architecture is right; the row
+An FPGA must **not** be an agent. The architecture is right. The row
 in the adapter table is the part that misleads.
 
 **Discrete FPGA + MCU/SBC.** One registry device: the companion.
@@ -279,7 +278,7 @@ is the radio or the motor driver is an in-flight reboot by another name.
 
 **SoC FPGA (Zynq et al.).** The PS *is* a Pi-class agent. The PL is
 cargo on the same chip. Two artifacts, one `device_id`, two confirm
-paths. Partial reconfiguration is a third artifact type; ignore it until
+paths. Partial reconfiguration is a third artifact type. Ignore it until
 someone has a full-bitstream path that is boring.
 
 **Size.** ice40up5k ~100 KB, Artix-7 35T ~1.6 MB (squeaks under 1.9 MB),
@@ -290,7 +289,7 @@ R1) and probably deltas (V3, and actually load-bearing here).
 
 **Sim.** Verilator/cocotb as named. That is the R9 sim-runner for this
 adapter, not QEMU. Do not wait for it: a bitstream that enumerates and
-passes a fabric ID is a confirm; HDL sim is the V2 gate.
+passes a fabric ID is a confirm. HDL sim is the V2 gate.
 
 **Enroll.** You flash the companion, not the FPGA. The companion’s
 enroll path (ESP Web Serial, STM32 CLI, Pi image) is the only onboarding.
@@ -308,13 +307,13 @@ protocol one — and out of scope the same way application config is.
 
 Ranked by *unlock*: the smallest change that makes a non-ESP32 board a
 member rather than a hope. The OTA library in [`HOBBYIST.md`](HOBBYIST.md)
-is the ESP32 extraction; this list is what that extraction has to leave
+is the ESP32 extraction. This list is what that extraction has to leave
 behind so a second port is possible.
 
 ### 1. Depin the protocol from Espressif — while only ESP32s exist
 
-**Do this before any STM32 or FPGA work.** The protocol is near-frozen;
-every ESP32 already in the field has to keep working. All of these are
+**Do this before any STM32 or FPGA work.** The protocol is near-frozen.
+Every ESP32 already in the field has to keep working. All of these are
 additive if done now, breaking if done later.
 
 1. **`device_id` is an opaque token**, 1–32 of the existing safe charset.
@@ -332,10 +331,10 @@ additive if done now, breaking if done later.
    without `fpga` cannot be staged a bitstream.
 4. **`partition_layout` stays an opaque string.** Do not invent
    STM32-shaped fields. The adapter on the device knows what its layout
-   id means; the server only knows the id and the slot size.
+   id means. The server only knows the id and the slot size.
 5. **Enrollment path is per-adapter.** The public API (`POST /v1/enroll`,
    token, baked config) stays. The *bytes-on-the-wire-to-flash* are an
-   ESP client today. Spec that a platform adapter may enroll via CLI /
+   ESP client today. Spec that a platform adapter can enroll via CLI /
    DFU / pre-baked image, and that unaided-onboarding-in-Chrome is an
    ESP-family standard, not a product-wide one.
 
@@ -345,18 +344,18 @@ few validators. It is the cheapest recall-prevention in the repo.
 
 ### 2. STM32 as an agent — MCUBoot, IP via Ethernet or a coprocessor, CLI enroll
 
-**The missing row.** Hobbyists will show up with Nucleos. Swarm builders
-will show up with everything-except-the-FC as STM32, and the FC as
+**The missing row.** Hobbyists will appear with Nucleos. Swarm builders
+will appear with everything-except-the-FC as STM32, and the FC as
 PX4 cargo (see #3).
 
 Ship a thin port, not a CubeIDE product:
 
 1. **Zephyr + MCUBoot agent** speaking v1 MQTT/HTTPS. Zephyr gives you
-   STM32 *and* nRF with one codebase; Cube-only is a trap. The
+   STM32 *and* nRF with one codebase. Cube-only is a trap. The
    [`HOBBYIST.md`](HOBBYIST.md) library extraction is the API this port
    implements — if the ESP32 library is “the IDF app,” the STM32 port
    cannot share it. Extract C (or a C-shaped protocol core) first.
-2. **Link adapters:** Ethernet on H7 as the first T2; ESP-Hosted/AT as
+2. **Link adapters:** Ethernet on H7 as the first T2. ESP-Hosted/AT as
    the maker path. WB/WL are *not* v1 agents.
 3. **Layout id** `mcuboot-<size>-v1`, slot size from the board’s
    `SUPPORTED_LAYOUTS` row. Dual-bank STM32 can be a second layout later.
@@ -366,7 +365,7 @@ Ship a thin port, not a CubeIDE product:
 
 Do not start with a Pixhawk. PX4’s bootloader and safety model are not
 MCUBoot-from-Fleetforge, and a bad OTA on an FC is the swarm crash
-[`SWARM.md`](SWARM.md) exists to prevent. First STM32 should be a
+[`SWARM.md`](SWARM.md) exists to prevent. First STM32 must be a
 boring H7 Nucleo that blinks, then a payload board.
 
 ### 3. Cargo artifacts on a companion — FPGA bitstreams, and PX4 as the same shape
@@ -388,18 +387,18 @@ status transitions the companion reports (`applying` means “I am writing
 the fabric,” not “I am rebooting”). Confirm is companion-defined (fabric
 ID, FC version, a self-test). Rollback is the companion loading the
 previous cargo slot — **the companion’s own A/B is a different slot.**
-A bad bitstream must not brick the agent that is supposed to roll it
+A bad bitstream must not brick the agent that must roll it
 back. That is the FPGA-specific flash-time immutable: the companion’s
 image and the bitstream live in different storage, and only the
 bitstream is in play during a fabric `stage`.
 
 This is also how mixed air/ground fleets absorb STM32 FCs without
 pretending Fleetforge is PX4. The vehicle is a Pi agent (#3 in
-[`SWARM.md`](SWARM.md)); the FC is cargo; the airframe’s ESP32 radio
+[`SWARM.md`](SWARM.md)). The FC is cargo. The airframe’s ESP32 radio
 is a second agent or also cargo. Three chips, two adapter kinds, one
 server.
 
-Size and Range already exist; what cargo needs from #1 is `type` and a
+Size and Range already exist. What cargo needs from #1 is `type` and a
 layout whose cap is not 1.9 MB. What it needs from R2 is: rolling back
 *cargo* must not reboot a flying companion, and a cargo confirm-fail
 must not take the agent down with it.
@@ -410,14 +409,14 @@ must not take the agent down with it.
 
 | Feature | Why it is not #1–#3 | When it starts to matter |
 |---|---|---|
-| **ESP32-H2 / P4 bundles** | Still the ESP adapter. Cheap, not a waist test. | H2 when Thread is real; P4 when you want a companion that is still Espressif. |
+| **ESP32-H2 / P4 bundles** | Still the ESP adapter. Cheap, not a waist test. | H2 when Thread is real. P4 when you want a companion that is still Espressif. |
 | **Raspberry Pi agent** | Named, load-bearing for swarm, different artifact (`os-image`). | [`SWARM.md`](SWARM.md) #3 — the vehicle. Do it as an *agent* adapter, not as cargo. |
-| **nRF + Thread** | Falls out of a Zephyr STM32 agent if #2 is Zephyr. | 100-node low-power flock; after deltas. |
-| **RP2040 / 2350** | Hobbyist-popular, weak OTA story on 2040, no on-die IP. | After STM32; do not let it queue-jump. |
-| **WebDFU / OpenOCD-in-the-browser** | Enrollment theatre. CLI is enough for v1-of-STM32. | If unaided-onboarding is ever an STM32 standard. It should not be, yet. |
+| **nRF + Thread** | Falls out of a Zephyr STM32 agent if #2 is Zephyr. | 100-node low-power flock. After deltas. |
+| **RP2040 / 2350** | Hobbyist-popular, weak OTA story on 2040, no on-die IP. | After STM32. Do not let it queue-jump. |
+| **WebDFU / OpenOCD-in-the-browser** | Enrollment theatre. CLI is enough for v1-of-STM32. | If unaided-onboarding is ever an STM32 standard. It must not be, yet. |
 | **Partial reconfiguration** | A third artifact type on the FPGA companion. | After full-bitstream cargo is boring. |
 | **Renode / Verilator in R9** | Sim is a gate, not a port. | After there is an artifact the gate could reject. |
-| **Vivado/IceStorm as R10 builders** | Producers behind the same upload API. | After cargo `type` exists; otherwise R10 only knows `idf.py`. |
+| **Vivado/IceStorm as R10 builders** | Producers behind the same upload API. | After cargo `type` exists. Otherwise R10 only knows `idf.py`. |
 
 ---
 
@@ -479,7 +478,7 @@ waist it claims to describe.
 - [`docs/SWARM.md`](SWARM.md) — Pi agent, PX4-as-cargo, companion = gateway
 - [`design/architecture.md`](../design/architecture.md) — adapter table, companion CPU
 - [`spec/device-protocol.md`](../spec/device-protocol.md) — identity, layout, hierarchy
-- [`spec/prd.md`](../spec/prd.md) — Pi & FPGA out of v1; “wrong guess” as a risk
-- [`spec/open-questions.md`](../spec/open-questions.md) — 1.9 MB vs `ota_slot_size`
+- [`spec/prd.md`](../spec/prd.md) — Pi & FPGA out of v1. “Wrong guess” as a risk
+- [`spec/open-questions.md`](../spec/open-questions.md) — 1.9 MB versus `ota_slot_size`
 - [`src/fleetforge/firmware/manifest.py`](../src/fleetforge/firmware/manifest.py) — `SUPPORTED_LAYOUTS`
 - [`agent/tools/make_manifest.py`](../agent/tools/make_manifest.py) — Espressif target map already includes H2/P4

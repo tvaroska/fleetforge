@@ -7,7 +7,7 @@ for makers rather than for a swarm.
 
 This is a reading of the current aim, documentation and feature set against one
 question: *what would actually get used by someone with a DevKit, a sketch, and a
-board they cannot easily walk to?* Requirements stay in `spec/`; live tasks stay in
+board they cannot easily walk to?* Requirements stay in `spec/`. Live tasks stay in
 `TODO.md`. Landing any of the recommendations below is a `/new-feature` (or a
 release), not an edit of this file.
 
@@ -21,7 +21,7 @@ without a bad build bricking them.
 
 The problem statement in [`spec/prd.md`](../spec/prd.md) is precise and correct:
 
-> USB flashing doesn't scale past the bench; a bad push with no recovery bricks
+> USB flashing does not scale past the bench. A bad push with no recovery bricks
 > devices and kills trust.
 
 The architectural bet is two thin waists:
@@ -29,12 +29,12 @@ The architectural bet is two thin waists:
 | Waist | Contract | Why it matters |
 |---|---|---|
 | Device-facing | Opaque versioned blob + four verbs (`stage → apply → confirm → rollback`) | ESP32 today, Pi/FPGA later, without rewriting the core |
-| User-facing | Headless API + SSE; every UI is a client | Dashboard, HA, CLI, MCP all equal |
+| User-facing | Headless API + SSE. Every UI is a client | Dashboard, HA, CLI, MCP all equal |
 
 Two authority rules that almost nobody else in this space gets right:
 
-1. **The device owns the reboot.** A drone must not apply mid-flight; a vehicle
-   must not reboot in motion; `awaiting_safe_window` may last indefinitely.
+1. **The device owns the reboot.** A drone must not apply mid-flight. A vehicle
+   must not reboot in motion. `awaiting_safe_window` can last indefinitely.
 2. **The device owns the rollback.** A board that cannot reach the broker is
    exactly the board that must roll back — so the server never sends a rollback
    command.
@@ -72,27 +72,27 @@ The gen-3 layout is actually followed, not just declared:
 The load-bearing documents earn it:
 
 - [`spec/device-protocol.md`](../spec/device-protocol.md) — topic namespace *is*
-  the ACL design; retain vs persistent-session rule prevents a whole class of
-  replay bugs; SNTP-before-TLS is written down before anyone hits “certificate
+  the ACL design. Retain versus persistent-session rule prevents a whole class of
+  replay bugs. SNTP-before-TLS is written down before anyone hits “certificate
   not yet valid”
 - [`design/architecture.md`](../design/architecture.md) — flash-time immutables,
   transport split (MQTT control / HTTPS bytes), capability reporting
   (`partition_layout` + `ota_slot_size`)
 - [`spec/prd.md`](../spec/prd.md) — two KPIs that cannot be gamed against each
-  other (delivery success vs fleet safety)
+  other (delivery success versus fleet safety)
 - [`spec/standards.md`](../spec/standards.md) — *Unaided onboarding* is a real
   product standard, not a slogan
 
-Decision quality is high. Examples: enrollment over HTTPS not MQTT; ingestor as
-sole MQTT subscriber; agent bundles as artifacts not image contents;
-impersonation instead of a GCS key file; `fw_version` is the version that
+Decision quality is high. Examples: enrollment over HTTPS not MQTT. Ingestor as
+sole MQTT subscriber. Agent bundles as artifacts not image contents.
+Impersonation instead of a GCS key file. `fw_version` is the version that
 *booted*.
 
 ### What is weak or stale
 
 **README is a lie.** It still says the dashboard is a skeleton and “the agent,
 the flasher and OTA itself do not exist.” R0 is live at `bingo.tvaroska.sk`.
-R1’s backend, firmware, and dashboard button have landed. A hobbyist (or a
+R1’s backend, firmware, and dashboard button landed. A hobbyist (or a
 future-you in six months) will bounce.
 
 **The product surface in the PRD is not planned.** This sentence is in
@@ -102,7 +102,7 @@ future-you in six months) will bounce.
 > OTA library (ESP-IDF/Arduino) to embed in custom firmware**.
 
 (b) has no feature file, no release, no task, no contract. For a hobbyist this
-is not a later nicety — it is the product. The prebuilt agent is a demo that
+is not a later nicety. It is the product. The prebuilt agent is a demo that
 connects and heartbeats. Nobody deploys a Morse-code blinker they cannot write.
 
 **CUJs do not exist.** [`spec/open-questions.md`](../spec/open-questions.md)
@@ -112,7 +112,7 @@ no “I have an Arduino sketch and a DevKit on the desk” journey anywhere.
 **Feature files are two different products.** `enrollment.md` /
 `infrastructure.md` / `ota-deploy.md` are 50–100 KB of as-built archive.
 `health-telemetry.md` is 1.3 KB of stub table. Status lines are stale
-(`ota-deploy.md` still says Planned). Fine for the implementer; useless as a
+(`ota-deploy.md` still says Planned). Fine for the implementer. Useless as a
 map.
 
 **No operator manual.** Runbooks cover the *stack* (dev-stack, artifact-storage,
@@ -121,13 +121,13 @@ recover from a brownout” as a user. The dashboard *is* supposed to be that
 manual (`enrollment-console-is-the-diagnostic-surface`), but that only works
 once onboarding is proven on metal — and it is not.
 
-**Hobbyist vs swarm is not resolved in writing.** v1 = 5 boards, one operator,
+**Hobbyist versus swarm is not resolved in writing.** v1 = 5 boards, one operator,
 hosted. V2 = source-to-artifact. V3 = swarm, and *also* “public product.”
 Groups, bulk deploy, HA, CLI, SoftAP, Arduino library, self-host TLS — all
 deferred, many of them the things a hobbyist actually opens the app for.
 
-**Known spec bugs sitting in `open-questions.md`:** `prd.md` “≤ 1.9 MB” vs
-`ota_slot_size` 1966080; sleepy-device `confirm_timeout_s` will roll back a good
+**Known spec bugs sitting in `open-questions.md`:** `prd.md` “≤ 1.9 MB” versus
+`ota_slot_size` 1966080. Sleepy-device `confirm_timeout_s` will roll back a good
 image (called out in the ESPHome review at `products/docs/esphome-review.md`,
 not yet in spec).
 
@@ -146,7 +146,7 @@ currently tell what to *do*.
 | Hosted Compose stack, one origin, admin auth | Live |
 | Enrollment tokens, `POST /v1/enroll`, per-device MQTT creds + pattern ACLs | Live |
 | Web Serial flasher, chip detect, baked Wi-Fi + token | Live (Chromium only) |
-| Serial console as diagnostic surface, fault naming, diagnostic bundle | Live (software; hardware unverified) |
+| Serial console as diagnostic surface, fault naming, diagnostic bundle | Live (software, hardware unverified) |
 | Prebuilt agent (esp32/s3/c3/c6), A/B layout, rollback-enabled bootloader | Shipped as artifacts |
 | Live fleet list over SSE | Live |
 | Artifact upload, signed-URL download with Range, `stage → apply` orchestration | Built, QEMU-proven |
@@ -158,7 +158,7 @@ currently tell what to *do*.
 
 R0 is not closed. The one board on hand brownouts during RF calibration
 (`S0-fw-3`). `R0-test-2` (the release’s “done when”) and `R1-test-1` cannot run.
-QEMU covers the transport; it does not cover the radio, the power rail, or a
+QEMU covers the transport. It does not cover the radio, the power rail, or a
 USB-CDC re-acquire. The product’s stated risk is onboarding, and onboarding is
 unproven on metal.
 
@@ -168,7 +168,7 @@ unproven on metal.
 |---|---|---|
 | **R2** ⭐ | Checksum + A/B auto-rollback, device-armed confirm | The reason to OTA a board in the attic |
 | R4 | Heartbeat metrics, last-seen, boot-ok | “Is it alive?” |
-| R5 | Custom self-test at confirm | “Boots but the display is garbage” |
+| R5 | Custom self-test at confirm | “Boots but the show is garbage” |
 | R6 | App-level signing, resumable download, two KPIs | Production-grade, still one layer of defense |
 
 *(Numbering as of the 2026-09-22 renumber: R3 is now the OTA library this review
@@ -176,7 +176,7 @@ recommends, and the rest of the v1 ladder shifted by one. `docs/releases.md` is 
 current ladder.)*
 
 R2 is correctly identified as the whole gamble. Until it ships, the dashboard’s
-Deploy button is a brick factory. `TODO.md` already warns this; a hobbyist will
+Deploy button is a brick factory. `TODO.md` already warns this. A hobbyist will
 click it anyway.
 
 ### Explicitly out of scope for v1 — and this is where hobbyists live
@@ -194,7 +194,7 @@ From `prd.md` and the feature files:
 - Remote shell, logs beyond 7 days, alerting
 
 Some of those refusals are load-bearing (config-management would eat the
-product; ESPHome is the existence proof). Some are sequencing. Some are a
+product, ESPHome is the existence proof). Some are sequencing. Some are a
 hobbyist-shaped hole.
 
 ### Competitive position
@@ -233,7 +233,7 @@ firmware, Fleetforge is a very good demo of itself.
 keeps broker URL, Wi-Fi creds and enrollment token in a dedicated flash
 partition (`ff_cfg, data, 0x40, 0x12000, 0x1000` in `agent/partitions.csv`),
 written by the browser flasher. A hobbyist who drops the library into a sketch
-and flashes from the Arduino IDE **has no `ff_cfg` partition** — the config has
+and flashes from the Arduino IDE **has no `ff_cfg` partition**. The config has
 nowhere to land, and overwriting a custom partition table is the classic
 Arduino-IDE failure. So the release opens with a decision, not with extraction:
 
@@ -263,7 +263,7 @@ no implicit dashboard coupling) — which is what the thin waist claimed to be.
 
 Effort shape: R0-fw already wrote most of the C. The missing work is packaging,
 Arduino glue, docs, and a “first custom firmware” CUJ. That is a release. It
-should have a feature file.
+must have a feature file.
 
 ### 2. Safe deploy: auto-rollback **plus** safe-mode (R2, extended)
 
@@ -272,21 +272,21 @@ in a roof weather station, a crawlspace sensor, or a frame behind glass **only**
 if a bad `.bin` comes back by itself.
 
 Ship R2 as planned (checksum, device-armed confirm,
-`esp_ota_mark_app_valid_cancel_rollback`, dashboard `good` vs `rolled-back`).
+`esp_ota_mark_app_valid_cancel_rollback`, dashboard `good` versus `rolled-back`).
 Then add the layer ESPHome has and Fleetforge does not:
 
 **`safe_mode`** — but it is *two* features with very different costs, and they
 must not be scoped as one:
 
 - **(a) The app bricks itself** — boots, then loops or crashes before MQTT. A/B
-  does not cover this, and it is the common case. ESPHome's answer needs no new
+  does not cover this. It is the common case. ESPHome's answer needs no new
   partition: an NVS flag plus a boot counter reboots **the same image** into a
   reduced mode — serial + net + OTA only, held open for a few minutes,
   enterable by mashing reset. New `up/status` state: reachable, degraded, still
   updatable. Today that board looks dead. **Cheap, touches no flash-time
   immutable — ship it with R2.**
 - **(b) Both slots are bad** — cannot be solved inside the image, by
-  definition. It needs a recovery app partition, and `ab-4m-v1` refuses one on
+  definition. It needs a recovery app partition. `ab-4m-v1` refuses one on
   purpose (`agent/partitions.csv`: *“No `factory` partition on purpose: a
   factory-only board can never OTA its way to A/B”*). The map is also full:
   `0x20000 + 2 × 0x1E0000 = 0x3E0000`, ~128 KB spare on a 4 MB part. Per
@@ -312,16 +312,16 @@ eventually hits.
 
 The problem statement is “devices they can’t easily reach.” The v1 provisioner
 is **USB config flash**. A Wi-Fi change is a reflash. That makes the second
-operation — the one that happens after you install the thing — require the same
-physical access the product exists to remove.
+operation (the one that happens after you install the thing) require the same
+physical access the product exists to delete.
 
 Hobbyist reality: the board moves from the desk AP to the house AP to a travel
-router; the PSK rotates; the device is in a box, a garden, a frame, a vehicle.
+router. The PSK rotates. The device is in a box, a garden, a frame, a vehicle.
 ESPHome and WLED solved this years ago with Improv (Apache-2.0, serial and BLE).
 The ESPHome review already recommended it for the enrollment `next_url`
 handoff. Use it for the *repeat* path too.
 
-What a hobbyist should be able to do:
+What a hobbyist must be able to do:
 
 1. Phone or Chromium talks to the board over BLE (or the serial console already
    on the flash page).
@@ -337,7 +337,7 @@ them — so either the agent gains a `ff_cfg` write path, or credentials move to
 NVS. Settle that before scoping.
 
 **Split serial from BLE.** Serial Improv reuses the Web Serial code already on
-the flash page and is nearly free; BLE is the larger, separate half and is what
+the flash page and is nearly free. BLE is the larger, separate half and is what
 buys the phone-in-the-garden story. They are two tasks, not one.
 
 Remembered flash profiles (SSID + token scope, not the PSK in the browser) are
@@ -347,7 +347,7 @@ repeat path deserves its own design. Yes. Ten identical controllers is a more
 common hobbyist fleet than five different research projects.
 
 This stays inside the product boundary: it provisions **the link the agent
-needs**, not application config. SoftAP can wait; Improv is the one the
+needs**, not application config. SoftAP can wait. Improv is the one the
 community already knows.
 
 ---
@@ -356,12 +356,12 @@ community already knows.
 
 | Feature | Why it is not #1–#3 | When it starts to matter |
 |---|---|---|
-| **Home Assistant add-on + MQTT Discovery `update` entities** | Cheap *after* the API exists; does not help you write firmware or recover a brick | The week you want other hobbyists to try it. ESPHome’s entire distribution *is* HA. |
-| **Self-host Compose on a Pi** | v1 is hosted-for-one by design; TLS-without-DNS is the real unsolved piece | The moment a second person runs it. Hobbyists will not send device traffic to someone else’s domain. |
+| **Home Assistant add-on + MQTT Discovery `update` entities** | Cheap *after* the API exists. Does not help you write firmware or recover a brick | The week you want other hobbyists to try it. ESPHome’s entire distribution *is* HA. |
+| **Self-host Compose on a Pi** | v1 is hosted-for-one by design. TLS-without-DNS is the real unsolved piece | The moment a second person runs it. Hobbyists will not send device traffic to someone else’s domain. |
 | **CLI / batch flasher** | v1 enroll is one-board, Chromium-only | ~10 boards of the same build (LED controllers, sensors). |
-| **ESPHome `managed-lite` adapter** (serve a poll manifest) | Distribution play, not a core capability; MD5-only, 6 h latency, no safe-window | Instant fleet from people who already have ESPHome nodes. |
-| **git-tag → artifact (R6–R7)** | Nice once OTA is trusted; hobbyists already have a `.bin` | When the library exists and they are tired of the upload button. |
-| **Server-side compile (R9)** | Reverses a v1 non-goal; ACE risk; ESPHome already owns this niche | Only if you want “no toolchain on the laptop.” Do not let it become per-device compile. |
+| **ESPHome `managed-lite` adapter** (serve a poll manifest) | Distribution play, not a core capability. MD5-only, 6 h latency, no safe-window | Instant fleet from people who already have ESPHome nodes. |
+| **git-tag → artifact (R6–R7)** | Nice once OTA is trusted. Hobbyists already have a `.bin` | When the library exists and they are tired of the upload button. |
+| **Server-side compile (R9)** | Reverses a v1 non-goal. ACE risk. ESPHome already owns this niche | Only if you want “no toolchain on the laptop.” Do not let it become per-device compile. |
 
 ---
 
@@ -372,7 +372,7 @@ community already knows.
   schema is enough.
 - **Groups as a *release*.** Tags on enrollment tokens already exist. Bulk
   deploy of identical artifacts starts to matter around board #8, not at V3. A
-  thin “deploy this `.bin` to these checkboxes” is a hobbyist feature; a
+  thin “deploy this `.bin` to these checkboxes” is a hobbyist feature. A
   hierarchical drone mesh is not.
 - **Application config through `dn/cfg`.** Correct refusal. That path turns
   this into a worse ESPHome. If hobbyists need a setting, it belongs in their
@@ -407,15 +407,15 @@ then Improv reprovision, HA, self-host, V2 source-to-artifact
 slotted — it remains a recommendation, not a release.
 
 **Why the library comes after R2, not before it.** Section 3 calls today's
-Deploy button a brick factory, and that is the argument against shipping the
+Deploy button a brick factory. That is the argument against shipping the
 four-verb contract into other people's `setup()`/`loop()` first: a library is a
-multiplier on however safe deploy currently is. Handing it out before
+multiplier on but safe deploy currently is. Handing it out before
 auto-rollback exists spreads the unsafe path across custom firmware on boards
 nobody can reach — the exact failure the product exists to prevent. If the
 library must ship earlier for momentum, gate its documentation on rollback being
 live, and say so in the release.
 
-Until R2 exists, hobbyists should not push to anything they cannot unplug. Until
+Until R2 exists, hobbyists must not push to anything they cannot unplug. Until
 the library exists, every later release is features of a firmware the hobbyist
 did not write. Until Improv exists, “can’t easily reach” is only true for the
 first flash.
@@ -431,7 +431,7 @@ other room can pick up.
 ## Related
 
 - [`docs/personas/PERSONAS.md`](personas/PERSONAS.md) — canonical persona descriptions and priority matrix
-- [`docs/SWARM.md`](SWARM.md) — mixed air/ground flock persona; gateway, coordinated apply, Pi+delta
+- [`docs/SWARM.md`](SWARM.md) — mixed air/ground flock persona. Gateway, coordinated apply, Pi+delta
 - [`docs/PLATFORMS.md`](PLATFORMS.md) — STM32 / FPGA / the ESP-shaped leaks in the waist
 - [`spec/prd.md`](../spec/prd.md) — users, scope, KPIs
 - [`docs/roadmap.md`](roadmap.md) — release ladder

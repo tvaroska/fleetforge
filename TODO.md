@@ -9,11 +9,10 @@ build is caught before the fleet, and any device that gets one recovers itself.
 **Works on metal** — device `94a990dd09a4`, an ESP32-S3, against prod (`bingo.tvaroska.sk`):
 
 - **Enroll** (R0, closed 2026-09-22). Browser flash → enrolled → live on the broker in
-  13 s, and `S0-test-3` passed an unaided run by someone who had never seen the code.
+  13 s. `S0-test-3` passed an unaided run by someone who never saw the code.
   Write-up: [docs/features/enrollment.md](docs/features/enrollment.md).
 - **OTA of the agent** (R1, `R1-test-1` passed 2026-09-23). A dashboard-driven deploy
-  took the board `0.3.2 → 0.3.1` in ~25 s. Getting there fixed three prod defects that had
-  made deploy impossible (`../docs/ops-log.md` F-2026-09-23-001/002/003, all deployed).
+  took the board `0.3.2 → 0.3.1` in ~25 s. Getting there fixed three prod defects that made deploy impossible (`../docs/ops-log.md` F-2026-09-23-001/002/003, all deployed).
   Write-up: [docs/features/ota-deploy.md](docs/features/ota-deploy.md).
 - **Auto-rollback of "boots, joins, never confirms"** (2026-09-23). A deliberately broken
   `0.3.2-rbtest` came back on 0.3.1 in 71 s, unattended
@@ -25,12 +24,12 @@ build is caught before the fleet, and any device that gets one recovers itself.
   `is_terminal: false` (R2-BE-1).
 - An image that boots, gets its announce acked and is broken anyway confirms itself and
   **nothing recovers it**. Roll to **one board at a time**.
-- No upload form in the dashboard (`docs/runbooks/upload-artifact.sh` is the only way in),
-  and every device has `name: null`. Neither has a task yet.
+- No upload form in the dashboard (`docs/runbooks/upload-artifact.sh` is the only way in).
+  Every device has `name: null`. Neither has a task yet.
 
-**Next: R2 — safe deploy (verify + auto-rollback).** Not opened yet. The CUJ-1 T3 gate
-blocked R1 → R2 on 2026-09-23 on segment 5; `S0-test-4` fixed the cause the same day and
-the gate's reproduction now converges, but **the gate itself has not been re-run**. First
+**Next: R2 — safe deploy (check + auto-rollback).** Not opened yet. The CUJ-1 T3 gate
+blocked R1 → R2 on 2026-09-23 on segment 5. `S0-test-4` fixed the cause the same day and
+the gate's reproduction now converges, but **the gate itself was not re-run**. First
 step: `/replan`, which re-runs it and, on a pass, opens R2 here. R2's task list is in
 [docs/features/ota-deploy.md](docs/features/ota-deploy.md) → *Phase 2* (R2-FW-3 and most
 of R2-TEST-1 already landed in R1). The flaky-Wi-Fi rollback spike is still open — same
@@ -38,10 +37,10 @@ file, *De-risking*.
 
 **Blocked:**
 
-- `S0-test-1` needs a bridge-chip board (CP2102/CH340); `S0-test-2` needs the S3 on the
+- `S0-test-1` needs a bridge-chip board (CP2102/CH340). `S0-test-2` needs the S3 on the
   bench. Both are hardware sessions, and the bench host is unsettled (see the ⚠️ notes).
 - **R3 (thin OTA library)** waits on R2 by decision
-  (`design/decisions/ota-library-ships-after-safe-deploy.md`); its task list lives in
+  (`design/decisions/ota-library-ships-after-safe-deploy.md`). Its task list lives in
   [docs/features/ota-library.md](docs/features/ota-library.md) until it opens.
 - **A dev box with pruned images cannot `just up`**: `minio/minio` and `minio/mc` no
   longer pull (`DECISIONS.md` 2026-10-01). No task filed yet.
@@ -62,7 +61,7 @@ attempted-but-failed. `spec/` and `design/` are status-free.
 > Completed work: [docs/features/](docs/features/) · Decisions: `DECISIONS.md`
 
 > **Task IDs:** fleetforge is release-driven, so IDs are `R{N}-{category}-{number}`
-> (e.g. `R0-be-1`). Sprint 0 uses `S0-{category}-{number}`.
+> (for example,`R0-be-1`). Sprint 0 uses `S0-{category}-{number}`.
 > Categories: db, be, fe, test, qa, sec, infra, fw, spec, rel, perf, ops.
 
 **Deployment (v1):** single hosted instance at `bingo.tvaroska.sk` (domain reused from
@@ -76,9 +75,9 @@ the retired bingo app), single-tenant, **not a public product until V3**.
 
 Bricking risks, broker auth and security issues get filed here as they surface.
 
-- [ ] **S0-test-1**: Bench-verify the serial console on real hardware (P1, 0.5d)
+- [ ] **S0-test-1**: Bench-check the serial console on real hardware (P1, 0.5d)
       Filed 2026-09-10, when S0-fe-1 shipped. Its software half is proven in jsdom against
-      replays of real `agent/main/*.c` output; these four cannot be, because they are
+      replays of real `agent/main/*.c` output. These four cannot be, because they are
       properties of a USB bridge chip and an OS, not of the classifier. The bench is
       Windows + Chrome (settled 2026-10-02) — the Linux dev box does not enumerate boards
       over WebSerial.
@@ -88,24 +87,24 @@ Bricking risks, broker auth and security issues get filed here as they surface.
         available to watch". The native-USB half of this check is **S0-test-2** — no
         C3/C6/S3 board is on hand (2026-09-11).
       * **115200 decodes cleanly.** `sdkconfig.defaults` sets no
-        `CONFIG_ESP_CONSOLE_UART_BAUDRATE` so this should be right, but a wrong baud
-        yields plausible-looking mojibake rather than an error, and the classifier would
+        `CONFIG_ESP_CONSOLE_UART_BAUDRATE` so this must be right, but a wrong baud
+        yields plausible-looking mojibake rather than an error. The classifier would
         then silently match nothing.
       * **The EN pulse boots the app, not the ROM loader.** `SerialConsole.reboot()`
         drives RTS high with DTR low. If the wiring inverts, the board lands in download
         mode and prints `waiting for download` forever.
       * **Release really releases.** After the button, the COM port must open in another
-        terminal (e.g. PuTTY, 115200). If it reports "Access denied" / port in use,
+        terminal (for example,PuTTY, 115200). If it reports "Access denied" / port in use,
         `port.close()` is not being reached.
       Acceptance: all four confirmed against **any** bridge-chip board (CP2102 or CH340) —
       retargeted 2026-09-23, since the DevKit v1 is out of consideration and this task
       tests the bridge-chip *path*, not that board. Anything that fails comes back as a
-      new S0 task with the observed behaviour.
-      The bench host is Windows + Chrome (settled 2026-10-02; earlier entries said the Mac).
+      new S0 task with the observed behavior.
+      The bench host is Windows + Chrome (settled 2026-10-02, earlier entries said the Mac).
       Re-acquire is an OS-and-driver property — record the driver and COM port used.
       * **Folded in from S0-fe-8 (accepted 2026-10-01 without a bench run).** On Windows,
         with the board's VCP driver *not* installed, an operator who has never installed one
-        reaches a working COM port using only "My board isn't listed" on the flash page:
+        reaches a working COM port using only "My board is not listed" on the flash page:
         no Device Manager, no asking. Also confirm that picking COM1 gets refused by name
         and that the Silicon Labs driver link resolves (the dev box gets a 403 from Akamai).
 
@@ -113,19 +112,19 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       Split from S0-test-1 on 2026-09-11: the only board on hand is an ESP32-DevKit v1,
       whose bridge chip keeps the port alive across `hard_reset`. That exercises the
       *easy* half. The 8 s `getPorts()` poll in `serialConsole.ts` exists for the parts
-      that come back as a **different** `SerialPort`, and nothing has ever tested it on
+      that come back as a **different** `SerialPort`. Nothing has ever tested it on
       metal — a too-short window shows "No board is available to watch" on a board that
       is merely rebooting, which is the exact false negative the console exists to
-      remove. ~~**Blocked on acquiring a C3, C6 or S3.**~~
-      **Unblocked 2026-09-22.** An **ESP32-S3** is on hand and has already enrolled against
+      delete. ~~**Blocked on acquiring a C3, C6 or S3.**~~
+      **Unblocked 2026-09-22.** An **ESP32-S3** is on hand and enrolled against
       prod — device `94a990dd09a4`, the board that passed `R0-test-2` on 2026-09-19. This
       task's premise ("the only board on hand is an ESP32-DevKit v1") is simply out of
       date. Cheap to run now, since the board is already flashed and known-good.
       Acceptance: on the bench, `hard_reset` from the console on a native-USB board
       reconnects inside the window and streams the boot log without operator action.
       The bench is **Windows + Chrome** (settled 2026-10-02): the S3 enrolled from it with
-      native USB on COM3. Earlier entries said the Mac; that is superseded. Record the
+      native USB on COM3. Earlier entries said the Mac. That is superseded. Record the
       driver and COM port used — the re-acquire window is an OS-and-driver property.
 
-- [x] **S0-test-3**: Someone who has not seen the code onboards a board unaided — passed 2026-09-22 → [enrollment.md](docs/features/enrollment.md)
+- [x] **S0-test-3**: Someone who did not see the code onboards a board unaided — passed 2026-09-22 → [enrollment.md](docs/features/enrollment.md)
 - [x] **S0-fw-3**: A board that browns out during RF calibration cannot escape it — withdrawn 2026-09-23, not fixed → [enrollment.md](docs/features/enrollment.md)

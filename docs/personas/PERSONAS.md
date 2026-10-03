@@ -15,7 +15,7 @@ and what makes or breaks the product for them.
 > sensor timing without crawling under the porch with a laptop and a micro-USB cable."*
 
 ### Context & Scale
-- **Fleet:** 3 to 15 boards (heterogeneous: e-paper display, garden sensors, LED matrix,
+- **Fleet:** 3 to 15 boards (heterogeneous: e-paper show, garden sensors, LED matrix,
   coop door controller).
 - **Environment:** Home Wi-Fi (single SSID/PSK), residential router, sporadic dead spots.
 - **Hardware:** ESP32-WROOM devkits, Xiao C3/S3, classic NodeMCU boards.
@@ -29,8 +29,8 @@ and what makes or breaks the product for them.
 - Easily change Wi-Fi credentials when moving a project from the desk to the shed.
 
 ### Pain Points & Blockers
-- **The "Demo Agent" Trap:** Cannot use Fleetforge if it requires running the stock C agent;
-  needs an embeddable Arduino/PlatformIO library that slips into existing `setup()` and `loop()`.
+- **The "Demo Agent" Trap:** Cannot use Fleetforge if it requires running the stock C agent.
+  Needs an embeddable Arduino/PlatformIO library that slips into existing `setup()` and `loop()`.
 - **Partition Wipeout:** Flashing via Arduino IDE over USB frequently overwrites custom
   partition tables unless a board definition or custom `partitions.csv` is packaged for them.
 - **Sleepy Node Rollback:** Battery-powered sensors that wake, sample, report, and sleep
@@ -63,10 +63,10 @@ and what makes or breaks the product for them.
 ### Core Goals
 - Safe, airtime-budgeted fleet updates in fully disconnected field conditions.
 - Zero risk of an airborne drone rebooting mid-flight or rolling back during a mission.
-- Fast delta updates that don't saturate the mission radio link during operations.
+- Fast delta updates that do not saturate the mission radio link during operations.
 
 ### Pain Points & Blockers
-- **Hosted Cloud Dependency:** A server that relies on Google Cloud Storage or public Let's
+- **Hosted Cloud Dependency:** A server that relies on Google Cloud Storage or public Let us
   Encrypt certificates is useless in a field with no internet.
 - **Simultaneous Reboot Crashes:** Group deploy that triggers simultaneous reboots will
   drop flying assets out of the sky or cause radio blackouts.
@@ -116,11 +116,11 @@ naturally fit the system without distorting its core boundaries:
 ---
 
 ### 3. Commercial Hardware OEM / Small IoT Team ("Marcus")
-*Building 50 to 500 connected commercial units (e.g., smart agriculture sensors, brewery monitors, HVAC controllers).*
+*Building 50 to 500 connected commercial units (for example, smart agriculture sensors, brewery monitors, HVAC controllers).*
 
 - **Profile:** Small startup (2–5 engineers). Sells physical products to non-technical customers.
   Devices are scattered across customer sites with varying firewall rules.
-- **Why Fleetforge fits:** They don't have the runway to build a custom OTA backend, but they
+- **Why Fleetforge fits:** They do not have the runway to build a custom OTA backend, but they
   refuse to pay $2–$5/device/month to vendor clouds (Particle, Balena, AWS IoT Device Management)
   which erodes their hardware margins.
 - **Key Needs:**
@@ -129,7 +129,7 @@ naturally fit the system without distorting its core boundaries:
   - Cryptographic artifact signing (R6) so compromised endpoints cannot flash rogue binaries.
   - Zero-touch factory provisioning: flashing an enrollment token at assembly, shipping
     the box to a customer who plugs it in, and having it auto-register.
-- **Distinction from Hobbyist:** Cannot accept Chromium-only Web Serial flashing; needs a
+- **Distinction from Hobbyist:** Cannot accept Chromium-only Web Serial flashing. Needs a
   **batch CLI flasher** for the assembly bench and an audit log of who deployed what version.
 
 ---
@@ -149,8 +149,8 @@ naturally fit the system without distorting its core boundaries:
   - Pre-flight simulation gate (R9) running Espressif QEMU in headless CI to reject crashing
     builds before touching hardware benches.
   - Software Bill of Materials (SBOM) and artifact signature verification.
-- **Distinction from Swarm Operator:** Doesn't care about field gateways or airframe deferral;
-  cares about automated gating, branch-to-fleet deployment policies, and reproducible toolchains.
+- **Distinction from Swarm Operator:** Does not care about field gateways or airframe deferral.
+  Cares about automated gating, branch-to-fleet deployment policies, and reproducible toolchains.
 
 ---
 
@@ -164,11 +164,11 @@ naturally fit the system without distorting its core boundaries:
   OTA updates over Wi-Fi/Ethernet are significantly faster and more reliable for daily test runs.
 - **Key Needs:**
   - High-throughput OTA updates (multiple test builds flashed per hour).
-  - Custom confirm hook (R5 self-test): Run an automated regression suite on the board;
-    if tests fail, auto-rollback and report failure back to the test harness.
+  - Custom confirm hook (R5 self-test): Run an automated regression suite on the board.
+    If tests fail, auto-rollback and report failure back to the test harness.
   - Device health telemetry: Free heap, crash counts, assert logs, and reset reasons.
   - Fast forced reboot / re-flash endpoints to recover hung boards.
-- **Distinction from OEM:** Devices are all on a controlled local network; physical damage
+- **Distinction from OEM:** Devices are all on a controlled local network. Physical damage
   to a board is annoying but not fatal. Speed of re-flashing and diagnostic reporting trumps
   battery sleep or safe-window deferral.
 

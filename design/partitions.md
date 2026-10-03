@@ -5,7 +5,7 @@
 changing any of it.
 
 This is the narrative owner for the flash layout. The **authoritative machine-readable
-copy is [`agent/partitions.csv`](../agent/partitions.csv)**; the wire form is
+copy is [`agent/partitions.csv`](../agent/partitions.csv)**. The wire form is
 [`device-protocol.md`](../spec/device-protocol.md) (`partition_layout`, `ota_slot_size`).
 Where this document and those two disagree, they are right and this is stale.
 
@@ -50,15 +50,15 @@ bootloader offset differs, and nothing in this repo hardcodes it.
 ### Why each row is the way it is
 
 - **No `factory` partition, deliberately.** A factory-only board can never OTA its way to
-  A/B — it would need a table rewrite, which OTA cannot do. Ship the full A/B map from
+  A/B. It would need a table rewrite, which OTA cannot do. Ship the full A/B map from
   the first USB flash even though nothing writes `ota_1` until R2.
   `make_manifest.py` refuses to emit a bundle whose decoded table contains one.
 - **Two slots of *equal* size.** `up/announce` reports a single `ota_slot_size`, and the
   server's pre-flight capability check compares an artifact against that one number. Slots
   of different sizes would make that check true for one slot and false for the other.
 - **`ff_cfg` reserved at R0, before its payload format existed.** A partition cannot be
-  added later, so the space had to be claimed before anyone knew exactly what went in it.
-- **`nvs` is guarded, not wiped.** The device credential obtained at enrollment lives
+  added later. Thus, the space had to be claimed before anyone knew exactly what went in it.
+- **`nvs` is guarded, not wiped.** The device credential got at enrollment lives
   here, and so does the RF calibration cache. The flasher proves it is not writing into
   `nvs` by parsing the table it is flashing in the same operation
   (`frontend/src/partitionTable.ts`) rather than by hardcoding `0x9000` — which would be
@@ -72,9 +72,9 @@ bootloader offset differs, and nothing in this repo hardcodes it.
 ## 2. The three flash-time immutables
 
 An OTA image writes *into* a partition. It cannot rewrite the table, add a partition, or
-change a bootloader build-time option. Three things are therefore fixed at first USB
+change a bootloader build-time option. Three things are thus fixed at first USB
 flash — get one wrong and every deployed board needs physical retrieval, which is the
-exact intervention this product exists to remove. Full rationale in
+exact intervention this product exists to delete. Full rationale in
 [`architecture.md`](architecture.md) → *Flash-time immutables*.
 
 | Immutable | Where | Value |
@@ -88,8 +88,8 @@ Two notes that are easy to get backwards:
 - **Anti-rollback is off because it would block R2.** It burns a monotonic version
   counter that forbids booting an older image — which is precisely what rollback does.
 - **Secure Boot v2 and R6's app-level signing are not interchangeable.** Secure Boot
-  burns a key digest to eFuse and needs a re-signed bootloader, so it can never be
-  enabled on already-deployed boards; it is post-v1 and new-devices-only. R6 verifies a
+  burns a key digest to eFuse and needs a re-signed bootloader. Thus, it can never be
+  enabled on already-deployed boards. It is post-v1 and new-devices-only. R6 checks a
   signature over the artifact in software, which is deliverable over OTA.
 
 Every safety option lives in the common `sdkconfig.defaults`, never in a per-target file.
@@ -121,25 +121,25 @@ Payload keys, in emit order: `api_base`, `mqtt_uri`, `token`, `ssid`, `psk`, `li
 `ntp`, `hb_s`, `power`, `wake_s`. `api_base` and `mqtt_uri` are the two the firmware
 cannot invent a default for.
 
-**Three implementations, one contract:** `agent/tools/ff_cfg.py` (writer; its module
+**Three implementations, one contract:** `agent/tools/ff_cfg.py` (writer, its module
 docstring is the authoritative prose), `agent/main/ff_cfg.c` (firmware reader),
 `frontend/src/ffcfg.ts` (browser writer). `frontend/src/ffcfg.vector.json` is a golden
 vector both test suites assert against, ASCII-only on purpose — Python's `json.dumps`
-defaults to `ensure_ascii=True` and `JSON.stringify` does not, so a non-ASCII SSID
+defaults to `ensure_ascii=True` and `JSON.stringify` does not. Thus, a non-ASCII SSID
 produces different bytes from the two writers even though both decode to the same object.
-The contract is the decoded object; the vector can only pin bytes where they agree.
+The contract is the decoded object. The vector can only pin bytes where they agree.
 
-**Failure posture: loud and terminal.** Any error — bad CRC, wrong version, erased,
-missing key — makes the agent idle rather than fall back to a compiled-in default. A
-board that boots with a bad config and does nothing is diagnosable from its serial log;
-one that invents a server URL connects somewhere unexpected and is not.
+**Failure posture: loud and terminal.** Any error (bad CRC, wrong version, erased,
+missing key) makes the agent idle rather than revert to a compiled-in default. A
+board that boots with a bad config and does nothing is diagnosable from its serial log.
+One that invents a server URL connects somewhere unexpected and is not.
 
 ---
 
 ## 4. The same numbers, written down six times
 
 `0x1E0000` / `1966080` / `1920K` / `1.9 MB` appear in six places. Five of those copies are
-deliberate; one is a defect.
+deliberate. One is a defect.
 
 | Where | Form | Why it is a copy |
 |---|---|---|
@@ -148,20 +148,20 @@ deliberate; one is a defect.
 | `src/fleetforge/firmware/manifest.py` | `EXPECTED_OTA_SLOT_SIZE` | Server-side capability check. Retyped, not imported — the two ends of a contract must be able to disagree. |
 | `tests/test_agent_partitions.py` | literal | **The tripwire.** A test that imports the value it guards proves nothing. |
 | `docs/runbooks/agent-build.md` | `1920K` | Expected `gen_esp32part.py` decode, for eyeballing a build. |
-| `spec/prd.md` → *Requirements & targets* | `≤ 1.9 MB` | **Defect.** The rounded form reads as an independent second cap; it invites an implementation with two thresholds a few kilobytes apart and a rejection nobody can explain. Tracked in [`open-questions.md`](../spec/open-questions.md); the fix is to cite `ota_slot_size` instead. |
+| `spec/prd.md` → *Requirements & targets* | `≤ 1.9 MB` | **Defect.** The rounded form reads as an independent second cap. It invites an implementation with two thresholds a few kilobytes apart and a rejection nobody can explain. Tracked in [`open-questions.md`](../spec/open-questions.md). The fix is to cite `ota_slot_size` instead. |
 
 **Offsets, by contrast, are never typed.** ESP-IDF writes the authoritative
-`{offset: file}` map to `build/flasher_args.json`; `make_manifest.py` reads it and the
+`{offset: file}` map to `build/flasher_args.json`. `make_manifest.py` reads it and the
 manifest carries the numbers through untouched to the API, the browser flasher and the
 QEMU harness. `ota_slot_size` itself is decoded from the generated
-`partition-table.bin` — the table the bootloader will actually read — not copied from the
+`partition-table.bin` (the table the bootloader will actually read) not copied from the
 CSV that was its input.
 
 ### What enforces it
 
-- `tests/test_agent_partitions.py` — no toolchain needed; catches overlapping slots, a
+- `tests/test_agent_partitions.py` — no toolchain needed. Catches overlapping slots, a
   drifting slot size, a `factory` row creeping back, `ff_cfg` disappearing, the rollback
-  option dropped, any eFuse option turned on.
+  option dropped, any eFuse option enabled.
 - `just agent-verify <target>` — decodes the real `partition-table.bin` with IDF's own
   `gen_esp32part.py` and greps `sdkconfig.resolved`. Needs the IDF container, so it is not
   part of `just test`.
@@ -173,10 +173,10 @@ CSV that was its input.
 ## 5. The unallocated tail
 
 `0x3E0000`–`0x400000`, 128 KB, is unallocated on every board in the field. It is **not
-reserved for anything** — it is what is left after two 1920 KB slots. Recording it here
+reserved for anything**. It is what remains after two 1920 KB slots. Recording it here
 because it is the space any future in-flash recovery mechanism would want, and 128 KB is
 too small for a usable recovery app. A both-slots-bad recovery partition does not fit on
-`ab-4m-v1` and cannot be retrofitted; see [`docs/HOBBYIST.md`](../docs/HOBBYIST.md) §4.2
+`ab-4m-v1` and cannot be retrofitted. See [`docs/HOBBYIST.md`](../docs/HOBBYIST.md) §4.2
 for what that rules in and out.
 
 ---
@@ -185,7 +185,7 @@ for what that rules in and out.
 
 **A new layout is a new id** (`ab-4m-v2`, `ab-8m-v1`, …) plus an entry in
 `SUPPORTED_LAYOUTS` plus a `device-protocol.md` change — **never an edit to an existing
-row.** Boards already flashed keep `ab-4m-v1` until someone physically retrieves them, so
+row.** Boards already flashed keep `ab-4m-v1` until someone physically gets them. Thus,
 both layouts must be supported simultaneously, and the layout version is what lets the
 server detect and quarantine a board carrying a superseded one.
 
@@ -201,8 +201,8 @@ Procedure for the build side: [`runbooks/agent-build.md`](../docs/runbooks/agent
 ## 7. Reproducing this layout outside the agent build
 
 Everything above describes boards flashed from a Fleetforge agent bundle. Anyone
-embedding the protocol in their **own** firmware — the thin OTA library named in
-[`prd.md`](../spec/prd.md) — has to reproduce it, and the current design assumes they
+embedding the protocol in their **own** firmware (the thin OTA library named in
+[`prd.md`](../spec/prd.md)) has to reproduce it, and the current design assumes they
 will not by accident.
 
 To announce `"partition_layout": "ab-4m-v1"` truthfully, a build must have:
@@ -211,18 +211,18 @@ To announce `"partition_layout": "ab-4m-v1"` truthfully, a build must have:
 2. A custom partition table byte-identical to §1 — including `ff_cfg` at `0x12000` with
    subtype `0x40`, and no `factory` row.
 3. `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`, which is a **bootloader** option and
-   therefore cannot be added later.
+   thus cannot be added later.
 4. None of the three eFuse options enabled.
 
 Anything short of that is a different layout and must announce a different id. The server
-accepts only the ids in `SUPPORTED_LAYOUTS`, and a deploy only matches equal ids, so a
+accepts only the ids in `SUPPORTED_LAYOUTS`, and a deploy only matches equal ids. Thus, a
 mismatch is a rejected deploy, not a silent brick — which is the intended failure.
 
 **Arduino gets its own layout id: `ab-4m-arduino-v1`.** An Arduino IDE build uses a board
 definition's own partition scheme, and its upload recipe cannot reach `ab-4m-v1`'s offsets.
 So the library ships the stock `min_spiffs` map plus a 4 KB `ff_cfg` at `0x3D0000`, under
-a new id rather than an edit to this one. The slot size is the same (1,966,080 B), so the
-upload cap does not change; only offsets differ, and the agent finds `ff_cfg` by subtype
+a new id rather than an edit to this one. The slot size is the same (1,966,080 B). Thus, the
+upload cap does not change. Only offsets differ, and the agent finds `ff_cfg` by subtype
 `0x40`, not by address. The NVS-backed config path was rejected. See
 [`decisions/arduino-gets-its-own-layout-id.md`](decisions/arduino-gets-its-own-layout-id.md)
 (measurements in its Appendix) and `spec/device-protocol.md` → *Partition layouts*.
@@ -240,6 +240,6 @@ compares `partition_layout` by equality.
 - [`spec/device-protocol.md`](../spec/device-protocol.md) — `partition_layout` and
   `ota_slot_size` on the wire
 - [`CRITICAL.md`](../CRITICAL.md) — escalation rules for these paths
-- [`runbooks/agent-build.md`](../docs/runbooks/agent-build.md) — building and verifying a bundle
+- [`runbooks/agent-build.md`](../docs/runbooks/agent-build.md) — building and checking a bundle
 - [`runbooks/agent-qemu.md`](../docs/runbooks/agent-qemu.md) — booting a flash image with a
   generated `ff_cfg`

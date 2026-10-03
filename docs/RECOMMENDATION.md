@@ -34,7 +34,7 @@ What actually works on metal, as of 2026-09-23:
 - Dashboard Deploy of an *agent* `.bin` → version changes (~25 s)
 - One brick mode recovers itself: boots, joins, never gets announce acked → rolls back in
   71 s — on an `FF_ROLLBACK_TEST` build, where `CONFIRM_TIMEOUT_S` is 60 rather than the
-  shipped 300 (`ff_mqtt.c:56-63`). The mechanism proved is the real one; the wait is not.
+  shipped 300 (`ff_mqtt.c:56-63`). The mechanism proved is the real one. The wait is not.
 
 That is a complete demo of Fleetforge. It is not a product Alex can put in a chicken coop.
 
@@ -63,12 +63,12 @@ touch:
   of work is a `.bin` from the IDE. The path from that file to a board is curl + admin
   password on stdin.
 - **No device naming, no tags, no “this is the coop door.”** Flow 1 step 7 is in the
-  spec; `GET /v1/devices` returns `name: null` and there is no PATCH. The fleet table is
+  spec. `GET /v1/devices` returns `name: null` and there is no PATCH. The fleet table is
   a list of 12-hex MACs.
 - **README still says the agent, the flasher, and OTA do not exist.** A second person
   (or future-you) bounces before they find `TODO.md`.
 
-R3 is correctly sequenced *after* R2 — a library is a multiplier on however safe deploy
+R3 is correctly sequenced *after* R2. A library is a multiplier on but safe deploy
 currently is. That does not make the gap smaller. Until the four verbs live in
 `setup()`/`loop()`, every later release is a feature of firmware Alex did not write.
 
@@ -91,14 +91,14 @@ From `TODO.md` after `R1-test-1`:
 | Boots, joins, never confirms | **Proven** 2026-09-23 (`confirm_timeout_cb` on metal) |
 | Boots, announce is acked, app is broken anyway | **Confirms itself. No automatic recovery.** This is the residual gamble. |
 
-That third case is the common one: a null deref in `loop()`, a display that comes up
+That third case is the common one: a null deref in `loop()`, a show that starts
 garbage, a sensor that never reads. Confirm is “broker accepted the announce,” not “the
-thing you care about works.” R5’s custom self-test is what closes it; R2 as specified
+thing you care about works.” R5’s custom self-test is what closes it. R2 as specified
 does not.
 
 Worse, the parts of R2 that *are* specified will fail a v1 board:
 
-- **Sleepy confirm is a 300 s wall clock.** `CONFIRM_TIMEOUT_S` is compile-time 300;
+- **Sleepy confirm is a 300 s wall clock.** `CONFIRM_TIMEOUT_S` is compile-time 300.
   `confirm_timeout_s` on the command is parsed and **ignored** (`ff_mqtt.c`). The PRD’s
   e-paper “wakes, refreshes, sleeps” will roll back a perfect image. ESPHome already
   burned this (`boot_is_good_on_shutdown`). It is in the persona pain list. It is not
@@ -113,7 +113,7 @@ Worse, the parts of R2 that *are* specified will fail a v1 board:
   `{"state": "rebooting", "is_terminal": false}` and stayed there. Nothing writes
   `CONFIRMED` — `TERMINAL_DEPLOY_STATES` lists it (`db/models.py:172`) and no code path
   reaches it, because confirm reporting is `R2-be-1`/`R2-fw-3`.
-- **Integrity is done; provenance is not.** `ff_ota` reads the written slot back,
+- **Integrity is done. Provenance is not.** `ff_ota` reads the written slot back,
   sha256s it from flash, and refuses to boot into a mismatch (`ff_ota.c:100`, `:422`) —
   the strong version of the check, not the download-stream one. What is missing is any
   reason to trust the digest: nothing proves the `stage` command came from you. That is
@@ -121,7 +121,7 @@ Worse, the parts of R2 that *are* specified will fail a v1 board:
 
 The 2026-09-23 session is the same shape as a product gap, not just an ops finding:
 Deploy had **never worked on prod** (`ARTIFACT_URL_SECRET` / `PUBLIC_BASE_URL` unwired),
-`mosquitto-init` has never reached the running broker, and `/v1/healthz` was green the
+`mosquitto-init` has never reached the running broker. `/v1/healthz` was green the
 whole time. For a hosted-for-one v1, the operator *is* the user. A control plane that
 reports healthy while the only path that matters is broken is how you brick a board you
 cannot walk to.
@@ -132,11 +132,11 @@ mode at least named — Deploy on a board in the attic is still a bet.
 
 ---
 
-## Gap 3 — After the first flash, the product still needs the USB cable it exists to remove
+## Gap 3 — After the first flash, the product still needs the USB cable it exists to delete
 
 The problem statement is devices they cannot easily reach. The v1 provisioner is USB
-config flash. A Wi-Fi change is a reflash. That makes the *second* operation — the one
-that happens after you install the thing — require the same physical access the product
+config flash. A Wi-Fi change is a reflash. That makes the *second* operation (the one
+that happens after you install the thing) require the same physical access the product
 exists to eliminate.
 
 Alex’s actual life with 3–15 boards:
@@ -147,7 +147,7 @@ Alex’s actual life with 3–15 boards:
    `spec/open-questions.md` already asks whether the repeat path deserves its own
    design. Yes.
 3. The only flash path is Web Serial, Chromium, one click, HTTPS. Firefox/Safari cannot
-   onboard. There is no CLI. Marcus and Sarah both list batch CLI as P0; Alex hits it
+   onboard. There is no CLI. Marcus and Sarah both list batch CLI as P0. Alex hits it
    the moment they are on a laptop that is not Chrome.
 
 Wi-Fi creds live in `ff_cfg`, a 4 KB partition the browser flasher writes at `0x12000`.
@@ -156,7 +156,7 @@ community answer and is not on the ladder — [`HOBBYIST.md`](HOBBYIST.md) recom
 `releases.md` did not slot it. SoftAP is post-v1 by decision.
 
 This is not “missing a nice-to-have provisioner.” It is the product claim failing on
-the second day. USB-once-then-OTA only holds if the *link* can be repaired without USB.
+the second day. USB-once-then-OTA only holds if the *link* can be fixed without USB.
 Today it cannot. Combined with gap 1 (you can only OTA the demo agent) and gap 2 (and
 only somewhat safely), the field loop is: crawl under the porch with a laptop anyway.
 
@@ -176,7 +176,7 @@ only somewhat safely), the field loop is: crawl under the porch with a laptop an
 The docs-as-engineering-system are unusually good (`spec/` protected, `DECISIONS.md`
 actually explains, protocol near-frozen and treated that way). They are also aimed at
 the builder. There is no operator manual for “flash a board, upload a `.bin`, recover
-from a brownout.” The dashboard is supposed to *be* that manual. It cannot be, while
+from a brownout.” The dashboard must *be* that manual. It cannot be, while
 Deploy hangs, Upload is a shell script, and the README says none of this exists.
 
 ---
@@ -193,7 +193,7 @@ Until then Fleetforge is a very good demo of Fleetforge.
 
 ## Related
 
-- [`docs/HOBBYIST.md`](HOBBYIST.md) — earlier hobbyist review (2026-09-21); this file
+- [`docs/HOBBYIST.md`](HOBBYIST.md) — earlier hobbyist review (2026-09-21). This file
   is a fresh read after R0 and R1 closed on metal
 - [`docs/personas/PERSONAS.md`](personas/PERSONAS.md) — canonical personas and priority
   matrix

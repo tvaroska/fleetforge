@@ -18,7 +18,7 @@ just stack-check           # parse both compose files
 ## Ports
 
 All host ports are overridable in `.env`. 80/443 are deliberately **not** published
-— this is a shared dev machine.
+. This is a shared dev machine.
 
 | Host port | Env var | Serves |
 |---|---|---|
@@ -34,7 +34,7 @@ The API has **no host port and no Traefik router**. The only way to reach it is
 what makes "no CORS" structural rather than configured.
 
 The broker has **no host port either**: everything goes through Traefik's `mqtt`
-entrypoint, so the dev path and the prod path are the same path.
+entrypoint. Thus, the dev path and the prod path are the same path.
 
 ## Broker authentication (R0-sec-1)
 
@@ -44,23 +44,23 @@ mechanisms, both consulted by the broker, and **allow wins**:
 | Mechanism | File | Decides |
 |---|---|---|
 | dynamic-security plugin | `/mosquitto/data/dynamic-security.json` (data volume) | *who exists* and what their password is — written by `POST /v1/enroll` |
-| `acl_file` | `mosquitto/acl` | *what anyone may do* — the two `%u` pattern rules |
+| `acl_file` | `mosquitto/acl` | *what anyone can do* — the two `%u` pattern rules |
 
 The ACL rules are **not** in a dynsec role: Mosquitto 2.0's plugin has no `%u`
 substitution (DECISIONS.md 2026-09-08). The `device` role exists and is deliberately
-empty — `createClient` requires a role name and nothing more.
+empty. `createClient` requires a role name and nothing more.
 
 Four credentials exist before any board enrolls, all created by
 `mosquitto/bootstrap.sh` in the `mosquitto-init` one-shot:
 
-| Username (`.env`) | Role | May |
+| Username (`.env`) | Role | Can |
 |---|---|---|
 | `MQTT_DYNSEC_USERNAME` (`ff-admin`) | dynsec `admin` | create clients, read `$SYS` — the API and the healthcheck |
 | `MQTT_INGESTOR_USERNAME` (`ff-ingestor`) | `ingestor` | subscribe/receive `ff/v1/d/+/up/#`, nothing else |
 | `MQTT_COMMAND_USERNAME` (`ff-commander`) | `commander` | send `ff/v1/d/+/dn/#` and nothing else — the API's deploy publisher (R1-be-2) |
 | a device id | `device` (empty) | write `ff/v1/d/<its own id>/up/#`, read `…/dn/#` |
 
-The commander may **not** subscribe or receive anything: the ingestor is the only
+The commander can **not** subscribe or receive anything: the ingestor is the only
 subscriber, and a leaked deploy credential must not be able to forge `up/status`. It is
 also a separate credential from `ff-admin` on purpose — the dynsec admin is broker-root
 over `$CONTROL`, which is not a privilege the deploy path needs.
@@ -76,10 +76,10 @@ It is deliberately not part of `just test` (that must not need a broker).
 ## Is deploy actually possible? (S0-infra-9)
 
 The api container's healthcheck is `/v1/readyz`, not `/v1/healthz`. It is `unhealthy`,
-and the body names the gap, while the database is unreachable **or** any
+and the body names the gap. Meanwhile, the database is unreachable **or** any
 deploy-mandatory setting is missing: the object store, `ARTIFACT_URL_SECRET`,
 `PUBLIC_BASE_URL`, `MQTT_COMMAND_*`. Because `frontend` waits for a healthy api, a gap
-also means the dashboard never comes up on a fresh `up`. Ask the API directly:
+also means the dashboard never starts on a fresh `up`. Ask the API directly:
 
 ```bash
 curl -s localhost:${FF_HTTP_PORT:-8080}/v1/readyz    # {"status":"not-ready","missing":[…]} on a gap
@@ -98,7 +98,7 @@ just deploy-check-prod     # the same, inside fleetforge-api on prod. Run after 
 Each half prints `SELFTEST OK` or exits non-zero with a diagnosis. Both 2026-09-23
 findings fail it (ops-log F-2026-09-23-001/002).
 
-## Publishing a test message
+## Publish a test message
 
 ```bash
 # As the dynsec admin (the default): fine for reading, useless for writing up/*.
@@ -113,7 +113,7 @@ docker compose logs -f ingestor    # the ingestor is the only subscriber
 ```
 
 **The admin credential cannot publish a device's `up/*`.** The `%u` patterns bind to
-the *username*, and `ff-admin` is not a device id — so `just mqtt-pub` without the
+the *username*. `ff-admin` is not a device id — so `just mqtt-pub` without the
 last two arguments connects fine and is then **silently dropped**. See failure 5.
 
 To hand-send a command the way the API does, use the commander credential — the admin
@@ -138,7 +138,7 @@ docker compose exec -T mosquitto sh -c "mosquitto_pub -V 5 -h 127.0.0.1 \
 #  => RC:135  Not authorized     (RC:0 or RC:16 = allowed)
 ```
 
-## Watching a device come online
+## Watch a device come online
 
 The ingestor only ever **updates** device rows — it never creates one, because the
 only way into the registry is a burned enrollment token (`POST /v1/enroll`, R0-be-4).
@@ -167,7 +167,7 @@ just mqtt-pub "ff/v1/d/$DEV/up/presence" '{"online":true}' 1 "$DEV" "$PW"  # ret
 psql -c "SELECT presence_reported FROM devices WHERE device_id='$DEV';"     # => t
 ```
 
-Watch the same thing the dashboard sees — the SSE stream (R0-be-5). Log in first;
+Watch the same thing the dashboard sees — the SSE stream (R0-be-5). Log in first.
 `curl` will not send the `Secure` session cookie over plain http, so take the token
 out of the `Set-Cookie` and use the bearer transport (same credential, R0-be-1):
 
@@ -206,15 +206,14 @@ Two results that look like bugs and are not: publishing for a device that is not
 `devices` logs *"ignoring message from unregistered or decommissioned device"* and
 creates nothing (that is the enrollment boundary), and a `docker compose restart
 ingestor` replays every **retained** `announce`/`presence` without moving `last_seen`
-— a replay is not evidence that a board is alive.
+. A replay is not evidence that a board is alive.
 
 The dev container has no `--reload`: after editing `src/`, run
 `docker compose restart ingestor`.
 
 ## Simulated boards (R0-test-1)
 
-Everything above is a board typed out by hand. `just sim` is the same six steps —
-enroll, connect, announce, presence, heartbeat, goodbye — run by a process, which is
+Everything above is a board typed out by hand. `just sim` is the same six steps (enroll, connect, announce, presence, heartbeat, goodbye) run by a process, which is
 how the fleet view, the SSE stream and the presence rules get exercised before
 R0-fw-1 exists. It needs the stack up and an enrollment token, exactly like a real
 board does.
@@ -233,7 +232,7 @@ just sim --token "$(newtoken)" --name blinker --heartbeat-interval 5 --duration 
 #  goodbye  ff/v1/d/2ea26f5ddc68/up/presence {"online":false} (qos 1, retain)
 ```
 
-The `device_id` is derived from `--name` (stable across runs, and a *locally
+The `device_id` comes from `--name` (stable across runs, and a *locally
 administered* MAC, so it can never collide with real silicon). The board's broker
 password is written to `.sim/<device_id>.json`, mode 0600 — **that file is the only
 copy**, exactly like the NVS on a real board, so the second run needs no token:
@@ -244,7 +243,7 @@ just sim --name blinker --forget …          # deliberately re-enroll (needs a 
                                             #   or the same one inside the 600 s grace window)
 ```
 
-`.sim/` is gitignored. It holds live fleet credentials; treat it like a key file, and
+`.sim/` stays in .gitignore. It holds live fleet credentials. Treat it like a key file, and
 if you delete one, that board needs a fresh single-use token.
 
 Things worth simulating that are awkward by hand:
@@ -283,11 +282,11 @@ is burned). A traceback is a bug.
 
 ## Failures you will actually hit
 
-**1. Traefik returns 404 for the dashboard, but the container is up.**
+**1. Traefik returns 404 for the dashboard. But the container is up.**
 Traefik silently skips containers that are not `healthy`. Check
 `docker inspect fleetforge-frontend --format '{{json .State.Health}}'`. Two probes
-have already been fixed this way: `node:22-slim` ships neither `wget` nor `curl`,
-and nginx listens on IPv4 only, so a probe against `localhost` resolves to `::1`
+were already fixed this way: `node:22-slim` ships neither `wget` nor `curl`,
+and nginx listens on IPv4 only. Thus, a probe against `localhost` resolves to `::1`
 and is refused. Use `127.0.0.1` in container healthchecks.
 
 **2. Traefik returns 502 and the container is healthy.**
@@ -297,12 +296,12 @@ frontend, `fleetforge_backend` for mosquitto).
 
 **3. The API cannot reach Postgres: "connection refused" on `localhost:5433`.**
 Somebody added `env_file: .env` to a service. `.env` holds the **host** database
-URL; containers get `postgres:5432` set explicitly in `docker-compose.yml`, and
+URL. Containers get `postgres:5432` set explicitly in `docker-compose.yml`, and
 pydantic-settings gives real environment variables precedence over `.env` values.
-Remove the `env_file:`.
+Delete the `env_file:`.
 
 **4. "port is already allocated".**
-5432 belongs to `bridge-postgres`. Override the `FF_*_PORT` values in `.env`;
+5432 belongs to `bridge-postgres`. Override the `FF_*_PORT` values in `.env`.
 Postgres itself stays on 5433 because alembic, pytest and `just db-up` all assume it.
 
 **5. Something MQTT does not work, and nothing says why.** Three distinct symptoms:
@@ -315,17 +314,17 @@ enrolled during the `NullProvisioner` era (see below), or somebody wiped the
 
 *A publish that "succeeds" and never arrives* — authorization. **In MQTT 3.1.1 there
 is no reason code**: paho reports success and the broker drops the message. Neither
-does the broker log say so at the default log level — `Denied PUBLISH` is
+does the broker log say so at the default log level. `Denied PUBLISH` is
 `MOSQ_LOG_DEBUG` in 2.0.22 and `mosquitto.conf` enables only
-error/warning/notice/information (turning on `log_type debug` logs every topic; not
+error/warning/notice/information (enable `log_type debug` logs every topic, not
 worth it). Get the truth with `mosquitto_pub -V 5 -d` from **inside** the container
 (recipe above): `RC:135` is the denial. The usual cause is publishing as the dynsec
 admin instead of as the device, or a topic under another device's id.
 
 *`Error saving Dynamic security plugin config` / `not writable`* — ownership.
-`dynamic-security.json` must be `mosquitto:mosquitto` `0600`; root-owned, the plugin
+`dynamic-security.json` must be `mosquitto:mosquitto` `0600`. Root-owned, the plugin
 applies enrollments **in memory only** and loses every device credential on the next
-restart while the API reports success. `mosquitto/bootstrap.sh` fixes it; verify with
+restart while the API reports success. `mosquitto/bootstrap.sh` fixes it. Check with
 `docker compose exec -T mosquitto ls -l /mosquitto/data/dynamic-security.json` and
 `docker compose logs mosquitto | grep -ci "not writable"` (must be `0`).
 
@@ -334,9 +333,9 @@ Two lines in the broker log are **expected and harmless**: `chown:
 mount from the repo, on purpose) and the matching "world readable / owner is not
 mosquitto" warnings about that file.
 
-**5b. A device enrolled before R0-sec-1 cannot connect, and cannot be repaired.**
+**5b. A device enrolled before R0-sec-1 cannot connect, and cannot be fixed.**
 Those enrollments ran through `NullProvisioner`: the broker never stored a
-credential, and the password only ever existed in the enrollment response, so the
+credential, and the password only ever existed in the enrollment response. Thus, the
 server cannot re-provision one the board would know. Find them with `SELECT device_id
 FROM devices WHERE broker_provisioned_at IS NULL` — the only fix is re-enrollment
 with a fresh `ffe_` token.
@@ -349,9 +348,9 @@ application_name, state FROM pg_stat_activity WHERE
 application_name='fleetforge-events';"` — expect one row **per api worker**, `idle`.
 Then `docker compose logs api | grep ff_events`: `listening on ff_events` at startup,
 and a reconnect warning for every blip since. If psql *does* see the notification
-(bisect above) and the stream does not, it is the API; if neither does, it is the
+(bisect above) and the stream does not, it is the API. If neither does, it is the
 ingestor or the broker. Note that a reconnect deliberately **ends every open stream** —
-the client is expected to reconnect and re-read `GET /v1/devices`.
+the client must reconnect and re-read `GET /v1/devices`.
 
 **7. The frontend container fails to start after a `package.json` change.**
 The dev `node_modules` lives in the `ff_node_modules` named volume, seeded once from
@@ -361,9 +360,9 @@ fleetforge_ff_node_modules` after `just down`.
 ## Host workflow (no stack required)
 
 `just db-up` starts Postgres alone, which is all `just migrate` and `just test`
-need. Keep it that way: no test may shell out to `docker compose`.
+need. Keep it that way: no test can call to `docker compose`.
 
-### Setting the admin password
+### Set the admin password
 
 `.env.example` ships a working dev value: the argon2id hash of the obviously-fake
 password **`fleetforge-dev-only`**. `cp -n .env.example .env` and login works out of
@@ -379,7 +378,7 @@ Paste the printed line into `.env` **exactly as printed — single-quoted**:
 ADMIN_PASSWORD_HASH='$argon2id$v=19$m=19456,t=2,p=1$...'
 ```
 
-Then `just up` and verify the container actually received it:
+Then `just up` and check the container actually received it:
 
 ```bash
 docker compose config | grep -i ADMIN_PASSWORD_HASH
@@ -394,7 +393,7 @@ login returns 401 with nothing in the logs to explain it**. `python-dotenv` stri
 the surrounding single quotes, so the one quoted line serves both the host process
 and compose interpolation.
 
-The value is a *hash*, never a password, and the API cannot recover the plaintext
+The value is a *hash*, never a password. The API cannot recover the plaintext
 from it — losing the password means minting a new hash. Production sets its own in
 `services/prod/.env` (ask before changing that file). Without the variable, the
 `api` service refuses to start (`${ADMIN_PASSWORD_HASH:?…}`) — deliberately, since a
@@ -414,10 +413,10 @@ The cookie value *is* an ordinary admin token: the same string works as
 is a 401, with no restart and no waiting.
 
 Five failed logins in 60 s from one client IP (or 30 across all of them) return 429
-until the window passes; the counter is per API process, so `docker compose restart
+until the window passes. The counter is per API process, so `docker compose restart
 api` clears it.
 
-### Setting the artifact download secret (R1-be-3)
+### Set the artifact download secret (R1-be-3)
 
 `ARTIFACT_URL_SECRET` is mandatory in compose, so on an existing `.env` that predates
 R1-be-3 **`just up`, `just minio-up` and `just stack-check` all fail** with:
@@ -436,9 +435,9 @@ just artifact-secret        # prints 32 bytes of hex; paste into .env
 ```
 
 `.env.example` ships an obviously-fake value that works for dev. The secret is the HMAC
-key behind the **public** `GET /v1/artifact/{sha256}/bin` endpoint — the signature in the
-link is the board's only credential — so there is deliberately no default in compose.
-`PUBLIC_BASE_URL` is the origin a *device* must reach; the host copy in `.env` is what
+key behind the **public** `GET /v1/artifact/{sha256}/bin` endpoint (the signature in the
+link is the board's only credential) so there is deliberately no default in compose.
+`PUBLIC_BASE_URL` is the origin a *device* must reach. The host copy in `.env` is what
 `just artifact-url <sha256>` signs with, and the container's copy comes from
 `FF_PUBLIC_BASE_URL` (default `http://localhost:${FF_HTTP_PORT}`). Rotating the secret
 invalidates every link in flight — at most `SIGNED_URL_TTL_S` of staged deploys, which
@@ -464,18 +463,18 @@ Full details, the GCS side and the provisioning recipe:
 [artifact-storage.md](artifact-storage.md).
 
 **The signed URL's host is `localhost:9000`, never `minio:9000`.** A presigned S3 URL
-signs the `Host` header, so the URL cannot be rewritten after signing — which is why the
+signs the `Host` header. Thus, the URL cannot be rewritten after signing — which is why the
 `api` service sets *two* endpoints: `S3_ENDPOINT_URL=http://minio:9000` for its own I/O
-and `S3_PUBLIC_ENDPOINT_URL=http://localhost:${FF_MINIO_PORT}` for the URLs it hands out.
-Run the selftest inside the container and it says it could not fetch the URL it printed:
+and `S3_PUBLIC_ENDPOINT_URL=http://localhost:${FF_MINIO_PORT}` for the URLs it issues.
+Run the selftest inside the container and it says it could not get the URL it printed:
 
 ```bash
 docker compose exec -T api python -m fleetforge.storage selftest
 ```
 
 That is correct — `localhost:9000` inside the api container is that container's own
-loopback. Copy the printed URL and `curl` it from the host; you get 200. A **403 or 404**
-would be a real failure (bad signature, expired, or no permission); a **connection
+loopback. Copy the printed URL and `curl` it from the host. You get 200. A **403 or 404**
+would be a real failure (bad signature, expired, or no permission). A **connection
 refused from inside the container** is the design working.
 
 Two more things worth knowing before you lose an hour:
@@ -485,5 +484,5 @@ Two more things worth knowing before you lose an hour:
   from `docker-compose.yml`. Same trap as `DATABASE_URL`: never add `env_file: .env` to
   the `api` service.
 * **`tests/test_object_store_minio.py` skips itself** when nothing answers on
-  `localhost:9000`. A green `just test` therefore does *not* mean the real backend was
+  `localhost:9000`. A green `just test` thus does *not* mean the real backend was
   exercised — run `just minio-up` first, and check the run does not say `3 skipped`.

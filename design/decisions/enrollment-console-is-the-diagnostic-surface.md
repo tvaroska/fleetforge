@@ -13,10 +13,10 @@ brownouts during Wi-Fi PHY calibration and resets, forever.
 
 The board said so, on every cycle, in one line: `E BOD: Brownout detector was
 triggered`. Diagnosing it took an engineer reading a serial log pasted by hand into a
-chat window, after several wrong turns caused by the panel displaying a **Network up**
+chat window, after several wrong turns caused by the panel showing a **Network up**
 checkmark left over from an earlier boot.
 
-Nothing server-side could have helped. A board that brownouts before associating never
+Nothing server-side could helped. A board that brownouts before associating never
 reaches the network, so `device_progress`, the arrivals list and the fleet view are all
 structurally blind to it — the exact limit `progress.py` already states in its module
 docstring. The board's own UART is the only witness, and the browser holding the port
@@ -24,7 +24,7 @@ is the only thing that can hear it.
 
 ## Decision
 
-Treat the console panel — not the server — as the diagnostic surface of record for
+Treat the console panel (not the server) as the diagnostic surface of record for
 everything between "flashed" and "on the fleet", and hold it to a stated standard:
 anything the board says that the panel cannot explain is a defect in the panel.
 
@@ -40,16 +40,15 @@ was true on 2026-09-11 and is not a passing grade.
 ## Consequences
 
 **The parser becomes load-bearing, and it is fragile.** `classifyConsoleLine` matches
-log strings that exist in `agent/main/*.c`, and it failed here precisely because the
+log strings that exist in `agent/main/*.c`. It failed here precisely because the
 brownout line does not use the ESP-IDF log format. Every new failure mode is a parser
-change. The alternative — having the agent report structured faults, starting with
-`esp_reset_reason()` at boot — trades that fragility for a firmware round-trip, which is
+change. The alternative (having the agent report structured faults, starting with
+`esp_reset_reason()` at boot) trades that fragility for a firmware round-trip, which is
 the worst possible dependency for a board that will not come online. Recorded in
 `spec/open-questions.md` rather than settled.
 
-**Onboarding gets an acceptance criterion that cannot be automated.** "A person who has
-not seen the codebase onboards a board unaided" needs a person. It is still the
-criterion that decides the feature, so it is written down as one (`S0-test-3`) instead
+**Onboarding gets an acceptance criterion that cannot be automated.** "A person who did not see the codebase onboards a board unaided" needs a person. It is still the
+criterion that decides the feature. Thus, it is written down as one (`S0-test-3`) instead
 of being replaced by the parts of it that a test runner can check.
 
 **R0 is not done when the pieces work.** R0's stated risk is onboarding. Filing the

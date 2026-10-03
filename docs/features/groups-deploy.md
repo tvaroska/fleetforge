@@ -21,7 +21,7 @@ first genuinely homogeneous fleet: many identical drones.
 |----|------|----------|--------|
 | SW-DB-1 | Tags/groups schema + device↔group membership | P0 | 0.5d |
 | SW-BE-1 | Assign devices to groups/tags (API) | P0 | 1d |
-| SW-BE-2 | Deploy to a group (fan out the per-device transaction) | P0 | 1.5d |
+| SW-BE-2 | Deploy to a group (distribute the per-device transaction) | P0 | 1.5d |
 | SW-FE-1 | Group management UI + group deploy | P0 | 1d |
 | SW-FE-2 | Per-device progress view for a bulk deploy | P0 | 1.5d |
 | SW-TEST-1 | E2E: deploy to a group → all members update, progress visible | P0 | 1d |
@@ -43,7 +43,7 @@ device in the registry and the parent of its drones.
   drone individually but reaches it via its parent, and never assumes it holds an MQTT
   session per device.
 - **Link:** if the vehicle runs a Wi-Fi AP (or ESP-NOW), the drones stay IP-bearing and
-  no protocol bridging is needed at all. Zigbee/BLE/LoRa bridging is a separate,
+  no protocol bridging is necessary at all. Zigbee/BLE/LoRa bridging is a separate,
   later question.
 
 ## Phase 3: Scale hardening
@@ -51,7 +51,7 @@ device in the registry and the parent of its drones.
 - **Airtime-aware scheduling** — concurrency limits so a fleet deploy does not saturate
   the local link.
 - **Delta updates** — 5–50 KB diffs against ~1.5 MB images, applied read-active-slot →
-  write-inactive-slot, so the A/B layout frozen at R0 is a prerequisite.
+  write-inactive-slot. Thus, the A/B layout frozen at R0 is a prerequisite.
 - **Safe-window deferral at scale** — drones must not apply mid-flight. The
   device-owned-reboot rule (design/architecture.md principle 5) is load-bearing here.
 

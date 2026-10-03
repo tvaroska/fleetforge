@@ -20,7 +20,7 @@ self-test → pass/fail`) so no single engine locks us in across the platform la
   hardware (the R5 self-test is reused verbatim).
 - **v1 backend (ESP32):** Espressif's QEMU fork via `pytest-embedded-qemu` —
   first-party, self-hostable, mature, multi-DUT.
-- **Growth backend:** Renode (MIT) — widest arch reach; spike ESP32 completeness
+- **Growth backend:** Renode (MIT) — widest arch reach. Spike ESP32 completeness
   before relying on it.
 - **Rejected:** Wokwi (SaaS, no real self-host) · Velxio (AGPL + license-gated QEMU,
   ESP32-only OSS path).

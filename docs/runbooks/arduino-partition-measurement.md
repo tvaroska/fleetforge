@@ -20,7 +20,7 @@ Install, prune what you are not compiling, and delete the scratch tree when done
 ## Setup — everything in a scratch tree, nothing in `$HOME`
 
 `arduino-cli` defaults to `~/.arduino15`. Point it somewhere disposable instead so cleanup
-is one `rm -rf` and the box is left exactly as found.
+is one `rm -rf` and the box remains exactly as found.
 
 ```bash
 export SP=/tmp/ff-arduino-spike
@@ -59,7 +59,7 @@ export H=$SP/data/packages/esp32/hardware/esp32/3.3.12
 
 ## The measurements
 
-A two-line sketch is enough; none of this depends on what the sketch does.
+A two-line sketch is enough. None of this depends on what the sketch does.
 
 ```bash
 mkdir -p $SP/sk/Probe
@@ -67,7 +67,7 @@ printf 'void setup(){Serial.begin(115200);}\nvoid loop(){delay(1000);}\n' > $SP/
 ```
 
 **Always decode the built `partitions.bin`, never read back the csv you wrote.** The csv in
-the build dir is an input; the `.bin` is what the bootloader will actually read, and the
+the build dir is an input. The `.bin` is what the bootloader will actually read, and the
 gap between them is the whole point of the exercise.
 
 ```bash
@@ -82,16 +82,16 @@ produce a board that builds clean and never boots.
 | # | What to establish | How |
 |---|---|---|
 | 1 | The stock table | compile as above for `esp32:esp32:esp32` and `:esp32s3`, decode |
-| 2 | Whether any stock scheme matches our slot size | decode every `$H/tools/partitions/*.csv`; look for two **equal** `app`/`ota_*` rows of `0x1E0000` |
+| 2 | Whether any stock scheme matches our slot size | decode every `$H/tools/partitions/*.csv`. Look for two **equal** `app`/`ota_*` rows of `0x1E0000` |
 | 3 | Whether a sketch-local table wins | drop a `partitions.csv` in the *sketch* folder, recompile, decode. Repeat with `-b esp32:esp32:esp32:PartitionScheme=min_spiffs` to check it beats an explicit menu choice too |
 | 4 | Whether it survives a board change | compile the **same sketch folder** under a second FQBN, decode both |
-| 5 | Which boards have no menu | `grep '\.menu\.PartitionScheme\.' $H/boards.txt` vs `grep '\.name=' $H/boards.txt` |
+| 5 | Which boards have no menu | `grep '\.menu\.PartitionScheme\.' $H/boards.txt` versus `grep '\.name=' $H/boards.txt` |
 | 6 | The bootloader's safety posture | `grep -E 'APP_ROLLBACK|ANTI_ROLLBACK|SECURE_BOOT|FLASH_ENC' $SP/data/packages/esp32/tools/esp32-libs/*/sdkconfig` |
-| 7 | Cost of a config path | compile a sketch that reads config from NVS and one that reads it from a partition; compare the `Sketch uses N bytes` lines against the bare probe |
+| 7 | Cost of a config path | compile a sketch that reads config from NVS and one that reads it from a partition. Compare the `Sketch uses N bytes` lines against the bare probe |
 
 Precedence for #3 is stated in `platform.txt` itself — the `recipe.hooks.prebuild.1/2/3`
 lines, `build.partitions` < variant < `{build.source.path}`, last write winning. Read
-those three lines when a core bump surprises you; they are the mechanism.
+those three lines when a core bump surprises you. They are the mechanism.
 
 ## Two traps
 
@@ -99,7 +99,7 @@ those three lines when a core bump surprises you; they are the mechanism.
   `upload.maximum_size`, not from the table that was built.** A build with 1966080 B slots
   reported `Maximum is 1310720 bytes`. It is not a layout check and cannot be used as one.
 - **A library cannot ship the table.** The hook reads `{build.source.path}` — the sketch
-  folder. A `partitions.csv` inside `libraries/…` is never consulted, so the file has to
+  folder. A `partitions.csv` inside `libraries/…` is never consulted. Thus, the file has to
   arrive with the *example*, or by the user copying it. The override is also silent: the
   IDE says nothing when a sketch-local table replaces the board's.
 

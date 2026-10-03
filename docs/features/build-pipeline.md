@@ -7,12 +7,12 @@
 
 ## Overview
 
-The server clones a repo at a ref and **builds the artifact itself**, so a user needs
+The server clones a repo at a ref and **builds the artifact itself**. Thus, a user needs
 neither a local toolchain nor a CI provider. Point Fleetforge at a repo, get a
 deployable version.
 
 Together with VCS ingestion (R7–R8) and the simulation gate (R9), this completes V2's
-theme: **source → build → verify → deploy**, with nothing hand-carried.
+theme: **source → build → check → deploy**, with nothing hand-carried.
 
 ## This reverses a v1 non-goal — deliberately
 
@@ -24,7 +24,7 @@ architecture:
    same upload API that a GitHub Action or a human uses. Artifacts stay **opaque to the
    core** (design/architecture.md principle 2) — the core cannot tell a server-built blob from an
    uploaded one, and gains no ability to parse either.
-2. **Debug stays out of scope.** Build only; no on-server debugging, no IDE.
+2. **Debug stays out of scope.** Build only. No on-server debugging, no IDE.
 
 ## Security — this is arbitrary code execution
 
@@ -32,10 +32,10 @@ Building a repo means running that repo's build scripts on the server. On a
 public-facing host this is the single most dangerous surface in the product, and it
 must be treated as such **from the first commit**, not hardened later:
 
-- Sandboxed, per-build ephemeral containers; no host mounts; no access to the control
+- Sandboxed, per-build ephemeral containers. No host mounts. No access to the control
   plane's network or database.
 - Hard CPU / memory / disk / wall-clock caps.
-- No ambient credentials in the build environment; private-repo tokens scoped to a
+- No ambient credentials in the build environment. Private-repo tokens scoped to a
   single clone and never exposed to build scripts.
 - Single-tenant v1 posture keeps the blast radius to your own code. **Multi-tenant
   hosting would make this a hostile-code problem** and needs a stronger boundary
