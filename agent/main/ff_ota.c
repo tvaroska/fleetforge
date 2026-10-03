@@ -3,7 +3,9 @@
  *
  * The wire behaviour is not invented here either: `src/fleetforge/simulator/device.py`
  * already walks `staging → downloading → verifying → staged → applying → rebooting`, the
- * ingestor parses what it publishes, and this file repeats that walk on real flash. Four
+ * ingestor parses what it publishes, and this file repeats that walk on real flash. What
+ * happens after the reboot (`confirming` → `confirmed` | `rolling_back` → `rolled_back`) is
+ * reported by ff_mqtt.c from the record this file writes at `staged` (ff_txn.h). Four
  * properties are worth stating out loud, because each one is a silent wrong answer rather
  * than an error:
  *
@@ -41,6 +43,7 @@
 #include "esp_partition.h"
 #include "esp_system.h"
 #include "ff_mqtt.h"
+#include "ff_txn.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "mbedtls/sha256.h"
@@ -428,6 +431,22 @@ static void ota_task(void *arg)
         fail(cmd, "sha256 mismatch");
         goto done;
     }
+
+    /* The transaction is live from HERE, not from `applying`: finish() has already moved
+     * the boot pointer to `target`, so any reset from now on — our esp_restart(), a power
+     * cut, a watchdog — boots the new image, including after `apply: "on_command"`. The
+     * record is what lets that image (or the one the board falls back to) report the
+     * outcome against this cmd_id. Written BEFORE the "staged and bootable" line below,
+     * because that line is what an operator waits for before pulling the plug.
+     * Report-only: a failed save loses the outcome report, never the deploy or the
+     * rollback, so the update carries on. */
+    esp_err_t txn_err = ff_txn_save(cmd->cmd_id, target->address);
+    if (txn_err != ESP_OK) {
+        ESP_LOGE(TAG, "update %s: cannot record the transaction (%s) — the outcome will not "
+                      "be reported after the reboot",
+                 cmd->cmd_id, esp_err_to_name(txn_err));
+    }
+
     ESP_LOGI(TAG, "update %s: sha256 %s matches; %s is staged and bootable", cmd->cmd_id, digest,
              target->label);
 
@@ -451,10 +470,9 @@ static void ota_task(void *arg)
                   "PENDING_VERIFY; ff_mqtt confirms it only once the retained announce is "
                   "acknowledged, and rolls back otherwise.",
              cmd->cmd_id, target->label);
-    /* Nothing is written to NVS about this transaction on purpose: the new image
-     * announces itself and that is the whole report. A cmd_id persisted across the reboot
-     * is R2's `confirming`/`confirmed` story, and half of it here would be a state
-     * machine nobody drives. */
+    /* The transaction record was written at `staged` (ff_txn), so the image that comes
+     * up — or the one the bootloader falls back to — reports `confirming`/`confirmed` or
+     * `rolled_back` against this cmd_id. That is ff_mqtt.c's job, not this file's. */
     vTaskDelay(pdMS_TO_TICKS(OTA_PUBLISH_DRAIN_MS));
     esp_restart(); /* does not return */
 

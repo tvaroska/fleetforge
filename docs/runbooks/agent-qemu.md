@@ -182,6 +182,44 @@ After a **failed** apply (a hand-published `stage` with a corrupted digest) the 
 readings must all still say the old version — board log, `up/hb`, and `dev`. That is the
 half worth running first, because it is the one nobody checks.
 
+### Driving an outcome: `confirmed` and `rolled_back` (R2-be-1)
+
+Since agent 0.4.0 the board records the transaction at `staged`
+(`ff-txn: transaction <cmd_id> recorded`). It reports the outcome after the reboot, and
+each boot names its decision in one line: `ff-mqtt: transaction <cmd_id>: confirming on
+ota_1` or `… rolled_back (returned to ota_1; ota_0 did not confirm)`. Every image in the
+run must contain this code: board **A**, the confirm artifact **B**, and the rollback
+artifact **R**. R is built with `--build-arg FF_ROLLBACK_TEST=1` to a scratch dir per
+[rollback-test.md](rollback-test.md). Upload all three as `target=esp32` artifacts, boot A
+with `--fresh`, and watch `up/status`.
+
+* **`confirmed`.** Deploy B with `apply: "on_command"`. Wait for `is staged and bootable`
+  in the log **and** `staged` on the topic, then `sleep 1` and power-cycle (stop, start).
+  Expect the board to log `ota state pending_verify`, then `confirming on ota_1`, then
+  `CONFIRMED`, then `ff-txn: … closed — record cleared`. Expect the rows to end
+  `staged, confirming, confirmed` (terminal). Power-cycle once more: there is no
+  transaction line, and no new rows.
+* **`rolled_back`, by the bootloader.** Deploy A back with the default `apply: "auto"`.
+  After `rebooting` the emulator soft-resets into the new slot and hits the
+  `esp_timer_impl_init` panic described above while in `PENDING_VERIFY`, so the bootloader
+  aborts it. Wait ~10 s, then stop and start. The board on the old slot reports
+  `rolled_back`, with a `detail` naming the slots.
+* **`rolled_back`, by the confirm timer** (CRITICAL path). Deploy R with
+  `apply: "on_command"` and power-cycle after `staged`. R logs `confirming`, ignores its
+  announce ack, and at 60 s logs `no working session … rolling back`. `rolling_back`
+  reaches the topic **before** the reset (a 2 s grace timer bounds it). Then come the panic
+  loop and a stop/start, and the old slot reports `rolled_back`. Expect rows `… confirming,
+  rolling_back, rolled_back`. If the board is still on `-rbtest` after ~2 min, that is a P0.
+
+This box runs the stack on **8088**. The dev stack may also have been started from
+`docker-compose.yml` plus a local override rather than the dev override (check
+`docker inspect fleetforge-frontend --format '{{index .Config.Labels "com.docker.compose.project.config_files"}}'`).
+In that case the `ff-qemu` Traefik router is missing and the board's enroll gets a
+**404**. Recreate `api` and `frontend` with the same `-f` files plus a throwaway override
+that adds only the `ff-qemu` labels, and set `FF_PUBLIC_BASE_URL=http://10.0.2.2:8088
+FF_S3_PUBLIC_ENDPOINT_URL=http://10.0.2.2:9000` on the command. Put both back afterwards
+with the original `-f` set.
+
 ## What a first boot looks like
 
 Recorded from the R0-fw-1 acceptance run, trimmed to the agent's own lines:

@@ -18,6 +18,7 @@ idf_component_register(SRCS "agent_main.c"
                             "ff_progress.c"
                             "ff_store.c"
                             "ff_time.c"
+                            "ff_txn.c"
                        INCLUDE_DIRS "."
                        REQUIRES esp_eth
                                 esp_hw_support

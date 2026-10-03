@@ -47,7 +47,10 @@ import aiomqtt
 
 from fleetforge.simulator.client import enroll, issue_enrollment_token, login
 from fleetforge.simulator.device import (
+    CONFIRM_AUTO,
+    CONFIRM_MODES,
     DEFAULT_AWAKE_S,
+    DEFAULT_CONFIRM_TIMEOUT_S,
     DEFAULT_HEARTBEAT_INTERVAL_S,
     LINK_FAST,
     LINK_PROFILES,
@@ -196,6 +199,8 @@ async def _run_board(
             stop=stop,
             endpoint=endpoint,
             safe_window=args.safe_window,
+            confirm=args.confirm,
+            confirm_timeout_s=args.confirm_timeout,
             step=step,
         )
         return
@@ -209,6 +214,8 @@ async def _run_board(
         stop=stop,
         endpoint=endpoint,
         safe_window=args.safe_window,
+        confirm=args.confirm,
+        confirm_timeout_s=args.confirm_timeout,
         step=step,
     )
 
@@ -393,6 +400,24 @@ def _shared(parser: argparse.ArgumentParser) -> None:
             "`hold` parks in awaiting_safe_window indefinitely (a vehicle in motion). "
             "Nothing server-side ends a hold — that is the point of the flag"
         ),
+    )
+    parser.add_argument(
+        "--confirm",
+        default=CONFIRM_AUTO,
+        choices=CONFIRM_MODES,
+        help=(
+            "what the image this board reboots into does: `auto` confirms at the announce "
+            "ack and reports confirmed; `never` joins but never confirms (an FF_ROLLBACK_TEST "
+            "image), so after --confirm-timeout it reports rolling_back, goes back to the "
+            "version it came from and reports rolled_back"
+        ),
+    )
+    parser.add_argument(
+        "--confirm-timeout",
+        type=float,
+        default=DEFAULT_CONFIRM_TIMEOUT_S,
+        metavar="SECONDS",
+        help="the device-side confirm timer (spec/prd.md -> Timing: 300 s)",
     )
     parser.add_argument("--link", default=LINK_FAST, choices=LINK_PROFILES)
     parser.add_argument("--seed", type=int, default=0, help="makes --link slow reproducible")

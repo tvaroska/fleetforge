@@ -402,9 +402,10 @@ class TestStatusStatesMatchTheSpec:
         assert declared <= spec_states, f"not in spec/device-protocol.md: {declared - spec_states}"
 
     def test_the_walk_the_agent_performs_is_declared(self) -> None:
-        """R1 ends at `rebooting`; `confirming`/`confirmed`/`rolling_back`/`rolled_back`
-        are R2's (the agent confirms silently, at the announce PUBACK) and
-        `awaiting_safe_window` belongs to a board with a window to wait for."""
+        """ff_ota.c walks to `rebooting`; since R2-be-1 ff_mqtt.c reports the outcome after
+        the reboot — `confirming`/`confirmed`, or `rolling_back`/`rolled_back` from the
+        image the board returned to. `awaiting_safe_window` stays absent: it belongs to a
+        board with a window to wait for, and this agent is always-on."""
         declared = set(re.findall(r'#define FF_STATUS_[A-Z_]+ "([a-z_]+)"', FF_MQTT_H.read_text()))
         assert declared == {
             "staging",
@@ -414,4 +415,8 @@ class TestStatusStatesMatchTheSpec:
             "applying",
             "rebooting",
             "failed",
+            "confirming",
+            "confirmed",
+            "rolling_back",
+            "rolled_back",
         }

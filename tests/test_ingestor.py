@@ -451,6 +451,63 @@ async def test_a_retained_replay_writes_no_second_row(session: AsyncSession) -> 
     assert [row.state for row in await deploy_rows(session)] == ["requested", "confirmed"]
 
 
+# The R2 walks (R2-be-1): what a board reports AFTER the apply reboot. The server needed
+# no change for these — the point of the tests is that the whole walk, as the agent and
+# the simulator now emit it, lands as one transaction with exactly one terminal row.
+
+PRE_REBOOT_WALK = ["staging", "downloading", "verifying", "staged", "applying", "rebooting"]
+
+
+async def test_the_confirm_walk_ends_in_one_terminal_row(session: AsyncSession) -> None:
+    await seed_device(session)
+    await seed_intent(session)
+
+    for state in [*PRE_REBOOT_WALK, "confirming"]:
+        await publish(session, "status", {"cmd_id": CMD_ID, "state": state, "pct": None})
+    await publish(session, "status", {"cmd_id": CMD_ID, "state": "confirmed", "pct": 100})
+
+    rows = await deploy_rows(session)
+    assert [row.state for row in rows] == ["requested", *PRE_REBOOT_WALK, "confirming", "confirmed"]
+    assert [row.state for row in rows if row.is_terminal] == ["confirmed"]
+    for row in rows[-2:]:
+        assert (row.artifact_version, row.from_version) == ("1.5.0", "1.4.2")
+
+
+async def test_the_rollback_walk_ends_in_one_terminal_row(session: AsyncSession) -> None:
+    """`rolling_back` comes from the bad image, `rolled_back` from the one it returned to —
+    one transaction either way, because both carry the cmd_id the record kept."""
+    await seed_device(session)
+    await seed_intent(session)
+    detail = "returned to ota_0; ota_1 did not confirm"
+
+    for state in [*PRE_REBOOT_WALK, "confirming", "rolling_back"]:
+        await publish(session, "status", {"cmd_id": CMD_ID, "state": state})
+    await publish(session, "status", {"cmd_id": CMD_ID, "state": "rolled_back", "detail": detail})
+
+    rows = await deploy_rows(session)
+    assert [row.state for row in rows][-3:] == ["confirming", "rolling_back", "rolled_back"]
+    assert [row.state for row in rows if row.is_terminal] == ["rolled_back"]
+    rolled = rows[-1]
+    assert (rolled.artifact_version, rolled.from_version) == ("1.5.0", "1.4.2")
+    assert rolled.detail == {"detail": detail}
+    assert rows[-2].artifact_version == "1.5.0"
+
+
+async def test_the_old_images_retained_rolled_back_is_recorded_once(session: AsyncSession) -> None:
+    """The board republishes `rolled_back` after any reset before its PUBACK, and the
+    broker replays the retained copy on every ingestor restart. One row, forever."""
+    await seed_device(session)
+    await seed_intent(session)
+    body = {"cmd_id": CMD_ID, "state": "rolled_back", "detail": "returned to ota_0"}
+
+    await publish(session, "status", body)
+    await publish(session, "status", body)  # republished by the next boot
+    replay = await publish(session, "status", body, retained=True)
+
+    assert replay is not None and replay.type is EventType.DEVICE_SEEN
+    assert [row.state for row in await deploy_rows(session)] == ["requested", "rolled_back"]
+
+
 async def test_a_retained_status_does_not_prove_liveness(session: AsyncSession) -> None:
     """The replay of a dead board's last status must not mark the fleet alive."""
     await seed_device(session)

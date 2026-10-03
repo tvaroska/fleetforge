@@ -21,8 +21,9 @@ build is caught before the fleet, and any device that gets one recovers itself.
 
 **Not yet, and why it matters:**
 
-- Nothing reports confirm/rollback: every deploy parks at `rebooting` with
-  `is_terminal: false` (R2-BE-1).
+- Confirm/rollback is reported only from agent 0.4.0 on (R2-be-1). Prod's board is on
+  0.3.1, so the deploy that first carries 0.4.x to it still parks at `rebooting`. From then
+  on every deploy ends `confirmed` or `rolled_back`.
 - An image that boots, gets its announce acked and is broken anyway confirms itself and
   **nothing recovers it**. Roll to **one board at a time**.
 - No upload form in the dashboard (`docs/runbooks/upload-artifact.sh` is the only way in),
@@ -134,17 +135,19 @@ Bricking risks, broker auth and security issues get filed here as they surface.
 ## R2: Safe deploy — verify + auto-rollback
 
 Retires bricking, the whole gamble. R2-FW-3 (device-side confirm timer) and most of
-R2-TEST-1 landed early in R1 (`ff_mqtt.c`; `docs/runbooks/rollback-test.md`). The agent's
-reported walk still ends at `rebooting`, so the server never sees a rollback.
+R2-TEST-1 landed early in R1 (`ff_mqtt.c`; `docs/runbooks/rollback-test.md`). Since
+R2-be-1, agent 0.4.0 reports `confirming` → `confirmed` | `rolling_back` → `rolled_back`
+after the reboot.
 
-- [ ] **R2-be-1**: Observe confirm/rollback outcome; record it to `deploy_events` (P0, 1d)
+- [x] **R2-be-1**: Observe confirm/rollback outcome; record it to `deploy_events` (P0, 1d) _(done 2026-10-03; reviewed; see docs/features/ota-deploy.md)_
       Today every deploy parks at `rebooting` with `is_terminal: false`. Needs the agent to
       report `confirming`/`confirmed`/`rolling_back`/`rolled_back` (`ff_ota.h`).
 - [ ] **R2-fw-1**: Checksum verify before apply, on the real agent (P0, 1d)
       Confirm what already landed in R1 before starting; the simulator verifies sha256.
 - [ ] **R2-fw-2**: A/B slot apply, atomic switch — confirm against the R1 agent (P0, 1.5d)
 - [ ] **R2-fe-1**: Dashboard shows `good` vs `rolled-back` per device (P0, 0.5d)
-      Blocked on R2-be-1: nothing to read until the server sees the outcome.
+      Unblocked by R2-be-1: `deploy.state` is now `confirmed`/`rolled_back` with
+      `is_terminal: true` (the simulator's `--confirm never` gives you a rolled-back row).
 - [ ] **R2-test-1**: Remaining failure modes — boot loop, brownout mid-write (P0, 1d)
       The `0.3.2-rbtest` run covers only "boots, joins, never confirms".
 - [ ] **R2-test-2**: Flaky-Wi-Fi rollback spike (P1, 0.5d)

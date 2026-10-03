@@ -94,11 +94,17 @@ until it is fixed, no board can be deployed to unless someone can physically rea
 
 ## Known gaps this test does not close
 
-- **The server never learns.** At R1 the agent's reported walk ends at `rebooting`
-  (`ff_ota.h`), so `confirming`/`confirmed`/`rolling_back`/`rolled_back` are never
-  published. A rollback is therefore inferred from the announced version changing back,
-  not read from a deploy state — and the deploy row stays non-terminal either way. R2's
-  to fix.
+- ~~**The server never learns.**~~ **Closed for R2→R2 deploys (R2-be-1, agent 0.4.0).**
+  The agent now records the transaction at `staged`, and reports the outcome after the
+  reboot. For an rbtest run, expect these `deploy_events` rows for the cmd_id:
+  `… staged, applying, rebooting, confirming, rolling_back, rolled_back`. Only
+  `rolled_back` is terminal, and its `detail` names the slots (`returned to ota_1; ota_0
+  did not confirm`). `rolling_back` comes from the rbtest image ~2 s before its reboot, and
+  it is best-effort. `rolled_back` comes from the image the board returned to.
+  **Transition gap:** this needs agent 0.4.0 or later on **both** sides of the
+  transaction. A board still running an R1 agent (≤ 0.3.x, e.g. prod's 0.3.1) neither
+  records the deploy nor reports a rollback *to* itself. For that board this gap is still
+  open, and the rollback is still only inferable from the announced version.
 - **One failure mode, not the family.** This covers "boots, joins, never confirms". It
   does not cover a boot loop, a brownout mid-write, or a flaky radio — the last of which
   is the separate R2 spike tracked in `docs/features/ota-deploy.md`.

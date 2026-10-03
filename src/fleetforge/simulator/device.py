@@ -84,10 +84,17 @@ STATE_AWAITING_SAFE_WINDOW = "awaiting_safe_window"
 STATE_APPLYING = "applying"
 STATE_REBOOTING = "rebooting"
 STATE_FAILED = "failed"
+# The outcome (R2-be-1), reported by the session that observed it — never by `_stage`.
+STATE_CONFIRMING = "confirming"
+STATE_CONFIRMED = "confirmed"
+STATE_ROLLING_BACK = "rolling_back"
+STATE_ROLLED_BACK = "rolled_back"
 
-# The walk a healthy `apply: "auto"` deploy makes. `awaiting_safe_window` is NOT in it:
-# a board that judges the window safe immediately goes straight from `staged` to
-# `applying` (`--safe-window hold` is the other case, and it never leaves).
+# The walk a healthy `apply: "auto"` deploy makes up to the reboot. `awaiting_safe_window`
+# is NOT in it: a board that judges the window safe immediately goes straight from
+# `staged` to `applying` (`--safe-window hold` is the other case, and it never leaves).
+# What follows the reboot is reported by the NEXT session (`StageRunner.on_boot`):
+# `CONFIRM_WALK` for an image that confirms, `ROLLBACK_WALK` for one that does not.
 STAGE_WALK = (
     STATE_STAGING,
     STATE_DOWNLOADING,
@@ -96,6 +103,8 @@ STAGE_WALK = (
     STATE_APPLYING,
     STATE_REBOOTING,
 )
+CONFIRM_WALK = (STATE_CONFIRMING, STATE_CONFIRMED)
+ROLLBACK_WALK = (STATE_CONFIRMING, STATE_ROLLING_BACK, STATE_ROLLED_BACK)
 
 # `spec/device-protocol.md` → *`dn/cmd` — commands*: the type this simulator executes,
 # and the two `apply` modes.
@@ -109,6 +118,17 @@ APPLY_ON_COMMAND = "on_command"
 SAFE_WINDOW_AUTO = "auto"
 SAFE_WINDOW_HOLD = "hold"
 SAFE_WINDOW_MODES = (SAFE_WINDOW_AUTO, SAFE_WINDOW_HOLD)
+
+# `--confirm`: what the image this board reboots into does. `auto` confirms at the
+# announce PUBACK, like a healthy agent. `never` joins the fleet and never confirms — an
+# `FF_ROLLBACK_TEST` image (`docs/runbooks/rollback-test.md`) — so the confirm timer
+# fires and the board goes back to the version it came from.
+CONFIRM_AUTO = "auto"
+CONFIRM_NEVER = "never"
+CONFIRM_MODES = (CONFIRM_AUTO, CONFIRM_NEVER)
+# `spec/prd.md` → *Requirements & targets → Timing*: "confirm timeout 300 s". The real
+# agent ignores the command's `confirm_timeout_s` and so does this one.
+DEFAULT_CONFIRM_TIMEOUT_S = 300.0
 
 # Artifact downloads are chunked so a 1.9 MB image does not arrive as one read, the same
 # shape the real agent's HTTPS client uses.
@@ -431,11 +451,23 @@ def _fetch(url: str) -> bytes:
     return b"".join(chunks)
 
 
+@dataclass(frozen=True, slots=True)
+class PendingConfirm:
+    """The NVS analogue: the transaction that crossed the apply reboot (`agent/main/ff_txn.h`).
+
+    `previous_identity` is the board as it was before the apply — what a rollback returns
+    it to, captured **before** `fw_version` was rebound.
+    """
+
+    cmd_id: str
+    previous_identity: DeviceIdentity
+
+
 @dataclass(slots=True)
 class StageRunner:
     """Executes `stage` commands and owns everything that outlives one session.
 
-    Three pieces of state, each for a reason:
+    The state, each piece for a reason:
 
     * `seen` — the dedup set. QoS 1 is at-least-once and `spec/device-protocol.md` makes
       deduplication **the device's job**; it lives here rather than in the session loop
@@ -445,23 +477,44 @@ class StageRunner:
       download" is an acceptance criterion and needs to be observable.
     * `identity` — adopted after a successful apply, so later `up/announce` publishes
       carry the **new** `fw_version`, exactly as a rebooted board would.
-    * `reboot` — set when an apply has happened, and the only way the new `identity`
-      ever reaches the server. See `_stage` and `run_session`.
+    * `reboot` — set when an apply (or a rollback) has happened, and the only way the
+      new `identity` ever reaches the server. See `_stage` and `run_session`.
+    * `pending` — the transaction an apply rebooted into, set before `reboot`; the next
+      session reports its outcome (`on_boot`). The firmware keeps the same thing in NVS,
+      because `cmd_id` would otherwise die with the image that received the `stage`.
+    * `rolled_back` — the `cmd_id` a rollback still owes a `rolled_back` for. Reported by
+      the session on the image the board **returned to**, exactly as on metal.
     """
 
     identity: DeviceIdentity
     link: LinkProfile
     safe_window: str = SAFE_WINDOW_AUTO
+    confirm: str = CONFIRM_AUTO
+    confirm_timeout_s: float = DEFAULT_CONFIRM_TIMEOUT_S
     seen: set[str] = field(default_factory=set)
     downloads: int = 0
-    # Not an argument: a caller passing in a pre-set event would start a board that
-    # reboots before it has applied anything.
+    # Not arguments: a caller passing in a pre-set event would start a board that reboots
+    # before it has applied anything, and a pre-set transaction is one nobody issued.
     reboot: asyncio.Event = field(default_factory=asyncio.Event, init=False)
+    pending: PendingConfirm | None = field(default=None, init=False)
+    rolled_back: str | None = field(default=None, init=False)
+    # When the confirm timer of the current boot fires (monotonic). Armed once per boot,
+    # like the firmware's esp_timer: a reconnect resumes it rather than restarting it.
+    _confirm_deadline: float | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         if self.safe_window not in SAFE_WINDOW_MODES:
             raise SimulatorError(
                 f"--safe-window must be one of {list(SAFE_WINDOW_MODES)}, not {self.safe_window!r}"
+            )
+        if self.confirm not in CONFIRM_MODES:
+            raise SimulatorError(
+                f"--confirm must be one of {list(CONFIRM_MODES)}, not {self.confirm!r}"
+            )
+        if not self.confirm_timeout_s > 0:
+            raise SimulatorError(
+                f"--confirm-timeout must be a positive number of seconds, "
+                f"not {self.confirm_timeout_s!r}"
             )
 
     async def handle(self, client: aiomqtt.Client, message: aiomqtt.Message, step: Step) -> None:
@@ -503,7 +556,11 @@ class StageRunner:
     async def _stage(
         self, client: aiomqtt.Client, cmd_id: str, body: dict[str, object], step: Step
     ) -> None:
-        """The state walk: stage → download → verify → stage(d) → apply → reboot."""
+        """The state walk: stage → download → verify → stage(d) → apply → reboot.
+
+        It ends at `rebooting`, as the firmware's does: the outcome belongs to the next
+        session (`on_boot`), which is the one that can observe it.
+        """
         artifact = body.get("artifact")
         if not isinstance(artifact, dict):
             await self._status(client, cmd_id, STATE_FAILED, step, detail="no artifact in command")
@@ -559,6 +616,12 @@ class StageRunner:
 
         await self._status(client, cmd_id, STATE_APPLYING, step)
         await self._status(client, cmd_id, STATE_REBOOTING, step)
+        # The transaction crosses the reboot (the firmware writes it to NVS at `staged`;
+        # nothing here can reset between the two, so recording it at the reboot is the
+        # same). `previous_identity` is taken BEFORE the rebind below: it is what a
+        # rollback returns the board to.
+        self.pending = PendingConfirm(cmd_id=cmd_id, previous_identity=self.identity)
+        self._confirm_deadline = None
         if isinstance(version, str) and version:
             # The board comes back running the new image: later announces and heartbeats
             # say so, which is what makes "delivery success" checkable end to end.
@@ -572,6 +635,70 @@ class StageRunner:
         # is what ends the session; this is the simulator's reboot. Unconditional,
         # because the reboot is the consequence of the apply and not of the payload
         # carrying a version.
+        self.reboot.set()
+
+    async def on_boot(self, client: aiomqtt.Client, step: Step) -> "asyncio.Task[None] | None":
+        """Report what the last reboot left owed. Called after the announce + presence.
+
+        Those two publishes are awaited at QoS 1, so returning from them is this
+        simulator's announce PUBACK — the moment the firmware confirms. Each outcome is
+        cleared only after its publish returned, the firmware's clear-at-PUBACK: a
+        session that dies first leaves it owed, and the next one says it again (the
+        server deduplicates on `(cmd_id, state)`).
+
+        Returns the confirm-timer task for a `--confirm never` image, which the session
+        must treat as a sentinel: it ends the session by setting `reboot`.
+        """
+        if self.rolled_back is not None:
+            await self._status(
+                client,
+                self.rolled_back,
+                STATE_ROLLED_BACK,
+                step,
+                detail=f"returned to {self.identity.fw_version}; the new image did not confirm",
+            )
+            self.rolled_back = None
+            return None
+
+        pending = self.pending
+        if pending is None:
+            return None
+        await self._status(client, pending.cmd_id, STATE_CONFIRMING, step)
+        if self.confirm == CONFIRM_AUTO:
+            await self._status(client, pending.cmd_id, STATE_CONFIRMED, step, pct=100)
+            step(f"confirm  {self.identity.fw_version} confirmed at the announce ack")
+            self.pending = None
+            self._confirm_deadline = None
+            return None
+
+        if self._confirm_deadline is None:
+            self._confirm_deadline = time.monotonic() + self.confirm_timeout_s
+        remaining = max(0.0, self._confirm_deadline - time.monotonic())
+        step(f"confirm  --confirm never: rolling back in {remaining:.1f}s unless confirmed")
+        return asyncio.create_task(self._confirm_timeout(client, pending, remaining, step))
+
+    async def _confirm_timeout(
+        self, client: aiomqtt.Client, pending: PendingConfirm, delay_s: float, step: Step
+    ) -> None:
+        """`ff_mqtt.c::confirm_timeout_cb`: report `rolling_back` (best-effort), then go back.
+
+        The report is attempted BEFORE the reboot is triggered, because setting `reboot`
+        ends the session and cancels this task. It is best-effort exactly as on metal:
+        a failed publish is logged and the rollback happens anyway.
+        """
+        await asyncio.sleep(delay_s)
+        step(
+            f"confirm  no confirm {self.confirm_timeout_s:g}s after boot — rolling back to "
+            f"{pending.previous_identity.fw_version}"
+        )
+        try:
+            await self._status(client, pending.cmd_id, STATE_ROLLING_BACK, step)
+        except aiomqtt.MqttError as exc:
+            step(f"confirm  {STATE_ROLLING_BACK} not delivered ({exc}); rolling back anyway")
+        self.identity = pending.previous_identity
+        self.rolled_back = pending.cmd_id
+        self.pending = None
+        self._confirm_deadline = None
         self.reboot.set()
 
     async def _status(
@@ -644,13 +771,16 @@ async def run_session(
        while the board was away is drained before anything else happens;
     2. `announce` (retained) — identity, before any claim about liveness;
     3. `presence {"online":true}` (retained);
-    4. heartbeats and the command reader, concurrently;
-    5. on a clean exit, the **goodbye** — retained `{"online":false}` — and only then
+    4. whatever the last reboot left owed — `confirming`/`confirmed`, or `rolled_back`
+       (`StageRunner.on_boot`);
+    5. heartbeats and the command reader, concurrently;
+    6. on a clean exit, the **goodbye** — retained `{"online":false}` — and only then
        the DISCONNECT the context manager sends.
 
-    Ends when `stop` is set, when `stage.reboot` is set (an apply happened — the session
-    dies the way a restarting board's does, and the caller's loop brings it back on the
-    new image), when `awake_s` elapses (the sleepy duty cycle), or when a child task
+    Ends when `stop` is set, when `stage.reboot` is set (an apply happened, or a
+    `--confirm never` image's confirm timer fired — the session dies the way a restarting
+    board's does, and the caller's loop brings it back on the right image), when `awake_s`
+    elapses (the sleepy duty cycle), or when a child task
     raises — an `aiomqtt.MqttError` from the heartbeat loop propagates so the caller's
     reconnect logic can see it. `stop` rather than task cancellation is
     deliberate: publishing the goodbye needs a live event loop and an uncancelled
@@ -698,6 +828,9 @@ async def run_session(
             retain=True,
             step=step,
         )
+        # After the announce, so the server knows which version is running when the
+        # outcome of the last reboot lands.
+        confirm_timer = await stage.on_boot(client, step)
 
         workers = [
             asyncio.create_task(
@@ -706,14 +839,24 @@ async def run_session(
             asyncio.create_task(_command_loop(client, stage, step)),
         ]
         # Two ways to be asked to leave, and they are not the same event: `stop` is the
-        # operator, `stage.reboot` is the board restarting into the image it just applied.
-        sentinels = [asyncio.create_task(stop.wait()), asyncio.create_task(stage.reboot.wait())]
+        # operator, `stage.reboot` is the board restarting into the image it just applied
+        # (or rolling back from it). The confirm timer is a sentinel too, NOT a worker: it
+        # returns normally after setting `reboot`, and a worker returning normally means
+        # "the broker closed the stream".
+        sentinels: list[asyncio.Task[object]] = [
+            asyncio.create_task(stop.wait()),
+            asyncio.create_task(stage.reboot.wait()),
+        ]
+        if confirm_timer is not None:
+            sentinels.append(confirm_timer)
         try:
             done, _ = await asyncio.wait(
                 [*workers, *sentinels], timeout=awake_s, return_when=asyncio.FIRST_COMPLETED
             )
             for task in done:
-                if task not in sentinels:
+                if task is confirm_timer:
+                    task.result()  # a bug in the timer surfaces; a normal return is a reboot
+                elif task not in sentinels:
                     # Re-raises MqttError from a worker; a worker returning normally
                     # means the broker closed the message stream, which is the same
                     # thing the caller must react to.
@@ -766,6 +909,8 @@ async def run_always_on(
     stop: asyncio.Event,
     endpoint: str = "broker",
     safe_window: str = SAFE_WINDOW_AUTO,
+    confirm: str = CONFIRM_AUTO,
+    confirm_timeout_s: float = DEFAULT_CONFIRM_TIMEOUT_S,
     step: Step = _silent,
 ) -> None:
     """One session, forever, reconnecting with capped exponential backoff.
@@ -787,7 +932,13 @@ async def run_always_on(
     """
     boot_monotonic = time.monotonic()
     connected = asyncio.Event()
-    stage = StageRunner(identity=device, link=link, safe_window=safe_window)
+    stage = StageRunner(
+        identity=device,
+        link=link,
+        safe_window=safe_window,
+        confirm=confirm,
+        confirm_timeout_s=confirm_timeout_s,
+    )
     delay = RECONNECT_INITIAL_DELAY_S
     while not stop.is_set():
         try:
@@ -840,6 +991,8 @@ async def run_sleepy(
     stop: asyncio.Event,
     endpoint: str = "broker",
     safe_window: str = SAFE_WINDOW_AUTO,
+    confirm: str = CONFIRM_AUTO,
+    confirm_timeout_s: float = DEFAULT_CONFIRM_TIMEOUT_S,
     step: Step = _silent,
 ) -> None:
     """wake → connect → announce/presence/hb → drain `dn/` → disconnect → sleep → repeat.
@@ -851,7 +1004,13 @@ async def run_sleepy(
     `2.5 x expected_wake_interval_s` branch end to end.
     """
     boot_monotonic = time.monotonic()
-    stage = StageRunner(identity=device, link=link, safe_window=safe_window)
+    stage = StageRunner(
+        identity=device,
+        link=link,
+        safe_window=safe_window,
+        confirm=confirm,
+        confirm_timeout_s=confirm_timeout_s,
+    )
     while not stop.is_set():
         step(f"wake     staying up {awake_s:.0f}s")
         await run_session(

@@ -1044,7 +1044,7 @@ What that result does **not** do is retire R2-BE-1. The R1 agent's reported walk
 `rebooting` (`ff_ota.h`), so the rollback is only inferable from the announced version
 changing back; the server never sees `rolling_back`/`rolled_back` and the deploy row stays
 non-terminal. R2-FE-1's `good` vs `rolled-back` column has nothing to read until BE-1
-lands.
+lands. (It landed on 2026-10-03. See *R2-be-1* below.)
 
 **A fourth failure mode surfaced alongside it: a board that was never protected.** Rollback
 needs a bootloader that supports it, and Fleetforge OTA replaces the app, not the
@@ -1054,6 +1054,137 @@ us, and announces identically to one that has it. Step 1 of
 that makes the difference visible, together with a measured partition-table fingerprint to
 cross-check the `partition_layout` name `_check_compatible()` currently takes on trust.
 Both are R2-sized and belong with the safe-deploy work.
+
+### Confirm/rollback outcome reaches `deploy_events` (R2-be-1) — **LANDED 2026-10-03**
+
+**What shipped.** The server half already existed. `record_observed_status` (R1-be-4)
+records any state, and `confirmed`, `rolled_back` and `failed` are terminal. The gap was
+that nothing published those states, because the `cmd_id` died with the image that
+received the `stage`. This task closes the gap on the device and in the simulator. The
+server code is unchanged, and so is the spec.
+
+- **`agent/main/ff_txn.{h,c}` (new).** One NVS record, `(cmd_id, target slot address)`,
+  in its own namespace `ff_txn`. It offers `save`, `load` and `clear_if(cmd_id)` under one
+  static mutex.
+- **`ff_ota.c`** saves the record once the read-back sha256 matches, before the
+  `staged and bootable` line and before `staged` is published. Slot selection, `finish()`
+  and `restore_boot_partition()` are byte-for-byte unchanged.
+- **`ff_mqtt.c`** classifies the boot once, before connecting, from otadata plus the
+  record. It then reports:
+  - `confirming` once per boot, on connect;
+  - `confirmed` at the announce PUBACK, only when marking the image valid succeeded;
+  - `rolled_back` from the image the board returned to, with a detail naming the slots
+    (`returned to ota_1; ota_0 did not confirm`);
+  - `rolling_back`, best-effort, when the confirm timer fires.
+
+  The record is cleared at the terminal state's PUBACK. `confirm_timeout_cb` never touches
+  the MQTT client: it starts a pre-created 2 s `ff_rollback` timer and hands the report to a
+  one-shot task. If the timer cannot start, or there is nothing to report, it rolls back
+  immediately, as before. An announce ack that arrives inside the grace window does not
+  confirm an image that has already been sentenced.
+- **Agent `0.4.0`** (was 0.3.2). The image grew 4,208 B on esp32 and 4,352 B on esp32s3,
+  and the budgets in `tests/test_agent_power_and_size.py` were raised to the measured byte.
+- **Simulator.** `StageRunner` gains `pending` (the NVS analogue) and `rolled_back`, plus
+  `on_boot()`, which the session calls right after announce + presence. There are two new
+  CLI flags: `--confirm auto|never` (`never` = an `FF_ROLLBACK_TEST` image) and
+  `--confirm-timeout SECONDS` (default 300). This is CUJ-1 segment 6's harness.
+
+**Why the outcome is device-reported, and the transition gap.** See `DECISIONS.md`
+2026-10-03. In short: the server does not infer a rollback from the announced version,
+and a deploy issued to an R1 agent (prod's board is on 0.3.1) gets no outcome report even
+if the new image is R2. **Rollout note:** the first deploy that carries this agent to a
+board stays at `rebooting`, as before. Every deploy *from* a 0.4.x board reports its
+outcome. Do not read a stuck `rebooting` on that first hop as a defect.
+
+**Verification.** T1: `just test` is green: ruff, `ruff format --check`, mypy and **992
+tests**. That includes the updated `test_the_walk_the_agent_performs_is_declared` (now 11
+states) and the new firmware tripwires in `tests/test_agent_txn.py`:
+- `confirm_timeout_cb`'s body, extracted by brace matching, has no `esp_mqtt_client_`;
+- `ff_txn_save(` sits between the digest check and `FF_STATUS_STAGED`;
+- the outcome states appear in `ff_mqtt.c` and never in `ff_ota.c`;
+- the record is cleared only through `clear_if`.
+
+There are also new ingestor R2-walk tests and simulator confirm/rollback tests.
+`just agent-build esp32` and `just agent-build esp32s3` both end in `BUNDLE OK` under
+`-Werror`, and `just agent-qemu-smoke esp32` ends in `HARNESS OK`.
+
+T2-A, the simulator on the live dev stack. The artifact was `1.5.0/esp32c6`
+(`sha256 2484cb76…`). `good` = `760e607624d6` ran with the default `--confirm auto`, and
+`bad` = `2e05d4b689d2` ran with `--confirm never --confirm-timeout 5`.
+
+```
+good  cmd f628952d37bf417eb2d7c839d56abaf7
+ requested|f|1.5.0|1.4.2   staging|f   downloading|f   verifying|f   staged|f
+ applying|f   rebooting|f   confirming|f|1.5.0|1.4.2   confirmed|t|1.5.0|1.4.2
+ GET /v1/devices -> fw_version 1.5.0, deploy.state confirmed, is_terminal true
+
+bad   cmd 743166db33584dc58fc64f49149fc412   (rolled_back 9 s after the POST)
+ requested … rebooting|f   confirming|f   rolling_back|f
+ rolled_back|t|1.5.0|1.4.2|{"detail": "returned to 1.4.2; the new image did not confirm"}
+ GET /v1/devices -> fw_version 1.4.2, deploy.state rolled_back, is_terminal true
+```
+
+Every state appeared exactly once, and every row carried both versions. **Replay:**
+`count(deploy_events)` was 144 before and stayed at 144 after each of two
+`docker compose restart ingestor`. **Reuse:** a repeat POST to `good` minted
+`bcb92f7c…` with `reused: false`, and that deploy also walked to `confirmed`.
+
+T2-B, the real agent in QEMU (`docs/runbooks/agent-qemu.md` → *Driving an outcome*).
+The record below is the run on the **final** code. An earlier run on images `0.4.0`/
+`0.4.1`/`0.4.2-rbtest` passed the same three cases before the late-ack guard and the
+immediate no-record rollback were added. The board was A′ `0.4.0`, B′ was `0.4.3`, and R′
+was `0.4.4-rbtest` (`FF_ROLLBACK_TEST=1`, an artifact only). All three images contain this
+code.
+
+```
+B1 confirmed   cmd 761416d5…  0.4.3, apply on_command, power-cycled after `staged`
+  board: ff-txn: transaction 761416d5… recorded (target slot at 0x00200000)
+         running image: fw_version 0.4.3, ota state pending_verify
+         ff-mqtt: transaction 761416d5…: confirming on ota_1
+         … is now CONFIRMED …  -> state=confirmed queued -> ff-txn: … closed — record cleared
+  rows:  requested staging downloading verifying staged confirming|f confirmed|t|0.4.3|0.4.0
+  fw_version 0.4.3. One more power cycle: `ota state valid`, no transaction line,
+  rows 7 -> 7.
+
+B2 rolled back by the bootloader   cmd 62febfdb…  0.4.4-rbtest, apply auto
+  soft reset into ota_0 -> the known QEMU esp_timer_impl_init panic in PENDING_VERIFY
+  -> the bootloader aborts ota_0. Cold boot on ota_1:
+  board: ff-mqtt: transaction 62febfdb…: rolled_back (returned to ota_1; ota_0 did not confirm)
+  rows:  … applying rebooting|f   rolled_back|t|0.4.4-rbtest|0.4.3|returned to ota_1; ota_0 did not confirm
+  fw_version stays 0.4.3.
+
+B3 rolled back by the confirm timer   cmd f39ead85…  0.4.4-rbtest, on_command + power cycle
+  board: running image: fw_version 0.4.4-rbtest, ota state pending_verify
+         transaction f39ead85…: confirming on ota_0
+         FF_ROLLBACK_TEST: ignoring the announce ack on purpose …
+  (69882) no working session 60 s after an OTA boot — marking this image invalid …
+  (69892) publish … state=rolling_back          <- on the broker at 13:11:32, BEFORE the reset
+  (72882) esp_ota_ops: Rollback to previously worked partition.
+  cold boot on ota_1: transaction f39ead85…: rolled_back (returned to ota_1; ota_0 did not confirm)
+  rows:  … staged|f   confirming|f   rolling_back|f   rolled_back|t|0.4.4-rbtest|0.4.3
+  fw_version back at 0.4.3.
+```
+
+B3 is the run that proves the board still rolls back with the reporting code in place: the
+grace timer fired the rollback 3 s after the report, and nothing waited on the MQTT
+client.
+
+**Spec proposals (not applied — `spec/` is protected).** For `spec/device-protocol.md` →
+`up/status`:
+
+1. "`confirming` is reported by the new image once it has a broker session, and
+   `confirmed` once it has marked itself valid. `rolled_back` is reported by the image the
+   device **returned to**, on its first session after the rollback. `rolling_back` is
+   best-effort and may never arrive. A device must therefore persist the `cmd_id` across
+   the apply reboot."
+2. "A device MAY republish a terminal state after a reset, and recording stays
+   idempotent."
+3. An outcome can only be reported by firmware that implements (1), so transactions
+   issued to older agents may legitimately never reach a terminal state.
+
+**Out of scope.** A `stage` that arrives while the running image is still
+`PENDING_VERIFY` would target the rollback slot. That belongs to R2-fw-2 (see
+`DECISIONS.md`).
 
 ## De-risking
 

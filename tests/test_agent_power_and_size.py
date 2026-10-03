@@ -91,14 +91,21 @@ FORBIDDEN_OPTIONS = [
 # 1,010,912 -> 1,011,216, i.e. +304 B of .rodata for the boot line that names the running
 # image's version and OTA state (`ota_state_name()` plus its strings). No other target was
 # rebuilt, so no other number moved.
+#
+# Raised 2026-10-03 (R2-be-1) for **esp32 and esp32s3**, the two targets rebuilt, to the
+# exact measured byte: esp32 1,011,216 -> 1,015,424 (+4,208 B), esp32s3 991,344 -> 995,696
+# (+4,352 B). The added code is the transaction record that survives the apply reboot
+# (ff_txn.c), the boot-time classification and the outcome reporting in ff_mqtt.c
+# (`confirming`/`confirmed`/`rolling_back`/`rolled_back`, the enqueue path, the rollback
+# grace timer) and their log strings. 1,015,424 B is 52% of the slot.
 APP_SIZE_BUDGET_BYTES = {
-    "esp32": 1_011_216,
+    "esp32": 1_015_424,
     # Raised from 973_136 for the OTA-capable agent (R1-fw-1/R1-fw-2), which cost every
     # target ~18 KB. Only esp32 was raised at the time: this gate reads whatever is in
     # `agent/dist/`, so a target nobody had built locally is not checked and does not
     # fail. The other two are still carrying 0.2.0-era numbers and will need the same
     # raise the first time they are built — that is a gap in the gate, not slack here.
-    "esp32s3": 991_344,
+    "esp32s3": 995_696,
     "esp32c3": 1_028_336,
     "esp32c6": 1_077_840,
 }

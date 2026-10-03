@@ -6,6 +6,84 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-03 — the deploy outcome is device-reported, from a transaction record that survives the reboot (R2-be-1)
+
+**Decided: the agent persists ONE record across the apply reboot, `(cmd_id, target slot
+address)`, and the outcome is reported by the session that observed it.** This
+**supersedes** the "nothing is persisted across the reboot" rule in the 2026-09-17 entries
+(R1-fw-1 §1, restated in R1-fw-2 §3). Those entries stay as written. Without the record
+the `cmd_id` died with the image that received the `stage`, so every deploy parked at
+`rebooting` with `is_terminal: false`, and the server could not tell a confirm from a
+rollback.
+
+- **Written by `ff_ota.c` at `staged`, not at `applying`.** `esp_https_ota_finish()` has
+  already moved the boot pointer by then, so any reset boots the new image. That includes
+  `apply: "on_command"` followed by a power cut. The write goes before the `staged and
+  bootable` log line, because that line is what the QEMU runbook waits for before pulling
+  the plug. The slot logic is unchanged.
+- **Its own NVS namespace (`ff_txn`), never `ff`.** `ff_store` erases `ff` on a token
+  change, and that rule stays about credentials. Nothing erases the partition (S0-fw-4).
+  A save erases the namespace first, so a torn write reads back as "no record", never as an
+  old `cmd_id` paired with a new slot.
+- **Classified once at boot, from otadata, never from the record alone** (`ff_mqtt.c`
+  `classify_txn`). Running the recorded slot in `PENDING_VERIFY` means `confirming`.
+  Running it `VALID` means `confirmed` is owed. Running the other slot while
+  `esp_ota_get_last_invalid_partition()` names the recorded one means `rolled_back`. This
+  covers INVALID (our timer) and ABORTED (the bootloader). Anything else is a stale record:
+  it is discarded with a WARN and nothing is reported. A false `rolled_back` would be a lie
+  kept forever.
+- **`confirmed` is queued only when `esp_ota_mark_app_valid_cancel_rollback()` returned
+  ESP_OK**, at the same announce PUBACK as before. The confirm moment did not move.
+  `rolled_back` is reported by the image the board **returned to**.
+- **The record is cleared at the terminal state's PUBACK, never at enqueue, and only if
+  it is still for that `cmd_id`** (`ff_txn_clear_if`). A reset before the PUBACK re-derives
+  the same outcome and says it again, and the server deduplicates. A newer `stage` that
+  verified in the meantime keeps its own record.
+- **`rolling_back` is best-effort and can never delay the rollback.** `confirm_timeout_cb`
+  calls no `esp_mqtt_client_*` function. Those take the client's lock, and a broken image
+  is exactly the one whose mqtt task may be wedged. The callback starts a pre-created
+  `ff_rollback` esp_timer (2 s grace) and spawns a one-shot task that enqueues the report.
+  If the timer cannot start, or there is no transaction to report on (an image written by
+  an R1 agent), it rolls back immediately, as before. Proven in QEMU: an
+  `FF_ROLLBACK_TEST` image put `rolling_back` on the broker and was back on the old slot
+  3 s later.
+- **The timeout's decision stands through the grace window.** Before, the reboot followed
+  the decision within microseconds. Now it can be up to 2 s later, so an announce ack that
+  lands in between is logged and does **not** mark the image valid
+  (`s_rollback_decided`). Otherwise one transaction could end both `confirmed` and
+  `rolled_back`.
+- **Outcome publishes are enqueued (`esp_mqtt_client_enqueue`, store=true), not
+  published.** They come from the esp-mqtt event handler or from the report task.
+  `ff_mqtt_publish_status` keeps its immediate send for ff_ota's task, whose drain timing
+  depends on it.
+
+**Rejected:**
+- **Inferring `rolled_back` on the server** from an announce whose `fw_version` equals
+  `from_version`. It breaks `deploys.py` rule 1: the server never writes a state for a
+  transaction the device did receive.
+- **The new image reading its own retained `up/status`** to recover the `cmd_id`. That
+  needs devices to have read access on `up/`, which is a `mosquitto/acl` change, and the ACL
+  is CRITICAL.
+
+**The transition gap, accepted.** Only an image that contains this code writes the record,
+and only the image the board returns to can report `rolled_back`. So a deploy issued while
+a board runs an R1 agent gets no outcome, even if the new image is R2. That includes prod's
+`94a990dd09a4` on 0.3.1. Such a transaction stays at `rebooting`, and a rollback *to* an R1
+image is never reported. From the second R2→R2 deploy on, every outcome is reported.
+
+**The simulator models the same thing** (`StageRunner.pending`/`rolled_back`,
+`--confirm auto|never`, `--confirm-timeout`). The confirm timer is a session
+*sentinel*, not a worker, because it ends the session by setting `reboot`. It is armed
+once per boot, so a reconnect resumes it rather than restarting it.
+
+**Out of scope, noted.** A `stage` that arrives while the running image is still
+`PENDING_VERIFY` would write the rollback target. IDF's `esp_ota_begin` should refuse it,
+and ff_ota reports `failed`. That belongs to R2-fw-2.
+
+Agent `0.4.0`. Details and evidence: `docs/features/ota-deploy.md` → *R2-be-1*.
+
+---
+
 ## 2026-10-02 — the flashing bench is Windows + Chrome, not the Mac
 
 **Decided: every host reference to "the Mac" as the bench is superseded.** The bench is a

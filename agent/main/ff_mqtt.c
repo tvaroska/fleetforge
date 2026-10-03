@@ -35,6 +35,7 @@
 #include "ff_identity.h"
 #include "ff_ota.h"
 #include "ff_progress.h"
+#include "ff_txn.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "mqtt_client.h"
@@ -62,6 +63,14 @@ static const char *TAG = "ff-mqtt";
 #define CONFIRM_TIMEOUT_S 300
 #endif
 
+/* How long a timed-out image keeps running after the confirm timer fires, so a queued
+ * `rolling_back` can leave the wire before the reboot. Bounded by an esp_timer that is
+ * created at boot (see arm_confirm_timeout), never by the MQTT client: the rollback must
+ * happen whatever the session is doing. 2 s covers one pass of the esp-mqtt task loop. */
+#define ROLLBACK_REPORT_GRACE_MS 2000
+/* cJSON + one log line; the heartbeat task does the same work in the same size. */
+#define ROLLBACK_REPORT_STACK 4096
+
 static const char PRESENCE_ONLINE[] = "{\"online\":true}";
 static const char PRESENCE_OFFLINE[] = "{\"online\":false}";
 
@@ -75,11 +84,32 @@ typedef struct {
     char topic_dn[TOPIC_MAX];
     int announce_msg_id;   /* the id whose PUBACK means "this board did its job" */
     bool session_confirmed; /* the announce has been acknowledged at least once */
+    volatile bool connected; /* a broker session is up right now (read by the report task) */
     TaskHandle_t heartbeat; /* NULL until the first successful connect */
     char last_command_id[64];
 } ff_mqtt_ctx_t;
 
 static ff_mqtt_ctx_t s_ctx;
+
+/* What this boot owes the server about the transaction ff_ota recorded before the last
+ * reboot (ff_txn.h). Decided ONCE, at boot, by classify_txn() — from otadata, never from
+ * the record alone — and only ever moved towards TXN_NONE afterwards. */
+typedef enum {
+    TXN_NONE,              /* nothing to report: the R1 behaviour */
+    TXN_CONFIRMING,        /* running the recorded slot, PENDING_VERIFY: confirm or roll back */
+    TXN_ALREADY_CONFIRMED, /* running the recorded slot, VALID: `confirmed` is owed */
+    TXN_ROLLED_BACK,       /* the recorded slot was rejected; we are what it fell back to */
+} txn_kind_t;
+
+static struct {
+    txn_kind_t kind;
+    char cmd_id[FF_TXN_MAX_CMD_ID];
+    char detail[64];        /* slot labels only — never a URL */
+    bool confirming_sent;   /* `confirming` is reported once per boot */
+    int terminal_msg_id;    /* the queued `confirmed`/`rolled_back`; its PUBACK clears */
+} s_txn = {.kind = TXN_NONE, .terminal_msg_id = -1};
+
+static int enqueue_status(const char *cmd_id, const char *state, int pct, const char *detail);
 
 /* ── the OTA confirm / rollback pair ──────────────────────────────────────────────────
  *
@@ -96,7 +126,14 @@ static ff_mqtt_ctx_t s_ctx;
  * image would confirm itself before it had done anything. Hence: confirm only after the
  * board has demonstrably worked (broker connected AND the retained announce acknowledged).
  *
- * Do not try to prove these by forcing the partition state; R2 owns the live test. */
+ * Do not try to prove these by forcing the partition state; R2 owns the live test.
+ *
+ * R2-be-1 adds REPORTING to both branches and changes neither decision: `confirmed` is
+ * queued only after esp_ota_mark_app_valid_cancel_rollback() returned ESP_OK, and the
+ * timeout path may queue a best-effort `rolling_back` but never waits for it. Nothing in
+ * confirm_timeout_cb() calls an esp_mqtt_client_* function — those take the client's lock,
+ * which the mqtt task holds during network I/O, and a broken image is exactly the image
+ * whose mqtt task may be wedged. */
 
 static bool pending_verify(void)
 {
@@ -108,20 +145,59 @@ static bool pending_verify(void)
     return state == ESP_OTA_IMG_PENDING_VERIFY;
 }
 
-static void confirm_this_image(void)
+/* true only when this call marked an OTA image valid — the one fact `confirmed` may be
+ * reported on. */
+static bool confirm_this_image(void)
 {
     if (!pending_verify()) {
-        return; /* the normal R0 path: nothing to confirm, nothing to roll back */
+        return false; /* the normal R0 path: nothing to confirm, nothing to roll back */
     }
     esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
     if (err == ESP_OK) {
         ESP_LOGW(TAG, "this image was written by OTA and is now CONFIRMED: the broker "
                       "accepted us and the retained announce was acknowledged");
-    } else {
-        ESP_LOGE(TAG, "cannot confirm this OTA image (%s) — the bootloader will roll back "
-                      "on the next reset",
-                 esp_err_to_name(err));
+        return true;
     }
+    ESP_LOGE(TAG, "cannot confirm this OTA image (%s) — the bootloader will roll back "
+                  "on the next reset",
+             esp_err_to_name(err));
+    return false;
+}
+
+/* Pre-created at boot by arm_confirm_timeout(), so the timeout path allocates nothing it
+ * depends on. When it fires the grace period is over: roll back, reported or not. */
+static esp_timer_handle_t s_rollback_timer;
+
+/* Set by confirm_timeout_cb() the moment it decides to roll back. Before the grace timer
+ * the reboot followed that decision within microseconds; now it follows within
+ * ROLLBACK_REPORT_GRACE_MS, and an announce ack arriving inside that window must not
+ * confirm an image that is already on its way out — that would end in both `confirmed`
+ * and `rolled_back` for one transaction. The decision made at the timeout stands. */
+static volatile bool s_rollback_decided;
+
+static void rollback_now_cb(void *arg)
+{
+    (void)arg;
+    esp_ota_mark_app_invalid_rollback_and_reboot(); /* does not return on success */
+    ESP_LOGE(TAG, "esp_ota_mark_app_invalid_rollback_and_reboot returned — there is no "
+                  "other bootable slot to go back to");
+}
+
+/* One shot, off the esp_timer task: the enqueue takes the mqtt client's lock and may wait
+ * on a wedged mqtt task. Waiting HERE is harmless — the rollback timer is already running
+ * and does not care whether this ever finishes. */
+static void rollback_report_task(void *arg)
+{
+    (void)arg;
+    if (s_ctx.connected) {
+        (void)enqueue_status(s_txn.cmd_id, FF_STATUS_ROLLING_BACK, FF_STATUS_PCT_NONE, NULL);
+    } else {
+        /* It would only sit in the outbox and die with the reboot. The board we return
+         * to reports `rolled_back`, which is the state that matters. */
+        ESP_LOGW(TAG, "no broker session: %s for %s is not reported", FF_STATUS_ROLLING_BACK,
+                 s_txn.cmd_id);
+    }
+    vTaskDelete(NULL);
 }
 
 /* The negative branch. Runs once, CONFIRM_TIMEOUT_S after boot, and only for an image the
@@ -137,6 +213,24 @@ static void confirm_timeout_cb(void *arg)
     ESP_LOGE(TAG, "no working session %d s after an OTA boot — marking this image invalid "
                   "and rolling back to the previous slot",
              CONFIRM_TIMEOUT_S);
+
+    s_rollback_decided = true;
+
+    /* The invariant: past the guard above, every path leaves either the rollback timer
+     * running or the rollback already called. Nothing here blocks, and nothing here calls
+     * the mqtt client. No ESP_ERROR_CHECK: an abort in PENDING_VERIFY would roll back too,
+     * but by accident. With no transaction to report on (an image written by an R1 agent)
+     * there is nothing to wait for, and the rollback is immediate, exactly as before. */
+    if (s_txn.kind == TXN_CONFIRMING && s_rollback_timer != NULL &&
+        esp_timer_start_once(s_rollback_timer, (uint64_t)ROLLBACK_REPORT_GRACE_MS * 1000ULL) ==
+            ESP_OK) {
+        if (xTaskCreate(rollback_report_task, "ff_rbrep", ROLLBACK_REPORT_STACK, NULL, 4, NULL) !=
+            pdPASS) {
+            ESP_LOGE(TAG, "cannot start the %s report — rolling back unreported in %d ms",
+                     FF_STATUS_ROLLING_BACK, ROLLBACK_REPORT_GRACE_MS);
+        }
+        return; /* rollback_now_cb() fires in ROLLBACK_REPORT_GRACE_MS */
+    }
     esp_ota_mark_app_invalid_rollback_and_reboot(); /* does not return */
 }
 
@@ -148,6 +242,19 @@ static void arm_confirm_timeout(void)
         ESP_LOGD(TAG, "not an OTA boot: no confirm timer armed");
         return;
     }
+    /* Created now, used only if the confirm timer fires. If it cannot be created the
+     * timeout path rolls back immediately, exactly as before R2-be-1. */
+    const esp_timer_create_args_t rollback_args = {
+        .callback = rollback_now_cb,
+        .name = "ff_rollback",
+    };
+    if (esp_timer_create(&rollback_args, &s_rollback_timer) != ESP_OK) {
+        s_rollback_timer = NULL;
+        ESP_LOGW(TAG, "no rollback grace timer: a timed-out image will roll back without "
+                      "reporting %s",
+                 FF_STATUS_ROLLING_BACK);
+    }
+
     const esp_timer_create_args_t args = {
         .callback = confirm_timeout_cb,
         .name = "ff_confirm",
@@ -156,6 +263,98 @@ static void arm_confirm_timeout(void)
     if (esp_timer_create(&args, &timer) == ESP_OK) {
         ESP_ERROR_CHECK(esp_timer_start_once(timer, (uint64_t)CONFIRM_TIMEOUT_S * 1000000ULL));
         ESP_LOGW(TAG, "OTA boot: %d s to reach the fleet or roll back", CONFIRM_TIMEOUT_S);
+    }
+}
+
+/* ── the transaction that crossed the reboot (R2-be-1) ──────────────────────────────
+ *
+ * Read once, before connecting. The record says WHICH transaction; otadata says WHAT
+ * happened to it. No outcome is ever authored from the record alone: a stale record that
+ * turned into a false `rolled_back` would be a lie kept forever in deploy_events. */
+
+static void classify_txn(void)
+{
+    s_txn.kind = TXN_NONE;
+    s_txn.cmd_id[0] = '\0';
+    s_txn.detail[0] = '\0';
+    s_txn.confirming_sent = false;
+    s_txn.terminal_msg_id = -1;
+
+    ff_txn_t rec;
+    esp_err_t err = ff_txn_load(&rec);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        return;
+    }
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "cannot read the transaction record (%s) — no outcome will be reported "
+                      "for it",
+                 esp_err_to_name(err));
+        return;
+    }
+    strlcpy(s_txn.cmd_id, rec.cmd_id, sizeof(s_txn.cmd_id));
+
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    if (running != NULL && running->address == rec.target_addr) {
+        esp_ota_img_states_t state = ESP_OTA_IMG_UNDEFINED;
+        if (esp_ota_get_state_partition(running, &state) == ESP_OK) {
+            if (state == ESP_OTA_IMG_PENDING_VERIFY) {
+                s_txn.kind = TXN_CONFIRMING;
+                ESP_LOGW(TAG, "transaction %s: confirming on %s", s_txn.cmd_id, running->label);
+                return;
+            }
+            if (state == ESP_OTA_IMG_VALID) {
+                /* We confirmed, then reset before the `confirmed` PUBACK. Say it again; the
+                 * server deduplicates. */
+                s_txn.kind = TXN_ALREADY_CONFIRMED;
+                ESP_LOGW(TAG, "transaction %s: already confirmed on %s", s_txn.cmd_id,
+                         running->label);
+                return;
+            }
+        }
+    } else if (running != NULL) {
+        /* INVALID (our confirm timer) or ABORTED (the bootloader found it still
+         * PENDING_VERIFY at a reset): either way the board left the recorded slot. */
+        const esp_partition_t *invalid = esp_ota_get_last_invalid_partition();
+        if (invalid != NULL && invalid->address == rec.target_addr) {
+            s_txn.kind = TXN_ROLLED_BACK;
+            snprintf(s_txn.detail, sizeof(s_txn.detail), "returned to %s; %s did not confirm",
+                     running->label, invalid->label);
+            ESP_LOGW(TAG, "transaction %s: rolled_back (%s)", s_txn.cmd_id, s_txn.detail);
+            return;
+        }
+    }
+
+    /* A USB re-flash over a live record, an UNDEFINED state, anything without evidence. */
+    ESP_LOGW(TAG, "stale transaction record for %s — discarded", s_txn.cmd_id);
+    (void)ff_txn_clear_if(s_txn.cmd_id);
+    s_txn.cmd_id[0] = '\0';
+}
+
+/* On every connect, after the announce: whatever this boot still owes. Mqtt-task context,
+ * so everything here is enqueued, not published. */
+static void report_txn_on_connect(void)
+{
+    switch (s_txn.kind) {
+    case TXN_CONFIRMING:
+        if (!s_txn.confirming_sent) {
+            s_txn.confirming_sent =
+                enqueue_status(s_txn.cmd_id, FF_STATUS_CONFIRMING, FF_STATUS_PCT_NONE, NULL) > 0;
+        }
+        break;
+    case TXN_ALREADY_CONFIRMED:
+        if (s_txn.terminal_msg_id <= 0) {
+            s_txn.terminal_msg_id = enqueue_status(s_txn.cmd_id, FF_STATUS_CONFIRMED, 100, NULL);
+        }
+        break;
+    case TXN_ROLLED_BACK:
+        if (s_txn.terminal_msg_id <= 0) {
+            s_txn.terminal_msg_id = enqueue_status(s_txn.cmd_id, FF_STATUS_ROLLED_BACK,
+                                                   FF_STATUS_PCT_NONE, s_txn.detail);
+        }
+        break;
+    case TXN_NONE:
+    default:
+        break;
     }
 }
 
@@ -226,6 +425,11 @@ static void on_connected(ff_mqtt_ctx_t *ctx)
     ESP_LOGI(TAG, "publish %s (qos 1, retain, msg_id %d) %s", ctx->topic_presence, id,
              PRESENCE_ONLINE);
 
+    ctx->connected = true;
+    /* After the announce, so the server already knows which version is running when the
+     * outcome lands. */
+    report_txn_on_connect();
+
     /* One task for the life of the process: esp-mqtt reconnects underneath us, and
      * restarting the heartbeat on every reconnect would drift the interval. */
     if (ctx->heartbeat == NULL) {
@@ -239,23 +443,17 @@ static void on_connected(ff_mqtt_ctx_t *ctx)
     }
 }
 
-void ff_mqtt_publish_status(const char *cmd_id, const char *state, int pct, const char *detail)
+/* The `up/status` body, key for key as `simulator/device.py::_status()` builds it and
+ * `ingestor/protocol.py::StatusPayload` parses it — including the explicit nulls. Heap;
+ * the caller frees it. NULL when out of memory (already logged). */
+static char *build_status_payload(const char *cmd_id, const char *state, int pct,
+                                  const char *detail)
 {
-    if (s_ctx.client == NULL) {
-        /* Before ff_mqtt_run() there is no session to publish on. Cannot happen today —
-         * the only caller is ff_ota, and a command can only arrive over a live session —
-         * but a dropped status is an outcome lost forever, so it says so. */
-        ESP_LOGE(TAG, "cannot report %s for %s: there is no mqtt session yet", state, cmd_id);
-        return;
-    }
-
     cJSON *root = cJSON_CreateObject();
     if (root == NULL) {
         ESP_LOGE(TAG, "out of memory building a status payload (%s)", state);
-        return;
+        return NULL;
     }
-    /* Key for key as `simulator/device.py::_status()` builds it and
-     * `ingestor/protocol.py::StatusPayload` parses it — including the explicit nulls. */
     cJSON_AddStringToObject(root, "cmd_id", cmd_id);
     cJSON_AddStringToObject(root, "state", state);
     if (pct < 0) {
@@ -273,6 +471,21 @@ void ff_mqtt_publish_status(const char *cmd_id, const char *state, int pct, cons
     cJSON_Delete(root);
     if (payload == NULL) {
         ESP_LOGE(TAG, "out of memory serialising a status payload (%s)", state);
+    }
+    return payload;
+}
+
+void ff_mqtt_publish_status(const char *cmd_id, const char *state, int pct, const char *detail)
+{
+    if (s_ctx.client == NULL) {
+        /* Before ff_mqtt_run() there is no session to publish on. Cannot happen today —
+         * the only caller is ff_ota, and a command can only arrive over a live session —
+         * but a dropped status is an outcome lost forever, so it says so. */
+        ESP_LOGE(TAG, "cannot report %s for %s: there is no mqtt session yet", state, cmd_id);
+        return;
+    }
+    char *payload = build_status_payload(cmd_id, state, pct, detail);
+    if (payload == NULL) {
         return;
     }
 
@@ -285,6 +498,29 @@ void ff_mqtt_publish_status(const char *cmd_id, const char *state, int pct, cons
     ESP_LOGI(TAG, "publish %s (qos 1, retain, msg_id %d) cmd_id=%s state=%s pct=%d",
              s_ctx.topic_status, msg_id, cmd_id, state, pct);
     free(payload);
+}
+
+/* The same message, QUEUED rather than sent: esp_mqtt_client_enqueue() stores it in the
+ * outbox and the mqtt task sends it. The variant for the esp-mqtt event handler and for the
+ * rollback report task. QoS 1, retained (same reason as above), store = true so a reconnect
+ * resends it. Returns the msg_id — the PUBACK to wait for — or a value <= 0 on failure. */
+static int enqueue_status(const char *cmd_id, const char *state, int pct, const char *detail)
+{
+    if (s_ctx.client == NULL) {
+        ESP_LOGE(TAG, "cannot report %s for %s: there is no mqtt session yet", state, cmd_id);
+        return -1;
+    }
+    char *payload = build_status_payload(cmd_id, state, pct, detail);
+    if (payload == NULL) {
+        return -1;
+    }
+    int msg_id =
+        esp_mqtt_client_enqueue(s_ctx.client, s_ctx.topic_status, payload, 0, QOS, 1, true);
+    /* Same rule as above: never `detail`. */
+    ESP_LOGI(TAG, "publish %s (qos 1, retain, queued, msg_id %d) cmd_id=%s state=%s pct=%d",
+             s_ctx.topic_status, msg_id, cmd_id, state, pct);
+    free(payload);
+    return msg_id;
 }
 
 /* ── commands ─────────────────────────────────────────────────────────────────────── */
@@ -463,6 +699,7 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base, int32_t event_i
     case MQTT_EVENT_DISCONNECTED:
         /* Not an error and not handled: esp-mqtt reconnects with its own backoff. Logged
          * because the serial console is the only diagnostic a board has. */
+        ctx->connected = false;
         ESP_LOGW(TAG, "mqtt disconnected; the client will reconnect");
         break;
 
@@ -477,7 +714,28 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base, int32_t event_i
         if (event->msg_id == ctx->announce_msg_id && !ctx->session_confirmed) {
             ctx->session_confirmed = true;
             ESP_LOGI(TAG, "announce acknowledged by the broker");
-            confirm_this_image();
+            if (s_rollback_decided) {
+                ESP_LOGW(TAG, "the announce ack arrived after the confirm timeout — the "
+                              "rollback already decided stands; NOT confirming");
+            } else if (confirm_this_image() && s_txn.kind == TXN_CONFIRMING) {
+                /* Reported only on a successful mark-valid. If marking failed nothing is
+                 * said: the bootloader rolls back at the next reset and the image we
+                 * return to reports `rolled_back`. From here this boot owes `confirmed`,
+                 * and a reconnect before it is queued retries it. */
+                s_txn.kind = TXN_ALREADY_CONFIRMED;
+                s_txn.terminal_msg_id =
+                    enqueue_status(s_txn.cmd_id, FF_STATUS_CONFIRMED, 100, NULL);
+            }
+        }
+        /* The terminal state is delivered: the transaction is closed, and only now is the
+         * record cleared. A reset before this re-derives the same outcome from otadata at
+         * the next boot and says it again, which the server deduplicates. Clearing at
+         * enqueue time would trade that harmless repeat for a lost outcome. */
+        if (s_txn.kind != TXN_NONE && s_txn.terminal_msg_id > 0 &&
+            event->msg_id == s_txn.terminal_msg_id) {
+            (void)ff_txn_clear_if(s_txn.cmd_id);
+            s_txn.kind = TXN_NONE;
+            s_txn.terminal_msg_id = -1;
         }
         break;
 
@@ -556,6 +814,10 @@ esp_err_t ff_mqtt_run(const ff_cfg_t *cfg, const ff_cred_t *cred)
     }
     ESP_ERROR_CHECK(esp_mqtt_client_register_event(s_ctx.client, ESP_EVENT_ANY_ID,
                                                    mqtt_event_handler, &s_ctx));
+
+    /* What the last reboot left to report, decided before the timer below can fire. */
+    ff_txn_init();
+    classify_txn();
 
     /* Armed before the connect attempt, so an image that can never reach its broker still
      * rolls back on schedule rather than waiting for a connection that never comes. */

@@ -5,12 +5,13 @@
  * non-atomic switch, bricks the device." This is the first code in the agent that moves
  * the boot partition, and the only code that can move it back.
  *
- * Scope at R1 (R1-fw-1). The walk ends at `rebooting` → esp_restart(): `confirming`,
- * `confirmed`, `rolling_back` and `rolled_back` belong to the confirm/rollback pair
- * already living in ff_mqtt.c, which this task makes LIVE for the first time (an image
- * written by OTA boots ESP_OTA_IMG_PENDING_VERIFY). Nothing is persisted across the
- * reboot: the board that comes back up simply announces, and `cmd_id` dies with the
- * old image. R2 owns the state machine that survives a reset.
+ * Scope (R1-fw-1, R2-be-1). This walk ends at `rebooting` → esp_restart(): `confirming`,
+ * `confirmed`, `rolling_back` and `rolled_back` belong to the confirm/rollback pair in
+ * ff_mqtt.c (an image written by OTA boots ESP_OTA_IMG_PENDING_VERIFY). What crosses the
+ * reboot is one record, `(cmd_id, target slot)`, which this module writes to NVS through
+ * ff_txn the moment a verified image is bootable (`staged`). ff_mqtt.c reads it at the next
+ * boot and reports the outcome against that cmd_id. This module never reports an outcome
+ * itself: the session that observed it does.
  */
 
 #pragma once

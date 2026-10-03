@@ -37,6 +37,10 @@ from fleetforge.ingestor.protocol import AnnouncePayload, PresencePayload, parse
 from fleetforge.simulator import __main__ as cli
 from fleetforge.simulator.device import (
     ANNOUNCE,
+    CONFIRM_AUTO,
+    CONFIRM_NEVER,
+    CONFIRM_WALK,
+    DEFAULT_CONFIRM_TIMEOUT_S,
     HEARTBEAT,
     LINK_FAST,
     LINK_SLOW,
@@ -45,6 +49,7 @@ from fleetforge.simulator.device import (
     PRESENCE_OFFLINE,
     PRESENCE_ONLINE,
     QOS,
+    ROLLBACK_WALK,
     SAFE_WINDOW_AUTO,
     SAFE_WINDOW_HOLD,
     SLOW_MAX_DELAY_S,
@@ -52,9 +57,13 @@ from fleetforge.simulator.device import (
     STAGE_WALK,
     STATE_APPLYING,
     STATE_AWAITING_SAFE_WINDOW,
+    STATE_CONFIRMED,
+    STATE_CONFIRMING,
     STATE_DOWNLOADING,
     STATE_FAILED,
     STATE_REBOOTING,
+    STATE_ROLLED_BACK,
+    STATE_ROLLING_BACK,
     STATE_STAGED,
     STATE_STAGING,
     STATE_VERIFYING,
@@ -551,6 +560,12 @@ def test_the_retyped_states_are_the_servers_states() -> None:
     for state in (*STAGE_WALK, STATE_AWAITING_SAFE_WINDOW, STATE_FAILED):
         assert state in values, f"{state} is not a DeployState"
     assert STATE_STAGED in values and STATE_VERIFYING in values
+    # R2-be-1: the outcome, reported by the session after the reboot.
+    outcome = (STATE_CONFIRMING, STATE_CONFIRMED, STATE_ROLLING_BACK, STATE_ROLLED_BACK)
+    for state in outcome:
+        assert state in values, f"{state} is not a DeployState"
+    assert CONFIRM_WALK == (STATE_CONFIRMING, STATE_CONFIRMED)
+    assert ROLLBACK_WALK == (STATE_CONFIRMING, STATE_ROLLING_BACK, STATE_ROLLED_BACK)
 
 
 def test_the_stage_walk_is_the_spec_order_and_does_not_assume_a_safe_window() -> None:
@@ -780,6 +795,10 @@ async def test_an_apply_ends_the_session_and_the_next_one_reports_the_new_versio
     assert [report["state"] for report in statuses(before)] == list(STAGE_WALK)
     assert PRESENCE_OFFLINE not in [payload for _, payload, _, _ in before.published]
     assert any(line.startswith("reboot") for line in lines)
+    # R2-be-1: the session on the new image reports the outcome of the same transaction.
+    await wait_until(lambda: len(statuses(after)) == len(CONFIRM_WALK))
+    assert [report["state"] for report in statuses(after)] == list(CONFIRM_WALK)
+    assert {report["cmd_id"] for report in statuses(after)} == {"cmd-stage-1"}
 
 
 async def test_an_apply_with_no_version_still_reboots(
@@ -858,6 +877,198 @@ async def test_a_session_that_applies_nothing_is_not_cut_short(downloads: list[s
     assert any(payload == PRESENCE_OFFLINE for _, payload, _, _ in fake.published), (
         "a session that ended without applying anything still owes its goodbye"
     )
+
+
+# ---------------------------------------------------------------------------
+# The outcome after the reboot (R2-be-1)
+#
+# The session on the image the board rebooted into reports `confirming` → `confirmed`;
+# a `--confirm never` image reports `confirming` → `rolling_back`, goes back, and the
+# session on the image it RETURNED to reports `rolled_back`. Same split as the firmware
+# (`agent/main/ff_mqtt.c`): the outcome is reported by whoever observed it.
+# ---------------------------------------------------------------------------
+
+
+async def one_session(
+    stage: StageRunner,
+    fake: FakeClient,
+    *,
+    awake_s: float | None = 0.1,
+    stop: asyncio.Event | None = None,
+) -> list[str]:
+    """Run exactly one session of `stage`'s board against `fake`; return its transcript."""
+    lines, step = transcript()
+    await asyncio.wait_for(
+        run_session(
+            stage.identity,
+            credential_for(stage.identity.device_id),
+            client_factory=lambda: fake,  # type: ignore[arg-type,return-value]
+            link=LinkProfile(LINK_FAST),
+            heartbeat_interval_s=10.0,
+            awake_s=awake_s,
+            stop=stop,
+            stage=stage,
+            step=step,
+        ),
+        timeout=5.0,
+    )
+    return lines
+
+
+async def applied_stage(**kwargs: Any) -> StageRunner:
+    """A board on 1.4.2 that has just applied 1.5.0 (`cmd-stage-1`) and is rebooting."""
+    stage = StageRunner(
+        identity=DeviceIdentity(device_id="a4cf12b3de90", fw_version="1.4.2"),
+        link=LinkProfile(LINK_FAST),
+        **kwargs,
+    )
+    first = FakeClient()
+    first.inbox.put_nowait(FakeMessage("ff/v1/d/a4cf12b3de90/dn/cmd", stage_command()))
+    await one_session(stage, first, awake_s=None)
+    assert stage.reboot.is_set(), "the apply did not reboot"
+    assert [report["state"] for report in statuses(first)] == list(STAGE_WALK)
+    stage.reboot.clear()  # what run_always_on does before the next session
+    return stage
+
+
+async def test_a_confirming_image_reports_confirmed_once_and_then_nothing(
+    downloads: list[str],
+) -> None:
+    """`confirming` → `confirmed`, both retained, both for the applied cmd_id, after the
+    announce — and the transaction is closed, so the session after says nothing."""
+    stage = await applied_stage()
+    assert stage.pending is not None and stage.pending.cmd_id == "cmd-stage-1"
+    assert stage.pending.previous_identity.fw_version == "1.4.2"
+
+    second = FakeClient()
+    await one_session(stage, second)
+
+    assert channel_payloads(second, "a4cf12b3de90", ANNOUNCE)[0]["fw_version"] == "1.5.0"
+    reports = statuses(second)
+    assert [report["state"] for report in reports] == list(CONFIRM_WALK)
+    assert {report["cmd_id"] for report in reports} == {"cmd-stage-1"}
+    assert reports[-1]["pct"] == 100
+    status_topic = up_topic("a4cf12b3de90", STATUS)
+    assert [
+        (qos, retain) for topic, _, qos, retain in second.published if topic == status_topic
+    ] == [(1, True)] * len(CONFIRM_WALK)
+    # Announce first: the server knows the running version when the outcome lands.
+    assert second.calls.index(f"publish {up_topic('a4cf12b3de90', ANNOUNCE)}") < second.calls.index(
+        f"publish {status_topic}"
+    )
+    assert stage.pending is None
+
+    third = FakeClient()
+    await one_session(stage, third)
+    assert statuses(third) == []
+
+
+async def test_an_image_that_never_confirms_rolls_back_and_the_old_one_reports_it(
+    downloads: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The whole rollback, through `run_always_on`: the timer fires, the board comes back
+    on the version it left, and THAT session reports `rolled_back`."""
+    monkeypatch.setattr("fleetforge.simulator.device.REBOOT_DELAY_S", 0.0)
+    identity = DeviceIdentity(device_id="a4cf12b3de90", fw_version="1.4.2", capabilities=("ota",))
+    clients, factory = session_factory(identity.device_id, stage_command(version="1.5.0"))
+    stop = asyncio.Event()
+    lines, step = transcript()
+
+    await drive_until(
+        run_always_on(
+            identity,
+            credential_for(identity.device_id),
+            client_factory=factory,
+            link=LinkProfile(LINK_FAST),
+            heartbeat_interval_s=0.01,
+            stop=stop,
+            confirm=CONFIRM_NEVER,
+            confirm_timeout_s=0.2,
+            step=step,
+        ),
+        lambda: len(clients) == 3 and statuses(clients[2]) != [],
+        stop,
+    )
+
+    device_id = identity.device_id
+    applied, on_new, back = clients[:3]
+    assert [report["state"] for report in statuses(applied)] == list(STAGE_WALK)
+    assert channel_payloads(on_new, device_id, ANNOUNCE)[0]["fw_version"] == "1.5.0"
+    assert [report["state"] for report in statuses(on_new)] == [
+        STATE_CONFIRMING,
+        STATE_ROLLING_BACK,
+    ]
+    assert channel_payloads(back, device_id, ANNOUNCE)[0]["fw_version"] == "1.4.2"
+    assert channel_payloads(back, device_id, HEARTBEAT)[0]["fw_version"] == "1.4.2"
+    rolled = statuses(back)
+    assert [report["state"] for report in rolled] == [STATE_ROLLED_BACK]
+    assert rolled[0]["cmd_id"] == "cmd-stage-1"
+    assert "1.4.2" in rolled[0]["detail"]
+    everything = [r["state"] for fake in clients for r in statuses(fake)]
+    assert STATE_CONFIRMED not in everything
+    assert everything.count(STATE_ROLLED_BACK) == 1
+    # A rollback is a reboot, not a goodbye: the session on the bad image says nothing
+    # on its way out.
+    assert PRESENCE_OFFLINE not in [payload for _, payload, _, _ in on_new.published]
+    assert sum(line.startswith("reboot") for line in lines) >= 2
+
+
+async def test_stop_during_the_confirm_timer_cancels_it_cleanly(downloads: list[str]) -> None:
+    """Ctrl-C while an image waits to be confirmed: no rollback, and the goodbye still goes."""
+    stage = await applied_stage(confirm=CONFIRM_NEVER, confirm_timeout_s=30.0)
+    stop = asyncio.Event()
+    second = FakeClient()
+    asyncio.get_running_loop().call_later(0.1, stop.set)
+
+    await one_session(stage, second, awake_s=None, stop=stop)
+
+    assert [report["state"] for report in statuses(second)] == [STATE_CONFIRMING]
+    assert any(payload == PRESENCE_OFFLINE for _, payload, _, _ in second.published)
+    assert stage.rolled_back is None
+    assert stage.pending is not None, "nothing confirmed and nothing rolled back"
+    assert stage.identity.fw_version == "1.5.0"
+    assert not stage.reboot.is_set()
+
+
+async def test_a_reconnect_resumes_the_confirm_timer_rather_than_restarting_it(
+    downloads: list[str],
+) -> None:
+    """The firmware arms its timer once per boot; a broker blip does not buy more time."""
+    stage = await applied_stage(confirm=CONFIRM_NEVER, confirm_timeout_s=0.3)
+    await one_session(stage, FakeClient(), awake_s=0.2)  # a blip before the timer fires
+    assert stage.pending is not None
+
+    second = FakeClient()
+    started = time.monotonic()
+    await one_session(stage, second, awake_s=None)
+
+    assert time.monotonic() - started < 0.25, "the timer restarted from zero on reconnect"
+    assert [report["state"] for report in statuses(second)] == [
+        STATE_CONFIRMING,
+        STATE_ROLLING_BACK,
+    ]
+    assert stage.reboot.is_set() and stage.rolled_back == "cmd-stage-1"
+
+
+async def test_a_session_with_no_transaction_publishes_no_status() -> None:
+    fake = await drive_session(DeviceIdentity(device_id="a4cf12b3de90"))
+    assert statuses(fake) == []
+
+
+def test_an_unknown_confirm_mode_or_timeout_is_refused_before_any_io() -> None:
+    identity = DeviceIdentity(device_id="a4cf12b3de90")
+    with pytest.raises(SimulatorError):
+        StageRunner(identity=identity, link=LinkProfile(LINK_FAST), confirm="sometimes")
+    with pytest.raises(SimulatorError):
+        StageRunner(identity=identity, link=LinkProfile(LINK_FAST), confirm_timeout_s=0)
+
+
+def test_the_cli_offers_both_confirm_modes() -> None:
+    args = cli.build_parser().parse_args(["run", "--confirm", "never", "--confirm-timeout", "5"])
+    assert (args.confirm, args.confirm_timeout) == (CONFIRM_NEVER, 5.0)
+    defaults = cli.build_parser().parse_args(["fleet"])
+    assert (defaults.confirm, defaults.confirm_timeout) == (CONFIRM_AUTO, DEFAULT_CONFIRM_TIMEOUT_S)
+    assert DEFAULT_CONFIRM_TIMEOUT_S == 300.0  # spec/prd.md -> Timing
 
 
 def test_redact_url_keeps_the_origin_and_drops_everything_else() -> None:
