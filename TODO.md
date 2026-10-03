@@ -2,7 +2,7 @@
 
 **Goal:** Self-hosted OTA firmware management for embedded fleets (ESP32 first) — a bad
 build is caught before the fleet, and any device that gets one recovers itself.
-**Updated:** 2026-10-01
+**Updated:** 2026-10-03
 
 ## Where this stands
 
@@ -28,13 +28,11 @@ build is caught before the fleet, and any device that gets one recovers itself.
 - No upload form in the dashboard (`docs/runbooks/upload-artifact.sh` is the only way in),
   and every device has `name: null`. Neither has a task yet.
 
-**Next: R2 — safe deploy (verify + auto-rollback).** Not opened yet. The CUJ-1 T3 gate
-blocked R1 → R2 on 2026-09-23 on segment 5; `S0-test-4` fixed the cause the same day and
-the gate's reproduction now converges, but **the gate itself has not been re-run**. First
-step: `/replan`, which re-runs it and, on a pass, opens R2 here. R2's task list is in
-[docs/features/ota-deploy.md](docs/features/ota-deploy.md) → *Phase 2* (R2-FW-3 and most
-of R2-TEST-1 already landed in R1). The flaky-Wi-Fi rollback spike is still open — same
-file, *De-risking*.
+**Now: R2 — safe deploy (verify + auto-rollback), opened 2026-10-03.** The CUJ-1 T3 gate
+re-ran and passed on its graded segments (3: enroll, 5: OTA reports the new version); 6 and
+the wrong-layout refusal still have no harness. `jeep` found nothing assessable in what the
+run could show, so the pass rests on the deterministic judge. Task list below; background in
+[docs/features/ota-deploy.md](docs/features/ota-deploy.md) → *Phase 2*.
 
 **Blocked:**
 
@@ -49,6 +47,7 @@ file, *De-risking*.
 <!-- Counters: spec=1 infra=7 db=1 be=6 fe=7 sec=1 fw=4 test=3 -->
 <!-- Sprint 0 counters: fe=8 fw=4 infra=9 test=4 ops=1 -->
 <!-- R1 counters: be=3 fe=1 fw=2 test=1 -->
+<!-- R2 counters: fw=2 be=1 fe=1 test=2 spec=1 -->
 <!-- R3 counters: spec=1 fw=4 test=1 -->
 
 Live status lives ONLY here. States: `- [ ]` open · `- [x]` done · `- [!]`
@@ -129,3 +128,28 @@ Bricking risks, broker auth and security issues get filed here as they surface.
 
 - [x] **S0-test-3**: Someone who has not seen the code onboards a board unaided — passed 2026-09-22 → [enrollment.md](docs/features/enrollment.md)
 - [x] **S0-fw-3**: A board that browns out during RF calibration cannot escape it — withdrawn 2026-09-23, not fixed → [enrollment.md](docs/features/enrollment.md)
+
+---
+
+## R2: Safe deploy — verify + auto-rollback
+
+Retires bricking, the whole gamble. R2-FW-3 (device-side confirm timer) and most of
+R2-TEST-1 landed early in R1 (`ff_mqtt.c`; `docs/runbooks/rollback-test.md`). The agent's
+reported walk still ends at `rebooting`, so the server never sees a rollback.
+
+- [ ] **R2-be-1**: Observe confirm/rollback outcome; record it to `deploy_events` (P0, 1d)
+      Today every deploy parks at `rebooting` with `is_terminal: false`. Needs the agent to
+      report `confirming`/`confirmed`/`rolling_back`/`rolled_back` (`ff_ota.h`).
+- [ ] **R2-fw-1**: Checksum verify before apply, on the real agent (P0, 1d)
+      Confirm what already landed in R1 before starting; the simulator verifies sha256.
+- [ ] **R2-fw-2**: A/B slot apply, atomic switch — confirm against the R1 agent (P0, 1.5d)
+- [ ] **R2-fe-1**: Dashboard shows `good` vs `rolled-back` per device (P0, 0.5d)
+      Blocked on R2-be-1: nothing to read until the server sees the outcome.
+- [ ] **R2-test-1**: Remaining failure modes — boot loop, brownout mid-write (P0, 1d)
+      The `0.3.2-rbtest` run covers only "boots, joins, never confirms".
+- [ ] **R2-test-2**: Flaky-Wi-Fi rollback spike (P1, 0.5d)
+      Does a marginal radio stall the download past the confirm timer? Open since R0; the
+      reason deploys are still one board at a time.
+- [ ] **R2-spec-1**: Propose `rollback_capable` + partition fingerprint in `up/announce` (P1, 0.5d)
+      Proposal only (`spec/` is protected). Shape: `docs/features/board-profiles.md` step 1
+      and `spec/open-questions.md` → *Bootloader attestation on the Arduino path*.
