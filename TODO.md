@@ -79,7 +79,7 @@ the retired bingo app), single-tenant, **not a public product until V3**.
 
 Bricking risks, broker auth and security issues get filed here as they surface.
 
-- [ ] **S0-test-1**: Bench-verify the serial console on real hardware (P1, 0.5d)
+- [!] **S0-test-1**: Bench-verify the serial console on real hardware (P1, 0.5d) _(⚠ failed 2026-10-03; blocker: Hardware-gated. Boris must run Checks A–E at the Windows + Chrome bench and fill in the results table. Check E re-flashes prod board 94a990dd09a4 and ends its 0.3.1 baseline, so it runs last. (after 2)_
       Filed 2026-09-10, when S0-fe-1 shipped. Its software half is proven in jsdom against
       replays of real `agent/main/*.c` output; these four cannot be, because they are
       properties of a USB bridge chip and an OS, not of the classifier. The bench is
