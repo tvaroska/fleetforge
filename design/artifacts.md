@@ -38,7 +38,7 @@ It is written with `Cache-Control: no-store`. Every blob it points at is immutab
 **Until S0-infra-6** the left-hand column read `agent/dist/<target>/`, `COPY`d into the
 app image at `/app/agent`, checked once at startup and versioned by the application
 image. That split was a correct trade at R0-infra-2 and `firmware/__init__.py` recorded
-why: the bundles are identical for every tenant, they version with the image, and
+why. The bundles are identical for every tenant, they version with the image, and
 routing them through `ObjectStore` would made the R0 flasher depend on a GCS
 credential that could not be minted. A working flasher beat an elegant one.
 
@@ -51,22 +51,22 @@ and one index write.
 
 ## Three pressures
 
-**1. One agent version at a time.** The deployed agent is a property of the server
+**1. One agent version at a time**. The deployed agent is a property of the server
 deploy. There is no "flash the previous agent", and `S0-infra-2` — three stale bundles
 shipped in v0.3.0 — is the same coupling presenting as staleness rather than as an
 absent rollback.
 
-**2. The combinatorics.** Four chip targets today, with ESP32-H2, Thread and a Pi
+**2. The combinatorics**. Four chip targets today, with ESP32-H2, Thread and a Pi
 adapter named in the roadmap. More than one partition layout eventually — `firmware/catalog.py`
 is now keyed on `(target, partition_layout)` since S0-infra-7, so two layouts for one
 chip coexist. Add the agent versions worth keeping, then V2's repo × ref × target, then
 V3's delta images, which are indexed by *pairs* of versions and thus quadratic.
 Nothing in this sequence is tractable if an image is "a directory someone named".
 
-**3. Nothing identifies a build.** `manifest.json` carries `agent_version`,
+**3. Nothing identifies a build**. `manifest.json` carries `agent_version`,
 `source_commit`, `idf_version` and a digest-pinned `idf_image` — good provenance, and
 more than most projects have. It carries **no digest of the build configuration and no
-digest of the build as a whole.** That is precisely the identifier the S0-fw-3
+digest of the build as a whole**. That is precisely the identifier the S0-fw-3
 investigation needed and did not have: three sessions went by before anyone established
 that every brownout on record came from a 160 MHz `-Og` build. That was recovered by
 correlating a timestamp against `git log` rather than read off the artifact.
@@ -81,9 +81,9 @@ correlating a timestamp against `git log` rather than read off the artifact.
 `fleetforge/blobs/sha256/<hex>` — write-once, never overwritten, never deleted while
 referenced. Implemented and **frozen** in `src/fleetforge/storage/blobs.py`.
 `objectstore.py::put` documents overwrite-is-fine *because* artifacts are
-content-addressed, and that module is what makes the sentence true rather than a promise.
+content-addressed. That module is what makes the sentence true rather than a promise.
 
-**The key handed to `ObjectStore` is store-relative.** `fleetforge/` above is the
+**The key handed to `ObjectStore` is store-relative**. `fleetforge/` above is the
 *store's* prefix, joined on by `resolve_key`, not part of the key:
 
 | | `Settings` | prefix | key handed to the store | resulting object |
@@ -98,23 +98,22 @@ different layouts.
 
 Three more rules, all encoded:
 
-* **Lowercase hex only, rejected and never fixed.** `AB…` and `ab…` would be two
+* **Lowercase hex only, rejected and never fixed**. `AB…` and `ab…` would be two
   objects holding one artifact — the "two spellings of one object" failure
   `objectstore.py`'s reject-never-normalize rule exists to stop.
 * **`Cache-Control: public, max-age=31536000, immutable`**, exactly, written as object
   metadata by `put_blob` — not a note in this document. The key *is* the bytes. Thus, the
   object can never change. `ObjectStore.put` takes `cache_control` and both adapters
   send it only when asked. Thus, an ordinary `put` stays the same.
-* **No existence pre-check before a put.** It is a round trip and a race, and it buys
-  nothing: the same key always carries the same bytes. Thus, a retried upload is a no-op.
+* **No existence pre-check before a put**. It is a round trip and a race, and it buys
+  nothing. The same key always carries the same bytes. Thus, a retried upload is a no-op.
 
 Deduplication is not the headline benefit but it is a real one: a new agent version
 usually changes `app.bin` only, and `bootloader`, `partition-table` and `ota-data` are
 byte-identical across versions and across every device. Storing them per bundle is
 storing the same four kilobytes a thousand times.
 
-The prefix rule in `objectstore.py` is unaffected and non-negotiable: `gs://btvaroska`
-is shared with `secrets/`, podcast audio and backups, fleetforge owns `fleetforge/`
+The prefix rule in `objectstore.py` stays intact and non-negotiable. `gs://btvaroska` is shared with `secrets/`, podcast audio and backups, fleetforge owns `fleetforge/`
 only. `resolve_key` rejects rather than normalizes.
 
 ### Metadata
@@ -149,14 +148,14 @@ object is written and a data migration afterwards. Column rationale lives in the
 "Do we already have this?" is then a lookup rather than a build. Two absences are
 deliberate and must stay:
 
-* **No `artifacts.storage_key` column.** The key is `blob_key(sha256)`, a pure function
+* **No `artifacts.storage_key` column**. The key is `blob_key(sha256)`, a pure function
   of the primary key. Storing it makes a second spelling that can disagree with the
   first. (Nor a `deleted_at`/refcount: nothing deletes blobs before R2, and a refcount
   with no decrementer is a lie.)
 * **No FK from `builds.outputs`** — PostgreSQL cannot FK into JSONB. `outputs` is JSONB
-  rather than a `build_outputs` join table because an agent bundle build produces four
+  rather than a `build_outputs` join table. This is because an agent bundle build produces four
   parts (one `artifact_sha256` column cannot hold them, and a per-part row would collide
-  on the cache-key PK) and the set is consumed as a unit. The price is that **a future
+  on the cache-key PK) and the set moves as a unit. The price is that **a future
   pruner must treat `builds.outputs` as a GC root**. A join table is the additive
   migration the day part-wise queries appear.
 
@@ -176,8 +175,7 @@ alternate layouts and per-board config all fit that shape without a new concept.
 ### Per-device data stays out of artifact identity
 
 `ff_cfg` as a separate part at a reserved offset is what lets N devices share one
-artifact. It is the structural advantage over ESPHome, where configuration is compiled
-in and a fleet of 377 means 377 compiles (see `products/docs/esphome-review.md`). Every
+artifact. It is the structural advantage over ESPHome, where configuration compiles in and a fleet of 377 means 377 compiles (see `products/docs/esphome-review.md`). Every
 future feature gets checked against this: anything that pushes per-device data into the
 image bytes re-creates their ten-hour fleet update, and must be routed through
 `ff_cfg` or through runtime configuration instead.
@@ -192,12 +190,12 @@ image bytes re-creates their ten-hour fleet update, and must be routed through
 
 Two gaps to close, both small:
 
-**`config_sha256`.** The hash of `sdkconfig.resolved`, in the manifest and in the
+**`config_sha256`**. The hash of `sdkconfig.resolved`, in the manifest and in the
 `S0-fe-7` diagnostic bundle (which already ships the resolved config, hashing it is a
 few lines). This is not speculative tidiness — "which build produced this brownout log?"
 is the live question, and with a config digest on both sides it is a string comparison.
 
-**The version-number collision.** `TODO.md` says S0-fw-3 "shipped in v0.3.3" while
+**The version-number collision**. `TODO.md` says S0-fw-3 "shipped in v0.3.3" while
 `agent/version.txt` reads `0.2.0`: server release versions and agent versions, both
 called "version", differing by more than a patch. The wire protocol gets this right (`fw_version` and `agent_version` are separate fields in `up/announce`) and the prose
 must follow it.
@@ -245,5 +243,5 @@ credential that is not a key file), S0-infra-6 (bundles served from the store) a
 S0-infra-7 (catalog keyed by target *and* layout). The build engine itself stays R10.
 
 `just storage-check --blob` proves the frozen scheme against whichever backend is
-configured: it writes at `blobs/sha256/<digest of the payload>` and reads the
+configured. It writes at `blobs/sha256/<digest of the payload>` and reads the
 `Cache-Control` wait a signed-URL GET.

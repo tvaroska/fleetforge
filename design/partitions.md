@@ -49,19 +49,18 @@ bootloader offset differs, and nothing in this repo hardcodes it.
 
 ### Why each row is the way it is
 
-- **No `factory` partition, deliberately.** A factory-only board can never OTA its way to
+- **No `factory` partition, deliberately**. A factory-only board can never OTA its way to
   A/B. It would need a table rewrite, which OTA cannot do. Ship the full A/B map from
   the first USB flash even though nothing writes `ota_1` until R2.
   `make_manifest.py` refuses to emit a bundle whose decoded table contains one.
-- **Two slots of *equal* size.** `up/announce` reports a single `ota_slot_size`, and the
+- **Two slots of *equal* size**. `up/announce` reports a single `ota_slot_size`, and the
   server's pre-flight capability check compares an artifact against that one number. Slots
   of different sizes would make that check true for one slot and false for the other.
-- **`ff_cfg` reserved at R0, before its payload format existed.** A partition cannot be
-  added later. Thus, the space had to be claimed before anyone knew exactly what went in it.
-- **`nvs` is guarded, not wiped.** The device credential got at enrollment lives
+- **`ff_cfg` reserved at R0, before its payload format existed**. A partition allows no addition later. Thus, the space had to be claimed before anyone knew exactly what went in it.
+- **`nvs` has a guard, not wiped**. The device credential got at enrollment lives
   here, and so does the RF calibration cache. The flasher proves it is not writing into
   `nvs` by parsing the table it is flashing in the same operation
-  (`frontend/src/partitionTable.ts`) rather than by hardcoding `0x9000` — which would be
+  (`frontend/src/partitionTable.ts`) rather than by hardcoding `0x9000`. This would be
   right today and silently wrong for the next layout.
 - **1920 KB per slot on a 4 MB part** is the practical maximum once the data partitions
   and 64 KB alignment are paid for. The connect-only agent builds to ~1.08 MB of it (55%)
@@ -73,7 +72,7 @@ bootloader offset differs, and nothing in this repo hardcodes it.
 
 An OTA image writes *into* a partition. It cannot rewrite the table, add a partition, or
 change a bootloader build-time option. Three things are thus fixed at first USB
-flash — get one wrong and every deployed board needs physical retrieval, which is the
+flash — get one wrong and every deployed board needs physical retrieval. This is the
 exact intervention this product exists to delete. Full rationale in
 [`architecture.md`](architecture.md) → *Flash-time immutables*.
 
@@ -85,12 +84,11 @@ exact intervention this product exists to delete. Full rationale in
 
 Two notes that are easy to get backwards:
 
-- **Anti-rollback is off because it would block R2.** It burns a monotonic version
-  counter that forbids booting an older image — which is precisely what rollback does.
-- **Secure Boot v2 and R6's app-level signing are not interchangeable.** Secure Boot
-  burns a key digest to eFuse and needs a re-signed bootloader. Thus, it can never be
-  enabled on already-deployed boards. It is post-v1 and new-devices-only. R6 checks a
-  signature over the artifact in software, which is deliverable over OTA.
+- **Anti-rollback is off because it would block R2**. It burns a monotonic version
+  counter that forbids booting an older image. This is precisely what rollback does.
+- **Secure Boot v2 and R6's app-level signing are not interchangeable**. Secure Boot
+  burns a key digest to eFuse and needs a re-signed bootloader. Thus, it can never work on already-deployed boards. It is post-v1 and new-devices-only. R6 checks a
+  signature over the artifact in software. This is deliverable over OTA.
 
 Every safety option lives in the common `sdkconfig.defaults`, never in a per-target file.
 The per-target files carry hardware facts only (console peripheral, PSRAM, the OpenCores
@@ -129,7 +127,7 @@ defaults to `ensure_ascii=True` and `JSON.stringify` does not. Thus, a non-ASCII
 produces different bytes from the two writers even though both decode to the same object.
 The contract is the decoded object. The vector can only pin bytes where they agree.
 
-**Failure posture: loud and terminal.** Any error (bad CRC, wrong version, erased,
+**Failure posture: loud and terminal**. Any error (bad CRC, wrong version, erased,
 missing key) makes the agent idle rather than revert to a compiled-in default. A
 board that boots with a bad config and does nothing is diagnosable from its serial log.
 One that invents a server URL connects somewhere unexpected and is not.
@@ -146,11 +144,11 @@ deliberate. One is a defect.
 | `agent/partitions.csv` | `0x1E0000` | **The source.** |
 | `spec/device-protocol.md` | `1966080` | The wire contract. Frozen. |
 | `src/fleetforge/firmware/manifest.py` | `EXPECTED_OTA_SLOT_SIZE` | Server-side capability check. Retyped, not imported — the two ends of a contract must be able to disagree. |
-| `tests/test_agent_partitions.py` | literal | **The tripwire.** A test that imports the value it guards proves nothing. |
+| `tests/test_agent_partitions.py` | literal | **The tripwire**. A test that imports the value it guards proves nothing. |
 | `docs/runbooks/agent-build.md` | `1920K` | Expected `gen_esp32part.py` decode, for eyeballing a build. |
-| `spec/prd.md` → *Requirements & targets* | `≤ 1.9 MB` | **Defect.** The rounded form reads as an independent second cap. It invites an implementation with two thresholds a few kilobytes apart and a rejection nobody can explain. Tracked in [`open-questions.md`](../spec/open-questions.md). The fix is to cite `ota_slot_size` instead. |
+| `spec/prd.md` → *Requirements & targets* | `≤ 1.9 MB` | **Defect**. The rounded form reads as an independent second cap. It invites an implementation with two thresholds a few kilobytes apart and a rejection nobody can explain. Tracked in [`open-questions.md`](../spec/open-questions.md). The fix is to cite `ota_slot_size` instead. |
 
-**Offsets, by contrast, are never typed.** ESP-IDF writes the authoritative
+**Offsets, by contrast, are never typed**. ESP-IDF writes the authoritative
 `{offset: file}` map to `build/flasher_args.json`. `make_manifest.py` reads it and the
 manifest carries the numbers through untouched to the API, the browser flasher and the
 QEMU harness. `ota_slot_size` itself is decoded from the generated
@@ -185,8 +183,8 @@ for what that rules in and out.
 
 **A new layout is a new id** (`ab-4m-v2`, `ab-8m-v1`, …) plus an entry in
 `SUPPORTED_LAYOUTS` plus a `device-protocol.md` change — **never an edit to an existing
-row.** Boards already flashed keep `ab-4m-v1` until someone physically gets them. Thus,
-both layouts must be supported simultaneously, and the layout version is what lets the
+row**. Boards already flashed keep `ab-4m-v1` until someone physically gets them. Thus,
+both layouts must be supported simultaneously. The layout version is what lets the
 server detect and quarantine a board carrying a superseded one.
 
 Per [`CRITICAL.md`](../CRITICAL.md), any task touching `agent/partitions.csv`,
@@ -202,7 +200,7 @@ Procedure for the build side: [`runbooks/agent-build.md`](../docs/runbooks/agent
 
 Everything above describes boards flashed from a Fleetforge agent bundle. Anyone
 embedding the protocol in their **own** firmware (the thin OTA library named in
-[`prd.md`](../spec/prd.md)) has to reproduce it, and the current design assumes they
+[`prd.md`](../spec/prd.md)) has to reproduce it. The current design assumes they
 will not by accident.
 
 To announce `"partition_layout": "ab-4m-v1"` truthfully, a build must have:
@@ -211,19 +209,19 @@ To announce `"partition_layout": "ab-4m-v1"` truthfully, a build must have:
 2. A custom partition table byte-identical to §1 — including `ff_cfg` at `0x12000` with
    subtype `0x40`, and no `factory` row.
 3. `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`, which is a **bootloader** option and
-   thus cannot be added later.
+   thus allows no addition later.
 4. None of the three eFuse options enabled.
 
 Anything short of that is a different layout and must announce a different id. The server
-accepts only the ids in `SUPPORTED_LAYOUTS`, and a deploy only matches equal ids. Thus, a
-mismatch is a rejected deploy, not a silent brick — which is the intended failure.
+accepts only the ids in `SUPPORTED_LAYOUTS`. A deploy only matches equal ids. Thus, a
+mismatch is a rejected deploy, not a silent brick. This is the intended failure.
 
-**Arduino gets its own layout id: `ab-4m-arduino-v1`.** An Arduino IDE build uses a board
-definition's own partition scheme, and its upload recipe cannot reach `ab-4m-v1`'s offsets.
+**Arduino gets its own layout id: `ab-4m-arduino-v1`**. An Arduino IDE build uses a board
+definition's own partition scheme. Its upload recipe cannot reach `ab-4m-v1`'s offsets.
 So the library ships the stock `min_spiffs` map plus a 4 KB `ff_cfg` at `0x3D0000`, under
 a new id rather than an edit to this one. The slot size is the same (1,966,080 B). Thus, the
 upload cap does not change. Only offsets differ, and the agent finds `ff_cfg` by subtype
-`0x40`, not by address. The NVS-backed config path was rejected. See
+`0x40`, not by address. The NVS-backed config path triggered a rejection. See
 [`decisions/arduino-gets-its-own-layout-id.md`](decisions/arduino-gets-its-own-layout-id.md)
 (measurements in its Appendix) and `spec/device-protocol.md` → *Partition layouts*.
 

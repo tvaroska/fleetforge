@@ -7,12 +7,12 @@ questions that are deliberately not v1's problem.
 > This file is an **index**. Requirements and targets live in [prd.md](../spec/prd.md).
 > Release contents in [releases.md](releases.md). Task history in `features/*.md`.
 > **Where each release stands (closed, active, blocked) lives only in
-> [TODO.md](../TODO.md).** Nothing here carries live state.
+> [TODO.md](../TODO.md)**. Nothing here carries live state.
 
 ## Strategic vision
 
 **Safe remote firmware updates for a fleet of ESP32 devices** — where "safe" means a bad
-build is caught *before* the fleet, and any device that does get a bad update recovers
+build triggers a catch *before* the fleet. Any device that does get a bad update recovers
 itself. Architected around **two thin waists**:
 
 1. **Device-facing:** opaque, versioned artifact + a 4-verb update contract
@@ -101,7 +101,7 @@ and S3 have no 802.15.4 at all. A Thread path is a new-hardware path.
 
 ## Growth-stage risks
 
-*v1's own risks are in [prd.md](../spec/prd.md) → Key risks. These become real later.*
+*v1's own risks are in [prd.md](../spec/prd.md) → Key risks. These become real later*.
 
 1. **Scale ceiling** — Wi-Fi will not reach a 100+ low-power swarm, and 802.15.4
    bandwidth makes full-image OTA energetically expensive. Mitigated in advance by

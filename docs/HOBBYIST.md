@@ -6,8 +6,8 @@
 for makers rather than for a swarm.
 
 This is a reading of the current aim, documentation and feature set against one
-question: *what would actually get used by someone with a DevKit, a sketch, and a
-board they cannot easily walk to?* Requirements stay in `spec/`. Live tasks stay in
+question: *what would actually get used by someone with a DevKit, a sketch. A
+board they cannot easily walk to*? Requirements stay in `spec/`. Live tasks stay in
 `TODO.md`. Landing any of the recommendations below is a `/new-feature` (or a
 release), not an edit of this file.
 
@@ -33,10 +33,10 @@ The architectural bet is two thin waists:
 
 Two authority rules that almost nobody else in this space gets right:
 
-1. **The device owns the reboot.** A drone must not apply mid-flight. A vehicle
+1. **The device owns the reboot**. A drone must not apply mid-flight. A vehicle
    must not reboot in motion. `awaiting_safe_window` can last indefinitely.
-2. **The device owns the rollback.** A board that cannot reach the broker is
-   exactly the board that must roll back — so the server never sends a rollback
+2. **The device owns the rollback**. A board that cannot reach the broker is
+   exactly the board that must roll back. Thus, the server never sends a rollback
    command.
 
 That is a real product, not a dashboard over `esp_https_ota`.
@@ -67,13 +67,13 @@ The gen-3 layout is actually followed, not just declared:
 - `DECISIONS.md` is append-only and dense with *why*
 - `CRITICAL.md` exists for paths that OTA cannot fix (partition table,
   bootloader rollback bit, eFuse)
-- The device protocol is marked near-frozen *and treated that way*
+- The device protocol carries the near-frozen mark *and treated that way*
 
 The load-bearing documents earn it:
 
 - [`spec/device-protocol.md`](../spec/device-protocol.md) — topic namespace *is*
   the ACL design. Retain versus persistent-session rule prevents a whole class of
-  replay bugs. SNTP-before-TLS is written down before anyone hits “certificate
+  replay bugs. SNTP-before-TLS appears before anyone hits “certificate
   not yet valid”
 - [`design/architecture.md`](../design/architecture.md) — flash-time immutables,
   transport split (MQTT control / HTTPS bytes), capability reporting
@@ -90,12 +90,12 @@ Impersonation instead of a GCS key file. `fw_version` is the version that
 
 ### What is weak or stale
 
-**README is a lie.** It still says the dashboard is a skeleton and “the agent,
+**README is a lie**. It still says the dashboard is a skeleton and “the agent,
 the flasher and OTA itself do not exist.” R0 is live at `bingo.tvaroska.sk`.
 R1’s backend, firmware, and dashboard button landed. A hobbyist (or a
 future-you in six months) will bounce.
 
-**The product surface in the PRD is not planned.** This sentence is in
+**The product surface in the PRD is not planned**. This sentence is in
 `prd.md`:
 
 > Device side: (a) a prebuilt agent to flash for instant wow, and (b) **a thin
@@ -105,21 +105,21 @@ future-you in six months) will bounce.
 is not a later nicety. It is the product. The prebuilt agent is a demo that
 connects and heartbeats. Nobody deploys a Morse-code blinker they cannot write.
 
-**CUJs do not exist.** [`spec/open-questions.md`](../spec/open-questions.md)
+**CUJs do not exist**. [`spec/open-questions.md`](../spec/open-questions.md)
 says so. *Unaided onboarding* has acceptance criteria hanging in air. There is
 no “I have an Arduino sketch and a DevKit on the desk” journey anywhere.
 
-**Feature files are two different products.** `enrollment.md` /
+**Feature files are two different products**. `enrollment.md` /
 `infrastructure.md` / `ota-deploy.md` are 50–100 KB of as-built archive.
 `health-telemetry.md` is 1.3 KB of stub table. Status lines are stale
 (`ota-deploy.md` still says Planned). Fine for the implementer. Useless as a
 map.
 
-**No operator manual.** Runbooks cover the *stack* (dev-stack, artifact-storage,
+**No operator manual**. Runbooks cover the *stack* (dev-stack, artifact-storage,
 agent-qemu, agent-build). Nothing covers “flash a board, upload a `.bin`,
 recover from a brownout” as a user. The dashboard *is* supposed to be that
-manual (`enrollment-console-is-the-diagnostic-surface`), but that only works
-once onboarding is proven on metal — and it is not.
+manual (`enrollment-console-is-the-diagnostic-surface`). But that only works
+once onboarding is proven on metal. It is not.
 
 **Hobbyist versus swarm is not resolved in writing.** v1 = 5 boards, one operator,
 hosted. V2 = source-to-artifact. V3 = swarm, and *also* “public product.”
@@ -131,7 +131,7 @@ deferred, many of them the things a hobbyist actually opens the app for.
 image (called out in the ESPHome review at `products/docs/esphome-review.md`,
 not yet in spec).
 
-Verdict on docs: **A- as an engineering system, C as a product description.**
+Verdict on docs: **A- as an engineering system, C as a product description**.
 The architecture will survive contact with a second platform. A hobbyist cannot
 currently tell what to *do*.
 
@@ -154,7 +154,7 @@ currently tell what to *do*.
 | `deploy_events` written forever | Built |
 | Device simulator | Built |
 
-### What is gated on a board
+### What depends on a board
 
 R0 is not closed. The one board on hand brownouts during RF calibration
 (`S0-fw-3`). `R0-test-2` (the release’s “done when”) and `R1-test-1` cannot run.
@@ -222,14 +222,14 @@ expert.
 
 ### 1. Thin OTA library — Arduino, ESP-IDF component, PlatformIO
 
-**This is the on-ramp. It is named in the PRD and does not exist as a plan.**
+**This is the on-ramp. It appears by name in the PRD and does not exist as a plan**.
 
 A hobbyist’s unit of work is a sketch, not a fleetforge agent. The prebuilt
 agent proves the wire. It does not water the plants, drive the frame, or fly
 the quad. Until the four-verb contract is a library they drop into *their*
 firmware, Fleetforge is a very good demo of itself.
 
-**Prerequisite, not a step: where does a library user's config live?** The agent
+**Prerequisite, not a step: where does a library user's config live**? The agent
 keeps broker URL, Wi-Fi creds and enrollment token in a dedicated flash
 partition (`ff_cfg, data, 0x40, 0x12000, 0x1000` in `agent/partitions.csv`),
 written by the browser flasher. A hobbyist who drops the library into a sketch
@@ -290,13 +290,13 @@ must not be scoped as one:
   purpose (`agent/partitions.csv`: *“No `factory` partition on purpose: a
   factory-only board can never OTA its way to A/B”*). The map is also full:
   `0x20000 + 2 × 0x1E0000 = 0x3E0000`, ~128 KB spare on a 4 MB part. Per
-  `CRITICAL.md` a layout change is **a new layout id, never an edit** — so every
+  `CRITICAL.md` a layout change is **a new layout id, never an edit**. Thus, every
   board already flashed as `ab-4m-v1` can never gain this. That makes it an
-  `ab-8m-v2` / next-layout decision for `DECISIONS.md`, **not an R2 scope-add.**
+  `ab-8m-v2` / next-layout decision for `DECISIONS.md`, **not an R2 scope-add**.
 
 Two spec fixes that belong in the same release, cheap now, recall-level later:
 
-- **`confirm_timeout_s` must differ by `power_class`.** A sleepy e-paper that
+- **`confirm_timeout_s` must differ by `power_class`**. A sleepy e-paper that
   wakes, refreshes, and sleeps will roll back a perfect image against a 300 s
   wall clock. ESPHome already burned this (`boot_is_good_on_shutdown`). The PRD
   lists the e-paper as a v1 board. The protocol as written will fail that board.
@@ -326,7 +326,7 @@ What a hobbyist must be able to do:
 1. Phone or Chromium talks to the board over BLE (or the serial console already
    on the flash page).
 2. New SSID/PSK in. Nothing about the device's identity is re-typed — note this
-   is **not** the enrollment token: that lives in the `ff_cfg` flash partition
+   is **not** the enrollment token. That lives in the `ff_cfg` flash partition
    and is *burned* at enrollment. What must survive a re-provision is the broker
    credential returned by `POST /v1/enroll`.
 3. Board reconnects, appears green. No ladder, no USB.
@@ -336,7 +336,7 @@ partition the browser flasher writes. Improv means the running app rewrites
 them — so either the agent gains a `ff_cfg` write path, or credentials move to
 NVS. Settle that before scoping.
 
-**Split serial from BLE.** Serial Improv reuses the Web Serial code already on
+**Split serial from BLE**. Serial Improv reuses the Web Serial code already on
 the flash page and is nearly free. BLE is the larger, separate half and is what
 buys the phone-in-the-garden story. They are two tasks, not one.
 
@@ -367,17 +367,17 @@ community already knows.
 
 ## What not to pull forward for hobbyists
 
-- **V3 swarm / gateway / Thread / delta / FPGA.** Right architecture, wrong
+- **V3 swarm / gateway / Thread / delta / FPGA**. Right architecture, wrong
   decade for a maker with five DevKits. `parent_device_id` reserved in the
   schema is enough.
-- **Groups as a *release*.** Tags on enrollment tokens already exist. Bulk
+- **Groups as a *release***. Tags on enrollment tokens already exist. Bulk
   deploy of identical artifacts starts to matter around board #8, not at V3. A
   thin “deploy this `.bin` to these checkboxes” is a hobbyist feature. A
   hierarchical drone mesh is not.
-- **Application config through `dn/cfg`.** Correct refusal. That path turns
+- **Application config through `dn/cfg`**. Correct refusal. That path turns
   this into a worse ESPHome. If hobbyists need a setting, it belongs in their
   firmware (or a later, explicit app-config channel).
-- **Simulation (R8) before rollback is boringly reliable.** At hobbyist scale a
+- **Simulation (R8) before rollback is boringly reliable**. At hobbyist scale a
   bad build costs one reboot. Sim earns its keep when CI pushes unattended.
 
 ---
@@ -406,9 +406,9 @@ then Improv reprovision, HA, self-host, V2 source-to-artifact
 ([`releases.md`](releases.md)), and the v1 tail shifted by one. Improv is not yet
 slotted — it remains a recommendation, not a release.
 
-**Why the library comes after R2, not before it.** Section 3 calls today's
+**Why the library comes after R2, not before it**. Section 3 calls today's
 Deploy button a brick factory. That is the argument against shipping the
-four-verb contract into other people's `setup()`/`loop()` first: a library is a
+four-verb contract into other people's `setup()`/`loop()` first. A library is a
 multiplier on but safe deploy currently is. Handing it out before
 auto-rollback exists spreads the unsafe path across custom firmware on boards
 nobody can reach — the exact failure the product exists to prevent. If the

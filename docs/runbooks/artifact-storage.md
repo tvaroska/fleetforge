@@ -13,10 +13,10 @@ for V2 self-hosting, **GCS** in production.
 
 It already holds this estate's `secrets/` (the `.env` backups from root `CLAUDE.md`),
 `podcasts/` and `audio/` (the `boris` private podcast feed), `backup/`, `production/`
-and `data/`. **Fleetforge owns exactly one prefix: `fleetforge/`.**
+and `data/`. **Fleetforge owns exactly one prefix: `fleetforge/`**.
 
 A key reaches the adapter from an HTTP request body (R1's upload endpoint), so the
-prefix is confined **twice**, and both must exist:
+prefix applies only **twice**, and both must exist:
 
 1. **In the adapter** — `storage/objectstore.py::resolve_key` rejects (never fixes)
    any key that could escape: `..`, a leading `/`, `//`, a backslash, control or
@@ -50,7 +50,7 @@ the key.
 So in a bucket listing both deployments read the same way, and a key that already starts
 with `fleetforge/` is a bug (it would store `fleetforge/fleetforge/blobs/…`) — the
 adapters refuse it rather than fixing it. The digest is lowercase hex, always. An
-uppercase spelling is rejected, never normalized. This is because it would be a second object
+uppercase spelling triggers a rejection, never normalized. This is because it would be a second object
 holding one artifact.
 
 Blobs are written with `Cache-Control: public, max-age=31536000, immutable` as real
@@ -119,9 +119,9 @@ Granting `allUsers` is exactly what PAP exists to block.
 
 ## `btvaroska` forbids keys — which is why the credential is an impersonation
 
-**RESOLVED 2026-09-15 (S0-infra-5).** This section used to read *BLOCKED*. The blocker was
-two facts and only one of them was about GCP: the org will not issue a key, **and the
-adapter accepted nothing else**. The second half is fixed (`storage/factory.py` now takes
+**RESOLVED 2026-09-15 (S0-infra-5)**. This section used to read *BLOCKED*. The blocker was
+two facts and only one of them was about GCP. The org will not issue a key, **and the
+adapter accepted nothing else**. The second half has a fix (`storage/factory.py` now takes
 `GCS_IMPERSONATE_SERVICE_ACCOUNT`) and the whole path was round-tripped against the
 real bucket (see *Checked against real GCS* below). The org-policy fact below stays the same and is not going away.
 
@@ -139,7 +139,7 @@ describe constraints/iam.disableServiceAccountKeyCreation --project=btvaroska
 
 Do not "fix" this by turning the constraint off. The answer taken is:
 
-1. **Impersonation (keyless) — IMPLEMENTED.** The runtime principal holds
+1. **Impersonation (keyless) — IMPLEMENTED**. The runtime principal holds
    `roles/iam.serviceAccountTokenCreator` on
    `fleetforge-artifacts@btvaroska.iam.gserviceaccount.com` and impersonates it.
    V4 signing goes through the IAM `signBlob` API instead of a local private key.
@@ -172,12 +172,12 @@ GCS_IMPERSONATE_SERVICE_ACCOUNT=fleetforge-artifacts@btvaroska.iam.gserviceaccou
 * put → get (sha256 matches) → signed URL → **got with no credentials at all** →
   `cache-control: public, max-age=31536000, immutable` → delete → `ObjectNotFound` →
   idempotent second delete.
-* **`signBlob` is checked, not assumed.** The URL carries
+* **`signBlob` undergoes a check, not assumed**. The URL carries
   `X-Goog-Credential=fleetforge-artifacts@btvaroska.iam.gserviceaccount.com/…/goog4_request`
   and an unauthenticated GET returns the bytes. There is no private key in the process. Thus,
   that signature can only came from the IAM API.
 * **Containment measured through the adapter**, with `GCS_PREFIX=` empty so the in-process
-  confinement is deliberately off and the *IAM* condition is what answers:
+  confinement is deliberately off and the *IAM* condition is what answers.
   `--key "secrets/ff-impersonation-probe-$(uuidgen).bin"` exits non-zero with
   `SELFTEST FAILED: ObjectStoreError: gcs put of secrets/… failed: Forbidden`.
 
@@ -213,22 +213,21 @@ keeping straight:
 
 ### But do not simply switch on ADC
 
-`mainsite` is the **shared** VM service account for the whole estate, and the listing
-above is the proof: it can read `secrets/` (this estate's `.env` backups), `podcasts/`,
+`mainsite` is the **shared** VM service account for the whole estate. The listing
+above is the proof. It can read `secrets/` (this estate's `.env` backups), `podcasts/`,
 `backup/` — everything. Plain ADC would hand fleetforge read access to every other app's
 secrets and make the prefix condition on `fleetforge-artifacts` decorative.
 
-This is a **stronger** reason to refuse ADC than the signing one, and it survives now that
-`signBlob` is known to work. Option 1 above (impersonation) is thus the answer for
-**containment first** and signing second: `mainsite` impersonates `fleetforge-artifacts`,
-which is scoped to `fleetforge/` by the condition that already exists. `factory.py` and
+This is a **stronger** reason to refuse ADC than the signing one. It survives now that
+`signBlob` is clear to work. Option 1 above (impersonation) is thus the answer for
+**containment first** and signing second: `mainsite` impersonates `fleetforge-artifacts`.
+This is scoped to `fleetforge/` by the condition that already exists. `factory.py` and
 `storage/gcs.py` both say so in their docstrings, in that order.
 
 ## Do not commit secrets to git
 
 Production has no key file at all. `GCS_IMPERSONATE_SERVICE_ACCOUNT` is a service
-account **email** — not a credential, and exactly what proves no key was used, which is
-why `describe` (and thus the selftest, and the logs) prints it in full.
+account **email** — not a credential, and exactly what proves no key was used. That is why `describe` (and thus the selftest, and the logs) prints it in full.
 
 Where a key file is still used (self-hosted V2), `secrets/` is in `.gitignore`. A
 committed key is a full compromise of `gs://btvaroska`, including the `.env` backups under
@@ -287,7 +286,7 @@ endpoint — it is **not** local CPU any more, and `storage/gcs.py` says so. Con
   signing through `asyncio.to_thread` under `_guard` on **both** paths — one thread hop
   wasted with a key file, a hung API prevented without one.
 * It has latency and a quota. A per-request signed URL is one extra round trip to Google.
-* **IAM propagation can 403 a fresh grant.** Root `docs/ops-log.md` F-2026-08-18-001: the
+* **IAM propagation can 403 a fresh grant**. Root `docs/ops-log.md` F-2026-08-18-001: the
   `boris` podcast feed 500'd once with `403 PERMISSION_DENIED: iam.serviceAccounts.signBlob`
   right after a deploy and recovered by itself two requests later. Retry for ~5 minutes
   before believing a negative result. Which 403 you got matters: `getAccessToken` denied
@@ -296,7 +295,7 @@ endpoint — it is **not** local CPU any more, and `storage/gcs.py` says so. Con
 
 ## Rotation
 
-**There is nothing to rotate in production.** The credential is an impersonation. Thus, the
+**There is nothing to rotate in production**. The credential is an impersonation. Thus, the
 only long-lived thing is an IAM grant, and the access token it mints lives an hour and
 refreshes itself. To revoke, delete the member:
 
@@ -321,8 +320,7 @@ gcloud iam service-accounts keys delete <OLD_KEY_ID> \
 ```
 
 Signed URLs already issued keep working until they expire (30 min by default,
-`SIGNED_URL_TTL_S`) — revoking a key or a grant does not revoke outstanding URLs, which is
-why the TTL is short.
+`SIGNED_URL_TTL_S`) — revoking a key or a grant does not revoke outstanding URLs. That is why the TTL is short.
 
 ## Check the store
 
@@ -339,8 +337,8 @@ put → get (sha256) → `signed_url` (got over HTTP) → delete → `ObjectNotF
 a second, idempotent delete, and ends `SELFTEST OK`.
 
 **Reading the container run:** the printed URL's host is `localhost:9000`, *not*
-`minio:9000`, and the selftest says it could not get it from inside the network. That
-is correct. A presigned URL signs the `Host` header, so the URL a device is handed must
+`minio:9000`. The selftest says it could not get it from inside the network. That
+is correct. A presigned URL signs the `Host` header, so the URL a device receives must
 be generated against an endpoint reachable from outside the compose network
 (`S3_PUBLIC_ENDPOINT_URL`). Rewriting the host after signing invalidates the signature.
 The selftest re-signs against the internal endpoint to prove signing itself works, and
@@ -350,7 +348,7 @@ the URL is a real failure. A **connection refused** from inside the container is
 `just storage-check --key '../escape.bin'` must exit non-zero with `ObjectKeyError`.
 `just storage-check --blob` additionally checks the content-addressed key and the
 `Cache-Control` header (see *Key layout* above). `--key` and `--blob` are mutually
-exclusive, because a blob's key is its digest and nothing else.
+exclusive. This is because a blob's key is its digest and nothing else.
 
 ## Publish agent bundles (S0-infra-6)
 
@@ -389,22 +387,22 @@ just agent-publish esp32
 ```
 
 `CLOUDSDK_CONFIG=/tmp/no-gcloud-adc` (any empty directory) is not optional and is the same gotcha as *on this dev box,
-ADC is a USER* above: the ADC **file** here is a user principal with no
+ADC is a USER* above. The ADC **file** here is a user principal with no
 `roles/iam.serviceAccountTokenCreator` on `fleetforge-artifacts`, while an empty config
 dir makes google-auth fall through to the metadata server, which answers with
 `devserver@btvaroska` — the identity that *is* granted it (DECISIONS.md 2026-09-15).
 
 **Order matters on a release:** publish the bundles *before* deploying an app image that
 no longer carries them, or the flasher answers 503 in the window between. And never run
-`just agent-build*` on `prod` — bundles are built here and published there.
+`just agent-build*` on `prod` — bundles build here and publish there.
 
 ## Production configuration
 
-**Still not wired on the running container as of S0-infra-6.** `services/prod/` lives in
-the `services` repo and its env is protected (root `CLAUDE.md`: ask first), so S0-infra-6
-PROPOSES the change rather than applying it — and **until it is applied, prod's flasher
-answers 503**, because the deployed app image will no longer carry the bundles. Four env
-lines wire it, and **nothing is mounted**:
+**Still not wired on the running container as of S0-infra-6**. `services/prod/` lives in
+the `services` repo and its env has protection (root `CLAUDE.md`: ask first), so S0-infra-6
+PROPOSES the change rather than applying it — and **until it applies, prod's flasher
+answers 503**. This is because the deployed app image will no longer carry the bundles. Four env
+lines wire it, and **nothing mounts**:
 
 ```yaml
       OBJECT_STORE_BACKEND: gcs
@@ -418,13 +416,13 @@ lines wire it, and **nothing is mounted**:
   a secret. Thus, they belong in the compose file, not in `.env`.
 * No key file, no mount, no `GCS_CREDENTIALS_FILE`. The container reaches the GCE metadata
   server over the default bridge. If that fails the symptom is
-  `SELFTEST FAILED: ObjectStoreError: …Application Default Credentials…` — a
+  `SELFTEST FAILED: ObjectStoreError: …Application Default Credentials…`. A
   credential-resolution failure is an `ObjectStoreError` (503), never an
-  `ObjectStoreConfigError` (500), and never a hang: it runs under the verb's timeout.
+  `ObjectStoreConfigError` (500), and never a hang. It runs under the verb's timeout.
 * Check from the container with no key anywhere:
   `docker compose exec -T fleetforge-api python -m fleetforge.storage selftest --backend gcs --blob`.
 
-Setting **both** `S3_*` and `GCS_*` is refused rather than resolved by precedence —
+Setting **both** `S3_*` and `GCS_*` triggers a refusal rather than resolved by precedence —
 "which bucket did my firmware go to?" must not be answered by reading a factory. Unset
 one, or set `OBJECT_STORE_BACKEND` explicitly. The same rule applies to the credential:
 `GCS_CREDENTIALS_FILE` and `GCS_IMPERSONATE_SERVICE_ACCOUNT` together is

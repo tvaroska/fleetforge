@@ -52,11 +52,11 @@ will not.
 The evidence is not “R3 is planned.” The evidence is the surface they would actually
 touch:
 
-- **No Arduino / PlatformIO / IDF component to embed.** `R3-fw-2`–`R3-fw-5` and
+- **No Arduino / PlatformIO / IDF component to embed**. `R3-fw-2`–`R3-fw-5` and
   `R3-test-1` are unchecked. The two landed R3 tasks are a partition-table spike
   (`R3-fw-1`) and a written journey (`R3-spec-1`) — necessary, and neither is the
   on-ramp. A CUJ nobody can walk is the gap stated precisely, not evidence against it.
-- **The dashboard can Deploy but cannot Upload.** `frontend/src/api.ts` has
+- **The dashboard can Deploy but cannot Upload**. `frontend/src/api.ts` has
   `listArtifacts` and `deployDevice`. It has no upload method.
   `docs/runbooks/upload-artifact.sh` exists *because of this* (“until it grows a form
   this script is the only way to get something deployable into the fleet”). Alex’s unit
@@ -65,7 +65,7 @@ touch:
 - **No device naming, no tags, no “this is the coop door.”** Flow 1 step 7 is in the
   spec. `GET /v1/devices` returns `name: null` and there is no PATCH. The fleet table is
   a list of 12-hex MACs.
-- **README still says the agent, the flasher, and OTA do not exist.** A second person
+- **README still says the agent, the flasher, and OTA do not exist**. A second person
   (or future-you) bounces before they find `TODO.md`.
 
 R3 is correctly sequenced *after* R2. A library is a multiplier on but safe deploy
@@ -79,8 +79,8 @@ library, not a substitute for it.
 
 ## Gap 2 — “Safe” is still a claim covering one of three brick modes
 
-The pitch is the first sentence of the README: a bad build is caught *before* the fleet,
-and any device that gets one recovers itself. v1 has no “before the fleet” (sim is V2).
+The pitch is the first sentence of the README. A bad build triggers a catch *before* the fleet.
+Any device that gets one recovers itself. v1 has no “before the fleet” (sim is V2).
 Recovery on metal covers **one** failure mode.
 
 From `TODO.md` after `R1-test-1`:
@@ -89,7 +89,7 @@ From `TODO.md` after `R1-test-1`:
 |---|---|
 | Image fails to boot | Bootloader A/B — standard IDF, **not exercised by us** |
 | Boots, joins, never confirms | **Proven** 2026-09-23 (`confirm_timeout_cb` on metal) |
-| Boots, announce is acked, app is broken anyway | **Confirms itself. No automatic recovery.** This is the residual gamble. |
+| Boots, announce is acked, app is broken anyway | **Confirms itself. No automatic recovery**. This is the residual gamble. |
 
 That third case is the common one: a null deref in `loop()`, a show that starts
 garbage, a sensor that never reads. Confirm is “broker accepted the announce,” not “the
@@ -98,25 +98,25 @@ does not.
 
 Worse, the parts of R2 that *are* specified will fail a v1 board:
 
-- **Sleepy confirm is a 300 s wall clock.** `CONFIRM_TIMEOUT_S` is compile-time 300.
-  `confirm_timeout_s` on the command is parsed and **ignored** (`ff_mqtt.c`). The PRD’s
+- **Sleepy confirm is a 300 s wall clock**. `CONFIRM_TIMEOUT_S` is compile-time 300.
+  `confirm_timeout_s` on the command parses and **ignored** (`ff_mqtt.c`). The PRD’s
   e-paper “wakes, refreshes, sleeps” will roll back a perfect image. ESPHome already
   burned this (`boot_is_good_on_shutdown`). It is in the persona pain list. It is not
   in the agent.
-- **No in-image safe-mode.** A/B does not cover “boots, then crashes before MQTT.” That
+- **No in-image safe-mode**. A/B does not cover “boots, then crashes before MQTT.” That
   board looks dead. ESPHome’s answer is an NVS boot counter into a reduced image —
   cheap, no flash-time immutable. Not scoped.
-- **The dashboard lies about success.** R1’s walk ends at `rebooting`. `is_terminal`
+- **The dashboard lies about success**. R1’s walk ends at `rebooting`. `is_terminal`
   stays false forever, so every successful deploy renders as in-flight. An operator
   watching the coop door cannot tell “it worked” from “it is still going” from “it hung.”
   Measured 2026-09-23 running the CUJ suite: a clean deploy parked at
   `{"state": "rebooting", "is_terminal": false}` and stayed there. Nothing writes
   `CONFIRMED` — `TERMINAL_DEPLOY_STATES` lists it (`db/models.py:172`) and no code path
   reaches it, because confirm reporting is `R2-be-1`/`R2-fw-3`.
-- **Integrity is done. Provenance is not.** `ff_ota` reads the written slot back,
+- **Integrity is complete. Provenance is not**. `ff_ota` reads the written slot back,
   sha256s it from flash, and refuses to boot into a mismatch (`ff_ota.c:100`, `:422`) —
   the strong version of the check, not the download-stream one. What is missing is any
-  reason to trust the digest: nothing proves the `stage` command came from you. That is
+  reason to trust the digest. Nothing proves the `stage` command came from you. That is
   R6 signing, and it is correctly later.
 
 The 2026-09-23 session is the same shape as a product gap, not just an ops finding:
@@ -156,7 +156,7 @@ community answer and is not on the ladder — [`HOBBYIST.md`](HOBBYIST.md) recom
 `releases.md` did not slot it. SoftAP is post-v1 by decision.
 
 This is not “missing a nice-to-have provisioner.” It is the product claim failing on
-the second day. USB-once-then-OTA only holds if the *link* can be fixed without USB.
+the second day. USB-once-then-OTA only holds if the *link* can recover without USB.
 Today it cannot. Combined with gap 1 (you can only OTA the demo agent) and gap 2 (and
 only somewhat safely), the field loop is: crawl under the porch with a laptop anyway.
 
@@ -164,13 +164,13 @@ only somewhat safely), the field loop is: crawl under the porch with a laptop an
 
 ## What I would not put in the top 3
 
-- **V3 swarm / gateway / Thread / delta.** Right architecture, wrong decade for five
+- **V3 swarm / gateway / Thread / delta**. Right architecture, wrong decade for five
   DevKits. `parent_device_id` reserved in the schema is enough.
-- **Server-side compile / simulation.** Correctly V2. At this scale a bad build costs
+- **Server-side compile / simulation**. Correctly V2. At this scale a bad build costs
   one reboot, once rollback is real.
-- **Home Assistant, self-host TLS, groups-as-hierarchy.** Distribution and scale, not
+- **Home Assistant, self-host TLS, groups-as-hierarchy**. Distribution and scale, not
   the on-ramp.
-- **Application config through `dn/cfg`.** Correct refusal. That path becomes a worse
+- **Application config through `dn/cfg`**. Correct refusal. That path becomes a worse
   ESPHome.
 
 The docs-as-engineering-system are unusually good (`spec/` protected, `DECISIONS.md`

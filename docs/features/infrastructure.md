@@ -10,9 +10,9 @@ Five tables form the core data model:
 
 **device_groups** - Optional grouping for enrollment tokens and future bulk deployments. Groups are referenced by nullable foreign keys. An ungrouped device is represented by NULL rather than a magic "default" row.
 
-**devices** - The fleet registry. Uses the device's eFuse MAC (lowercase hex, 12 characters) as the natural primary key because it serves double duty as the MQTT username that ACL patterns depend on. Each device declares its power class (always_on or sleepy), which determines how presence is derived. Sleepy devices must declare an expected wake interval. This is enforced by a table-level CHECK constraint because without it the presence formula becomes undefined. Devices soft-delete via `decommissioned_at` rather than hard deletion to preserve KPI history integrity.
+**devices** - The fleet registry. Uses the device's eFuse MAC (lowercase hex, 12 characters) as the natural primary key. This is because it serves double duty as the MQTT username that ACL patterns depend on. Each device declares its power class (always_on or sleepy), which determines how presence comes. Sleepy devices must declare an expected wake interval. This a table-level CHECK constraint enforces it because without it the presence formula becomes undefined. Devices soft-delete via `decommissioned_at` rather than hard deletion to preserve KPI history integrity.
 
-**enrollment_tokens** - Single-use tokens that exchange for per-device MQTT credentials. The burn operation is implemented as a single conditional UPDATE with a WHERE clause that checks unused/unexpired/unrevoked state atomically. This prevents token reuse even under concurrent enrollment attempts. Tokens store only the argon2id hash of the secret. The plaintext is never persisted.
+**enrollment_tokens** - Single-use tokens that exchange for per-device MQTT credentials. The burn operation runs as a single conditional UPDATE with a WHERE clause that checks unused/unexpired/unrevoked state atomically. This prevents token reuse even under concurrent enrollment attempts. Tokens store only the argon2id hash of the secret. The plaintext never touches disk.
 
 **admin_tokens** - Bearer tokens for dashboard and API access. Use the same argon2id storage and lookup strategy as enrollment tokens. The login cookie holds this token type directly rather than a separate session credential.
 
@@ -20,15 +20,15 @@ Five tables form the core data model:
 
 ### Key architectural decisions
 
-**No PostgreSQL ENUM types.** The device protocol is forward-compatible - servers must tolerate agents they cannot update. Using PG enums for link_type or deploy state would require a migration before storing a value a future agent invents, turning unknown-value ingests into silent fleet visibility outages. The sole exception is power_class, which gets a CHECK constraint because derived presence is only defined for the known vocabulary.
+**No PostgreSQL ENUM types**. The device protocol is forward-compatible - servers must tolerate agents they cannot update. Using PG enums for link_type or deploy state would require a migration before storing a value a future agent invents, turning unknown-value ingests into silent fleet visibility outages. The sole exception is power_class, which gets a CHECK constraint because derived presence is only defined for the known vocabulary.
 
-**Token format enables indexed lookup.** Admin and enrollment tokens follow the wire format `{prefix}_{uuid-hex}.{secret-b64url}` where the UUID is the table's primary key. This is necessary because argon2 hashes are salted and cannot be searched by value - find a token by scanning every row and checking each hash would be O(n) argon2 calls per request. The UUID provides the indexed lookup. Only the secret half is checked against the hash.
+**Token format enables indexed lookup**. Admin and enrollment tokens follow the wire format `{prefix}_{uuid-hex}.{secret-b64url}` where the UUID is the table's primary key. This is necessary because argon2 hashes are salted and cannot be searched by value - find a token by scanning every row and checking each hash would be O(n) argon2 calls per request. The UUID provides the indexed lookup. Only the secret half checks against the hash.
 
-**Atomic single-use burn.** The enrollment token burn is a single UPDATE statement with a WHERE clause that simultaneously checks the token is unused, not revoked, and not expired, returning the row ID only if all conditions hold. Zero rows returned means already burned. Under PostgreSQL's default READ COMMITTED isolation, the loser of a race re-evaluates the predicate after the winner commits and correctly gets zero rows. This property is proven by a test that runs the burn from two independent connections concurrently.
+**Atomic single-use burn**. The enrollment token burn is a single UPDATE statement with a WHERE clause that simultaneously checks the token is unused, not revoked, and not expired, returning the row ID only if all conditions hold. Zero rows returned means already burned. Under PostgreSQL's default READ COMMITTED isolation, the loser of a race re-evaluates the predicate after the winner commits and correctly gets zero rows. This property is proven by a test that runs the burn from two independent connections concurrently.
 
-**Presence is derived, not stored.** For always_on devices, presence comes from the retained up/presence topic. For sleepy devices, a device is considered online if server receipt time minus last_seen is less than 2.5 times the expected wake interval. The schema stores the ingredients (presence_reported, last_seen, expected_wake_interval_s) but no online column - the API derives the answer at read time.
+**Presence comes, not stored**. For always_on devices, presence comes from the retained up/presence topic. For sleepy devices, a device is considered online if server receipt time minus last_seen is less than 2.5 times the expected wake interval. The schema stores the ingredients (presence_reported, last_seen, expected_wake_interval_s) but no online column - the API derives the answer at read time.
 
-**Deploy events survive device removal.** The PRD requires KPI history be kept forever while devices must remain removable from the dashboard. The schema reconciles this by soft-deleting devices (via decommissioned_at) and placing an ON DELETE RESTRICT foreign key from deploy_events to devices. Hard-deleting a device with history is impossible by construction rather than merely discouraged.
+**Deploy events survive device removal**. The PRD requires KPI history be kept forever while devices must remain removable from the dashboard. The schema reconciles this by soft-deleting devices (via decommissioned_at) and placing an ON DELETE RESTRICT foreign key from deploy_events to devices. Hard-deleting a device with history is impossible by construction rather than merely discouraged.
 
 ### Project conventions established
 
@@ -48,19 +48,19 @@ Created the entire Python project structure from scratch including pyproject.tom
 
 ### Gotchas learned
 
-**Alembic env.py must not import application settings.** Importing app config in env.py forces every unrelated setting to check before `alembic upgrade head` can run. The migration environment reads DATABASE_URL directly from the environment and escapes % characters before passing to configparser.
+**Alembic env.py must not import application settings**. Importing app config in env.py forces every unrelated setting to check before `alembic upgrade head` can run. The migration environment reads DATABASE_URL directly from the environment and escapes % characters before passing to configparser.
 
-**Server defaults and autogenerate.** Enabling compare_server_default in Alembic produces permanent false diffs on columns with now() or gen_random_uuid() defaults. The comparison was left disabled.
+**Server defaults and autogenerate**. Enabling compare_server_default in Alembic produces permanent false diffs on columns with now() or gen_random_uuid() defaults. The comparison was left disabled.
 
-**Test database over asyncpg, not psycopg.** The test harness creates and drops the test database using an AUTOCOMMIT engine over asyncpg rather than adding a synchronous psycopg dependency just for setup.
+**Test database over asyncpg, not psycopg**. The test harness creates and drops the test database using an AUTOCOMMIT engine over asyncpg rather than adding a synchronous psycopg dependency just for setup.
 
-**Acceptance criteria include KPI queries.** The task was checked by proving that both KPI definitions from the PRD (delivery success rate and fleet safety rate) are answerable from the schema on day one, even though the dashboards will not exist until R6.
+**Acceptance criteria include KPI queries**. The task passed checks by proving that both KPI definitions from the PRD (delivery success rate and fleet safety rate) are answerable from the schema on day one, even though the dashboards will not exist until R6.
 
 ## Bingo Retirement (R0-infra-0)
 
 To prepare the production environment for fleetforge deployment, the unfinished bingo application was fully retired from production on 2026-09-08. This freed critical resources on a memory-constrained host and made the `bingo.tvaroska.sk` domain available for fleetforge.
 
-### What was deleted
+### What disappeared
 
 - **Containers**: `bingo` (backend) and `bingo-frontend` services stopped and deleted from prod docker-compose
 - **Database**: `bingo_db` database and `bingo_user` role dropped after checked backup to `gs://btvaroska/retired/bingo/`
@@ -78,9 +78,9 @@ The bingo git repository and its Artifact Registry images (`us-central1-docker.p
 
 2. **Smoke test configuration**: Deploy script smoke tests must be updated in the same commit that deletes services, otherwise the deploy fails its health checks and auto-rolls back.
 
-3. **Database backup before drop**: The database drop is irreversible. A dedicated, checked single-database dump was taken and shipped to GCS before any destructive operations. The nightly cluster backup exists but requires full-cluster restore.
+3. **Database backup before drop**: The database drop is irreversible. A dedicated, checked single-database dump ran and shipped to GCS before any destructive operations. The nightly cluster backup exists but requires full-cluster restore.
 
-4. **Tracked secrets in git**: Discovered that `prod/bingo.env` was tracked in git despite being listed in `.gitignore` (gitignore does not apply to already-tracked files). The bingo credentials became dead the moment the role was dropped, so removal was safe. Similar issues with other env files were filed as separate security tasks.
+4. **Tracked secrets in git**: Discovered that `prod/bingo.env` was tracked in git despite being listed in `.gitignore` (gitignore does not apply to already-tracked files). The bingo credentials became dead the moment we dropped the role, so removal was safe. Similar issues with other env files were filed as separate security tasks.
 
 5. **Init script inertness**: Postgres init scripts only run on fresh volumes. Deleting database creation from init scripts does not drop existing databases - that requires explicit `DROP` commands. Conversely, leaving a `CREATE USER` line with an undefined variable creates a user with an empty password on disaster recovery.
 
@@ -121,17 +121,16 @@ api, ingestor and frontend. The stack is simultaneously the everyday dev loop an
 V2 self-hosting artifact the PRD promises. Making it the dev environment is the
 anti-rot mechanism named in `design/production.md`.
 
-### The two properties the rest of R0 is built on
+### The two properties the rest of R0 builds on
 
-**One origin, no CORS.** Traefik routes only the frontend. nginx inside the frontend
+**One origin, no CORS**. Traefik routes only the frontend. nginx inside the frontend
 container serves the SPA and proxies `/v1/*` to `api:8000`. The api publishes no host
 port, joins no frontend network and carries no Traefik labels. "No CORS" is thus
 a topology property, not a configuration setting, and a unit test asserts that no
 `access-control-allow-*` header can appear.
 
-**MQTT only through Traefik.** Mosquitto publishes no host port. A TCP router on a
-dedicated `mqtt` entrypoint (`:8883`) with ``HostSNI(`*`)`` is the only way in, which
-is the same shape production will use with `HostSNI(bingo.tvaroska.sk)` plus a cert
+**MQTT only through Traefik**. Mosquitto publishes no host port. A TCP router on a
+dedicated `mqtt` entrypoint (`:8883`) with ``HostSNI(`*`)`` is the only way in. This is the same shape production will use with `HostSNI(bingo.tvaroska.sk)` plus a cert
 resolver. A publish to `ff/v1/d/{id}/up/announce` on host port 8883 arrives at the
 ingestor's `ff/v1/d/+/up/#` subscription, exercising entrypoint, router, broker and
 subscription in one command.
@@ -156,7 +155,7 @@ code:
 
 ### Infrastructure decisions
 
-**One image, two commands.** A single root Dockerfile with `base` → `development` →
+**One image, two commands**. A single root Dockerfile with `base` → `development` →
 `production` stages. `api` and `ingestor` are the same image with different
 `command:` values. The production stage runs as a non-root user that does *not* own
 `/app`. Thus, the running process cannot rewrite its own source.
@@ -165,36 +164,36 @@ code:
 pattern, so the production fragment reuses the identical image and switch. The
 ingestor never migrates.
 
-**Broker authz is a directory listing.** `mosquitto.conf` contains no ACL of any
+**Broker authz is a directory listing**. `mosquitto.conf` contains no ACL of any
 kind. The only line granting unauthenticated access lives alone in
 `conf.d/10-dev-anonymous.conf` under a delete-me banner. R0-sec-1 deletes one file
 rather than auditing a config, and must update the broker healthcheck in the same
 commit. (It did — see *Broker authentication and authorisation* below.)
 
-**Object storage is pre-wired.** The `fleetforge` bucket is created idempotently, and
+**Object storage is pre-wired**. The `fleetforge` bucket starts idempotently, and
 `S3_ENDPOINT_URL`, `S3_BUCKET`, `S3_ACCESS_KEY` and `S3_SECRET_KEY` are already in the
 api's environment, so R0-be-6 is pure code.
 
 ### Gotchas learned
 
-**The mosquitto CLI forces TLS on port 8883.** `mosquitto_pub -p 8883` never sends a
+**The mosquitto CLI forces TLS on port 8883**. `mosquitto_pub -p 8883` never sends a
 plaintext byte — it attempts a TLS handshake. The broker logs "disconnected due
 to protocol error" while the client reports `Error: Protocol error`. Against a
 plaintext dev broker on the prod-parity port this looks exactly like a broken TCP
 router. Checked by capturing the wire bytes: port 8884 sends a normal MQTT CONNECT,
 port 8883 sends nothing. `just mqtt-pub` / `just mqtt-sub` use paho instead.
 
-**Traefik silently skips containers that are not healthy.** A failing healthcheck
+**Traefik silently skips containers that are not healthy**. A failing healthcheck
 presents as a 404 from the entrypoint, with no router in `/api/http/routers` and no
 error in Traefik's log. Two probes hit this: `node:22-slim` ships neither `wget` nor
 `curl`, and nginx listens on IPv4 only so a probe against `localhost` resolves to
-`::1` and is refused. Container healthchecks use `127.0.0.1`.
+`::1` and triggers a refusal. Container healthchecks use `127.0.0.1`.
 
-**`env_file: .env` would break every container.** `.env` holds the host database URL
+**`env_file: .env` would break every container**. `.env` holds the host database URL
 (`localhost:5433`) that alembic, pytest and `just` need. Pydantic-settings gives real
 environment variables precedence over `.env` values, so injecting it would point the
 API at its own network namespace. Containers get `postgres:5432` explicitly, and the
-rule is written into both `.env.example` and the compose header.
+rule goes into both `.env.example` and the compose header.
 
 ### Verification
 
@@ -210,7 +209,7 @@ the production-shaped stack (`just up-prod`, no override file) reproducing all o
 ## Broker authentication and authorisation (R0-sec-1)
 
 `allow_anonymous false`, per-device credentials, and the two pattern ACLs that are the
-whole fleet authorisation model. `conf.d/10-dev-anonymous.conf` is deleted. The R0
+whole fleet authorisation model. `conf.d/10-dev-anonymous.conf` disappears. The R0
 enrollment path (R0-be-4) stopped being a no-op and now really provisions.
 
 ### Two mechanisms, not one
@@ -225,7 +224,7 @@ role. They cannot. So the shipped design splits the two halves:
 | `dynamic_security` plugin | `dynamic-security.json`, in the `fleetforge_mosquitto` volume | who exists, and their password — written by `POST /v1/enroll` |
 | `acl_file` | `mosquitto/acl` (bind-mounted `:ro` from the repo) | `pattern write ff/v1/d/%u/up/#` and `pattern read ff/v1/d/%u/dn/#` |
 
-Both backends are consulted and **allow wins**. The spec's promise (no per-device ACL
+Both backends run and **allow wins**. The spec's promise (no per-device ACL
 rows, nothing to provision at enrollment) is intact. Only the file changed. The dynsec
 `device` role still exists because `createClient` requires a role name. It is
 **deliberately empty**: moving the patterns into it does not fail loudly, it silently
@@ -251,37 +250,36 @@ client, the write-only `commander` role and `ff-commander` client, and sets all 
 default ACL accesses to `deny`. It is idempotent, runs on every `up` and every deploy,
 and reads the estate back out of the broker before exiting. The API gets the dynsec
 `admin` credential. The broker healthcheck authenticates as the same admin against
-`'$SYS/broker/uptime'`, because an anonymous probe is now a permanently unhealthy
+`'$SYS/broker/uptime'`. This is because an anonymous probe is now a permanently unhealthy
 broker (and, per R0-infra-1, an unhealthy container is a Traefik 404).
 
-**The phases cannot be merged. The reason is the most expensive thing learned about
-this broker.** Until 2026-09-23 there was one phase, which started a *throwaway* broker
+**The phases must stay separate. The reason is the most expensive thing learned about
+this broker**. Until 2026-09-23 there was one phase, which started a *throwaway* broker
 on `127.0.0.1:1884`, applied everything to that, and wrote the resulting JSON into the
 shared volume. The dynsec plugin reads that file once at broker startup and is
 authoritative in memory thereafter — rewriting the file from its own state whenever a
 device enrolls. So on any deployment whose broker was already running, the bootstrap was
 not merely ignored, its entries were scheduled for deletion. It worked in dev only
 because `just nuke` means the broker is always starting fresh. On prod it had **never
-once taken effect**: `ff-commander` did not exist on the broker at all, every OTA deploy
+once taken effect**. `ff-commander` did not exist on the broker at all, every OTA deploy
 answered `Not authorized`. `mosquitto-init` logged a clean run each time.
 
 ### Gotchas learned
 
-**`dynamic-security.json` is mutable state owned by uid 1883.** The plugin rewrites it
+**`dynamic-security.json` is mutable state owned by uid 1883**. The plugin rewrites it
 on every enrollment. Root-owned, it logs `not writable`, applies the change **in memory**
 and loses every device credential at the next restart — while the API reports success.
 The bootstrap chowns and chmods it to `0600`. `grep -ci "not writable"` on the broker log
 is an acceptance check.
 
-**Read authorisation is enforced on delivery, not on SUBSCRIBE.** A device can subscribe
+**Read authorisation runs on delivery, not on SUBSCRIBE**. A device can subscribe
 to `#` and gets SUBACK 0, then receives only its own `dn/` traffic. Any test asserting on
-the SUBACK code proves nothing. Same class: a forged LWT is accepted at CONNECT and
-dropped when it fires, so presence cannot be forged for another board.
+the SUBACK code proves nothing. Same class: a forged LWT passes at CONNECT and drops when it fires, so presence cannot be forged for another board.
 
 **A denied publish is invisible below MQTT v5** — paho reports success and the broker
-drops the message — **and the broker log does not help either**: `Denied PUBLISH` is
-`MOSQ_LOG_DEBUG` in 2.0.22, which is not enabled (debug logs every topic). The
-authoritative read is `mosquitto_pub -V 5 -d` inside the container: `RC:135` is the
+drops the message — **and the broker log does not help either**. `Denied PUBLISH` is
+`MOSQ_LOG_DEBUG` in 2.0.22. This is not enabled (debug logs every topic). The
+authoritative read is `mosquitto_pub -V 5 -d` inside the container. `RC:135` is the
 denial, `RC:0`/`RC:16` are both "allowed".
 
 **The `:ro` acl bind mount produces expected noise**: `chown:
@@ -320,7 +318,7 @@ Four things, all in the `services` repo under `prod/`:
 
 1. **A `mqtt` entrypoint on the shared Traefik** (`--entrypoints.mqtt.address=:8883`)
    plus `8883:8883` on the published ports. Every other app on the box sits behind
-   this same Traefik, which is why the task is CRITICAL in both repos.
+   this same Traefik. That is why the task is CRITICAL in both repos.
 2. **A `mosquitto` service** on the public `eclipse-mosquitto:2.0.22` image, with a
    `mosquitto-init` one-shot ahead of it, a `mosquitto_data` named volume, and a
    TCP router: ``HostSNI(`bingo.tvaroska.sk`)`` → `mosquitto:1883`,
@@ -330,8 +328,8 @@ Four things, all in the `services` repo under `prod/`:
    Usernames are `ff-admin` / `ff-ingestor` — deliberately **not** 12 lowercase hex
    digits, per the R0-sec-1 reviewer note: the `acl_file` patterns key on `%u`. Thus, a
    hex-shaped service username could be re-keyed by enrolling that `device_id`.
-4. **A drift guard.** `prod/mosquitto/` is a *copy* of `fleetforge/mosquitto/`,
-   because `deploy.sh` only ships `services/prod/`. `scripts/validate-config.sh`
+4. **A drift guard**. `prod/mosquitto/` is a *copy* of `fleetforge/mosquitto/`.
+   This is because `deploy.sh` only ships `services/prod/`. `scripts/validate-config.sh`
    now diffs the two and fails the deploy if they diverge. `acl` is the entire
    fleet authorisation model, so silent drift there is a security bug, not a nit.
 
@@ -344,12 +342,12 @@ reachable only on the internal `backend`/`frontend` networks.
 
 ### Gotchas learned
 
-- **`docker rollout` must never touch the broker.** It starts a second copy
+- **`docker rollout` must never touch the broker**. It starts a second copy
   alongside the first. Two brokers cannot share the dynamic-security store or the
   1883 bind. `mosquitto` thus went into a new `INFRA_SERVICES` list
   (recreated in place with traefik/postgres), not `APP_SERVICES`. A scoped
   `deploy.sh --service X` resets `INFRA_SERVICES` so it never touches the broker.
-- **A running fleetforge dev stack breaks `just deploy` on this machine.** The
+- **A running fleetforge dev stack breaks `just deploy` on this machine**. The
   staging gate's Traefik reaches the *host* Docker daemon through socket-proxy, so
   it discovers `fleetforge-frontend` (whose ``Host(`localhost`)`` rule outranks
   staging's `PathPrefix(/)`) and routes `localhost:8090` at a network it cannot
@@ -359,7 +357,7 @@ reachable only on the internal `backend`/`frontend` networks.
   (The fleetforge dev Postgres also squats host port 5433, which staging wants.)
 - The fleetforge `api`/`ingestor`/`frontend` are **not** in the prod fragment:
   no images in Artifact Registry, and an unpullable ref in `PULL_SERVICES` fails
-  the pull for every other app on the box. Only the broker is deployed.
+  the pull for every other app on the box. Only the broker deploys.
 
 ### Verification (T2)
 
@@ -378,7 +376,7 @@ Run from prod itself, which bypasses the missing firewall rule:
 
 ### The GCP firewall rule (closed 2026-09-09)
 
-The rule was the last outstanding step: this dev box runs as
+The rule was the last outstanding step. This dev box runs as
 `devserver@btvaroska.iam.gserviceaccount.com`, which has no `compute.firewalls.*`
 on project `sites-470716` (prod is instance `main` there, us-central1-c, tags
 `http-server`,`https-server`). Until the rule existed, 8883 was unreachable from
@@ -399,7 +397,7 @@ gcloud compute firewall-rules create sites-allow-mqtt \
 **`--network=sites` is necessary** — the project has no `default` network. Thus, the
 flag cannot be omitted. The rule mirrors `sites-allow-https` (same target tag,
 same `0.0.0.0/0` source). `0.0.0.0/0` is intended, because boards connect from
-arbitrary networks and the port is guarded by TLS + `allow_anonymous false` +
+arbitrary networks and the port has a guard on TLS + `allow_anonymous false` +
 per-device dynsec credentials, not by source IP.
 
 ### Verification from off-box (2026-09-09)
@@ -428,7 +426,7 @@ behind the door.
 ## Production capacity measurement (R0-infra-4)
 
 **2026-09-10 — A repeatable harness to answer "is the box out of headroom?" with defensible
-measurements, not point samples.**
+measurements, not point samples**.
 
 The task delivered `scripts/capacity_snapshot.py`, a stdlib-only Python script that reads
 `/proc` and cgroup v2 directly to measure host and per-container memory usage over a
@@ -482,8 +480,7 @@ Exit code 0 for OK/TIGHT, 1 for FAIL. The verdict prints last, always, even on f
 
 ### The dependency problem: measuring before the app exists on prod
 
-Fleetforge's app containers (api/ingestor/frontend) are not on prod yet — R0-infra-5 is
-blocked on permissions. The measurement thus splits:
+Fleetforge's app containers (api/ingestor/frontend) are not on prod yet — R0-infra-5 waits on permissions. The measurement thus splits:
 
 - **Footprint of api/ingestor/frontend**: measured on the dev box in the **production
   shape** (`just up-prod`: built images, nginx not Vite, no `--reload`, same limits as
@@ -511,7 +508,7 @@ Fleetforge containers measured on the dev box under load (25 devices heartbeatin
 | **Total app** | — | **131 MiB** | **512 M** | Sum of loaded peaks |
 | Postgres marginal | — | **~20 MiB** | (shared) | anon delta for fleetforge's pool + LISTEN connections |
 
-The api's 256 M limit is checked — no `memory.events max` even under 20 concurrent
+The api's 256 M limit undergoes a check — no `memory.events max` even under 20 concurrent
 argon2id hashes against the `CapacityLimiter(2)`. Frontend in production shape (nginx) is
 6 MiB, not 48 M (Vite dev server).
 
@@ -539,8 +536,8 @@ Declared over-commit = (3392 + 448) / 3924 = 99.5% (3904 / 3924 MiB)
 ```
 
 The 151 MiB measured footprint fits in the 384 MiB headroom that bingo freed (R0-infra-0),
-with margin. Declared over-commit is 99.5% on paper, but measured peaks are what matter —
-the net add is negative (bingo used more than fleetforge does), and `MemAvailable` floor
+with margin. Declared over-commit is 99.5% on paper, but measured peaks are what matter.
+The net add is negative (bingo used more than fleetforge does), and `MemAvailable` floor
 stays comfortably above the 512 MiB TIGHT threshold.
 
 **Follow-up (closed 2026-09-10)**: re-run after R0-infra-5 landed — see *The app on prod*
@@ -563,7 +560,7 @@ Updated: `design/production.md` → *Capacity — Measured 2026-09-10* (replaced
 
 ### Gotchas learned
 
-**`just up` ≠ `just up-prod`.** The dev-shape frontend runs the Vite dev server (node,
+**`just up` ≠ `just up-prod`**. The dev-shape frontend runs the Vite dev server (node,
 48 M against a 64 M limit, 74%). Prod-shape runs nginx (~6 M). Measuring the dev shape
 produces a false "frontend needs a bigger limit" alarm. Same for api: `--reload` keeps a
 reloader parent alive. Always measure in the production shape.
@@ -576,16 +573,16 @@ Do not divide by it. A test exists for this (the ZeroDivisionError trap).
 of `memory.current` across samples and reports both — they answer different questions
 ("has this ever" versus "did it during my test").
 
-**Read authorisation on `/proc` and cgroup paths.** The script needs no `sudo` (boris is
+**Read authorisation on `/proc` and cgroup paths**. The script needs no `sudo` (boris is
 in the `docker` group on both hosts), but cgroup v2 paths are
 `/sys/fs/cgroup/system.slice/docker-<full-64-hex-id>.scope/` — the **full** container id,
 not the short one. Fallback chain for cgroup v1 and alternate paths is present but unused
 on current hosts (kernel 6.1 and 6.17, both cgroup v2).
 
-**The `--watch` run on prod holds the ssh session for 15 minutes.** Use
+**The `--watch` run on prod holds the ssh session for 15 minutes**. Use
 `run_in_background: true` for the Bash call, or shorten the window to ≤ 8 min.
 
-**`docker stats` and `memory.current` both include page cache.** Report `anon` from
+**`docker stats` and `memory.current` both include page cache**. Report `anon` from
 `memory.stat` alongside. A container "using" 200 M of which 190 M is reclaimable file
 cache is not a capacity problem.
 
@@ -599,7 +596,7 @@ cache is not a capacity problem.
 + `pytest`) → `frontend-build` → build → check → push. A broken build cannot
 reach the registry, because prod pulls by tag.
 
-**Two images, not three.** `fleetforge` serves both the api and the ingestor —
+**Two images, not three**. `fleetforge` serves both the api and the ingestor —
 same code, different `command`, exactly as `docker-compose.yml` builds them from
 one `fleetforge:dev`. A third image would mean two builds of identical layers and
 two chances for the pair to drift.
@@ -629,14 +626,14 @@ and at least one `assets/*.js`.
 ### Open Items — blocked on permissions
 
 Everything under `services/prod/` the permission refuses it classifier, and
-self-granting the rule is refused too (correctly). Blocked edits:
+self-granting the rule triggers a refusal too (correctly). Blocked edits:
 
 1. `prod/.env` — `FLEETFORGE_DB_PASSWORD`
 2. `prod/postgres/01-init.sh` — `fleetforge` role + database
 3. `prod/docker-compose.yml` — `fleetforge-api` (alias `api`), `fleetforge-ingestor`,
    `fleetforge-frontend` + the `websecure` router for `bingo.tvaroska.sk`
 
-`scripts/deploy.sh` was deliberately left alone: naming a service in
+`scripts/deploy.sh` stayed untouched on purpose: naming a service in
 `PULL_SERVICES` that the compose file does not define fails `docker compose pull`
 for **every** app on the box. The ingestor belongs in `INFRA_SERVICES`, never
 `APP_SERVICES` — `docker rollout` runs two copies during the swap and the
@@ -648,7 +645,7 @@ Owner: add `Edit(//home/boris/products/services/prod/**)` and
 ## Agent firmware build pipeline (R0-infra-2)
 
 **2026-09-09 — the ESP32 agent now builds, reproducibly, into four flashable bundles
-the API serves to the browser flasher.**
+the API serves to the browser flasher**.
 
 Before this there was no `agent/` at all. `R0-fe-3` needs bytes to write to a board and
 `R0-fw-1` needs a project to grow into. This task produced both, plus the flash-time
@@ -684,8 +681,7 @@ app image. The dev override bind-mounts the working tree instead.
 
 ### The flash-time immutables
 
-`agent/partitions.csv` — layout id `ab-4m-v1`, frozen at R0 because **a partition table
-cannot be changed by OTA**:
+`agent/partitions.csv` — layout id `ab-4m-v1`, frozen at R0 because **OTA cannot change a partition table**:
 
 ```
 nvs 0x9000 24K · otadata 0xf000 8K · phy_init 0x11000 4K · ff_cfg 0x12000 4K
@@ -694,11 +690,11 @@ ota_0 0x20000 1920K · ota_1 0x200000 1920K
 
 * `1920K == 0x1E0000 == 1966080` is exactly the `ota_slot_size` `spec/device-protocol.md`
   promises in `up/announce`. The number is retyped literally in
-  `tests/test_agent_partitions.py`, which also greps the spec — so the two cannot drift
+  `tests/test_agent_partitions.py`, which also greps the spec. Thus, the two cannot drift
   apart silently.
-* **No `factory` partition, on purpose.** A factory-only board can never OTA its way to
+* **No `factory` partition, on purpose**. A factory-only board can never OTA its way to
   an A/B layout. It would be a recall.
-* **`ff_cfg` (data, subtype `0x40`, 4 KB) is reserved now** for the flash-time config the
+* **`ff_cfg` (data, subtype `0x40`, 4 KB) has a reservation now** for the flash-time config the
   browser flasher writes per board (broker URL, Wi-Fi credentials, enrollment token).
   `R0-fw-1`/`R0-fe-3` define its payload. Reserving it later is impossible.
 
@@ -710,14 +706,14 @@ eFuses: irreversible, per board, and out of scope until there is a key-managemen
 `verify_bundle.py` fails the build if any of them ever appears enabled in the *resolved*
 config.
 
-Per-target `sdkconfig.defaults.<target>` files exist but are comment-only: every safety
+Per-target `sdkconfig.defaults.<target>` files exist but are comment-only. Every safety
 option lives in the one common file. Thus, there is a single place to read the posture.
 
 ### Offsets are derived, never typed
 
 `make_manifest.py` reads `build/flasher_args.json` by name and copies whatever ESP-IDF
 computed. This is not pedantry — the bootloader really does live at `0x1000` on ESP32 and
-at `0x0` on the RISC-V parts, and a hardcoded value flashes cleanly and never boots on
+at `0x0` on the RISC-V parts. A hardcoded value flashes cleanly and never boots on
 half the fleet. The same script decodes the built partition-table **binary** and refuses
 to emit a bundle whose table has a `factory` partition, is missing `ota_1`, has slots of
 different sizes, or holds an app that does not fit its slot.
@@ -734,7 +730,7 @@ The justfile header now says ~8.9 GB and "want ≥ 12 G before the first pull".
 ### Gotcha: a prefix match on `CONFIG_SECURE_BOOT` fails every ESP32 build
 
 `verify_bundle.py` first matched forbidden options by prefix and rejected a perfectly good
-esp32 bundle: `CONFIG_SECURE_BOOT_V1_SUPPORTED=y` is a SoC **capability** symbol, present
+esp32 bundle. `CONFIG_SECURE_BOOT_V1_SUPPORTED=y` is a SoC **capability** symbol, present
 whether or not secure boot is enabled. The check now matches exact option names. A safety
 check that fails on correct input is worse than none — it teaches the next person to
 delete it.
@@ -754,9 +750,9 @@ exists.
 - `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y` in the built config. Anti-rollback, secure
   boot and flash encryption all `is not set`.
 - Every part re-hashed against its manifest. Deliberately flipping a byte in `app.bin`
-  fails `agent-verify` and the bundle is refused at load.
+  fails `agent-verify` and the bundle triggers a refusal at load.
 - `just up` and `just up-prod`: `/v1/agent/manifest` is 401 unauthenticated, 200 with the
-  admin credential, and all 16 part downloads are byte-identical to the files on disk
+  admin credential. All 16 part downloads are byte-identical to the files on disk
   with a matching `"sha256-…"` ETag. The production stack has **no bind mounts** — the
   bytes come from the image.
 - Empty `AGENT_IMAGES_DIR`: one startup WARNING naming the path, then 401 before 503, and
@@ -768,10 +764,10 @@ exists.
 - 435 tests pass (74 new across `test_agent_partitions.py`, `test_firmware_catalog.py`
   and `test_api_agent.py`), lint and mypy clean.
 
-### Spec proposals (not written — `spec/` is protected)
+### Spec proposals (not written — `spec/` has protection)
 
 1. `spec/device-protocol.md` must record that `ab-4m-v1` includes a 4 KB `ff_cfg` data
-   partition (subtype `0x40`) at `0x12000`, and that flash-time configuration lives there.
+   partition (subtype `0x40`) at `0x12000`. That flash-time configuration lives there.
    Today the spec pins `ota_slot_size` and the layout id but says nothing about where the
    flasher writes the broker URL and enrollment token.
 2. `spec/flows.md` Flow 1 step 4 must name that partition, so `R0-fe-3` has a contract
@@ -781,12 +777,12 @@ exists.
 
 ## The app on prod (R0-infra-5)
 
-**Completed 2026-09-10.** R0-infra-3 shipped the broker and opened 8883. Nothing was
+**Completed 2026-09-10**. R0-infra-3 shipped the broker and opened 8883. Nothing was
 behind the door. This task built the two **app** images (`R0-infra-2` is the *firmware*
 pipeline — a different artifact) and put the api, ingestor and frontend on the production
 box. `https://bingo.tvaroska.sk` stopped returning 404 and started serving the SPA.
 
-The task shipped in two halves a day apart, because the second half needed a permission
+The task shipped in two halves a day apart. This is because the second half needed a permission
 grant from the owner.
 
 ### Half 1 — the image pipeline (2026-09-09)
@@ -817,8 +813,8 @@ Landed in the `services` repo (`prod/docker-compose.yml`, `prod/postgres/01-init
 
 ### The `api` DNS collision, and why a whole network was the cheap fix
 
-fleetforge's nginx has `proxy_pass http://api:8000` compiled into `frontend/nginx.conf`,
-and this box already runs a `content-api`. Rather than rebuild the frontend image with a
+fleetforge's nginx has `proxy_pass http://api:8000` compiled into `frontend/nginx.conf`.
+This box already runs a `content-api`. Rather than rebuild the frontend image with a
 renamed upstream, the fragment adds a dedicated `fleetforge` network that only these three
 containers join, and gives `fleetforge-api` the **network alias `api`** on it. The name
 resolves for fleetforge's nginx and for nobody else. `backend` stays the same. No image
@@ -829,29 +825,29 @@ change, no config templating, and the next fleetforge image still works unmodifi
 `docker rollout` starts a second copy alongside the first during the swap. The ingestor is
 the fleet's sole MQTT subscriber (design/production.md → *The single-subscriber rule*), so
 two copies would write **every telemetry row twice**. It sits in `INFRA_SERVICES` in
-`deploy.sh` and is recreated in place — the same reasoning that already keeps `mosquitto`
+`deploy.sh` and is recreated in place. The same reasoning that already keeps `mosquitto`
 out of `APP_SERVICES`.
 
 ### Gotchas learned
 
-**`docker-entrypoint-initdb.d` runs only on a fresh volume.** Adding the `fleetforge` role
-to `01-init.sh` created nothing on the running box. The role had to be made by hand with
-`psql`. That file is now the disaster-recovery path and carries a comment saying so. It must stay in sync with what was created manually.
+**`docker-entrypoint-initdb.d` runs only on a fresh volume**. Adding the `fleetforge` role
+to `01-init.sh` created nothing on the running box. The role had to consist by hand with
+`psql`. That file is now the disaster-recovery path and carries a comment saying so. It must stay in sync with what we created manually.
 
-**A missing `smoke_endpoint_for_service` case rolls back a good deploy.** The first deploy
+**A missing `smoke_endpoint_for_service` case rolls back a good deploy**. The first deploy
 succeeded, every container started healthy, and then the smoke test curled an empty URL,
 reported HTTP 000 and triggered the auto-rollback. (The rollback itself no-op'd — "Pre-deploy
 state file is empty".) Any service added to `--service` must get a smoke entry. The function
 now says so in a comment.
 
-**argon2id hashes in `.env` must be single-quoted.** Compose otherwise eats the `$argon2id`,
+**argon2id hashes in `.env` must be single-quoted**. Compose otherwise eats the `$argon2id`,
 `$v` and `$m` segments and login can never succeed. Check with
 `docker compose config | grep -i ADMIN_PASSWORD_HASH` — a literal `$$` in that output is
 correct. The R0-infra-3 hash had this problem *and* its plaintext was unrecoverable. Thus, the
 admin password was reminted as part of this task.
 
-**The simulator could not speak TLS.** R0-test-1 left it as an explicit TODO against
-plaintext dev. Acceptance here required a board over `mqtts://…:8883`, so `--tls` was added
+**The simulator could not speak TLS**. R0-test-1 left it as an explicit TODO against
+plaintext dev. Acceptance here required a board over `mqtts://…:8883`, so `--tls` went in
 (`mqtt_client_factory(..., tls=...)` → `aiomqtt.TLSParameters()`, system trust store, no
 pinning). Without the flag the connect does not fail — it *hangs* until timeout, which reads
 like a firewall problem rather than a missing argument.
@@ -860,7 +856,7 @@ like a firewall problem rather than a missing argument.
 
 No GCS credential is wired. `constraints/iam.disableServiceAccountKeyCreation` on the
 `btvaroska` org blocks minting the key, and no R0 route touches the store —
-`select_backend` only raises when something calls it. R1 is blocked until the key exists.
+`select_backend` only raises when something calls it. R1 blocks until the key exists.
 Tracked in docs/runbooks/artifact-storage.md → BLOCKED.
 
 *(Superseded 2026-09-15 by S0-infra-5 below: the key is still un-mintable and always will
@@ -902,13 +898,13 @@ first measurement of the real thing.
 | `MemAvailable` floor | 2231 MiB | **2141 MiB** |
 | Declared commitment | 99.5% projected | 98% (3840 / 3925 MiB) |
 
-Peak runs ~40% over projection, current ~15% over — the dev box never carries real TLS
-sessions or a live Postgres pool. **The verdict of R0-infra-4 stands: no resize needed.**
-The floor only dropped 90 MiB and sits four times the 512 MiB threshold, and no fleetforge
+Peak runs ~40% over projection, current ~15% over. The dev box never carries real TLS
+sessions or a live Postgres pool. **The verdict of R0-infra-4 stands: no resize needed**.
+The floor only dropped 90 MiB and sits four times the 512 MiB threshold. No fleetforge
 container came near its limit (api 41.6%, ingestor 53.8%, frontend 29.4%, mosquitto 29.8%
 of their peaks, `memory.events max = 0` for all four).
 
-**The run reports `VERDICT: TIGHT`, and it is not fleetforge.** `prod-download-1` peaked at
+**The run reports `VERDICT: TIGHT`, and it is not fleetforge**. `prod-download-1` peaked at
 **100% of its 512 MiB limit with 97 `memory.events max` reclaim events** (0 OOM kills). That
 is the downloader hitting its ceiling and being squeezed. It is a pre-existing condition
 in another app. It was simply invisible until this harness existed. The paging delta
@@ -919,7 +915,7 @@ scope for R0. Raised to the owner as an ops finding against `downloader`.
 
 ## The QEMU harness, re-checked (S0-infra-1, closed 2026-09-11)
 
-**Filed as:** "`just agent-qemu esp32` boot-loops — no firmware can be run (P1)". The
+**Filed as:** "`just agent-qemu esp32` boot-loops — no firmware can run (P1)". The
 ticket carried a decoded `LoadProhibited` backtrace (`main_task → esp_task_wdt_init → esp_task_wdt_impl_timer_allocate → esp_intr_alloc →
 task_wdt_isr`) and named the
 `-global driver=timer.esp32.timg,property=wdt_disable,value=true` flag as the suspect.
@@ -945,7 +941,7 @@ Everything below is green, at HEAD, on 2026-09-11:
 
 Also settled in passing: the bundle in `agent/dist/esp32` is the **S0-fw-1 firmware**
 (`ff_progress` strings are in `app.bin`, manifest `source_commit f81d6f1` plus a dirty
-tree). It boots and enrolls, so S0-fw-1's firmware half is no longer unrun — its two
+tree). It boots and enrolls, so S0-fw-1's firmware half is no longer unrun. Its two
 outstanding acceptances are now executable.
 
 ### Defect 1 — the recipe could not run without a terminal
@@ -958,24 +954,23 @@ cannot attach stdin to a TTY-enabled container because stdin is not a terminal
 
 Every agent session, script and CI shell is non-interactive. The recipe named in this
 task's own acceptance criterion **could not be executed by the thing that had to execute
-it**, and the way round it is to hand-roll a `docker run` — which is exactly where an
+it**. The way round it is to hand-roll a `docker run`. This is exactly where an
 emulator invocation acquires a wrong `-M`, `-m` or `-global` and starts panicking inside
 the watchdog. This is the most probable origin of the filed backtrace. Fixed: `-it` only
 when `[ -t 0 ]`.
 
 ### Defect 2 — the emulator was pinned but never checked
 
-`idf_image` is pinned by sha256 and every bundle manifest records the same digest, which
-reads as a guarantee that the emulator is fixed. It is not: **Docker checks a digest on
-`pull`, not on `run`**. Thus, a damaged or replaced local layer is used in silence — and
-`qemu-system-xtensa` lives in that image. The pinned image was in fact **absent from this
+`idf_image` pins by sha256 and every bundle manifest records the same digest, which
+reads as a guarantee that the emulator has a fix. It is not: **Docker checks a digest on
+`pull`, not on `run`**. Thus, a damaged or replaced local layer runs in silence. `qemu-system-xtensa` lives in that image. The pinned image was in fact **absent from this
 box's Docker store** when the investigation started and had to be re-pulled (2.4 GB), with
 `/` at 85%.
 
 Every other input to a boot is content-addressed and deterministic: the bundle (per-part
 sha256 in `manifest.json`), the eFuse blob (IDF's own `default_efuse` bytes), the flash
 merge (`esptool merge_bin` over manifest offsets). Identical inputs cannot yield two
-behaviors, so at failure time one input was not what it claimed, and the local emulator
+behaviors, so at failure time one input was not what it claimed. The local emulator
 image is the only one verifiably in a different state since. Unprovable after the fact.
 Closed going forward by `qemu_sha256`.
 
@@ -1002,7 +997,7 @@ emulated board is accumulating.
 * **`just agent-qemu esp32 --fresh`, headless** — the recipe itself, from a wiped flash
   image, reached the full transcript above. `/v1/devices` shows `000000000000` enrolled
   `2026-09-11T14:15:02Z` (10:15 EDT), `partition_layout ab-4m-v1`, `ota_slot_size
-  1966080`, and the newest enrollment token reads `used` / `used_by 000000000000`.
+  1966080`. The newest enrollment token reads `used` / `used_by 000000000000`.
 * **`just agent-qemu-smoke esp32`** — `HARNESS OK` in 17 s (down from the full deadline
   once it learned to stop as soon as the answer is knowable).
 * **Vacuity-checked twice, because a check that cannot fail proves nothing:**
@@ -1017,7 +1012,7 @@ emulated board is accumulating.
 
 ### The honest limit
 
-**The originally-filed panic was never reproduced. Thus, it was never fixed.** What ships is
+**The originally-filed panic was never reproduced. Thus, it was never fixed**. What ships is
 a harness that runs where it has to run, checks the emulator it is about to trust,
 self-checks in one command, and a written record. Hashing one binary is also not a full
 image integrity check — shared libraries and the Python tooling are not covered. If the
@@ -1028,7 +1023,7 @@ backtrace decode.
 
 **Filed as:** "Rebuild the c3/c6/s3 agent bundles, and make a stale bundle unshippable."
 Three of the four agent firmware bundles predated S0-fw-1's stage reporter and shipped
-stale in v0.3.0, invisible in exactly the way S0-fw-1 was built to prevent. The task
+stale in v0.3.0, invisible in exactly the way S0-fw-1 built to prevent. The task
 delivered a rebuild of all four targets and a git-provenance based staleness guard that
 gates the release path.
 
@@ -1053,7 +1048,7 @@ verdicts:
 - **UNTRACEABLE** — `source_commit` is absent, `"unknown"`, or not a commit in this repo
 - **NOT BUILT** — no `manifest.json` present
 - **DIRTY SOURCES** — uncommitted changes under the source pathspec. A bundle records
-  HEAD, not what was compiled
+  HEAD, not what the build compiled
 
 The dirty-tree refusal lives in the release path only (`just build`), never in
 `just agent-build`. Dirty-tree builds are the firmware dev loop (edit → build → QEMU →
@@ -1064,7 +1059,7 @@ commit), and breaking that would get the guard deleted.
 The TODO's literal wording was "bundle is older than `agent/main/`" by modification time.
 `git checkout`, `git pull` and branch switches rewrite source mtimes with no content
 change. A clone sets them all to clone time. A check that fires on a correct tree is the
-check people delete — the runbook already carries that lesson verbatim about a
+check people delete. The runbook already carries that lesson verbatim about a
 `CONFIG_SECURE_BOOT_V1_SUPPORTED` prefix match. Git ancestry answers the same question
 ("does this bundle contain the newest agent source change?") and cannot be wrong about it.
 This deviation from the TODO's wording is deliberate.
@@ -1072,7 +1067,7 @@ This deviation from the TODO's wording is deliberate.
 ### Where the guard is sited, and why it moves
 
 `just agent-check-fresh` gates `just build` as a dependency, positioned between
-`_require-agent-dist` and `test`. The check is implemented as a standalone script that
+`_require-agent-dist` and `test`. The check runs as a standalone script that
 takes bundle directories as arguments, with the justfile recipe as a thin caller. No
 logic lives in the justfile and nothing knows about `Dockerfile` or `agent/dist` as
 hardcoded locations.
@@ -1103,11 +1098,11 @@ justfile line is a reviewable commit. No bypass environment variable exists.
 
 **`git status --porcelain -- agent :(exclude)agent/dist`** is the source pathspec. That is,exactly the Docker build context `agent/.dockerignore` defines (`COPY . /project`).
 Rejected narrower variants (per-target `sdkconfig.defaults.<target>`, "only
-`agent/main/`"): they drift from `.dockerignore`, and the whole point is that anything
+`agent/main/`"): they drift from `.dockerignore`. The whole point is that anything
 that can change a bundle is counted. Over-strict costs a rebuild. Under-strict costs a
 fleet.
 
-**ESP-IDF timestamps every build into `esp_app_desc_t`.** Rebuilding the same commit does
+**ESP-IDF timestamps every build into `esp_app_desc_t`**. Rebuilding the same commit does
 not reproduce bytes (compile date/time are in the binary). Thus, a hash comparison can never
 be the staleness signal. Provenance in the manifest (`source_commit`, `idf_image`,
 `built_at`) is the only durable handle. Documented in the runbook's *Reproducibility*
@@ -1115,10 +1110,9 @@ section.
 
 ## Agent bundles served from the object store (planned 2026-09-11)
 
-**Landed as S0-infra-6 on 2026-09-15** — see *Agent bundles are served from the store
+**Landed as S0-infra-6 on 2026-09-15** — see *Agent bundles come from the store
 (S0-infra-6, closed 2026-09-15)* at the end of this file for what actually shipped and
-what was measured. The planning material below stays as the record of why the move was
-taken and of the shape that was agreed before it was built.
+what measured. The planning material below stays as the record of why the move ran and of the shape that was agreed before it built.
 
 **Closed:** 2026-09-15 · **Priority:** P2 · **Added:** 2026-09-11
 **Requirements:** [spec/standards.md](../../spec/standards.md) → *infrastructure* →
@@ -1143,9 +1137,9 @@ at all. Shipping a working flasher beat shipping an elegant one.
 Two things changed since. **The target list grows** — four chips at ~1.2 MB each
 today, with ESP32-H2, a Thread path and a Raspberry Pi adapter already named in
 [roadmap.md](../roadmap.md), so every future chip taxes every application image. And
-**the coupling failed once**: `S0-infra-2` exists because three of the four
+**the coupling failed once**. `S0-infra-2` exists because three of the four
 bundles missed the S0-fw-1 stage reporter and shipped stale in v0.3.0, invisible in
-exactly the way S0-fw-1 was built to prevent. Baking makes "the firmware is current"
+exactly the way S0-fw-1 built to prevent. Baking makes "the firmware is current"
 a property of whoever remembered to run `just agent-build-all` before `just build`.
 
 ### Shape
@@ -1156,7 +1150,7 @@ see the ADR for why that was judged to preserve the defect rather than mitigate 
 
 The verification in `firmware/catalog.py` moves with the bundles rather than being
 dropped: per-part sha256, `partition_layout` / `ota_slot_size` agreement with
-`spec/device-protocol.md`, and a bundle failing either is dropped with its target named.
+`spec/device-protocol.md`. A bundle failing either drops with its target named.
 Provenance (`source_commit`, digest-pinned IDF image) stays in the manifest.
 
 ### Interaction with S0-infra-2
@@ -1173,10 +1167,8 @@ preserves in `manifest.json:source_commit`.
 ### The accepted risk
 
 A full move makes onboarding (the product's core flow) depend on the object store
-being reachable and credentialled. Today it is neither: the prod GCS credential cannot
-be minted at all. Owner's call, taken 2026-09-11 with that consequence stated. The
-mitigation is that the store blocker is a hard prerequisite rather than a caveat, and
-that an unreachable store must present as a named fault in the flasher rather than a
+being reachable and credentialled. Today it is neither: the prod GCS credential has no mint path at all. Owner's call, taken 2026-09-11 with that consequence stated. The
+mitigation is that the store blocker is a hard prerequisite rather than a caveat. That an unreachable store must present as a named fault in the flasher rather than a
 broken page.
 
 ## Build identity in the agent manifest (S0-infra-3, closed 2026-09-14)
@@ -1201,7 +1193,7 @@ provenance fields (`target`, `agent_version`, `idf_version`, `idf_image`, `sourc
 `name`/`offset`/`size`/`sha256` **sorted by name** — so the manifest's own part ordering,
 which is by offset for the flasher's benefit, cannot leak into the identity.
 
-`built_at` is excluded on purpose. Two builds of identical inputs must produce the same
+`built_at` stays out on purpose. Two builds of identical inputs must produce the same
 id. A timestamp in the digest would make every rebuild look like a new build. The
 field would be decoration. See DECISIONS.md, 2026-09-14.
 
@@ -1212,16 +1204,16 @@ mismatch — it imports `build_identity` from its sibling rather than reimplemen
 serialisation, so writer and verifier cannot drift. `firmware/manifest.py` accepts both as
 optional `Sha256Hex` fields (`MANIFEST_SCHEMA` stays 1: additive and optional means a
 reader has nothing to switch on), `firmware/catalog.py` carries them through,
-`GET /v1/agent/manifest` serves them, and the S0-fe-7 diagnostic bundle prints both in its
+`GET /v1/agent/manifest` serves them. The S0-fe-7 diagnostic bundle prints both in its
 header, at full 64 hex — a truncated prefix invites an argument about whether two bundles
-match, which is the argument the fields exist to end.
+match. This is the argument the fields exist to end.
 
 ### Old bundles warn, malformed bundles drop
 
 A bundle with no `config_sha256` predates this change: it loads, with a WARNING naming the
-target and telling the reader to rebuild. A bundle with a *malformed* digest is dropped,
-because a corrupt digest is one that would be compared and believed. The distinction is
-the whole safety argument, and `tests/test_firmware_catalog.py::TestBuildIdentity` pins
+target and telling the reader to rebuild. A bundle with a *malformed* digest drops.
+This is because a corrupt digest is one that would be compared and believed. The distinction is
+the whole safety argument. `tests/test_firmware_catalog.py::TestBuildIdentity` pins
 both halves plus a vacuity guard that a healthy load warns about nothing.
 
 ### T2 acceptance evidence (2026-09-14)
@@ -1230,8 +1222,7 @@ A **real two-pass ESP-IDF build**, not a synthesised one. Build A (`just agent-b
 esp32` on a pristine tree) emitted `config_sha256 8c8ae96b…d49a` / `build_digest
 28fd4e0f…6c9c`, and `just agent-verify` printed `(recomputed, matches)`. Build B changed
 one line of `agent/sdkconfig.defaults` (`CONFIG_ESP_MAIN_TASK_STACK_SIZE` 8192 → 9216) and
-built to `/tmp/ff-build-b`, never into `agent/dist`. Thus, the variant image could not be
-flashed: `config_sha256 6346e2a8…8685` / `build_digest 9d583fdf…2c7a`, while
+built to `/tmp/ff-build-b`, never into `agent/dist`. Thus, the variant image failed to flash: `config_sha256 6346e2a8…8685` / `build_digest 9d583fdf…2c7a`, while
 `source_commit`, `agent_version`, `idf_version`, `idf_image`, `partition_layout` and
 `ota_slot_size` were all identical — the pair the old manifest could not distinguish. The
 resolved `sdkconfig` diff was exactly the two stack-size lines. The edit was reverted and
@@ -1256,7 +1247,7 @@ load. `just agent-build-all` clears it.
 
 Two tables (`artifacts` and `builds`), a frozen key scheme (`blobs/sha256/<hex>`), cache-control metadata on content-addressed objects, and a complete test harness proving the rules against real MinIO. All code landed with the tables empty and no readers — the same shipping posture `fleetforge.storage` itself took at R0-be-6.
 
-**Core module:** `src/fleetforge/storage/blobs.py` — pure functions with no SDK import, following the same rule as `objectstore.py`. Provides `digest_bytes`, `blob_key`, `parse_blob_key` and `put_blob`. The key is `blobs/sha256/<hex>` (store-relative, explained below). Every helper checks rigorously: uppercase hex is rejected never lowercased, `parse_blob_key` accepts only the exact prefix plus 64 lowercase hex with nothing before or after.
+**Core module:** `src/fleetforge/storage/blobs.py` — pure functions with no SDK import, following the same rule as `objectstore.py`. Provides `digest_bytes`, `blob_key`, `parse_blob_key` and `put_blob`. The key is `blobs/sha256/<hex>` (store-relative, explained below). Every helper checks rigorously: uppercase hex triggers a rejection never lowercased, `parse_blob_key` accepts only the exact prefix plus 64 lowercase hex with nothing before or after.
 
 **Schema:** Migration `0003_artifacts_and_builds.py` creates two tables. `artifacts` holds one row per content digest with columns for sha256 (PK), size, kind, target, partition layout, provenance (JSONB) and created_at, plus a PostgreSQL CHECK enforcing lowercase hex format. `builds` maps cache keys to the artifacts they produced, with columns for cache_key (PK), key_inputs (JSONB), outputs (JSONB), target, partition_layout and created_at. Both tables include appropriate indexes and constraints following the db/models.py conventions.
 
@@ -1272,7 +1263,7 @@ So `blob_key()` returns `blobs/sha256/<hex>` and must never contain `fleetforge/
 
 ### Schema design: why JSONB for build outputs
 
-`builds.outputs` is JSONB rather than a join table because a bundle build produces four parts. Thus, one `artifact_sha256` column cannot represent it and per-part rows would collide on the cache-key primary key. The output set is consumed as a unit (it becomes the manifest view) and is never queried part-wise across builds.
+`builds.outputs` is JSONB rather than a join table because a bundle build produces four parts. Thus, one `artifact_sha256` column cannot represent it and per-part rows would collide on the cache-key primary key. The output set moves as a unit (it becomes the manifest view) and is never queried part-wise across builds.
 
 The cost is real and documented: PostgreSQL cannot foreign-key into JSONB. Thus, a future pruner (R2) must treat `builds.outputs` as a GC root rather than trusting referential integrity. A `build_outputs` join table is the additive migration the day part-wise queries appear.
 
@@ -1304,11 +1295,11 @@ All helpers reject malformed input and never normalize it, following the `object
 
 ### Gotchas learned
 
-**Alembic autogenerate needs hand-editing for quality.** The migration was generated with `alembic revision --autogenerate` but then hand-edited for comments, ordering and proper op.f(...) constraint names. The autogenerated output is a starting point, not a committable artifact.
+**Alembic autogenerate needs hand-editing for quality**. The migration was generated with `alembic revision --autogenerate` but then hand-edited for comments, ordering and proper op.f(...) constraint names. The autogenerated output is a starting point, not a committable artifact.
 
-**Python regex anchors for digests:** The validation uses `\Z` not `$` because `$` also matches before a trailing newline, so `^[0-9a-f]{64}$` accepts `"<hex>\n"`. PostgreSQL CHECK uses `$` where POSIX has no such behavior. This is documented in DECISIONS.md.
+**Python regex anchors for digests:** The validation uses `\Z` not `$`. This is because `$` also matches before a trailing newline, so `^[0-9a-f]{64}$` accepts `"<hex>\n"`. PostgreSQL CHECK uses `$` where POSIX has no such behavior. This is documented in DECISIONS.md.
 
-**Both tables land empty with no readers.** This is what makes `downgrade()` an honest reverse. The same thing will not be true next time a migration touches these tables.
+**Both tables land empty with no readers**. This is what makes `downgrade()` an honest reverse. The same thing will not be true next time a migration touches these tables.
 
 ### Wire protocol unchanged
 
@@ -1365,13 +1356,13 @@ The R0 path stays the same: when exactly one layout exists for a target, `catalo
 
 ### Gotchas learned
 
-**monkeypatch.setitem, never setattr.** The catalog imports `SUPPORTED_LAYOUTS` which binds the same dict object. Mutating via `setitem` is visible in both modules and is undone after the test. Using `setattr` rebinds only one module's name and the test proves nothing.
+**monkeypatch.setitem, never setattr**. The catalog imports `SUPPORTED_LAYOUTS` which binds the same dict object. Mutating via `setitem` is visible in both modules and is undone after the test. Using `setattr` rebinds only one module's name and the test proves nothing.
 
-**AmbiguousBundleError must not inherit from AgentBundleError.** `load_bundles` catches AgentBundleError to drop bad bundles. If ambiguity inherited from it, a future refactor could swallow the error and silently serve first-match.
+**AmbiguousBundleError must not inherit from AgentBundleError**. `load_bundles` catches AgentBundleError to drop bad bundles. If ambiguity inherited from it, a future refactor could swallow the error and silently serve first-match.
 
-**Directory suffix validation.** `_split_dir_name` must reject what the old SAFE_TARGET check rejected (`.hidden`, `esp32.`, and others.). Malformed names drop the bundle with a warning rather than raising an exception.
+**Directory suffix validation**. `_split_dir_name` must reject what the old SAFE_TARGET check rejected (`.hidden`, `esp32.`, and others.). Malformed names drop the bundle with a warning rather than raising an exception.
 
-**409 is the only new status code.** Existing 404s stay as-is. The 409 only appears for ambiguous layout selection — it names the problem so the flasher can tell the user rather than silently picking the wrong partition table.
+**409 is the only new status code**. Existing 404s stay as-is. The 409 only appears for ambiguous layout selection — it names the problem so the flasher can tell the user rather than silently picking the wrong partition table.
 
 ### Verification (T2)
 
@@ -1457,7 +1448,7 @@ and mints a token, which on a non-GCP host hangs for seconds. `put`'s
 
 ### Gotchas learned
 
-**On this dev box ADC is a USER, not `devserver@`.** `gcloud config` shows the active
+**On this dev box ADC is a USER, not `devserver@`**. `gcloud config` shows the active
 account as `devserver@btvaroska`. But `google.auth.default()` returns an `authorized_user`
 from `gcloud auth application-default login` — the ADC **file** wins over the metadata
 server. That principal has no tokenCreator binding, so impersonation 403s on
@@ -1467,14 +1458,14 @@ identity, which *is* granted. That is the dev-box fast loop against real GCS, an
 corrects the plan's standing claim that this box cannot impersonate at all.
 
 **A credential-resolution failure is an `ObjectStoreError`, never an
-`ObjectStoreConfigError`.** `objectstore.py` promises config errors are raised "at
+`ObjectStoreConfigError`**. `objectstore.py` promises config errors are raised "at
 construction/selection time, never mid-request-body", and `api/deps.get_object_store`
 translates them only around `create_object_store`. One raised inside `put`/`get`/
 `signed_url` escapes an already-started request as a **500** where the docstring promises a
 retriable 503. So: eager shape checks raise `ObjectStoreConfigError`. No ADC, a refused
 token and a `signBlob` 403 all raise `ObjectStoreError`.
 
-**The likely failure is a refused token, and it says nothing useful by default.** An ADC
+**The likely failure is a refused token, and it says nothing useful by default**. An ADC
 that resolves but can not impersonate raises `RefreshError` **lazily, at first use**, which
 `_guard` reports as `gcs get of … failed: RefreshError` — naming neither the principal nor
 the missing role. `_impersonated_bucket` thus refreshes the credential eagerly and
@@ -1482,7 +1473,7 @@ translates, naming the target and `roles/iam.serviceAccountTokenCreator` and not
 (the 403 body carries an opaque troubleshooter id that must not reach a handler). Cost is
 zero: the next call would minted that token anyway.
 
-**`project=None`, never omitted.** `storage.Client.__init__` maps `None` to "no project".
+**`project=None`, never omitted**. `storage.Client.__init__` maps `None` to "no project".
 The default `_marker` sentinel makes google-cloud-storage go looking for a project through
 ADC and raise when it cannot find one. The bucket is cross-project and nothing lists
 buckets.
@@ -1490,16 +1481,16 @@ buckets.
 ### S0-infra-6 hand-off
 
 The prod container is **still unwired** — `services/prod/docker-compose.yml`'s
-`fleetforge-api` block carries the now-stale comment *"No object store on purpose: the GCS
-service-account key cannot be minted"*. Four env lines wire it and nothing is mounted:
+`fleetforge-api` block carries the now-stale comment *"No object store on purpose. The GCS
+service-account key has no mint path"*. Four env lines wire it and nothing mounts:
 `OBJECT_STORE_BACKEND: gcs`, `GCS_BUCKET: btvaroska`, `GCS_PREFIX: fleetforge/`,
 `GCS_IMPERSONATE_SERVICE_ACCOUNT: fleetforge-artifacts@btvaroska.iam.gserviceaccount.com`.
 None is a secret. Root `CLAUDE.md` requires asking before touching production config. Thus,
 this task proposed them rather than applying them.
 
-## Agent bundles are served from the store (S0-infra-6, closed 2026-09-15)
+## Agent bundles come from the store (S0-infra-6, closed 2026-09-15)
 
-**Filed as:** "Agent bundles are served from the store, not baked into the image" — the
+**Filed as:** "Agent bundles come from the store, not baked into the image" — the
 move named by `design/decisions/infrastructure-agent-bundles-are-artifacts.md`, unblocked
 by S0-infra-5's keyless credential.
 
@@ -1510,7 +1501,7 @@ contents and became ordinary content-addressed artifacts, on the same `ObjectSto
 R1's user artifacts use. `COPY agent/dist /app/agent` and `AGENT_IMAGES_DIR` are gone.
 `.dockerignore` now excludes `agent/` outright.
 
-**Publish side.** `firmware/catalog.py`'s old filesystem loader became
+**Publish side**. `firmware/catalog.py`'s old filesystem loader became
 `firmware/bundledir.py` — the same verification (every part re-hashed, layout and OTA
 slot checked against `spec/device-protocol.md`, `path` forced to a bare filename), but it
 now **raises** instead of dropping, because a publisher that skipped a corrupt bundle
@@ -1520,17 +1511,17 @@ uploads each part and the manifest through `put_blob` (immutable `Cache-Control`
 exposes `publish` / `list` / `rollback`, wrapped by `just agent-publish`,
 `just agent-publish-all`, `just agent-list`, `just agent-rollback`.
 
-**The index object.** `agent/index.json` (`firmware/index.py`) is the only mutable key in
+**The index object**. `agent/index.json` (`firmware/index.py`) is the only mutable key in
 the scheme: schema version, `updated_at`, and one entry per `(target, partition_layout)`
 naming the current manifest digest plus up to 20 superseded ones. Written with
 `Cache-Control: no-store`, never through `put_blob`.
 
-**Read side.** `firmware/catalog.py` is now store-backed: `load_catalog` reads the index,
+**Read side**. `firmware/catalog.py` is now store-backed: `load_catalog` reads the index,
 gets each manifest blob and re-checks it. `CatalogCache` holds the result for
 `AGENT_CATALOG_TTL_S` (default 60 s) behind an `asyncio.Lock`. `agent_part` streams the
 bytes from the store under the admin credential and re-hashes them before answering.
 
-**Frontend.** The Flash button is disabled while the manifest is unreadable, and the
+**Frontend**. The Flash button is disabled while the manifest is unreadable, and the
 target line names each build's version when a partial publish left them out of step.
 
 ### Publish is not deploying — the criterion the task exists for
@@ -1543,34 +1534,32 @@ flasher within the catalog TTL with **the same api container still running**, an
 
 ### Five criteria from `spec/standards.md`
 
-- **Named faults, never silence.** Three distinct answers: *"no agent images were
-  published yet"* (503, reachable-but-empty), *"the agent image store cannot be reached"*
-  (503, transport), and 502 for bytes that do not match the manifest. The 503 detail is
-  lifted verbatim into the flasher's banner. Thus, it carries no bucket, key, exception class
+- **Named faults, never silence**. Three distinct answers: *"no agent images exist yet"* (503, reachable-but-empty), *"the agent image store is unreachable"*
+  (503, transport), and 502 for bytes that do not match the manifest. The 503 detail copies verbatim into the flasher's banner. Thus, it carries no bucket, key, exception class
   or traceback — those go to the log.
-- **No stale snapshot over a failing refresh.** `CatalogCache` drops its snapshot
+- **No stale snapshot over a failing refresh**. `CatalogCache` drops its snapshot
   *before* the refresh read. Thus, a store outage produces a named 503 rather than a manifest
-  the API can no longer honor. Failures are not cached either.
-- **One bad entry does not take the others down.** A manifest that is missing, unparseable
-  or disagrees with the protocol is dropped with a WARNING naming the target. The other
+  the API can no longer honor. The cache never stores failures either.
+- **One bad entry does not take the others down**. A manifest that is missing, unparseable
+  or disagrees with the protocol drops with a WARNING naming the target. The other
   targets still serve. That rule survived the move from the filesystem.
-- **No key is ever built from a request.** `{target}`/`{part}` only index the catalog. The
+- **No key is ever built from a request**. `{target}`/`{part}` only index the catalog. The
   only key that reaches the store is `blob_key(<a digest the published manifest carried>)`.
-- **The container starts when the bucket is down.** `create_app()` does no store I/O. The
+- **The container starts when the bucket is down**. `create_app()` does no store I/O. The
   catalog is lazy.
 
 ### Deliberate non-goals
 
-- **No `list` verb.** The store seam keeps four verbs. Listing is a per-backend paging
+- **No `list` verb**. The store seam keeps four verbs. Listing is a per-backend paging
   contract, and a catalog defined by "whatever is in the prefix" cannot be rolled back,
   cannot be made atomic, and answers "what is current?" with a guess.
-- **No database tables.** The index is the catalog. Agent bundles are per-deployment
-  facts, not per-tenant records, and a DB row would have to be kept in step with the
+- **No database tables**. The index is the catalog. Agent bundles are per-deployment
+  facts, not per-tenant records. A DB row must stay in step with the
   bytes by hand.
-- **No multi-version serving.** One current bundle per `(target, layout)`. Rollback
+- **No multi-version serving**. One current bundle per `(target, layout)`. Rollback
   re-points the index rather than exposing a version axis on the wire, which would change
   `/v1/agent/manifest` for every client to serve a case that happens twice a year.
-- **No signed URL on this path.** The API streams the bytes under the admin credential. A
+- **No signed URL on this path**. The API streams the bytes under the admin credential. A
   signed URL would drag `signBlob` (a network call since S0-infra-5) into onboarding.
 
 ### Files created
@@ -1600,57 +1589,56 @@ flasher within the catalog TTL with **the same api container still running**, an
 
 ### Gotchas learned
 
-**A bundle directory copied elsewhere fails on its name, not its contents.** The loader
+**A bundle directory copied elsewhere fails on its name, not its contents**. The loader
 derives the target from the directory name, so `cp -r agent/dist/esp32 /tmp/bad` fails
 with *"manifest says target 'esp32' but it sits in 'bad'"* before any integrity check
 runs. Corruption drills must keep the directory named after the target.
 
-**Part failures must name the target.** `just agent-publish-all` checks several bundles
+**Part failures must name the target**. `just agent-publish-all` checks several bundles
 in one run, and *"app is 993697 bytes on disk"* does not say which board would were
 bricked.
 
-**The TTL is visible in an outage drill.** With a fresh snapshot, `/v1/agent/manifest`
+**The TTL is visible in an outage drill**. With a fresh snapshot, `/v1/agent/manifest`
 keeps answering 200 for up to `AGENT_CATALOG_TTL_S` after the store goes down, while a
 part download fails immediately. That is the cache working, not a stale-serve bug — the
 no-stale rule binds at refresh time.
 
-**The index RMW is a read-change-write race, knowingly accepted.** Two concurrent
+**The index RMW is a read-change-write race, knowingly accepted**. Two concurrent
 publishes of *different* targets can lose one entry. There is one publisher (an operator
 at a terminal) and the loser is re-published by re-running one command. A compare-and-set
 would need a generation precondition the seam deliberately does not expose.
 
 ### Verification (T2)
 
-- **AC1 — the image carries no firmware.** `docker build --target=production` then
+- **AC1 — the image carries no firmware**. `docker build --target=production` then
   `ls /app/agent` → *No such file or directory*. `find /app -name '*.bin' | wc -l` → `0`.
-- **AC2 — it builds with no bundles at all and the flasher still works.** With
+- **AC2 — it builds with no bundles at all and the flasher still works**. With
   `agent/dist` moved aside the build succeeded and produced the **same image id**
   (`sha256:0c4f698b…`), proving the bundles are not in the build context. Against
   `just up-prod` + `just agent-publish esp32`: the manifest lists `esp32`, and
   `GET /v1/agent/esp32/app` is 200 whose sha256 (`2484cb76…`) equals the manifest's app
   digest. `just agent-qemu-smoke esp32` → *HARNESS OK: esp32 boots, reads its config, and
   does not loop.*
-- **AC3 — publishing is not deploying.** `just agent-publish esp32c6`, then after the TTL
+- **AC3 — publishing is not deploying**. `just agent-publish esp32c6`, then after the TTL
   the manifest lists `esp32, esp32c6` with the api container id **unchanged** and
   `docker compose logs … | grep -ci restart` → `0`.
-- **AC4 — an unreachable store is a named fault.** With `docker compose stop minio`, both
-  `/v1/agent/manifest` and `/v1/agent/esp32/app` answer 503 *"the agent image store cannot
-  be reached. Thus, there is no firmware to offer. No board can be flashed until it is
+- **AC4 — an unreachable store is a named fault**. With `docker compose stop minio`, both
+  `/v1/agent/manifest` and `/v1/agent/esp32/app` answer 503 *"the agent image store is unreachable. Thus, there is no firmware to offer. No board can be flashed until it is
   back."* — no bucket, key or traceback in the body. The key appears only in the ERROR
   log line. 401 still precedes 503 for an anonymous caller.
-- **AC5 — corruption is still refused, with the target named.** One appended byte →
+- **AC5 — corruption still triggers a refusal, with the target named**. One appended byte →
   *"esp32: app is 993697 bytes on disk, manifest says 993696"*, exit 1. A hand-edited
   `ota_slot_size` → *"ota_slot_size 4194304 is not the 1966080 that layout 'ab-4m-v1'
-  declares"*, exit 1. Nothing was written (`agent-list` unchanged), and the uncorrupted
+  declares"*, exit 1. Nothing was written (`agent-list` unchanged). The uncorrupted
   publish exits 0 (vacuity check).
-- **AC6 — a previous version is still flashable with no rebuild.** Published a second,
+- **AC6 — a previous version is still flashable with no rebuild**. Published a second,
   distinguishable build, then `rollback esp32 --manifest <D1>`: the manifest reports the
-  older `agent_version`, the part download still checks, and the api container id stays the same.
-- **AC7 — self-hosting is unaffected.** Everything above ran against MinIO with no GCS
+  older `agent_version`, the part download still checks. The api container id stays the same.
+- **AC7 — self-hosting stays intact**. Everything above ran against MinIO with no GCS
   configuration present at all.
-- **AC8 — T1.** `just lint`, `just typecheck`, `uv run pytest tests/` (703 passed),
+- **AC8 — T1**. `just lint`, `just typecheck`, `uv run pytest tests/` (703 passed),
   `npm test` (205 passed) and `npm run build` all green.
-- **AC9 — prod.** Not run: the production container is still unwired and root `CLAUDE.md`
+- **AC9 — prod**. Not run: the production container is still unwired and root `CLAUDE.md`
   requires asking before touching production config. Proposed below.
 
 ### Production hand-off (APPLIED 2026-09-16, in v0.3.5)
@@ -1660,14 +1648,14 @@ Done, in the order below, and checked from prod itself:
 `creds=impersonated(fleetforge-artifacts@btvaroska.iam.gserviceaccount.com)` and the four
 targets at `0.2.0`, whose manifest digests match the ones `just agent-publish-all` wrote
 from the dev box (`esp32` `8b35fe50…`, `esp32c3` `fa6f9b41…`, `esp32c6` `a1fdf71c…`,
-`esp32s3` `3bfdf57f…`). No key file exists on prod and none is mounted — the VM's
+`esp32s3` `3bfdf57f…`). No key file exists on prod and none mounts — the VM's
 `mainsite@sites-470716` identity impersonates the scoped artifacts account.
 
 The record of what was replaced, kept because the *reason* outlives the edit:
 
 `services/prod/docker-compose.yml`'s `fleetforge-api` block used to set
 `AGENT_IMAGES_DIR: /app/agent` and carries the now-false comment *"No object store on
-purpose: the GCS service-account key cannot be minted"*. Replace both with:
+purpose. The GCS service-account key has no mint path"*. Replace both with:
 
 ```yaml
       OBJECT_STORE_BACKEND: gcs
@@ -1677,14 +1665,14 @@ purpose: the GCS service-account key cannot be minted"*. Replace both with:
 ```
 
 **Order matters:** publish the bundles to GCS *before* deploying an app image that no
-longer carries them, or prod's flasher answers 503 in between. Nothing is mounted and no
+longer carries them, or prod's flasher answers 503 in between. Nothing mounts and no
 key exists (S0-infra-5).
 
 ## Readiness covers deploy, and deploy has a release gate (S0-infra-9, closed 2026-10-01)
 
-**Problem.** Deploy had never worked on prod while every probe was green (ops-log
+**Problem**. Deploy had never worked on prod while every probe was green (ops-log
 F-2026-09-23-001/002/003). `/v1/readyz` pinged only the database, the container
-healthcheck used `/v1/healthz`, and each deploy-mandatory setting was one startup
+healthcheck used `/v1/healthz`. Each deploy-mandatory setting was one startup
 WARNING. `just broker-check`, which would caught F-002, was something you ran at your
 desk, not a gate.
 
@@ -1694,7 +1682,7 @@ desk, not a gate.
   missing: `S3_* or GCS_*`, `ARTIFACT_URL_SECRET`, `PUBLIC_BASE_URL`,
   `MQTT_COMMAND_USERNAME/_PASSWORD`. Empty strings count as unset (compose interpolation).
 - **`/v1/readyz`**: 503 when the database is unreachable **or** that list is non-empty.
-  Every gap is reported at once:
+  Every gap reports at once:
   `{"status":"not-ready","detail":"…","missing":[…]}`. Names only, never values, since the
   probe is public behind nginx. `healthz` stays the same and still no-I/O.
 - **Healthcheck → `/v1/readyz`** in `docker-compose.yml` and in services
@@ -1715,17 +1703,17 @@ desk, not a gate.
 
 ### Gotchas learned
 
-- **The download endpoint never reads `PUBLIC_BASE_URL`.** Only the deploy that mints the
+- **The download endpoint never reads `PUBLIC_BASE_URL`**. Only the deploy that mints the
   link does. A host-side check that signs with the host's own `PUBLIC_BASE_URL` passes
   against an API that has none. Step 0 exists for this reason. Do not delete it as
   redundant.
-- **`readyz` green with a broken broker is correct.** It checks presence. Live broker
+- **`readyz` green with a broken broker is correct**. It checks presence. Live broker
   state (F-002) can only be caught by connecting as the commander, so readiness alone is
   not enough and the gate has to exist too.
-- **A gap now keeps the dashboard down on a fresh `up`.** `frontend` has
+- **A gap now keeps the dashboard down on a fresh `up`**. `frontend` has
   `depends_on: api: service_healthy` in dev and prod. Traefik routes only to the frontend,
   so an api that turns unhealthy at runtime does not take a running dashboard down.
-- **`minio/minio` and `minio/mc` can no longer be pulled** (Docker Hub: "repository does
+- **`minio/minio` and `minio/mc` no longer pulls** (Docker Hub: "repository does
   not exist", quay.io: unauthorized). A dev box with pruned images cannot `just up`. T2
   ran with an uncommitted `/tmp` override using `cgr.dev/chainguard/minio{,-client}:latest-dev`
   (no `curl` in that image, so the healthcheck used `wget`, plus `user: "0"`). The real
@@ -1749,7 +1737,7 @@ desk, not a gate.
 
 ## The ingestor's liveness file means "connected and consuming" (S0-infra-8, closed 2026-10-01)
 
-**Problem.** The ingestor healthcheck compares `/tmp/ingestor-alive`'s mtime against
+**Problem**. The ingestor healthcheck compares `/tmp/ingestor-alive`'s mtime against
 120 s, but the file was touched only on connect and per inbound message. With no board
 publishing, the fleet's sole MQTT subscriber read `unhealthy` forever. The dev stack sat
 red for 27 hours (`FailingStreak` 3292) over a working process. It went green within
@@ -1764,21 +1752,20 @@ dev light was a false positive and prod had no light.
   the heartbeat.
 - **Stall guard (`Consumer`, `STALL_LIMIT` 60 s)**: `run_once` records when the current
   message started. If one message was in flight for over 60 s, the ticks stop. A
-  timer alone would stay green over a hung database write, because the broker session
-  stays up. A *failed* write still returns normally. Thus, a Postgres outage does not turn
+  timer alone would stay green over a hung database write. This is because the broker session stays up. A *failed* write still returns normally. Thus, a Postgres outage does not turn
   the ingestor red: restarting it does not fix Postgres.
 - The per-message `touch_heartbeat()` in `handle_message` is gone. The timer is the only
   writer.
 - **services `prod/docker-compose.yml`**: `fleetforge-ingestor` gets the same healthcheck
   as dev (120 s, interval 30 s, retries 3, start 30 s). Dev's comment is corrected.
-- `tests/test_ingestor_liveness.py` (fake client, no broker or DB) covers four cases: an
+- `tests/test_ingestor_liveness.py` (fake client, no broker or DB) covers four cases. An
   idle session stays fresh, a dropped session goes stale, a wedged consumer goes stale and
-  recovers without a restart, and a failed write keeps it fresh. Against the old
+  recovers without a restart. A failed write keeps it fresh. Against the old
   `main.py`, three of the four fail.
 
 ### Gotchas learned
 
-- **The prod healthcheck needs an image that contains this change.** An older image
+- **The prod healthcheck needs an image that contains this change**. An older image
   touches the file only on traffic, so on prod's mostly idle fleet it would read
   `unhealthy`. Ship the compose change and the digest bump in the same release.
 - Nothing on prod acts on container health yet. `scripts/healthcheck.sh` polls HTTPS
@@ -1799,14 +1786,14 @@ dev light was a false positive and prod had no light.
   21 s later.
 - Prod before release: `prod-fleetforge-ingestor-1 running health=none`. The prod
   compose renders the healthcheck (`docker compose config`). **Prod will only report a
-  health state after the next release deploys an image that contains this change.**
+  health state after the next release deploys an image that contains this change**.
   Check with `ssh prod docker inspect prod-fleetforge-ingestor-1 --format
   '{{.State.Health.Status}}'`.
 - `just test`: 973 passed, ruff and mypy clean.
 
 ## One status document, and a true front door (S0-ops-1, closed 2026-10-01)
 
-**Problem.** The rule "live status lives ONLY in `TODO.md`" was written everywhere and
+**Problem**. The rule "live status lives ONLY in `TODO.md`" was written everywhere and
 followed almost nowhere. The README still said "R0 in progress… the agent, the flasher and
 OTA itself do not exist" a week after R0 closed and R1 passed on metal. `docs/roadmap.md`
 (last updated 2026-09-15) and the feature-file headers carried their own Status values,
@@ -1816,8 +1803,7 @@ took up ~200 lines of the live list. It carried three releases.
 ### What shipped
 
 - **`TODO.md`** is now Sprint 0 plus a short *Where this stands*: what works on metal,
-  what does not, what is next (R2, behind a `/replan` re-run of the CUJ-1 gate) and what is
-  blocked. It went from 666 lines to ~150. The closed R0/R1 sections are gone. Closed
+  what does not, what is next (R2, behind a `/replan` re-run of the CUJ-1 gate) and what blocks. It went from 666 lines to ~150. The closed R0/R1 sections are gone. Closed
   Sprint 0 tasks are one-line `[x]` entries with pointers.
 - **README** status block rewritten as one paragraph that matches metal. Its `mosquitto/`
   row now names `acl` and the two dynsec phases instead of a `conf.d/` that holds no authz.
@@ -1830,7 +1816,7 @@ took up ~200 lines of the live list. It carried three releases.
 - **The R3 task list** moved word for word to `ota-library.md` → *R3 task list*, without
   checkboxes. It moves back into `TODO.md` when R3 opens.
 
-**Archive gap closed first.** Three closed tasks existed only in `TODO.md`. Before the
+**Archive gap closed first**. Three closed tasks existed only in `TODO.md`. Before the
 strip they got write-ups: `S0-test-3` and `S0-fw-3` in `enrollment.md`, and `R1-test-1`
 plus the CUJ-1 gate table in `ota-deploy.md`. Cutting first would lost the two
 `S0-fw-3` results the task said must never be re-derived.
@@ -1843,6 +1829,6 @@ plus the CUJ-1 gate table in `ota-deploy.md`. Cutting first would lost the two
   resolves (scripted check, 0 broken).
 - A read of README then `TODO.md` alone answers all three questions. **What works:**
   enroll, agent OTA, and rollback of a board that never confirms, all on the S3 against
-  prod. **What is next:** R2, opened by `/replan` once the gate passes. **What is blocked:**
+  prod. **What is next:** R2, opened by `/replan` once the gate passes. **What blocks:**
   the bench tasks need hardware, R3 waits on R2. `just up` fails on a pruned dev box.
 - `just lint` clean (no code touched).

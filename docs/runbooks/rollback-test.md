@@ -5,8 +5,8 @@ The live test of `agent/main/ff_mqtt.c`'s confirm/rollback pair — CRITICAL.md'
 gamble. A bug here means a board that cannot recover itself — the one failure the product
 must never have."**
 
-**Run this at the bench, with USB in reach.** Its failure mode is a board that does not
-come back, and the only recovery is a serial re-flash. That is not a reason to skip it.
+**Run this at the bench, with USB in reach**. Its failure mode is a board that does not
+come back. The only recovery is a serial re-flash. That is not a reason to skip it.
 It is the reason to do it while you can still recover. This is because the alternative is
 discovering the same thing remotely on a board you cannot reach.
 
@@ -29,18 +29,17 @@ a state the bootloader never produces.
 (`agent/CMakeLists.txt`, `agent/main/CMakeLists.txt`, `agent/Dockerfile`). It changes two
 things and nothing else:
 
-1. **The announce ack is discarded.** `ctx->announce_msg_id = -1` after the publish. Thus,
-   the PUBACK can never match and `session_confirmed` stays false. The announce itself is
-   still published and still retained — the board genuinely joins the fleet on the bad
-   version, which is what makes the rollback visible in the dashboard rather than only on
+1. **The announce ack drops**. `ctx->announce_msg_id = -1` after the publish. Thus,
+   the PUBACK can never match and `session_confirmed` stays false. The announce itself still publishes with the retain flag — the board genuinely joins the fleet on the bad
+   version. This is what makes the rollback visible in the dashboard rather than only on
    a console.
-2. **`CONFIRM_TIMEOUT_S` drops 300 → 60.** This does not weaken the test: the timer under
+2. **`CONFIRM_TIMEOUT_S` drops 300 → 60**. This does not weaken the test. The timer under
    test is the one compiled into the *new* image. Thus, the mechanism is identical and only
    the wait is shorter.
 
 The flag also appends `-rbtest` to `PROJECT_VER`, which travels through
 `esp_app_get_description()->version` into every `up/announce`. One switch, so there is no
-half-configured state, and a test image cannot be mistaken for a shippable one.
+half-configured state. A test image cannot be mistaken for a shippable one.
 
 The resolved sdkconfig is **byte-identical** to a normal build (`config_sha256` matches).
 Thus, the bootloader posture (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`, no eFuse burns) is
@@ -69,7 +68,7 @@ FF_TARGET=esp32s3 FF_BIN=/tmp/rbtest-esp32s3/app.bin \
   FF_VERSION=<version>-rbtest docs/runbooks/upload-artifact.sh
 ```
 
-> **Never `just agent-publish` a rollback-test build.** That writes the flasher catalog,
+> **Never `just agent-publish` a rollback-test build**. That writes the flasher catalog,
 > which is the USB onboarding path. It would make a deliberately broken image the one
 > every new board gets flashed with. The artifact store and the flasher catalog are
 > different stores for exactly this reason (`artifact-storage.md`).
@@ -86,18 +85,17 @@ t+~85s   no acked session -> mark_app_invalid_rollback_and_reboot()
 t+~95s   board returns announcing the PREVIOUS version
 ```
 
-**Pass = the board comes home on the previous version, unattended.** Nobody touches it.
+**Pass = the board comes home on the previous version, unattended**. Nobody touches it.
 
 Still on `-rbtest` after ~2 minutes means the negative branch did not fire. The board is running an image the bootloader was waiting on. Recover over USB and treat it as a P0:
-until it is fixed, no board can be deployed to unless someone can physically reach it.
+until we fix it, no board can be deployed to unless someone can physically reach it.
 
 ## Known gaps this test does not close
 
-- **The server never learns.** At R1 the agent's reported walk ends at `rebooting`
+- **The server never learns**. At R1 the agent's reported walk ends at `rebooting`
   (`ff_ota.h`), so `confirming`/`confirmed`/`rolling_back`/`rolled_back` are never
   published. A rollback is thus inferred from the announced version changing back,
-  not read from a deploy state — and the deploy row stays non-terminal either way. R2's
+  not read from a deploy state. The deploy row stays non-terminal either way. R2's
   to fix.
-- **One failure mode, not the family.** This covers "boots, joins, never confirms". It
-  does not cover a boot loop, a brownout mid-write, or a flaky radio — the last of which
-  is the separate R2 spike tracked in `docs/features/ota-deploy.md`.
+- **One failure mode, not the family**. This covers "boots, joins, never confirms". It
+  does not cover a boot loop, a brownout mid-write, or a flaky radio. The last of which is the separate R2 spike tracked in `docs/features/ota-deploy.md`.

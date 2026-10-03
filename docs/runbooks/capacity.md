@@ -108,7 +108,7 @@ VERDICT: FAIL
 
 ## Resize the VM
 
-**The agent cannot do this.** Neither `devserver@btvaroska` nor `mainsite@sites-470716` has `compute.instances.*` on `sites-470716`. Run from **Cloud Shell** as the owner:
+**The agent cannot do this**. Neither `devserver@btvaroska` nor `mainsite@sites-470716` has `compute.instances.*` on `sites-470716`. Run from **Cloud Shell** as the owner:
 
 ### 1. Check the External IP (Critical)
 
@@ -174,9 +174,9 @@ All containers `Up`, all domains 200 (or their normal auth code), mosquitto `(he
 
 ## Technical Notes
 
-- **Swap *used* is a stock, not a flow.** A gigabyte of cold anonymous pages parked in swap and never read back costs nothing. What costs is the *rate* of `pswpin` / `pgmajfault`. A verdict built on "swap used is 1 G, thus resize" would be wrong. A verdict built on the window deltas is defensible.
-- **`memory.events max` is the signal that matters.** It counts forced reclaims at the limit — which happen long before an OOM kill and are otherwise invisible. A container with `max > 0` is under-provisioned even if it never crashes.
-- **`docker stats` is not used.** It is slow (~1 s/container even with `--no-stream`), gives no peak and no `memory.events`. This script reads cgroup v2 directly.
+- **Swap *used* is a stock, not a flow**. A gigabyte of cold anonymous pages parked in swap and never read back costs nothing. What costs is the *rate* of `pswpin` / `pgmajfault`. A verdict built on "swap used is 1 G, thus resize" would be wrong. A verdict built on the window deltas is defensible.
+- **`memory.events max` is the signal that matters**. It counts forced reclaims at the limit — which happen long before an OOM kill and are otherwise invisible. A container with `max > 0` is under-provisioned even if it never crashes.
+- **`docker stats` is not used**. It is slow (~1 s/container even with `--no-stream`), gives no peak and no `memory.events`. This script reads cgroup v2 directly.
 - **The script imports stdlib only** — no `uv`, no project venv, so the same script runs here and on prod over ssh. It must stay that way (prod has `python3 3.11` and nothing else).
 
 ---

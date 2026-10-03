@@ -9,8 +9,8 @@
 Make it production-grade: **app-level firmware signature verification** before apply,
 **resumable downloads** with retry/backoff for flaky Wi-Fi, and both KPIs surfaced.
 
-**App-level signing, not Secure Boot v2.** Secure Boot v2 burns a key digest to eFuse and
-needs a re-signed bootloader. Thus, it can never be enabled on an already-deployed board.
+**App-level signing, not Secure Boot v2**. Secure Boot v2 burns a key digest to eFuse and
+needs a re-signed bootloader. Thus, it can never work on an already-deployed board.
 It is post-v1 and new-devices-only. What R6 ships is pure software the agent can receive
 over OTA. The two are not interchangeable. See [design/architecture.md](../../design/architecture.md) →
 *Flash-time immutables*. This closes v1: auto-rollback (per-device) + checked, signed, resumable transport.
@@ -35,7 +35,7 @@ by design — see [releases.md](../releases.md).
 Definitions and targets: [prd.md](../../spec/prd.md) → *Success criteria*. The gap between the
 two numbers tells you *which stage* to fix.
 
-**Recording starts at R1, not here.** The `deploy_events` table is in the R0 schema and
+**Recording starts at R1, not here**. The `deploy_events` table is in the R0 schema and
 every deploy outcome is written from R1 onward — otherwise R6 arrives with two metrics
 and no history to compute them from.
 

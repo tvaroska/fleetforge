@@ -7,7 +7,7 @@
 *Target: ~5 heterogeneous boards, one per project (prd.md → Scope). No build pipeline, no simulation — a bad build per catches it-device auto-rollback alone.*
 
 ### R0 — Enroll a board (UI + recognition + flash + connect)
-The first functioning app: *I can register a board and see it online.* No code-deploy yet.
+The first functioning app: *I can register a board and see it online*. No code-deploy yet.
 - **Add (internal milestones, buildable in order):**
   1. Minimal server: MQTT broker + device registry (persist id/platform/version/last-seen) + enrollment-token generation.
   2. Agent (connect-only, **no OTA yet**) shipping the **final flash-time-immutable layer**: A/B partition table, rollback-enabled bootloader, eFuse posture (see design/architecture.md → *Flash-time immutables*). Connects, announces identity and heartbeats per [device-protocol.md](../spec/device-protocol.md).
@@ -26,14 +26,14 @@ The first functioning app: *I can register a board and see it online.* No code-d
 
 ### R2 — Safe deploy: check + auto-rollback ⭐
 - **Add:** checksum check before apply. A/B slot. **Device-side** confirm timer → `esp_ota_mark_app_valid_cancel_rollback()` on success, else self-rollback. Dashboard shows `good` versus `rolled-back`.
-- **Rollback authority is the device's, not the server's.** A device that cannot reach the broker is precisely the device that must roll back. It will never receive a command telling it to. The server observes and reports. It never triggers a rollback. (It follows that the confirm timeout is armed on the device before the reboot, not measured server-side.)
+- **Rollback authority is the device's, not the server's**. A device that cannot reach the broker is precisely the device that must roll back. It will never receive a command telling it to. The server observes and reports. It never triggers a rollback. (It follows that the confirm timeout is armed on the device before the reboot, not measured server-side.)
 - **You can now:** push a *deliberately broken* build → the board auto-recovers to the previous one.
 - **Risk retired:** bricking — **the single most important milestone** (just later in this ordering).
 
 ### R3 — Thin OTA library + first CUJ
 - **Add:** the four-verb contract as something a maker embeds in **their own** firmware — an ESP-IDF component extracted from the agent's `ff_*` modules, an Arduino library wrapping the same C, a worked example, and the project's first written CUJ ("I have a sketch and a DevKit on the desk").
-- **Sequenced after R2 on purpose.** A library is a multiplier on but safe deploy currently is. Issue the contract before auto-rollback exists spreads the unsafe path into custom firmware on boards nobody can reach. See `design/decisions/ota-library-ships-after-safe-deploy.md`.
-- **Opens with a spike, not with extraction.** Where a library user's config lives is undecided. The agent uses the `ff_cfg` flash partition, which an Arduino IDE build does not have. `spec/open-questions.md` carries the question. The spike answers it before the rest is estimated.
+- **Sequenced after R2 on purpose**. A library is a multiplier on but safe deploy currently is. Issue the contract before auto-rollback exists spreads the unsafe path into custom firmware on boards nobody can reach. See `design/decisions/ota-library-ships-after-safe-deploy.md`.
+- **Opens with a spike, not with extraction**. Where a library user's config lives remains open. The agent uses the `ff_cfg` flash partition, which an Arduino IDE build does not have. `spec/open-questions.md` carries the question. The spike answers it before we estimate the rest.
 - **You can now:** OTA *your own* project (the plant waterer, the frame, the coop door) not the demo agent.
 - **Risk retired:** the on-ramp. Until this exists, every release is a feature of firmware the user did not write.
 
@@ -50,7 +50,7 @@ The first functioning app: *I can register a board and see it online.* No code-d
 - **Add:** **app-level firmware signing** (agent checks a signature over the artifact before apply — *not* Secure Boot v2, which needs eFuse burns at flash time and is new-devices-only, see design/architecture.md), resumable range downloads, retry/backoff, both KPIs surfaced.
 - **You can now:** run it in earnest — production-grade safety + security.
 
-> **v1's defense in depth is one layer deep.** Simulate (V2) → canary (later) → auto-rollback (R2): only the last exists in v1. That is a deliberate bet that per-device auto-rollback is sufficient at 5 boards, where a bad build costs one board a reboot rather than a fleet.
+> **v1's defense in depth is one layer deep**. Simulate (V2) → canary (later) → auto-rollback (R2): only the last exists in v1. That is a deliberate bet that per-device auto-rollback is sufficient at 5 boards, where a bad build costs one board a reboot rather than a fleet.
 
 ---
 
@@ -68,7 +68,7 @@ The first functioning app: *I can register a board and see it online.* No code-d
 
 ### R9 — Advisory simulation gate
 - **Add:** `pytest-embedded` + Espressif QEMU boots the artifact and runs the **R5 self-test** *before* deploy. Warn + override in the UI.
-- **You can now:** catch bad builds before any device is touched.
+- **You can now:** catch bad builds before any device receives it.
 - *Moved out of v1: at 5 boards, auto-rollback already makes a bad build cheap. Sim earns its keep once builds arrive automatically from CI (R8) and nobody is watching each one.*
 
 ### R10 — Build from source (server-side compile)
@@ -93,7 +93,7 @@ The first functioning app: *I can register a board and see it online.* No code-d
 See [roadmap.md](roadmap.md) → *Beyond V3*.
 
 ## Notes
-- **v1 is R0–R6.** V2 (build pipeline) and V3 (swarm) are independent of each other. V2's R11 group-granularity policy is the one dependency running from V2 into V3.
+- **v1 is R0–R6**. V2 (build pipeline) and V3 (swarm) are independent of each other. V2's R11 group-granularity policy is the one dependency running from V2 into V3.
 - **R2 is the whole gamble** in this ordering (check + auto-rollback). De-risk it with a throwaway spike *during R0–R1* — prove auto-rollback saves a bad build on real flaky Wi-Fi before you rely on it.
-- **R0 ships R2's prerequisites.** The A/B partition table and rollback-enabled bootloader cannot be added by OTA later. Thus, they are flashed at R0 even though nothing uses them until R2.
+- **R0 ships R2's prerequisites**. The A/B partition table and rollback-enabled bootloader allows no addition by OTA later. Thus, they are flashed at R0 even though nothing uses them until R2.
 - Each release is shippable and demoable on its own. Nothing here requires a later step to be useful.

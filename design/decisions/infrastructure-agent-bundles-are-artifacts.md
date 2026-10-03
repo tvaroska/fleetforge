@@ -21,10 +21,10 @@ one, and that trade was correct at the time.
 
 Two facts have since changed it:
 
-1. **Target count grows monotonically.** Four chips at ~1.2 MB each today. ESP32-H2, a
+1. **Target count grows monotonically**. Four chips at ~1.2 MB each today. ESP32-H2, a
    Thread path and a Raspberry Pi adapter are already named in the roadmap. Every future
    chip taxes every application image, forever.
-2. **The coupling produced the defect it implies.** `S0-infra-2`: three of
+2. **The coupling produced the defect it implies**. `S0-infra-2`: three of
    four bundles missed the S0-fw-1 stage reporter and shipped stale in v0.3.0. Baking
    makes firmware currency a property of human memory — whether someone ran
    `just agent-build-all` before `just build`.
@@ -32,7 +32,7 @@ Two facts have since changed it:
 ## Decision
 
 Agent bundles move behind `ObjectStore`, distributed as versioned artifacts through the
-same path as user artifacts. **The application image ships zero agent bundles.**
+same path as user artifacts. **The application image ships zero agent bundles**.
 Publishing a bundle must not require rebuilding or redeploying the application.
 
 Verification moves with the bundles rather than being dropped: per-part sha256,
@@ -41,8 +41,8 @@ bundle dropped with its target named. Provenance stays in the manifest.
 
 ### Rejected: a baked fallback tier
 
-The considered alternative was store-first with a known-good baked set as fallback,
-which would kept onboarding working through a store outage. Rejected because it
+The considered alternative was store-first with a known-good baked set as fallback.
+This would kept onboarding working through a store outage. Rejected because it
 preserves the defect rather than mitigating it: the image still grows with target count,
 the bundles still have to be rebuilt at image build time to be worth revert to,
 and "which tier answered" becomes a new thing to diagnose during onboarding — the one
@@ -51,37 +51,37 @@ allowed to be stale is the v0.3.0 bug with an extra branch.
 
 ## Consequences
 
-**Accepted, with the cost stated.** Onboarding (the core flow) comes to depend on the
+**Accepted, with the cost stated**. Onboarding (the core flow) comes to depend on the
 object store being reachable and credentialled.
 
-**Amended 2026-09-11, after measuring prod.** This ADR was first written saying the GCS
+**Amended 2026-09-11, after measuring prod**. This ADR was first written saying the GCS
 blocker gates this work exactly as it gates R1. That is too strong, and the two are not
 the same prerequisite:
 
-* **This feature needs authenticated reads only.** The flasher is a browser holding an
-  admin session, not a device, and the API already serves bundle parts through
+* **This feature needs authenticated reads only**. The flasher is a browser holding an
+  admin session, not a device. The API already serves bundle parts through
   authenticated endpoints (`GET /v1/agent/{target}/{part}`). Keep that shape (the API
   reads from the store and streams to the browser) and no signed URL, no private key
   and no `signBlob` appears anywhere in the path. Prod's attached identity can already
   read the bucket cross-project (checked: `gcloud storage ls gs://btvaroska/`).
 * **R1 needs V4 signing**. This is because a device holds no GCP identity and the signature *is*
-  the authorization. That is the half that needs `signBlob`, which must work
+  the authorization. That is the half that needs `signBlob`. This must work
   but is **not yet checked**.
 
-So the real prerequisite for this feature is not an org-policy exemption: it is that
+So the real prerequisite for this feature is not an org-policy exemption. It is that
 `storage/factory.py` learns to accept a credential that is not a key file. That is
 ordinary backend work.
 
-**The containment requirement is not relaxed by any of this.** The obvious shortcut (enable plain ADC) must not be taken. Prod's identity is `mainsite@sites-470716`, the
+**The containment requirement is not relaxed by any of this**. The obvious shortcut (enable plain ADC) must not be taken. Prod's identity is `mainsite@sites-470716`, the
 shared VM service account for the whole estate. It can read `secrets/`, `podcasts/`
 and `backup/` in the same bucket. ADC would give fleetforge every other app's secrets and
 reduce the prefix condition on `fleetforge-artifacts` to decoration. Impersonation is necessary for **containment**, independently of signing.
 
 An unreachable store must thus present as a named fault in the flasher, held to the
-*Unaided onboarding* standard: a board that cannot be flashed says why, in plain
+*Unaided onboarding* standard. A board that cannot be flashed says why, in plain
 language. It must not offer a manifest it cannot honor.
 
-Self-hosting is unaffected — dev and self-host stacks serve through the same interface
+Self-hosting stays intact — dev and self-host stacks serve through the same interface
 against MinIO, with no GCS dependency. That the interface already has two adapters is
 what makes this move small.
 

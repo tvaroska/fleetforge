@@ -14,7 +14,7 @@ bingo* below). Expedient, not branded — **Fleetforge is not a public product u
 Thus, the domain is an operational detail. A proper domain lands when it goes public.
 
 *This does not weaken the single-tenant hosted model:* it is still a real public domain
-with a real Let us Encrypt certificate, which is what the devices and Web Serial need. It
+with a real Let us Encrypt certificate. This is what the devices and Web Serial need. It
 is "not public" in the product sense (no signup, one admin) which SPEC already states.
 
 ## Components
@@ -38,7 +38,7 @@ not a cron job. This is free and was not previously noticed.
 
 ## The single-subscriber rule
 
-**The ingestor is a separate, single-instance process. The API never subscribes to MQTT.**
+**The ingestor is a separate, single-instance process. The API never subscribes to MQTT**.
 
 If the API ran N uvicorn workers and each opened its own MQTT subscription, every message
 would be ingested N times, and an SSE client attached to worker A would never see an event
@@ -62,7 +62,7 @@ volume forces a second worker.
 
 DESIGN requires the dashboard and API on **one origin** (no CORS, SameSite=Strict is then
 sufficient against CSRF). nginx in the frontend container serves the SPA and proxies
-`/v1/*` to the API — the same shape `bingo-frontend` used with `BACKEND_URL`.
+`/v1/*` to the API. The same shape `bingo-frontend` used with `BACKEND_URL`.
 
 ```
 bingo.tvaroska.sk:443  ──► Traefik ──► frontend (nginx) ──┬── /        → SPA
@@ -108,10 +108,10 @@ adapter boundary is what keeps that a configuration change.
 device downloads do not consume the VM's bandwidth. This meaningfully de-risks the
 capacity problem below.
 
-Since **R1-be-3** the device is not handed the store's URL directly: it gets
+Since **R1-be-3** the device is not handed the store's URL directly. It gets
 `GET /v1/artifact/{sha256}/bin?exp=…&sig=…` on **our** origin, whose HMAC signature is its
 authorization, and the API answers **307** to a cached store URL rather than proxying the
-bytes — so the backend stays invisible to the fleet while "served without touching the API
+bytes. Thus, the backend stays invisible to the fleet while "served without touching the API
 process" remains true, and range/resume stays the store's own RFC-correct implementation.
 It needs `ARTIFACT_URL_SECRET` and `PUBLIC_BASE_URL` in the production environment.
 
@@ -184,7 +184,7 @@ container has `memory.events max > 0` under idle load.
 
 **Follow-up:** Re-run `just capacity-check-prod` after `R0-infra-5` deploys the app to prod,
 to confirm this projection against live measurements. The dev-box measurement is in the
-production *shape* but not at production *scale* — a real 25-board fleet can differ.
+production *shape* but not at production *scale*. A real 25-board fleet can differ.
 
 **Triggers for resize:**
 - Any container shows `memory.events max > 0` (reclaim at the limit)
@@ -194,7 +194,7 @@ production *shape* but not at production *scale* — a real 25-board fleet can d
 See `docs/runbooks/capacity.md` for the resize procedure (requires owner, Cloud Shell).
 
 Disk is helped considerably by artifacts living in GCS. The remaining growth is the
-ESP-IDF builder image, which is large (~2–3 GB). **Build agent images off-box** (locally
+ESP-IDF builder image. This is large (~2–3 GB). **Build agent images off-box** (locally
 or in CI, pushed to Artifact Registry) rather than building on the prod VM.
 
 ## Two deployment artifacts, deliberately

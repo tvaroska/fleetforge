@@ -30,5 +30,5 @@ later the canary assertion — *write once, run in sim and on device, no drift*
 
 ## Reuse note
 
-The self-test entrypoint defined here is consumed by the simulation gate
+The self-test entrypoint defined here moves by the simulation gate
 (simulation.md, R9 — V2) with **no code change** — one test, three enforcement points.

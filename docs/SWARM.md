@@ -10,7 +10,7 @@ different persona, different top 3.
 This is a reading of the current aim, documentation and feature set against one
 question: *what would actually let a ground vehicle and a flock of drones take
 new firmware into a field with no internet, apply it without falling out of the
-sky, and still talk to each other while they work?* Requirements stay in
+sky, and still talk to each other while they work*? Requirements stay in
 `spec/`. Live tasks stay in `TODO.md`. Landing any of the recommendations below
 is a `/new-feature` (or a release), not an edit of this file.
 
@@ -18,7 +18,7 @@ is a `/new-feature` (or a release), not an edit of this file.
 
 ## 0. The boundary, said first
 
-**Fleetforge manages firmware versions, not the swarm.** That sentence is in
+**Fleetforge manages firmware versions, not the swarm**. That sentence is in
 [`spec/prd.md`](../spec/prd.md) → *Explicitly out of scope*. It is the
 load-bearing one for this persona.
 
@@ -73,7 +73,7 @@ The device owns the reboot. A rollback reboot is still a reboot. That state
 machine is cheap to design in and expensive to retrofit. It is the reason
 this persona can use v1 at all.
 
-The swarm itself is named as **V3** (roadmap, releases, `groups-deploy.md`):
+The swarm itself appears by name as **V3** (roadmap, releases, `groups-deploy.md`):
 
 > One ground vehicle acting as gateway, plus a large number of flying drones —
 > a *mobile, in-fleet* node that is simultaneously a managed device and the
@@ -94,8 +94,8 @@ moment a drone is reassigned. The gateway republishes. The core stays unaware,
 the same trick as the FPGA companion CPU.
 
 That is a real swarm-OTA architecture, paid for in v1 as empty fields and
-rules. Almost none of it is implemented. v1 capacity is **25 devices, 5
-concurrent deploys, hosted on a public domain.** A field flock of 40 behind a
+rules. Almost none of it exists in code. v1 capacity is **25 devices, 5
+concurrent deploys, hosted on a public domain**. A field flock of 40 behind a
 vehicle with no internet is a different product that happens to share a
 protocol.
 
@@ -118,19 +118,19 @@ The architecture refused the mistakes that make swarm OTA a rewrite:
 - **Device-owned apply** is in the v1 protocol, not a V3 patch. `apply: "auto"`
   versus `apply: "on_command"` is already on `dn/cmd`. Stage in the air, apply on
   the ground is a *payload flag*, not a new verb.
-- **Presence is derived**, never a socket. Sleepy and parented nodes can go
+- **Presence comes**, never a socket. Sleepy and parented nodes can go
   “offline” with no event. A drone behind a vehicle that drove into a valley
   is the same shape as the e-paper frame.
-- **MQTT never carries payload.** A group deploy does not buffer 1.5 MB × N on
+- **MQTT never carries payload**. A group deploy does not buffer 1.5 MB × N on
   the broker. HTTPS + signed URL + Range is the only way a 40-node update is
   tractable. It is already the v1 data plane.
-- **Flat namespace + reserved `parent_device_id`.** Hierarchy is an ACL grant
+- **Flat namespace + reserved `parent_device_id`**. Hierarchy is an ACL grant
   and a relay, not a topic redesign.
-- **Opaque artifacts.** The ground vehicle can be a Pi image and the drone an
+- **Opaque artifacts**. The ground vehicle can be a Pi image and the drone an
   ESP32 `.bin` without the core knowing. That is the mixed-fleet contract.
 - **CBOR called as a drop-in** for constrained V3 links. JSON in v1, same
   data model.
-- **Link is IP-bearing, not Wi-Fi.** Thread joins free because it is
+- **Link is IP-bearing, not Wi-Fi**. Thread joins free because it is
   IPv6-native. ESP-NOW / Wi-Fi AP on the vehicle keeps drones IP-bearing and
   needs no protocol bridge. Zigbee/BLE/LoRa *do* need a bridge — deferred as
   a second product, correctly.
@@ -144,13 +144,13 @@ require a recall.
 
 ### What is weak or contradictory
 
-**V2 versus V3.** [`spec/prd.md`](../spec/prd.md) has a section titled
+**V2 versus V3**. [`spec/prd.md`](../spec/prd.md) has a section titled
 “### V2 — robotic swarm” that describes the ground-vehicle gateway. The same
 file’s roadmap, plus `roadmap.md`, `releases.md` and `groups-deploy.md`, put
 that work in **V3**. V2 is source-to-artifact. A swarm builder reading the PRD
 will plan against the wrong release.
 
-**`groups-deploy.md` is a silhouette.** Phase 1 is a task table for tags and
+**`groups-deploy.md` is a silhouette**. Phase 1 is a task table for tags and
 bulk deploy. Phase 2 is four bullets (edge relay, disconnected op, hierarchy,
 Wi-Fi AP / ESP-NOW). Phase 3 is three more bullets (airtime, delta,
 safe-window at scale). There is no protocol for the relay, no store-and-forward
@@ -159,27 +159,27 @@ clock story (SNTP-before-TLS fails in a valley), no captured-gateway threat
 model, no capacity numbers above 25. Compared to enrollment or OTA, this is
 not a feature file. It is a placeholder with the right nouns.
 
-**v1 topology fights the field.** The supported v1 deploy is a hosted public
+**v1 topology fights the field**. The supported v1 deploy is a hosted public
 domain. Devices need Let’s Encrypt and a public broker. The swarm’s defining
 requirement is that the vehicle is *out of range*. Hosted-first makes R0–R6
 demoable. It does not make V3 a configuration change. The gateway is a second
 product that happens to speak the same four verbs — the PRD already says this
 about non-IP radios. It is also true of the IP gateway.
 
-**Capacity is a v1 number pretending to be a product number.** 25 devices, 5
+**Capacity is a v1 number pretending to be a product number**. 25 devices, 5
 concurrent deploys, 1.9 MB images, 5-minute healthy-link deploy. A 40-drone
 update of 1.5 MB on a vehicle AP is not 5 minutes and must not be 40
-concurrent downloads. Airtime-aware scheduling is named, not specified. The
+concurrent downloads. Airtime-aware scheduling appears by name, not specified. The
 PRD table has no V3 column.
 
-**Coordination is unnamed.** Out-of-scope is “application-level provisioning”
+**Coordination is unnamed**. Out-of-scope is “application-level provisioning”
 and “a data pipeline for telemetry.” A swarm builder will still ask: *where
-do my drones talk?* The docs never say “use MAVLink / ROS 2 / your mesh. Here
+do my drones talk*? The docs never say “use MAVLink / ROS 2 / your mesh. Here
 is how the gateway stays out of the way. Here is a sibling broker you can
 run.” Silence reads as either “we will do it later” or “you are on your own,”
 and both are expensive.
 
-**The clock in a valley.** `spec/device-protocol.md` requires SNTP before the
+**The clock in a valley**. `spec/device-protocol.md` requires SNTP before the
 first TLS handshake. A vehicle that was off for a week, boots under
 canopy, and has no NTP source cannot enroll, cannot download, cannot even
 connect. v1 can ignore this (public SNTP, always-on internet). V3 cannot.
@@ -190,7 +190,7 @@ or a “trust the gateway’s clock” rule.
 worth one device.” A gateway with extra ACL entries for every child is worth
 the flock. Physical access to a recovered drone exposes NVS (flash encryption
 off). A lost drone is expected in this persona. A captured ground vehicle is
-the control plane. Neither threat is written down.
+the control plane. Neither threat appears.
 
 **No CUJ for “the flock is in a field.”** Unaided onboarding is a desk CUJ.
 There is no “stage 40, 3 still airborne, 1 canary on the ground, vehicle has
@@ -215,8 +215,8 @@ the product by.
 | Device simulator | Live | Can fake N devices on a desk. No radio, no parent, no airtime. |
 
 R0 is not closed on metal. R2 (auto-rollback) is not built. **Do not put this
-on an airframe that cannot be walked to.** The hobbyist warning applies
-harder: a bricked drone is a crash, not a trip to the attic.
+on an airframe that cannot be walked to**. The hobbyist warning applies
+harder. A bricked drone is a crash, not a trip to the attic.
 
 ### V3 as written (`groups-deploy.md`)
 
@@ -263,7 +263,7 @@ There is no good “safe OTA for a mixed ESP32/Pi flock you take off-grid.”
 
 Fleetforge’s wedge for this persona is **one contract across the Pi gateway
 and the ESP32 airframes, with apply deferred to a safe window, with the
-parent as a cache rather than a protocol translator.** Nobody else is selling
+parent as a cache rather than a protocol translator**. Nobody else is selling
 that. Nobody else has to: most swarm builders roll it themselves, badly,
 after the first mid-air brick.
 
@@ -276,7 +276,7 @@ can take a new image into a field with no uplink, apply it without losing
 vehicles, and keep using *their* coordination stack while they do.
 
 The embeddable OTA library from [`HOBBYIST.md`](HOBBYIST.md) is a
-**prerequisite, not a top-3 item here.** You do not fly the stock agent. The
+**prerequisite, not a top-3 item here**. You do not fly the stock agent. The
 four verbs have to live inside the flight controller and the vehicle
 computer. Without that extraction, everything below is a feature of a
 firmware that cannot leave the ground. Treat R3 (library + CUJ) as a gate
@@ -284,7 +284,7 @@ on this persona the same way R2 is a gate on any unreachable board.
 
 ### 1. The field gateway — disconnected hierarchy, plus a sibling bus
 
-**This is the swarm. V3 phase 2, specified as four bullets.**
+**This is the swarm. V3 phase 2, specified as four bullets**.
 
 One ground vehicle, in the flock, out of internet range:
 
@@ -297,7 +297,7 @@ One ground vehicle, in the flock, out of internet range:
 - **Upstream sync** when the link returns: announce, status, deploy_events.
   The core already must not assume a live MQTT session per device. This is
   that rule doing its job.
-- **Store-and-forward `stage`.** An operator at camp says “this version, this
+- **Store-and-forward `stage`**. An operator at camp says “this version, this
   group.” The vehicle carries the bytes and the command. Drones that are
   airborne sit in `awaiting_safe_window`. Drones that are down apply. The
   server determines later.
@@ -305,20 +305,19 @@ One ground vehicle, in the flock, out of internet range:
 Two things the current sketch does not say, and this persona will hit on day
 one:
 
-**Clock.** SNTP-before-TLS cannot mean “public NTP.” The vehicle is the time
+**Clock**. SNTP-before-TLS cannot mean “public NTP.” The vehicle is the time
 source. Drones trust the parent’s clock, or the gateway stops TLS and
 the last mile is a local CA, or HTTP-date on the cached artifact endpoint
-is allowed to step a board that woke at epoch zero. Pick one in spec before
-any field agent is flashed. This is a flash-time-immutable *behavior* even
+is allowed to step a board that woke at epoch zero. Pick one in spec before you flash any field agent. This is a flash-time-immutable *behavior* even
 if it is not an eFuse.
 
-**A sibling application bus, not a Fleetforge topic.** Do not open the
+**A sibling application bus, not a Fleetforge topic**. Do not open the
 `ff/v1/d/%u/…` ACLs. Do not carry waypoints on `dn/cfg`. Do put, on the same
 vehicle image, a **second listener** (or a second vhost on the same
 Mosquitto) that the swarm builder owns: their topics, their ACLs, their
 MAVLink-over-MQTT or ROS 2 bridge if they want one. Document it as *the*
 coordination surface. Fleetforge stays out of the payload. The builder does
-not run two computers in the rack because the OTA broker refused to share a
+not run two computers in the rack. This is because the OTA broker refused to share a
 kernel with MAVLink.
 
 A captured vehicle is then worth the flock on *both* planes. That is honest,
@@ -332,32 +331,32 @@ v1 with tags. With it, the product matches the sentence already in the PRD.
 ### 2. Coordinated apply — stage the flock, apply on the ground, never all at once
 
 **R2 is necessary and not sufficient. A flock that auto-rollbacks one-by-one
-can still all reboot together.**
+can still all reboot together**.
 
 The protocol already has the primitive: `apply: "on_command"` stages and
 waits. `apply: "auto"` lets the device pick the window. What this persona
 needs is that primitive as a *fleet action*, with policy:
 
-1. **Canary first.** One airframe, on the ground, at the vehicle. Self-test
+1. **Canary first**. One airframe, on the ground, at the vehicle. Self-test
    (R5) plus “it armed, it hovered, it landed” as the custom confirm — that
    last part is the builder’s firmware, not Fleetforge. The rest of the
    group does not leave `staged` until the canary is `confirmed`.
    `groups-deploy.md` parks canary in “Post.” At flock size it is the
    difference between losing one drone and losing the sortie.
-2. **Stage in the air, apply on the ground.** Upload and check while the
+2. **Stage in the air, apply on the ground**. Upload and check while the
    radio is idle-ish and the vehicle still has the cache hot. Do not apply
    until `power_class` / a builder-supplied “safe” bit says on_ground /
    parked. The server already must not time out `awaiting_safe_window`.
    The dashboard must not look like a hang when twenty nodes sit there
    (R1-fe-1 already learned this for one device).
-3. **Never all at once.** Airtime-aware concurrency is V3 phase 3 as
+3. **Never all at once**. Airtime-aware concurrency is V3 phase 3 as
    “don’t saturate the AP.” For this persona it is also **don’t take the
-   whole flock through reboot together.** Even on the ground, stagger apply
+   whole flock through reboot together**. Even on the ground, stagger apply
    so a bad image plus a rollback bug loses a canary-sized slice, not N.
    Mixed versions during the roll are the builder’s compatibility problem.
    Fleetforge’s job is to *show the skew* (count per `fw_version` in the
    group) so they can refuse to arm a mixed flock if they want.
-4. **Rollback is still device-owned, still on the ground.** A drone that
+4. **Rollback is still device-owned, still on the ground**. A drone that
    applied, took off, and then fails confirm must not reboot in the air.
    The sleepy-device confirm bug in [`HOBBYIST.md`](HOBBYIST.md) has an
    airborne twin: confirm-timeout versus “I am flying.” The rule has to key
@@ -370,7 +369,7 @@ fan-out without those three is how you brick a swarm in one click.
 
 ### 3. Mixed platforms and cheap bytes — Pi vehicle, ESP32 airframes, deltas
 
-**The most important node in the swarm is probably not an ESP32.**
+**The most important node in the swarm is probably not an ESP32**.
 
 The ground vehicle is a gateway, a broker, an artifact cache, a time source,
 and usually a companion computer running Linux (Pi, Jetson). The airframes
@@ -380,20 +379,20 @@ adapters do not exist.
 
 Ship, in this order:
 
-1. **Raspberry Pi adapter.** OS image or container as the artifact, A/B or
+1. **Raspberry Pi adapter**. OS image or container as the artifact, A/B or
    an equivalent confirm, health = systemd/app, rollback = previous slot.
    Until this exists, the parent is an unmanaged box that happens to
    forward MQTT — the worst node to leave unmanaged. This is because it is the
    flock’s uplink, cache, clock and (if you took recommendation 1)
    coordination bus.
-2. **Delta updates, indexed by version *pairs*.** [`design/artifacts.md`](../design/artifacts.md)
+2. **Delta updates, indexed by version *pairs***. [`design/artifacts.md`](../design/artifacts.md)
    already flags that this is quadratic and that the A/B layout frozen at
    R0 is the prerequisite (read active, write inactive). 5–50 KB instead of
    1.5 MB is not a convenience on a vehicle AP. It is the difference
    between possible and not on Thread / 802.15.4. Airtime spent on OTA is
    airtime stolen from telemetry and command. This is a coordination
    feature pretending to be a compression feature.
-3. **Airtime budget as a first-class deploy constraint.** Concurrent
+3. **Airtime budget as a first-class deploy constraint**. Concurrent
    downloads, per-link, advertised by the gateway. v1’s “5 concurrent, 5
    minutes, healthy Wi-Fi” is a desk number. The vehicle must refuse to
    start N downloads that would knock MAVLink off the AP.
@@ -426,21 +425,21 @@ promised in `flows.md` and is the thing that makes mixed fleets survivable.
 
 ## What not to pull forward for this persona
 
-- **Mission control, formation, task allocation, a GCS.** That is a different
+- **Mission control, formation, task allocation, a GCS**. That is a different
   product. The sibling bus exists so those products can sit next to
   Fleetforge without sharing a schema.
-- **Opening `ff/v1` ACLs so drones can talk.** Destroys the captured-node
+- **Opening `ff/v1` ACLs so drones can talk**. Destroys the captured-node
   story and turns the control plane into an ad-hoc mesh. If the builder
   wants MQTT-as-mesh, that is the sibling listener.
-- **Application config on `dn/cfg`.** Same refusal as the hobbyist file.
+- **Application config on `dn/cfg`**. Same refusal as the hobbyist file.
   Waypoints are not heartbeat intervals.
-- **Hosted-multitenant swarm-as-a-service.** V3 as “public product” and V3
+- **Hosted-multitenant swarm-as-a-service**. V3 as “public product” and V3
   as “vehicle in a valley” do not want the same deployment. The field
   gateway is single-operator infrastructure.
-- **Per-device compile (R10 aimed at N airframes).** The ESPHome failure
+- **Per-device compile (R10 aimed at N airframes)**. The ESPHome failure
   mode. One artifact per *role* (vehicle image, drone image), N devices.
   Content-addressed cache keyed on the build, not on the node.
-- **Hobbyist #3 (Improv) as a swarm P0.** Useful at the bench. In the field
+- **Hobbyist #3 (Improv) as a swarm P0**. Useful at the bench. In the field
   the vehicle *is* the AP. Drones join it at boot. Re-provisioning 40
   airframes over BLE is not the path.
 

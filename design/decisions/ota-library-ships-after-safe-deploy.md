@@ -12,7 +12,7 @@ Release contents: [../../docs/releases.md](../../docs/releases.md) → R3. Requi
 feature file, no release, no task and no contract until this decision.
 
 [`docs/HOBBYIST.md`](../../docs/HOBBYIST.md) ranked (b) the single largest unlock for the
-primary persona, on the grounds that R1–R6 are all features *of the agent* — and the
+primary persona, on the grounds that R1–R6 are all features *of the agent*. The
 agent connects, heartbeats and blinks. Every release thus improves the updating of
 a device that does nothing its owner cares about.
 
@@ -21,21 +21,21 @@ on-ramp built early.
 
 ## Decision
 
-The library is a release. It is **R3 — immediately after R2, not before it.** The v1
+The library is a release. It is **R3 — immediately after R2, not before it**. The v1
 ladder shifts by one: health & telemetry R3→R4, custom self-test R4→R5, signed OTA
 R5→R6. V2 becomes R7–R11.
 
 ## Why not before R2
 
-A library is a **multiplier on but safe deploy currently is.** `TODO.md` already
+A library is a **multiplier on but safe deploy currently is**. `TODO.md` already
 warns that today's Deploy button is unsafe. There is no checksum verification, no
 device-armed confirm and no auto-rollback until R2. Handing the four-verb contract to
 makers in that state would put the unsafe path inside custom firmware, on boards chosen
-precisely because they are hard to reach, which is the exact failure the product exists
+precisely. This is because they are hard to reach. This is the exact failure the product exists
 to prevent. The blast radius of a premature library is not "one demo board reboots". It
 is other people's installations.
 
-The inverse ordering costs little: R2 is the next release either way, and the extraction
+The inverse ordering costs little: R2 is the next release either way. The extraction
 work does not start sooner for being planned sooner.
 
 **Consequence if the order is ever revisited:** the library's documentation must be gated
@@ -46,7 +46,7 @@ on rollback being live. The release must say so. A library that ships with a
 
 `R{N}-{category}-{number}` is the task-ID format, and `roadmap.md`, `releases.md` and
 `TODO.md` all key off integer releases. `R2.5` would be the only non-integer in the
-system. Appending the library after R6 was considered and rejected. It puts the primary
+system. Appending the library after R6 was not our choice. It puts the primary
 persona's on-ramp behind the entire v1 hardening ladder.
 
 The renumber was affordable because **no R3+ task IDs exist yet**: R0 and R1 are the only
@@ -62,7 +62,7 @@ was true when written.
   thin waist has always claimed to be a small additive contract. It was never
   tested against anything but the agent. Whatever the library exposes becomes
   additive-only from the moment it ships.
-- The release cannot be estimated until the config-storage question is answered — the
+- The release has no estimate until we answer the config-storage question — the
   agent's `ff_cfg` flash partition has no equivalent in an Arduino build. That question
   is in [`../../spec/open-questions.md`](../../spec/open-questions.md) and `R3-fw-1` is a
   spike, not an implementation task.

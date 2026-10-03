@@ -1,8 +1,8 @@
 # Runbook — measuring what an Arduino build does to the partition table
 
 How to reproduce the measurement behind `R3-fw-1`. Run this whenever the Arduino-ESP32
-core is bumped: every finding below is a property of **that core's** `platform.txt` and
-`boards.txt`, not of ESP-IDF, and a core release can change any of them without warning.
+core is bumped. Every finding below is a property of **that core's** `platform.txt` and
+`boards.txt`, not of ESP-IDF. A core release can change any of them without warning.
 The conclusions it produced are in `design/decisions/arduino-gets-its-own-layout-id.md`
 (the decision, and the raw measurements in its *Appendix*).
 
@@ -13,7 +13,7 @@ The conclusions it produced are in `design/decisions/arduino-gets-its-own-layout
 | Disk | ~7.8 GB installed, ~2.1 GB after pruning. **This box runs at 90%+.** |
 | Runs where | Developer box only. Never on `prod`. |
 
-**Disk is the failure mode.** The core pulls every target's libs plus both toolchains.
+**Disk is the failure mode**. The core pulls every target's libs plus both toolchains.
 Install, prune what you are not compiling, and delete the scratch tree when done — check
 `df -h /` before you start and after you finish.
 
@@ -66,8 +66,8 @@ mkdir -p $SP/sk/Probe
 printf 'void setup(){Serial.begin(115200);}\nvoid loop(){delay(1000);}\n' > $SP/sk/Probe/Probe.ino
 ```
 
-**Always decode the built `partitions.bin`, never read back the csv you wrote.** The csv in
-the build dir is an input. The `.bin` is what the bootloader will actually read, and the
+**Always decode the built `partitions.bin`, never read back the csv you wrote**. The csv in
+the build dir is an input. The `.bin` is what the bootloader will actually read. The
 gap between them is the whole point of the exercise.
 
 ```bash
@@ -96,10 +96,10 @@ those three lines when a core bump surprises you. They are the mechanism.
 ## Two traps
 
 - **The `Sketch uses … Maximum is N bytes` line comes from the board menu's
-  `upload.maximum_size`, not from the table that was built.** A build with 1966080 B slots
+  `upload.maximum_size`, not from the table that built**. A build with 1966080 B slots
   reported `Maximum is 1310720 bytes`. It is not a layout check and cannot be used as one.
-- **A library cannot ship the table.** The hook reads `{build.source.path}` — the sketch
-  folder. A `partitions.csv` inside `libraries/…` is never consulted. Thus, the file has to
+- **A library cannot ship the table**. The hook reads `{build.source.path}` — the sketch
+  folder. A `partitions.csv` inside `libraries/…` never takes effect. Thus, the file has to
   arrive with the *example*, or by the user copying it. The override is also silent: the
   IDE says nothing when a sketch-local table replaces the board's.
 

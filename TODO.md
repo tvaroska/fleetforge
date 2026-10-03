@@ -1,7 +1,6 @@
 # Fleetforge — TODO
 
-**Goal:** Self-hosted OTA firmware management for embedded fleets (ESP32 first) — a bad
-build is caught before the fleet, and any device that gets one recovers itself.
+**Goal:** Self-hosted OTA firmware management for embedded fleets (ESP32 first) — the gate catches a bad build before the fleet, and any device that gets one recovers itself.
 **Updated:** 2026-10-01
 
 ## Where this stands
@@ -27,7 +26,7 @@ build is caught before the fleet, and any device that gets one recovers itself.
 - No upload form in the dashboard (`docs/runbooks/upload-artifact.sh` is the only way in).
   Every device has `name: null`. Neither has a task yet.
 
-**Next: R2 — safe deploy (check + auto-rollback).** Not opened yet. The CUJ-1 T3 gate
+**Next: R2 — safe deploy (check + auto-rollback)**. Not opened yet. The CUJ-1 T3 gate
 blocked R1 → R2 on 2026-09-23 on segment 5. `S0-test-4` fixed the cause the same day and
 the gate's reproduction now converges, but **the gate itself was not re-run**. First
 step: `/replan`, which re-runs it and, on a pass, opens R2 here. R2's task list is in
@@ -79,21 +78,21 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       Filed 2026-09-10, when S0-fe-1 shipped. Its software half is proven in jsdom against
       replays of real `agent/main/*.c` output. These four cannot be, because they are
       properties of a USB bridge chip and an OS, not of the classifier. The bench is
-      Windows + Chrome (settled 2026-10-02) — the Linux dev box does not enumerate boards
+      Windows + Chrome (settled 2026-10-02). The Linux dev box does not enumerate boards
       over WebSerial.
-      * **Re-acquire after `hard_reset`, bridge-chip path.** `serialConsole.ts` re-reads
+      * **Re-acquire after `hard_reset`, bridge-chip path**. `serialConsole.ts` re-reads
         `navigator.serial.getPorts()` every 250 ms for 8 s. On a classic esp32 the port
         *survives* the reset, so this must reconnect without ever showing "No board is
-        available to watch". The native-USB half of this check is **S0-test-2** — no
+        available to watch". The native-USB half of this check is **S0-test-2**. No
         C3/C6/S3 board is on hand (2026-09-11).
-      * **115200 decodes cleanly.** `sdkconfig.defaults` sets no
+      * **115200 decodes cleanly**. `sdkconfig.defaults` sets no
         `CONFIG_ESP_CONSOLE_UART_BAUDRATE` so this must be right, but a wrong baud
         yields plausible-looking mojibake rather than an error. The classifier would
         then silently match nothing.
-      * **The EN pulse boots the app, not the ROM loader.** `SerialConsole.reboot()`
+      * **The EN pulse boots the app, not the ROM loader**. `SerialConsole.reboot()`
         drives RTS high with DTR low. If the wiring inverts, the board lands in download
         mode and prints `waiting for download` forever.
-      * **Release really releases.** After the button, the COM port must open in another
+      * **Release really releases**. After the button, the COM port must open in another
         terminal (for example,PuTTY, 115200). If it reports "Access denied" / port in use,
         `port.close()` is not being reached.
       Acceptance: all four confirmed against **any** bridge-chip board (CP2102 or CH340) —
@@ -102,9 +101,9 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       new S0 task with the observed behavior.
       The bench host is Windows + Chrome (settled 2026-10-02, earlier entries said the Mac).
       Re-acquire is an OS-and-driver property — record the driver and COM port used.
-      * **Folded in from S0-fe-8 (accepted 2026-10-01 without a bench run).** On Windows,
+      * **Folded in from S0-fe-8 (accepted 2026-10-01 without a bench run)**. On Windows,
         with the board's VCP driver *not* installed, an operator who has never installed one
-        reaches a working COM port using only "My board is not listed" on the flash page:
+        reaches a working COM port using only "My board does not appear" on the flash page:
         no Device Manager, no asking. Also confirm that picking COM1 gets refused by name
         and that the Silicon Labs driver link resolves (the dev box gets a 403 from Akamai).
 
@@ -113,18 +112,18 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       whose bridge chip keeps the port alive across `hard_reset`. That exercises the
       *easy* half. The 8 s `getPorts()` poll in `serialConsole.ts` exists for the parts
       that come back as a **different** `SerialPort`. Nothing has ever tested it on
-      metal — a too-short window shows "No board is available to watch" on a board that
-      is merely rebooting, which is the exact false negative the console exists to
+      metal. A too-short window shows "No board is available to watch" on a board that
+      is merely rebooting. This is the exact false negative the console exists to
       delete. ~~**Blocked on acquiring a C3, C6 or S3.**~~
-      **Unblocked 2026-09-22.** An **ESP32-S3** is on hand and enrolled against
+      **Unblocked 2026-09-22**. An **ESP32-S3** is on hand and enrolled against
       prod — device `94a990dd09a4`, the board that passed `R0-test-2` on 2026-09-19. This
       task's premise ("the only board on hand is an ESP32-DevKit v1") is simply out of
       date. Cheap to run now, since the board is already flashed and known-good.
       Acceptance: on the bench, `hard_reset` from the console on a native-USB board
       reconnects inside the window and streams the boot log without operator action.
-      The bench is **Windows + Chrome** (settled 2026-10-02): the S3 enrolled from it with
-      native USB on COM3. Earlier entries said the Mac. That is superseded. Record the
-      driver and COM port used — the re-acquire window is an OS-and-driver property.
+      The bench is **Windows + Chrome** (settled 2026-10-02). The S3 enrolled from it with
+      native USB on COM3. Earlier entries said the Mac. That is obsolete. Record the
+      driver and COM port used. The re-acquire window is an OS-and-driver property.
 
 - [x] **S0-test-3**: Someone who did not see the code onboards a board unaided — passed 2026-09-22 → [enrollment.md](docs/features/enrollment.md)
 - [x] **S0-fw-3**: A board that browns out during RF calibration cannot escape it — withdrawn 2026-09-23, not fixed → [enrollment.md](docs/features/enrollment.md)

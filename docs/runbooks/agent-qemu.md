@@ -12,7 +12,7 @@ the one to reach for before blaming a board.
 | Working dir | `.qemu/` — gitignored, mode 0700, **holds live credentials** |
 | Recipes | `just agent-qemu-smoke`, `just agent-cfg`, `just agent-qemu`, `just agent-qemu-clean` |
 
-**Start with `just agent-qemu-smoke`.** It answers "is the harness alive?" in about
+**Start with `just agent-qemu-smoke`**. It answers "is the harness alive?" in about
 17 seconds with no enrollment token, no running stack and no board. It is the first
 thing to run before believing any claim that the emulator is broken — see
 [What we know about the boot-loop panic](#what-we-know-about-the-boot-loop-panic).
@@ -24,8 +24,8 @@ with `just agent-qemu-clean` when you are done.
 ## Why an emulator is worth a runbook
 
 The agent's first ten seconds are the part of the product that cannot be tested by unit
-tests and cannot be fixed by an OTA: eFuse MAC → `device_id`, the `ff_cfg` partition, the
-clock, a single-use token that is gone once it is spent, and a credential that exists
+tests and cannot recover through an OTA: eFuse MAC → `device_id`, the `ff_cfg` partition, the
+clock, a single-use token that is gone once it is spent. A credential that exists
 exactly once in one HTTP response body. QEMU runs that sequence end-to-end against the
 same API and the same broker a real board talks to, as often as you like, for free.
 
@@ -51,7 +51,7 @@ just agent-cfg --api-base http://10.0.2.2:8080 --mqtt-uri mqtt://10.0.2.2:8883 \
 just agent-qemu esp32                    # Ctrl-A x quits
 ```
 
-`10.0.2.2` is not a typo and not this machine's LAN address: it is QEMU's slirp gateway,
+`10.0.2.2` is not a typo and not this machine's LAN address. It is QEMU's slirp gateway,
 the address the *guest* uses for the host running the emulator. `--network host` on the
 container is what makes that host this dev box. The guest always gets `10.0.2.15`.
 
@@ -63,8 +63,7 @@ missing.
 
 ### For an OTA run, the download URLs must be `10.0.2.2` too (R1-be-3)
 
-The same gateway rule applies to firmware downloads, and it bites in two places because
-there are two hops. Export both **before `just up`**:
+The same gateway rule applies to firmware downloads, and it bites in two places. This is because there are two hops. Export both **before `just up`**:
 
 ```bash
 FF_PUBLIC_BASE_URL=http://10.0.2.2:8080 FF_S3_PUBLIC_ENDPOINT_URL=http://10.0.2.2:9000 just up
@@ -78,10 +77,9 @@ docker compose exec -T api env | grep -E 'PUBLIC_BASE_URL|S3_PUBLIC'   # both mu
 * `S3_PUBLIC_ENDPOINT_URL` (compose reads `FF_S3_PUBLIC_ENDPOINT_URL`, default
   `http://localhost:${FF_MINIO_PORT:-9000}`) is the origin the API's **307 redirect**
   points at. Getting the first one right and leaving this one at `localhost` fails one hop
-  later, which looks like a working deploy and a board that cannot download — the log line
-  is an `esp_https_ota` connect failure against `127.0.0.1`, and nothing server-side is
+  later, which looks like a working deploy and a board that cannot download. The log line is an `esp_https_ota` connect failure against `127.0.0.1`, and nothing server-side is
   wrong. A presigned URL **signs the Host header**, so this cannot be patched up after the
-  fact: it has to be right before the URL is minted.
+  fact. It has to be right before the URL mints.
 
 Symptom either way: `staging → downloading` and then `failed`, with the API log
 showing a 307 (or nothing at all). Neither value affects production, where both origins
@@ -108,13 +106,13 @@ minutes.
 
 Hand-built commands (a corrupted `sha256`, a duplicate `id`) must be published as the
 **commander**, not as the dynsec admin: `mosquitto/acl` grants `publishClientSend
-ff/v1/d/+/dn/#` to that role alone, and a denied publish is silent —
+ff/v1/d/+/dn/#` to that role alone. A denied publish is silent —
 `just mqtt-pub 'ff/v1/d/000000000000/dn/cmd' "$(cat cmd.json)" 0 "$MQTT_COMMAND_USERNAME"
 "$MQTT_COMMAND_PASSWORD"`.
 
 ### The emulator cannot survive `esp_restart()`
 
-**Everything up to the reboot works. The reboot itself does not.** After the agent applies
+**Everything up to the reboot works. The reboot itself does not**. After the agent applies
 an update and calls `esp_restart()`, the next boot panics before `app_main`:
 
 ```
@@ -209,7 +207,7 @@ I ff-mqtt: announce acknowledged by the broker
 I ff-mqtt: publish ff/v1/d/000000000000/up/hb (qos 1, no retain, msg_id 21411, uptime 9 s)
 ```
 
-**No token and no password appear anywhere in that transcript, by design.** If one ever
+**No token and no password appear anywhere in that transcript, by design**. If one ever
 does, that is a bug in the firmware's logging, not a detail of the harness.
 
 Host side, while it runs:
@@ -228,7 +226,7 @@ flushes. Give it a file or a terminal.
 
 ## Every emulated board is `000000000000`
 
-QEMU's default eFuse image has a zero MAC. `device_id` is the eFuse MAC — so every
+QEMU's default eFuse image has a zero MAC. `device_id` is the eFuse MAC. Thus, every
 board booted this way enrolls as `000000000000` and they would collide with each other.
 The agent says so, loudly, once per boot. Consequences worth knowing:
 
@@ -238,15 +236,15 @@ The agent says so, loudly, once per boot. Consequences worth knowing:
 * A real ESP32 always has a burned MAC. There is no code path that special-cases this.
 
 `agent-qemu` now refuses to start a second board rather than trusting you to remember:
-the container is named `ff-qemu-<target>`, and a second `just agent-qemu esp32` exits 1
+the container appears by name `ff-qemu-<target>`. A second `just agent-qemu esp32` exits 1
 telling you to stop the first. **Two boards do not produce two sets of results — they
 produce one unreadable set**, because both enroll, heartbeat and report stages as the
 same `device_id`, and nothing on the server can tell them apart. S0-fw-1 discarded a
 full round of acceptance evidence to this.
 
 > **The trap that let it happen, worth knowing on its own:**
-> `docker ps --filter ancestor=espressif/idf:v5.5.5` **matches nothing here.** `idf_image`
-> is pinned by digest, and the `ancestor` filter compares the reference you typed, not the
+> `docker ps --filter ancestor=espressif/idf:v5.5.5` **matches nothing here**. `idf_image`
+> pins by digest, and the `ancestor` filter compares the reference you typed, not the
 > image the container actually runs. The command exits 0 having killed nothing, which
 > reads exactly like "no emulators are running". Use `just agent-qemu-stop`, or match on
 > the image column:
@@ -272,7 +270,7 @@ just agent-qemu esp32 --fresh  # rebuild the image = wipe NVS = forget the crede
 
 A re-enroll inside the server's 600 s grace window succeeds with the *same* token (that
 window exists so a board that crashed after enrolling can retry). Later than that, the
-already-used token is refused with a 409 and the log names *used, revoked or expired*.
+already-used token triggers a refusal with a 409 and the log names *used, revoked or expired*.
 
 **`--fresh` is not how a board is made to re-enroll any more** (S0-fw-4). It throws the
 whole image away, credential *and* the cached RF calibration in IDF's `phy` namespace —
@@ -280,7 +278,7 @@ which is the very thing the flasher used to do on every flash and no longer does
 clears the credential now is a **new enrollment token**: `ff_store_sync_token()` compares a
 fingerprint of the `ff_cfg` token against the one stored beside the credential and erases
 the `ff` namespace, and only that namespace, when they differ. So `--fresh` is the "brand
-new board" button, and the section below is the "re-flashed board" one.
+new board" button. The section below is the "re-flashed board" one.
 
 ## Re-flash ff_cfg without erasing NVS
 
@@ -339,7 +337,7 @@ erased its own credential and kept its calibration.
 
 ## Prove the clock rule
 
-`spec/device-protocol.md` → *Clock — SNTP before TLS* only means something because the
+`spec/device-protocol.md` → *Clock — SNTP before TLS* only means something. This is because the
 build sets `CONFIG_MBEDTLS_HAVE_TIME_DATE=y` (IDF leaves certificate **dates** unchecked
 by default). Both directions are one command each, against a real TLS endpoint:
 
@@ -387,13 +385,13 @@ same clock tick. `id` is what keeps them in the order the board produced them. O
 | `Ctrl-A x`, or `just agent-qemu-stop esp32` | an ungraceful death — the broker publishes the **LWT**, retained `{"online":false}` on `up/presence`, and `/v1/devices` flips to `"online": false` within ~1.5 × keepalive (measured ≈18 s at `--hb 10`, S0-fw-1) |
 | nothing (just leave it) | heartbeats every `--hb` seconds, forever |
 
-There is no goodbye publish: a board that is dying has no way to send one. Thus, the agent
+There is no goodbye publish. A board that is dying has no way to send one. Thus, the agent
 does not pretend it can. The will is the mechanism.
 
 ## Reproduce a board that gets partway
 
 The three failures worth being able to summon on demand. All are S0-fw-1's acceptance
-evidence, and all of them are what an operator is actually looking at when they say a
+evidence. All of them are what an operator is actually looking at when they say a
 board "never appeared". Watch `GET /v1/devices` → `arrivals`, not the serial log.
 
 **Stalled at `enrolling` — the server is up but cannot provision a broker credential.**
@@ -412,11 +410,11 @@ The agent retries at 60 s, then 120, 240, … (`ENROLL_RETRY_MIN/MAX_MS`), repor
 same board re-present the same one. `docker compose start mosquitto` and it recovers to
 `enrolled` → `mqtt_connected` → `online` on its own, with no reflash.
 
-Note the interaction, because it makes the flag flicker: `progress_stall_s` is 60 s and
+Note the interaction, because it makes the flag flicker. `progress_stall_s` is 60 s and
 the *first* retry interval is also 60 s. Thus, the row alternates `stalled=false/true` for
 the first couple of minutes and only settles once the backoff doubled past 60 s.
 
-**Stalled at `mqtt_refused` — enrolled, but the broker will not have it.** Rotate the
+**Stalled at `mqtt_refused` — enrolled. But the broker will not have it**. Rotate the
 credential out from under a board that has one in NVS, then reboot it *without*
 `--fresh`:
 
@@ -430,7 +428,7 @@ just agent-qemu esp32
 #   fleet: ARRIVING stage=mqtt_refused detail='broker connack 5'
 ```
 
-**Invisible — the enrollment token itself is refused.** Mint a token, revoke it, flash
+**Invisible — the enrollment token itself triggers a refusal**. Mint a token, revoke it, flash
 it. This one is a *negative* result and the reason the serial console exists:
 
 ```bash
@@ -494,7 +492,7 @@ was tried, all green:
 Two real defects turned up while proving that, and the first explains how a working
 harness became an unrunnable one.
 
-**1. The recipe could not run without a terminal.** `agent-qemu` passed `docker run -it`
+**1. The recipe could not run without a terminal**. `agent-qemu` passed `docker run -it`
 unconditionally:
 
 ```
@@ -502,31 +500,29 @@ $ just agent-qemu esp32
 cannot attach stdin to a TTY-enabled container because stdin is not a terminal
 ```
 
-Every agent session, script and CI shell is non-interactive. Thus, the recipe could not be
-run by the things that most need to run it — and the way round it is to hand-roll a
-`docker run`, which is exactly where an emulator invocation acquires a wrong `-M`, `-m`
+Every agent session, script and CI shell is non-interactive. Thus, the recipe could not run by the things that most need to run it. The way round it is to hand-roll a
+`docker run`. This is exactly where an emulator invocation acquires a wrong `-M`, `-m`
 or `-global` and starts panicking in the watchdog. That is the most probable origin of
 the filed backtrace. Fixed: `-it` is now passed only when stdin is a TTY.
 
-**2. The emulator was pinned but never checked.** `idf_image` is pinned by sha256 and
+**2. The emulator was pinned but never checked**. `idf_image` pins by sha256 and
 each bundle manifest records the same digest, which reads as a guarantee that the
-emulator is fixed. It is not — **Docker checks a digest on `pull`, not on `run`**. Thus, a
-locally damaged or replaced layer is used in silence. `qemu-system-xtensa` lives in
+emulator has a fix. It is not — **Docker checks a digest on `pull`, not on `run`**. Thus, a
+locally damaged or replaced layer runs in silence. `qemu-system-xtensa` lives in
 that image. The pinned image was in fact **absent from this box's Docker store** when
 the investigation started and had to be re-pulled (2.4 GB), on a disk sitting at 85%.
 
 Every other input to a boot is content-addressed and deterministic: the bundle (per-part
 sha256 in `manifest.json`), the eFuse blob (IDF's own `default_efuse` bytes), the flash
 merge (`esptool merge_bin` over manifest offsets). Identical inputs cannot produce two
-different behaviors — so at failure time one input was not what it claimed, and the
+different behaviors — so at failure time one input was not what it claimed. The
 local emulator image is the only one verifiably in a different state since. Unprovable
 after the fact. Closed going forward: `qemu_sha256` in the justfile pins the hash of the
-emulator **binary**, checked inside the container before every boot, and its version is
-printed into every transcript.
+emulator **binary**, checked inside the container before every boot. Its version is printed into every transcript.
 
 The honest limit: hashing that one binary is not a full integrity check of the image
 (shared libraries and the Python tooling are not covered). It covers the file whose
-behavior decides whether a boot means anything, which is the part that was in doubt.
+behavior decides whether a boot means anything. This is the part that was in doubt.
 
 ### If it boot-loops again
 
@@ -562,5 +558,5 @@ smoke check is red, it already told you which of the four assertions failed.
 ## Related
 
 * `docs/runbooks/agent-build.md` — where `agent/dist/<target>` comes from
-* `docs/runbooks/dev-stack.md` — the stack this boots against, admin login, `just sim`
+* `docs/runbooks/dev-stack.md`. The stack this boots against, admin login, `just sim`
 * `spec/device-protocol.md` — the wire contract every line of that transcript implements

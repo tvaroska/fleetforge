@@ -16,12 +16,12 @@ on device X?" and "roll back to tag v1.3" become first-class.
 
 ## Decisions (from flows.md)
 
-- **Ingestion = push first.** CI POSTs the artifact (ship a GitHub Action, templates for
+- **Ingestion = push first**. CI POSTs the artifact (ship a GitHub Action, templates for
   GitLab/Gitea/Forgejo). Provider-agnostic, holds no repo secrets, air-gap-friendly.
   Pull adapters (Fleetforge watches releases) come later.
-- **Provider scope = provider-agnostic API.** One generic upload endpoint + provenance
+- **Provider scope = provider-agnostic API**. One generic upload endpoint + provenance
   schema.
-- **Deploy policy = per group.** Dev fleet auto-deploys on tag. Prod fleet stays manual.
+- **Deploy policy = per group**. Dev fleet auto-deploys on tag. Prod fleet stays manual.
   - *Sequencing:* enable auto-deploy-per-group with confidence only once canary/staged
     rollout lands — auto-deploy is only as safe as its rollback.
 

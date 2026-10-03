@@ -39,7 +39,7 @@ was true on 2026-09-11 and is not a passing grade.
 
 ## Consequences
 
-**The parser becomes load-bearing, and it is fragile.** `classifyConsoleLine` matches
+**The parser becomes load-bearing, and it is fragile**. `classifyConsoleLine` matches
 log strings that exist in `agent/main/*.c`. It failed here precisely because the
 brownout line does not use the ESP-IDF log format. Every new failure mode is a parser
 change. The alternative (having the agent report structured faults, starting with
@@ -47,10 +47,10 @@ change. The alternative (having the agent report structured faults, starting wit
 the worst possible dependency for a board that will not come online. Recorded in
 `spec/open-questions.md` rather than settled.
 
-**Onboarding gets an acceptance criterion that cannot be automated.** "A person who did not see the codebase onboards a board unaided" needs a person. It is still the
-criterion that decides the feature. Thus, it is written down as one (`S0-test-3`) instead
+**Onboarding gets an acceptance criterion that cannot be automated**. "A person who did not see the codebase onboards a board unaided" needs a person. It is still the
+criterion that decides the feature. Thus, it appears as one (`S0-test-3`) instead
 of being replaced by the parts of it that a test runner can check.
 
-**R0 is not done when the pieces work.** R0's stated risk is onboarding. Filing the
-gap as a P0 that gates the release, rather than as polish, follows from that — the
+**R0 is not done when the pieces work**. R0's stated risk is onboarding. Filing the
+gap as a P0 that gates the release, rather than as polish, follows from that. The
 release either retires its risk or it does not.

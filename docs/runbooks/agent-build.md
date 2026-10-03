@@ -12,9 +12,9 @@ of the `justfile`. The API side is `src/fleetforge/firmware/` + `/v1/agent/*`.
 | Consumed by | `just agent-publish <target>` → `ObjectStore` (`blobs/sha256/…` + `agent/index.json`) → `/v1/agent/*` |
 | Registry | `us-central1-docker.pkg.dev/sites-470716/containers/fleetforge-agent-<target>` |
 
-**Never run any of this on `prod`.** The production VM cannot hold a ~9 GB toolchain
+**Never run any of this on `prod`**. The production VM cannot hold a ~9 GB toolchain
 image and a build there would starve the broker. This is a developer-box pipeline whose
-*output* is **published** from this box to the object store prod reads (S0-infra-6) — the
+*output* is **published** from this box to the object store prod reads (S0-infra-6). The
 app image carries no firmware at all.
 
 ## Build
@@ -36,7 +36,7 @@ anything other than `BUNDLE OK: <target>` did not produce a flashable bundle.
 A bundle that checks is not yet a bundle that boots. **`docs/runbooks/agent-qemu.md`
 runs this exact output in an emulator** — enroll, MQTT, announce, presence, heartbeat,
 against the local stack and with no hardware. It is the cheapest way to determine that a
-firmware change broke the first ten seconds, which is the part no unit test covers and no
+firmware change broke the first ten seconds. This is the part no unit test covers and no
 OTA can fix.
 
 ## Disk is the number-one failure mode
@@ -58,7 +58,7 @@ df -h /                       # want >= 12 G before the first pull
 ```
 
 **Never `docker image prune -a`, `docker system prune -a` or `docker volume prune` on
-this box.** It hosts other projects' images and their volumes. Deleting them is not this
+this box**. It hosts other projects' images and their volumes. Deleting them is not this
 repo's call. If the three safe prunes are not enough, the next safe things are
 regenerable caches that belong to nobody's data: `uv cache prune`, `npm cache clean
 --force`, `go clean -modcache`, `sudo apt-get clean`,
@@ -79,7 +79,7 @@ agent/dist/esp32/
   manifest.json           offsets, sizes, sha256s, chip family, provenance
 ```
 
-**Offsets come from ESP-IDF, never from this repo.** `agent/tools/make_manifest.py`
+**Offsets come from ESP-IDF, never from this repo**. `agent/tools/make_manifest.py`
 reads `build/flasher_args.json` by name (`bootloader`, `partition-table`, `otadata`,
 `app`) and copies the offsets the toolchain computed. The bootloader offset genuinely
 differs per chip (`0x1000` on ESP32, `0x0` on the RISC-V parts). A hardcoded value would
@@ -88,7 +88,7 @@ flash cleanly and never boot on half the fleet.
 `manifest.json` also carries `idf_image` (the digest) and `source_commit`. Thus, any bundle
 on disk or in the registry can be traced back to the exact toolchain and tree.
 `source_commit` is `git rev-parse HEAD` — a bundle built from a **dirty** working tree
-records HEAD, not what was compiled. Commit before building anything you intend to push.
+records HEAD, not what the build compiled. Commit before building anything you intend to push.
 
 ## What `just agent-verify` proves
 
@@ -119,7 +119,7 @@ ota_1,app,ota_1,0x200000,1920K,
 ```
 
 `1920K == 0x1E0000 == 1966080` is the `ota_slot_size` `spec/device-protocol.md` promises
-in `up/announce`, and the layout id is `ab-4m-v1`. **Those three facts move together or
+in `up/announce`. The layout id is `ab-4m-v1`. **Those three facts move together or
 not at all** — see *Changing the partition table* below.
 
 ## Staleness — a bundle can be correct and still be wrong
@@ -127,7 +127,7 @@ not at all** — see *Changing the partition table* below.
 `just agent-verify` proves the bundle is correct. `just agent-check-fresh` proves it is
 **current**. v0.3.0 shipped three targets (esp32c3, esp32c6, esp32s3) that predated
 S0-fw-1 (the stage reporter) — not because anyone edited the code and forgot to rebuild,
-but because nothing checked. A bundle built from a commit that predates the agent sources
+but. This is because nothing checked. A bundle built from a commit that predates the agent sources
 is stale.
 
 ```bash
@@ -142,7 +142,7 @@ Four verdicts, decided by **git ancestry, not mtime**:
 | **STALE** | bundle predates a later commit under `agent/` (excluding `agent/dist`) |
 | **UNTRACEABLE** | `source_commit` absent/unknown, or not a commit in this repo |
 | **NOT BUILT** | no `manifest.json` — run `just agent-build <target>` |
-| **DIRTY SOURCES** | uncommitted edits under `agent/` — a bundle records HEAD, not what was compiled |
+| **DIRTY SOURCES** | uncommitted edits under `agent/` — a bundle records HEAD, not what the build compiled |
 
 Why git ancestry, not mtime: `git checkout`, `git pull` and branch switches rewrite
 source mtimes with no content change. A clone sets them all to clone time. A check that
@@ -160,13 +160,13 @@ the sweep over every target you intend to ship.
 
 > Note the check on (5) matches **exact option names**. An earlier prefix match also hit
 > `CONFIG_SECURE_BOOT_V1_SUPPORTED=y`, which is a SoC *capability* symbol present in every
-> ESP32 build — a check that fails on a correct build teaches whoever hits it to delete
+> ESP32 build. A check that fails on a correct build teaches whoever hits it to delete
 > the check.
 
 ## Publish them (S0-infra-6)
 
 A built bundle reaches a flasher by being **published**, not by being baked into an
-image. Nothing is copied into the app image and nothing is bind-mounted:
+image. Nothing copies into the app image and nothing is bind-mounted:
 
 ```bash
 just agent-publish esp32      # verify freshness + integrity, then upload
@@ -190,12 +190,12 @@ Full recipe, including publishing to production's GCS from this box:
 The API reads `agent/index.json` **lazily, at most once per `AGENT_CATALOG_TTL_S`**
 (default 60 s) — not once at startup. A `just agent-publish` thus reaches the
 flasher within a minute with nothing restarted and no image rebuilt. Every manifest is
-re-checked on read, and every part's bytes are re-hashed as they are streamed. Thus, a
-bundle whose manifest disagrees with the spec is dropped with a WARNING naming the
+re-checked on read. Every part's bytes are re-hashed as they are streamed. Thus, a
+bundle whose manifest disagrees with the spec drops with a WARNING naming the
 target, and bytes that disagree with the manifest are a 502 rather than a bad flash. One
 bad target does not stop the others from serving.
 
-Constructing the app does **no** store I/O: a container must start when the bucket is
+Constructing the app does **no** store I/O. A container must start when the bucket is
 slow or down, and say so per request instead of crash-looping.
 
 ### Catalog key and directory convention (S0-infra-7)
@@ -229,13 +229,13 @@ A new layout is **never** an edit to an existing row (DECISIONS.md 2026-09-09).
 |---|---|
 | `just up` / `just up-prod` (dev box) | MinIO, via `just agent-publish <target>` — no bind mount, no api restart |
 | production | `gs://btvaroska/fleetforge/`, via the same `just agent-publish` run from this box |
-| nothing published | `/v1/agent/*` answers 503 *"no agent images were published yet…"* |
-| store unreachable | `/v1/agent/*` answers 503 *"the agent image store cannot be reached…"*, and the dashboard's Flash button is disabled |
+| nothing published | `/v1/agent/*` answers 503 *"no agent images exist yet…"* |
+| store unreachable | `/v1/agent/*` answers 503 *"the agent image store is unreachable…"*, and the dashboard's Flash button is disabled |
 
 Those last two are deliberately different sentences: "publish something" and "look at the
 network" send an operator to different places.
 
-`just build` no longer gates on `agent/dist` at all — the image ships no firmware. Thus, an
+`just build` no longer gates on `agent/dist` at all. The image ships no firmware. Thus, an
 empty `agent/dist` cannot produce a bad image. The gate that matters moved to
 `just agent-publish`.
 
@@ -246,7 +246,7 @@ just agent-image esp32        # build the OCI image, nothing leaves the box
 just agent-push esp32         # push :<latest git tag> and :latest
 ```
 
-The pushed image is the `FROM scratch` export stage: its entire payload is the bundle. Thus,
+The pushed image is the `FROM scratch` export stage. Its entire payload is the bundle. Thus,
 it is kilobytes in the registry and its digest is a provenance handle. Extract one with
 
 ```bash
@@ -263,10 +263,10 @@ docker rm "$CID"
 
 ### Reproducibility — what "identical" means here
 
-A pull of a pushed digest gives back the bundle **byte for byte**. That was checked
+A pull of a pushed digest gives back the bundle **byte for byte**. That passed checks
 end to end (push → `docker rmi` → pull by digest → export → `diff -r`, no differences).
 
-**Rebuilding the same commit does not.** ESP-IDF stamps the compile date and time into
+**Rebuilding the same commit does not**. ESP-IDF stamps the compile date and time into
 `esp_app_desc_t`, so `app.bin` and `bootloader.bin` get a new sha256 on every build even
 with the toolchain pinned by digest and no source change — only `partition-table.bin` and
 `ota-data-initial.bin` are stable. That is why provenance lives in the manifest
@@ -278,7 +278,7 @@ changes every produced binary — a `sdkconfig.defaults` change, that is,a `DECI
 entry and a re-check of all four targets. Worth doing before the fleet is large. Not
 done at R0.
 
-**These are not compose services.** Never add `fleetforge-agent-*` to `PULL_SERVICES` or
+**These are not compose services**. Never add `fleetforge-agent-*` to `PULL_SERVICES` or
 `APP_SERVICES` in `services/scripts/deploy.sh`: `docker compose pull` fails as a unit. Thus,
 one unresolvable reference breaks the deploy for every other app on the box. Production
 gets the binaries inside the app image, not from these.
@@ -302,10 +302,9 @@ field keep the old one — so:
 ## Change the partition table — read this first
 
 *Design and rationale for the layout itself: [`design/partitions.md`](../../design/partitions.md).
-What follows is the build-side procedure.*
+What follows is the build-side procedure*.
 
-`agent/partitions.csv` is in `CRITICAL.md` for a reason: **a partition table cannot be
-changed by OTA.** A board already in the field keeps the layout it was flashed with
+`agent/partitions.csv` is in `CRITICAL.md` for a reason: **OTA cannot change a partition table**. A board already in the field keeps the layout from initial flash
 forever. Thus, a change here means a physical recall.
 
 Three things are one contract and move together:
@@ -317,16 +316,15 @@ Three things are one contract and move together:
   moves alone.
 
 A new layout is a **new id** (`ab-4m-v2`, …) plus a server that understands both, never an
-edit to `ab-4m-v1`. There is deliberately no `factory` partition: a factory-only board
-can never OTA its way to A/B. `make_manifest.py` refuses to emit a bundle whose built
+edit to `ab-4m-v1`. There is deliberately no `factory` partition. A factory-only board can never OTA its way to A/B. `make_manifest.py` refuses to emit a bundle whose built
 table has one, is missing `ota_1`, or whose slots differ in size.
 
 ## Troubleshoot
 
 | Symptom | Cause |
 |---|---|
-| `no space left on device` during pull | see *Disk* above. The partial image is discarded, re-pull after reclaiming |
+| `no space left on device` during pull | see *Disk* above. The partial image drops, re-pull after reclaiming |
 | `make_manifest: build/config/sdkconfig is missing` | IDF 5.x keeps the text config at the project root. It is resolved from `project_description.json["config_file"]` — do not hardcode a path |
 | Build succeeds but the bundle is stale | a `sdkconfig` at the project root **overrides** `sdkconfig.defaults`. It stays in .gitignore and dockerignored, but check the build context |
 | `/v1/agent/manifest` is 503 with bundles on disk | the api loads them at startup — restart it. Then read the WARNING, which names the path and the dropped targets |
-| A target is missing from the manifest | it was dropped at load: the WARNING names it and the reason (usually a partial `agent-build-all` after a disk failure) |
+| A target is missing from the manifest | it dropped at load: the WARNING names it and the reason (usually a partial `agent-build-all` after a disk failure) |

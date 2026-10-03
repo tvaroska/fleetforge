@@ -37,7 +37,7 @@ device in the registry and the parent of its drones.
 - **Gateway = edge relay**, not a radio protocol translator: local broker + artifact
   cache + upstream sync. Pull an artifact once over the uplink, serve it N times
   locally — which also collapses the airtime cost of a swarm update.
-- **Disconnected operation** is the defining requirement: the vehicle will be out of
+- **Disconnected operation** is the defining requirement. The vehicle will be out of
   internet range in the field.
 - **Hierarchy:** `parent_device_id` (reserved in the R0 schema). The server tracks each
   drone individually but reaches it via its parent, and never assumes it holds an MQTT

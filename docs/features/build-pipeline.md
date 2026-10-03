@@ -20,11 +20,11 @@ theme: **source → build → check → deploy**, with nothing hand-carried.
 of scope. V2 takes the build half back. Two constraints keep that from corroding the
 architecture:
 
-1. **The builder is a producer, not a privileged path.** It emits an artifact into the
+1. **The builder is a producer, not a privileged path**. It emits an artifact into the
    same upload API that a GitHub Action or a human uses. Artifacts stay **opaque to the
    core** (design/architecture.md principle 2) — the core cannot tell a server-built blob from an
    uploaded one, and gains no ability to parse either.
-2. **Debug stays out of scope.** Build only. No on-server debugging, no IDE.
+2. **Debug stays out of scope**. Build only. No on-server debugging, no IDE.
 
 ## Security — this is arbitrary code execution
 
