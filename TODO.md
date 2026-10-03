@@ -41,7 +41,7 @@ run could show, so the pass rests on the deterministic judge. Task list below; b
 
 - `S0-test-1` is waiting on a bench session (the S3's `UART` socket is a bridge-chip
   path; see the task); `S0-test-2` needs the S3 on the
-  bench. Both are hardware sessions, and the bench host is unsettled (see the ⚠️ notes).
+  bench. Both are hardware sessions on the Windows + Chrome bench (settled 2026-10-02).
 - **R3 (thin OTA library)** waits on R2 by decision
   (`design/decisions/ota-library-ships-after-safe-deploy.md`); its task list lives in
   [docs/features/ota-library.md](docs/features/ota-library.md) until it opens.
