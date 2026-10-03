@@ -463,6 +463,7 @@ def stage_command(
     sha256: str = FIRMWARE_SHA256,
     version: str = "1.5.0",
     apply: str = "auto",
+    size: int = len(FIRMWARE),
 ) -> bytes:
     """The `stage` body exactly as `api/routers/deploys.py` publishes it.
 
@@ -477,7 +478,7 @@ def stage_command(
             "artifact": {
                 "url": url,
                 "sha256": sha256,
-                "size": len(FIRMWARE),
+                "size": size,
                 "version": version,
             },
             "apply": apply,
@@ -626,6 +627,44 @@ async def test_a_sha256_mismatch_fails_and_never_applies(downloads: list[str]) -
     assert STATE_APPLYING not in states and STATE_REBOOTING not in states
     assert statuses(fake)[-1]["detail"] == "sha256 mismatch"
     assert any("MISMATCH" in line for line in lines)
+
+
+@pytest.mark.parametrize(
+    "sha256",
+    [
+        "abc",
+        FIRMWARE_SHA256.upper(),
+        # 65 characters. The firmware's `take_string` sees this as too long for its
+        # buffer and says "malformed" too (R2-fw-1), so the two devices agree.
+        FIRMWARE_SHA256 + "0",
+        "g" * 64,
+    ],
+)
+async def test_a_malformed_digest_is_refused_before_any_download(
+    downloads: list[str], sha256: str
+) -> None:
+    """R2-fw-1: the firmware refuses a misspelt digest at the command seam, before any I/O
+    — never normalised. The simulator is a device, so it refuses the same command."""
+    _, fake, _ = await run_stage(stage_command(sha256=sha256))
+
+    reports = statuses(fake)
+    assert [report["state"] for report in reports] == [STATE_FAILED]
+    assert reports[-1]["detail"] == "artifact sha256 malformed"
+    assert downloads == []
+
+
+async def test_an_artifact_larger_than_the_slot_is_refused_before_download(
+    downloads: list[str],
+) -> None:
+    """R2-fw-1: one byte over the 1966080-byte slot. `staging` first, because the firmware
+    learns the slot size only after publishing it; nothing is fetched."""
+    _, fake, lines = await run_stage(stage_command(size=1966081))
+
+    reports = statuses(fake)
+    assert [report["state"] for report in reports] == [STATE_STAGING, STATE_FAILED]
+    assert reports[-1]["detail"] == "artifact larger than the ota slot"
+    assert downloads == []
+    assert any("1966081" in line for line in lines)
 
 
 async def test_a_download_failure_is_reported_not_retried_silently(

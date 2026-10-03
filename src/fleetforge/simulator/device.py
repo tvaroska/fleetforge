@@ -49,6 +49,7 @@ import contextlib
 import hashlib
 import json
 import random
+import re
 import time
 import urllib.parse
 import urllib.request
@@ -71,6 +72,12 @@ STATUS = "status"
 # `dn/cmd`, the only downlink channel in R1. Retyped here rather than imported from
 # `broker/commands.py` for the reason `POWER_CLASSES` is retyped — see below.
 COMMAND = "cmd"
+
+# `artifact.sha256` as the firmware accepts it (`agent/main/ff_mqtt.c::on_stage`,
+# `is_lowercase_sha256`): exactly 64 lowercase hex characters, never normalised. Local on
+# purpose, not `fleetforge.storage.blobs.SHA256_HEX`: the simulator imports nothing from
+# the server (`tests/test_invariants.py`).
+_SHA256_HEX = re.compile(r"[0-9a-f]{64}")
 
 # `spec/device-protocol.md` → *`up/status` — the update transaction*, retyped for the
 # same reason as `POWER_CLASSES`: importing `fleetforge.db` would drag SQLAlchemy into a
@@ -573,8 +580,25 @@ class StageRunner:
                 client, cmd_id, STATE_FAILED, step, detail="artifact url/sha256 missing"
             )
             return
+        if not _SHA256_HEX.fullmatch(expected_sha):
+            # Refused before any I/O, as the firmware does (R2-fw-1): no `staging`, no
+            # download. A real board would otherwise erase its spare slot to find out.
+            await self._status(
+                client, cmd_id, STATE_FAILED, step, detail="artifact sha256 malformed"
+            )
+            return
 
         await self._status(client, cmd_id, STATE_STAGING, step)
+
+        size = artifact.get("size")
+        if isinstance(size, int) and size > self.identity.ota_slot_size:
+            # The firmware knows the slot only after `staging` (ff_ota.c::ota_task), and
+            # refuses before anything is fetched or erased. Same order here.
+            step(f"stage    {size} bytes will not fit a {self.identity.ota_slot_size}-byte slot")
+            await self._status(
+                client, cmd_id, STATE_FAILED, step, detail="artifact larger than the ota slot"
+            )
+            return
 
         await self._status(client, cmd_id, STATE_DOWNLOADING, step)
         try:

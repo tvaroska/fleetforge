@@ -548,6 +548,21 @@ static field_result_t take_string(const cJSON *obj, const char *key, char *out, 
     return FIELD_OK;
 }
 
+/* Exactly 64 characters, each 0-9 or a-f, then NUL: the server's own rule
+ * (`storage/blobs.py::SHA256_HEX`) and what ff_ota.h documents. Never normalised, always
+ * rejected (the identity.py idiom): an uppercase digest is not "the same digest", it is a
+ * command no server of ours wrote. Hand-rolled on purpose — isxdigit() accepts A-F. */
+static bool is_lowercase_sha256(const char *s)
+{
+    for (size_t i = 0; i < 64; i++) {
+        char c = s[i];
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
+            return false; /* also stops at an early NUL: a short digest */
+        }
+    }
+    return s[64] == '\0';
+}
+
 /* Parse a `stage` and hand it to ff_ota. This function is the command seam: it is the only
  * place the `dn/cmd` JSON is interpreted, and what leaves it is a plain C struct — ff_ota.c
  * never sees a cJSON object and never builds a topic string. */
@@ -585,11 +600,26 @@ static void on_stage(const cJSON *root, const char *id)
                                "artifact url too long");
         return;
     }
-    if (take_string(artifact, "sha256", cmd.sha256, sizeof(cmd.sha256)) != FIELD_OK) {
-        /* Unverified bytes are never applied, so a command with no usable digest is not a
-         * command this agent can carry out at all. */
+    /* Unverified bytes are never applied, so a command with no usable digest is not a
+     * command this agent can carry out at all. A digest that is present but not spelled
+     * the one way the server spells it (64 lowercase hex) is refused HERE, before any I/O:
+     * the alternative is erasing the spare slot — the previous known-good image — and
+     * downloading for minutes to learn what the command already said (R2-fw-1). */
+    switch (take_string(artifact, "sha256", cmd.sha256, sizeof(cmd.sha256))) {
+    case FIELD_OK:
+        break;
+    case FIELD_MISSING:
         ff_mqtt_publish_status(cmd.cmd_id, FF_STATUS_FAILED, FF_STATUS_PCT_NONE,
                                "artifact sha256 missing");
+        return;
+    case FIELD_TOO_LONG:
+        ff_mqtt_publish_status(cmd.cmd_id, FF_STATUS_FAILED, FF_STATUS_PCT_NONE,
+                               "artifact sha256 malformed");
+        return;
+    }
+    if (!is_lowercase_sha256(cmd.sha256)) {
+        ff_mqtt_publish_status(cmd.cmd_id, FF_STATUS_FAILED, FF_STATUS_PCT_NONE,
+                               "artifact sha256 malformed");
         return;
     }
     /* Optional, and only ever logged. */

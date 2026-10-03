@@ -147,7 +147,7 @@ after the reboot.
 - [x] **R2-be-1**: Observe confirm/rollback outcome; record it to `deploy_events` (P0, 1d) _(done 2026-10-03; reviewed; see docs/features/ota-deploy.md)_
       Today every deploy parks at `rebooting` with `is_terminal: false`. Needs the agent to
       report `confirming`/`confirmed`/`rolling_back`/`rolled_back` (`ff_ota.h`).
-- [ ] **R2-fw-1**: Checksum verify before apply, on the real agent (P0, 1d)
+- [x] **R2-fw-1**: Checksum verify before apply, on the real agent (P0, 1d) _(done 2026-10-03; reviewed; see docs/features/ota-deploy.md)_
       Confirm what already landed in R1 before starting; the simulator verifies sha256.
 - [ ] **R2-fw-2**: A/B slot apply, atomic switch — confirm against the R1 agent (P0, 1.5d)
 - [ ] **R2-fe-1**: Dashboard shows `good` vs `rolled-back` per device (P0, 0.5d)

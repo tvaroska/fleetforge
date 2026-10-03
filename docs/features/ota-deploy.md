@@ -635,6 +635,9 @@ own header says the same thing to the next editor):
 3. **A mismatch puts the boot partition back.** `finish()` has already called
    `esp_ota_set_boot_partition()` by the time we hash, so the undo is not tidiness —
    without it a board with a rejected image boots into it at the next power cut.
+   *(Points 2 and 3 were superseded on 2026-10-03 by R2-fw-1. The 16-byte claim does not
+   hold for IDF v5.5.5, so the hash now runs before `finish()` and a mismatch never moves
+   the pointer. See "Checksum verify before the boot switch" below.)*
 4. **The URL never appears in a log line or a `detail`.** It is the authorization
    (R1-be-3), so failures are described without it: "cannot open the artifact", not the
    link that could not be opened.
@@ -1185,6 +1188,99 @@ client.
 **Out of scope.** A `stage` that arrives while the running image is still
 `PENDING_VERIFY` would target the rollback slot. That belongs to R2-fw-2 (see
 `DECISIONS.md`).
+
+### Checksum verify before the boot switch (R2-fw-1)
+
+**What R1 had.** The agent already checked the sha256 against flash, but only *after*
+`esp_https_ota_finish()`, which is the call that moves the boot pointer. A mismatch then
+put the pointer back. For the whole read-back, otadata named an image nobody had
+verified. A power cut in that window booted it.
+
+**What changed (agent 0.4.1).**
+
+- `ff_ota.c::ota_task`: `verifying` → read back + hash → on a mismatch or read error,
+  `esp_https_ota_abort()` and `failed`. Nothing has moved. On a match, the log says
+  `… matches what is on flash in ota_1; switching the boot partition`, then `finish()`, then
+  `ff_txn_save`, then `… is staged and bootable`, then `staged`. The mismatch line now ends
+  `the boot partition was never moved`. `restore_boot_partition()` runs only for a failed
+  `finish()`. Flash encryption is a compile-time `#error`, because the premise (no write
+  buffering) depends on it being off. See DECISIONS 2026-10-03 for the IDF v5.5.5
+  evidence.
+- Slot-size guard: `size > ota slot` publishes `staging, failed "artifact larger than the
+  ota slot"` before anything is fetched or erased.
+- `ff_mqtt.c::on_stage`: `artifact.sha256` must be exactly 64 lowercase hex. Anything else
+  gets one `failed "artifact sha256 malformed"`, with no `staging` and no download. The
+  value is never normalised.
+- The simulator refuses the same two commands in the same order.
+
+**T1.** `just test` passed: 1003 tests, ruff, ruff format, and mypy. It includes the new
+`tests/test_agent_verify.py` tripwires, which fail on the 0.4.0 source. It also includes
+the reordered `test_agent_txn` check (verify < finish < `ff_txn_save` < `staged and
+bootable` < `STAGED`) and the simulator tests for a malformed digest (four spellings) and
+an oversize artifact. `just agent-build esp32` and `esp32s3` both ended in `BUNDLE OK`.
+The app grew by +368 B and +400 B, and the budgets were raised to exactly those bytes.
+`just agent-qemu-smoke esp32` gave `HARNESS OK`.
+
+**T2 (real agent in QEMU, esp32, against the dev stack on 10.0.2.2:8088).** otadata is
+`.qemu/flash-esp32.bin` at 0xF000/0x2000, read with QEMU stopped:
+`dd if=.qemu/flash-esp32.bin bs=4096 skip=15 count=2 status=none | sha256sum | cut -c1-16`.
+A `--fresh` board is not all-0xFF here. On its first boot it marks ota_0 VALID, giving
+`seq=1 state=VALID` = `8ba3b110139f4544`. The comparison is before and after, so this does
+not matter.
+
+```
+T2-0  negative control: saved 0.4.0 bundle, stage sha256 "b"*64, apply auto
+  topic: staging, downloading, verifying, failed "sha256 mismatch"
+  board: (35464) state=verifying
+         (35504-37254) esp_image ×2 (finish(): esp_ota_end + set_boot_partition)
+         (44504) sha256 MISMATCH, flash holds 5d2e6347…, the command says bbbb…
+         (45604) boot partition put back to ota_0: the staged image was rejected …
+  otadata 8ba3b110139f4544 -> f30f1c544a73a3fa  (seq 1 -> seq 2 = ota_1, seq 3 = ota_0)
+  => R1 rewrote otadata twice; the pointer named the unverified ota_1 for ~8 s.
+
+T2-1  0.4.1 (A), --fresh, same corrupt stage
+  topic: staging, downloading, verifying, failed "sha256 mismatch"   (no staged/applying)
+  board: (40974) state=verifying
+         (48064) sha256 MISMATCH, flash holds 5d2e6347…, the command says bbbb… — the
+                 boot partition was never moved
+         'put back' count: 0; no esp_image lines after verifying (finish() never ran)
+  otadata 8ba3b110139f4544 -> 8ba3b110139f4544, cmp of the 8192 bytes: BYTE-IDENTICAL
+  cold boot: running partition: ota_0 … fw_version 0.4.1; GET /v1/devices: 0.4.1
+  rows: staging, downloading, verifying, failed
+  The pre-finish() read-back hashed to the artifact's real sha256 (5d2e6347…): every
+  byte was on flash before finish(), as the IDF source says.
+
+T2-2  uppercase B_SHA, then "abc"
+  topic: exactly one status each: failed "artifact sha256 malformed"
+  docker compose logs api --since t0 | grep -c 'GET /v1/artifact'  ->  0
+  rows: failed / failed
+
+T2-3  size 1966081, otherwise valid
+  topic: staging, failed "artifact larger than the ota slot"
+  board: the artifact is 1966081 bytes, slot ota_1 holds 1966080
+  GET /v1/artifact since the publish -> 0
+
+T2-4  happy path: POST /v1/devices/000000000000/deploy {"version":"0.4.2","apply":"on_command"} -> 202
+  board: (79063) sha256 5d2e6347… matches what is on flash in ota_1; switching the boot partition
+         (81453) ff-txn: transaction b75ac8d0… recorded (target slot at 0x00200000)
+         (81453) ota_1 is staged and bootable
+  otadata 8ba3b110139f4544 -> 8ee76b96c568c878  (seq 2 = ota_1: the switch, after verify)
+  power cycle: running image: fw_version 0.4.2, ota state pending_verify
+               transaction b75ac8d0…: confirming on ota_1 -> CONFIRMED -> record cleared
+  rows: requested, staging, downloading, verifying, staged, confirming, confirmed|t
+  GET /v1/devices: 0.4.2
+
+T2-5  simulator against the live stack: just sim-fleet 1 --capabilities ota, deploy 1.5.0
+  verify sha256 … matches -> staged -> applying -> rebooting -> confirming -> confirmed
+```
+
+**Spec proposal (not applied).** For `spec/device-protocol.md` → `dn/cmd`:
+"`artifact.sha256` is exactly 64 lowercase hex characters. A device refuses any other
+spelling with `failed` before downloading, and refuses an `artifact.size` larger than its
+`ota_slot_size` before writing."
+
+**Not covered here.** Real hardware. The prod board runs 0.3.1, and this was not deployed
+there. A metal check can be a later bench item.
 
 ## De-risking
 

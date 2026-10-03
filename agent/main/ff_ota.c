@@ -13,16 +13,23 @@
  *    of transitions, not a progress feed — `deploys.record_observed_status` dedups on
  *    `(device_id, cmd_id, state)`, so a per-chunk publish writes nothing and costs the
  *    broker a message per 4 KB. Progress goes to the serial console instead.
- * 2. **The digest is checked by reading the partition BACK, after esp_https_ota_finish().**
- *    Hashing the stream as it arrives looks equivalent and is not: `esp_ota_write` withholds
- *    the first 16 bytes of the image header until the write completes, so a hash of "what we
- *    think we wrote" is a hash of something that was never on flash. Reading the slot back
- *    is the only check that covers the flash write itself, which is the part that can fail.
- * 3. **A mismatch puts the boot partition back.** `esp_https_ota_finish()` has already
- *    called `esp_ota_set_boot_partition()` by the time we hash, so the undo —
- *    `esp_ota_set_boot_partition(esp_ota_get_running_partition())` — is not tidiness: without
- *    it a board with a bad image reboots into it at the next power cut, which for this
- *    product means a van and a screwdriver.
+ * 2. **The digest is checked by reading the slot BACK after the last write, and BEFORE
+ *    esp_https_ota_finish() moves the boot pointer.** Hashing the stream as it arrives looks
+ *    equivalent and is not: it is a hash of what we meant to write, and reading the slot
+ *    back is the only check that covers the flash write itself, which is the part that can
+ *    fail. Reading back BEFORE finish() is possible because, without flash encryption,
+ *    `esp_ota_write()` writes every byte it is handed straight to the partition
+ *    (IDF v5.5.5 `app_update/esp_ota_ops.c`: the `partial_data[16]` buffer exists only inside
+ *    `if (esp_flash_encryption_enabled())`, and what it holds back is the TRAILING partial
+ *    16-byte block, not the header), and `esp_https_ota.c::_ota_write()` hands every chunk to
+ *    it unbuffered. R1-fw-1 believed `esp_ota_write` withheld the first 16 bytes of the
+ *    header until the end; that is not what v5.5.5 does (DECISIONS 2026-10-03, R2-fw-1).
+ *    The #error below makes flash encryption a build failure, so the premise cannot rot.
+ * 3. **A mismatch never moves the boot pointer.** It is caught before finish(), so the
+ *    image is abandoned with esp_https_ota_abort() and otadata is never written. Before
+ *    R2-fw-1 the switch came first and was undone afterwards, and in between — the whole
+ *    read-back of up to 1.9 MB — a power cut or a watchdog booted an unverified image. The
+ *    only path that can still need restore_boot_partition() is a failed finish().
  * 4. **The URL is never logged.** It is the authorization (R1-be-3: "signed URL never
  *    persisted, never logged"), so it does not appear in a log line, in a `detail`, or
  *    truncated "just for debugging". Everything else about a failure is said plainly.
@@ -47,6 +54,11 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "mbedtls/sha256.h"
+#include "sdkconfig.h"
+
+#if CONFIG_SECURE_FLASH_ENC_ENABLED
+#error "ff_ota verifies the slot BEFORE esp_https_ota_finish(); with flash encryption esp_ota_write() holds back a trailing partial block until esp_ota_end(), so that read-back would hash an incomplete image. See R2-fw-1."
+#endif
 
 static const char *TAG = "ff-ota";
 
@@ -140,11 +152,12 @@ static esp_err_t partition_digest(const esp_partition_t *part, size_t length, ch
     return err;
 }
 
-/* Put the boot partition back where it was before esp_https_ota_finish() moved it. The
- * one branch in this file that must never be wrong: it runs when the image on flash is
- * NOT the image the server asked for, and skipping it arms a reboot into unverified
- * bytes. Logged at ERROR either way — an operator needs to know a board is carrying a
- * rejected image in its spare slot. */
+/* Point the boot partition at the running slot again, in case a FAILED
+ * esp_https_ota_finish() left it anywhere else. Since R2-fw-1 a sha256 mismatch never gets
+ * here — it is caught before finish() and nothing was moved (property 3) — so this is the
+ * belt-and-braces branch for an image IDF itself refused. It is also the only call to
+ * esp_ota_set_boot_partition() in this file. Logged at ERROR either way — an operator needs
+ * to know a board is carrying a rejected image in its spare slot. */
 static void restore_boot_partition(void)
 {
     const esp_partition_t *running = esp_ota_get_running_partition();
@@ -306,6 +319,16 @@ static void ota_task(void *arg)
     }
     ESP_LOGI(TAG, "update %s: writing slot %s (%" PRIu32 " bytes)", cmd->cmd_id, target->label,
              target->size);
+    /* An artifact that cannot fit is refused BEFORE anything is fetched or erased.
+     * Otherwise it is discovered when esp_ota_write() runs off the end of the slot — after
+     * the slot, which holds the previous image, has been erased. `size == 0` means the
+     * server did not say; the digest still covers whatever arrives. */
+    if (cmd->size > target->size) {
+        ESP_LOGE(TAG, "update %s: the artifact is %u bytes, slot %s holds %" PRIu32,
+                 cmd->cmd_id, (unsigned)cmd->size, target->label, target->size);
+        fail(cmd, "artifact larger than the ota slot");
+        goto done;
+    }
 
     resolved = malloc(OTA_RESOLVED_URL_MAX);
     if (resolved == NULL) {
@@ -397,9 +420,43 @@ static void ota_task(void *arg)
 
     ff_mqtt_publish_status(cmd->cmd_id, FF_STATUS_VERIFYING, FF_STATUS_PCT_NONE, NULL);
 
-    /* IDF's own validation (magic byte, image length, secure-boot signature when it is
-     * on) AND the boot-partition switch. From here on the board is pointed at the new
-     * slot, and every failure path below has to put it back. */
+    /* THE check, and it happens while the boot pointer still names the running slot.
+     * perform() has returned ESP_OK and every one of the `got` bytes is on flash in
+     * `target` already (property 2), so reading it back here hashes exactly what a reboot
+     * would run. A failure on this side of finish() is an esp_https_ota_abort(): otadata
+     * has not been touched, so there is nothing to undo.
+     *
+     * There is deliberately NO second hash after finish(). Without flash encryption
+     * esp_ota_end() writes nothing more to the slot, and what it does do —
+     * ota_verify_partition(), which re-reads the image and checks IDF's own appended
+     * SHA-256 and checksum — is a second, independent read-back anyway. */
+    char digest[65];
+    err = partition_digest(target, got, digest);
+    if (err != ESP_OK) {
+        esp_https_ota_abort(handle);
+        ESP_LOGE(TAG, "cannot read %s back: %s", target->label, esp_err_to_name(err));
+        fail(cmd, "cannot verify the staged image");
+        goto done;
+    }
+    /* Exact comparison: the command seam (ff_mqtt.c::on_stage) only lets a 64-character
+     * lowercase digest through, and hex_encode() emits lowercase. */
+    if (strcmp(digest, cmd->sha256) != 0) {
+        esp_https_ota_abort(handle);
+        /* Both digests are public facts about the artifact — unlike the URL — so they are
+         * printed in full, exactly as the simulator does. */
+        ESP_LOGE(TAG, "update %s: sha256 MISMATCH, flash holds %s, the command says %s — "
+                      "the boot partition was never moved",
+                 cmd->cmd_id, digest, cmd->sha256);
+        fail(cmd, "sha256 mismatch");
+        goto done;
+    }
+    ESP_LOGI(TAG, "update %s: sha256 %s matches what is on flash in %s; switching the boot "
+                  "partition",
+             cmd->cmd_id, digest, target->label);
+
+    /* IDF's own validation (magic byte, image length, appended SHA-256, secure-boot
+     * signature when it is on) AND the boot-partition switch. finish() frees the handle
+     * on every path, success or not. */
     err = esp_https_ota_finish(handle);
     if (err != ESP_OK) {
         if (err == ESP_ERR_OTA_VALIDATE_FAILED) {
@@ -414,30 +471,14 @@ static void ota_task(void *arg)
         goto done;
     }
 
-    char digest[65];
-    err = partition_digest(target, got, digest);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "cannot read %s back: %s", target->label, esp_err_to_name(err));
-        restore_boot_partition();
-        fail(cmd, "cannot verify the staged image");
-        goto done;
-    }
-    if (strcasecmp(digest, cmd->sha256) != 0) {
-        /* Both digests are public facts about the artifact — unlike the URL — so they are
-         * printed in full, exactly as the simulator does. */
-        ESP_LOGE(TAG, "update %s: sha256 MISMATCH, flash holds %s, the command says %s",
-                 cmd->cmd_id, digest, cmd->sha256);
-        restore_boot_partition();
-        fail(cmd, "sha256 mismatch");
-        goto done;
-    }
-
-    /* The transaction is live from HERE, not from `applying`: finish() has already moved
-     * the boot pointer to `target`, so any reset from now on — our esp_restart(), a power
+    /* The transaction is live from HERE, not from `applying`: finish() has just moved the
+     * boot pointer to `target`, so any reset from now on — our esp_restart(), a power
      * cut, a watchdog — boots the new image, including after `apply: "on_command"`. The
      * record is what lets that image (or the one the board falls back to) report the
-     * outcome against this cmd_id. Written BEFORE the "staged and bootable" line below,
-     * because that line is what an operator waits for before pulling the plug.
+     * outcome against this cmd_id. AFTER finish(), never before: a record saved ahead of a
+     * finish() that then fails would name a slot that is not bootable. Written BEFORE the
+     * "staged and bootable" line below, because that line is what an operator waits for
+     * before pulling the plug.
      * Report-only: a failed save loses the outcome report, never the deploy or the
      * rollback, so the update carries on. */
     esp_err_t txn_err = ff_txn_save(cmd->cmd_id, target->address);
@@ -447,8 +488,7 @@ static void ota_task(void *arg)
                  cmd->cmd_id, esp_err_to_name(txn_err));
     }
 
-    ESP_LOGI(TAG, "update %s: sha256 %s matches; %s is staged and bootable", cmd->cmd_id, digest,
-             target->label);
+    ESP_LOGI(TAG, "update %s: %s is staged and bootable", cmd->cmd_id, target->label);
 
     ff_mqtt_publish_status(cmd->cmd_id, FF_STATUS_STAGED, 100, NULL);
 

@@ -12,6 +12,9 @@
  * ff_txn the moment a verified image is bootable (`staged`). ff_mqtt.c reads it at the next
  * boot and reports the outcome against that cmd_id. This module never reports an outcome
  * itself: the session that observed it does.
+ *
+ * Verify before switch (R2-fw-1): the slot is read back and hashed BEFORE the boot pointer
+ * moves, so an image that fails the digest is never bootable, not even for a moment.
  */
 
 #pragma once

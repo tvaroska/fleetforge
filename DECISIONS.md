@@ -6,6 +6,67 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-03 — the digest is checked before the boot pointer moves (R2-fw-1)
+
+**Decided: `ff_ota.c::ota_task` reads the slot back and compares the sha256 BEFORE
+`esp_https_ota_finish()`. A mismatch is an `esp_https_ota_abort()`, and otadata is never
+written.** This **supersedes** two points of R1-fw-1 §2 (2026-09-17), which stays as
+written: the claim that `esp_ota_write` withholds the header's first 16 bytes until the
+write completes, and the rule that a mismatch restores the boot partition. Agent 0.4.1.
+
+- **The window that existed.** `finish()` is `esp_ota_end()` plus
+  `esp_ota_set_boot_partition()`. The R1 order hashed after it and undid the switch on a
+  mismatch. Between the two, while up to 1.9 MB was read back and hashed, otadata named an
+  unverified image. A power cut, a brownout (S0-fw-3) or a watchdog in that window boots
+  it. In QEMU the 0.4.0 agent held the bad pointer for about 8 s (37.3 s → 45.6 s in the
+  T2-0 log). Each mismatch also rewrote otadata twice.
+- **The IDF evidence (v5.5.5, re-read for this task).** In `app_update/esp_ota_ops.c`,
+  `esp_ota_write()` buffers bytes in `partial_data[16]` only inside
+  `if (esp_flash_encryption_enabled())`, and what it holds back is the TRAILING partial
+  block. `esp_ota_end()` writes that block only when `partial_bytes > 0`, then runs
+  `ota_verify_partition()`. `esp_https_ota.c::_ota_write()` passes each chunk straight to
+  `esp_ota_write()`. So without encryption, every byte is on flash once `perform()`
+  returns ESP_OK. The T2 run confirms it: the pre-`finish()` read-back hashed to exactly
+  the artifact's sha256 (`5d2e6347…`).
+- **No second hash after `finish()`.** Without encryption, `esp_ota_end()` writes nothing
+  more to the slot, and its `ota_verify_partition()` already re-reads the image against
+  IDF's appended SHA-256. `restore_boot_partition()` stays, but only on the failed-`finish()`
+  path. It is now the one call to `esp_ota_set_boot_partition()` in the file.
+- **`#if CONFIG_SECURE_FLASH_ENC_ENABLED` → `#error`** in `ff_ota.c`, so the premise
+  cannot rot silently. `verify_bundle.py` already rejects encryption fleet-wide. There is
+  no runtime check, because a board with encryption eFuses and our plaintext bootloader
+  does not boot at all.
+- **`ff_txn_save` stays after `finish()`.** The transaction becomes live when the boot
+  pointer moves (R2-be-1). A record saved ahead of a `finish()` that fails would name a
+  slot that is not bootable.
+- **The command seam accepts `artifact.sha256` only as 64 lowercase hex**
+  (`ff_mqtt.c::on_stage`, `is_lowercase_sha256`). The value is never normalised (the
+  `identity.py` idiom). Uppercase, short, too long or non-hex gets `failed` /
+  `artifact sha256 malformed` with no `staging` and no I/O. Before, such a digest cost an
+  erase of the spare slot (the previous good image) and a full download. The comparison in
+  `ff_ota.c` is now an exact `strcmp`.
+- **Slot-size guard.** `cmd->size > target->size` publishes `failed` /
+  `artifact larger than the ota slot` before `resolve_artifact_url` and before
+  `esp_https_ota_begin`. That means nothing is fetched or erased. On the wire it comes
+  after `staging`, because the slot is resolved after that publish.
+- **Simulator parity** (`simulator/device.py::_stage`). It applies the same two refusals,
+  in the same order, with the same details. The regex is local, because simulator import
+  purity is enforced.
+
+**Proven in QEMU (T2).** 0.4.0 + corrupt stage: `boot partition put back`, and otadata
+changed. 0.4.1 + the same stage: `… was never moved`, and otadata was byte-identical
+(8192 bytes, `cmp`). Uppercase and `abc` digests got one `failed` each and no
+`GET /v1/artifact`. 1966081 bytes got `staging, failed`, again with no GET. The happy path
+gave `matches … switching` → `ff-txn … recorded` → `staged and bootable` →
+`confirmed|t`. Transcripts are in `docs/features/ota-deploy.md`.
+
+**Spec proposal (not applied; `spec/` is protected).** `spec/device-protocol.md` →
+`dn/cmd`: "`artifact.sha256` is exactly 64 lowercase hex characters. A device refuses any
+other spelling with `failed` before downloading, and refuses an `artifact.size` larger
+than its `ota_slot_size` before writing."
+
+---
+
 ## 2026-10-03 — the deploy outcome is device-reported, from a transaction record that survives the reboot (R2-be-1)
 
 **Decided: the agent persists ONE record across the apply reboot, `(cmd_id, target slot

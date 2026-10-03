@@ -9,7 +9,8 @@ violation is silent on the bench and expensive in the field:
 * the confirm-timeout path never touches the MQTT client — a broken image is exactly the
   image whose mqtt task may be wedged, and the rollback must not wait on it;
 * the outcome states are published only by ff_mqtt.c, the session that observed them;
-* ff_ota.c records the transaction only after the digest matched, and before `staged`;
+* ff_ota.c records the transaction only after the digest matched and finish() moved the
+  boot pointer, and before `staged`;
 * the record is cleared only for the cmd_id that was reported.
 
 Same idiom as `test_ff_cfg.py` (whose comment-stripper is reused): the comments in these
@@ -112,13 +113,17 @@ def test_a_late_ack_cannot_confirm_an_image_already_rolling_back() -> None:
 
 
 def test_the_transaction_is_recorded_after_verification_and_before_staged() -> None:
+    """R2-fw-1 put the digest check before finish() (the boot switch); the record still
+    follows finish(), because it is only true once the new slot is bootable."""
     ota = _code(FF_OTA_C)
-    verified = ota.index("strcasecmp(digest, cmd->sha256)")
-    saved = ota.index("ff_txn_save(")
-    staged = ota.index("FF_STATUS_STAGED")
-    bootable = ota.index("is staged and bootable")
     assert ota.count("ff_txn_save(") == 1, "recorded on more than one path"
-    assert verified < saved < bootable < staged
+    task = _function_body(ota, "ota_task")
+    verified = task.index("strcmp(digest, cmd->sha256)")
+    finish = task.index("esp_https_ota_finish(")
+    saved = task.index("ff_txn_save(")
+    bootable = task.index("is staged and bootable")
+    staged = task.index("FF_STATUS_STAGED")
+    assert verified < finish < saved < bootable < staged
 
 
 def test_the_record_is_cleared_only_for_the_reported_cmd_id() -> None:

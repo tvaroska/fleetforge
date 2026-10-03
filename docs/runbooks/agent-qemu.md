@@ -182,6 +182,19 @@ After a **failed** apply (a hand-published `stage` with a corrupted digest) the 
 readings must all still say the old version — board log, `up/hb`, and `dev`. That is the
 half worth running first, because it is the one nobody checks.
 
+Since agent 0.4.1 (R2-fw-1) the digest is checked before the boot pointer moves. The
+mismatch line ends `the boot partition was never moved`, and `boot partition put back`
+must **not** appear. Older agents logged that second line. To check that otadata was not
+touched, read it with the board stopped (`just agent-qemu-stop esp32`) before and after
+the corrupt stage. The two values must be identical:
+
+```bash
+otadata() { dd if=.qemu/flash-esp32.bin bs=4096 skip=15 count=2 status=none | sha256sum | cut -c1-16; }
+```
+
+A `--fresh` board is not all-0xFF. Its first boot marks ota_0 valid, so expect
+`8ba3b110139f4544` both times, not the all-0xFF hash.
+
 ### Driving an outcome: `confirmed` and `rolled_back` (R2-be-1)
 
 Since agent 0.4.0 the board records the transaction at `staged`
