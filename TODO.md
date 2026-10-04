@@ -299,6 +299,11 @@ are R3). Order inside each flow: the one-place status first, then the cards, the
       Boot loop, power cut mid-download, hang before the session, silent store, marginal
       radio: `docs/runbooks/rollback-test.md`. Flow 2's "rolls back on its own" rests on it.
       Hardware-gated; needs the special fault-injection build.
+      _(2026-10-04: bench script docs/runbooks/bench-replay.md and judge `just bench-judge`;
+      rehearsed on dev (simulator + QEMU esp32: power-cut, confirmed, bootloop, hang all JUDGE
+      PASS); esp32s3 bench images built at 1a00f7e. Bench run owed: waits on S0-bug-1 (board
+      offline), the board on agent ≥ 0.4.5 (S0-infra-10 or a normal deploy), and an upload path
+      on prod (R2b release or the curl fallback).)_
 - [ ] **R2b-test-3**: Update flow end to end (P1, 1d)
       Upload from the dashboard, pre-check refuses a wrong-layout build, upload refuses the merged
       binary, deploy a good build to `confirmed`, deploy a deliberately broken one to

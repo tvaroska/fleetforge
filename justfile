@@ -159,6 +159,33 @@ capacity-check *args:
 capacity-check-prod *args:
     ssh prod 'python3 - --watch 900 --interval 30 {{args}}' < scripts/capacity_snapshot.py
 
+# ── Bench replay judge (R2b-test-2) ──────────────────────────────────────────
+#
+# Grades one deploy transaction's deploy_events rows against a bench scenario
+# (docs/runbooks/bench-replay.md). ref = cmd_id (32 hex) or device id (12 hex:
+# its newest transaction); anything else is refused before any SQL exists. The
+# SELECT goes to psql on stdin (read-only on prod, over ssh). Exit: 0 PASS,
+# 1 FAIL, 2 usage/refused/no rows, 3 INCOMPLETE (run again later).
+#
+#     just bench-judge bootloop 94a990dd09a4          # prod
+#     just bench-judge confirmed <cmd_id> dev          # the dev stack
+#     python3 scripts/bench_judge.py --list            # the scenarios
+#
+# Grade one bench-replay transaction (prod: a read-only SELECT over ssh).
+bench-judge $scenario $ref $where="prod":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # The arguments arrive as env vars ($scenario, $ref, $where), never spliced into this script.
+    case "$where" in prod|dev) ;; *) echo "where must be prod or dev, not '$where'" >&2; exit 2;; esac
+    python3 scripts/bench_judge.py --list | cut -d' ' -f1 | grep -qxF -- "$scenario" \
+        || { echo "unknown scenario '$scenario'; see: python3 scripts/bench_judge.py --list" >&2; exit 2; }
+    sql=$(python3 scripts/bench_judge.py --sql "$ref") || exit 2
+    if [ "$where" = prod ]; then
+        printf '%s\n' "$sql" | ssh prod 'cd /opt/boris/prod && docker compose exec -T postgres psql -U fleetforge fleetforge -v ON_ERROR_STOP=1 -At -F "|"'
+    else
+        printf '%s\n' "$sql" | docker compose exec -T postgres psql -U fleetforge fleetforge -v ON_ERROR_STOP=1 -At -F '|'
+    fi | python3 scripts/bench_judge.py "$scenario"
+
 # ── Simulated boards (R0-test-1) ─────────────────────────────────────────────
 #
 # A fake ESP32 that enrolls, connects, announces, holds presence and heartbeats,

@@ -6,6 +6,24 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-04 — The R2 bench replay is one ordered session graded from deploy_events by a judge; "silent store" on metal is a WAN cut; the run is held for the board (R2b-test-2)
+
+**Decided: `scripts/bench_judge.py` + `just bench-judge` grade each bench step; `docs/runbooks/bench-replay.md` is the session script. `R2b-test-2` stays open until a human runs it at the bench.**
+
+- **Why it is held.** The acceptance is a person at the Windows bench with the S3 `94a990dd09a4` on COM3 pulling USB and switching an AP off. Blocked on `S0-bug-1` (board offline since 14:24 UTC), the board's agent (0.3.x; every step needs ≥ 0.4.5: 0.4.0 for `rolled_back` from the returned-to image, 0.4.3 for a hang image to roll back, 0.4.4 for the stall guard; via `S0-infra-10` or a normal deploy), and a prod upload path (R2b-fe-7 `392bf28` is not an ancestor of prod `9200e0f`; the runbook's curl `POST /v1/artifact` is the fallback). Same precedent as R2b-test-1.
+- **The judge reads rows, not the API.** `GET /v1/devices` carries only the newest transaction's summary. The judge pipes one `SELECT … FROM deploy_events … ORDER BY at, id` into psql **on stdin** (read-only over ssh on prod, `docker compose exec` on dev). REF is a 32-hex cmd_id or a 12-hex device id (newest `requested`), lowercased; anything else exits 2 before any SQL exists, and the recipe takes its arguments as env vars (`$scenario $ref $where`), never spliced into the script. Exit 0 PASS, 1 FAIL, 2 usage/refused/no rows, 3 INCOMPLETE. Deviation from the plan: the SELECT also returns `cmd_id` (7 columns), so a device-id run prints the cmd_id the operator must write down and re-deploy.
+- **Scenarios** (one spec each, one checker; order is a subsequence; the first row must be `requested`): `confirmed`; `rbtest` (`staged, confirming, rolled_back`, `rolling_back` best-effort WARN, 60-240 s from `rebooting` when present); `bootloop` (no `confirming`/`rolling_back`, ≤ 180 s only from a `rebooting` row); `hang` (artifact ≥ 0.4.3, ≥ 300 s, > 900 s WARN); `power-cut` (open `downloading`/`verifying` is the pass, never INCOMPLETE); `outage-short`; `stall` (`failed` with exactly `download stalled` or `download failed`, and it says which); `reboot-outage-long`. A rollback needs the agent's detail `returned to ota_N; ota_M did not confirm`; the simulator's wording fails it by design.
+- **"Silent store" on metal is a WAN cut with the AP up** (plus R2, the AP off). "Alive but silent" needs a proxy in the board's path, so it and the pre-1 KB residual stay QEMU-only.
+- **Dashboard `apply: auto` only at the bench.** The dashboard has no on_command; on metal `esp_restart()` works and auto means no step is blocked by a parked staged image.
+- **No recipe or script builds fault images.** `test_no_recipe_builds_a_fault_image` is the tripwire; the runbook has hand-run `docker build` lines into `/tmp/ff-bench-*` and a copied context for `0.4.5-bench`, so `agent/` never goes dirty.
+- **Trap.** `/tmp/ff-hang-esp32s3` is `0.4.2-hangtest` (built at `5fa5c33`), the negative control: the judge fails it by name. The version gate reads the label, so it cannot catch an old build given an arbitrary label (`/tmp/ff-hang-esp32` is pre-0.4.3 code labelled `0.4.22-hangtest`); build the bench images at HEAD.
+- **T2-R evidence (dev).** Images: esp32s3 `0.4.5-bench/-rbtest/-bltest/-hangtest` at `1a00f7e`, all `verify_bundle.py` OK, one `config_sha256` (`d10f52d6…`, equal to `agent/dist/esp32s3`), sha256s in the runbook snapshot. Wiring: unknown device exits 2 "no rows"; `x';--` exits 2 refused, docker never invoked (PATH shim). Simulator: `0f4e8e45…` `JUDGE PASS confirmed`; the same judged as bootloop `JUDGE FAIL`; `57d00633…` (9.9.9-rbtest, `--confirm never --confirm-timeout 70`) `JUDGE FAIL rbtest` with only `rollback-detail` failing (the designed negative control). QEMU esp32, artifacts uploaded with the runbook's curl: `938acbb8…` `JUDGE PASS power-cut` at 30%, then re-POST `reused:true` same cmd → `JUDGE PASS confirmed`; `38262d37…` `JUDGE PASS bootloop` (one `abort()`, window SKIP: no `rebooting` row); `176b907c…` `JUDGE PASS hang` (staged → rolled_back 323.9 s). Prod read-only pipe ran: the board's newest txn is the R1-era `0.3.2-rbtest` deploy parked at `rebooting` → `JUDGE FAIL confirmed`, as expected.
+- **Rejected:** a judge over the API; a just recipe or script that builds fault images; a proxy at the bench for "alive but silent"; flipping the task on a rehearsal.
+
+Supersedes nothing.
+
+---
+
 ## 2026-10-04 — "Send again" is Deploy pinned to the failed version: it opens the pre-check, never posts; offered only on a failure before reboot that the same build can survive (R2b-fe-11)
 
 **Decided: `deployResult.sendAgain` names the version; `DeployCell` runs the normal pre-check for it. Frontend only.**

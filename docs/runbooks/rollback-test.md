@@ -10,6 +10,10 @@ come back. The only recovery is a serial re-flash. That is not a reason to skip 
 It is the reason to do it while you can still recover. This is because the alternative is
 discovering the same thing remotely on a board you cannot reach.
 
+**The bench replay of every section below is one ordered session:**
+[bench-replay.md](bench-replay.md) (R2b-test-2). It names the images, the order, the console
+lines to watch, and grades each step from `deploy_events` with `just bench-judge`.
+
 ## Why it needs a special build
 
 Both halves of the pair are guarded by `ESP_OTA_IMG_PENDING_VERIFY`, which only an image
