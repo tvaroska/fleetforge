@@ -1325,3 +1325,261 @@ Implementation notes behind `spec/flows.md` Flow 1 and the 2026-10-04 entries in
   than a bad chip. The copy should say what to try first and name the chip only on repeat.
 - **Diagnostic bundle.** Must be redacted: no token, Wi-Fi passphrase or broker credential
   (the CUJ-1 hard-fail trap).
+
+### Known networks: wire proposal (R2b-spec-1, 2026-10-04) — PROPOSED, not applied
+
+`spec/` is protected during `/implement`, so this is the wire half of Flow 3 written as
+paste-ready patches for a later `spec:` commit (the route R2-spec-1 took). **Nothing here is
+built.** No agent, server, frontend, schema, migration, simulator or test change has been
+made, and `spec/` is untouched. The decision is logged in `DECISIONS.md` (2026-10-04,
+R2b-spec-1), as proposed only. `R2b-fw-1`, `R2b-fe-12` and `R2b-be-5` are marked blocked in
+`TODO.md` until the owner accepts and applies it.
+
+**What exists today.**
+
+- **The `ff_cfg` reader ignores unknown keys** (`agent/main/ff_cfg.c`, header comment and
+  `parse_payload()`). A new key is additive: a fielded agent that has never heard of `nets`
+  still boots and joins the top-level `ssid`.
+- **The header version check is terminal.** `ff_cfg_load()` refuses any
+  `header.version != FF_CFG_VERSION` (1), so a version bump would idle every fielded agent.
+- **One network today:** `ssid` (`FF_CFG_MAX_SSID` 33 = 32 octets + NUL) and `psk`
+  (`FF_CFG_MAX_PSK` 65). An open network already works (`ff_net_wifi.c` sets
+  `threshold.authmode = WIFI_AUTH_OPEN`).
+- **Payload budget** is 4080 bytes (`FF_CFG_MAX_PAYLOAD`); a typical payload is a few hundred.
+  `spec/open-questions.md` keeps room for a possible CA root (~1.3–2 KB RSA, under 1 KB ECDSA).
+- **Wi-Fi bring-up** (`agent/main/ff_net_wifi.c`) connects directly to one SSID with no scan,
+  reconnects forever on a 1 s → 30 s doubling backoff, and walks a TX-power ladder
+  (`TX_LADDER_*`).
+- **The announce is republished on every MQTT connect** (`ff_mqtt.c::on_connected()` calls
+  `ff_identity_announce_json()`), so a board that changed network re-announces with no new
+  mechanism. It is built in one place, `agent/main/ff_identity.c::announce_object()`, and the
+  enroll body is that object plus `token`, so new announce fields reach `POST /v1/enroll` too.
+- **The server tolerates unknown fields:** `ingestor/protocol.py::AnnouncePayload` and
+  `api/schemas.py::EnrollRequest` are both `extra="ignore"`. A new agent against an old server
+  is safe.
+- **Credential tripwire.** `tests/test_agent_partitions.py::test_agent_holds_no_credential`
+  greps `agent/` for `wifi[_-]?(ssid|password)` next to a quoted value. The proposed names
+  (`nets`, `ssid`, `psk`, `known_networks`) never trip it.
+- **Coupling gotcha.** `tests/test_ff_cfg.py::TestAnnounceMatchesTheSpec::test_the_firmware_builds_exactly_the_spec_keys`
+  parses the JSON example under `` ### `up/announce` — identity `` and asserts that
+  `ff_identity.c` emits every key in it. If the example gains `"ssid"` before R2b-fw-1 lands,
+  `just test` goes red. Hence two patches: **A** (prose, test-neutral) and **B** (the two
+  example lines, in the R2b-fw-1 commit).
+- **Redaction gotcha.** `agent/tools/ff_cfg.py::describe()` redacts only top-level
+  `SECRET_KEYS` (`token`, `psk`), so it would print a nested `nets[].psk`. The same holds for
+  `ff_cfg_log()`, the frontend diagnostic bundle and `ffcfg.ts` error messages. This is an
+  obligation on the follow-ups, not a spec change.
+- **Key-list tripwires.** `tests/test_ff_cfg.py::TestCSourceAgrees` requires every key in
+  `ff_cfg.KNOWN_KEYS` to appear in `ff_cfg.c`; `frontend/src/ffcfg.ts::KEY_ORDER` mirrors the
+  list and `frontend/src/ffcfg.vector.json` is the ASCII-only golden vector. Adding `nets`
+  touches all of them, in R2b-fw-1 and R2b-fe-12.
+
+**The decisions.**
+
+1. **Format "A": top-level first, `nets` for the rest.** The top-level `ssid` / `psk` stay
+   the first, highest-priority network. A new optional key `nets` is an array of
+   `{"ssid": "...", "psk": "..."}` objects holding the remaining networks in priority order.
+   An old blob is a list of one with no branching, and an old agent, or a maker's R3 firmware
+   that predates the list, joins network 1. No "top-level disagrees with `nets[0]`" rule is
+   needed. *Rejected:* `nets` holding all networks with the top level mirroring `nets[0]`
+   (two sources of truth, needs a conflict rule); `nets` only, with no top level (an old
+   reader gets no SSID and idles); a version bump (every fielded reader refuses the blob).
+2. **At most 4 networks in total** (top level + 3 in `nets`): home, shed, phone hotspot,
+   travel router. Budget: a worst-case entry with JSON escaping is about 340 B, so 4 are about
+   1.4 KB; with a worst-case baseline of about 600 B (two 159-char URIs and a 127-char token)
+   about 2 KB stays free for the CA root. RAM: 3 extra fixed entries in `ff_cfg_t` are about
+   300 B of struct, no heap. **Writers refuse more than 4** (`ff_cfg.py validate`, and
+   `ffcfg.ts validateFfCfg` before a token is minted). **A reader that finds more uses the
+   first ones it has room for and logs a warning; it never refuses to boot over length**, so a
+   future flasher may raise the cap.
+3. **Entry rules.** `psk` absent or `""` is an open network. Unknown keys inside an entry are
+   ignored. A malformed `nets` is a bad config and the board idles loudly, consistent with
+   `ff_cfg.c`'s "present but wrong type is an error" rule. Malformed: not an array, an entry
+   that is not an object, a missing or empty `ssid`, a non-string field, an over-length
+   `ssid` / `psk`.
+4. **Selection: fixed priority (list order), not signal strength.** The board joins the first
+   known network its scan sees, and within one SSID (mesh, several APs) the strongest AP. It
+   **never leaves a working association** for a higher-priority network; it re-selects only
+   after losing the link, which avoids flapping between overlapping APs and a link drop
+   mid-OTA. A visible network that does not get the board an address (wrong passphrase, MAC
+   filter) does not block the others: the next attempt takes the next visible known network.
+   When no visible known network works, the networks the scan did not see are tried directly,
+   in order, so **hidden SSIDs still work**; then it rescans. **With exactly one network it
+   connects directly, as today**, with no scan, so the QEMU/openeth run and every
+   single-network board behave identically. *Rejected:* strongest-in-range. It flaps between
+   two networks at similar RSSI and makes "on: shed" unpredictable for the operator.
+5. **No known network in range.** One console line per full attempt cycle, naming how many
+   networks it knows, e.g. `no known network in range (2 known); scanning again in 30 s`. It
+   keeps trying forever on the existing 1 s → 30 s backoff, and never reboots, opens an AP or
+   captive portal, or falls back to anything. **It cannot tell the server** (no link): the
+   server sees an offline board and nothing more. Only the onboarding watch and result card,
+   which read the console, can say "none of its N known networks is in range"; the Fleet row
+   can say "offline, last on: shed" and must not claim the cause. This corrects
+   `spec/flows.md` Flow 3 step 5 and TODO `R2b-fe-13`, which implied the fleet view could see it.
+6. **Announce: two optional, flat fields,** placed after `link_type` in the example.
+   `ssid` (string | null) is the SSID this broker session runs over, exactly as written in
+   `ff_cfg` (always valid UTF-8, since `ff_cfg` is JSON). `known_networks` (integer | null) is
+   how many networks the board will try, after any it dropped for room. `known_networks` is
+   **new beyond the TODO line**: Flow 3 step 5's "knows 2 networks" has no other source, since
+   the server never sees `ff_cfg`. Both are `null` on `link_type: ethernet` and absent on
+   agents older than R2b-fw-1; the server treats absent and `null` alike, as "not reported".
+   The passphrase and the other SSIDs are never sent. Not on `up/hb`: the announce already
+   repeats every session. Enroll carries both by construction; the server stores them and
+   never rejects them (a malformed value is stored as null, as R2-spec-1 decided for enroll).
+7. **Storage: `ff_cfg` only in v1. The agent never writes the list.** NVS vs `ff_cfg` for a
+   list the agent edits stays open (R2b-spec-3 / Improv).
+8. **Downgrade safety.** An OTA that puts a pre-list agent, or a maker image without the list,
+   on a board in range of only `nets[...]` can join only network 1. It never reaches the
+   broker and never confirms, so the R2 confirm timer rolls it back unattended. The R3
+   consequence stands: the library must read `nets`, or every OTA to a maker image works only
+   within range of network 1.
+
+All of it is additive: no field is renamed, re-typed or repurposed, `proto` stays 1, the
+`ff_cfg` `version` stays 1, and the announce fields are flat (the CBOR drop-in holds).
+
+**Obligations on the follow-ups** (notes, not new tasks).
+
+- **R2b-fw-1:** read `nets` into a fixed array; truncate and warn above capacity; add the scan
+  and selection loop, leaving the single-network path unchanged; the "no known network"
+  console line; emit `ssid` / `known_networks` in `announce_object()`; redact nested `psk` in
+  `ff_cfg_log()` (and `ff_cfg.py describe()`); extend `KNOWN_KEYS` and `ff_cfg.c` together.
+  How selection interacts with the TX ladder is the implementer's call, but it must stay
+  bounded. No scans while associated. Apply Patch B in the same commit.
+- **R2b-fe-12:** extend `ffcfg.ts` (`nets`, the cap of 4, a nested `psk` never in an error
+  message or the diagnostic bundle); add an ASCII golden vector with `nets`; keep the
+  no-browser-storage rule.
+- **R2b-be-5:** `AnnouncePayload`, `IDENTITY_FIELDS`, device columns (a migration is
+  CRITICAL), the read model and the simulator (`simulator/device.py`); store, never reject, on
+  enroll; validate `ssid` at ≤ 32 bytes and `known_networks` as a small non-negative integer,
+  storing an invalid value as null.
+- **R2b-fe-13:** the honest offline copy, "offline, last on: shed", never the cause.
+
+**Paste-ready patches.** Generated with `git diff` against `9088e29`. Apply Patch A any time
+after the owner accepts this proposal (it is test-neutral). Apply Patch B on top of A **in the
+R2b-fw-1 commit**, never before: it adds `"ssid"` and `"known_networks"` to the announce
+example, and `test_the_firmware_builds_exactly_the_spec_keys` fails until `ff_identity.c`
+emits them. Extract each block by its marker line and `git apply` it from the repo root.
+
+<!-- R2b-spec-1 patch A -->
+```diff
+diff --git a/spec/device-protocol.md b/spec/device-protocol.md
+index 0a19981..f40e4ec 100644
+--- a/spec/device-protocol.md
++++ b/spec/device-protocol.md
+@@ -117,6 +117,15 @@ own receipt time**, never the device's timestamp — see *Clock* below.
+ has no data source. `partition_layout` also lets the server detect and quarantine boards
+ flashed with a superseded layout.
+ 
++`ssid` and `known_networks` say which network the board is on, never how it joined it.
++`ssid` is the SSID of the network this broker session runs over, as written in `ff_cfg`.
++`known_networks` is how many networks the board will try (after any it dropped for room).
++Both are `null` when `link_type` is `ethernet` and absent from agents older than the
++known-networks list. The server treats absent and `null` alike, as "not reported". The
++announce is republished on every broker connect, so a board that moved to another network
++reports it in its next session. The passphrase and the other networks' SSIDs are never
++sent.
++
+ #### Partition layouts
+ 
+ A layout id names a **whole flash map**, and it is a flash-time immutable: no OTA can
+@@ -140,6 +149,36 @@ board needs before it has ever spoken to the server: API origin, broker URI, lin
+ credentials and the enrollment token. The flasher writes it per board. A board finds it
+ by subtype through the partition table, never by a hardcoded offset.
+ 
++**Known networks.** A Wi-Fi board may know several networks:
++
++```
++"ssid": "home", "psk": "…", "nets": [{"ssid": "shed", "psk": "…"}, {"ssid": "bench"}]
++```
++
++- The top-level `ssid` / `psk` are the first, highest-priority network, so an old blob is a
++  list of one. `nets` (optional) holds the rest, in priority order.
++- At most 4 networks in all. Writers refuse more. A reader that finds more uses the first
++  ones it has room for, logs a warning, and never refuses to boot over length.
++- `psk` absent or `""` is an open network. Unknown keys inside an entry are ignored. A
++  malformed `nets` (not an array, an entry that is not an object, a missing or empty
++  `ssid`, a non-string field, an over-length `ssid` / `psk`) is a bad config: the board
++  idles.
++- The `ff_cfg` header `version` stays `1`. Readers refuse any other version, so a bump
++  would idle every fielded board; readers that predate `nets` ignore it and join the
++  top-level network.
++- Selection is fixed priority: the board joins the first known network its scan sees, and
++  the strongest AP of that SSID. It never leaves a working association for a
++  higher-priority network; it re-selects only after losing the link. A visible network
++  that does not get it an address does not block the next one. Networks the scan did not
++  see are then tried directly (hidden SSIDs), and it rescans. With one network it
++  connects directly, with no scan.
++- With no known network in range the board says so on its console once per attempt cycle
++  and keeps trying on the 1 s → 30 s backoff. It never reboots, never opens an access
++  point and never falls back to anything else. With no link it cannot tell the server,
++  which sees an offline board and nothing more.
++- Passphrases are never logged, announced or sent. In v1 the agent never writes the list;
++  only the flasher does.
++
+ ### `up/hb` — heartbeat
+ 
+ ```json
+diff --git a/spec/flows.md b/spec/flows.md
+index 6417b52..241e108 100644
+--- a/spec/flows.md
++++ b/spec/flows.md
+@@ -184,8 +184,11 @@ VCS integration and the server-side compiler are **automated artifact producers*
+ 4. JOIN    The board scans, picks a known network it can see, and joins. The next
+            `announce` names the network by SSID (never the passphrase).
+ 5. SEE     The Fleet row and the result card show "on: shed" and "knows 2 networks".
+-           If none is in range after a deadline, the card says so in plain language
+-           ("none of its 2 known networks is in range") and the board keeps trying.
++           If none is in range after a deadline, the result card (which reads the
++           console) says so in plain language ("none of its 2 known networks is in
++           range") and the board keeps trying. With no link the server cannot tell
++           out of range from powered off, so the Fleet row says only "offline, last
++           on: shed".
+ ```
+ 
+ **Later, in this order** (planned, not specified here):
+@@ -197,7 +200,8 @@ VCS integration and the server-side compiler are **automated artifact producers*
+ - **A network that was not on the list needs a re-flash,** until Improv lands. This is the accepted limit of v1.
+ - **Passphrases stay out of the server and out of browser storage.** Only the SSID is ever reported.
+ - **The board's own code must keep the list.** A maker's firmware (R3) has to read the same network list and, later, carry the Improv handler; otherwise the OTA that made the board useful would strand it on its current network.
+-- **Open, not decided:** how many networks, and the selection rule (a fixed priority order, or the strongest of those in range); the `ff_cfg` format change that carries a list (a proposal to `spec/device-protocol.md`, which is protected); how a board reports "no known network in range" (the announce cannot be sent without a link); whether a network list or credentials belong in NVS or `ff_cfg` once the agent can write them.
++- **Decided (R2b-spec-1):** up to four networks, in the operator's order; the first one in range wins, and a board that has joined one stays on it until the link drops; with none in range the board keeps trying and says so on its console. Format and selection rule: [device-protocol.md](device-protocol.md) → *Known networks*.
++- **Still open:** whether a network list or credentials belong in NVS or `ff_cfg` once the agent can write them (R2b-spec-3); and how "no known network in range" could ever reach the server, since the board has no link to send it over.
+ 
+ ## Where the pieces line up
+ - The **self-test** appears in Flow 2 step 3 (sim gate) and step 6 (device confirm) — the same code, two enforcement points.
+diff --git a/spec/open-questions.md b/spec/open-questions.md
+index 1bfa1db..eb00ac9 100644
+--- a/spec/open-questions.md
++++ b/spec/open-questions.md
+@@ -77,7 +77,9 @@ records the intended posture, but nothing on the wire confirms it. A `rollback_c
+ boolean in `up/announce` is additive and would let the server quarantine a board that
+ lies. Unverified against a real Arduino-built board.
+ 
+-**Field Wi-Fi change.** `flows.md` accepts re-flash for a credential change. Whether
+-that holds once boards are sealed in boxes (CUJ-1) is open; see the *repeat path*
+-question above. Candidate: copy `ssid`/`psk` from `ff_cfg` to NVS on enrolment and
+-let `dn/cmd` `set_cfg` rewrite them. Not decided.
++**Field Wi-Fi change.** Partly answered (R2b-spec-1). A board flashed with a list of
++known networks moves between them with no re-flash ([device-protocol.md](device-protocol.md)
++→ *Known networks*, `flows.md` Flow 3). A network not on the list still needs a re-flash,
++and whether that holds once boards are sealed in boxes (CUJ-1) is open; see the *repeat
++path* question above. The writable store (NVS or `ff_cfg`), and `dn/cmd` `set_cfg` versus
++Improv as the way in, move to R2b-spec-3. Not decided.
+```
+
+<!-- R2b-spec-1 patch B -->
+```diff
+diff --git a/spec/device-protocol.md b/spec/device-protocol.md
+index f40e4ec..9f56aba 100644
+--- a/spec/device-protocol.md
++++ b/spec/device-protocol.md
+@@ -103,6 +103,8 @@ own receipt time**, never the device's timestamp — see *Clock* below.
+   "fw_version": "1.4.2",
+   "agent_version": "0.3.2",
+   "link_type": "wifi",
++  "ssid": "shed",
++  "known_networks": 2,
+   "power_class": "always_on",
+   "expected_wake_interval_s": null,
+   "parent_device_id": null,
+```

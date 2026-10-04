@@ -6,6 +6,62 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-04 — A board knows up to four Wi-Fi networks, joins the first it can see, and announces only the one it is on (R2b-spec-1, proposed)
+
+**Decided: `ff_cfg` keeps its top-level `ssid` / `psk` as the first network and gains an
+optional `nets` array for up to three more, in priority order (at most 4 networks in all);
+the board joins the first known network its scan sees, by fixed priority rather than signal
+strength, and stays on it until the link drops; `up/announce` gains two
+optional flat fields, `ssid` and `known_networks`. This entry covers the PROPOSAL only.
+Nothing is built: no agent, server, frontend, migration, simulator or test change, and
+`spec/` is untouched.** The full text and the two paste-ready patches are in
+`docs/features/enrollment.md` → *Known networks: wire proposal (R2b-spec-1)*.
+
+- **Format "A": top-level first, `nets` for the rest.** An old blob is a list of one with no
+  branching, and an old agent (whose reader ignores unknown keys) joins network 1. Rejected:
+  `nets` holding every network with the top level mirroring `nets[0]` (two sources of truth),
+  `nets` with no top level (old readers idle), and a version bump.
+- **At most 4 networks in all.** A worst-case escaped entry is about 340 B, so 4 cost about
+  1.4 KB; with a ~600 B worst-case baseline about 2 KB of the 4080-byte payload stays free
+  for a possible CA root. Writers (`ff_cfg.py validate`, `ffcfg.ts validateFfCfg`) refuse
+  more; a reader that finds more uses what fits, warns, and never refuses to boot.
+- **Fixed-priority selection, no roaming while associated.** List order wins, the strongest
+  AP within one SSID, fall-through past a visible network that gives no address, hidden SSIDs
+  tried directly, and one network connects directly with no scan (QEMU run unchanged).
+  Rejected: strongest-in-range, which flaps at similar RSSI and makes "on: shed"
+  unpredictable.
+- **No known network in range:** a console line per attempt cycle, keeps trying on the
+  1 s → 30 s backoff, never reboots or opens an AP. **The server cannot see "no network in
+  range"**: with no link it sees only an offline board. Only the result card, which reads the
+  console, can name it; the Fleet row says "offline, last on: shed". This corrects Flow 3
+  step 5 and `R2b-fe-13`.
+- **Announce `ssid` and `known_networks`.** `ssid` is the network this broker session runs
+  over; `known_networks` is how many the board will try. `known_networks` was added beyond
+  the TODO line because "knows 2 networks" has no other source: the server never sees
+  `ff_cfg`. Both `null` on ethernet, absent on older agents (absent = `null` = not
+  reported). Never the passphrase or the other SSIDs. Enroll stores them, never rejects.
+- **The `ff_cfg` header version stays 1.** `ff_cfg_load()` refuses any other version, so a
+  bump would idle every fielded board.
+- **Downgrade is caught by the R2 rollback.** A pre-list image on a board in range of only
+  `nets[...]` never confirms and rolls back unattended. The R3 library must read `nets`, or
+  every OTA to a maker image works only within range of network 1.
+- **Application order: Patch A (prose) any time after acceptance, Patch B (the two
+  announce-example lines) in the R2b-fw-1 commit.** `test_the_firmware_builds_exactly_the_spec_keys`
+  requires `ff_identity.c` to emit every key in that example, so B before fw-1 turns
+  `just test` red.
+- **Dependents are blocked until the owner accepts:** `R2b-fw-1`, `R2b-fe-12`, `R2b-be-5`
+  (marked in `TODO.md`), so `/implement-all` does not build against an unapproved spec.
+- **Redaction gotcha.** `ff_cfg.py describe()`, `ff_cfg_log()`, the diagnostic bundle and
+  `ffcfg.ts` errors redact only a top-level `psk`; each must redact `nets[].psk` before
+  `nets` ships.
+- **Still open:** NVS vs `ff_cfg` once the agent can write the list (R2b-spec-3).
+
+Answers the *Open* items of the 2026-10-04 Flow 3 entry (count, selection rule, `ff_cfg`
+format, no-network report); supersedes nothing.
+
+
+---
+
 ## 2026-10-04 — The pre-flight card is shown on detect, never blocks, and the known-board button says re-enrol (R2b-fe-2)
 
 **Decided: once a chip is detected, a card between identify and configure says whether the

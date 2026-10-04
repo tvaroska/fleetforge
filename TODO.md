@@ -2,7 +2,7 @@
 
 **Goal:** Self-hosted OTA firmware management for embedded fleets (ESP32 first) — a bad
 build is caught before the fleet, and any device that gets one recovers itself.
-**Updated:** 2026-10-03
+**Updated:** 2026-10-04
 
 ## Where this stands
 
@@ -201,7 +201,7 @@ are R3). Order inside each flow: the one-place status first, then the cards, the
 
 ### Foundations
 
-- [ ] **R2b-spec-1**: Propose the known-networks list and `ssid` for `spec/device-protocol.md` (P1, 0.5d)
+- [x] **R2b-spec-1**: Propose the known-networks list and `ssid` for `spec/device-protocol.md` (P1, 0.5d) _(done 2026-10-04; reviewed; proposal filed, spec not applied; see DECISIONS.md and docs/features/enrollment.md)_
       Proposal only (`spec/` is protected, and the file is near-frozen: additive only). Shape:
       `ff_cfg` carries a list of networks (SSID + passphrase) and old single-network blobs
       stay readable; `up/announce` gains an optional `ssid` (never the passphrase). Decide:
@@ -305,14 +305,19 @@ are R3). Order inside each flow: the one-place status first, then the cards, the
       `ssid` in `announce`. States "no known network in range" and keeps trying. New agent
       version; `just agent-verify` and the QEMU run unchanged. Depends on `R2b-spec-1`
       being accepted.
+      **Blocked:** waits for the owner to accept and apply the R2b-spec-1 proposal (Patch A; fw-1 also applies Patch B). See docs/features/enrollment.md → *Known networks: wire proposal*.
 - [ ] **R2b-fe-12**: Flasher takes several networks, passphrase field uses the password manager (P1, 1d)
       `ffcfg.ts` encodes the list; "add another network". The no-browser-storage rule in
       `FlashBoard.tsx` stays: the field is marked for the browser's own password manager,
       and nothing is written to storage. Depends on `R2b-spec-1`.
-- [ ] **R2b-be-5**: Ingest and expose the board's `ssid` (P1, 0.5d)
-      Additive field on the device read model. Depends on `R2b-spec-1`.
+      **Blocked:** waits for the owner to accept and apply the R2b-spec-1 proposal (Patch A; fw-1 also applies Patch B). See docs/features/enrollment.md → *Known networks: wire proposal*.
+- [ ] **R2b-be-5**: Ingest and expose the board's `ssid` and `known_networks` (P1, 0.5d)
+      Additive fields on the device read model. Depends on `R2b-spec-1`.
+      **Blocked:** waits for the owner to accept and apply the R2b-spec-1 proposal (Patch A; fw-1 also applies Patch B). See docs/features/enrollment.md → *Known networks: wire proposal*.
 - [ ] **R2b-fe-13**: Fleet row shows the network: "on: shed", "knows 2 networks" (P1, 0.5d)
-      And "none of its known networks is in range" when it has not announced for a while.
+      An offline board shows "offline, last on: shed": the server cannot tell out of range
+      from powered off (R2b-spec-1). Only the result card, which reads the console, names
+      "none of its 2 known networks is in range".
       Depends on `R2b-be-5`.
 - [ ] **R2b-test-4**: Move a board between two networks on the bench (P1, 0.5d)
       Flash with two networks, power it where only the second is in range, see it join and
