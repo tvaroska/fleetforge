@@ -88,7 +88,8 @@ the retired bingo app), single-tenant, **not a public product until V3**.
 
 Bricking risks, broker auth and security issues get filed here as they surface.
 
-- [ ] **S0-bug-1**: Board `94a990dd09a4` did not reach "On the fleet" after the 2026-10-04 bench flash (P1, 0.5d)
+- [!] **S0-bug-1**: Board `94a990dd09a4` did not reach "On the fleet" after the 2026-10-04 bench flash (P1, 0.5d)
+      _(⚠ failed 2026-10-04; blocker: Blocked on operator: replug USB with the dashboard and serial terminal closed, then watch the ingestor log for 10 min or more. (after 2 attempts))_
       Found at the bench during Check F: after a native-USB flash the console re-opened by
       itself and streamed the log, then sat at "waiting for **Clock set**" and the Fleet table
       did not show the board online. Not diagnosed: the bench notes do not say whether it was
