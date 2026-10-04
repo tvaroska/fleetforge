@@ -57,7 +57,7 @@ run could show, so the pass rests on the deterministic judge. Task list below; b
   longer pull (`DECISIONS.md` 2026-10-01). No task filed yet.
 
 <!-- Counters: spec=1 infra=7 db=1 be=6 fe=7 sec=1 fw=4 test=3 -->
-<!-- Sprint 0 counters: fe=8 fw=4 infra=9 test=4 ops=1 bug=1 -->
+<!-- Sprint 0 counters: fe=8 fw=4 infra=10 test=4 ops=1 bug=1 -->
 <!-- R1 counters: be=3 fe=1 fw=2 test=1 -->
 <!-- R2 counters: fw=6 be=1 fe=1 test=2 spec=1 (fw-3 is the R1-landed confirm timer) -->
 <!-- R3 counters: spec=1 fw=4 test=1 -->
@@ -96,6 +96,29 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       continues), or the broker. First step: is the board online now, and what do its last
       stage reports and the ingestor log say? Until answered, the one enrolled board's state
       is unknown. Acceptance: the cause is named, and the board is on the fleet or re-flashed.
+      Diagnosed 2026-10-04: **Cause A** (fixed in the console): the board DID reach the fleet
+      at 14:20:08 and stayed online until 14:24:58. The SNTP wait timed out after 15 s, but
+      the S3's RTC kept a sane clock across the hard reset, so TLS enrolment worked
+      (`enroll 200`, MQTT connected). The console's strict first-unreached ordering kept
+      showing "waiting for Clock set" and never the on-fleet banner; a later milestone now
+      implies the earlier ones (`skipped`). **Cause B**: the board went silent at ~14:24:13
+      (broker keepalive timeout, no DISCONNECT, 10 s after the dashboard tab closed) and has
+      not returned: power removed vs firmware wedge cannot be told apart from the server.
+      Prod's agent bundles are stale: see S0-infra-10.
+      Operator owed: power-cycle the board (replug USB) with the dashboard **and** any serial
+      terminal closed. Watch `docker compose logs -f fleetforge-ingestor | grep 94a990` on prod
+      for 10 min or more. Heartbeats every 60 s for 10 min: cause B was the power being removed;
+      tick S0-bug-1. Silent again after 2-4 min with nothing touched: firmware wedge, file a new
+      S0 fw task (suspects: USB-Serial-JTAG console back-pressure, task WDT that does not
+      reset) and tick S0-bug-1. If it never connects, re-flash from the flash page.
+- [ ] **S0-infra-10**: Prod's flasher serves agent 0.3.2 (esp32s3) and 0.2.0 (esp32/c3/c6); the repo is at 0.4.5 (P1, 0.25d)
+      Found by S0-bug-1 (2026-10-04): `gs://btvaroska/fleetforge/agent/index.json` was last
+      published 2026-09-23. Every board flashed from bingo.tvaroska.sk gets a pre-R2 agent
+      with none of R2-fw-1...6. Decide first whether the 0.3.x serial baseline is wanted
+      (serial-console-bench.md Check E/F talk about a 0.3.1 baseline). If not, `just
+      agent-publish-all` to prod per docs/runbooks/artifact-storage.md, *Publishing agent
+      bundles*, with the user's go-ahead. Consider making `/release` or `just deploy` warn
+      when the published agent_version lags `agent/version.txt`.
 - [x] **S0-test-3**: Someone who did not see the code onboards a board unaided — passed 2026-09-22 → [enrollment.md](docs/features/enrollment.md)
 - [x] **S0-fw-3**: A board that browns out during RF calibration cannot escape it — withdrawn 2026-09-23, not fixed → [enrollment.md](docs/features/enrollment.md)
 

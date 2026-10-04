@@ -119,7 +119,18 @@ export type ConsoleSummary = {
    * diagnosis in the wrong direction, and it did.
    */
   reached: Milestone[]
-  /** The next thing that has not happened yet, or null once the board is on the fleet. */
+  /**
+   * Passed without its log line: milestones before the furthest one reached that this boot
+   * never printed. `clock` after an SNTP timeout on a board whose RTC kept a sane time
+   * across the reset (S0-bug-1, 2026-10-04 bench): the TLS handshake that enrolled it proves
+   * the clock was valid. `enroll` on a board reusing a stored credential. Derived after the
+   * loop, so a reboot clears it together with `reached`.
+   */
+  skipped: Milestone[]
+  /**
+   * The milestone after the furthest one reached, or null once the board is on the fleet.
+   * Not "first unreached": a later milestone proves the earlier ones were passed.
+   */
   waitingFor: Milestone | null
   /**
    * The most recent explained failure that no later milestone has invalidated. A board
@@ -251,6 +262,9 @@ const specific = (text: string, remedy: Remedy | null = null): Hint => ({
   kind: 'specific',
   remedy,
 })
+
+/** First year the agent treats as a real clock: `FF_TIME_SANE_YEAR`, `agent/main/ff_time.c:24`. */
+const FF_TIME_SANE_YEAR = 2024
 
 /** The boot-ROM reset banner: `rst:0xf (RTCWDT_BROWN_OUT_RESET),boot:0x13 (SPI_FAST…)`. */
 const RESET_BANNER = /^rst:0x[0-9a-f]+\s*\(([A-Z0-9_]+)\)/i
@@ -543,9 +557,22 @@ function hintFor(tag: string | null, text: string): Hint | null {
 
   if (tag === 'ff-time') {
     if (text.startsWith('sntp: no answer')) {
+      const year = /clock is still (\d{4})-/.exec(text)?.[1]
+      if (year !== undefined && Number(year) >= FF_TIME_SANE_YEAR) {
+        // GENERIC: this is not a cause, and must never displace a specific one.
+        return {
+          text:
+            "No NTP answer, but the board's clock already holds a plausible time (it " +
+            'survived the reset), so TLS can still work. If enrolment fails next, the ' +
+            'network may be blocking UDP/123.',
+          kind: 'generic',
+          remedy: null,
+        }
+      }
       return specific(
         'The clock is still unset, so TLS cannot check a certificate: enrolment over ' +
-          'https:// and mqtts:// will fail. The network may be blocking UDP/123.',
+          'https:// and mqtts:// will fail until the clock is set. The network may be ' +
+          'blocking UDP/123.',
       )
     }
     if (text.includes('no ntp server configured')) {
@@ -697,7 +724,10 @@ export function summarizeConsole(events: ConsoleEvent[], now = Date.now()): Cons
   }
 
   const ordered = MILESTONES.filter((m) => reached.has(m))
-  const waitingFor = MILESTONES.find((m) => !reached.has(m)) ?? null
+  // A milestone reached proves every earlier one was passed, even if it never logged.
+  const furthest = MILESTONES.reduce((acc, m, i) => (reached.has(m) ? i : acc), -1)
+  const skipped = MILESTONES.filter((m, i) => i < furthest && !reached.has(m))
+  const waitingFor = MILESTONES[furthest + 1] ?? null
 
   // Nothing may spin forever: a milestone that has outlived its budget says so itself, even
   // when the board has gone completely quiet and no line will ever arrive to explain it.
@@ -712,7 +742,7 @@ export function summarizeConsole(events: ConsoleEvent[], now = Date.now()): Cons
         }
       : null
 
-  return { reached: ordered, waitingFor, fault, boots, rebootLoop, overdue }
+  return { reached: ordered, skipped, waitingFor, fault, boots, rebootLoop, overdue }
 }
 
 /** How the console gets hold of a port. See `serialConsole.ts` for what each one costs. */

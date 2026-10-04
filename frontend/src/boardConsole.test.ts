@@ -13,6 +13,7 @@ import {
   type ConsoleEvent,
 } from './boardConsole'
 import { BENCH_2026_09_11 } from './fixtures/bench-2026-09-11'
+import { BENCH_2026_10_04 } from './fixtures/bench-2026-10-04'
 
 /** "Now" for a replay. Anchored to the real clock so the tests that do not care about time
  *  still see a summary taken moments after the last line, as a bench operator would. */
@@ -599,5 +600,65 @@ describe('an overdue milestone carries MILESTONE_REMEDY', () => {
     const summary = summarizeConsole(events, at(events) + MILESTONE_DEADLINE_MS.link + 1000)
     expect(summary.overdue?.milestone).toBe('link')
     expect(summary.overdue?.remedy).toBeNull()
+  })
+})
+
+// ── S0-bug-1: a later milestone proves the earlier ones were passed ─────────────────────
+describe('summarizeConsole when a milestone line never printed', () => {
+  const RESET = 'rst:0x1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)'
+
+  it('replays the 2026-10-04 bench: SNTP timed out, enrolled, on the fleet', () => {
+    const events = classify(BENCH_2026_10_04)
+    const summary = summarizeConsole(events, at(events))
+    expect(summary.waitingFor).toBeNull()
+    expect(summary.reached).toEqual(['boot', 'link', 'enroll', 'fleet'])
+    expect(summary.skipped).toEqual(['clock'])
+    expect(summary.fault).toBeNull()
+    expect(summary.overdue).toBeNull()
+    expect(summarizeConsole(events, at(events) + 10 * 60_000).overdue).toBeNull()
+  })
+
+  it('waits for the fleet after enrolling, still counting the clock as skipped', () => {
+    const events = classify(BENCH_2026_10_04.slice(0, 4))
+    const summary = summarizeConsole(events, at(events))
+    expect(summary.waitingFor).toBe('fleet')
+    expect(summary.skipped).toEqual(['clock'])
+  })
+
+  it('treats a stored-credential reboot as on the fleet, with enrol skipped', () => {
+    const events = classify([
+      'I (100) ff-agent: fleetforge agent 0.3.2 (idf v5.5.5), built Sep 23 2026 19:00:00',
+      'I (900) ff-net: wifi link up, ip 192.168.1.57 gw 192.168.1.1 mask 255.255.255.0',
+      'I (3000) ff-time: sntp: 1970-01-01T00:00:03Z -> 2026-10-04T15:00:00Z (via pool.ntp.org)',
+      'I (3100) ff-store: reusing the stored credential (no enrollment): 94a990dd09a4',
+      'I (3900) ff-mqtt: mqtt connected as 94a990dd09a4 (mqtts://bingo.tvaroska.sk:8883)',
+    ])
+    const summary = summarizeConsole(events, at(events))
+    expect(summary.waitingFor).toBeNull()
+    expect(summary.skipped).toEqual(['enroll'])
+  })
+
+  it('retracts everything, skipped included, when the board resets', () => {
+    const events = classify([
+      ...BENCH_2026_10_04,
+      RESET,
+      'I (100) ff-agent: fleetforge agent 0.3.2 (idf v5.5.5), built Sep 23 2026 19:00:00',
+    ])
+    const summary = summarizeConsole(events, at(events))
+    expect(summary.reached).toEqual(['boot'])
+    expect(summary.skipped).toEqual([])
+    expect(summary.waitingFor).toBe('link')
+  })
+
+  it('gives a generic hint when the clock is already sane, a specific one when it is not', () => {
+    const sane = classifyConsoleLine(BENCH_2026_10_04[2], 0, T0)
+    expect(sane.hintKind).toBe('generic')
+    expect(sane.hint).toMatch(/survived the reset/)
+    const unset = classifyConsoleLine(
+      'W (12500) ff-time: sntp: no answer from pool.ntp.org within 10000 ms; clock is still 1970-01-01T00:00:02Z',
+      0,
+      T0,
+    )
+    expect(unset.hintKind).toBe('specific')
   })
 })

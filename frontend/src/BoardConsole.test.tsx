@@ -18,6 +18,7 @@ import {
   type ConsoleFactory,
 } from './boardConsole'
 import { BENCH_2026_09_11 } from './fixtures/bench-2026-09-11'
+import { BENCH_2026_10_04 } from './fixtures/bench-2026-10-04'
 
 const HAPPY = [
   'rst:0x1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)',
@@ -157,6 +158,17 @@ describe('BoardConsolePanel', () => {
     })
     expect(await screen.findByTestId('console-online')).toBeInTheDocument()
     expect(screen.queryByTestId('console-fault')).not.toBeInTheDocument()
+  })
+
+  it('shows a board on the fleet when SNTP timed out but enrolment worked (S0-bug-1)', async () => {
+    const { factory } = fakeConsole(BENCH_2026_10_04)
+    render(<BoardConsolePanel autoWatch createConsole={factory} />)
+
+    expect(await screen.findByTestId('console-online')).toBeInTheDocument()
+    const milestones = screen.getByTestId('boot-milestones')
+    const clock = milestones.querySelector('li[data-state="skipped"]')
+    expect(clock).toHaveTextContent('Clock set')
+    expect(milestones.querySelector('[data-state="waiting"]')).toBeNull()
   })
 
   it('names the cause when the board goes silent', async () => {

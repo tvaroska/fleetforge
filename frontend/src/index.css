@@ -350,6 +350,11 @@ textarea.log {
   font-weight: 700;
 }
 
+.milestones li.skipped {
+  color: var(--ff-dim);
+  font-weight: 400;
+}
+
 .milestones li.waiting {
   color: var(--ff-fg);
   font-weight: 700;

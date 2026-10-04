@@ -28,16 +28,34 @@ const LEVEL_CLASS: Record<ConsoleLevel, string> = {
   plain: 'muted',
 }
 
-function Checklist({ reached, waitingFor }: { reached: Milestone[]; waitingFor: Milestone | null }) {
+function Checklist({
+  reached,
+  skipped,
+  waitingFor,
+}: {
+  reached: Milestone[]
+  skipped: Milestone[]
+  waitingFor: Milestone | null
+}) {
   return (
     <ol className="milestones" data-testid="boot-milestones">
       {MILESTONES.map((milestone) => {
         const done = reached.includes(milestone)
-        const state = done ? 'done' : milestone === waitingFor ? 'waiting' : 'pending'
+        const wasSkipped = !done && skipped.includes(milestone)
+        const state = done
+          ? 'done'
+          : wasSkipped
+            ? 'skipped'
+            : milestone === waitingFor
+              ? 'waiting'
+              : 'pending'
         return (
           <li key={milestone} className={state} data-state={state}>
-            <span aria-hidden="true">{done ? '✓' : milestone === waitingFor ? '…' : '·'}</span>{' '}
+            <span aria-hidden="true">
+              {done ? '✓' : wasSkipped ? '–' : milestone === waitingFor ? '…' : '·'}
+            </span>{' '}
             {MILESTONE_LABELS[milestone]}
+            {state === 'skipped' && <span className="muted"> — not logged</span>}
             {state === 'waiting' && <span className="muted"> — waiting</span>}
           </li>
         )
@@ -240,7 +258,11 @@ export function BoardConsolePanel({
       {state.opening && <p className="muted">Opening the port…</p>}
 
       {state.watching && (
-        <Checklist reached={state.summary.reached} waitingFor={state.summary.waitingFor} />
+        <Checklist
+          reached={state.summary.reached}
+          skipped={state.summary.skipped}
+          waitingFor={state.summary.waitingFor}
+        />
       )}
 
       {fault !== null && (
@@ -308,7 +330,7 @@ export function BoardConsolePanel({
         </p>
       )}
 
-      {state.summary.waitingFor === null && state.summary.reached.length === MILESTONES.length && (
+      {state.summary.reached.includes('fleet') && (
         <p className="ok" role="status" data-testid="console-online">
           This board enrolled and is on the fleet. You can release the port.
         </p>

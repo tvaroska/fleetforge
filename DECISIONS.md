@@ -6,6 +6,29 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-04 — A later milestone implies the earlier ones; a clock can survive a reset (S0-bug-1)
+
+**Decided: the console's `waitingFor` is the milestone after the furthest one reached, not
+the first unreached one. Earlier milestones that never logged are reported as `skipped`.
+`reached` stays "seen this boot" (S0-fe-4's stale-tick rule stands; nothing superseded).**
+
+- **Why.** On the 2026-10-04 bench the SNTP wait timed out, yet enrolment over https and
+  MQTT worked: with `MBEDTLS_HAVE_TIME_DATE=y` a passing TLS handshake proves the clock, and
+  the S3's RTC survives the native-USB `hard_reset`. The board was on the fleet from 14:20:08
+  to 14:24:58 while the panel said "waiting for Clock set" and never showed the banner.
+- **Same rule covers** a reboot with a stored credential (no `enroll 200` line): `enroll` is
+  `skipped`, not waited on.
+- **Hint softened.** `sntp: no answer` with a clock year >= 2024 (`FF_TIME_SANE_YEAR`) is a
+  generic hint; with 1970 it stays specific, now "will fail until the clock is set".
+- **The on-fleet banner** keys on `reached` including `fleet`.
+- **Cause B** (board silent from ~14:24:13, never back) is unresolved: power removed vs
+  firmware wedge needs an operator power-cycle run, see TODO S0-bug-1.
+- **Side finding:** prod serves stale agent bundles (0.3.2 / 0.2.0 vs repo 0.4.5), filed as
+  S0-infra-10. Publishing to prod was not done.
+
+
+---
+
 ## 2026-10-04 — Flow 3: a board knows several Wi-Fi networks; Improv later (corrects the Wi-Fi wording of the entries below)
 
 **Decided: `spec/flows.md` gets Flow 3, "Change the network a board uses". v1 is a list of
