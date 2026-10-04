@@ -7,6 +7,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Dashboard } from './Dashboard'
 import { type DeviceSummary } from './api'
 import { type EventSourceLike } from './fleet'
+import { type BoardFlasher, type FlasherFactory } from './flasher'
 
 const ui = { version: '0.4.2', commit: 'unknown', builtAt: 'unknown' }
 const health = { phase: 'ok', health: { status: 'ok', version: '0.4.2' } } as const
@@ -60,12 +61,18 @@ function mockApi(devices: DeviceSummary[]) {
       return json({ cmd_id: 'c', device_id: 'x', version: '1.5.0', apply: 'auto', reused: false })
     }
     if (url === '/v1/devices') return json({ devices, arrivals: [] })
+    if (url === '/v1/agent/manifest') {
+      return json({
+        agent_version: '0.4.5',
+        builds: [{ chip_family: 'ESP32', agent_version: '0.4.5', partition_layout: 'ab-4m-v1', parts: [] }],
+      })
+    }
     if (url === '/v1/enrollment-tokens') return json({ tokens: [] })
     return json({})
   })
 }
 
-function renderDashboard() {
+function renderDashboard(createFlasher?: FlasherFactory) {
   const sources = vi.fn(
     (): EventSourceLike => ({
       readyState: 0,
@@ -83,6 +90,7 @@ function renderDashboard() {
       health={health}
       ui={ui}
       createEventSource={sources}
+      createFlasher={createFlasher}
     />,
   )
   return { sources }
@@ -128,5 +136,44 @@ describe('Dashboard', () => {
     const { sources } = renderDashboard()
     await screen.findByTestId('strip-board')
     expect(sources).toHaveBeenCalledTimes(1)
+  })
+
+  describe('pre-flight card', () => {
+    const fakeFlasher: FlasherFactory = async () =>
+      ({
+        detect: async () => ({
+          chipName: 'ESP32',
+          description: 'ESP32-D0WD-V3',
+          macAddress: 'A4:CF:12:B3:DE:90',
+          flashSizeBytes: 4 * 1024 * 1024,
+          features: [],
+        }),
+        write: async () => {},
+        finish: async () => {},
+        close: async () => {},
+      }) as BoardFlasher
+
+    async function detectOnDashboard(devices: DeviceSummary[]) {
+      Object.defineProperty(navigator, 'serial', { value: {}, configurable: true })
+      Object.defineProperty(window, 'isSecureContext', { value: true, configurable: true })
+      mockApi(devices)
+      const { sources } = renderDashboard(fakeFlasher)
+      await screen.findByTestId('strip-board')
+      await userEvent.click(screen.getByRole('button', { name: /select port and detect/i }))
+      return { sources, card: await screen.findByTestId('preflight-card') }
+    }
+
+    it('is known, with the listed firmware, from the page fleet', async () => {
+      const { sources, card } = await detectOnDashboard([device()])
+      await waitFor(() => expect(card).toHaveAttribute('data-kind', 'known'))
+      expect(card).toHaveTextContent('fw 1.4.2')
+      expect(sources).toHaveBeenCalledTimes(1)
+    })
+
+    it('is new for an empty fleet', async () => {
+      const { sources, card } = await detectOnDashboard([])
+      await waitFor(() => expect(card).toHaveAttribute('data-kind', 'new'))
+      expect(sources).toHaveBeenCalledTimes(1)
+    })
   })
 })

@@ -15,7 +15,7 @@ import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { FlashBoard } from './FlashBoard'
 import { planWrite, predictDeviceId } from './flash'
-import type { AgentBuildInfo, AgentManifest } from './api'
+import type { AgentBuildInfo, AgentManifest, DeviceSummary } from './api'
 import type { BoardConsole, ConsoleFactory } from './boardConsole'
 import { BUILT_IN_PORT, checkChosenPort } from './flasher'
 import type { BoardFlasher, ChipInfo, FlashPart, WriteOptions } from './flasher'
@@ -923,5 +923,125 @@ describe('FlashBoard — the diagnostic bundle', () => {
     expect(bundle).toContain('ffe_[REDACTED]')
     expect(bundle).toContain('mqtts://fleet:[REDACTED]@bench.local:8883')
     expect(bundle).toContain(`passphrase ${PASSPHRASE.length} chars (never printed)`)
+  })
+})
+
+describe('FlashBoard — pre-flight card (R2b-fe-2)', () => {
+  const NOW = Date.parse('2026-09-10T12:00:00Z')
+  const row = (over: Partial<DeviceSummary> = {}): DeviceSummary => ({
+    device_id: 'a4cf12b3de90',
+    name: null,
+    group_id: null,
+    platform_type: 'esp32',
+    fw_version: '1.4.2',
+    agent_version: '0.4.5',
+    link_type: 'wifi',
+    power_class: 'always_on',
+    expected_wake_interval_s: null,
+    parent_device_id: null,
+    partition_layout: 'ab-4m-v1',
+    ota_slot_size: 1966080,
+    capabilities: ['ota'],
+    last_seen: '2026-09-10T11:59:30Z',
+    enrolled_at: '2026-09-10T11:00:00Z',
+    broker_provisioned_at: null,
+    online: true,
+    deploy: null,
+    ...over,
+  })
+  const fleetOf = (devices: DeviceSummary[] | null) => ({
+    devices,
+    arrivals: [],
+    error: null,
+    now: NOW,
+  })
+
+  async function detect(
+    devices: DeviceSummary[] | null | undefined,
+    info: ChipInfo = chipInfo(),
+    flasher = new FakeFlasher(info),
+  ) {
+    const mocked = mockFetch(await defaultRoutes())
+    render(
+      <FlashBoard
+        onSessionExpired={vi.fn()}
+        createFlasher={async () => flasher}
+        fleet={devices === undefined ? undefined : fleetOf(devices)}
+      />,
+    )
+    await userEvent.click(screen.getByRole('button', { name: /select port and detect/i }))
+    await screen.findByTestId('chip-info')
+    return { ...mocked, flasher }
+  }
+
+  it('shows the known-board card before the button and mints nothing on detect', async () => {
+    const { calls } = await detect([row()])
+    const card = screen.getByTestId('preflight-card')
+    expect(card).toHaveAttribute('data-kind', 'known')
+    expect(card).toHaveTextContent(
+      'Re-flashing issues a new token and re-enrols it; its current baseline ends.',
+    )
+    expect(card).toHaveTextContent('fw 1.4.2')
+    expect(card).toHaveTextContent('online')
+    const button = screen.getByRole('button', { name: 'Re-flash and re-enrol this board' })
+    expect(card.compareDocumentPosition(button) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(calls).not.toContain('POST /v1/enrollment-tokens')
+  })
+
+  it('says new board for an id that is not on the fleet', async () => {
+    await detect([row({ device_id: 'b26a938324ab' })])
+    const card = screen.getByTestId('preflight-card')
+    expect(card).toHaveAttribute('data-kind', 'new')
+    expect(card).toHaveTextContent(/new board/i)
+    expect(screen.getByRole('button', { name: 'Flash this board' })).toBeInTheDocument()
+  })
+
+  it('does not block Flash while the fleet is loading', async () => {
+    await detect(null)
+    expect(screen.getByTestId('preflight-card')).toHaveAttribute('data-kind', 'checking')
+    await userEvent.type(screen.getByLabelText(/ssid/i), SSID)
+    await userEvent.type(screen.getByLabelText(/passphrase/i), PASSPHRASE)
+    expect(screen.getByRole('button', { name: 'Flash this board' })).toBeEnabled()
+  })
+
+  it('says unknown-id when no MAC was read', async () => {
+    await detect([row()], chipInfo({ macAddress: null }))
+    expect(screen.getByTestId('preflight-card')).toHaveAttribute('data-kind', 'unknown-id')
+  })
+
+  it('warns about an update in progress and a layout change', async () => {
+    await detect([
+      row({
+        partition_layout: 'other-layout',
+        deploy: {
+          cmd_id: 'c',
+          state: 'downloading',
+          at: '2026-09-10T11:59:00Z',
+          is_terminal: false,
+          artifact_version: '1.5.0',
+          from_version: '1.4.2',
+          pct: null,
+          detail: null,
+        },
+      }),
+    ])
+    const card = screen.getByTestId('preflight-card')
+    expect(card).toHaveTextContent(/update is in progress/i)
+    expect(card).toHaveTextContent('Partition layout changes: other-layout → ab-4m-v1.')
+  })
+
+  it('is gone once the flash has finished', async () => {
+    const flasher = new FakeFlasher(chipInfo())
+    await detect([row()], chipInfo(), flasher)
+    await userEvent.type(screen.getByLabelText(/ssid/i), SSID)
+    await userEvent.type(screen.getByLabelText(/passphrase/i), PASSPHRASE)
+    await userEvent.click(screen.getByRole('button', { name: /re-flash and re-enrol this board/i }))
+    await screen.findByRole('heading', { name: 'Flashed' })
+    expect(screen.queryByTestId('preflight-card')).toBeNull()
+  })
+
+  it('renders no card without the fleet prop', async () => {
+    await detect(undefined)
+    expect(screen.queryByTestId('preflight-card')).toBeNull()
   })
 })

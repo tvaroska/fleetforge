@@ -13,6 +13,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError, api, type AgentManifest } from './api'
+import { type Fleet } from './fleet'
 import { BoardConsolePanel } from './BoardConsole'
 import { type ConsoleFactory } from './boardConsole'
 import { uriSecrets, type DiagnosticContext } from './diagnostics'
@@ -26,6 +27,8 @@ import {
   type FlasherFactory,
 } from './flasher'
 import { PortHelp } from './PortHelp'
+import { PreflightCard } from './PreflightCard'
+import { describePreflight, installFor } from './preflight'
 
 /** 921600 first: it is what a CP210x/native-USB board wants. 115200 is the CH340 escape. */
 const BAUD_RATES = [921600, 460800, 115200]
@@ -102,10 +105,10 @@ function Unavailable({ reason }: { reason: 'no-web-serial' | 'insecure' }) {
       <p className="muted">
         {reason === 'no-web-serial' ? (
           <>
-            Flashing needs the Web Serial API: use Chrome or Edge. Chromium-only is an
-            accepted v1 limit (<code>spec/prd.md</code> — client constraint). Everything else on
-            this page works in any browser; you can still generate a token below and flash the
-            board with <code>esptool.py</code>.
+            Flashing needs the Web Serial API: use Chrome or Edge. Chromium-only is an accepted v1
+            limit (<code>spec/prd.md</code> — client constraint). Everything else on this page works
+            in any browser; you can still generate a token below and flash the board with{' '}
+            <code>esptool.py</code>.
           </>
         ) : (
           <>
@@ -123,11 +126,15 @@ export function FlashBoard({
   createFlasher,
   createConsole,
   onBoardIdentified,
+  fleet,
 }: {
   onSessionExpired: () => void
   // R2b-fe-1: tells the status strip which board this is, once detected and again once
   // flashed. Optional; the flasher works the same without it.
   onBoardIdentified?: (deviceId: string) => void
+  // R2b-fe-2: the fleet from `Dashboard`'s single `useFleet` — never open a second one
+  // here (one SSE slot each). Feeds the pre-flight card; absent means no card.
+  fleet?: Pick<Fleet, 'devices' | 'arrivals' | 'error' | 'now'>
   // Injected by the tests only: jsdom has no `navigator.serial` (see `flasher.ts`).
   createFlasher?: FlasherFactory
   createConsole?: ConsoleFactory
@@ -205,6 +212,16 @@ export function FlashBoard({
   const mixedVersions =
     manifest !== null && new Set(manifest.builds.map((b) => b.agent_version)).size > 1
   const predicted = chip === null ? null : predictDeviceId(chip)
+  const preflight =
+    chip !== null && fleet !== undefined
+      ? describePreflight({
+          predictedId: predicted,
+          devices: fleet.devices,
+          arrivals: fleet.arrivals,
+          fleetError: fleet.error,
+          install: installFor(manifest, chip),
+        })
+      : null
   const apiBase = defaultApiBase()
   const config: FlashConfigInput = {
     apiBase,
@@ -227,8 +244,7 @@ export function FlashBoard({
   // Not memoised on purpose: it is only ever used from an `onClick`, and `config` is a
   // fresh literal on every render, so a `useCallback` would churn and buy nothing — and
   // one with an honest dependency list would be rebuilt every render anyway.
-  const recoverByReflash = () =>
-    state.reflash({ config, baudRate: form.baudRate })
+  const recoverByReflash = () => state.reflash({ config, baudRate: form.baudRate })
 
   // S0-fe-7. A plain literal for the same reason `recoverByReflash` is: `config` is a
   // fresh object on every render, so a memo with an honest dependency list would be
@@ -260,8 +276,8 @@ export function FlashBoard({
       <h2 id="flash-heading">Flash a board</h2>
       <p className="muted">
         Connect an ESP32 over USB, confirm what it is, and write the agent plus this board&apos;s
-        own configuration. A single-use enrollment token is minted for it automatically — you do
-        not need to generate one below.
+        own configuration. A single-use enrollment token is minted for it automatically — you do not
+        need to generate one below.
       </p>
 
       {manifestError !== null && (
@@ -331,9 +347,7 @@ export function FlashBoard({
             <dt>Device ID</dt>
             <dd>
               {predicted === null ? 'unknown' : <code>{predicted}</code>}{' '}
-              <span className="muted">
-                (predicted — the board reads its own eFuse MAC at boot)
-              </span>
+              <span className="muted">(predicted — the board reads its own eFuse MAC at boot)</span>
             </dd>
           </dl>
 
@@ -365,6 +379,9 @@ export function FlashBoard({
               Other — enter manually
             </label>
           </fieldset>
+          {preflight !== null && fleet !== undefined && state.phase !== 'done' && (
+            <PreflightCard preflight={preflight} now={fleet.now} />
+          )}
         </>
       )}
 
@@ -487,10 +504,9 @@ export function FlashBoard({
 
       <h3>3 · Flash</h3>
       <p className="muted">
-        Every flash mints a fresh single-use token. The board notices the new token on its
-        first boot, clears the broker credential it was holding and enrols again — so a board
-        that has already been enrolled re-registers without erasing its cached radio
-        calibration.
+        Every flash mints a fresh single-use token. The board notices the new token on its first
+        boot, clears the broker credential it was holding and enrols again — so a board that has
+        already been enrolled re-registers without erasing its cached radio calibration.
       </p>
       {configError !== null && (
         <p className="bad" role="alert" data-testid="config-error">
@@ -500,16 +516,14 @@ export function FlashBoard({
       <p>
         <button
           type="button"
-          onClick={() =>
-            void state.flash({ config, baudRate: form.baudRate })
-          }
+          onClick={() => void state.flash({ config, baudRate: form.baudRate })}
           // `manifest === null` disables it too: since S0-infra-6 the agent images come
           // from the object store, so "no manifest" is a real running state (store down,
           // nothing published). Without this the operator presses Flash, the board is put
           // into bootloader mode, and the failure only surfaces at part 1 of 4.
           disabled={state.busy || chip === null || configError !== null || manifest === null}
         >
-          Flash this board
+          {preflight?.kind === 'known' ? 'Re-flash and re-enrol this board' : 'Flash this board'}
         </button>
       </p>
 
@@ -527,8 +541,7 @@ export function FlashBoard({
 
       {state.progress !== null && (
         <p data-testid="flash-progress">
-          {state.progress.label} — part {state.progress.partIndex + 1} of{' '}
-          {state.progress.partCount}
+          {state.progress.label} — part {state.progress.partIndex + 1} of {state.progress.partCount}
           <progress value={state.progress.written} max={state.progress.total || 1} />
         </p>
       )}

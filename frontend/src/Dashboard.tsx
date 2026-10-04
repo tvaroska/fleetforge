@@ -5,12 +5,14 @@
 //
 // Which board the strip shows: the last one picked in the table, deployed to, or
 // detected/flashed in the flasher; with nothing picked and exactly one board, that one.
+// The flasher also reads the shared fleet (pre-flight card, R2b-fe-2).
 
 import { useState } from 'react'
 import { type Me } from './api'
 import { buildInfo, type BuildInfo } from './buildInfo'
 import { useArtifacts } from './deploy'
 import { EnrollBoard } from './EnrollBoard'
+import { type FlasherFactory } from './flasher'
 import { FlashBoard } from './FlashBoard'
 import { FleetTable } from './FleetView'
 import { useFleet, type EventSourceFactory } from './fleet'
@@ -25,6 +27,7 @@ export function Dashboard({
   health,
   ui = buildInfo,
   createEventSource,
+  createFlasher,
 }: {
   me: Me
   expire: () => void
@@ -33,6 +36,8 @@ export function Dashboard({
   ui?: BuildInfo
   // Injected by the tests only: jsdom has no `EventSource` (see `fleet.ts`).
   createEventSource?: EventSourceFactory
+  // Injected by the tests only: jsdom has no `navigator.serial`.
+  createFlasher?: FlasherFactory
 }) {
   const fleet = useFleet({ onSessionExpired: expire, createEventSource })
   const artifacts = useArtifacts({ onSessionExpired: expire })
@@ -63,7 +68,12 @@ export function Dashboard({
       />
       {/* Flashing mints its own token, so it sits above the manual token screen:
           the common path is "plug a board in", not "copy a string somewhere". */}
-      <FlashBoard onSessionExpired={expire} onBoardIdentified={setSelected} />
+      <FlashBoard
+        onSessionExpired={expire}
+        onBoardIdentified={setSelected}
+        fleet={fleet}
+        createFlasher={createFlasher}
+      />
       <EnrollBoard onSessionExpired={expire} />
     </>
   )

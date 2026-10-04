@@ -6,6 +6,29 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-04 — The pre-flight card is shown on detect, never blocks, and the known-board button says re-enrol (R2b-fe-2)
+
+**Decided: once a chip is detected, a card between identify and configure says whether the
+predicted id is a new board or already on the fleet. It never disables Flash, and for a known
+board the button reads "Re-flash and re-enrol this board".**
+
+- **No modal, no confirm box.** The spec asks that the operator be told; the card is above the
+  button and the label carries the consequence into the click.
+- **Non-blocking.** While the fleet is loading or unreadable the card says it could not check
+  and states the consequence conditionally. Blocking would let a dead API stop flashing.
+- **One fleet.** `Dashboard` passes its `useFleet` result to `FlashBoard` as a prop; without the
+  prop there is no card. Never open a second `useFleet` there.
+- **Hidden after a successful flash**, when the Flashed section takes over.
+- **"Re-flash, keep identity" is not offered**: a requirement without a mechanism (R2b-spec-3).
+- **The console's re-flash recovery button (S0-fe-6) shows no card.** It is a one-click flash
+  of the board just flashed in this tab; a stop there would undo S0-fe-6.
+- **Ids compare case-insensitively.** A retired board is absent from `GET /v1/devices`, so it
+  reads as "not on the fleet", and the copy claims no more.
+- Supersedes nothing.
+
+
+---
+
 ## 2026-10-04 — The status strip's board is the one last picked, deployed to or flashed; "differ" compares version and commit (R2b-fe-1)
 
 **Decided: the strip shows the board the operator last picked in the Fleet table, deployed

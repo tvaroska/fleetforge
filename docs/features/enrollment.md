@@ -1296,6 +1296,18 @@ Implementation notes behind `spec/flows.md` Flow 1 and the 2026-10-04 entries in
   API differ", gone within 58 s of removing the stub; a deploy of 1.5.0 to a sim board
   read `Board b26a938324ab · esp32c6 · fw 1.4.2 → 1.5.0 · online · updating: rebooting`,
   then `fw 1.5.0 · online · last update good`, matching the row; one `/v1/events` stream.
+- **Pre-flight card (R2b-fe-2, built).** As soon as a chip is detected, a card between
+  "Which board is this?" and the Flash button says what flashing will do. Four kinds
+  (`data-kind`): `known` (predicted id is on the fleet: name, platform, fw, online/offline,
+  an in-progress update, a layout change, and "Re-flashing issues a new token and re-enrols
+  it; its current baseline ends."), `new` ("New board", plus a prior boot-progress arrival),
+  `checking` (fleet not loaded or read failed; states the consequence conditionally) and
+  `unknown-id` (no MAC). Sources: `predictDeviceId`, the page's one fleet (passed to
+  `FlashBoard` as a prop) and the manifest. It never blocks Flash; the button reads
+  "Re-flash and re-enrol this board" for `known`. "Keep identity" is not offered (no
+  mechanism yet). Hidden once the flash is done. Observed: `flash.test.tsx -t pre-flight`
+  and `Dashboard.test.tsx` pass, one EventSource per page. Not run in a real browser (no
+  board, so detect cannot run); detecting the enrolled bench S3 is folded into `R2b-test-1`.
 - **Layout profile.** Arduino IDE and PlatformIO hardcode the app offset (`0x10000`), which
   `ab-4m-v1` does not use. `ab-4m-arduino-v1` (`ff_cfg` at `0x3D0000`) exists for that
   case. Offering it at onboarding means the stock starter agent has to be built for each

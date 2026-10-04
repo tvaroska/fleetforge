@@ -224,7 +224,7 @@ are R3). Order inside each flow: the one-place status first, then the cards, the
       Read-only, from `buildInfo`, `GET /v1/healthz`, and the selected board's device row.
       Acceptance: after a deploy, one glance shows the running UI, API and the board's
       firmware; a stale cached bundle is visible (UI and API differ).
-- [ ] **R2b-fe-2**: Pre-flight card before a flash (P0, 1d)
+- [x] **R2b-fe-2**: Pre-flight card before a flash (P0, 1d) _(done 2026-10-04; see docs/features/enrollment.md)_
       From `predictDeviceId(chip)` and the device list already fetched: new board, or
       known board with firmware, online state and "re-flashing issues a new token and
       re-enrols it; its current baseline ends". No backend change. Acceptance: flashing a
