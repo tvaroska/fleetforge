@@ -121,6 +121,15 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       agent-publish-all` to prod per docs/runbooks/artifact-storage.md, *Publishing agent
       bundles*, with the user's go-ahead. Consider making `/release` or `just deploy` warn
       when the published agent_version lags `agent/version.txt`.
+      _(2026-10-04: decided, 0.3.x baseline not kept (DECISIONS). Bundles rebuilt at 08de7b9
+      (all four 0.4.5, agent-check-fresh green) and published to the dev MinIO only;
+      `just agent-check-prod` added and wired into `just build` as a warning. Operator owed
+      (needs go-ahead): publish to prod:
+      mkdir -p /tmp/no-gcloud-adc && CLOUDSDK_CONFIG=/tmp/no-gcloud-adc OBJECT_STORE_BACKEND=gcs
+      GCS_BUCKET=btvaroska GCS_PREFIX=fleetforge/
+      GCS_IMPERSONATE_SERVICE_ACCOUNT=fleetforge-artifacts@btvaroska.iam.gserviceaccount.com
+      just agent-publish-all ; then `just agent-check-prod` must print CHECK-VERSION OK and
+      this task flips to [x].)_
 - [x] **S0-test-3**: Someone who did not see the code onboards a board unaided — passed 2026-09-22 → [enrollment.md](docs/features/enrollment.md)
 - [x] **S0-fw-3**: A board that browns out during RF calibration cannot escape it — withdrawn 2026-09-23, not fixed → [enrollment.md](docs/features/enrollment.md)
 
