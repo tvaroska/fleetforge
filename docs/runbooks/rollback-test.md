@@ -198,14 +198,16 @@ hotspot walked away until the RSSI in `up/hb` is marginal. PuTTY on COM3 at 1152
 normal artifact, and note the cmd_id of each deploy.
 
 1. **Outage mid-download, short.** Deploy with `apply: "on_command"`. At `update <cmd>:
-   20%`, pull the AP's power for 60 s, then restore it. Pass: progress resumes and reaches
-   `staged`, or the deploy ends `failed` / `download failed` and the board stays on its
+   20%`, pull the AP's power for 30 s, then restore it (60 s is now the stall budget's
+   edge, R2-fw-5). Pass: progress resumes and reaches `staged`, or the deploy ends
+   `failed` / `download failed` or `failed` / `download stalled` and the board stays on its
    image. Either way the board is on a VALID image, and a re-deploy works.
 2. **Outage mid-download, long.** As 1, with the AP off for 6 min. Pass: the board ends
-   `failed` / `download failed` (TCP keepalive ended it, the D4 path) and a re-deploy works.
-   **The P0 for R2-fw-5 is the other outcome:** the row parks at `downloading`, no
-   `failed` for ≥ 5 min after the AP is back, and every new deploy gets `another update is
-   already in progress` until a power cycle (the D3 path).
+   `failed` / `download failed` (TCP keepalive ended it, the D4 path) **or** `failed` /
+   `download stalled` (agent ≥ 0.4.4: no bytes for 60 s, R2-fw-5), and a re-deploy works.
+   **The regression is the other outcome:** the row still parks at `downloading` more than
+   ~100 s after the AP went off, and every new deploy gets `another update is already in
+   progress` until a power cycle (the pre-0.4.4 D3 path).
 3. **Outage after the reboot, short.** Deploy with `apply: "auto"`. Kill the AP the moment
    the console prints `rebooting`, and bring it back after 2 min. Pass: `OTA boot: 300 s …`,
    then `confirming`, `CONFIRMED`, rows `… confirming, confirmed`.
@@ -215,10 +217,12 @@ normal artifact, and note the cmd_id of each deploy.
    image rolled back is a miss, not a brick (DECISIONS 2026-10-03, R2-fw-4, change 2).
 
 **The one question only metal answers** (step 2): when the radio is really gone, does the
-download end by itself through TCP keepalive (`keep_alive_enable`, IDF defaults 5 s idle,
-5 s interval, 3 probes: `download failed` after ~20 s with no ACKs), or does it sit in the
-EAGAIN loop QEMU showed for 600 s? The answer decides whether R2-fw-5 is a QEMU-only
-"silent peer" fix or a field fix.
+download end through TCP keepalive (`keep_alive_enable`, IDF defaults 5 s idle, 5 s
+interval, 3 probes: `download failed` after ~20 s with no ACKs), or does it sit in the
+EAGAIN loop QEMU showed? Since agent 0.4.4 (R2-fw-5) the answer only decides which
+`detail` you see, not whether the slot is freed: the stall guard ends the EAGAIN loop as
+`download stalled` 60-80 s after the last byte (≈ 80 s in QEMU). `download failed` means
+keepalive got there first, which is the expected metal outcome.
 
 ## Known gaps this test does not close
 
@@ -246,6 +250,9 @@ EAGAIN loop QEMU showed for 600 s? The answer decides whether R2-fw-5 is a QEMU-
 - **A flaky radio, as of R2-test-2: covered in QEMU, with its limit; bench replay owed**
   (*Marginal radio* above). The download and the confirm timer never overlap, so a slow or
   stalled download cannot trip the timer. An outage after the reboot that outlasts the
-  300 s rolls a good image back (a miss). A far end that goes silent mid-download holds the
-  update slot until a power cycle (R2-fw-5). QEMU cannot say whether a really dead radio
-  ends the download by keepalive instead.
+  300 s rolls a good image back (a miss). A far end that goes silent mid-download no longer
+  holds the update slot: since agent 0.4.4 (R2-fw-5) it ends `failed` / `download stalled`
+  60-80 s after the last byte and the next deploy runs (proven in QEMU, bench replay owed).
+  Residual: a peer that goes silent before the first 1 KB of body is not caught (IDF's
+  `read_header()` loops inside the first `perform()`). QEMU cannot say whether a really dead
+  radio ends the download by keepalive first.

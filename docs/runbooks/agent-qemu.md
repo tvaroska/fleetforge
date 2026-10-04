@@ -384,12 +384,19 @@ between the two starts plus the boot (2-4 s in the R2-test-2 runs).
 | # | Scenario | Recipe | Pass |
 |---|---|---|---|
 | D1 | Slow download | api/mqtt `0=pass`; store `0=throttle:8192`. Deploy with `on_command`. | `10%`…`100%` over ≥ 100 s, `staged`. No `OTA boot: 300 s` line and no `no working session` on the running image. Stop/start: `confirmed`. |
-| D2 | Outage mid-download, link returns | store `0=throttle:16384,20=blackhole,110=throttle:16384`. Start the board, deploy **at once** (the download must be running before t=20). | Progress stops ≈ 90 s, resumes, `matches what is on flash`, `staged`. No `failed`. Stop/start: `confirmed`. See the openeth panic below. |
-| D3 | Silent far end | store `0=throttle:16384,20=blackhole,620=reset`. Deploy at once. | The download never ends by itself in the 600 s hold (R2-fw-5). At the reset: `data read -1, errno 128`, `update <cmd> failed: download failed`. The active otadata sector is unchanged, and the next deploy (a **new** cmd_id) runs to `confirmed`. |
-| D4 | Far end closes | the reset at the end of D3. | `failed` / `download failed`, the board stays on its image. |
+| D2 | Outage mid-download, link returns | store `0=throttle:16384,20=blackhole,50=throttle:16384` (a 30 s outage, inside the stall budget). Start the board, deploy **at once** (the download must be running before t=20). | Progress stops ≈ 30 s, resumes, `matches what is on flash`, `staged`. No `no bytes for`, no `failed`. Stop/start: `confirmed`. See the openeth panic below. |
+| D3 | Silent far end | store `0=throttle:16384,20=blackhole,240=pass`. Deploy at once. | Agent ≥ 0.4.4 (R2-fw-5): `E ff-ota: update <cmd>: no bytes for 60 s at <n> bytes — abandoning the download …` then `update <cmd> failed: download stalled`, ≈ 80 s after the last byte (60 s at the earliest), which is up to ~90 s after the last `N%` line, because progress is only logged every 10 %. `failed` / `download stalled` on the topic, deploy terminal. No reset, no transaction line. The active otadata sector is unchanged (the inactive one erased). The slot is free: after t=240 a new POST (a **new** cmd_id) runs to `staged`, without a reboot. Before 0.4.4 the download never ended by itself (600 s hold). |
+| D4 | Far end closes | a `reset` inside the stall budget, e.g. store `0=throttle:16384,20=blackhole,40=reset` (R2-test-2 measured it as the reset after D3's 600 s hold, on agent 0.4.3). | `data read -1, errno 128`, `failed` / `download failed`, the board stays on its image. |
 | P1 | Outage after the reboot, shorter than the timer | Stage with all-pass, stop, then ONE process: `just agent-qemu-flaky "0=blackhole,200=pass"`, start at once. | `OTA boot: 300 s` and `confirming on …` before the session. `announce acknowledged` < 300 000 ms, `CONFIRMED`, no `no working session`. |
 | P2 | Outage after the reboot, longer than the timer | As P1, `"0=blackhole,330=pass"`. | `no working session 300 s after an OTA boot` at ≈ 300 000 ms, then the reset. After a stop/start past 330 s: the old slot, `rolled_back`. otadecode: the new slot `INVALID`. |
 | P3 | Flapping link after the reboot | As P1, `"0=pass,5=blackhole" --repeat 30`. | Terminal either way (`confirmed` before 300 s, or the P2 shape), never `PENDING_VERIFY` past 302 s. |
+
+**Any store outage of 60 s or more now ends `download stalled`** (agent ≥ 0.4.4,
+R2-fw-5). The guard compares the image length each time `esp_https_ota_perform()`
+returns, and a read in flight when the link goes silent returns its partial bytes only at
+its 20 s timeout, which counts as progress. So the abort lands ≈ 80 s after the last byte
+(60 s at the earliest), and the logged `no bytes for 60 s` counts from that last return.
+Keep a "link returns" recipe's outage under 60 s, or it tests the stall guard instead.
 
 **The openeth "RX frame dropped" panic is a harness artifact.** One D2 run in three
 panicked a second or so after the link came back:

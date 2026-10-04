@@ -1048,9 +1048,11 @@ plus a torn otadata write, in QEMU: all land on the previous image. It also foun
 did **not** recover: an image that hangs before its broker session. R2-fw-4 (agent 0.4.3)
 fixed it by arming the confirm timer first thing in `app_main`, proven in QEMU. The flaky
 radio (R2-test-2) cannot outrun the confirm timer, because the download and the timer
-never overlap. A silent peer mid-download, though, holds the update slot until a power
-cycle (R2-fw-5). Proven in QEMU, bench replay owed. See *Remaining failure modes
-(R2-test-1)*, *Arm the confirm timer at boot (R2-fw-4)* and *Flaky link (R2-test-2)* below.
+never overlap. A silent peer mid-download used to hold the update slot until a power
+cycle; since agent 0.4.4 (R2-fw-5) it ends `failed` / `download stalled` after 60-80 s.
+Proven in QEMU, bench replay owed. See *Remaining failure modes (R2-test-1)*, *Arm the
+confirm timer at boot (R2-fw-4)*, *Flaky link (R2-test-2)* and *A stalled download fails
+(R2-fw-5)* below.
 
 What that result does **not** do is retire R2-BE-1. The R1 agent's reported walk ends at
 `rebooting` (`ff_ota.h`), so the rollback is only inferable from the announced version
@@ -1937,7 +1939,7 @@ P3  stage 0.4.51 (cmd acacc9f2), stop; one proxy "0=pass,5=blackhole" --repeat 3
   no stall counter, and `ff_ota.c` loops while IN_PROGRESS with no deadline. It is safe
   (the running image stays VALID) but not live. On a real board, TCP keepalive
   (`keep_alive_enable`, 5 s / 5 s / 3) may close a socket whose radio is really gone and
-  turn it into D4. That is the bench question.
+  turn it into D4. That is the bench question. → fixed by R2-fw-5 (agent 0.4.4).
 - **The re-POST of an in-flight deploy can fail it (R2-fw-6, P2).** The agent deduplicates
   on the **last** command id only (`last_command_id`). After any other command, a
   re-delivery of the in-flight one reaches `ff_ota_start()`, gets `ESP_ERR_INVALID_STATE`,
@@ -1979,6 +1981,101 @@ state=VALID`. Artifacts: B1 `0.4.50` (`61731613…`) and B2 `0.4.51` (`f939f606�
 normal builds of this tree. T2-0, the tool smoke against MinIO with `0=pass,3=blackhole,8=pass`:
 at t≈1 s `200 0.003 s`; at t≈4 s `200 4.09 s`, with `conn 2 open` at 3.9 s and `upstream
 connected` at 8.0 s.
+
+### A stalled download fails (R2-fw-5)
+
+**A download that stops making progress for 60 s is abandoned and reported `failed` /
+`download stalled`, and the update slot is free for the next `stage`.** Agent 0.4.4.
+Proof status: **proven in QEMU (esp32, dev stack), bench replay owed**
+(`../runbooks/rollback-test.md` → *Marginal radio*). Decision: DECISIONS.md 2026-10-03
+(R2-fw-5). Replay: `../runbooks/agent-qemu.md` → *Driving a flaky link*, D2/D3. Fixes D3
+of *Flaky link (R2-test-2)* above.
+
+**The change (`agent/main/ff_ota.c`, the only firmware file).** The perform loop keeps the
+last image length it saw and the `esp_timer_get_time()` at which it last grew. The clock
+starts at `downloading`, right after `esp_https_ota_begin()`, so the wait for the first
+body byte counts too. When the length has not grown for `OTA_STALL_MS` (60 000;
+`_Static_assert` ≥ 2 × `OTA_HTTP_TIMEOUT_MS`), the loop breaks. The stall branch comes
+before the `download failed` branch (after the break `err` is still IN_PROGRESS) and has
+the same posture: `esp_https_ota_abort()`, `fail(cmd, "download stalled")`, `goto done`.
+No `finish()`, no otadata write, no transaction record, no URL in the log. `done:` clears
+`s_running`. The check runs before the loop's size-less `continue`, so a command without a
+size is guarded too. Property 6 in the file header says this.
+
+**Timing, measured.** The check runs each time `perform()` returns, which while stalled is
+every 20 s. The read in flight when the link goes silent returns its partial bytes only at
+its 20 s timeout, and that return counts as progress. So the abort lands **≈ 80 s after the
+last byte** (60 s at the earliest, when the silence starts on a read boundary), and the
+logged `no bytes for 60 s` counts from that last return. Both S1 runs: 80.1 s and 80.2 s
+after the last progress line.
+
+| # | Scenario (store proxy schedule) | Observed in QEMU | Pass |
+|---|---|---|---|
+| S1 | Silent far end (`0=throttle:16384,20=blackhole,240=pass`), board 0.4.4 fresh, B = 0.4.60 `on_command` | Last progress `30%` at 29 138 ms, `no bytes for 60 s at 310587 bytes` at 109 258 ms (proxy t ≈ 100), `failed` / `download stalled` on the topic, API `is_terminal: true`. Online, heartbeating, no reset, no transaction line. After t=240, **without a reboot**, a new POST got a fresh cmd (`reused: false`) → `staged` → stop/start → `confirmed` on 0.4.60. | yes |
+| S1b | Same, repeated from 0.4.4 on ota_0 (otadata evidence) | `30%` at 31 831 ms, stall at 112 071 ms, `download stalled`. otadecode before: `sector0: seq=3 -> ota_0 VALID / sector1: seq=2 -> ota_1 VALID`; after: `sector0: seq=3 -> ota_0 VALID / sector1: empty` (the active sector unchanged; `esp_ota_begin()` erased the inactive one, as documented). Cold boot: `Loaded app … 0x20000`, `ota state valid`, no transaction line. | yes |
+| S2 | 30 s outage (`0=throttle:16384,20=blackhole,50=throttle:16384`), 0.4.60 → 0.4.4 | `30%` at 39 472 ms, `40%` at 75 582 ms (resumed), `100%` at 113 002 ms, `matches what is on flash`, `staged`. No `no bytes for`, no `failed`. Stop/start → `confirmed`. | yes |
+| S3 | Healthy (store `pass`), the S1 recovery deploy | 0 % → 100 % in 31.4 s, `staged`, no `no bytes for`. `confirmed` after stop/start. | yes |
+
+**Transcripts (trimmed).** Proxy lines are `[s since proxy start]`, app lines `I (ms since
+boot)`; the proxy started ≈ 10-13 s after the board's clock.
+
+```
+S1  store: throttle:16384, 20=blackhole, 240=pass   (cmd 78863f93…, 0.4.4 -> 0.4.60)
+      [   0.983] conn 1 open 19000 -> 127.0.0.1:9000
+      I (10338)  ff-ota: update 78863f93…: 0% (1024 bytes)
+      I (29138)  ff-ota: update 78863f93…: 30% (308224 bytes)        <- the last progress line
+      [  20.001] mode throttle:16384 -> blackhole
+      E (109258) ff-ota: update 78863f93…: no bytes for 60 s at 310587 bytes — abandoning the download; the boot partition was never moved
+      E (109268) ff-ota: update 78863f93… failed: download stalled
+      topic: 78863f93 staging, downloading, failed "download stalled"
+      GET /v1/devices: online true, fw 0.4.4, deploy {state failed, is_terminal true, detail "download stalled"}
+      … up/hb every 10 s, no rst:, no ff-txn line …
+      [ 240.098] mode blackhole -> pass
+    same boot, POST 0.4.60 -> cmd 994910ef…, reused:false
+      I (268148) ff-ota: update 994910ef…: staging version 0.4.60 …
+      I (300018) ff-ota: update 994910ef…: 100% (1018016 bytes)
+      I (311248) ff-ota: update 994910ef…: ota_1 is staged and bootable
+    stop, start: Loaded app … 0x200000, pending_verify, confirming on ota_1, CONFIRMED
+
+S1b (cmd e6ab3211…, 0.4.4 on ota_0 -> 0.4.60)
+      I (31831)  ff-ota: update e6ab3211…: 30% (308224 bytes)
+      E (112071) ff-ota: update e6ab3211…: no bytes for 60 s at 312225 bytes — abandoning the download; …
+      E (112081) ff-ota: update e6ab3211… failed: download stalled
+    stop -> otadecode: sector0: seq=3 -> ota_0 state=VALID crc=ok / sector1: empty
+
+S2  store: throttle:16384, 20=blackhole, 50=throttle:16384   (cmd 96bcf01e…, 0.4.60 -> 0.4.4)
+      [  20.001] mode throttle:16384 -> blackhole
+      I (39472)  ff-ota: update 96bcf01e…: 30% (308224 bytes)
+      [  50.027] mode blackhole -> throttle:16384
+      I (75582)  ff-ota: update 96bcf01e…: 40% (407253 bytes)
+      I (113002) ff-ota: update 96bcf01e…: 100% (1018016 bytes)
+      I (121152) ff-ota: … sha256 505f45…ffcb matches what is on flash in ota_0; …
+      I (124082) ff-ota: … ota_0 is staged and bootable
+      'no bytes for' in this boot: 0
+    stop, start: Loaded app … 0x20000, confirming on ota_0, CONFIRMED
+```
+
+**T1.** `tests/test_agent_download_stall.py` (6 text tripwires over the comment-stripped
+source: the budget is `#define`d, ≥ 2 × the read timeout and ≤ 120 s, with the
+`_Static_assert`; the clock starts after `begin()` and before the loop; the stall check
+precedes the size-less `continue`; the stall branch aborts and never finishes, saves a
+transaction, touches the boot partition or names the URL; it precedes `download failed`;
+`done:` clears `s_running`). `just agent-build esp32` and `esp32s3` (`-Werror`) end
+`BUNDLE OK`; `APP_SIZE_BUDGET_BYTES` raised to the measured bytes (esp32 1 018 016,
++320 B; esp32s3 998 352, +288 B). `just test` green.
+
+**Accepted behaviour change.** R2-test-2's D2 (a 90 s silent outage mid-download, then the
+link returns) used to resume and reach `staged`. It now ends `failed` / `download
+stalled`. An outage shorter than the budget still resumes (S2). The recovery is a
+re-deploy, a new POST after the terminal `failed`.
+
+**Known residual, not fixed.** IDF's `read_header()` runs inside the **first**
+`perform()` call and loops on `-ESP_ERR_HTTP_EAGAIN` until it has the first 1024 body bytes.
+A peer that goes silent before the first 1 KB of body never returns control to
+`ota_task`, so this guard cannot see it. The response-header phase is bounded (a
+`fetch_headers()` timeout fails `esp_https_ota_begin()`). A trickle peer (1 byte every
+19 s) counts as progress and is not caught either. The simulator is unchanged: its
+`urlopen(timeout=30)` already ends a silent download as `download failed: TimeoutError`.
 
 ## De-risking
 

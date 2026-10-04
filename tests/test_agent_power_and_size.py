@@ -117,14 +117,19 @@ FORBIDDEN_OPTIONS = [
 # confirm timer cannot be created, and the reworded `OTA boot:` line (the fault hook is
 # not compiled into these builds). The timer itself only moved, from ff_mqtt_run() to the
 # first statement of app_main.
+#
+# Raised 2026-10-03 (R2-fw-5) for **esp32 and esp32s3**, the two targets rebuilt, to the
+# exact measured byte: esp32 1,017,696 -> 1,018,016 (+320 B), esp32s3 998,064 -> 998,352
+# (+288 B). The added code is the download stall check in ff_ota.c's perform loop (the
+# esp_timer reads, the abort branch) and its log string.
 APP_SIZE_BUDGET_BYTES = {
-    "esp32": 1_017_696,
+    "esp32": 1_018_016,
     # Raised from 973_136 for the OTA-capable agent (R1-fw-1/R1-fw-2), which cost every
     # target ~18 KB. Only esp32 was raised at the time: this gate reads whatever is in
     # `agent/dist/`, so a target nobody had built locally is not checked and does not
     # fail. The other two are still carrying 0.2.0-era numbers and will need the same
     # raise the first time they are built — that is a gap in the gate, not slack here.
-    "esp32s3": 998_064,
+    "esp32s3": 998_352,
     "esp32c3": 1_028_336,
     "esp32c6": 1_077_840,
 }

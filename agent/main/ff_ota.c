@@ -5,7 +5,7 @@
  * already walks `staging → downloading → verifying → staged → applying → rebooting`, the
  * ingestor parses what it publishes, and this file repeats that walk on real flash. What
  * happens after the reboot (`confirming` → `confirmed` | `rolling_back` → `rolled_back`) is
- * reported by ff_mqtt.c from the record this file writes at `staged` (ff_txn.h). Five
+ * reported by ff_mqtt.c from the record this file writes at `staged` (ff_txn.h). Six
  * properties are worth stating out loud, because each one is a silent wrong answer rather
  * than an error:
  *
@@ -43,6 +43,15 @@
  *    rewrites the same seq into the other otadata sector, which is the running image's
  *    entry. Both sectors then name the staged slot, and a rollback has nowhere to go
  *    (DECISIONS 2026-10-03, R2-fw-2).
+ * 6. **A download that stops making progress ends** (R2-fw-5). IDF turns a read timeout
+ *    with nothing read into ESP_ERR_HTTPS_OTA_IN_PROGRESS, so a peer that stays connected
+ *    and silent would keep the perform loop, and `s_running`, alive for ever. If the image
+ *    length read has not grown for OTA_STALL_MS (wall clock, from `downloading`), the
+ *    download is abandoned with esp_https_ota_abort() and reported `failed` /
+ *    `download stalled`; the slot is free for the next `stage`. On metal TCP keepalive
+ *    usually ends a dead radio first (`download failed`). Known residual: IDF's
+ *    read_header() loops inside the FIRST perform() until it has 1 KB of body, so a peer
+ *    silent before that is not seen here (DECISIONS 2026-10-03, R2-fw-5).
  */
 
 #include "ff_ota.h"
@@ -59,6 +68,7 @@
 #include "esp_ota_ops.h"
 #include "esp_partition.h"
 #include "esp_system.h"
+#include "esp_timer.h"
 #include "ff_mqtt.h"
 #include "ff_txn.h"
 #include "freertos/FreeRTOS.h"
@@ -80,6 +90,16 @@ static const char *TAG = "ff-ota";
 #define OTA_TASK_PRIO 5
 
 #define OTA_HTTP_TIMEOUT_MS 20000
+/* How long the image may stop growing before the download is abandoned (property 6).
+ * Wall clock, not a count of empty reads, so it keeps its meaning if OTA_HTTP_TIMEOUT_MS
+ * changes, and it also covers the wait for the first body byte. It is checked each time
+ * perform() returns, which while stalled is every OTA_HTTP_TIMEOUT_MS, so the abort lands
+ * 60-80 s after the last byte. 60 s, not less: on metal TCP keepalive (IDF 5 s idle, 5 s
+ * interval, 3 probes) ends a socket whose radio is really gone in ~20 s, and it should stay
+ * the first responder; this guard is for a far end that is alive and silent (R2-fw-5). */
+#define OTA_STALL_MS 60000
+_Static_assert(OTA_STALL_MS >= 2 * OTA_HTTP_TIMEOUT_MS,
+               "one slow read must never trip the stall guard");
 /* Response headers. The 307 to the object store carries a long `Location`. */
 #define OTA_HTTP_RX_BUFFER 4096
 /* THE REQUEST buffer, and the gotcha: IDF defaults it to 512 bytes, while the request line
@@ -503,8 +523,23 @@ static void ota_task(void *arg)
     ff_mqtt_publish_status(cmd->cmd_id, FF_STATUS_DOWNLOADING, 0, NULL);
 
     int last_logged_pct = -10;
+    /* The stall clock (property 6) starts at `downloading`, so the wait for the first body
+     * byte counts too. */
+    int last_len = 0;
+    int64_t last_progress_us = esp_timer_get_time();
+    bool stalled = false;
     while ((err = esp_https_ota_perform(handle)) == ESP_ERR_HTTPS_OTA_IN_PROGRESS) {
         int so_far = esp_https_ota_get_image_len_read(handle);
+        /* BEFORE the size-less `continue` below, or a command without a size would never
+         * be guarded. */
+        int64_t now_us = esp_timer_get_time();
+        if (so_far > last_len) {
+            last_len = so_far;
+            last_progress_us = now_us;
+        } else if (now_us - last_progress_us >= (int64_t)OTA_STALL_MS * 1000) {
+            stalled = true;
+            break;
+        }
         if (cmd->size == 0 || so_far < 0) {
             continue; /* the server did not say how big it is; no percentage to report */
         }
@@ -516,6 +551,18 @@ static void ota_task(void *arg)
         }
     }
 
+    /* BEFORE the `download failed` branch: after the break `err` is still IN_PROGRESS,
+     * which would read as a failed download. Same posture as that branch: abort, never
+     * finish(), so otadata and the transaction record are not touched. */
+    if (stalled) {
+        int stalled_s = (int)((esp_timer_get_time() - last_progress_us) / 1000000);
+        esp_https_ota_abort(handle);
+        ESP_LOGE(TAG, "update %s: no bytes for %d s at %d bytes — abandoning the download; "
+                      "the boot partition was never moved",
+                 cmd->cmd_id, stalled_s, last_len);
+        fail(cmd, "download stalled");
+        goto done;
+    }
     if (err != ESP_OK) {
         esp_https_ota_abort(handle);
         fail(cmd, "download failed");

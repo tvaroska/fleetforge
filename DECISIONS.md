@@ -6,6 +6,59 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-03 — a download that stops making progress fails after 60 s (R2-fw-5)
+
+**Decided: `ff_ota.c::ota_task()` abandons a download whose image length has not grown for
+`OTA_STALL_MS` (60 s, wall clock) and reports `failed` / `download stalled`; `s_running`
+clears and the next `stage` runs.** Agent 0.4.4. Fixes D3 of the R2-test-2 entry below,
+which stays as written. Proof status: **proven in QEMU (esp32), bench replay owed**
+(`docs/runbooks/rollback-test.md` → *Marginal radio*). Transcripts:
+`docs/features/ota-deploy.md` → *A stalled download fails (R2-fw-5)*.
+
+- **Wall clock, not a read counter.** Equivalent to "K = 3 empty 20 s reads", but it keeps
+  its meaning if `OTA_HTTP_TIMEOUT_MS` changes, and it also covers the wait for the first
+  body byte (the clock starts at `downloading`, right after `esp_https_ota_begin()`).
+  `_Static_assert(OTA_STALL_MS >= 2 * OTA_HTTP_TIMEOUT_MS)` so one slow read cannot trip it.
+- **Granularity, measured (the plan said "normally ~60 s"; it is ~80 s).** The check runs
+  each time `perform()` returns, every 20 s while stalled. The read in flight when the link
+  goes silent returns its partial bytes only at its 20 s timeout, and that counts as
+  progress. So the abort lands ≈ 80 s after the last byte (60 s at the earliest). QEMU:
+  80.1 s and 80.2 s after the last progress line. Docs say "60-80 s"; the logged
+  `no bytes for 60 s` counts from the last return that brought bytes.
+- **Why 60 s and not longer.** On metal, TCP keepalive (`keep_alive_enable`, IDF 5 s / 5 s
+  / 3) ends a socket whose radio is really gone in ~20 s (D4, `download failed`). The stall
+  guard only fires for "far end alive but silent" (a wedged store or proxy, QEMU slirp),
+  and the distinct detail tells the operator which one happened.
+- **Failure shape = the `download failed` branch.** `esp_https_ota_abort()`, `fail()`,
+  `goto done`. No `finish()`, no otadata write, no `ff_txn_save`, no
+  `restore_boot_partition()`. The branch sits BEFORE `download failed` (after the break
+  `err` is still IN_PROGRESS), and the bookkeeping runs before the loop's size-less
+  `continue`. `detail` is exactly `download stalled`; seconds and bytes go to serial only;
+  the URL is never logged.
+- **Accepted behaviour change.** R2-test-2's D2 (90 s silent outage, then the link returns)
+  used to resume to `staged`; it now ends `failed` / `download stalled`. This supersedes
+  the D2 expectation. An outage shorter than the budget still resumes (QEMU S2, 30 s). The
+  recovery is a re-deploy.
+- **Known residual, not fixed.** IDF v5.5.5 `read_header()` (inside the FIRST `perform()`)
+  loops on `-ESP_ERR_HTTP_EAGAIN` until it has the first 1024 body bytes, so a peer silent
+  before the first 1 KB of body never returns control to `ota_task`. Closing it needs a
+  cross-task socket shutdown into esp_http_client internals, rejected for CRITICAL code at
+  this size. The response-header phase is already bounded (`fetch_headers()` timeout →
+  `esp_https_ota_begin()` fails). A trickle peer (1 byte every 19 s) counts as progress and
+  is out of scope ("stops making progress").
+- **Accepted divergence: the simulator is unchanged.** `simulator/device.py`'s
+  `urlopen(timeout=30)` already ends a silent download as `download failed: TimeoutError`.
+  No server logic depends on the detail text.
+- **Rejected.** A server-side expiry for a row stuck at `downloading` (rule 1 in
+  `deploys.py`, rejected twice before); changing `OTA_HTTP_TIMEOUT_MS` or keepalive; a
+  Kconfig/sdkconfig knob (`sdkconfig.defaults` is CRITICAL, and this is a firmware constant
+  like the others).
+- **Spec proposal (not applied).** `spec/device-protocol.md` → `dn/cmd` `stage`: "A device
+  that receives no artifact bytes for 60 s abandons the download and reports `failed`
+  (detail `download stalled`). The update slot is free again for the next `stage`."
+
+---
+
 ## 2026-10-03 — a flaky link cannot outrun the confirm timer; a silent one can hold a download forever (R2-test-2)
 
 **Decided: the flaky-radio question is answered, and the answer is structural. The

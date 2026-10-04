@@ -28,9 +28,10 @@ build is caught before the fleet, and any device that gets one recovers itself.
   **nothing recovers it**. Roll to **one board at a time**. (The flaky radio is no longer a
   reason: R2-test-2 showed in QEMU that the download and the confirm timer never overlap.
   Bench replay owed.)
-- A store connection that goes silent mid-download holds the board's update slot until a
-  power cycle (R2-test-2 → R2-fw-5). The board is safe on its old image, but no new deploy
-  starts. Keep USB in reach.
+- A store connection that goes silent mid-download no longer holds the board's update
+  slot: since agent 0.4.4 (R2-fw-5) the download fails as `download stalled` 60-80 s after
+  the last byte and the next deploy starts (proven in QEMU, bench replay owed). A peer that
+  goes silent before the first 1 KB of body is still not caught.
 - An OTA'd image that hangs before its broker session rolls back by itself since agent
   0.4.3 (R2-fw-4): proven in QEMU, bench replay owed.
 - No upload form in the dashboard (`docs/runbooks/upload-artifact.sh` is the only way in),
@@ -179,7 +180,8 @@ after the reboot.
       _(done 2026-10-03; proven in QEMU — the download and the confirm timer never overlap; a silent peer mid-download holds the update slot for 600 s+ → R2-fw-5; bench replay owed, see docs/runbooks/rollback-test.md; see docs/features/ota-deploy.md)_
       Does a marginal radio stall the download past the confirm timer? Open since R0; it
       was the reason deploys are still one board at a time.
-- [ ] **R2-fw-5**: A download that stops making progress fails instead of holding the update slot forever (P1, 0.5d)
+- [x] **R2-fw-5**: A download that stops making progress fails instead of holding the update slot forever (P1, 0.5d)
+      _(done 2026-10-03; reviewed; agent 0.4.4, proven in QEMU (esp32) — a silent store ends `failed` / `download stalled` ≈ 80 s after the last byte and the next deploy runs in the same boot; bench replay owed; see docs/features/ota-deploy.md)_
       Found by R2-test-2. A peer that goes silent mid-download (QEMU: proxy blackhole,
       held 600 s) never ends `esp_https_ota_perform`: every 20 s read timeout is
       `-ESP_ERR_HTTP_EAGAIN` → `IN_PROGRESS`. The row parks at `downloading` and every
