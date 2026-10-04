@@ -30,6 +30,11 @@ The first functioning app: *I can register a board and see it online*. No code-d
 - **You can now:** push a *deliberately broken* build → the board auto-recovers to the previous one.
 - **Risk retired:** bricking — **the single most important milestone** (just later in this ordering).
 
+### R2b — Operator flows: onboard, update, change Wi-Fi
+- **Add:** the three flows in `spec/flows.md` as one guided experience: a status strip and result card, a pre-flight card before a flash, dashboard upload and a pre-check before a deploy, an update timeline, and a list of known Wi-Fi networks so a board can move between them with no re-flash.
+- **You can now:** onboard, update and relocate a board from the dashboard and see, in one place, what version it runs and what happened.
+- **Risk retired:** the operator experience around R0–R2. Almost all dashboard work; only the known-networks list touches the agent. Tasks: `TODO.md` → *R2b*.
+
 ### R3 — Thin OTA library + first CUJ
 - **Add:** the four-verb contract as something a maker embeds in **their own** firmware — an ESP-IDF component extracted from the agent's `ff_*` modules, an Arduino library wrapping the same C, a worked example, and the project's first written CUJ ("I have a sketch and a DevKit on the desk").
 - **Sequenced after R2 on purpose**. A library is a multiplier on but safe deploy currently is. Issue the contract before auto-rollback exists spreads the unsafe path into custom firmware on boards nobody can reach. See `design/decisions/ota-library-ships-after-safe-deploy.md`.

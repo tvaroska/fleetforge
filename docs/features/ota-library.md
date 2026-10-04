@@ -253,6 +253,9 @@ Work* above. Release contents: [releases.md](../releases.md) → R3. Journey:
       headers are a strict subset of what `agent_main.c` uses.
 
 - **R3-fw-3**: Arduino library wrapping the same C (P1, 2d)
+      **Flow 3 requirement (2026-10-04):** the library must read the same known-networks list the
+      agent reads (`R2b-fw-1`), and later carry the Improv handler. Otherwise an OTA to the
+      maker's own firmware strands the board on its current network.
       Depends on `R3-fw-2`. The persona writes Arduino or PlatformIO and does not use
       ESP-IDF (`docs/personas/PERSONAS.md` §1). If adopting Fleetforge means porting their
       project, they will not adopt it.

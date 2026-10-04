@@ -34,7 +34,10 @@ build is caught before the fleet, and any device that gets one recovers itself.
 - An OTA'd image that hangs before its broker session rolls back by itself since agent
   0.4.3 (R2-fw-4): proven in QEMU, bench replay owed.
 - No upload form in the dashboard (`docs/runbooks/upload-artifact.sh` is the only way in),
-  and every device has `name: null`. Neither has a task yet.
+  and every device has `name: null`. Now `R2b-fe-7` and `R2b-be-1` / `R2b-fe-6`.
+- The operator experience (onboard, update, change Wi-Fi) is specified as three flows in
+  `spec/flows.md` (2026-10-04) and is **R2b** below. Almost all of it is dashboard work that
+  needs no new protocol; only the known-networks list touches the agent and `ff_cfg`.
 
 **Now: R2 — safe deploy (verify + auto-rollback), opened 2026-10-03.** The CUJ-1 T3 gate
 re-ran and passed on its graded segments (3: enroll, 5: OTA reports the new version); 6 and
@@ -44,9 +47,9 @@ run could show, so the pass rests on the deterministic judge. Task list below; b
 
 **Blocked:**
 
-- `S0-test-1` is waiting on a **CP2102/CH340 bridge-chip board**: the bench S3 has only
-  a native-USB socket (2026-10-04), so it cannot run Checks A-E. `S0-test-2` needs the S3
-  on the bench. Both are hardware sessions on the Windows + Chrome bench (settled 2026-10-02).
+- `S0-test-1` and `S0-test-2` are deferred to after R2b (2026-10-04) and need hardware:
+  a CP2102/CH340 board for Checks A-E (the bench S3 has only native USB), the S3 for
+  Check F. Both on the Windows + Chrome bench (settled 2026-10-02).
 - **R3 (thin OTA library)** waits on R2 by decision
   (`design/decisions/ota-library-ships-after-safe-deploy.md`). Its task list lives in
   [docs/features/ota-library.md](docs/features/ota-library.md) until it opens.
@@ -54,10 +57,11 @@ run could show, so the pass rests on the deterministic judge. Task list below; b
   longer pull (`DECISIONS.md` 2026-10-01). No task filed yet.
 
 <!-- Counters: spec=1 infra=7 db=1 be=6 fe=7 sec=1 fw=4 test=3 -->
-<!-- Sprint 0 counters: fe=8 fw=4 infra=9 test=4 ops=1 -->
+<!-- Sprint 0 counters: fe=8 fw=4 infra=9 test=4 ops=1 bug=1 -->
 <!-- R1 counters: be=3 fe=1 fw=2 test=1 -->
 <!-- R2 counters: fw=6 be=1 fe=1 test=2 spec=1 (fw-3 is the R1-landed confirm timer) -->
 <!-- R3 counters: spec=1 fw=4 test=1 -->
+<!-- R2b counters: spec=3 fe=13 be=5 fw=1 test=4 -->
 
 Live status lives ONLY here. States: `- [ ]` open · `- [x]` done · `- [!]`
 attempted-but-failed. `spec/` and `design/` are status-free.
@@ -84,65 +88,14 @@ the retired bingo app), single-tenant, **not a public product until V3**.
 
 Bricking risks, broker auth and security issues get filed here as they surface.
 
-- [!] **S0-test-1**: Bench-verify the serial console on real hardware (P1, 0.5d) _(⚠ failed 2026-10-03; blocker: Hardware-gated. Boris must run Checks A–E at the Windows + Chrome bench and fill in the results table. Check E re-flashes prod board 94a990dd09a4 and ends its 0.3.1 baseline, so it runs last. (after 2)_
-      Filed 2026-09-10, when S0-fe-1 shipped. Its software half is proven in jsdom against
-      replays of real `agent/main/*.c` output. These four cannot be, because they are
-      properties of a USB bridge chip and an OS, not of the classifier. The bench is
-      Windows + Chrome (settled 2026-10-02). The Linux dev box does not enumerate boards
-      over WebSerial.
-      * **Re-acquire after `hard_reset`, bridge-chip path**. `serialConsole.ts` re-reads
-        `navigator.serial.getPorts()` every 250 ms for 8 s. On a classic esp32 the port
-        *survives* the reset, so this must reconnect without ever showing "No board is
-        available to watch". The native-USB half of this check is **S0-test-2**. No
-        C3/C6/S3 board is on hand (2026-09-11).
-      * **115200 decodes cleanly**. `sdkconfig.defaults` sets no
-        `CONFIG_ESP_CONSOLE_UART_BAUDRATE` so this must be right, but a wrong baud
-        yields plausible-looking mojibake rather than an error. The classifier would
-        then silently match nothing.
-      * **The EN pulse boots the app, not the ROM loader**. `SerialConsole.reboot()`
-        drives RTS high with DTR low. If the wiring inverts, the board lands in download
-        mode and prints `waiting for download` forever.
-      * **Release really releases**. After the button, the COM port must open in another
-        terminal (for example,PuTTY, 115200). If it reports "Access denied" / port in use,
-        `port.close()` is not being reached.
-      Acceptance: all four confirmed against **any** bridge-chip board (CP2102 or CH340) —
-      retargeted 2026-09-23, since the DevKit v1 is out of consideration and this task
-      tests the bridge-chip *path*, not that board. Anything that fails comes back as a
-      new S0 task with the observed behavior.
-      The bench host is Windows + Chrome (settled 2026-10-02, earlier entries said the Mac).
-      Re-acquire is an OS-and-driver property — record the driver and COM port used.
-      * **Folded in from S0-fe-8 (accepted 2026-10-01 without a bench run)**. On Windows,
-        with the board's VCP driver *not* installed, an operator who has never installed one
-        reaches a working COM port using only "My board does not appear" on the flash page:
-        no Device Manager, no asking. Also confirm that picking COM1 gets refused by name
-        and that the Silicon Labs driver link resolves (the dev box gets a 403 from Akamai).
-      Bench script: docs/runbooks/serial-console-bench.md (2026-10-03). Board: **not the
-      bench S3** (2026-10-04: it has one native-USB socket and no bridge chip, so the UART-socket
-      proposal is withdrawn). Needs any CP2102/CH340 ESP32 board, not yet on hand. Check E
-      re-flashes the board it runs on; if that is 94a990dd09a4, it ends its 0.3.1 baseline.
-
-- [!] **S0-test-2**: The native-USB re-acquire path, on a C3/C6/S3 (P2, 0.25d) _(⚠ failed 2026-10-03; blocker: Hardware-gated: Boris must run Check F on the Windows + Chrome bench with the ESP32-S3 (94a990dd09a4) on native USB (COM3). (after 2 attempts))_
-      Split from S0-test-1 on 2026-09-11: the only board on hand is an ESP32-DevKit v1,
-      whose bridge chip keeps the port alive across `hard_reset`. That exercises the
-      *easy* half. The 8 s `getPorts()` poll in `serialConsole.ts` exists for the parts
-      that come back as a **different** `SerialPort`. Nothing has ever tested it on
-      metal. A too-short window shows "No board is available to watch" on a board that
-      is merely rebooting. This is the exact false negative the console exists to
-      delete. ~~**Blocked on acquiring a C3, C6 or S3.**~~
-      **Unblocked 2026-09-22**. An **ESP32-S3** is on hand and enrolled against
-      prod — device `94a990dd09a4`, the board that passed `R0-test-2` on 2026-09-19. This
-      task's premise ("the only board on hand is an ESP32-DevKit v1") is simply out of
-      date. Cheap to run now, since the board is already flashed and known-good.
-      Acceptance: on the bench, `hard_reset` from the console on a native-USB board
-      reconnects inside the window and streams the boot log without operator action.
-      The bench is **Windows + Chrome** (settled 2026-10-02): the S3 enrolled from it with
-      native USB on COM3. Earlier entries said the Mac; that is superseded. Record the
-      driver and COM port used — the re-acquire window is an OS-and-driver property.
-      Bench script: docs/runbooks/serial-console-bench.md → Check F (2026-10-03). Run it right
-      after S0-test-1's Check E: both re-flash `94a990dd09a4`, so the 0.3.1 baseline is given up
-      once. The panel's `watching …: opened on try N, T ms`
-      notice needs the frontend release after this commit on prod.
-
+- [ ] **S0-bug-1**: Board `94a990dd09a4` did not reach "On the fleet" after the 2026-10-04 bench flash (P1, 0.5d)
+      Found at the bench during Check F: after a native-USB flash the console re-opened by
+      itself and streamed the log, then sat at "waiting for **Clock set**" and the Fleet table
+      did not show the board online. Not diagnosed: the bench notes do not say whether it was
+      the Wi-Fi details, an unreachable time server (the agent gives up after 15 s and
+      continues), or the broker. First step: is the board online now, and what do its last
+      stage reports and the ingestor log say? Until answered, the one enrolled board's state
+      is unknown. Acceptance: the cause is named, and the board is on the fleet or re-flashed.
 - [x] **S0-test-3**: Someone who did not see the code onboards a board unaided — passed 2026-09-22 → [enrollment.md](docs/features/enrollment.md)
 - [x] **S0-fw-3**: A board that browns out during RF calibration cannot escape it — withdrawn 2026-09-23, not fixed → [enrollment.md](docs/features/enrollment.md)
 
@@ -198,3 +151,213 @@ after the reboot.
 - [x] **R2-spec-1**: Propose `rollback_capable` + partition fingerprint in `up/announce` (P1, 0.5d) _(done 2026-10-03; proposal filed, spec not applied; see DECISIONS.md and docs/features/board-profiles.md)_
       Proposal only (`spec/` is protected). Shape: `docs/features/board-profiles.md` step 1
       and `spec/open-questions.md` → *Bootloader attestation on the Arduino path*.
+
+---
+
+## R2b: Operator flows — onboard, update, change Wi-Fi
+
+Opened 2026-10-04 from `spec/flows.md` (Flow 1, 2, 3) and the 2026-10-04 entries in
+`DECISIONS.md`. Between R2 (safe deploy, done) and R3 (the library). Alex first, then Marcus;
+Siddharth and Sarah are served by API shape; Elena deferred. **Almost all dashboard work, and
+nothing here changes the wire protocol except the known-networks list** (`R2b-spec-1`,
+`R2b-fw-1`). The stock layout stays the default until R3 (Arduino layout and library marker
+are R3). Order inside each flow: the one-place status first, then the cards, then the rest.
+
+### Foundations
+
+- [ ] **R2b-spec-1**: Propose the known-networks list and `ssid` for `spec/device-protocol.md` (P1, 0.5d)
+      Proposal only (`spec/` is protected, and the file is near-frozen: additive only). Shape:
+      `ff_cfg` carries a list of networks (SSID + passphrase) and old single-network blobs
+      stay readable; `up/announce` gains an optional `ssid` (never the passphrase). Decide:
+      how many networks, the selection rule (fixed order or strongest in range), and what a
+      board with no known network does. Record in `DECISIONS.md`. Blocks `R2b-fw-1`,
+      `R2b-fe-12`, `R2b-be-5`.
+- [ ] **R2b-spec-2**: Decide `R2-spec-1`: apply, amend or drop (P2, 0.25d)
+      The pre-check warns on `rollback_capable: false` (Flow 2), and that field exists only if
+      the 2026-10-03 proposal is applied. Until decided, the warning is skipped.
+- [ ] **R2b-spec-3**: Spike: how the agent writes its network list, and what "keep identity" needs (P2, 1d)
+      Findings only, in `docs/features/enrollment.md`. Questions: `ff_cfg` or NVS for a list
+      the running agent edits (NVS is lost on "Erase All Flash"); how a re-flash keeps the
+      broker credential without burning a token; what Improv over serial needs on the agent.
+      Gates any task for "change Wi-Fi without USB", which is not filed yet.
+
+### Flow 1 — Onboard a board
+
+- [ ] **R2b-fe-1**: One status strip: UI and API versions, board, firmware, state (P0, 1d)
+      Replaces the footer's split of UI and API versions from the table's firmware column.
+      Read-only, from `buildInfo`, `GET /v1/healthz`, and the selected board's device row.
+      Acceptance: after a deploy, one glance shows the running UI, API and the board's
+      firmware; a stale cached bundle is visible (UI and API differ).
+- [ ] **R2b-fe-2**: Pre-flight card before a flash (P0, 1d)
+      From `predictDeviceId(chip)` and the device list already fetched: new board, or
+      known board with firmware, online state and "re-flashing issues a new token and
+      re-enrols it; its current baseline ends". No backend change. Acceptance: flashing a
+      known board shows the card first; a new board shows "new board".
+- [ ] **R2b-fe-3**: Onboarding result card, with plain-language flash failures (P0, 1.5d)
+      One card composed from the console summary, the device row and the versions: device id,
+      firmware, link, clock source, enrolled, on the fleet; on failure one cause and one next
+      action. Fold in the flash write/verify failure copy: say what to try first (cable,
+      port, lower baud) and name the flash chip only when it repeats. Depends on `R2b-fe-1`.
+- [ ] **R2b-fe-4**: Boot count, reset reason and milestone retraction in the timeline (P1, 1d)
+      Read `frontend/src/boardConsole.ts` first: a boot-boundary detector already exists
+      (`RESET_BANNER`, commanded-reset handling), so this may be small. Acceptance: a board
+      that reboots during watch shows the count and reason ("rebooted 3x: brownout") and the
+      milestones it had reached are retracted.
+- [ ] **R2b-fe-5**: Watch the console and the server together (P1, 1d)
+      A native-USB reset must not read as "no board": mark Enrolled / On the fleet from the
+      device list or `GET /v1/events` even when the console lost the port. Built without waiting
+      for the bench: the server's view is the truth either way. `S0-test-2` (Check F) tests it
+      afterwards.
+- [ ] **R2b-be-1**: Set a device's name and tag (P1, 0.5d)
+      `name` is in the schema and in `GET /v1/devices`, but nothing sets it, so every device
+      is `null`. A `PATCH /v1/devices/{id}`, admin-only. Acceptance: round-trips and shows in
+      the table.
+- [ ] **R2b-fe-6**: Name a board from the result card (P1, 0.5d)
+      Last line of Flow 1. Depends on `R2b-be-1`.
+- [ ] **R2b-test-1**: Re-run the unaided onboarding test against the new flow (P1, 0.5d)
+      Extends `S0-test-3`, which passed 2026-09-22 on the old UI. Someone who has not seen
+      the code onboards a board from the result card alone. Run after `R2b-fe-1`..`fe-4`.
+
+### Flow 2 — Update a board
+
+- [ ] **R2b-fe-7**: Upload a build from the dashboard (P0, 1.5d)
+      Replaces `docs/runbooks/upload-artifact.sh` as the way in (`spec/standards.md` →
+      *dashboard*). `POST /v1/artifact` exists, so this is the form: file, version, target.
+      Acceptance: an admin holding only the password uploads a `.bin` and sees it in the
+      Deploy dropdown, with no shell.
+- [ ] **R2b-be-2**: Dry-run pre-check for a deploy (P0, 1d)
+      `POST /v1/devices/{id}/deploy` already refuses a mismatched build with a 409, but only
+      when sent. Expose the same reasons without sending: layout and slot-size mismatch,
+      board offline, sleepy. Returns refusals and warnings as plain sentences. Reuse the
+      checks in `api/routers/deploys.py`; one source of truth.
+- [ ] **R2b-be-3**: Refuse a merged full-flash binary (P1, 1d)
+      A `*.merged.bin` carries bootloader and partition table at `0x0`; sending it as an
+      app image overwrites them. Detect at upload from the image header and size and name the
+      app `.bin` to pick. Nothing detects this today. Needs a fixture of a real merged image
+      and a real app image.
+- [ ] **R2b-fe-8**: Pre-check card on the Deploy cell (P0, 1d)
+      Shows the dry run: current to target, what is refused or warned, "rolls back on its own
+      if it never reconnects". Warnings can be overridden; refusals cannot. Depends on
+      `R2b-be-2`.
+- [ ] **R2b-fe-9**: Update timeline with elapsed seconds and stall text (P1, 1.5d)
+      sent, downloading, staged, rebooting, confirming, confirmed, from `deploy.state` and
+      `deploy_events`. **No percentage and no progress bar** (`deploy.ts`: `pct` is a
+      transition log). A stall says what it is and when the board gives up (60 to 80 s for a
+      silent download, R2-fw-5).
+- [ ] **R2b-fe-10**: Update result card (P1, 1d)
+      Firmware before to after, good or rolled back with the reason, UI and API versions,
+      when. Extends R2-fe-1's verdict. Depends on `R2b-fe-1`.
+- [ ] **R2b-be-4**: Record who sent a deploy (P2, 0.5d)
+      Audit record for Flow 2's result card (Marcus). Check what `deploy_events` already
+      stores before adding a column; a migration is CRITICAL.
+- [ ] **R2b-fe-11**: "Send again" after a failure before reboot (P2, 0.5d)
+      Safe because a repeated stage is deduplicated on the board (R2-fw-6). Not offered after
+      a rollback.
+- [ ] **R2b-test-2**: Bench replay of the R2 recovery paths proven only in QEMU (P1, 1d)
+      Boot loop, power cut mid-download, hang before the session, silent store, marginal
+      radio: `docs/runbooks/rollback-test.md`. Flow 2's "rolls back on its own" rests on it.
+      Hardware-gated; needs the special fault-injection build.
+- [ ] **R2b-test-3**: Update flow end to end (P1, 1d)
+      Upload from the dashboard, pre-check refuses a wrong-layout build and the merged
+      binary, deploy a good build to `confirmed`, deploy a deliberately broken one to
+      `rolled back`. Extends CUJ-1 steps 5 and 6.
+
+### Flow 3 — Change the network (known networks)
+
+- [ ] **R2b-fw-1**: Agent reads a list of known networks and joins the first it can see (P1, 2d)
+      CRITICAL (agent, `ff_cfg`, protocol). Old single-network `ff_cfg` stays readable. Reports
+      `ssid` in `announce`. States "no known network in range" and keeps trying. New agent
+      version; `just agent-verify` and the QEMU run unchanged. Depends on `R2b-spec-1`
+      being accepted.
+- [ ] **R2b-fe-12**: Flasher takes several networks, passphrase field uses the password manager (P1, 1d)
+      `ffcfg.ts` encodes the list; "add another network". The no-browser-storage rule in
+      `FlashBoard.tsx` stays: the field is marked for the browser's own password manager,
+      and nothing is written to storage. Depends on `R2b-spec-1`.
+- [ ] **R2b-be-5**: Ingest and expose the board's `ssid` (P1, 0.5d)
+      Additive field on the device read model. Depends on `R2b-spec-1`.
+- [ ] **R2b-fe-13**: Fleet row shows the network: "on: shed", "knows 2 networks" (P1, 0.5d)
+      And "none of its known networks is in range" when it has not announced for a while.
+      Depends on `R2b-be-5`.
+- [ ] **R2b-test-4**: Move a board between two networks on the bench (P1, 0.5d)
+      Flash with two networks, power it where only the second is in range, see it join and
+      the row change. Hardware-gated. Depends on `R2b-fw-1`.
+
+### Bench verification — after the flows land
+
+Moved from Sprint 0 on 2026-10-04: the bench runs wait until the new flows exist, so the
+console and the merged watch are tested once, in their final form. Order: `S0-bug-1` first
+(Sprint 0), then Check A–D when a bridge board is on hand, then E and F back to back (both
+re-flash `94a990dd09a4`).
+
+- [ ] **S0-test-1**: Bench-verify the serial console on real hardware (P1, 0.5d) _(deferred 2026-10-04: moved here from Sprint 0, to be run after the R2b flows land. Hardware-gated: needs a CP2102/CH340 board, which is not on hand. Id kept so the runbook and notes still resolve.)_
+      Filed 2026-09-10, when S0-fe-1 shipped. Its software half is proven in jsdom against
+      replays of real `agent/main/*.c` output. These four cannot be, because they are
+      properties of a USB bridge chip and an OS, not of the classifier. The bench is
+      Windows + Chrome (settled 2026-10-02). The Linux dev box does not enumerate boards
+      over WebSerial.
+      * **Re-acquire after `hard_reset`, bridge-chip path**. `serialConsole.ts` re-reads
+        `navigator.serial.getPorts()` every 250 ms for 8 s. On a classic esp32 the port
+        *survives* the reset, so this must reconnect without ever showing "No board is
+        available to watch". The native-USB half of this check is **S0-test-2**. No
+        C3/C6/S3 board is on hand (2026-09-11).
+      * **115200 decodes cleanly**. `sdkconfig.defaults` sets no
+        `CONFIG_ESP_CONSOLE_UART_BAUDRATE` so this must be right, but a wrong baud
+        yields plausible-looking mojibake rather than an error. The classifier would
+        then silently match nothing.
+      * **The EN pulse boots the app, not the ROM loader**. `SerialConsole.reboot()`
+        drives RTS high with DTR low. If the wiring inverts, the board lands in download
+        mode and prints `waiting for download` forever.
+      * **Release really releases**. After the button, the COM port must open in another
+        terminal (for example,PuTTY, 115200). If it reports "Access denied" / port in use,
+        `port.close()` is not being reached.
+      Acceptance: all four confirmed against **any** bridge-chip board (CP2102 or CH340) —
+      retargeted 2026-09-23, since the DevKit v1 is out of consideration and this task
+      tests the bridge-chip *path*, not that board. Anything that fails comes back as a
+      new S0 task with the observed behavior.
+      The bench host is Windows + Chrome (settled 2026-10-02, earlier entries said the Mac).
+      Re-acquire is an OS-and-driver property — record the driver and COM port used.
+      * **Folded in from S0-fe-8 (accepted 2026-10-01 without a bench run)**. On Windows,
+        with the board's VCP driver *not* installed, an operator who has never installed one
+        reaches a working COM port using only "My board does not appear" on the flash page:
+        no Device Manager, no asking. Also confirm that picking COM1 gets refused by name
+        and that the Silicon Labs driver link resolves (the dev box gets a 403 from Akamai).
+      Bench script: docs/runbooks/serial-console-bench.md (2026-10-03). Board: **not the
+      bench S3** (2026-10-04: it has one native-USB socket and no bridge chip, so the UART-socket
+      proposal is withdrawn). Needs any CP2102/CH340 ESP32 board, not yet on hand. Check E
+      re-flashes the board it runs on; if that is 94a990dd09a4, it ends its 0.3.1 baseline.
+
+- [ ] **S0-test-2**: The native-USB re-acquire path, on a C3/C6/S3 (P2, 0.25d) _(deferred 2026-10-04: moved here from Sprint 0, to be run after the R2b flows land, so it also tests the merged watch (`R2b-fe-5`). Hardware-gated: Check F on the Windows + Chrome bench with the ESP32-S3 (94a990dd09a4) on native USB (COM3). Id kept.)_
+      Split from S0-test-1 on 2026-09-11: the only board on hand is an ESP32-DevKit v1,
+      whose bridge chip keeps the port alive across `hard_reset`. That exercises the
+      *easy* half. The 8 s `getPorts()` poll in `serialConsole.ts` exists for the parts
+      that come back as a **different** `SerialPort`. Nothing has ever tested it on
+      metal. A too-short window shows "No board is available to watch" on a board that
+      is merely rebooting. This is the exact false negative the console exists to
+      delete. ~~**Blocked on acquiring a C3, C6 or S3.**~~
+      **Unblocked 2026-09-22**. An **ESP32-S3** is on hand and enrolled against
+      prod — device `94a990dd09a4`, the board that passed `R0-test-2` on 2026-09-19. This
+      task's premise ("the only board on hand is an ESP32-DevKit v1") is simply out of
+      date. Cheap to run now, since the board is already flashed and known-good.
+      Acceptance: on the bench, `hard_reset` from the console on a native-USB board
+      reconnects inside the window and streams the boot log without operator action.
+      The bench is **Windows + Chrome** (settled 2026-10-02): the S3 enrolled from it with
+      native USB on COM3. Earlier entries said the Mac; that is superseded. Record the
+      driver and COM port used — the re-acquire window is an OS-and-driver property.
+      Bench script: docs/runbooks/serial-console-bench.md → Check F (2026-10-03). Run it right
+      after S0-test-1's Check E: both re-flash `94a990dd09a4`, so the 0.3.1 baseline is given up
+      once. The panel's `watching …: opened on try N, T ms`
+      notice needs the frontend release after this commit on prod.
+      **2026-10-04 bench, partial.** Frontend 0.4.2 on prod. The S3 was flashed from COM3
+      (`303a:1001`, driver `usbser.sys`, serial `94:A9:90:DD:09:A4`, Windows 10, Chrome
+      154.0.8037.58). The console opened by itself and streamed the log with no click, which
+      is the core of this check. **Not recorded:** the `opened on try N, T ms` notice and
+      whether "No board is available to watch" appeared. The board then stalled at "Clock
+      set" (`S0-bug-1`). Needs one clean re-run once the board is on the fleet; that re-run
+      now waits for R2b.
+
+### Order
+
+1. `S0-bug-1` (Sprint 0). 2. `R2b-fe-1`, `-2`, `-3`, `-7` and `R2b-be-2`, `-3` (no dependencies).
+3. `R2b-fe-8`..`fe-10`, `R2b-fe-4`, `R2b-fe-5`, `R2b-be-1`/`fe-6`. 4. `R2b-spec-1`, then `R2b-fw-1`,
+`fe-12`, `be-5`, `fe-13`. 5. The `R2b-test-*` tasks and the bench verification (`S0-test-1`,
+`S0-test-2`) last, on the final flows. `R2b-spec-3` can run any time and gates future Improv work.
