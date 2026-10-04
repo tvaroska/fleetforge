@@ -26,7 +26,7 @@
 //    are two rows.
 //
 // Not here, on purpose:
-// * Who sent it: needs `R2b-be-4` (no data yet). That task adds a `Sent by` row.
+// * `Sent by` is server-authored text (R2b-be-4), rendered as text; absent when not recorded.
 // * A "Send again" button: `R2b-fe-11`. The next action may say "send it again" in words.
 // * The failed boot's crash reason and last milestone after a rollback: the agent does not
 //   report them. Only the board's own `detail` is shown, verbatim.
@@ -227,6 +227,16 @@ export function deployResult(
   const sentAt = deploy.steps?.[0]?.at
   if (sentAt !== undefined && Number.isFinite(Date.parse(sentAt))) {
     rows.push({ label: 'Sent', value: formatWhen(sentAt), tone: null })
+  }
+  const sender = deploy.sent_by
+  if (sender && typeof sender.subject === 'string' && sender.subject !== '') {
+    const credential =
+      typeof sender.credential === 'string' && sender.credential !== '' ? sender.credential : null
+    rows.push({
+      label: 'Sent by',
+      value: credential !== null ? `${sender.subject} · ${credential}` : sender.subject,
+      tone: null,
+    })
   }
   rows.push({
     label: 'Finished',

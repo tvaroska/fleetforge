@@ -46,6 +46,10 @@ that cannot take this image must be refused before anything is minted or recorde
 same reasons, answered 200 with all of them at once and nothing sent. Every sentence lives
 in `fleetforge/deploy_precheck.py`, which this endpoint turns into its first HTTP error.
 The pre-check has no side effects and its warnings (offline, sleepy) are never enforced.
+
+**Who sent it (R2b-be-4)** is recorded on the `requested` row (`detail.sent_by`): the
+subject, the token id and a snapshot of the token's label. The sender is whoever opened
+the transaction; a reuse writes no row, so the original sender stands.
 """
 
 import logging
@@ -57,6 +61,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from fleetforge.api.deps import (
     AdminDep,
+    AuthContext,
     CommandPublisherDep,
     SessionMakerDep,
     SettingsDep,
@@ -74,7 +79,7 @@ from fleetforge.artifact_urls import mint_artifact_url
 from fleetforge.broker import CommandPublisher, CommandPublishError, new_command_id, stage_payload
 from fleetforge.clock import now_utc
 from fleetforge.config import Settings
-from fleetforge.db.models import Device
+from fleetforge.db.models import AdminToken, Device
 from fleetforge.deploy_precheck import (
     NO_ARTIFACT_FOR_TARGET,
     Finding,
@@ -82,7 +87,12 @@ from fleetforge.deploy_precheck import (
     refusals,
     warnings,
 )
-from fleetforge.deploys import latest_open_transaction, record_publish_failure, record_requested
+from fleetforge.deploys import (
+    DeploySender,
+    latest_open_transaction,
+    record_publish_failure,
+    record_requested,
+)
 from fleetforge.presence import is_online
 
 logger = logging.getLogger(__name__)
@@ -109,6 +119,16 @@ URL_NOT_CONFIGURED = (
     "this server cannot hand out firmware download links, so no board could fetch the "
     "image; the server log names what is missing. Nothing was deployed."
 )
+
+
+async def _sender(session: AsyncSession, admin: AuthContext) -> DeploySender:
+    """The sender record: one PK read for the token's label (never fail a deploy over it)."""
+    token = await session.get(AdminToken, admin.token_id)
+    return DeploySender(
+        subject=admin.subject,
+        token_id=str(admin.token_id),
+        credential=token.name if token is not None else None,
+    )
 
 
 def _artifact_url(sha256: str, settings: Settings) -> str:
@@ -203,6 +223,7 @@ async def deploy_device(
         url = _artifact_url(artifact.sha256, settings)
 
         if not reused:
+            sent_by = await _sender(session, admin)
             await record_requested(
                 session,
                 device_id=device_id,
@@ -213,6 +234,7 @@ async def deploy_device(
                 size_bytes=artifact.size_bytes,
                 target=device.platform_type,
                 apply=body.apply,
+                sent_by=sent_by,
             )
             # Committed BEFORE the publish: record the intent, then act.
             await session.commit()

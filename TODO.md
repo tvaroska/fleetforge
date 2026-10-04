@@ -289,7 +289,7 @@ are R3). Order inside each flow: the one-place status first, then the cards, the
 - [x] **R2b-fe-10**: Update result card (P1, 1d) _(done 2026-10-04; see docs/features/dashboard.md)_
       Firmware before to after, good or rolled back with the reason, UI and API versions,
       when. Extends R2-fe-1's verdict. Depends on `R2b-fe-1`.
-- [ ] **R2b-be-4**: Record who sent a deploy (P2, 0.5d)
+- [x] **R2b-be-4**: Record who sent a deploy (P2, 0.5d) _(done 2026-10-04; see docs/features/ota-deploy.md)_
       Audit record for Flow 2's result card (Marcus). Check what `deploy_events` already
       stores before adding a column; a migration is CRITICAL.
 - [ ] **R2b-fe-11**: "Send again" after a failure before reboot (P2, 0.5d)

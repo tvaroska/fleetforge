@@ -1049,3 +1049,130 @@ async def test_the_name_is_not_logged(admin_app: FastAPI, fleet: AsyncSession) -
     messages = [record.getMessage() for record in records]
     assert any(f"device {DEVICE_ID} updated" in message for message in messages)
     assert not any("coop door" in message for message in messages)
+
+
+# ---------------------------------------------------------------------------
+# R2b-be-4: who sent it — the `requested` row's `detail.sent_by`, two keys out
+# ---------------------------------------------------------------------------
+
+SENDER_BLOB = {
+    "subject": "admin",
+    "token_id": "11111111-1111-1111-1111-111111111111",
+    "credential": "dashboard session (1.2.3.4)",
+}
+
+
+async def test_sent_by_is_the_requested_rows_sender_without_the_token_id(
+    admin_app: FastAPI, fleet: AsyncSession
+) -> None:
+    await add_device(fleet)
+    now = now_utc()
+    await add_deploy_event(
+        fleet,
+        DEVICE_ID,
+        "requested",
+        cmd_id="cmd-a",
+        at=now - dt.timedelta(seconds=30),
+        detail={"sha256": "c" * 64, "sent_by": SENDER_BLOB},
+    )
+    await add_deploy_event(fleet, DEVICE_ID, "confirmed", cmd_id="cmd-a", at=now, is_terminal=True)
+
+    deploy = await deploy_of(admin_app)
+
+    assert deploy["sent_by"] == {
+        "subject": "admin",
+        "credential": "dashboard session (1.2.3.4)",
+    }
+    assert set(deploy["sent_by"]) == {"subject", "credential"}
+    assert deploy["detail"] is None
+    assert [set(step) for step in deploy["steps"]] == [{"state", "at"}] * 2
+    assert "token_id" not in str(deploy)
+
+
+async def test_sent_by_is_null_without_a_requested_row_or_without_the_key(
+    admin_app: FastAPI, fleet: AsyncSession
+) -> None:
+    await add_device(fleet, "a4cf12b3de40")
+    await add_device(fleet, "a4cf12b3de41")
+    await add_deploy_event(fleet, "a4cf12b3de40", "staging", cmd_id="cmd-x")
+    await add_deploy_event(
+        fleet, "a4cf12b3de41", "requested", cmd_id="cmd-y", detail={"sha256": "c" * 64}
+    )
+
+    body = await list_devices(admin_app, await login_admin(admin_app))
+
+    assert {row["device_id"]: row["deploy"]["sent_by"] for row in body["devices"]} == {
+        "a4cf12b3de40": None,
+        "a4cf12b3de41": None,
+    }
+
+
+async def test_an_older_transactions_sender_does_not_bleed_into_a_newer_one(
+    admin_app: FastAPI, fleet: AsyncSession
+) -> None:
+    await add_device(fleet)
+    now = now_utc()
+    await add_deploy_event(
+        fleet,
+        DEVICE_ID,
+        "requested",
+        cmd_id="cmd-a",
+        at=now - dt.timedelta(hours=1),
+        detail={"sent_by": SENDER_BLOB},
+    )
+    await add_deploy_event(fleet, DEVICE_ID, "requested", cmd_id="cmd-b", at=now)
+
+    deploy = await deploy_of(admin_app)
+
+    assert deploy["sent_by"] is None
+
+
+@pytest.mark.parametrize("blob", ["admin", {"subject": 7}, {"subject": ""}, ["admin"], 3])
+async def test_a_malformed_sender_blob_is_null_not_a_500(
+    admin_app: FastAPI, fleet: AsyncSession, blob: Any
+) -> None:
+    await add_device(fleet)
+    await add_deploy_event(fleet, DEVICE_ID, "requested", cmd_id="cmd-a", detail={"sent_by": blob})
+
+    deploy = await deploy_of(admin_app)
+
+    assert deploy["sent_by"] is None
+
+
+async def test_a_non_string_credential_is_dropped_to_null(
+    admin_app: FastAPI, fleet: AsyncSession
+) -> None:
+    await add_device(fleet)
+    await add_deploy_event(
+        fleet,
+        DEVICE_ID,
+        "requested",
+        cmd_id="cmd-a",
+        detail={"sent_by": {"subject": "admin", "credential": 5}},
+    )
+
+    deploy = await deploy_of(admin_app)
+
+    assert deploy["sent_by"] == {"subject": "admin", "credential": None}
+
+
+async def test_each_board_gets_its_own_sender(admin_app: FastAPI, fleet: AsyncSession) -> None:
+    await add_device(fleet, "a4cf12b3de40")
+    await add_device(fleet, "a4cf12b3de41")
+    for device, who in [("a4cf12b3de40", "dashboard session (a)"), ("a4cf12b3de41", None)]:
+        await add_deploy_event(
+            fleet,
+            device,
+            "requested",
+            cmd_id=f"cmd-{device}",
+            detail={"sent_by": {"subject": "admin", "credential": who}},
+        )
+
+    body = await list_devices(admin_app, await login_admin(admin_app))
+
+    assert {
+        row["device_id"]: row["deploy"]["sent_by"]["credential"] for row in body["devices"]
+    } == {
+        "a4cf12b3de40": "dashboard session (a)",
+        "a4cf12b3de41": None,
+    }

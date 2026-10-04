@@ -6,6 +6,23 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-04 — Who sent a deploy is a snapshot on the `requested` row's `detail.sent_by`; no column, no migration (R2b-be-4)
+
+**Decided: `deploys.record_requested` writes `detail.sent_by = {subject, token_id, credential}`; the API surfaces `{subject, credential}` as `DeploySummary.sent_by`; the result card shows a `Sent by` row.**
+
+- **What.** `subject` is `AuthContext.subject` (`admin` in v1). `token_id` is the public half of the `ffa_` token, the same id the deploy log line prints (`requested by <uuid>`), so an auditor can join the record to the log; stored, not exposed. `credential` is the token's `name` at send time (`dashboard session (<client ip>)`).
+- **Snapshot, not a join.** `deploy_events` is kept forever and must be readable without joining; token rows have their own lifecycle. If the token row is gone, `credential` is null; an audit label never fails a deploy.
+- **Original sender stands across reuse.** A repeat POST inside the reuse window writes no row, so the transaction's sender is whoever opened it. The table stays append-only, one row per intent.
+- **The IP is a label, not proof.** It is the leftmost validated `X-Forwarded-For`, client-spoofable.
+- **`deps.py` untouched.** It is the admin-auth path (CRITICAL.md); the router reads the token name with one `session.get(AdminToken, ...)` in the same session, only on the non-reuse branch and after the refusal checks.
+- **Read side.** A third bounded query (not the steps query, which is capped at the newest `MAX_DEPLOY_STEPS` and could drop the `requested` row). `detail -> 'sent_by'` decodes to a Python `dict` through SQLAlchemy `text()` on asyncpg, verified by the devices tests. Parsed defensively: non-dict or empty/non-str `subject` gives null. It never enters `DeploySummary.detail` or `steps`.
+- **Rejected:** a `sent_by` column and migration; a read-time join to `admin_tokens`; adding `name` to `AuthContext`; a second row on reuse.
+- **Gotcha.** `tests/test_agent_power_and_size.py::test_every_built_bundle_is_within_budget` fails on this box (local `agent/dist` esp32c3/esp32c6 bundles are over budget); unrelated and untouched here. The dev admin password in `.env` did not match; T2 recreated the api with the `.env.example` hash and restored it afterwards.
+
+Supersedes nothing.
+
+---
+
 ## 2026-10-04 — The unaided re-run waits for the R2b flow on prod; the software half was rehearsed in a real Chromium (R2b-test-1)
 
 **Decided: `R2b-test-1` stays open. The unaided run is held until the R2b flow is on prod; this pass delivers the run script and a software rehearsal, not the acceptance.**

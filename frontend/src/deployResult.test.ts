@@ -295,6 +295,29 @@ describe('deployResult — everything else', () => {
     expect(row(good, 'Sent')).toBeDefined()
   })
 
+  it('puts a Sent by row between Sent and Finished, only when recorded', () => {
+    const fw = { fw_version: '1.5.0' }
+    const sent = must(
+      deployResult(
+        deploy({
+          steps: [step('requested', 40)],
+          sent_by: { subject: 'admin', credential: 'dashboard session (203.0.113.7)' },
+        }),
+        fw,
+        versions,
+        NOW,
+      ),
+    )
+    expect(sent.rows.map((r) => r.label)).toEqual(['Before', 'After', 'Sent', 'Sent by', 'Finished', 'UI / API'])
+    expect(row(sent, 'Sent by')).toBe('admin · dashboard session (203.0.113.7)')
+    const noCred = must(
+      deployResult(deploy({ sent_by: { subject: 'admin', credential: null } }), fw, versions, NOW),
+    )
+    expect(row(noCred, 'Sent by')).toBe('admin')
+    expect(row(must(deployResult(deploy({ sent_by: null }), fw, versions, NOW)), 'Sent by')).toBeUndefined()
+    expect(row(must(deployResult(deploy(), fw, versions, NOW)), 'Sent by')).toBeUndefined()
+  })
+
   it('has a UI / API row only with versions, and carries the mismatch flag', () => {
     const none = must(deployResult(deploy(), { fw_version: '1.5.0' }, null, NOW))
     expect(row(none, 'UI / API')).toBeUndefined()

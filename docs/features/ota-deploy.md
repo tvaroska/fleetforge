@@ -859,7 +859,7 @@ the next connect"). The version flip is observed by making the board reconnect
 
 **Update result card (R2b-fe-10).** A terminal transaction is rendered as one card from
 `DeploySummary` and `device.fw_version` alone (before, after, verdict, reason, one next
-action, UI and API versions, when); see `dashboard.md`. Who sent it waits on `R2b-be-4`, and
+action, UI and API versions, when); see `dashboard.md`. Who sent it is `DeploySummary.sent_by` (R2b-be-4, below), and
 the failed boot's crash reason after a rollback is not reported by the agent.
 
 **Deliberately not in R1:** an upload UI (curl only), a deploy history/timeline, group
@@ -2255,3 +2255,21 @@ flaky radio as the reason for one board at a time. It does **not** retire one bo
 time: an image that boots, confirms and is broken anyway is still recovered by nothing.
 Bench replay owed (`../runbooks/rollback-test.md` → *Marginal radio*), above all for the
 question QEMU cannot answer: does a really dead radio end D3 through TCP keepalive?
+
+## R2b-be-4: who sent a deploy (2026-10-04)
+
+The `requested` row's `detail` gains `sent_by: {subject, token_id, credential}`, written by
+`deploys.record_requested` from the router's `AuthContext` plus one PK read of the token's
+name (`credential` is a snapshot, today `dashboard session (<client ip>)`). **No migration and
+no column**: `detail` is already JSONB and already holds the server's facts about the intent.
+`GET /v1/devices` returns `deploy.sent_by = {subject, credential}` (no token id) read off the
+newest transaction's `requested` row by a third bounded query; null for older or malformed
+data. The result card shows a `Sent by` row between `Sent` and `Finished`. The original sender
+stands across a reuse (no second row); the API log line `requested by <token_id>` still names
+a re-sender. See DECISIONS.md.
+
+T2 on the dev stack: a sim board deploy was 202; the DB `requested` row held the sender with a
+token id equal to the API log line and the `ffa_` cookie id, no other row had `sent_by`, no URL
+in `detail`; after `confirmed` the API gave the two-key `sent_by`; a second login session's
+repeat deploy returned `reused: true` with one row and the first session's id; boards with older
+transactions gave null; Chromium showed `admin · dashboard session (172.18.0.1)` in the card.

@@ -73,7 +73,8 @@ detail is control-stripped, truncated and URL-redacted before it is stored, beca
 is device-controlled text landing in a table kept forever.
 
 **The reads live here too** (`latest_open_transaction`, `latest_deploys` and the
-current transaction's steps it carries for the dashboard's timeline, R2b-fe-9). The
+current transaction's steps and sender it carries for the dashboard's timeline, R2b-fe-9,
+and result card, R2b-be-4). The
 single-writer tripwire in `tests/test_invariants.py` bans other modules from writing
 this table; the *spirit* extends to reading it, for the same reason `progress.py` holds
 `latest_progress` next to `record_progress` and `api/routers/devices.py` merely calls
@@ -134,6 +135,20 @@ _OPEN_TRANSACTION_SQL = text(
 
 
 @dataclass(frozen=True, slots=True)
+class DeploySender:
+    """Who opened a deploy transaction (R2b-be-4). Transport-agnostic: the router builds it
+    from its `AuthContext` and the token row; this module never imports FastAPI.
+
+    `credential` is a snapshot of the admin token's label at send time, not a join: this
+    table is kept forever and a row must be understandable without joining others.
+    """
+
+    subject: str
+    token_id: str
+    credential: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class OpenTransaction:
     """An in-flight deploy intent a repeat request may re-use.
 
@@ -190,6 +205,7 @@ async def record_requested(
     size_bytes: int,
     target: str,
     apply: str,
+    sent_by: DeploySender,
 ) -> DeployEvent:
     """Record the intent to deploy: one `requested` row, never terminal.
 
@@ -200,7 +216,8 @@ async def record_requested(
     nothing in the history mentions.
 
     `detail` carries what the KPI query and the operator need to understand the row
-    without joining three tables — and nothing else. **No URL, no bucket, no key.**
+    without joining three tables, and who sent it (`sent_by`, R2b-be-4: the transaction's
+    sender is whoever opened it) — and nothing else. **No URL, no bucket, no key.**
     """
     row = DeployEvent(
         device_id=device_id,
@@ -214,6 +231,11 @@ async def record_requested(
             "size_bytes": size_bytes,
             "target": target,
             "apply": apply,
+            "sent_by": {
+                "subject": sent_by.subject,
+                "token_id": sent_by.token_id,
+                "credential": sent_by.credential,
+            },
         },
     )
     session.add(row)
@@ -453,6 +475,37 @@ _TRANSACTION_STEPS_SQL = text(
     """
 )
 
+# The sender of each board's newest transaction (R2b-be-4): the `requested` row's
+# `detail.sent_by`. Separate from the steps query because that one is capped at the newest
+# `MAX_DEPLOY_STEPS` rows and could drop the `requested` row of a chatty agent. Same
+# `at, id` ordering and `=` join as above (a NULL-cmd_id newest row has no sender).
+_TRANSACTION_SENDER_SQL = text(
+    """
+    WITH latest AS (
+        SELECT DISTINCT ON (device_id) device_id, cmd_id
+          FROM deploy_events
+         WHERE device_id = ANY(:device_ids)
+         ORDER BY device_id, at DESC, id DESC
+    )
+    SELECT DISTINCT ON (e.device_id) e.device_id, e.detail -> 'sent_by' AS sent_by
+      FROM deploy_events AS e
+      JOIN latest AS l ON l.device_id = e.device_id AND l.cmd_id = e.cmd_id
+     WHERE e.state = :requested_state
+     ORDER BY e.device_id, e.at DESC, e.id DESC
+    """
+)
+
+
+@dataclass(frozen=True, slots=True)
+class SenderSnapshot:
+    """Who sent a board's current transaction, as the API may show it.
+
+    No `token_id`: it is stored for audit joins to the API log, not surfaced.
+    """
+
+    subject: str
+    credential: str | None
+
 
 @dataclass(frozen=True, slots=True)
 class DeployStepSnapshot:
@@ -488,6 +541,9 @@ class DeploySnapshot:
     `steps` (R2b-fe-9) is every recorded transition of this same transaction, oldest
     first, capped at the newest `MAX_DEPLOY_STEPS`. Never empty: its last entry is
     always `(state, at)`, and a row with no `cmd_id` is a transaction of one.
+
+    `sent_by` (R2b-be-4) is the sender recorded on that transaction's `requested` row, or
+    None for transactions recorded before it existed or with no `requested` row.
     """
 
     cmd_id: str | None
@@ -499,6 +555,7 @@ class DeploySnapshot:
     pct: int | None
     detail: str | None
     steps: tuple[DeployStepSnapshot, ...]
+    sent_by: SenderSnapshot | None
 
 
 def _snapshot_pct(detail: Any) -> int | None:
@@ -527,6 +584,17 @@ def _snapshot_detail(detail: Any) -> str | None:
     return value if isinstance(value, str) else None
 
 
+def _snapshot_sender(value: Any) -> SenderSnapshot | None:
+    """`sent_by` out of the JSONB blob, defensively: a dict with a non-empty str `subject`."""
+    if not isinstance(value, dict):
+        return None
+    subject = value.get("subject")
+    if not isinstance(subject, str) or not subject:
+        return None
+    credential = value.get("credential")
+    return SenderSnapshot(subject, credential if isinstance(credential, str) else None)
+
+
 async def latest_deploys(
     session: AsyncSession, *, device_ids: Sequence[str]
 ) -> dict[str, DeploySnapshot]:
@@ -540,8 +608,8 @@ async def latest_deploys(
     is bounded by whatever cap the caller's own list carries (`devices.LIST_LIMIT`) and
     an empty list costs one trivially-false query rather than a special case.
 
-    Two reads: the newest row per board, then the steps of that row's transaction
-    (R2b-fe-9), both bounded by the same ids.
+    Three reads: the newest row per board, the steps of that row's transaction
+    (R2b-fe-9), and that transaction's sender (R2b-be-4), all bounded by the same ids.
     """
     ids = list(device_ids)
     rows = (await session.execute(_LATEST_DEPLOYS_SQL, {"device_ids": ids})).all()
@@ -550,6 +618,13 @@ async def latest_deploys(
             _TRANSACTION_STEPS_SQL, {"device_ids": ids, "max_steps": MAX_DEPLOY_STEPS}
         )
     ).all()
+    sender_rows = (
+        await session.execute(
+            _TRANSACTION_SENDER_SQL,
+            {"device_ids": ids, "requested_state": DeployState.REQUESTED.value},
+        )
+    ).all()
+    senders = {r.device_id: _snapshot_sender(r.sent_by) for r in sender_rows}
     steps: dict[str, list[DeployStepSnapshot]] = {}
     for step in step_rows:
         steps.setdefault(step.device_id, []).append(DeployStepSnapshot(step.state, step.at))
@@ -564,6 +639,7 @@ async def latest_deploys(
             pct=_snapshot_pct(row.detail),
             detail=_snapshot_detail(row.detail),
             steps=tuple(steps.get(row.device_id) or [DeployStepSnapshot(row.state, row.at)]),
+            sent_by=senders.get(row.device_id),
         )
         for row in rows
     }

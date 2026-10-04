@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from fleetforge.db.base import asyncpg_dsn
 from fleetforge.db.models import DeployEvent, Device
-from fleetforge.deploys import record_requested
+from fleetforge.deploys import DeploySender, record_requested
 from fleetforge.events import EVENTS_CHANNEL, DeviceEvent, EventType
 from fleetforge.ingestor.handlers import handle_up_message
 from tests.conftest import TEST_DB_NAME, capture_logs, database_url_for
@@ -369,6 +369,7 @@ async def seed_intent(
         size_bytes=1966080,
         target="esp32c6",
         apply="immediate",
+        sent_by=DeploySender(subject="admin", token_id="t", credential=None),
     )
 
 

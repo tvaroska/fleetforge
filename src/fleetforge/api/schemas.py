@@ -290,6 +290,16 @@ class DeployStep(BaseModel):
     at: dt.datetime
 
 
+class DeploySender(BaseModel):
+    """Who opened this deploy transaction (R2b-be-4). Server-authored, from the `requested`
+    row's snapshot of the admin credential's label. `credential` is that label as it was at
+    send time (today `dashboard session (<client ip>)`), or null if it was not recorded.
+    The token id is stored but deliberately not sent."""
+
+    subject: str
+    credential: str | None
+
+
 class DeploySummary(BaseModel):
     """A board's newest deploy state, as the fleet view sees it. R1-fe-1.
 
@@ -316,6 +326,9 @@ class DeploySummary(BaseModel):
     `steps` and `confirm_timeout_s` (R2b-fe-9) feed the update timeline: the transitions
     of this same transaction, and the confirm window the server tells the board, so the
     dashboard can state the board's own deadlines without inventing a number.
+
+    `sent_by` (R2b-be-4) is who opened this transaction; null when it was recorded before
+    that existed or has no `requested` row.
     """
 
     # NULL only for a row written before `cmd_id` was known — the column is nullable, so
@@ -337,6 +350,7 @@ class DeploySummary(BaseModel):
     # `Settings.confirm_timeout_s` — the same number the pre-check shows. The board's
     # compiled rollback timer is authoritative and equal to it in a production build.
     confirm_timeout_s: int
+    sent_by: DeploySender | None = None
 
 
 class ArrivalSummary(BaseModel):

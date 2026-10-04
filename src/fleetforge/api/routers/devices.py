@@ -68,6 +68,7 @@ from fleetforge.api.deps import (
 )
 from fleetforge.api.schemas import (
     ArrivalSummary,
+    DeploySender,
     DeployStep,
     DeploySummary,
     DeviceList,
@@ -115,6 +116,11 @@ def _deploy_summary(
         detail=snapshot.detail,
         steps=[DeployStep(state=step.state, at=step.at) for step in snapshot.steps],
         confirm_timeout_s=confirm_timeout_s,
+        sent_by=(
+            DeploySender(subject=snapshot.sent_by.subject, credential=snapshot.sent_by.credential)
+            if snapshot.sent_by is not None
+            else None
+        ),
     )
 
 

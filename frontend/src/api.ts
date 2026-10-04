@@ -101,6 +101,10 @@ export type DeviceUpdate = { name?: string | null; group_id?: string | null }
 // `pct` is NOT a progress feed — `deploy_events` is a log of transitions and the writer
 // keeps the first `pct` per state, so our agent reports one number for a whole download.
 // Render it as text. A bar driven by it sits still and reads as a hang.
+// Who opened a deploy transaction (api/schemas.py `DeploySender`, R2b-be-4). The token id
+// is stored server-side and deliberately not sent.
+export type DeploySender = { subject: string; credential: string | null }
+
 export type DeploySummary = {
   cmd_id: string | null
   state: string
@@ -116,6 +120,8 @@ export type DeploySummary = {
   // → no rollback deadline at all; the client never invents that number.
   steps?: DeployStep[]
   confirm_timeout_s?: number
+  // Optional for the same reason as `steps`; null for transactions recorded before R2b-be-4.
+  sent_by?: DeploySender | null
 }
 
 // Mirrors `DeployStep` in api/schemas.py: one recorded transition of the current

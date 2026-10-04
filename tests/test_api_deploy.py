@@ -35,6 +35,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from fleetforge.api.deps import get_command_publisher, get_object_store, get_settings
 from fleetforge.artifact_urls import verify_artifact_url
+from fleetforge.auth.tokens import ADMIN_TOKEN_PREFIX, parse_token
 from fleetforge.broker import CommandPublishError
 from fleetforge.clock import now_utc
 from fleetforge.db.models import TERMINAL_DEPLOY_STATES, DeployEvent, DeployState, Device
@@ -385,7 +386,13 @@ class TestTheUrlIsACredential:
             "size_bytes": len(IMAGE),
             "target": TARGET,
             "apply": "auto",
+            "sent_by": {
+                "subject": "admin",
+                "token_id": str(token_id_of(token)),
+                "credential": row["detail"]["sent_by"]["credential"],
+            },
         }
+        assert row["detail"]["sent_by"]["credential"].startswith("dashboard session (")
 
     async def test_it_is_not_in_the_logs(
         self,
@@ -435,6 +442,72 @@ class TestRecordsTheIntent:
     async def test_requested_is_never_a_terminal_state(self) -> None:
         """A `requested` row must not close a transaction — both KPIs read the terminal one."""
         assert DeployState.REQUESTED not in TERMINAL_DEPLOY_STATES
+
+
+def token_id_of(token: str) -> Any:
+    parts = parse_token(token, ADMIN_TOKEN_PREFIX)
+    assert parts is not None
+    return parts.token_id
+
+
+class TestRecordsTheSender:
+    """R2b-be-4: who sent it is `detail.sent_by` on the `requested` row. No column."""
+
+    async def test_the_requested_row_carries_the_sender(
+        self,
+        admin_app: FastAPI,
+        db: AsyncSession,
+        store: MemoryObjectStore,
+        publisher: FakeCommandPublisher,
+    ) -> None:
+        await add_device(db)
+        await add_artifact(db)
+        token = await login_admin(admin_app)
+
+        await deploy(admin_app, token)
+
+        [row] = await events(db)
+        sent_by = row["detail"]["sent_by"]
+        assert sent_by["subject"] == "admin"
+        assert sent_by["token_id"] == str(token_id_of(token))
+        assert sent_by["credential"].startswith("dashboard session (")
+
+    async def test_a_reuse_by_a_second_session_keeps_the_first_sender(
+        self,
+        admin_app: FastAPI,
+        db: AsyncSession,
+        store: MemoryObjectStore,
+        publisher: FakeCommandPublisher,
+    ) -> None:
+        await add_device(db)
+        await add_artifact(db)
+        first_token = await login_admin(admin_app)
+        second_token = await login_admin(admin_app)
+        assert token_id_of(first_token) != token_id_of(second_token)
+
+        await deploy(admin_app, first_token)
+        second = await deploy(admin_app, second_token)
+
+        assert second.json()["reused"] is True
+        [row] = await events(db)
+        assert row["detail"]["sent_by"]["token_id"] == str(token_id_of(first_token))
+
+    async def test_the_publish_failure_detail_is_unchanged(
+        self,
+        admin_app: FastAPI,
+        db: AsyncSession,
+        store: MemoryObjectStore,
+        publisher: FakeCommandPublisher,
+    ) -> None:
+        await add_device(db)
+        await add_artifact(db)
+        token = await login_admin(admin_app)
+        publisher.fail_with = CommandPublishError("no broker")
+
+        await deploy(admin_app, token)
+
+        _requested, failed = await events(db)
+        assert failed["detail"] == {"reason": "publish_failed"}
 
 
 class TestARetryIsTheSameTransaction:

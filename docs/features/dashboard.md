@@ -63,7 +63,7 @@ in `deployResult.ts`, markup in `DeployResultCard.tsx`, wiring in `DeployCell.ts
 * D6/D7: `Dashboard` computes `describeVersions` once and passes it to the table; the drift
   sentence moved to `deploy.ts::driftText` so the compact line and the card say the same words.
 
-**Not built:** who sent it (`R2b-be-4`, no data yet; that task adds a `Sent by` row); the
+**Not built:** who sent it (added later by `R2b-be-4`, 2026-10-04: a `Sent by` row between `Sent` and `Finished`); the
 "Send again" button (`R2b-fe-11`); the failed boot's crash reason and last milestone after a
 rollback (the agent does not report them).
 
