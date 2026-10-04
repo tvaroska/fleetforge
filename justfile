@@ -241,10 +241,14 @@ latest_tag := `git describe --tags --abbrev=0 2>/dev/null || echo "latest"`
 # all, so an empty `agent/dist` cannot make a bad app image. The freshness gate
 # moved to where the staleness actually escapes — `just agent-publish`, which is
 # now the only way a bundle reaches a flasher (S0-infra-2's v0.3.0 incident).
+#
+# It WARNS, and never fails, when prod's agent index lags agent/version.txt
+# (S0-infra-10): publish bundles BEFORE deploying, and `build` runs before deploy.
 build: test frontend-build frontend-test _build-images _verify-images _push-images
     @echo ""
     @echo "✓ {{ registry }}/fleetforge:{{ latest_tag }}"
     @echo "✓ {{ registry }}/fleetforge-frontend:{{ latest_tag }}"
+    -just agent-check-prod --warn-only
 
 # Both images carry the commit and build time they were made from, which is what
 # `/v1/healthz` and the dashboard footer report. Without these a deployed image can
@@ -435,6 +439,22 @@ agent-publish-all:
 # "is prod actually running the bundle I think it is?".
 agent-list:
     PYTHONPATH=src uv run python -m fleetforge.firmware list
+
+# Does the store serve the agent this checkout builds? Compares every target in
+# `agent_targets` against agent/version.txt (S0-infra-10: prod served 0.3.2/0.2.0 for
+# eleven days while the repo moved to 0.4.5, and nothing said so). Read-only.
+agent-check-published *args:
+    PYTHONPATH=src uv run python -m fleetforge.firmware check-version --expect "$(tr -d '[:space:]' < agent/version.txt)" {{ args }} {{ agent_targets }}
+
+# The same check against PRODUCTION's GCS index, from this box. Read-only: it never
+# writes, so the prod env is baked in here. There is deliberately NO agent-publish-prod
+# recipe; publishing to prod stays a typed command (artifact-storage.md).
+agent-check-prod *args:
+    mkdir -p /tmp/no-gcloud-adc
+    CLOUDSDK_CONFIG=/tmp/no-gcloud-adc OBJECT_STORE_BACKEND=gcs GCS_BUCKET=btvaroska \
+      GCS_PREFIX=fleetforge/ \
+      GCS_IMPERSONATE_SERVICE_ACCOUNT=fleetforge-artifacts@btvaroska.iam.gserviceaccount.com \
+      just agent-check-published {{ args }}
 
 # Re-point one target at a bundle that was published before. Nothing is uploaded and
 # nothing is deleted: rollback is an index write, so it is as fast as it needs to be

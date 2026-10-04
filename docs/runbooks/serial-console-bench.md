@@ -103,6 +103,9 @@ release, meaning `port.close()` is not reached.
 > relies on prod's board being on 0.3.1, so the deploy that first carries 0.4.x to it still
 > parks at `rebooting`. Do this only once the R2 OTA run that needs that baseline is done,
 > or once you have decided to give the baseline up. Checks A-D do not need it.
+>
+> *Update 2026-10-04: the 0.3.1 baseline is already gone. `94a990dd09a4` was re-flashed from
+> prod's flasher and runs 0.3.2; see DECISIONS.md (S0-infra-10).*
 
 `hard_reset` only happens at the end of a flash (`esptoolFlasher.ts`), so "Reboot the
 board" does not exercise re-acquire. Only a flash does.
@@ -123,6 +126,9 @@ board" does not exercise re-acquire. Only a flash does.
 > enrolment token, `ff_cfg` rewritten, `ota-data-initial.bin`). Run it straight after Check
 > E in the same session, so the 0.3.1 baseline is only given up once. If Check E is skipped,
 > the same baseline decision applies here.
+>
+> *Update 2026-10-04: the 0.3.1 baseline is already gone (board re-flashed, now 0.3.2); see
+> DECISIONS.md (S0-infra-10).*
 
 Setup:
 

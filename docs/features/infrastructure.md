@@ -1832,3 +1832,17 @@ plus the CUJ-1 gate table in `ota-deploy.md`. Cutting first would lost the two
   prod. **What is next:** R2, opened by `/replan` once the gate passes. **What blocks:**
   the bench tasks need hardware, R3 waits on R2. `just up` fails on a pruned dev box.
 - `just lint` clean (no code touched).
+
+## Prod's flasher lagged the repo (S0-infra-10, 2026-10-04)
+
+Found by S0-bug-1: prod's index served 0.3.2 (esp32s3) and 0.2.0 (esp32/c3/c6) while
+`agent/version.txt` was 0.4.5. Nothing compared the two.
+
+- **Added:** `python -m fleetforge.firmware check-version`, with the pure comparison in
+  `firmware/index.py`. `just agent-check-published` checks the configured store;
+  `just agent-check-prod` checks prod's GCS read-only. `just build` runs the latter with
+  `--warn-only` and a leading `-`, so a lag prints `WARNING: STALE` and never fails a build.
+- **Decided:** the 0.3.x baseline is not kept (DECISIONS.md 2026-10-04). All four bundles
+  were rebuilt at 0.4.5 and published to the dev MinIO.
+- **Owed:** the publish to prod's GCS needs the operator's go-ahead; the command is under
+  the task in TODO.md. The task closes when `just agent-check-prod` exits 0.

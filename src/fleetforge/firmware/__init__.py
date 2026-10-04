@@ -60,7 +60,10 @@ from fleetforge.firmware.index import (
     MAX_SUPERSEDED,
     AgentIndex,
     AgentIndexEntry,
+    PublishedVersion,
     SupersededEntry,
+    VersionStatus,
+    compare_published_versions,
 )
 from fleetforge.firmware.manifest import (
     EXPECTED_OTA_SLOT_SIZE,
@@ -100,8 +103,11 @@ __all__ = [
     "MAX_SUPERSEDED",
     "PART_NAMES",
     "PartManifest",
+    "PublishedVersion",
     "SUPPORTED_LAYOUTS",
     "SupersededEntry",
+    "VersionStatus",
+    "compare_published_versions",
     "load_bundle_dir",
     "load_catalog",
 ]

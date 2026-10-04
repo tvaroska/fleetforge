@@ -360,7 +360,13 @@ there is no redeploy in the path:
 just agent-publish esp32          # verify, upload, re-point the index
 just agent-list                   # what is current, and what can be rolled back to
 just agent-rollback esp32 <manifest-digest>
+just agent-check-published        # does the store serve agent/version.txt? exit 1 if not
+just agent-check-prod             # the same, read-only, against production's GCS
 ```
+
+Run `just agent-check-prod` after any agent version bump and before a release (`just build`
+runs it as a warning). A `STALE` row means the flasher hands out old firmware: publish
+(`just agent-check-fresh`, then the GCS publish below) before deploying. It never writes.
 
 What lands in the store:
 

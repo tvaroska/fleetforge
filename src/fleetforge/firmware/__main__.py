@@ -5,6 +5,8 @@ just agent-publish esp32                 # verify agent/dist/esp32, upload it, p
 just agent-publish-all                   # every target in `agent_targets`
 just agent-list                          # what is current, and what can be rolled back to
 just agent-rollback esp32 <digest>       # make a previously published bundle current
+just agent-check-published               # does the store serve agent/version.txt? exit 1 if not
+just agent-check-prod                    # the same, read-only, against production's GCS
 ```
 
 Publishing is **not** deploying (S0-infra-6): nothing here restarts a container or builds
@@ -28,10 +30,14 @@ import sys
 
 from fleetforge.config import Settings
 from fleetforge.firmware.bundledir import load_bundle_dir
-from fleetforge.firmware.index import AgentIndex
+from fleetforge.firmware.index import AgentIndex, compare_published_versions
 from fleetforge.firmware.publish import publish_bundle, read_index, rollback
 from fleetforge.storage.factory import create_object_store, select_backend
 from fleetforge.storage.objectstore import ObjectStore
+
+# A handler's way of saying "exit 0, but do not print `<COMMAND> OK`" (check-version
+# --warn-only found a lag). Never leaves `main`.
+_WARNED = -1
 
 
 def _step(message: str) -> None:
@@ -90,6 +96,36 @@ async def _list(args: argparse.Namespace, settings: Settings) -> int:
     return 0
 
 
+async def _check_version(args: argparse.Namespace, settings: Settings) -> int:
+    """Read-only: does the store serve `--expect`? Exit 1 when any row lags.
+
+    With `--warn-only` a lag is a `WARNING:` line and exit 0 (what `just build` uses);
+    a store that cannot be read is still `FAILED` and exit 1 either way.
+    """
+    store = _store(settings)
+    index = await read_index(store, settings.agent_index_key)
+    rows = compare_published_versions(index, args.expect, args.targets)
+    expected = args.expect.strip()
+    _step(f"{'target':<10} {'layout':<12} {'version':<10} status")
+    for row in rows:
+        suffix = "" if row.status == "current" else f" (repo {expected})"
+        _step(
+            f"{row.target:<10} {row.partition_layout or '-':<12} {row.published or '-':<10} "
+            f"{row.status.upper()}{suffix}"
+        )
+    stale = sum(1 for row in rows if row.status != "current")
+    if not stale:
+        return 0
+    prefix = "WARNING: " if args.warn_only else ""
+    print(
+        f"{prefix}STALE: {stale} bundle(s) lag agent {expected}: publish per "
+        "docs/runbooks/artifact-storage.md -> Publish to production's GCS",
+        file=sys.stderr,
+    )
+    # The stale line is the result; do not follow it with "CHECK-VERSION OK".
+    return _WARNED if args.warn_only else 1
+
+
 async def _rollback(args: argparse.Namespace, settings: Settings) -> int:
     store = _store(settings)
     index = await rollback(
@@ -105,7 +141,12 @@ async def _rollback(args: argparse.Namespace, settings: Settings) -> int:
 
 async def _run(args: argparse.Namespace) -> int:
     settings = Settings()  # type: ignore[call-arg]  # values come from the environment
-    handlers = {"publish": _publish, "list": _list, "rollback": _rollback}
+    handlers = {
+        "publish": _publish,
+        "list": _list,
+        "rollback": _rollback,
+        "check-version": _check_version,
+    }
     return await handlers[args.command](args, settings)
 
 
@@ -124,6 +165,13 @@ def main(argv: list[str] | None = None) -> int:
     roll.add_argument("--manifest", required=True, help="the manifest sha256 to restore")
     roll.add_argument("--layout", default=None, help="needed only when a target has two layouts")
 
+    check = subparsers.add_parser(
+        "check-version", help="exit 1 when the index serves an agent other than --expect"
+    )
+    check.add_argument("--expect", required=True, help="agent/version.txt, e.g. 0.4.5")
+    check.add_argument("--warn-only", action="store_true", help="print WARNING and exit 0 on a lag")
+    check.add_argument("targets", nargs="*", help="default: every entry in the index")
+
     args = parser.parse_args(argv)
 
     try:
@@ -134,7 +182,10 @@ def main(argv: list[str] | None = None) -> int:
         # whole question, and never with a traceback.
         print(f"FAILED: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 1
-    print(f"{args.command.upper()} OK")
+    if code == _WARNED:
+        return 0
+    if code == 0:
+        print(f"{args.command.upper()} OK")
     return code
 
 

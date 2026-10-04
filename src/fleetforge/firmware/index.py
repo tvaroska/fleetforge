@@ -27,6 +27,8 @@ the `upsert` rule are testable on their own.
 
 from __future__ import annotations
 
+import re
+from collections.abc import Sequence
 from datetime import UTC, datetime
 from typing import Final, Literal
 
@@ -143,3 +145,70 @@ class AgentIndex(BaseModel):
             updated_at=utc_now(),
             bundles=sorted([*others, replacement], key=lambda e: e.key),
         )
+
+
+VersionStatus = Literal["current", "behind", "ahead", "differs", "missing"]
+
+_PLAIN_SEMVER = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
+
+
+class PublishedVersion(BaseModel):
+    """One row of the "does the store serve the agent this checkout builds?" check."""
+
+    model_config = ConfigDict(frozen=True)
+
+    target: str
+    partition_layout: str  # "" when the target has no entry at all
+    published: str  # "" when missing, or when the entry carries no agent_version
+    status: VersionStatus
+
+
+def _semver(text: str) -> tuple[int, int, int] | None:
+    """`(major, minor, patch)` for a plain `X.Y.Z`; `None` for a suffix or anything else."""
+    match = _PLAIN_SEMVER.match(text)
+    return (int(match[1]), int(match[2]), int(match[3])) if match else None
+
+
+def _status(published: str, expected: str) -> VersionStatus:
+    if published == expected:
+        return "current"
+    have, want = _semver(published), _semver(expected)
+    if have is None or want is None:
+        # An empty agent_version (informational only), `0.4.5-review`, or garbage: we
+        # cannot say which side is newer, only that they are not the same.
+        return "differs"
+    return "behind" if have < want else "ahead"
+
+
+def compare_published_versions(
+    index: AgentIndex, expected: str, targets: Sequence[str] | None = None
+) -> list[PublishedVersion]:
+    """Compare what the index serves against `expected` (`agent/version.txt`). Pure.
+
+    With `targets`, every entry of each listed target is checked (a target may have
+    several layouts, one row each) and a listed target with no entry is `missing`. With
+    none, every entry in the index is checked. Anything but `current` is stale. Rows are
+    sorted by (target, layout), as `upsert` sorts the index.
+    """
+    want = expected.strip()
+    if targets:
+        entries = [e for e in index.bundles if e.target in targets]
+        covered = {e.target for e in entries}
+    else:
+        entries = list(index.bundles)
+        covered = set()
+    rows = [
+        PublishedVersion(
+            target=e.target,
+            partition_layout=e.partition_layout,
+            published=e.agent_version.strip(),
+            status=_status(e.agent_version.strip(), want),
+        )
+        for e in entries
+    ]
+    rows += [
+        PublishedVersion(target=t, partition_layout="", published="", status="missing")
+        for t in dict.fromkeys(targets or ())
+        if t not in covered
+    ]
+    return sorted(rows, key=lambda r: (r.target, r.partition_layout))

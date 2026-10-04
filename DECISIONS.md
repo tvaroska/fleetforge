@@ -6,6 +6,32 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-04 — Prod's flasher should serve the repo's agent; the 0.3.x baseline is not kept as the default (S0-infra-10)
+
+**Decided: publish 0.4.5 as the flasher default. A lag check now exists and `just build`
+warns on it. The prod publish itself is owed to the operator.**
+
+- **The baseline is already gone.** The S0-bug-1 bench flash re-enrolled `94a990dd09a4` from
+  prod's flasher, so it runs 0.3.2, not 0.3.1. The "STOP, ends the 0.3.1 baseline" boxes in
+  `docs/runbooks/serial-console-bench.md` (Check E/F) are moot; this refines them.
+- **Publishing loses nothing.** The displaced digests go onto `superseded`. Rollback is
+  `just agent-rollback <target> <digest>` against prod's env. Prod today:
+  esp32 0.2.0 `8b35fe50...c652`, esp32c3 0.2.0 `fa6f9b41...fa05`, esp32c6 0.2.0
+  `a1fdf71c...cf04`, esp32s3 0.3.2 `30df6a68f0cd56193a20f2499979030e7994a3363c0559185747d255313f1533`
+  (was 0.2.0 `3bfdf57f...55f0`).
+- **Open R2/R2b tasks assume >= 0.4.x** on new boards, and a 0.3.x board brings back the
+  transition gap (first deploy parks at `rebooting`, rollback-test.md). A re-flash from the
+  flash page today would install 0.3.2, without R2-fw-1..6.
+- **The check runs on the dev box** against prod's GCS index (`just agent-check-prod`,
+  read-only), because prod's container has no checkout. `just build` runs it with
+  `--warn-only`. The root `/release` skill is in the root repo: change proposed, not made.
+- **The agent did not publish to prod.** A blanket `/implement-all` run is not a go-ahead
+  for a write that changes the firmware every new board gets.
+- Supersedes nothing.
+
+
+---
+
 ## 2026-10-04 — A later milestone implies the earlier ones; a clock can survive a reset (S0-bug-1)
 
 **Decided: the console's `waitingFor` is the milestone after the furthest one reached, not
