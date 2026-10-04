@@ -1275,3 +1275,26 @@ the same bridge-chip board on the same bench.
 - CLI flasher for batch/CI enrollment.
 - SoftAP captive-portal provisioning (Wi-Fi change without re-flash).
 - Per-device mTLS certs (replace token-only trust).
+
+## Operator-flow additions (2026-10-04, planned, nothing built)
+
+Implementation notes behind `spec/flows.md` Flow 1 and the 2026-10-04 entries in
+`DECISIONS.md`. The spec says what the operator sees; this says what it would take.
+
+- **Layout profile.** Arduino IDE and PlatformIO hardcode the app offset (`0x10000`), which
+  `ab-4m-v1` does not use. `ab-4m-arduino-v1` (`ff_cfg` at `0x3D0000`) exists for that
+  case. Offering it at onboarding means the stock starter agent has to be built for each
+  (chip, layout) pair and published as a bundle, so the build matrix grows. It depends on
+  R3's library, so until R3 the flasher defaults to `ab-4m-v1` and shows the choice only
+  under "Advanced".
+- **Two-source watch.** The console (Web Serial) is one source; the other is the server's
+  view of the board's enrolment. Check whether a server-side stream or a poll already
+  exists before designing one; the console's milestone classifier is unchanged.
+- **Boot count and reset reason.** Read from the boot banner the console already sees
+  (`rst:0x..`). A milestone that was reached and then a new banner appears retracts the
+  milestones, and the boot counter increments. Naming "brownout" is only as good as the
+  reset reason the chip reports.
+- **Flash failures.** A verify failure at a sector is more often a cable, hub or baud rate
+  than a bad chip. The copy should say what to try first and name the chip only on repeat.
+- **Diagnostic bundle.** Must be redacted: no token, Wi-Fi passphrase or broker credential
+  (the CUJ-1 hard-fail trap).

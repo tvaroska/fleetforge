@@ -2155,6 +2155,28 @@ mqtt went through an all-pass proxy, and the store went through its own process,
 only while the board was stopped. A = 0.4.5 (`--fresh`), B = 0.4.70 (`50f6f2fb…`),
 C = 0.4.71 (`58f5e5a7…`), all normal builds of this tree.
 
+## Operator-flow additions (2026-10-04, planned, nothing built)
+
+Implementation notes behind `spec/flows.md` Flow 2 and the 2026-10-04 entries in
+`DECISIONS.md`.
+
+- **Merged binary.** A `*.merged.bin` carries bootloader, partition table and app from
+  offset `0x0`. Refusing it at the pre-check needs a way to tell it from an app image in
+  the uploaded file; the app image header and size are the candidates.
+- **`rollback_capable`.** A warning, not a refusal. It is `null` before a board's first
+  OTA and the `false` reading is unbenched (`DECISIONS.md` 2026-10-03), so it cannot guard
+  a first OTA. The override must be explicit in the UI and in the API.
+- **Library marker.** R3 only. How it is encoded in the app binary is open; until it is,
+  no refusal can be implemented.
+- **Crash reason after a rollback.** Open question, not a design. After the bootloader
+  rolls back, the surviving slot boots a fresh `esp_reset_reason()`, which may describe the
+  rollback reset rather than the failed boot's panic or watchdog. A reason and last milestone
+  would need to be written by the failed boot to a store that survives the reset (RTC
+  memory does not survive a brownout or power loss). Treat the field as best effort and
+  establish it on a bench before it goes on the wire.
+- **Send again.** Safe after a failure before reboot because sends are deduplicated on the
+  board (R2-fw-6).
+
 ## De-risking
 
 Run a **throwaway OTA + auto-rollback spike during R0–R1** on real flaky Wi-Fi —

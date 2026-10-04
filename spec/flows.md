@@ -9,7 +9,7 @@
 The operator sees **one flow with one result**, and a status strip that stays on screen for all of it:
 
 ```
-[ UI 0.4.2 · API 0.4.2 ]  Board 94a990dd09a4 · ESP32-S3 · COM3 · fw 0.3.1 → 0.4.5 (ab-4m-arduino-v1) · Boot #1 · Waiting for clock (18 s)
+[ UI 0.4.2 · API 0.4.2 ]  Board 94a990dd09a4 · ESP32-S3 · fw 0.3.1 → 0.4.5 · Waiting for clock (18 s)
 ```
 
 ```
@@ -18,22 +18,23 @@ The operator sees **one flow with one result**, and a status strip that stays on
              missing CP2102/CH340 driver link, COM1 system-port refusal), never a raw error.
 2. IDENTIFY  esptool-js reads chip family + revision + flash size + PSRAM + MAC
              → confirm board from a narrowed shortlist (always incl. "enter manually").
-             PRE-FLIGHT CARD, before anything is written: physical flash health, what is on the
-             board now (enrolled? which firmware and partition layout?) and exactly what the
+             PRE-FLIGHT CARD, before anything is written: what is on the
+             board now (enrolled? which firmware and layout?) and exactly what the
              flash will change. A board that is already enrolled is offered "re-flash, keep
              identity" next to "re-flash and re-enrol".
-3. CONFIGURE Broker URL + link (Wi-Fi or Ethernet) + toolchain layout profile: Arduino /
-             PlatformIO (`ab-4m-arduino-v1`, default for makers) or ESP-IDF (`ab-4m-v1`), so the
-             initial flash lays down the exact partition table the operator's IDE builds against.
-             Wi-Fi credentials are remembered in THIS BROWSER only (never sent to or stored by
-             the server), so the operator types them once per browser, not once per flash.
+3. CONFIGURE Broker URL + link (Wi-Fi or Ethernet). Wi-Fi credentials are remembered in THIS
+             BROWSER only (never sent to or stored by the server), so the operator types
+             them once per browser, not once per flash. The board's partition layout is
+             chosen for the operator and shown only under "Advanced" (from R3, an Arduino /
+             PlatformIO layout is the maker's default; until then the stock layout).
 4. FLASH     Dashboard mints a scoped, revocable, single-use ENROLLMENT TOKEN, flashes the
              matching prebuilt starter agent + baked config    [USB config flash]
              (config goes into the 4 KB `ff_cfg` partition — device-protocol.md
               → *Partition layouts*; NVS is never written by the flasher).
-             One progress bar. After the write the operator touches nothing. A write or verify
-             failure names whether USB dropped mid-write (loose cable / hub reset) or flash
-             verification failed at a sector (defective flash chip).
+             One progress bar. After the write the operator touches nothing. A write
+             or verify failure says what failed and what to try first (another cable or port,
+             a lower baud rate); only a failure that repeats on a good cable says the flash
+             chip may be defective.
 5. WATCH     The console re-acquires the board by itself and watches Web Serial and the server
              enrollment stream in parallel (so a native-USB ESP32-S3/C3 port reset never causes a
              false failure), showing a MILESTONE TIMELINE:
@@ -69,8 +70,8 @@ B2. Token valid → AUTO-ENROLL: registry entry created, per-device broker
 - **One flow, one result, one status strip.** The versions, the selected board's firmware and layout, the boot count and the onboarding state are read in one place. Today they are split across a footer, a table and the flasher, and an operator has to compare them by hand.
 - **Pre-flight before anything destructive.** Step 2 says what will change before the flash. A flash that re-enrols a board ends its previous identity and baseline; the operator must be told first, not find out afterwards.
 - **"Re-flash, keep identity" is a requirement, not yet a mechanism.** Until it is built, every flash mints a fresh token and the board re-enrols (as today). How it keeps the credential and `ff_cfg` without burning a token is a design question, tracked in `docs/features/enrollment.md`.
-- **Toolchain layout profile chosen at onboarding (`ab-4m-arduino-v1` vs `ab-4m-v1`).** Alex writes sketches in Arduino IDE or PlatformIO, which hardcode app offsets (`0x10000`) that conflict with `ab-4m-v1` ([ota-library.md](../docs/features/ota-library.md) → `R3-fw-1`). Flashing a starter agent built for `ab-4m-arduino-v1` in step 4 (`ff_cfg` at `0x3D0000`) lets a maker onboard in the browser and immediately OTA their own Arduino `.bin` in Flow 2 without ever fighting USB offsets or wiping `ff_cfg` from the IDE.
-- **Hardware fault triage, dual-source watch, and clean escalation.** Watching Web Serial and server enrollment in parallel avoids false negatives when native-USB parts (`ESP32-S3/C3/C6`) drop and re-enumerate their port on reset. Retracting milestones on reboot and surfacing the reset reason (`brownout`, `panic`, `download-mode`) plus boot count separates a bad board, bad power rail, or charge-only cable from a slow network. Every failed Result card pairs an in-place recovery button with a one-click redacted diagnostic bundle ([standards.md](standards.md) → *Unaided onboarding*).
+- **The partition layout is chosen for the operator, not by them.** A maker's Arduino or PlatformIO toolchain fixes app offsets that the stock layout does not match, so the layout the board is flashed with must match what their IDE builds against. Step 3 therefore defaults it and shows it only under "Advanced". The Arduino layout and its starter agent depend on the embeddable library (R3, [ota-library.md](../docs/features/ota-library.md)), so until R3 the default is the stock layout. Offsets and bundle matrix: [enrollment.md](../docs/features/enrollment.md) → *Operator-flow additions*.
+- **Watch two sources, name hardware faults.** Following Web Serial and the server's enrolment together avoids a false "no board" when a native-USB part drops and re-enumerates its port on reset. Retracting milestones on a reboot and showing the boot count and reset reason separates a bad board, a weak power supply or a charge-only cable from a slow network. Every failed Result card pairs one recovery action with a one-click redacted diagnostic bundle ([standards.md](standards.md) → *Unaided onboarding*).
 - **Onboarding is an API resource.** An *onboarding session* carries `state`, the milestone list with timestamps, the boot count and last reset reason, the plain-language stall text, and the final result. The dashboard renders it; CI (Siddharth), a HIL rack (Sarah) and a batch CLI (Marcus, post-v1) read and drive the same resource. No second design for headless use.
 - **Detection/flashing = in-dashboard Web Serial** (`esptool-js`, the ESP Web Tools stack). Plug in → one click to grant the port → chip auto-detected → flash. Zero install.
   - *Caveats:* Chrome/Edge only; needs `localhost`/HTTPS — **satisfied in v1 by the
@@ -96,11 +97,13 @@ What the operator sees is **one flow with one result**, under the same status st
               or sleepy); and what happens if the update fails ("rolls back on its own").
               Refuses in plain language before any bytes move:
               • a chip, partition-layout or slot-size mismatch;
-              • a full-flash merged binary (`*.merged.bin` at 0x0 instead of an app image —
-                names the app `.bin` to pick instead);
-              • a binary missing the Fleetforge OTA library marker ("would run once and orphan
-                the board from future updates");
-              • a board reporting `rollback_capable: false`.
+              • a full-flash merged binary (a `*.merged.bin` instead of an app image: names
+                the app `.bin` to pick instead).
+              Warns, with an explicit override:
+              • a board reporting `rollback_capable: false`. It cannot protect a first OTA
+                (the field is unknown until a board has taken one), so it is a warning;
+              • from R3, a binary without the Fleetforge OTA library marker (it would run
+                once and orphan the board from future updates).
 3. SEND       One button. An offline or sleepy board is told so: "queued until it reconnects /
               wakes". Idempotent: a repeated send is deduplicated, never a second download.
 4. WATCH      A timeline — sent → downloading → staged → rebooting → confirming → confirmed —
@@ -110,10 +113,9 @@ What the operator sees is **one flow with one result**, under the same status st
 5. RESULT     One card: firmware before → after, GOOD, ROLLED BACK or FAILED BEFORE REBOOT, with
               the reason, UI and API versions, who sent it and when. A failure shows one cause
               and one next action (plus "Send again" on a pre-reboot transport failure). When a
-              build rolls back, the card shows the failed boot's last-gasp crash breadcrumb
-              reported by the surviving slot (panic/exception, task watchdog, brownout, custom
-              self-test failure, or confirm timeout, plus the last milestone reached) so an
-              installed board can be debugged without USB.
+              build rolls back, the card shows the failed boot's crash reason and last
+              milestone where the surviving slot can report them (best effort: a power loss
+              leaves nothing to report).
 ```
 
 **The transaction** (what the board and server do between steps 3 and 5; unchanged):
@@ -133,11 +135,11 @@ What the operator sees is **one flow with one result**, under the same status st
 **Decisions (operator view):**
 - **One flow, one result, one status strip.** Before and after firmware, the verdict and the versions are read in one place, not compared by hand across a table row and a footer.
 - **Getting firmware in is a dashboard operation.** An upload form replaces `docs/runbooks/upload-artifact.sh` as the way in (`spec/standards.md` → *dashboard*).
-- **Pre-check before send, including hobbyist binary traps.** Beyond the layout and slot-size refusal that CUJ-1 requires, step 2 catches the two mistakes that brick an Arduino maker's installed board: uploading `sketch.ino.merged.bin` (bootloader + partitions + app at `0x0`) instead of `sketch.ino.bin`, and uploading a sketch compiled without the Fleetforge library (which boots once and permanently orphans the board). It also checks `rollback_capable` ([board-profiles.md](../docs/features/board-profiles.md)).
-- **Post-rollback "last-gasp" crash reason from the surviving slot.** An installed board has no USB cable attached. If `OTA1` crashes or fails to confirm, the server sees nothing from `OTA1` directly; once the bootloader rolls back to `OTA0` and the known-good image reconnects, it reports `rolled_back` together with the failed boot's reset reason (`esp_reset_reason()` / RTC breadcrumb: panic, watchdog, brownout, custom self-test failure, or network/confirm timeout) and the last milestone `OTA1` reached.
+- **Pre-check before send, including hobbyist binary traps.** Beyond the layout and slot-size refusal that CUJ-1 requires, step 2 refuses a merged full-flash binary, which would overwrite the bootloader. Two further checks are warnings, not refusals: `rollback_capable: false`, a reading the board only has after its first OTA ([board-profiles.md](../docs/features/board-profiles.md); the 2026-10-03 decision says the `false` signal is unbenched), and from R3 a missing library marker. A warning can be overridden, because for a bench rack a bricked board is an annoyance, not a loss.
+- **Crash reason after a rollback is best effort.** An installed board has no USB cable. After the bootloader rolls back, the surviving slot reports `rolled_back` and, where it can, the failed boot's reset reason and last milestone. Whether the reset reason and a breadcrumb survive a rollback, and a brownout or power loss, is not established: [ota-deploy.md](../docs/features/ota-deploy.md) → *Operator-flow additions*.
 - **The deployment is an API resource.** The result card, an audit record (who, what, when) and a CI client read the same thing. This is the audit trail Marcus needs; rings and provenance build on it later.
 - **The timeline reports only what the agent reports.** No progress bar: `downloading` is published once, so a bar would sit still and read as a hang.
-- **Open, recorded not decided:** how a sleepy battery node avoids a false rollback from the confirm timer (beyond surfacing its sleepy wake window at pre-check), and how the Fleetforge library marker is encoded in the app binary header.
+- **Open, recorded not decided:** how a sleepy battery node avoids a false rollback from the confirm timer (beyond surfacing its sleepy wake window at pre-check), and how the Fleetforge library marker is encoded in the app binary header (R3).
 
 **Decisions (transaction):**
 - **Artifact source = user's own toolchain (v1).** They build the `.bin` (idf.py / PlatformIO / Arduino); the server never builds in v1. *V2 adds a server-side compiler as one more producer — see [build-pipeline.md](../docs/features/build-pipeline.md).* Artifacts are opaque + versioned.

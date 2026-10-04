@@ -6,6 +6,38 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-04 — Flow edits reviewed: refusals gated or softened, implementation moved out of spec (supersedes parts of the two entries below)
+
+**Decided: the `spec/flows.md` additions of commit `624d218` stay, with six changes. This
+supersedes the "send again is open" line of the updates entry and adds the decisions that
+commit made without an entry. Spec and docs only; nothing is built.**
+
+- **Kept, now decided.** Watch Web Serial and the server's enrolment together (a
+  native-USB port reset must not read as "no board"); retract milestones on reboot and show
+  the boot count and reset reason; a failed Result card carries one recovery action and a
+  redacted diagnostic bundle; refuse a merged full-flash binary at pre-check; "send again"
+  after a failure before reboot (safe: sends are deduplicated on the board).
+- **R3 items are labelled R3.** The Arduino layout (`ab-4m-arduino-v1`) as the maker
+  default and the "no library marker" check need the embeddable library, which ships after
+  R2 (`design/decisions/ota-library-ships-after-safe-deploy.md`). Until R3 the default
+  layout is the stock one and no marker check exists; the marker's encoding is open.
+- **`rollback_capable: false` is a warning with an explicit override, not a refusal.** The
+  field is unknown until a board's first OTA, so it cannot protect that OTA, and the `false`
+  reading is unbenched (2026-10-03). A bench rack (Sarah, Siddharth) must be able to
+  override.
+- **Two claims weakened.** A verify failure no longer names a defective flash chip (a cable,
+  hub or baud rate is likelier; the chip is named only on repeat). The crash reason after a
+  rollback is best effort: the surviving slot may see the rollback reset, not the failed
+  boot's, and RTC memory does not survive a power loss. Feasibility is unestablished.
+- **The layout choice is made for the operator.** Step 3 shows it under "Advanced" only; Alex
+  does not know what a partition layout is.
+- **Implementation detail left the spec.** Offsets, reset-reason handling, the marker and the
+  bundle matrix are in `docs/features/enrollment.md` and `ota-deploy.md` under *Operator-flow
+  additions*. The status-strip example in Flow 1 is back to versions, board, firmware, state.
+- **Still open:** how the library marker is encoded (R3); sleepy nodes and the confirm timer;
+  how "re-flash, keep identity" keeps the credential without burning a token.
+
+
 ## 2026-10-04 — Firmware updates are one guided flow with one result; Alex first (flows.md Flow 2 operator view added)
 
 **Decided: `spec/flows.md` Flow 2 gains an operator view of five steps — Pick, Pre-check,
