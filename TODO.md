@@ -249,7 +249,8 @@ are R3). Order inside each flow: the one-place status first, then the cards, the
       the table.
 - [x] **R2b-fe-6**: Name a board from the result card (P1, 0.5d) _(done 2026-10-04; see docs/features/dashboard.md)_
       Last line of Flow 1. Depends on `R2b-be-1`.
-- [ ] **R2b-test-1**: Re-run the unaided onboarding test against the new flow (P1, 0.5d)
+- [!] **R2b-test-1**: Re-run the unaided onboarding test against the new flow (P1, 0.5d)
+      _(⚠ failed 2026-10-04; blocker: Human-gated. Three things must happen first: the R2b release to prod, the S0-infra-10 publish, and the S0-bug-1 diagnosis. (after 2 attempts))_
       Extends `S0-test-3`, which passed 2026-09-22 on the old UI. Someone who has not seen
       the code onboards a board from the result card alone. Run after `R2b-fe-1`..`fe-4`.
       _(2026-10-04: run script docs/runbooks/unaided-onboarding.md; software rehearsal in real
