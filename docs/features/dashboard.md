@@ -19,6 +19,19 @@ When `/implement` finishes a task, it appends a completed entry below.
 <!-- Newest first. One entry per completed task. Capture what a future reader
      needs WITHOUT the local plan file. -->
 
+### 2026-10-04 — R2b-be-1 Set a device's name and group (API)
+
+`PATCH /v1/devices/{device_id}` (admin-only) sets the two operator-set facts, `name` and `group_id`. Before this, `name` was in the schema and in `GET /v1/devices` but nothing wrote it, so every board showed as its id. The UI is a separate, later piece (naming from the result card).
+
+- **"Tag" is the existing `group_id`.** The spec treats group and tag as one concept and says naming must not become a second, weaker grouping, so no column or migration was added. Group CRUD stays out of scope; a group exists today only if created directly, and a group picker will need a read-only group listing first.
+- **Merge-patch.** An absent key is left alone, an explicit `null` clears it, `{}` is a 200 no-op that writes and emits nothing. Unknown keys are a 422 (`extra="forbid"`), and device claims such as `fw_version` are not settable here.
+- **Name rules, in the request schema (422).** Stripped; blank becomes NULL; at most 64 characters measured after stripping (a field-level `max_length` would count the unstripped text); no control or format characters; must not look like a device id (12 hex), so a name on one board can never be misread as another board's id.
+- **Unique among live boards, case-insensitively (409),** checked in the app with no DB constraint. The check excludes the board itself, so re-sending its own name is idempotent, and decommissioned boards. The detail names the other device.
+- **404s.** Unknown or decommissioned device, and unknown group. All checks run before any assignment, so a refused PATCH changes nothing.
+- **Response and events.** Returns the updated `DeviceSummary` (same shape as a list row, built field by field via a shared helper). Emits `device.updated` on `ff_events` in the same transaction before commit; the name is not in the envelope and clients re-read, so other open tabs pick it up. Logs carry field names only, never the name.
+- **Unchanged by design.** Re-enrolment and announces do not overwrite `name` or `group_id`.
+- **Gotcha.** `updated_at` is server-side `onupdate`; it is expired after flush and reading it in async code raises `MissingGreenlet`, so it is not part of the summary or the log line.
+
 ### 2026-10-04 — R2b-fe-10 Update result card
 
 **What shipped:** a finished deploy renders one "Update result" card inside the Deploy

@@ -18,6 +18,8 @@ history — supersede an old decision with a new entry that references it.
 - **Response is the updated `DeviceSummary`.** Emits `device.updated` on `ff_events` in the same transaction; the name is not in the envelope. Logs carry field names only.
 - **T2 on the dev stack:** A-L all as expected (200 trimmed, round trip, 409 naming be101, 422 x2, atomic 404, 404, 401, null clears, log lines list field names, 0 log hits for the name).
 - **Rejected:** a `tag` column; a DB unique index on name; group CRUD (V3); the name in the event envelope.
+- **Gotchas:** a field-level `max_length` counts unstripped text, so length is checked in the validator after stripping; `updated_at` (server-side onupdate) is expired after flush and raises `MissingGreenlet` if read in async, so it stays out of the summary and logs; `emit()` must precede `commit()` so a rolled-back write emits nothing.
+- **Proposed follow-up, not filed:** a read-only `GET /v1/groups` before a group picker can exist in the UI.
 - **Proposed follow-up, not filed:** a read-only `GET /v1/groups` before R2b-fe-6 can offer a group picker.
 
 Supersedes nothing.
