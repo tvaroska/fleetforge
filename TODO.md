@@ -44,9 +44,9 @@ run could show, so the pass rests on the deterministic judge. Task list below; b
 
 **Blocked:**
 
-- `S0-test-1` is waiting on a bench session (the S3's `UART` socket is a bridge-chip
-  path; see the task); `S0-test-2` needs the S3 on the
-  bench. Both are hardware sessions on the Windows + Chrome bench (settled 2026-10-02).
+- `S0-test-1` is waiting on a **CP2102/CH340 bridge-chip board**: the bench S3 has only
+  a native-USB socket (2026-10-04), so it cannot run Checks A-E. `S0-test-2` needs the S3
+  on the bench. Both are hardware sessions on the Windows + Chrome bench (settled 2026-10-02).
 - **R3 (thin OTA library)** waits on R2 by decision
   (`design/decisions/ota-library-ships-after-safe-deploy.md`). Its task list lives in
   [docs/features/ota-library.md](docs/features/ota-library.md) until it opens.
@@ -116,10 +116,10 @@ Bricking risks, broker auth and security issues get filed here as they surface.
         reaches a working COM port using only "My board does not appear" on the flash page:
         no Device Manager, no asking. Also confirm that picking COM1 gets refused by name
         and that the Silicon Labs driver link resolves (the dev box gets a 403 from Akamai).
-      Bench script: docs/runbooks/serial-console-bench.md (2026-10-03). Proposed board,
-      pending confirmation: the bench S3 DevKitC-1's UART socket (on-board bridge, primary
-      console UART0 @ 115200). Check E re-flashes 94a990dd09a4 and ends its 0.3.1 baseline,
-      so run it last.
+      Bench script: docs/runbooks/serial-console-bench.md (2026-10-03). Board: **not the
+      bench S3** (2026-10-04: it has one native-USB socket and no bridge chip, so the UART-socket
+      proposal is withdrawn). Needs any CP2102/CH340 ESP32 board, not yet on hand. Check E
+      re-flashes the board it runs on; if that is 94a990dd09a4, it ends its 0.3.1 baseline.
 
 - [!] **S0-test-2**: The native-USB re-acquire path, on a C3/C6/S3 (P2, 0.25d) _(⚠ failed 2026-10-03; blocker: Hardware-gated: Boris must run Check F on the Windows + Chrome bench with the ESP32-S3 (94a990dd09a4) on native USB (COM3). (after 2 attempts))_
       Split from S0-test-1 on 2026-09-11: the only board on hand is an ESP32-DevKit v1,
@@ -140,7 +140,7 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       driver and COM port used — the re-acquire window is an OS-and-driver property.
       Bench script: docs/runbooks/serial-console-bench.md → Check F (2026-10-03). Run it right
       after S0-test-1's Check E: both re-flash `94a990dd09a4`, so the 0.3.1 baseline is given up
-      once. Unplug the `UART` socket first. The panel's `watching …: opened on try N, T ms`
+      once. The panel's `watching …: opened on try N, T ms`
       notice needs the frontend release after this commit on prod.
 
 - [x] **S0-test-3**: Someone who did not see the code onboards a board unaided — passed 2026-09-22 → [enrollment.md](docs/features/enrollment.md)

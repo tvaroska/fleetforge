@@ -16,13 +16,13 @@ or Windows build changes.
 ## The bench
 
 - **Windows + Chrome on Windows** (not WSL). Leave `usbipd` *Not shared*.
-- **Board: the ESP32-S3 DevKitC-1, `UART` socket, not `USB` (native, COM3).** The `UART`
-  socket is an on-board USB-UART bridge (normally CP2102N `10c4:ea60`, some revisions use
-  CH343 `1a86:55d3`). It is the same bridge-chip path as any CP2102/CH340 DevKit: VCP
-  driver, DTR/RTS auto-reset, UART0. The primary console is UART0 at 115200
-  (`CONFIG_ESP_CONSOLE_UART_NUM=0`, `CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200` in
-  `agent/dist/esp32s3/sdkconfig.resolved`). Any other CP2102/CH340 board also qualifies.
-  Using the S3 `UART` socket is proposed, pending Boris's confirmation.
+- **Checks A-E need a bridge-chip board**: any ESP32 DevKit with an on-board CP2102(N)
+  (`10c4:ea60`), CH340 or CH343 (`1a86:55d3`) USB-UART bridge. That is the path under test:
+  VCP driver, DTR/RTS auto-reset, UART0 console at 115200 (`CONFIG_ESP_CONSOLE_UART_NUM=0`,
+  `CONFIG_ESP_CONSOLE_UART_BAUDRATE=115200` in `agent/dist/esp32s3/sdkconfig.resolved`
+  for the S3 build). **The bench S3 is not that board** (2026-10-04): it has a single
+  native-USB socket (`303a:1001`, COM3) and no bridge chip, so it only serves Check F.
+  No bridge-chip board is on hand yet.
 - Chrome's chooser shows the OS name (e.g. `Silicon Labs CP210x USB to UART Bridge
   (COM5)`), never "ESP32".
 
@@ -35,8 +35,8 @@ Constants this runbook relies on (`frontend/src/serialConsole.ts`): the console 
 
 | Item | Value |
 |------|-------|
-| Windows build | |
-| Chrome version | |
+| Windows build | Windows 10 (build number not recorded) |
+| Chrome version | 154.0.8037.58 |
 | Driver name + version (after install) | |
 | COM number | |
 | Console log line `port: ... (USB vvvv:pppp)` | |
@@ -53,7 +53,7 @@ pnputil /enum-drivers | Select-String -Context 0,6 -Pattern 'silabser|ch343|ch34
 # if present:  pnputil /delete-driver oemNN.inf /uninstall /force
 ```
 
-Unplug and replug the `UART` socket and confirm the chooser lists no new COM port. If
+Unplug and replug the board and confirm the chooser lists no new COM port. If
 Windows Update rebinds a driver by itself, record that as the finding: the "no COM port"
 dead end does not happen for that chip on that Windows build, and the check counts as not
 reproducible rather than passed.
@@ -126,9 +126,9 @@ board" does not exercise re-acquire. Only a flash does.
 
 Setup:
 
-- **Unplug the `UART` socket cable**, so only the native `USB` socket (COM3) is connected.
-  The console opens the first granted port that will open; the UART grant from Checks A-E
-  would otherwise win.
+- **Unplug any bridge-chip board**, so only the S3's native USB (COM3) is connected.
+  The console opens the first granted port that will open; a bridge-board grant from
+  Checks A-E would otherwise win.
 - Optionally revoke stale grants: Chrome -> Site settings -> `bingo.tvaroska.sk` -> Serial
   ports.
 - Record the driver: Device Manager -> Ports -> expected "USB Serial Device (COM3)", driver
