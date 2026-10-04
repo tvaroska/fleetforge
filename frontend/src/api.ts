@@ -210,6 +210,33 @@ export type DeployAccepted = {
   device_online: boolean
 }
 
+// Mirrors `PrecheckFinding` in api/schemas.py. `message` is lifted VERBATIM into the card,
+// the way `detail` is (`detailOf`). `needs_override` is R2b-be-7 and does not exist on the
+// server yet: absent means `false`. When it is true the warning gates the send and the
+// deploy body must carry `override: [code]`.
+export type PrecheckFinding = { code: string; message: string; needs_override?: boolean }
+
+// Mirrors `DeployPrecheck` in api/schemas.py — the 200 body of the dry run. Every refusal
+// travels in this body; only a bad version (400) and an unknown device (404) are errors.
+export type DeployPrecheck = {
+  device_id: string
+  target: string
+  version: string
+  from_version: string | null
+  sha256: string | null
+  size_bytes: number | null
+  artifact_partition_layout: string | null
+  device_partition_layout: string | null
+  ota_slot_size: number | null
+  power_class: string
+  expected_wake_interval_s: number | null
+  device_online: boolean
+  confirm_timeout_s: number
+  deployable: boolean
+  refusals: PrecheckFinding[]
+  warnings: PrecheckFinding[]
+}
+
 export class ApiError extends Error {
   readonly status: number
 
@@ -356,8 +383,27 @@ export const api = {
   // There is no `target` and no `sha256` in the body on purpose: the server resolves the
   // artifact from the device's own `platform_type`, so this call cannot flash an esp32
   // image onto an esp32c6.
-  deployDevice: (deviceId: string, version: string, apply: 'auto' | 'on_command' = 'auto') =>
+  //
+  // `override` names the gating warnings the operator ticked (R2b-be-7). It is sent ONLY
+  // when non-empty: `DeployRequest` forbids extra keys today, so even `override: []` is a
+  // 422 from a server that predates it.
+  deployDevice: (
+    deviceId: string,
+    version: string,
+    apply: 'auto' | 'on_command' = 'auto',
+    override: readonly string[] = [],
+  ) =>
     request<DeployAccepted>(`/v1/devices/${encodeURIComponent(deviceId)}/deploy`, {
+      method: 'POST',
+      body: JSON.stringify(
+        override.length > 0 ? { version, apply, override: [...override] } : { version, apply },
+      ),
+    }),
+
+  // The dry run of `deployDevice` (R2b-be-2): same body, no side effects, every refusal
+  // and warning in the 200 response.
+  precheckDeploy: (deviceId: string, version: string, apply: 'auto' | 'on_command' = 'auto') =>
+    request<DeployPrecheck>(`/v1/devices/${encodeURIComponent(deviceId)}/deploy/precheck`, {
       method: 'POST',
       body: JSON.stringify({ version, apply }),
     }),

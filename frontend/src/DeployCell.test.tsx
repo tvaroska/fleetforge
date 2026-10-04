@@ -17,13 +17,19 @@
 //    is TEXT with no CHECK and a newer agent is allowed to say something new.
 // 6. A finished deploy gets a verdict word, and the word is withheld when the board's
 //    announce contradicts it.
+// 7. Nothing reaches `/deploy` without the pre-check card: Deploy only checks, Send sends.
+// 8. A refusal offers no Send at all, and its sentence is the server's, verbatim.
+// 9. `override` is in the deploy body only for a gating warning the operator ticked;
+//    otherwise the body is exactly `{version, apply}` (today's server 422s on any extra key).
+// 10. A pre-check answer that arrives after the version changed, Cancel or a newer Deploy
+//    click is ignored.
 
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { DeployCell } from './DeployCell'
 import { FleetView } from './FleetView'
-import { type DeploySummary, type DeviceSummary } from './api'
+import { type DeployAccepted, type DeploySummary, type DeployPrecheck, type DeviceSummary } from './api'
 import { type EventSourceLike } from './fleet'
 
 const NOW = new Date('2026-09-10T12:00:00Z').getTime()
@@ -86,6 +92,63 @@ function responds(body: unknown, status = 200) {
       status,
       headers: { 'content-type': 'application/json' },
     })
+}
+
+function precheck(overrides: Partial<DeployPrecheck> = {}): DeployPrecheck {
+  return {
+    device_id: 'a4cf12b3de90',
+    target: 'esp32c6',
+    version: '1.5.0',
+    from_version: '1.4.2',
+    sha256: 'a'.repeat(64),
+    size_bytes: 230_000,
+    artifact_partition_layout: 'ab-4m-v1',
+    device_partition_layout: 'ab-4m-v1',
+    ota_slot_size: 1_966_080,
+    power_class: 'always_on',
+    expected_wake_interval_s: null,
+    device_online: true,
+    confirm_timeout_s: 300,
+    deployable: true,
+    refusals: [],
+    warnings: [],
+    ...overrides,
+  }
+}
+
+function accepted(overrides: Partial<DeployAccepted> = {}): DeployAccepted {
+  return {
+    cmd_id: 'cmd-a',
+    device_id: 'a4cf12b3de90',
+    version: '1.5.0',
+    sha256: 'a'.repeat(64),
+    size_bytes: 230_000,
+    apply: 'auto',
+    reused: false,
+    device_online: true,
+    ...overrides,
+  }
+}
+
+// Routes the two POSTs by URL. Each entry is `[body, status]` or just a body (200); the
+// factory returns a FRESH `Response` per call (see `responds`). `/deploy/precheck` is
+// matched first because `/deploy` is its prefix.
+function routes(
+  config: { precheck?: [unknown, number?] | [DeployPrecheck]; deploy?: [unknown, number?] } = {},
+) {
+  const [precheckBody, precheckStatus] = config.precheck ?? [precheck()]
+  const [deployBody, deployStatus] = config.deploy ?? [accepted()]
+  const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input?: unknown) => {
+    const url = String(input)
+    if (url.endsWith('/deploy/precheck')) return responds(precheckBody, precheckStatus)()
+    if (url.endsWith('/deploy')) return responds(deployBody, deployStatus)()
+    return new Response('not routed: ' + url, { status: 500 })
+  })
+  return { fetchMock }
+}
+
+function urls(fetchMock: { mock: { calls: unknown[][] } }): string[] {
+  return fetchMock.mock.calls.map((call) => String(call[0]))
 }
 
 // A `<td>` needs a row and a table around it or jsdom drops it, and `render` would
@@ -177,121 +240,332 @@ describe('DeployCell — choosing a version', () => {
 })
 
 describe('DeployCell — sending a deploy', () => {
-  it('posts the chosen version with apply auto, then re-reads the fleet', async () => {
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(
-      responds({
-        cmd_id: 'cmd-a',
-        device_id: 'a4cf12b3de90',
-        version: '1.5.0',
-        sha256: 'a'.repeat(64),
-        size_bytes: 230_000,
-        apply: 'auto',
-        reused: false,
-        device_online: true,
-      }),
-    )
-    const { onDeployed } = renderCell({ artifacts: [artifact('1.5.0')] })
+  it('checks first: Deploy posts only to the pre-check and shows the card', async () => {
+    const { fetchMock } = routes()
+    renderCell({ artifacts: [artifact('1.5.0')] })
 
     await userEvent.click(screen.getByRole('button', { name: 'Deploy' }))
 
-    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
-    expect(url).toBe('/v1/devices/a4cf12b3de90/deploy')
+    const card = await screen.findByTestId('precheck-card')
+    expect(urls(fetchMock)).toEqual(['/v1/devices/a4cf12b3de90/deploy/precheck'])
+    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
     expect(init.method).toBe('POST')
-    // No `target` and no `sha256`: the server resolves the artifact from the board's own
-    // `platform_type`, which is what makes a cross-chip flash unrepresentable here.
     expect(JSON.parse(init.body as string)).toEqual({ version: '1.5.0', apply: 'auto' })
-    expect(init.credentials).toBe('same-origin')
-
-    // The `requested` row is already committed, so the table re-reads instead of
-    // waiting out the poll interval.
-    await waitFor(() => expect(onDeployed).toHaveBeenCalledTimes(1))
+    expect(card).toHaveTextContent('1.4.2 → 1.5.0')
+    expect(screen.getByTestId('precheck-fit')).toHaveTextContent('230,000 of 1,966,080 bytes')
+    expect(screen.getByTestId('precheck-rollback')).toHaveTextContent(
+      'If 1.5.0 never reconnects within 300 s of its reboot, the board rolls back on its own to 1.4.2.',
+    )
+    expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled()
     expect(screen.queryByRole('alert')).toBeNull()
   })
 
-  it('sends the version the operator picked, not the default', async () => {
-    const fetchMock = vi
-      .spyOn(globalThis, 'fetch')
-      .mockImplementation(responds({ cmd_id: 'c', device_id: 'a4cf12b3de90', version: '1.5.0', sha256: 'a', size_bytes: 1, apply: 'auto', reused: false, device_online: true }))
+  it('sends on the second click with apply auto and no override, then re-reads the fleet', async () => {
+    const { fetchMock } = routes()
+    const { onDeployed } = renderCell({ artifacts: [artifact('1.5.0')] })
+
+    await userEvent.click(screen.getByRole('button', { name: 'Deploy' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Send' }))
+
+    await waitFor(() => expect(onDeployed).toHaveBeenCalledTimes(1))
+    expect(urls(fetchMock)).toEqual([
+      '/v1/devices/a4cf12b3de90/deploy/precheck',
+      '/v1/devices/a4cf12b3de90/deploy',
+    ])
+    const [, init] = fetchMock.mock.calls[1] as [string, RequestInit]
+    expect(init.method).toBe('POST')
+    // No `target`, no `sha256` and no `override` key: today's server forbids extra keys.
+    expect(JSON.parse(init.body as string)).toEqual({ version: '1.5.0', apply: 'auto' })
+    expect(init.credentials).toBe('same-origin')
+    expect(screen.queryByTestId('precheck-card')).toBeNull()
+    expect(screen.getByTestId('deploy-accepted')).toHaveTextContent('sent')
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('sends the version the operator picked, to both the pre-check and the deploy', async () => {
+    const { fetchMock } = routes({ precheck: [precheck({ version: '1.5.0' })] })
     renderCell({ artifacts: [artifact('1.6.0'), artifact('1.5.0')] })
 
     await userEvent.selectOptions(screen.getByRole('combobox'), '1.5.0')
     await userEvent.click(screen.getByRole('button', { name: 'Deploy' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Send' }))
 
-    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    for (const call of fetchMock.mock.calls) {
+      const [, init] = call as [string, RequestInit]
+      expect(JSON.parse(init.body as string)).toEqual({ version: '1.5.0', apply: 'auto' })
+    }
+  })
+
+  it('offers no Send for a refusal, shows its sentence verbatim and never reaches /deploy', async () => {
+    const message =
+      'this device runs partition layout ab-4m-v1 and 1.6.0 was built for ab-4m-arduino-v1, ' +
+      'so the image cannot boot on it.'
+    const { fetchMock } = routes({
+      precheck: [
+        precheck({
+          deployable: false,
+          refusals: [{ code: 'layout_mismatch', message }],
+          artifact_partition_layout: 'ab-4m-arduino-v1',
+        }),
+      ],
+    })
+    renderCell()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Deploy' }))
+
+    const refusals = await screen.findByTestId('precheck-refusals')
+    expect(refusals).toHaveTextContent('Refused:')
+    expect(refusals).toHaveTextContent(message)
+    expect(screen.getByTestId('precheck-card')).toHaveTextContent('Refusals cannot be overridden.')
+    expect(screen.queryByRole('button', { name: /^Send/ })).toBeNull()
+    expect(screen.queryByTestId('precheck-rollback')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeEnabled()
+    expect(urls(fetchMock)).toEqual(['/v1/devices/a4cf12b3de90/deploy/precheck'])
+  })
+
+  it('overrides a non-gating warning by the Send click, with no override key', async () => {
+    const message = 'this board is offline: the update waits in its queue until it reconnects.'
+    const { fetchMock } = routes({
+      precheck: [precheck({ device_online: false, warnings: [{ code: 'offline', message }] })],
+    })
+    renderCell({ device: device({ online: false }) })
+
+    await userEvent.click(screen.getByRole('button', { name: 'Deploy' }))
+
+    expect(await screen.findByTestId('precheck-warnings')).toHaveTextContent(`Warning: ${message}`)
+    expect(screen.queryByRole('checkbox')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Send' })).toBeNull()
+    await userEvent.click(screen.getByRole('button', { name: 'Send anyway' }))
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    const [, init] = fetchMock.mock.calls[1] as [string, RequestInit]
     expect(JSON.parse(init.body as string)).toEqual({ version: '1.5.0', apply: 'auto' })
   })
 
-  it('renders the server s refusal verbatim, numbers and all', async () => {
+  it('gates a gating warning on its own tick and then sends override for that code only', async () => {
+    const { fetchMock } = routes({
+      precheck: [
+        precheck({
+          warnings: [
+            { code: 'offline', message: 'this board is offline' },
+            { code: 'rollback_incapable', message: 'no rollback here', needs_override: true },
+          ],
+        }),
+      ],
+    })
+    renderCell()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Deploy' }))
+    const send = await screen.findByRole('button', { name: 'Send anyway' })
+    expect(send).toBeDisabled()
+    // Only the gating warning gets a box.
+    expect(screen.getAllByRole('checkbox')).toHaveLength(1)
+
+    await userEvent.click(screen.getByRole('checkbox', { name: 'Send anyway: rollback_incapable' }))
+    expect(send).toBeEnabled()
+    await userEvent.click(send)
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(2))
+    const [, init] = fetchMock.mock.calls[1] as [string, RequestInit]
+    expect(JSON.parse(init.body as string)).toEqual({
+      version: '1.5.0',
+      apply: 'auto',
+      override: ['rollback_incapable'],
+    })
+  })
+
+  it('discards the card and its ticks when the version changes', async () => {
+    routes({
+      precheck: [
+        precheck({
+          warnings: [{ code: 'rollback_incapable', message: 'no rollback', needs_override: true }],
+        }),
+      ],
+    })
+    renderCell({ artifacts: [artifact('1.6.0'), artifact('1.5.0')] })
+
+    await userEvent.click(screen.getByRole('button', { name: 'Deploy' }))
+    await userEvent.click(await screen.findByRole('checkbox'))
+    await userEvent.selectOptions(screen.getByRole('combobox'), '1.5.0')
+    expect(screen.queryByTestId('precheck-card')).toBeNull()
+
+    // A fresh check starts unticked.
+    await userEvent.click(screen.getByRole('button', { name: 'Deploy' }))
+    expect(await screen.findByRole('checkbox')).not.toBeChecked()
+  })
+
+  it('ignores a pre-check answer that arrives after the version changed', async () => {
+    let resolve: (response: Response) => void = () => {}
+    vi.spyOn(globalThis, 'fetch').mockImplementation(
+      () => new Promise<Response>((r) => (resolve = r)),
+    )
+    renderCell({ artifacts: [artifact('1.6.0'), artifact('1.5.0')] })
+
+    await userEvent.click(screen.getByRole('button', { name: 'Deploy' }))
+    expect(screen.getByRole('button', { name: 'Checking…' })).toBeDisabled()
+    await userEvent.selectOptions(screen.getByRole('combobox'), '1.5.0')
+    expect(screen.getByRole('button', { name: 'Deploy' })).toBeEnabled()
+
+    await act(async () => {
+      resolve(
+        new Response(JSON.stringify(precheck({ version: '1.6.0' })), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        }),
+      )
+    })
+
+    expect(screen.queryByTestId('precheck-card')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Deploy' })).toBeEnabled()
+  })
+
+  it('ignores the answer to an older check once a newer Deploy click is pending', async () => {
+    const pending: Array<(response: Response) => void> = []
+    vi.spyOn(globalThis, 'fetch').mockImplementation(
+      () => new Promise<Response>((r) => pending.push(r)),
+    )
+    const answer = (index: number, version: string) =>
+      act(async () => {
+        pending[index](
+          new Response(JSON.stringify(precheck({ version })), {
+            status: 200,
+            headers: { 'content-type': 'application/json' },
+          }),
+        )
+      })
+    renderCell({ artifacts: [artifact('1.6.0'), artifact('1.5.0')] })
+
+    // Check 1.6.0, change the pick (the Deploy button comes back), check 1.5.0.
+    await userEvent.click(screen.getByRole('button', { name: 'Deploy' }))
+    await userEvent.selectOptions(screen.getByRole('combobox'), '1.5.0')
+    await userEvent.click(screen.getByRole('button', { name: 'Deploy' }))
+    expect(pending).toHaveLength(2)
+
+    // The older answer lands first and must not paint a card, nor free the button.
+    await answer(0, '1.6.0')
+    expect(screen.queryByTestId('precheck-card')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Checking…' })).toBeDisabled()
+
+    await answer(1, '1.5.0')
+    expect(await screen.findByTestId('precheck-card')).toHaveTextContent('1.4.2 → 1.5.0')
+    expect(screen.getAllByTestId('precheck-card')).toHaveLength(1)
+  })
+
+  it('closes the card on Cancel without sending anything', async () => {
+    const { fetchMock } = routes()
+    renderCell()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Deploy' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Cancel' }))
+
+    expect(screen.queryByTestId('precheck-card')).toBeNull()
+    expect(urls(fetchMock)).toEqual(['/v1/devices/a4cf12b3de90/deploy/precheck'])
+  })
+
+  it('bounces a dead session on the pre-check to the login gate, with no alert and no card', async () => {
+    routes({ precheck: [{ detail: 'not authenticated' }, 401] })
+    const { onSessionExpired } = renderCell()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Deploy' }))
+
+    await waitFor(() => expect(onSessionExpired).toHaveBeenCalledTimes(1))
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.queryByTestId('precheck-card')).toBeNull()
+  })
+
+  it('renders a pre-check error verbatim and opens no card', async () => {
+    const detail = 'no device with id a4cf12b3de90'
+    routes({ precheck: [{ detail }, 404] })
+    renderCell()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Deploy' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(detail)
+    expect(screen.queryByTestId('precheck-card')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Deploy' })).toBeEnabled()
+  })
+
+  it('renders the server s refusal of the deploy verbatim, numbers and all, and keeps the card', async () => {
     const detail =
       'this device did not announce the `ota` capability, so it has no agent that can ' +
       'stage an update. It announced: nothing.'
-    vi.spyOn(globalThis, 'fetch').mockImplementation(responds({ detail }, 409))
+    routes({ deploy: [{ detail }, 409] })
     const { onDeployed } = renderCell()
 
     await userEvent.click(screen.getByRole('button', { name: 'Deploy' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Send' }))
 
     const alert = await screen.findByRole('alert')
     expect(alert).toHaveTextContent(detail)
     expect(onDeployed).not.toHaveBeenCalled()
-    // The button comes back: the refusal is about this board, and the operator may have
-    // a different version to try.
-    expect(screen.getByRole('button', { name: 'Deploy' })).toBeEnabled()
+    // The card stays and Send comes back: the refusal is about this board, and the
+    // operator may Cancel and try a different version.
+    expect(screen.getByTestId('precheck-card')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Send' })).toBeEnabled()
   })
 
   it('says a duplicate deploy will not download twice', async () => {
-    vi.spyOn(globalThis, 'fetch').mockImplementation(
-      responds({
-        cmd_id: 'cmd-a',
-        device_id: 'a4cf12b3de90',
-        version: '1.5.0',
-        sha256: 'a',
-        size_bytes: 1,
-        apply: 'auto',
-        reused: true,
-        device_online: true,
-      }),
-    )
+    routes({ deploy: [accepted({ reused: true })] })
     renderCell()
 
     await userEvent.click(screen.getByRole('button', { name: 'Deploy' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Send' }))
 
     expect(await screen.findByTestId('deploy-accepted')).toHaveTextContent(/already in flight/i)
     expect(screen.queryByRole('alert')).toBeNull()
   })
 
   it('calls an offline board s deploy queued, which is what the broker does with it', async () => {
-    vi.spyOn(globalThis, 'fetch').mockImplementation(
-      responds({
-        cmd_id: 'cmd-a',
-        device_id: 'a4cf12b3de90',
-        version: '1.5.0',
-        sha256: 'a',
-        size_bytes: 1,
-        apply: 'auto',
-        reused: false,
-        device_online: false,
-      }),
-    )
+    routes({ deploy: [accepted({ device_online: false })] })
     renderCell({ device: device({ online: false }) })
 
     await userEvent.click(screen.getByRole('button', { name: 'Deploy' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Send' }))
 
-    const accepted = await screen.findByTestId('deploy-accepted')
-    expect(accepted).toHaveTextContent(/queued/i)
+    const queued = await screen.findByTestId('deploy-accepted')
+    expect(queued).toHaveTextContent(/queued/i)
     // Queued is not a failure: the QoS-1 command waits in the persistent session.
-    expect(accepted).not.toHaveClass('bad')
+    expect(queued).not.toHaveClass('bad')
     expect(screen.queryByRole('alert')).toBeNull()
   })
 
-  it('bounces a dead session to the login gate instead of showing an error', async () => {
-    vi.spyOn(globalThis, 'fetch').mockImplementation(responds({ detail: 'not authenticated' }, 401))
+  it('bounces a dead session on the send to the login gate instead of showing an error', async () => {
+    routes({ deploy: [{ detail: 'not authenticated' }, 401] })
     const { onSessionExpired, onDeployed } = renderCell()
 
     await userEvent.click(screen.getByRole('button', { name: 'Deploy' }))
+    await userEvent.click(await screen.findByRole('button', { name: 'Send' }))
 
     await waitFor(() => expect(onSessionExpired).toHaveBeenCalledTimes(1))
     expect(screen.queryByRole('alert')).toBeNull()
     expect(onDeployed).not.toHaveBeenCalled()
+  })
+
+  it('never prints null or undefined when every nullable in the pre-check is null', async () => {
+    routes({
+      precheck: [
+        precheck({
+          from_version: null,
+          sha256: null,
+          size_bytes: null,
+          artifact_partition_layout: null,
+          device_partition_layout: null,
+          ota_slot_size: null,
+          expected_wake_interval_s: null,
+        }),
+      ],
+    })
+    renderCell()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Deploy' }))
+
+    await screen.findByTestId('precheck-card')
+    const cell = screen.getByTestId('deploy-cell')
+    expect(cell).toHaveTextContent('— → 1.5.0')
+    expect(cell).toHaveTextContent('the version it runs now')
+    expect(cell).not.toHaveTextContent('null')
+    expect(cell).not.toHaveTextContent('undefined')
   })
 })
 

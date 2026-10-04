@@ -19,6 +19,45 @@ When `/implement` finishes a task, it appends a completed entry below.
 <!-- Newest first. One entry per completed task. Capture what a future reader
      needs WITHOUT the local plan file. -->
 
+### 2026-10-04 — R2b-fe-8 Pre-check card on the Deploy cell
+
+**What shipped:** The Deploy button no longer sends. It asks `POST /deploy/precheck` (R2b-be-2,
+a dry run) and opens `PrecheckCard.tsx` under the controls: "Before you send", current to
+target (`1.4.2 → 1.5.0 — esp32c6 · online`), layout and size against the slot, the server's
+refusals and warnings, and the rollback line. **Send** is a second click and the only thing
+that reaches `POST /deploy`. Pure rules live in `deployPrecheck.ts` (`canSend`, `overrideFor`,
+`sendLabel`, `summaryLine`, `fitLine`, `rollbackLine`); the card renders and decides nothing;
+fetch and state stay in `DeployCell.tsx`.
+
+- **Refusals offer no Send.** Each is `Refused:` (word and colour) plus the server's sentence
+  verbatim, then "Refusals cannot be overridden."; only Cancel remains, and no rollback line.
+- **Warnings are overridden by the Send click** ("Send anyway") for today's non-gating ones.
+  A gating warning (`needs_override`, R2b-be-7, not on the server yet; absent means false)
+  also needs its own checkbox, and only then does the deploy body carry `override: [code]`.
+- **`override` only when non-empty.** `DeployRequest` forbids extra keys today, so even
+  `override: []` is a 422. The body stays exactly `{version, apply}` otherwise.
+- **Rollback line**, only when deployable: "If {version} never reconnects within
+  {confirm_timeout_s} s of its reboot, the board rolls back on its own to {from_version}."
+  (`the version it runs now` when unknown). It claims no more.
+- **Stale answers are dropped.** A sequence ref guards every state write after the await:
+  a version change, Cancel or a newer Deploy click discards the card, and a late pre-check
+  answer renders nothing. Changing the version also clears the ticks.
+- No `aria-live` or `role="alert"` on the card (the cell re-renders on every poll); errors
+  keep the existing alert paragraph, a pre-check 401 goes to the login gate.
+
+**T2 evidence (dev stack :8088, real Chromium, simulator boards with `--capabilities ota`):**
+Arduino label on the online row: card `1.4.2 → 1.6.0-ard-…`, `Refused:` with the layout
+sentence, "Refusals cannot be overridden.", buttons only Deploy/Cancel, no rollback line;
+`deploy_events` count unchanged. Clean label: `1,106,384 of 1,966,080 bytes`, the 300 s
+rollback line, **Send**; count still unchanged; Send posted `{"version":…,"apply":"auto"}`
+-> 202, card closed, live state `rebooting → 1.5.0-t2-…`. Sleepy row: `Warning:` about the
+20 s wake and **Send anyway**; offline row: `Warning:` offline, Send anyway -> 202, "queued",
+no `override` key. Gating warning (route-faked, the server cannot emit it yet): Send anyway
+disabled until `Send anyway: rollback_incapable` ticked, body
+`{"version":…,"apply":"auto","override":["rollback_incapable"]}`. Cleared cookies then
+Deploy: login gate, no alert. Note: a simulator started without `--capabilities ota` is
+refused with `no_ota_capability`, which the card shows verbatim.
+
 ### 2026-10-04 — R2b-fe-7 Upload a build from the dashboard
 
 **What shipped:** An "Upload a build" section between the Fleet table and the flasher
@@ -45,8 +84,8 @@ new version is in every matching row's Deploy select with no reload. The runbook
   proxy hides this. Fixed with an exact-match `location = /v1/artifact` at 4m (the API stays
   the size authority at 1966080); `/v1/` keeps the default. Guarded by
   `tests/test_frontend_nginx.py`.
-- **Not done:** drag-and-drop, upload progress (fetch has none), the pre-check card
-  (R2b-fe-8; the API is R2b-be-2).
+- **Not done:** drag-and-drop, upload progress (fetch has none). The pre-check card was
+  done in R2b-fe-8.
 
 **T2 evidence (dev stack, real Chromium; nginx path via the production image):**
 - `agent/dist/esp32c6/app.bin` (1,106,384 B): line "app.bin — 1,106,384 bytes · built as

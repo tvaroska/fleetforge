@@ -368,6 +368,15 @@ textarea.log {
   box-shadow: 4px 4px 0 var(--ff-line);
 }
 
+/* R2b-fe-8. The pre-check card inside a Deploy cell: hard-edged like `.issued`, but
+   small, because it sits in a table cell. */
+.precheck {
+  border: 2px solid var(--ff-line-hi);
+  border-radius: 0;
+  padding: 0 0.75rem 0.5rem;
+  margin: 0.5rem 0;
+}
+
 /* R2b-fe-1. One strip, on screen through the whole flow. Data, so mono. */
 .status-strip { position: sticky; top: 0; z-index: 1; background: var(--ff-panel);
   border-bottom: 2px solid var(--ff-line); padding: 0.5rem 0; margin-bottom: 1rem;

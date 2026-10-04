@@ -2183,6 +2183,8 @@ same-layout 200 deployable; Arduino label `layout_mismatch`; unknown label
 version 400; no auth 401; the real deploy of the refused label 409 with the identical
 sentence; `deploy_events` count unchanged.
 
+The dashboard card is R2b-fe-8 (`PrecheckCard.tsx`).
+
 ## Operator-flow additions (2026-10-04, planned, nothing built)
 
 Implementation notes behind `spec/flows.md` Flow 2 and the 2026-10-04 entries in

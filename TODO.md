@@ -270,7 +270,7 @@ are R3). Order inside each flow: the one-place status first, then the cards, the
       app image overwrites them. Detect at upload from the image header and size and name the
       app `.bin` to pick. Nothing detects this today. Needs a fixture of a real merged image
       and a real app image.
-- [ ] **R2b-fe-8**: Pre-check card on the Deploy cell (P0, 1d)
+- [x] **R2b-fe-8**: Pre-check card on the Deploy cell (P0, 1d) _(done 2026-10-04; see docs/features/dashboard.md)_
       Shows the dry run: current to target, what is refused or warned, "rolls back on its own
       if it never reconnects". Warnings can be overridden; refusals cannot. Depends on
       `R2b-be-2`.

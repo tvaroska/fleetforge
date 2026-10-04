@@ -68,6 +68,27 @@ function mockApi(devices: DeviceSummary[]) {
         artifacts: uploaded ? [{ ...artifact, version: '1.6.0', sha256: 'b'.repeat(64) }, artifact] : [artifact],
       })
     }
+    // Before the generic POST below, or the card would get a DeployAccepted body.
+    if (url.endsWith('/deploy/precheck') && init?.method === 'POST') {
+      return json({
+        device_id: 'x',
+        target: 'esp32c6',
+        version: '1.5.0',
+        from_version: '1.4.2',
+        sha256: 'a'.repeat(64),
+        size_bytes: 230_000,
+        artifact_partition_layout: 'ab-4m-v1',
+        device_partition_layout: 'ab-4m-v1',
+        ota_slot_size: 1_966_080,
+        power_class: 'always_on',
+        expected_wake_interval_s: null,
+        device_online: true,
+        confirm_timeout_s: 300,
+        deployable: true,
+        refusals: [],
+        warnings: [],
+      })
+    }
     if (url.startsWith('/v1/devices/') && init?.method === 'POST') {
       return json({ cmd_id: 'c', device_id: 'x', version: '1.5.0', apply: 'auto', reused: false })
     }
@@ -137,6 +158,8 @@ describe('Dashboard', () => {
     const row = (await screen.findAllByTestId('device-row'))[1]
     await waitFor(() => expect(within(row).getByRole('button', { name: 'Deploy' })).toBeEnabled())
     await userEvent.click(within(row).getByRole('button', { name: 'Deploy' }))
+    // The pre-check card; selection happens on a real send (R2b-fe-8).
+    await userEvent.click(await within(row).findByRole('button', { name: 'Send' }))
     await waitFor(() =>
       expect(screen.getByTestId('strip-board')).toHaveTextContent('b26a938324ab'),
     )

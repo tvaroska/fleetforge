@@ -6,6 +6,21 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-04 — The Deploy button opens the pre-check card; Send is a second click; refusals offer no Send; `override` is sent only when non-empty (R2b-fe-8)
+
+**Decided: Deploy runs `POST /deploy/precheck` and opens `PrecheckCard.tsx`; only the card's Send reaches `POST /deploy`. Details: `docs/features/dashboard.md`.**
+
+- **Refusals offer no Send**, only Cancel, and say "Refusals cannot be overridden."
+- **Non-gating warnings** (`never_connected`, `offline`, `sleepy`) are overridden by the Send click, whose label becomes "Send anyway". **Gating ones** (`needs_override`, R2b-be-7) also need a per-code tick.
+- **`override` only when non-empty**, and only codes the pre-check raised as gating and the operator ticked. Today's `DeployRequest` forbids extra keys, so `override: []` would be a 422.
+- **A stale pre-check answer is ignored** (sequence ref): a version change, Cancel or a newer Deploy click discards the card.
+- **Server sentences verbatim**, with `Refused:` / `Warning:` as a separate label element.
+- Flow 2 step 3 "one button" is the card's Send; no spec change.
+
+Supersedes nothing.
+
+---
+
 ## 2026-10-04 — A merged full-flash image is refused at upload with a 422, from two signatures; the pre-check never sees one (R2b-be-3)
 
 **Decided: `POST /v1/artifact` answers 422 with one plain sentence when the body is a merged full-flash image. Details: `docs/features/ota-deploy.md`.**
