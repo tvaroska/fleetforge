@@ -6,6 +6,22 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-04 — "Send again" is Deploy pinned to the failed version: it opens the pre-check, never posts; offered only on a failure before reboot that the same build can survive (R2b-fe-11)
+
+**Decided: `deployResult.sendAgain` names the version; `DeployCell` runs the normal pre-check for it. Frontend only.**
+
+- **D1.** Nothing reaches `/deploy` without the pre-check card (R2b-fe-8). The board may have changed since the failure; the pre-check is where that is said. The click selects the failed version (even when the select defaulted to a newer one) and opens the card; the operator clicks Send.
+- **D2.** Offered only for `failed`, steps known and none past the reboot, known version, and `resend: true` on the failure entry. `resend` is explicit on every entry (false for `artifact larger than the ota slot`, `image validation failed`), and a test pins `resend === /send it again/i.test(next)` so copy and flag cannot drift.
+- **D3.** The cell also requires the version to be in the board's artifact list, and disables the button while `phase !== 'idle'`.
+- **D4.** `DeployResultCard` takes optional `onSendAgain` and `busy` (capability by prop); plain button, no role or aria-live, not inside a `.bad`/`.warn` paragraph.
+- **D5.** The rollback card keeps "Do not send X again as it is" and has no button.
+- **D6.** No change to `deploy.ts`, the timeline, status strip, `api.ts` or backend.
+- **Rejected:** a one-click direct POST; offering it on plain `failed` or unknown steps (unknown is not "before"); deriving `resend` from the copy.
+
+Supersedes nothing.
+
+---
+
 ## 2026-10-04 — Who sent a deploy is a snapshot on the `requested` row's `detail.sent_by`; no column, no migration (R2b-be-4)
 
 **Decided: `deploys.record_requested` writes `detail.sent_by = {subject, token_id, credential}`; the API surfaces `{subject, credential}` as `DeploySummary.sent_by`; the result card shows a `Sent by` row.**

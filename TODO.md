@@ -292,7 +292,7 @@ are R3). Order inside each flow: the one-place status first, then the cards, the
 - [x] **R2b-be-4**: Record who sent a deploy (P2, 0.5d) _(done 2026-10-04; see docs/features/ota-deploy.md)_
       Audit record for Flow 2's result card (Marcus). Check what `deploy_events` already
       stores before adding a column; a migration is CRITICAL.
-- [ ] **R2b-fe-11**: "Send again" after a failure before reboot (P2, 0.5d)
+- [x] **R2b-fe-11**: "Send again" after a failure before reboot (P2, 0.5d) _(done 2026-10-04; see docs/features/dashboard.md)_
       Safe because a repeated stage is deduplicated on the board (R2-fw-6). Not offered after
       a rollback.
 - [ ] **R2b-test-2**: Bench replay of the R2 recovery paths proven only in QEMU (P1, 1d)

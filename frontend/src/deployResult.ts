@@ -24,10 +24,14 @@
 //    transition log (`DeployCell.tsx`).
 // 7. No arrow characters: R2-fe-1's tests forbid one beside a verdict, so before and after
 //    are two rows.
+// 8. `sendAgain` (R2b-fe-11) is set only for a failure before the reboot, with a known
+//    version, whose entry says the same build can survive (`resend`). Never after a
+//    rollback. The button is offered exactly when the next action says to send it again
+//    (a test pins `resend === /send it again/i.test(next)` for every entry). It opens the
+//    pre-check and never posts (`DeployCell.tsx`).
 //
 // Not here, on purpose:
 // * `Sent by` is server-authored text (R2b-be-4), rendered as text; absent when not recorded.
-// * A "Send again" button: `R2b-fe-11`. The next action may say "send it again" in words.
 // * The failed boot's crash reason and last milestone after a rollback: the agent does not
 //   report them. Only the board's own `detail` is shown, verbatim.
 
@@ -55,6 +59,8 @@ export type DeployResult = {
   agoTitle: string
   rows: ResultRow[]
   versionsDiffer: boolean
+  /** The version "Send again" re-checks, or null when not offered (R2b-fe-11). */
+  sendAgain: string | null
 }
 
 /**
@@ -62,56 +68,70 @@ export type DeployResult = {
  * the detail up to the first colon, so the simulator's `download failed: <Exception>`
  * finds `download failed`. The board's exact words are always shown as well.
  */
-export const FAILURE_REASONS: Record<string, { cause: string; next: string }> = {
+type FailureReason = { cause: string; next: string; resend: boolean }
+
+export const FAILURE_REASONS: Record<string, FailureReason> = {
   'download stalled': {
     cause: 'The download stopped: no data arrived for about a minute, so the board gave up.',
     next: 'Check the board’s Wi-Fi signal and that it can reach the server, then send it again.',
+    resend: true,
   },
   'download failed': {
     cause: 'The board could not download the image: the connection to the server failed.',
     next: 'Check the board’s network, then send it again.',
+    resend: true,
   },
   'truncated download': {
     cause: 'The image arrived incomplete.',
     next: 'Send it again.',
+    resend: true,
   },
   'size mismatch': {
     cause: 'The image arrived incomplete.',
     next: 'Send it again.',
+    resend: true,
   },
   'sha256 mismatch': {
     cause: 'The downloaded image did not match its checksum, so the board refused to install it.',
     next: 'Send it again; if it happens again, upload the build again.',
+    resend: true,
   },
   'cannot open the artifact': {
     cause: 'The board could not start the download from the server.',
     next: 'Check that the board can reach the server, then send it again.',
+    resend: true,
   },
   'artifact larger than the ota slot': {
     cause: 'The image is larger than the board’s update slot.',
     next: 'Build a smaller image; the pre-check shows the slot size.',
+    resend: false,
   },
   'the running image is not confirmed yet': {
     cause: 'The board is still confirming its current image and takes no new update until it has.',
     next: 'Wait for that to finish, then send it again.',
+    resend: true,
   },
   'an update is already staged and waits for a reboot': {
     cause: 'An earlier update is already written and waits for the board to reboot.',
     next: 'Let the board reboot (or power-cycle it), then send it again.',
+    resend: true,
   },
   'image validation failed': {
     cause: 'The board found the file is not a valid app image for it.',
     next: 'Check that you picked the app .bin built for this chip, not a merged or bootloader file.',
+    resend: false,
   },
 }
 
-const UNKNOWN_FAILURE = {
+const UNKNOWN_FAILURE: FailureReason = {
   cause: 'The board stopped the update; its own words are below.',
   next: 'Send it again; if it fails the same way, watch the board’s serial console while it updates.',
+  resend: true,
 }
-const SILENT_FAILURE = {
+const SILENT_FAILURE: FailureReason = {
   cause: 'The update failed and no reason was reported.',
   next: 'Check that the board is online, then send it again.',
+  resend: true,
 }
 
 // Milestones from the reboot on: a step on one of these means the board got past the point
@@ -128,7 +148,7 @@ function failedBeforeReboot(deploy: DeploySummary): boolean {
   })
 }
 
-function failureLookup(detail: string | null): { cause: string; next: string } {
+function failureLookup(detail: string | null): FailureReason {
   if (detail === null || detail.trim() === '') return SILENT_FAILURE
   const key = detail.split(':')[0].trim()
   return Object.hasOwn(FAILURE_REASONS, key) ? FAILURE_REASONS[key] : UNKNOWN_FAILURE
@@ -164,6 +184,7 @@ export function deployResult(
   let reason: string | null = null
   let next: string | null = null
   let after: string | null
+  let sendAgain: string | null = null
 
   if (verdict?.kind === 'verdict' && deploy.state === 'confirmed') {
     outcome = 'good'
@@ -207,6 +228,7 @@ export function deployResult(
     const found = failureLookup(deploy.detail)
     reason = found.cause
     next = found.next
+    if (before && v !== null && found.resend) sendAgain = v
     if (before) {
       after = backOnFrom ? `${from}, unchanged: ${target} was not installed` : `${target} was not installed`
     } else {
@@ -259,5 +281,6 @@ export function deployResult(
     agoTitle: formatWhen(deploy.at),
     rows,
     versionsDiffer: versions?.differ ?? false,
+    sendAgain,
   }
 }

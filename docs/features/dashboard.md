@@ -32,6 +32,17 @@ When `/implement` finishes a task, it appends a completed entry below.
 - **Unchanged by design.** Re-enrolment and announces do not overwrite `name` or `group_id`.
 - **Gotcha.** `updated_at` is server-side `onupdate`; it is expired after flush and reading it in async code raises `MissingGreenlet`, so it is not part of the summary or the log line.
 
+### 2026-10-04 — R2b-fe-11 Send again after a failure before reboot
+
+Frontend only (`deployResult.ts`, `DeployResultCard.tsx`, `DeployCell.tsx`).
+
+- **Pre-check first (D1).** "Send again" is Deploy pinned to the failed version: it selects that version and runs the same pre-check, which opens the pre-check card and hides the result card. Send is a second click. It never posts to `/deploy` itself.
+- **When offered (D2).** `deployResult.sendAgain` is the version, set only for a `failed` transaction whose steps are known and none reached the reboot, with a known version, and a failure entry whose new `resend` flag is true (false for `artifact larger than the ota slot` and `image validation failed`). Pinned by a test: `resend === /send it again/i.test(next)` for every entry. Never after a rollback.
+- **Cell conditions (D3).** The version must be in this board's artifact list; the button is disabled while a check or send is in flight.
+- **Render (D4, D5).** A `<p>` with a plain `Send again` button after the Next line; no `role` or `aria-live`. The rollback card keeps its "Do not send X again" text and gets no button.
+- **Tests.** `deployResult.test.ts` and `DeployCell.test.tsx` extended; full suite 583 passed, typecheck and build green.
+- **T2 (dev stack, headless Chromium).** Seeded `t11-seed-*` (stalled): card `failed before reboot`, button present; click gave exactly one `/deploy/precheck` for the failed version (select defaulted to the newer 1.6.0), result card hidden, no `/deploy`; Send gave one `/deploy`, a new cmd_id, and the sim reached `good` with no button. A `--confirm never` sim rolled back: no button. `t11-seed2-*` (image validation failed) and `t11-seed3-*` (rebooting step): no button; `t11-seed4-*` (null detail): button present.
+
 ### 2026-10-04 — R2b-fe-10 Update result card
 
 **What shipped:** a finished deploy renders one "Update result" card inside the Deploy
@@ -64,7 +75,7 @@ in `deployResult.ts`, markup in `DeployResultCard.tsx`, wiring in `DeployCell.ts
   sentence moved to `deploy.ts::driftText` so the compact line and the card say the same words.
 
 **Not built:** who sent it (added later by `R2b-be-4`, 2026-10-04: a `Sent by` row between `Sent` and `Finished`); the
-"Send again" button (`R2b-fe-11`); the failed boot's crash reason and last milestone after a
+"Send again" button (`R2b-fe-11`; built by `R2b-fe-11`, 2026-10-04); the failed boot's crash reason and last milestone after a
 rollback (the agent does not report them).
 
 **T2 evidence (dev stack, headless Chromium, simulators with `--capabilities ota`):**

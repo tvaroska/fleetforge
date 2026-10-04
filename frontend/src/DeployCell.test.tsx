@@ -29,6 +29,8 @@
 // 12. A finished update is one card — before, after, verdict, reason, one next action,
 //    versions, when — that never announces itself and never shows beside the pre-check
 //    card.
+// 13. Send again appears only on a failure before reboot, never after a rollback, and
+//    goes through the pre-check like Deploy.
 
 import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -961,5 +963,101 @@ describe('DeployCell — the update result card (R2b-fe-10)', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Cancel' }))
     expect(screen.queryByTestId('precheck-card')).toBeNull()
     expect(screen.getByTestId('deploy-result')).toBeInTheDocument()
+  })
+})
+
+describe('DeployCell — send again (R2b-fe-11)', () => {
+  const at = (secondsAgo: number) => new Date(NOW - secondsAgo * 1000).toISOString()
+  const step = (state: string, secondsAgo: number) => ({ state, at: at(secondsAgo) })
+  const failedDevice = (overrides: Partial<DeploySummary> = {}) =>
+    device({
+      deploy: deploy({
+        state: 'failed',
+        is_terminal: true,
+        detail: 'download stalled',
+        at: at(35),
+        steps: [step('requested', 120), step('downloading', 115), step('failed', 35)],
+        ...overrides,
+      }),
+    })
+  const both = [artifact('1.6.0'), artifact('1.5.0')]
+  const again = () => screen.queryByRole('button', { name: 'Send again' })
+
+  it('re-checks the failed version, opens the pre-check and sends nothing until Send', async () => {
+    const { fetchMock } = routes({ precheck: [precheck({ version: '1.5.0' })] })
+    const { onDeployed } = renderCell({ device: failedDevice(), artifacts: both })
+
+    const card = screen.getByTestId('deploy-result')
+    expect(card.querySelector('[role], [aria-live]')).toBeNull()
+    await userEvent.click(within(card).getByRole('button', { name: 'Send again' }))
+
+    expect(await screen.findByTestId('precheck-card')).toBeInTheDocument()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(urls(fetchMock)).toEqual(['/v1/devices/a4cf12b3de90/deploy/precheck'])
+    expect(JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body))).toEqual({
+      version: '1.5.0',
+      apply: 'auto',
+    })
+    expect(screen.queryByTestId('deploy-result')).toBeNull()
+    expect(screen.getByRole('combobox', { name: /Version for/ })).toHaveValue('1.5.0')
+
+    await userEvent.click(screen.getByRole('button', { name: 'Send' }))
+    await waitFor(() => expect(onDeployed).toHaveBeenCalledTimes(1))
+    expect(urls(fetchMock)).toEqual([
+      '/v1/devices/a4cf12b3de90/deploy/precheck',
+      '/v1/devices/a4cf12b3de90/deploy',
+    ])
+    expect(JSON.parse(String((fetchMock.mock.calls[1][1] as RequestInit).body))).toEqual({
+      version: '1.5.0',
+      apply: 'auto',
+    })
+  })
+
+  it('is not offered after a rollback', () => {
+    renderCell({
+      device: failedDevice({
+        state: 'rolled_back',
+        detail: 'returned to 1.4.2; the new image did not confirm',
+        steps: [step('requested', 90), step('rebooting', 70), step('rolled_back', 10)],
+      }),
+      artifacts: both,
+    })
+    expect(screen.getByTestId('deploy-result-next').textContent).toMatch(/^Next: Do not send 1\.5\.0 again/)
+    expect(again()).toBeNull()
+  })
+
+  it('is not offered for a step past the reboot or a build defect', () => {
+    renderCell({
+      device: failedDevice({ steps: [step('requested', 90), step('rebooting', 60), step('failed', 10)] }),
+      artifacts: both,
+    })
+    expect(again()).toBeNull()
+    cleanup()
+    renderCell({ device: failedDevice({ detail: 'image validation failed' }), artifacts: both })
+    expect(screen.getByTestId('deploy-result-next')).toHaveTextContent('Next: Check that you picked')
+    expect(again()).toBeNull()
+  })
+
+  it('is not offered when the failed version is not in the artifact list', () => {
+    renderCell({ device: failedDevice(), artifacts: [artifact('1.6.0')] })
+    expect(screen.getByTestId('deploy-result')).toBeInTheDocument()
+    expect(again()).toBeNull()
+  })
+
+  it('is disabled while the check is in flight', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(() => new Promise<Response>(() => {}))
+    renderCell({ device: failedDevice(), artifacts: both })
+    await userEvent.click(screen.getByRole('button', { name: 'Send again' }))
+    expect(screen.getByRole('button', { name: 'Send again' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Checking…' })).toBeDisabled()
+  })
+
+  it('bounces a dead session on the Send again pre-check to the login gate', async () => {
+    routes({ precheck: [{ detail: 'not authenticated' }, 401] })
+    const { onSessionExpired } = renderCell({ device: failedDevice(), artifacts: both })
+    await userEvent.click(screen.getByRole('button', { name: 'Send again' }))
+    await waitFor(() => expect(onSessionExpired).toHaveBeenCalledTimes(1))
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.queryByTestId('precheck-card')).toBeNull()
   })
 })

@@ -31,6 +31,13 @@
 // newer Deploy click discards the card, and a pre-check answer that arrives after that is
 // ignored.
 //
+// Send again (R2b-fe-11) is Deploy pinned to the failed version: on a failure before the
+// reboot (`deployResult.sendAgain`) whose version is in this board's list, it selects that
+// version and runs the same pre-check, which opens `PrecheckCard` and hides the result
+// card. The operator then clicks Send. It never posts to `/deploy` itself: the board may
+// have changed since the failure and the pre-check is where that is said. Disabled while a
+// check or send is in flight.
+//
 // Two things this cell deliberately does not do:
 //
 // * **No progress bar.** `pct` is a transition log, not a feed: our agent publishes
@@ -196,15 +203,15 @@ export function DeployCell({
     setPhase('idle')
   }
 
-  async function check() {
-    if (version === null) return
+  async function check(target: string | null = version) {
+    if (target === null) return
     const mine = ++seq.current
     setPhase('checking')
     setError(null)
     setAccepted(null)
     setTicked(new Set())
     try {
-      const result = await api.precheckDeploy(device.device_id, version)
+      const result = await api.precheckDeploy(device.device_id, target)
       if (mine !== seq.current) return
       setPrecheck(result)
     } catch (err) {
@@ -213,6 +220,11 @@ export function DeployCell({
       fail(err, 'the deploy could not be checked')
     }
     if (mine === seq.current) setPhase('idle')
+  }
+
+  function sendAgain(v: string) {
+    setChosen(v)
+    void check(v)
   }
 
   async function send() {
@@ -251,6 +263,10 @@ export function DeployCell({
 
   const name = device.name ?? device.device_id
   const result = deployResult(device.deploy, device, versions, now)
+  const resendVersion =
+    result?.sendAgain != null && artifacts.some((a) => a.version === result.sendAgain)
+      ? result.sendAgain
+      : null
 
   return (
     <td data-testid="deploy-cell">
@@ -311,7 +327,11 @@ export function DeployCell({
       )}
 
       {result !== null && precheck === null ? (
-        <DeployResultCard result={result} />
+        <DeployResultCard
+          result={result}
+          onSendAgain={resendVersion !== null ? () => sendAgain(resendVersion) : undefined}
+          busy={phase !== 'idle'}
+        />
       ) : (
         <LiveState device={device} now={now} />
       )}

@@ -5,11 +5,23 @@
 // `now` tick moves "(N s ago)") and on every poll, so a live region here would be re-read
 // to a screen-reader user over and over. The card is plain content, found by its heading.
 // (The onboarding `ResultCard` uses `role="status"`; that card does not tick.)
+//
+// "Send again" (R2b-fe-11) shows only when the judgement offers it (`result.sendAgain`) AND
+// the cell passes a handler (capability by prop). The click is the cell's: it opens the
+// pre-check, it never posts. No local state here.
 
 import { Fragment, useId } from 'react'
 import { type DeployResult } from './deployResult'
 
-export function DeployResultCard({ result }: { result: DeployResult }) {
+export function DeployResultCard({
+  result,
+  onSendAgain,
+  busy = false,
+}: {
+  result: DeployResult
+  onSendAgain?: () => void
+  busy?: boolean
+}) {
   const headingId = useId()
   return (
     <section
@@ -37,6 +49,13 @@ export function DeployResultCard({ result }: { result: DeployResult }) {
       {result.next !== null && (
         <p data-testid="deploy-result-next">
           <strong>Next:</strong> {result.next}
+        </p>
+      )}
+      {result.sendAgain !== null && onSendAgain && (
+        <p>
+          <button type="button" data-testid="deploy-send-again" disabled={busy} onClick={onSendAgain}>
+            Send again
+          </button>
         </p>
       )}
       <dl data-testid="deploy-result-rows">

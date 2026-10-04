@@ -7,6 +7,8 @@
 // 4. `failed before reboot` claimed when the steps do not prove no reboot happened.
 // 5. A device-controlled `detail` reaching a prototype key (`constructor`).
 // 6. `null`, `undefined`, `NaN`, `%` or an arrow in any string.
+// 7. (R2b-fe-11) The Send again version offered after a rollback, an unproven reboot or a
+//    build defect.
 
 import { describe, expect, it } from 'vitest'
 import { type DeploySummary } from './api'
@@ -341,6 +343,64 @@ describe('deployResult — everything else', () => {
     const result = must(deployResult({ ...d, pct: 100, steps: [step('requested', 5)] }, { fw_version: fw }, null, NOW))
     for (const s of strings(result)) {
       expect(s).not.toMatch(/null|undefined|NaN|%|→/)
+    }
+  })
+})
+
+describe('deployResult — send again (R2b-fe-11)', () => {
+  const fw = { fw_version: '1.4.2' }
+  const before = [step('requested', 120), step('downloading', 115), step('failed', 35)]
+  const failed = (overrides: Partial<DeploySummary> = {}) =>
+    deploy({ state: 'failed', detail: 'download stalled', steps: before, ...overrides })
+  const again = (d: DeploySummary) => must(deployResult(d, fw, versions, NOW)).sendAgain
+
+  it('is the failed version for a failure before reboot', () => {
+    expect(again(failed())).toBe('1.5.0')
+  })
+
+  it('finds the entry by prefix, and falls back for unknown words and a null detail', () => {
+    expect(again(failed({ detail: 'download failed: ConnectionError' }))).toBe('1.5.0')
+    expect(again(failed({ detail: 'flux capacitor' }))).toBe('1.5.0')
+    expect(again(failed({ detail: 'constructor' }))).toBe('1.5.0')
+    expect(again(failed({ detail: null }))).toBe('1.5.0')
+  })
+
+  it('is null for a build defect, and the failure card is unchanged', () => {
+    for (const detail of ['artifact larger than the ota slot', 'image validation failed']) {
+      const result = must(deployResult(failed({ detail }), fw, versions, NOW))
+      expect(result.sendAgain).toBeNull()
+      expect(result.word).toBe('failed before reboot')
+      expect(result.next).toBe(FAILURE_REASONS[detail].next)
+    }
+  })
+
+  it('is null when the steps do not prove the reboot did not happen', () => {
+    expect(again(failed({ steps: undefined }))).toBeNull()
+    expect(again(failed({ steps: [] }))).toBeNull()
+    expect(again(failed({ steps: [step('requested', 90), step('rebooting', 60), step('failed', 10)] }))).toBeNull()
+  })
+
+  it('is null for a rollback, a confirmed deploy, drift and an unknown state', () => {
+    expect(again(deploy({ state: 'rolled_back', steps: before }))).toBeNull()
+    expect(again(deploy({ state: 'rolled_back', steps: [step('requested', 90), step('rebooting', 60)] }))).toBeNull()
+    expect(again(deploy({ state: 'confirmed', steps: before }))).toBeNull()
+    expect(
+      must(deployResult(deploy({ state: 'confirmed' }), { fw_version: '9.9.9' }, versions, NOW)).sendAgain,
+    ).toBeNull()
+    expect(again(deploy({ state: 'exploded', steps: before }))).toBeNull()
+  })
+
+  it('is null without a known version', () => {
+    expect(again(failed({ artifact_version: null }))).toBeNull()
+  })
+
+  it('is offered exactly when the next action says to send it again', () => {
+    for (const [key, entry] of Object.entries(FAILURE_REASONS)) {
+      expect(entry.resend, key).toBe(/send it again/i.test(entry.next))
+    }
+    for (const detail of [null, 'flux capacitor']) {
+      const result = must(deployResult(failed({ detail }), fw, versions, NOW))
+      expect(result.sendAgain !== null).toBe(/send it again/i.test(result.next ?? ''))
     }
   })
 })
