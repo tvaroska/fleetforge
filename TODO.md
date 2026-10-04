@@ -252,6 +252,11 @@ are R3). Order inside each flow: the one-place status first, then the cards, the
 - [ ] **R2b-test-1**: Re-run the unaided onboarding test against the new flow (P1, 0.5d)
       Extends `S0-test-3`, which passed 2026-09-22 on the old UI. Someone who has not seen
       the code onboards a board from the result card alone. Run after `R2b-fe-1`..`fe-4`.
+      _(2026-10-04: run script docs/runbooks/unaided-onboarding.md; software rehearsal in real
+      Chromium on dev at 4b06281: 6/6 pass (frontend/scripts/onboarding-rehearsal.mjs). Prod is
+      0.4.2 / 9200e0f, "R2b NOT on prod"; `just agent-check-prod` STALE (esp32s3 0.3.2, others
+      0.2.0, repo 0.4.5). Human run owed; waits on the R2b release to prod, the S0-infra-10
+      publish and S0-bug-1.)_
 
 ### Flow 2 — Update a board
 

@@ -6,6 +6,19 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-04 — The unaided re-run waits for the R2b flow on prod; the software half was rehearsed in a real Chromium (R2b-test-1)
+
+**Decided: `R2b-test-1` stays open. The unaided run is held until the R2b flow is on prod; this pass delivers the run script and a software rehearsal, not the acceptance.**
+
+- **Why it is held.** The acceptance needs a person who has not seen the code, the S3 `94a990dd09a4` on the Windows bench, and the new flow on prod. Prod is 0.4.2 (`9200e0f`) and none of the R2b commits are on it (`git merge-base --is-ancestor 4b06281 9200e0f` is false); prod's flasher serves agent 0.3.2 (esp32s3) / 0.2.0 (others) against the repo's 0.4.5 (`S0-infra-10`); and `S0-bug-1`'s power-cycle diagnosis must happen before the run, because the re-flash erases its evidence. A release and a publish are prod changes that need the owner's go-ahead.
+- **The two runs.** Run 1 is a known-board re-flash of `94a990dd09a4` (it is already enrolled, so it also exercises the pre-flight card and the re-enrol path). Run 2 uses a wrong Wi-Fi passphrase as the induced fault. A spent token is impractical to induce now: every flash mints a fresh token. Script: `docs/runbooks/unaided-onboarding.md`.
+- **The software half.** `frontend/scripts/onboarding-rehearsal.mjs` runs the console and result card (Flow 1 steps 5-6) in a real Chromium against the dev stack, replaying real agent log lines through a fake `navigator.serial`, six scenarios graded on the S0-test-3 bar. It is run by hand, not in `npm test`, and Playwright is resolved from `PLAYWRIGHT_MODULE`, never a package dependency (same rule as `theme-shots.mjs`). 6/6 pass; it is a proxy and does not cover detect, flash or a real USB re-enumeration.
+- **Gotchas.** The dev admin password in `.env` is not necessarily `fleetforge-dev-only`. `just rebuild <svc>` fails at its `up -d` on a box with pruned images (it pulls `minio/mc`); after the build use `docker compose up -d --no-deps --no-build <svc>`. The dev API and frontend containers predated R2b (the PATCH route, fe-3 to fe-6) and were rebuilt to HEAD first.
+
+Supersedes nothing.
+
+---
+
 ## 2026-10-04 — A board is named from the success card; name only, no group picker; 422 details are made readable once in detailOf (R2b-fe-6)
 
 **Decided: `NameBoard.tsx` hangs off the success result card and sends `PATCH /v1/devices/{id}` with `{"name": ...}` only. Frontend only; no backend, migration or spec edit.**

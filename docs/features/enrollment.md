@@ -1421,6 +1421,35 @@ Implementation notes behind `spec/flows.md` Flow 1 and the 2026-10-04 entries in
   may be defective" appears. The connect-time "Hold BOOT" advice is never shown mid-write:
   the details line carries esptool's raw text and the token-revoked sentence. A deliberately
   bad cable/hub on the bench is folded into `R2b-test-1`.
+- **Unaided re-run (R2b-test-1, owed).** The run script is `docs/runbooks/unaided-onboarding.md`
+  (two runs: a known-board re-flash of `94a990dd09a4`, then a wrong-passphrase fault). What
+  landed 2026-10-04 is the software half, run in a real Chromium on the dev stack at HEAD
+  `4b06281`: `frontend/scripts/onboarding-rehearsal.mjs` replays real agent log lines through
+  a fake `navigator.serial` and grades the result card against the S0-test-3 bar. **6/6 PASS**
+  (`happy`, `bench-2026-10-04`, `brownout-loop`, `reboot-during-watch`, `wrong-psk`,
+  `spent-token`): every failure card has one headline, one next action, at most one remedy
+  button, one working "Copy diagnostic bundle" (clipboard non-empty) and no raw log token in
+  the headline or next text; `happy` and `bench-2026-10-04` show `data-outcome=success` with
+  Clock source and UI / API rows (the latter "Kept across the reset (no answer from
+  pool.ntp.org)"); `happy` named a board from the card, saw it in the fleet table, and cleared
+  it again (dev DB left as found); breaking one expectation made that scenario FAIL with exit 1.
+  Card texts that matter: `wrong-psk` "Wi-Fi: the board could not join the network" / "Check the
+  network name and passphrase in step 2 (2.4 GHz only), then re-flash."; `spent-token`
+  "Enrolment refused: the token or credential is not valid" with the one button "Re-flash the
+  board"; `brownout-loop` "Power: the board's supply is collapsing (brownout)" / "Use a short,
+  thick USB cable straight into the computer (no hub). If nothing changes, suspect the board's
+  own supply."; `reboot-during-watch` ends "Rebooted 3×: brownout", `Boot 4 · reset: brownout`,
+  Network up and Clock set marked lost at the restart. Cold-read notes, none filed as defects:
+  the `wrong-psk` card is the generic Wi-Fi cause even though the log line under it names the
+  password (reason 15), so a board that is merely out of range reads the same; the `spent-token`
+  card shows "Fill in the network details in step 2 to re-flash from here." instead of a button
+  until step 2 is filled in, so an operator who reloaded the page sees text where they expect
+  a button; the panel under the card still prints log-flavoured lines ("disconnected (reason
+  15)", "E BOD: ...") that a technician is not meant to need. This is a proxy: it does not cover
+  chip detection, the flash itself or a real native-USB re-enumeration, and it is NOT the
+  acceptance. The human run waits on the R2b release to prod (prod is 0.4.2, commit `9200e0f`,
+  no R2b commit), the agent publish (`S0-infra-10`: prod serves 0.3.2 for esp32s3, repo is
+  0.4.5) and `S0-bug-1`'s power-cycle diagnosis. Not marked passed.
 - **Diagnostic bundle.** Must be redacted: no token, Wi-Fi passphrase or broker credential
   (the CUJ-1 hard-fail trap).
 
