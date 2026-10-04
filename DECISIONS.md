@@ -6,6 +6,22 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-04 — A reboot during watch is counted as a restart with a reason; reached milestones are shown as lost, not silently reset (R2b-fe-4)
+
+**Decided: `summarizeConsole` returns `lastReset`, `restarts` and `retracted`; the panel, result card and bundle show them. Details: `docs/features/enrollment.md`.**
+
+- **Restarts, not boots.** A restart is an uncommanded boot boundary after the first boot seen, so the 2026-09-11 fixture (3 boots) is "Rebooted 2×". The reboot-loop banner's old "3 times so far" became "rebooted 2×: brownout" so the screen never shows both numbers; `rebootLoop.boots` and the bundle's "3 boots without reaching the fleet" are unchanged.
+- **Reason precedence:** download mode (`boot:` field) > clue from the boot that ended (BOD line, or a panic line; brownout wins) > banner name > unknown. The agent's "previous boot ended in a BROWNOUT" line refines the current boot.
+- **`SW_RESET` after a BOD line is a brownout.** `CONFIG_ESP_BROWNOUT_USE_INTR=y` makes the ISR restart the chip, so the real agent prints `rst:0x3 (SW_RESET)`. `RTCWDT_BROWN_OUT_RESET` is tested before `WDT`.
+- **`POWER_GLITCH_RESET` and kin are not claimed as brownout.** They are `unknown`, shown as `other (ROM_NAME)`.
+- **Commanded resets neither count nor retract.** This panel's own EN pulse empties the lost set.
+- **Stage named only when all restarts agree**; mixed reasons are grouped with counts.
+- **Rejected:** counting boots ("rebooted 3×" for 2 restarts); a status-strip segment (R2b-fe-5).
+
+Supersedes nothing; refines S0-fe-4's loop banner wording.
+
+---
+
 ## 2026-10-04 — The update timeline reads the current transaction's steps off `GET /v1/devices`; stall text states the board's own deadlines and never ends a deploy (R2b-fe-9)
 
 **Decided: `DeploySummary` carries `steps` and `confirm_timeout_s`; `deployTimeline.ts` turns them into six milestones, elapsed seconds, a deadline and a stall sentence. Details: `docs/features/dashboard.md`.**

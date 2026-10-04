@@ -19,6 +19,7 @@ import {
 } from './boardConsole'
 import { BENCH_2026_09_11 } from './fixtures/bench-2026-09-11'
 import { BENCH_2026_10_04 } from './fixtures/bench-2026-10-04'
+import { REBOOT_DURING_WATCH } from './fixtures/reboot-during-watch'
 import { CAUSE_NEXT } from './onboardingResult'
 
 const HAPPY = [
@@ -159,6 +160,12 @@ describe('BoardConsolePanel', () => {
     })
     expect(await screen.findByTestId('console-online')).toBeInTheDocument()
     expect(screen.queryByTestId('console-fault')).not.toBeInTheDocument()
+    // R2b-fe-4: one clean boot, which this panel itself asked for. Nothing restarted.
+    expect(screen.getByTestId('console-boot-count')).toHaveTextContent(
+      'Boot 1 · reset: power-on (by this panel)',
+    )
+    expect(screen.queryByTestId('console-restarts')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('console-reboot-loop')).not.toBeInTheDocument()
   })
 
   it('shows a board on the fleet when SNTP timed out but enrolment worked (S0-bug-1)', async () => {
@@ -202,7 +209,8 @@ describe('BoardConsolePanel', () => {
     expect(fault).toHaveTextContent(/bulk capacitor/)
 
     const loop = await screen.findByTestId('console-reboot-loop')
-    expect(loop).toHaveTextContent(/keeps restarting — 3 times/)
+    expect(loop).toHaveTextContent(/keeps restarting — rebooted 2×/)
+    expect(loop).toHaveTextContent(/brownout/)
     // And it does NOT second-guess the fault above it. This banner used to recommend a
     // shorter, thicker cable unconditionally, one line under a fault that already named
     // the cause off the log — which is how an operator with a perfectly good cable came
@@ -221,12 +229,51 @@ describe('BoardConsolePanel', () => {
     expect(screen.queryByTestId('console-online')).not.toBeInTheDocument()
   })
 
+  // R2b-fe-4: the count, the reason, and what the board had reached being taken away.
+  it('a board that reboots during watch shows the count, the reason and retracts what it had reached', async () => {
+    const { factory } = fakeConsole(REBOOT_DURING_WATCH)
+    render(<BoardConsolePanel autoWatch createConsole={factory} />)
+
+    // The panel's own S0-fe-5 notice makes boot 1 commanded: boots is still 4, restarts 3.
+    const loop = await screen.findByTestId('console-reboot-loop')
+    await waitFor(() => {
+      expect(loop).toHaveTextContent('This board keeps restarting — rebooted 3×: brownout.')
+    })
+    expect(screen.queryByTestId('console-restarts')).not.toBeInTheDocument()
+    expect(screen.getByTestId('console-boot-count')).toHaveTextContent('Boot 4 · reset: brownout')
+
+    const milestones = screen.getByTestId('boot-milestones')
+    const retracted = milestones.querySelectorAll('li[data-state="retracted"]')
+    expect(retracted).toHaveLength(1)
+    expect(retracted[0]).toHaveTextContent('Clock set')
+    expect(retracted[0]).toHaveTextContent('lost at the restart')
+    const waiting = milestones.querySelector('li[data-state="waiting"]')
+    expect(waiting).toHaveTextContent('Network up')
+    expect(waiting).toHaveAttribute('data-retracted', 'true')
+    expect(milestones.querySelectorAll('[data-state="done"]')).toHaveLength(1)
+  })
+
+  it('a board that reaches the fleet, panics and comes back says so, without a loop banner', async () => {
+    const { factory } = fakeConsole([
+      ...HAPPY,
+      "E (9000) task_wdt: Guru Meditation Error: Core  0 panic'ed (LoadProhibited).",
+      'rst:0xc (SW_CPU_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)',
+      'I (100) ff-agent: fleetforge agent 0.1.0 (idf v5.5.5), built Sep 10 2026 00:00:00',
+    ])
+    render(<BoardConsolePanel autoWatch createConsole={factory} />)
+
+    const restarts = await screen.findByTestId('console-restarts')
+    expect(restarts).toHaveTextContent('Rebooted 1× after reaching the fleet: panic.')
+    expect(screen.queryByTestId('console-reboot-loop')).not.toBeInTheDocument()
+  })
+
   it('guesses at power only when the log names no cause at all', async () => {
     const { factory } = fakeConsole(UNEXPLAINED_LOOP)
     render(<BoardConsolePanel autoWatch createConsole={factory} />)
 
     const loop = await screen.findByTestId('console-reboot-loop')
-    expect(loop).toHaveTextContent(/keeps restarting — 3 times/)
+    expect(loop).toHaveTextContent(/keeps restarting — rebooted 2×/)
+    expect(loop).toHaveTextContent(/power-on/)
     expect(screen.queryByTestId('console-fault')).not.toBeInTheDocument()
     // Nothing better is on screen, so the guess earns its place — but it stops short of
     // blaming the cable outright, because that is the advice that wasted the evening.

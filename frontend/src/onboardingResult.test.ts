@@ -13,6 +13,7 @@ import {
 } from './boardConsole'
 import { BENCH_2026_09_11 } from './fixtures/bench-2026-09-11'
 import { BENCH_2026_10_04 } from './fixtures/bench-2026-10-04'
+import { REBOOT_DURING_WATCH } from './fixtures/reboot-during-watch'
 import {
   CAUSE_NEXT,
   consoleFacts,
@@ -110,6 +111,17 @@ describe('describeOnboardingResult', () => {
     expect(value(result, 'On the fleet')).toBe('yes')
     // No versions passed: no versions row.
     expect(value(result, 'UI / API')).toBeUndefined()
+    // R2b-fe-4: nothing restarted, so no row.
+    expect(value(result, 'Restarts')).toBeUndefined()
+  })
+
+  it('a board that browned out three times during watch is a power failure with a Restarts row', () => {
+    const result = judge(REBOOT_DURING_WATCH)
+    expect(result?.outcome).toBe('failure')
+    if (result?.outcome !== 'failure') return
+    expect(result.cause).toBe('power')
+    expect(value(result, 'Restarts')).toBe('Rebooted 3\u00d7: brownout')
+    expect(result.rows.find((row) => row.label === 'Restarts')?.tone).toBe('bad')
   })
 
   it('names the clock source on the 2026-10-04 bench log (S0-bug-1)', () => {

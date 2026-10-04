@@ -19,7 +19,7 @@
 // exactly that one call to prove the tests are not vacuous.
 
 import type { ConsoleEvent, ConsoleSummary } from './boardConsole'
-import { MAX_CONSOLE_LINES, MILESTONE_LABELS } from './boardConsole'
+import { MAX_CONSOLE_LINES, MILESTONE_LABELS, describeRestarts, resetLabel } from './boardConsole'
 import type { AgentBuildInfo } from './api'
 import type { ChipInfo } from './flasher'
 
@@ -238,6 +238,21 @@ function progressSection(summary: ConsoleSummary): string[] {
           `${Math.round(summary.overdue.waitedMs / 1000)} s`,
     ),
     field('boots seen', String(summary.boots)),
+    field(
+      'last reset',
+      summary.lastReset === null
+        ? 'no boot seen'
+        : `${resetLabel(summary.lastReset)}` +
+            `${summary.lastReset.rom !== null ? ` (ROM: ${summary.lastReset.rom})` : ''}` +
+            `${summary.lastReset.commanded ? ', by this panel' : ''}`,
+    ),
+    field('restarts', describeRestarts(summary.restarts) ?? 'none'),
+    field(
+      'lost at restart',
+      summary.retracted.length === 0
+        ? 'nothing'
+        : summary.retracted.map((m) => MILESTONE_LABELS[m]).join(', '),
+    ),
     field(
       'reboot loop',
       summary.rebootLoop === null

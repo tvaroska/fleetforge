@@ -114,6 +114,10 @@ describe('buildDiagnosticBundle', () => {
     expect(bundle).toContain('rail collapsed during radio calibration')
     expect(bundle).toContain('reboot loop')
     expect(bundle).toContain('yes — 3 boots without reaching the fleet')
+    // R2b-fe-4: restarts and what they took away sit beside the boot count.
+    expect(bundle).toMatch(/restarts.*Rebooted 2\u00d7: brownout/)
+    expect(bundle).toMatch(/lost at restart.*Network up/)
+    expect(bundle).toMatch(/last reset.*brownout \(ROM: RTCWDT_BROWN_OUT_RESET\)/)
     // And it is at the top: a recipient must not have to scroll to find the diagnosis.
     expect(bundle.split('\n').slice(0, 15).join('\n')).toContain(
       'rail collapsed during radio calibration',

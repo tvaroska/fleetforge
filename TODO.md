@@ -233,7 +233,7 @@ are R3). Order inside each flow: the one-place status first, then the cards, the
       firmware, link, clock source, enrolled, on the fleet; on failure one cause and one next
       action. Fold in the flash write/verify failure copy: say what to try first (cable,
       port, lower baud) and name the flash chip only when it repeats. Depends on `R2b-fe-1`.
-- [ ] **R2b-fe-4**: Boot count, reset reason and milestone retraction in the timeline (P1, 1d)
+- [x] **R2b-fe-4**: Boot count, reset reason and milestone retraction in the timeline (P1, 1d) _(done 2026-10-04; see docs/features/enrollment.md)_
       Read `frontend/src/boardConsole.ts` first: a boot-boundary detector already exists
       (`RESET_BANNER`, commanded-reset handling), so this may be small. Acceptance: a board
       that reboots during watch shows the count and reason ("rebooted 3x: brownout") and the

@@ -168,8 +168,105 @@ export type ConsoleSummary = {
    * board never raises it.
    */
   rebootLoop: { boots: number } | null
+  /**
+   * Why the CURRENT boot started (R2b-fe-4), or null before the first boot marker. See
+   * `resetReasonFromBanner` for the banner half and `summarizeConsole` for the evidence that
+   * outranks it. `commanded` is true when this panel pulsed EN to cause it.
+   */
+  lastReset: (BootReset & { commanded: boolean }) | null
+  /**
+   * Every uncommanded boot boundary after the first boot seen, oldest first. RESTARTS, not
+   * boots: the first boot is not a restart, and a reset this panel commanded is not one
+   * either. Never cleared by a milestone, so a board that came back after a panic still
+   * says so; only Clear (events emptied) resets it.
+   */
+  restarts: Restart[]
+  /**
+   * Milestones an earlier boot reached (or implied) that an uncommanded restart took away,
+   * in `MILESTONES` order, and that this boot has neither reached nor skipped. Rendered as
+   * lost, not silently pending. A commanded reset empties the lost set: the operator asked
+   * for it, so the checklist simply starts over.
+   */
+  retracted: Milestone[]
   /** The milestone being waited on has blown its deadline. Nothing here spins forever. */
   overdue: MilestoneStall | null
+}
+
+/** Why a boot started. `spec/flows.md` names power-on, brownout, panic and download-mode; the
+ *  rest are what the ROM can also say. */
+export type ResetReason =
+  | 'power-on'
+  | 'brownout'
+  | 'panic'
+  | 'watchdog'
+  | 'restart'
+  | 'external'
+  | 'deep-sleep'
+  | 'download-mode'
+  | 'unknown'
+
+export const RESET_REASON_LABELS: Record<ResetReason, string> = {
+  'power-on': 'power-on',
+  brownout: 'brownout',
+  panic: 'panic',
+  watchdog: 'watchdog',
+  restart: 'software restart',
+  external: 'reset pin or USB reset',
+  'deep-sleep': 'deep-sleep wake',
+  'download-mode': 'download mode',
+  unknown: 'reason not reported',
+}
+
+export type BootReset = {
+  reason: ResetReason
+  /** The ROM's own name (`RTCWDT_BROWN_OUT_RESET`), or null when no banner was seen. */
+  rom: string | null
+}
+
+export type Restart = BootReset & {
+  at: number
+  /** What the boot that ENDED was waiting for at the moment it ended; null when it had
+   *  reached the fleet. */
+  stage: Milestone | null
+}
+
+/** The reason as a person reads it. `unknown` with a ROM name shows the name rather than
+ *  pretending to know: naming "brownout" is only as good as the reason the chip reports. */
+export function resetLabel(reset: BootReset): string {
+  return reset.reason === 'unknown' && reset.rom !== null
+    ? `other (${reset.rom})`
+    : RESET_REASON_LABELS[reset.reason]
+}
+
+export const RESTART_STAGE: Record<Milestone, string> = {
+  boot: 'during startup',
+  link: 'during network startup',
+  clock: 'while setting the clock',
+  enroll: 'while enrolling',
+  fleet: 'while connecting to the broker',
+}
+
+/**
+ * "Rebooted 3× during network startup: brownout". The stage is named only when every restart
+ * agrees; the reason is named once when they agree, else grouped with counts, most frequent
+ * first and ties by most recent. Null when there is nothing to say.
+ */
+export function describeRestarts(restarts: Restart[]): string | null {
+  if (restarts.length === 0) return null
+  let out = `Rebooted ${restarts.length}\u00d7`
+  const stages = new Set(restarts.map((r) => r.stage))
+  if (stages.size === 1) {
+    const stage = restarts[0].stage
+    out += stage === null ? ' after reaching the fleet' : ` ${RESTART_STAGE[stage]}`
+  }
+  const groups = new Map<string, { n: number; last: number }>()
+  restarts.forEach((r, i) => {
+    const label = resetLabel(r)
+    groups.set(label, { n: (groups.get(label)?.n ?? 0) + 1, last: i })
+  })
+  if (groups.size === 1) return `${out}: ${[...groups.keys()][0]}`
+  const ranked = [...groups.entries()].sort((a, b) => b[1].n - a[1].n || b[1].last - a[1].last)
+  return `${out}: ${ranked.map(([label, g]) => `${label} ${g.n}\u00d7`).join(', ')}`
 }
 
 export type MilestoneStall = {
@@ -301,8 +398,19 @@ const FF_TIME_SANE_YEAR = 2024
 /** The boot-ROM reset banner: `rst:0xf (RTCWDT_BROWN_OUT_RESET),boot:0x13 (SPI_FAST…)`. */
 const RESET_BANNER = /^rst:0x[0-9a-f]+\s*\(([A-Z0-9_]+)\)/i
 
+/** The `boot:` half of the same line: `boot:0x3 (DOWNLOAD_BOOT(UART0/UART1/SDIO_REI_REO_V2))`
+ *  on an ESP32, `boot:0x0 (DOWNLOAD(USB/UART0))` on an S3. Download mode lives here, not in `rst:`. */
+const BOOT_MODE = /boot:0x[0-9a-f]+\s*\(([^)]*)/i
+
 /** `E BOD: Brownout detector was triggered`. Named so `summarizeConsole` can refine it. */
 const BROWNOUT_LINE = /Brownout detector was triggered/i
+
+/** The end of a boot that panicked, before the ROM banner that hides it: the Guru Meditation
+ *  banner, a failed assert, or `abort()`. A brownout clue outranks it. */
+const PANIC_LINE = /Guru Meditation Error|assert failed:|abort\(\) was called/
+
+/** `agent_main.c::log_power_fault()` — the agent read `esp_reset_reason()` itself. */
+const PREVIOUS_BOOT_BROWNOUT = 'the previous boot ended in a BROWNOUT'
 
 /**
  * `W (802) phy_init: failed to load RF calibration data (0x1102), falling back to full
@@ -547,7 +655,7 @@ function hintFor(tag: string | null, text: string): Hint | null {
   // reset banner belong to the previous boot, and `summarizeConsole` clears its state at
   // every boot boundary. Without this line a board that browns out and then recovers
   // looks flawless here.
-  if (tag === 'ff-agent' && text.includes('the previous boot ended in a BROWNOUT')) {
+  if (tag === 'ff-agent' && text.includes(PREVIOUS_BOOT_BROWNOUT)) {
     return specific(
       'power',
       'This boot is fine, but the one before it died when the 3.3 V rail collapsed — the ' +
@@ -710,6 +818,23 @@ function hintFor(tag: string | null, text: string): Hint | null {
   return null
 }
 
+/**
+ * The ROM's own account of why a boot started, from the `rst:` name and the `boot:` name.
+ * Order matters: download mode is in `boot:`, and `RTCWDT_BROWN_OUT_RESET` contains `WDT`, so
+ * brownout is tested before watchdog. A name that is none of these (`POWER_GLITCH_RESET`,
+ * `EFUSE_RST`, ...) is `unknown` rather than guessed: a glitch is not claimed as a brownout.
+ */
+export function resetReasonFromBanner(rst: string, boot: string | null): ResetReason {
+  if (boot !== null && /DOWNLOAD/i.test(boot)) return 'download-mode'
+  if (/BROWN_?OUT/i.test(rst)) return 'brownout'
+  if (/WDT/i.test(rst)) return 'watchdog'
+  if (/DEEPSLEEP|DSLEEP/i.test(rst)) return 'deep-sleep'
+  if (/POWERON/i.test(rst)) return 'power-on'
+  if (/SW_/i.test(rst)) return 'restart'
+  if (/EXT_|USB|JTAG/i.test(rst)) return 'external'
+  return 'unknown'
+}
+
 /** Fold the events into the checklist and the current fault. Pure; the UI renders this. */
 export function summarizeConsole(events: ConsoleEvent[], now = Date.now()): ConsoleSummary {
   let reached = new Set<Milestone>()
@@ -729,6 +854,15 @@ export function summarizeConsole(events: ConsoleEvent[], now = Date.now()): Cons
    * never explains today's fault.
    */
   let calibrating = false
+  /** What the boot being folded has shown about how it will end: set by the BOD line or a
+   *  panic banner, used (and cleared) at the next boot boundary. Brownout outranks panic. */
+  let clue: 'brownout' | 'panic' | null = null
+  let lastReset: ConsoleSummary['lastReset'] = null
+  /** The current boot began with an uncommanded restart, so `restarts` ends with it. */
+  let inRestart = false
+  const restarts: Restart[] = []
+  /** Milestones taken away by an uncommanded restart and not yet won back. */
+  let lost = new Set<Milestone>()
   /** When the current wait began: the last boot boundary or milestone, whichever is later. */
   let since = events.length > 0 ? events[0].at : now
 
@@ -741,6 +875,37 @@ export function summarizeConsole(events: ConsoleEvent[], now = Date.now()): Cons
       romPending = event.bootMarker === 'rom'
       if (!continuing) {
         if (boots > 0 && !reached.has('fleet') && !commanded) rebootLoop = { boots: boots + 1 }
+        // Why this boot started: download mode (banner) > what the ending boot showed >
+        // the banner > unknown. An agent-only marker means the ROM lines were lost.
+        let reset: BootReset
+        if (event.bootMarker === 'rom') {
+          const rst = RESET_BANNER.exec(event.raw)
+          const bootMode = BOOT_MODE.exec(event.raw)
+          const fromBanner = resetReasonFromBanner(rst?.[1] ?? '', bootMode?.[1] ?? null)
+          reset = {
+            reason: fromBanner === 'download-mode' ? fromBanner : (clue ?? fromBanner),
+            rom: rst?.[1] ?? null,
+          }
+        } else {
+          reset = { reason: clue ?? 'unknown', rom: null }
+        }
+        if (boots > 0 && !commanded) {
+          const furthestEnding = MILESTONES.reduce((acc, m, i) => (reached.has(m) ? i : acc), -1)
+          restarts.push({
+            ...reset,
+            at: event.at,
+            stage: reached.has('fleet') ? null : (MILESTONES[furthestEnding + 1] ?? null),
+          })
+          MILESTONES.forEach((m, i) => {
+            if (i <= furthestEnding) lost.add(m)
+          })
+          inRestart = true
+        } else {
+          inRestart = false
+        }
+        if (commanded) lost = new Set()
+        lastReset = { ...reset, commanded }
+        clue = null
         commanded = false
         boots += 1
         // The new boot has proved nothing yet. This is the stale-✓ fix.
@@ -753,6 +918,16 @@ export function summarizeConsole(events: ConsoleEvent[], now = Date.now()): Cons
     // Before the milestone and hint `continue`s below: the `phy_init` warning carries no
     // hint of its own, so it would otherwise never be seen.
     if (PHY_FULL_CALIBRATION.test(event.raw)) calibrating = true
+
+    if (event.source === 'board') {
+      if (BROWNOUT_LINE.test(event.raw)) clue = 'brownout'
+      else if (PANIC_LINE.test(event.raw) && clue === null) clue = 'panic'
+      // The agent read `esp_reset_reason()` itself: it outranks a banner that said SW_RESET.
+      if (event.tag === 'ff-agent' && event.text.includes(PREVIOUS_BOOT_BROWNOUT)) {
+        if (lastReset !== null) lastReset = { ...lastReset, reason: 'brownout' }
+        if (inRestart) restarts[restarts.length - 1].reason = 'brownout'
+      }
+    }
 
     if (event.milestone !== null) {
       reached.add(event.milestone)
@@ -802,7 +977,22 @@ export function summarizeConsole(events: ConsoleEvent[], now = Date.now()): Cons
         }
       : null
 
-  return { reached: ordered, skipped, waitingFor, fault, boots, rebootLoop, overdue }
+  const retracted = MILESTONES.filter(
+    (m) => lost.has(m) && !reached.has(m) && !skipped.includes(m),
+  )
+
+  return {
+    reached: ordered,
+    skipped,
+    waitingFor,
+    fault,
+    boots,
+    rebootLoop,
+    lastReset,
+    restarts,
+    retracted,
+    overdue,
+  }
 }
 
 /** How the console gets hold of a port. See `serialConsole.ts` for what each one costs. */

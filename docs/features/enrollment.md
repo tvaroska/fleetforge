@@ -1338,10 +1338,39 @@ Implementation notes behind `spec/flows.md` Flow 1 and the 2026-10-04 entries in
 - **Two-source watch.** The console (Web Serial) is one source; the other is the server's
   view of the board's enrolment. Check whether a server-side stream or a poll already
   exists before designing one; the console's milestone classifier is unchanged.
-- **Boot count and reset reason.** Read from the boot banner the console already sees
-  (`rst:0x..`). A milestone that was reached and then a new banner appears retracts the
-  milestones, and the boot counter increments. Naming "brownout" is only as good as the
-  reset reason the chip reports.
+- **Boot count and reset reason (R2b-fe-4, built).** Frontend only (`boardConsole.ts`,
+  `BoardConsole.tsx`, `onboardingResult.ts`, `diagnostics.ts`); no agent, server or spec change.
+  `summarizeConsole` now returns `lastReset` (why the current boot started), `restarts`
+  (every uncommanded boot boundary after the first boot seen, oldest first) and `retracted`
+  (milestones an earlier boot had reached that a restart took away and this boot has not won
+  back). Reason precedence: download mode (the `boot:` half of the banner) > what the boot
+  that just ended showed (`E BOD: Brownout detector was triggered` gives brownout; a Guru
+  Meditation / `assert failed:` / `abort()` line gives panic; brownout outranks panic) > the
+  banner's own name > `unknown`. The agent's `the previous boot ended in a BROWNOUT` line then
+  refines the current boot (and its restart) to brownout. **The SW_RESET gotcha:** with
+  `CONFIG_ESP_BROWNOUT_USE_INTR=y` a real brownout prints `rst:0x3 (SW_RESET)`, so the banner
+  alone would say "software restart"; the evidence is the BOD line above it and the agent's
+  line below it. `RTCWDT_BROWN_OUT_RESET` is tested before `WDT`. `POWER_GLITCH_RESET`,
+  `EFUSE_*` and similar are `unknown` and shown as `other (ROM_NAME)`: naming "brownout" is
+  only as good as the reset reason the chip reports. A restart is an uncommanded boundary:
+  this panel's own EN pulse is neither a restart nor a retraction (it empties the lost set).
+  The sentence (`describeRestarts`): `Rebooted 3×`, then a stage (`during network startup`,
+  `after reaching the fleet`, ...) only when every restart agrees, then `: brownout` or, for
+  mixed reasons, `: brownout 2×, panic 1×`. Where it shows: the checklist (`↺ lost at the
+  restart`; a lost milestone that is also the one being waited on stays `waiting` with
+  `data-retracted`), a `Boot N · reset: reason` line, the reboot-loop banner headline (which
+  now says restarts, not boots: "rebooted 2×" for the 2026-09-11 fixture, which has 3 boots)
+  or, with no loop, a `console-restarts` line, the result card's `Restarts` row, and the
+  diagnostic bundle (`last reset`, `restarts`, `lost at restart`; `boots seen` and `reboot
+  loop` unchanged). Counts are within the visible 500-line window, as `boots` always was.
+  Observed: `vitest run src/boardConsole.test.ts` (reason table, fixture
+  `reboot-during-watch.ts`, panic after fleet, commanded, re-reached) and
+  `src/BoardConsole.test.tsx -t "reboots during watch"` (real panel, "rebooted 3×: brownout",
+  `Boot 4 · reset: brownout`, Clock set retracted, Network up waiting + retracted). Not run
+  against a real board or browser; a real reboot during watch is folded into `R2b-test-1`.
+  Out of scope: the status strip's boot count (the strip's onboarding segment is R2b-fe-5);
+  the server-side onboarding session resource (`spec/flows.md` "Onboarding is an API
+  resource") is a gap with no task filed.
 - **Flash failures (R2b-fe-3, built).** Only a throw from `flasher.write` gets the
   flash-failed card; failures before the write keep the plain alert paragraph. The cause is
   one of four kinds read off the esptool-js text (`flashFailure.ts`): the board

@@ -331,7 +331,7 @@ textarea.log {
 }
 
 /* The boot checklist. Plain list semantics, no bullets — the tick IS the bullet.
-   Glyph (✓ / … / ·) is set in BoardConsole.tsx; the weight ramp here is the second axis. */
+   Glyph (✓ / … / · / – / ↺) is set in BoardConsole.tsx; the weight ramp here is the second axis. */
 .milestones {
   list-style: none;
   margin: 0.5rem 0;
@@ -351,6 +351,11 @@ textarea.log {
 }
 
 .milestones li.skipped {
+  color: var(--ff-dim);
+  font-weight: 400;
+}
+
+.milestones li.retracted {
   color: var(--ff-dim);
   font-weight: 400;
 }

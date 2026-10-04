@@ -15,6 +15,7 @@
 import {
   MILESTONE_CAUSE,
   MILESTONE_LABELS,
+  describeRestarts,
   type Cause,
   type ConsoleEvent,
   type ConsoleSummary,
@@ -233,6 +234,16 @@ export function describeOnboardingResult(input: {
     { label: 'Enrolled', value: enrolled ? 'yes' : 'no', tone: enrolled ? 'ok' : 'bad' },
     { label: 'On the fleet', value: fleetValue, tone: success ? 'ok' : 'bad' },
   ]
+  // R2b-fe-4: a board that restarted while watched says so, success or not. Bad while it is
+  // still looping; a warning once it has come back.
+  const restartSentence = describeRestarts(summary.restarts)
+  if (restartSentence !== null) {
+    rows.push({
+      label: 'Restarts',
+      value: restartSentence,
+      tone: summary.rebootLoop !== null ? 'bad' : 'warn',
+    })
+  }
   if (versions !== null) {
     rows.push({ label: 'UI / API', value: `UI ${versions.ui} · API ${versions.api}`, tone: null })
   }

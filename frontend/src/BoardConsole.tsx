@@ -13,6 +13,8 @@ import {
   MILESTONES,
   MILESTONE_LABELS,
   REMEDY_LABELS,
+  describeRestarts,
+  resetLabel,
   useBoardConsole,
   type ConsoleFactory,
   type ConsoleLevel,
@@ -34,10 +36,13 @@ const LEVEL_CLASS: Record<ConsoleLevel, string> = {
 function Checklist({
   reached,
   skipped,
+  retracted,
   waitingFor,
 }: {
   reached: Milestone[]
   skipped: Milestone[]
+  /** Reached by an earlier boot and lost at an uncommanded restart (R2b-fe-4). */
+  retracted: Milestone[]
   waitingFor: Milestone | null
 }) {
   return (
@@ -45,21 +50,42 @@ function Checklist({
       {MILESTONES.map((milestone) => {
         const done = reached.includes(milestone)
         const wasSkipped = !done && skipped.includes(milestone)
+        const lost = !done && !wasSkipped && retracted.includes(milestone)
+        // done > skipped > waiting > retracted > pending. A retracted milestone that is
+        // also the one being waited on stays 'waiting' and carries the loss as a flag.
         const state = done
           ? 'done'
           : wasSkipped
             ? 'skipped'
             : milestone === waitingFor
               ? 'waiting'
-              : 'pending'
+              : lost
+                ? 'retracted'
+                : 'pending'
         return (
-          <li key={milestone} className={state} data-state={state}>
+          <li
+            key={milestone}
+            className={state}
+            data-state={state}
+            data-retracted={state === 'waiting' && lost ? 'true' : undefined}
+          >
             <span aria-hidden="true">
-              {done ? '✓' : wasSkipped ? '–' : milestone === waitingFor ? '…' : '·'}
+              {done
+                ? '✓'
+                : wasSkipped
+                  ? '–'
+                  : milestone === waitingFor
+                    ? '…'
+                    : lost
+                      ? '↺'
+                      : '·'}
             </span>{' '}
             {MILESTONE_LABELS[milestone]}
             {state === 'skipped' && <span className="muted"> — not logged</span>}
-            {state === 'waiting' && <span className="muted"> — waiting</span>}
+            {state === 'waiting' && (
+              <span className="muted">{lost ? ' — waiting (lost at the restart)' : ' — waiting'}</span>
+            )}
+            {state === 'retracted' && <span className="muted"> — lost at the restart</span>}
           </li>
         )
       })}
@@ -220,7 +246,8 @@ export function BoardConsolePanel({
     if (element !== null) element.scrollTop = element.scrollHeight
   }, [state.events.length])
 
-  const { fault, rebootLoop, overdue } = state.summary
+  const { fault, rebootLoop, overdue, lastReset, restarts } = state.summary
+  const restartSentence = describeRestarts(restarts)
   const busy = state.opening
   // Cheap, and `summary` already ticks at 1 Hz while watching.
   const outcome = describeOnboardingResult({
@@ -282,10 +309,18 @@ export function BoardConsolePanel({
 
       {state.opening && <p className="muted">Opening the port…</p>}
 
+      {state.watching && lastReset !== null && (
+        <p className="muted" data-testid="console-boot-count">
+          Boot {state.summary.boots} · reset: {resetLabel(lastReset)}
+          {lastReset.commanded ? ' (by this panel)' : ''}
+        </p>
+      )}
+
       {state.watching && (
         <Checklist
           reached={state.summary.reached}
           skipped={state.summary.skipped}
+          retracted={state.summary.retracted}
           waitingFor={state.summary.waitingFor}
         />
       )}
@@ -304,9 +339,21 @@ export function BoardConsolePanel({
       {/* Its own line, not the fault slot: on 2026-09-11 the board was both browning out AND
           restarting, and the operator needed to be told both. The loop is proof on its own
           even when nothing in the log explains it. */}
+      {restartSentence !== null && rebootLoop === null && (
+        <p className="warn" role="status" data-testid="console-restarts">
+          <strong>{restartSentence}.</strong>
+        </p>
+      )}
+
       {rebootLoop !== null && (
         <p className="bad" role="status" data-testid="console-reboot-loop">
-          <strong>This board keeps restarting — {rebootLoop.boots} times so far.</strong>
+          <strong>
+            This board keeps restarting —{' '}
+            {restartSentence === null
+              ? `${rebootLoop.boots} times so far`
+              : restartSentence.charAt(0).toLowerCase() + restartSentence.slice(1)}
+            .
+          </strong>
           <br />
           It is not staying up long enough to join the fleet.{' '}
           {/* The guess is only worth printing when nothing better is on screen. Until

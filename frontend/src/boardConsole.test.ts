@@ -8,12 +8,17 @@ import {
   MILESTONE_DEADLINE_MS,
   MILESTONES,
   classifyConsoleLine,
+  describeRestarts,
   panelNotice,
+  resetLabel,
+  resetReasonFromBanner,
   summarizeConsole,
   type ConsoleEvent,
+  type Restart,
 } from './boardConsole'
 import { BENCH_2026_09_11 } from './fixtures/bench-2026-09-11'
 import { BENCH_2026_10_04 } from './fixtures/bench-2026-10-04'
+import { REBOOT_DURING_WATCH } from './fixtures/reboot-during-watch'
 
 /** "Now" for a replay. Anchored to the real clock so the tests that do not care about time
  *  still see a summary taken moments after the last line, as a bench operator would. */
@@ -696,5 +701,240 @@ describe('the cause a line carries', () => {
   it('the fault follows the staged brownout (power)', () => {
     const events = classify(BENCH_2026_09_11)
     expect(summarizeConsole(events, at(events)).fault?.cause).toBe('power')
+  })
+})
+
+// ── R2b-fe-4: boot count, reset reason and milestone retraction ─────────────────────────
+
+const AGENT_LINE = 'I (100) ff-agent: fleetforge agent 0.4.5 (idf v5.5.5), built Oct  4 2026 10:00:00'
+const LINK = 'I (1002) ff-net: wifi link up, ip 192.168.1.57 gw 192.168.1.1 mask 255.255.255.0'
+const CLOCK =
+  'I (1500) ff-time: sntp: 1970-01-01T00:00:02Z -> 2026-10-04T10:00:00Z (via pool.ntp.org)'
+const ENROLL = 'I (2600) ff-enroll: enroll 200 https://bingo.tvaroska.sk/v1/enroll'
+const FLEET = 'I (3100) ff-mqtt: mqtt connected as a4cf12b3de90 (mqtts://bingo.tvaroska.sk:8883)'
+const BANNER = (rst: string) => `${rst},boot:0x13 (SPI_FAST_FLASH_BOOT)`
+
+describe('resetReasonFromBanner', () => {
+  it.each([
+    ['POWERON_RESET', 'power-on'],
+    ['POWERON', 'power-on'],
+    ['SW_RESET', 'restart'],
+    ['SW_CPU_RESET', 'restart'],
+    ['RTC_SW_SYS_RST', 'restart'],
+    ['RTC_SW_CPU_RST', 'restart'],
+    ['OWDT_RESET', 'watchdog'],
+    ['TG0WDT_SYS_RESET', 'watchdog'],
+    ['RTCWDT_SYS_RST', 'watchdog'],
+    ['SUPER_WDT_RST', 'watchdog'],
+    // Contains `WDT`: brownout is tested first.
+    ['RTCWDT_BROWN_OUT_RESET', 'brownout'],
+    ['RTCWDT_BROWN_OUT_RST', 'brownout'],
+    ['BROWN_OUT_RST', 'brownout'],
+    ['DEEPSLEEP_RESET', 'deep-sleep'],
+    ['DSLEEP', 'deep-sleep'],
+    ['EXT_CPU_RESET', 'external'],
+    ['USB_UART_CHIP_RESET', 'external'],
+    ['USB_JTAG_CHIP_RESET', 'external'],
+    // Not claimed as a brownout: the label is only as good as what the chip reports.
+    ['POWER_GLITCH_RESET', 'unknown'],
+    ['GLITCH_RTC_RST', 'unknown'],
+    ['EFUSE_RST', 'unknown'],
+    ['INTRUSION_RESET', 'unknown'],
+  ])('maps %s to %s', (rst, reason) => {
+    expect(resetReasonFromBanner(rst, null)).toBe(reason)
+  })
+
+  it('reads download mode from the boot: field', () => {
+    expect(
+      resetReasonFromBanner('POWERON_RESET', 'DOWNLOAD_BOOT(UART0/UART1/SDIO_REI_REO_V2)'),
+    ).toBe('download-mode')
+    const events = classify([
+      'rst:0x15 (USB_UART_CHIP_RESET),boot:0x0 (DOWNLOAD(USB/UART0))',
+      AGENT_LINE,
+    ])
+    expect(summarizeConsole(events).lastReset).toEqual({
+      reason: 'download-mode',
+      rom: 'USB_UART_CHIP_RESET',
+      commanded: false,
+    })
+  })
+
+  it('labels an unrecognised ROM name rather than guessing', () => {
+    expect(resetLabel({ reason: 'unknown', rom: 'POWER_GLITCH_RESET' })).toBe(
+      'other (POWER_GLITCH_RESET)',
+    )
+    expect(resetLabel({ reason: 'unknown', rom: null })).toBe('reason not reported')
+  })
+})
+
+describe('restarts, reset reasons and retraction', () => {
+  it('a board that browns out behind an SW_RESET banner is a brownout (REBOOT_DURING_WATCH)', () => {
+    const summary = summarizeConsole(classify(REBOOT_DURING_WATCH))
+    expect(summary.boots).toBe(4)
+    expect(summary.restarts).toHaveLength(3)
+    expect(summary.restarts.map((r) => r.reason)).toEqual(['brownout', 'brownout', 'brownout'])
+    expect(summary.restarts.every((r) => r.rom === 'SW_RESET')).toBe(true)
+    expect(summary.restarts.map((r) => r.stage)).toEqual(['enroll', 'link', 'link'])
+    expect(describeRestarts(summary.restarts)).toBe('Rebooted 3\u00d7: brownout')
+    expect(summary.reached).toEqual(['boot'])
+    expect(summary.retracted).toEqual(['link', 'clock'])
+    expect(summary.rebootLoop).toEqual({ boots: 4 })
+    expect(summary.lastReset).toEqual({ reason: 'brownout', rom: 'SW_RESET', commanded: false })
+  })
+
+  it('the agent line alone refines an SW_RESET banner to brownout', () => {
+    const summary = summarizeConsole(
+      classify([
+        BANNER('rst:0x1 (POWERON_RESET)'),
+        AGENT_LINE,
+        LINK,
+        BANNER('rst:0x3 (SW_RESET)'),
+        AGENT_LINE,
+        "W (105) ff-agent: the previous boot ended in a BROWNOUT: this board's 3.3 V rail fell below the detector's threshold",
+      ]),
+    )
+    expect(summary.restarts.map((r) => r.reason)).toEqual(['brownout'])
+    expect(summary.lastReset?.reason).toBe('brownout')
+  })
+
+  it('the 2026-09-11 fixture is two brownout restarts, and its other numbers do not move', () => {
+    const summary = summarizeConsole(classify(BENCH_2026_09_11))
+    expect(summary.restarts).toHaveLength(2)
+    expect(summary.restarts.every((r) => r.reason === 'brownout')).toBe(true)
+    expect(summary.restarts.every((r) => r.rom === 'RTCWDT_BROWN_OUT_RESET')).toBe(true)
+    expect(describeRestarts(summary.restarts)).toBe('Rebooted 2\u00d7: brownout')
+    expect(summary.retracted).toEqual(['link'])
+    expect(summary.boots).toBe(3)
+    expect(summary.rebootLoop).toEqual({ boots: 3 })
+    expect(summary.reached).toEqual(['boot'])
+  })
+
+  it('a panic after reaching the fleet is one restart and retracts everything', () => {
+    const summary = summarizeConsole(
+      classify([
+        BANNER('rst:0x1 (POWERON_RESET)'),
+        AGENT_LINE,
+        LINK,
+        CLOCK,
+        ENROLL,
+        FLEET,
+        "E (9000) task_wdt: Guru Meditation Error: Core  0 panic'ed (LoadProhibited). Exception was unhandled.",
+        BANNER('rst:0xc (SW_CPU_RESET)'),
+        AGENT_LINE,
+      ]),
+    )
+    expect(summary.restarts).toHaveLength(1)
+    expect(summary.restarts[0]).toMatchObject({ reason: 'panic', stage: null })
+    expect(describeRestarts(summary.restarts)).toBe('Rebooted 1\u00d7 after reaching the fleet: panic')
+    expect(summary.retracted).toEqual(['link', 'clock', 'enroll', 'fleet'])
+    expect(summary.rebootLoop).toBeNull()
+  })
+
+  it('a brownout outranks a panic seen in the same boot', () => {
+    const summary = summarizeConsole(
+      classify([
+        BANNER('rst:0x1 (POWERON_RESET)'),
+        AGENT_LINE,
+        'Guru Meditation Error: Core  0 panic\'ed (Interrupt wdt timeout on CPU0).',
+        'E BOD: Brownout detector was triggered',
+        BANNER('rst:0x3 (SW_RESET)'),
+        AGENT_LINE,
+      ]),
+    )
+    expect(summary.restarts[0].reason).toBe('brownout')
+  })
+
+  it('an agent-only boundary keeps the clue, and says so when there is none', () => {
+    const withClue = summarizeConsole(
+      classify([AGENT_LINE, 'E BOD: Brownout detector was triggered', AGENT_LINE]),
+    )
+    expect(withClue.restarts).toHaveLength(1)
+    expect(withClue.restarts[0]).toMatchObject({ reason: 'brownout', rom: null })
+
+    const without = summarizeConsole(classify([AGENT_LINE, AGENT_LINE]))
+    expect(without.restarts[0]).toMatchObject({ reason: 'unknown', rom: null })
+    expect(resetLabel(without.restarts[0])).toBe('reason not reported')
+  })
+
+  it('commanded resets are not restarts and retract nothing', () => {
+    const events: ConsoleEvent[] = [
+      ...classify([AGENT_LINE, LINK]),
+      panelNotice('— reset requested', 2, T0 + 2000, { commandedReset: true }),
+      ...classify([BANNER('rst:0x1 (POWERON_RESET)'), AGENT_LINE]).map((e, i) => ({
+        ...e,
+        seq: i + 3,
+        at: T0 + (i + 3) * 1000,
+      })),
+    ]
+    const summary = summarizeConsole(events)
+    expect(summary.restarts).toEqual([])
+    expect(summary.retracted).toEqual([])
+    expect(summary.lastReset).toEqual({ reason: 'power-on', rom: 'POWERON_RESET', commanded: true })
+  })
+
+  it('an uncommanded restart followed by a commanded one keeps the count but not the loss', () => {
+    const events: ConsoleEvent[] = [
+      ...classify([AGENT_LINE, LINK, AGENT_LINE]),
+      panelNotice('— reset requested', 3, T0 + 3000, { commandedReset: true }),
+      ...classify([AGENT_LINE]).map((e) => ({ ...e, seq: 4, at: T0 + 4000 })),
+    ]
+    const summary = summarizeConsole(events)
+    expect(summary.restarts).toHaveLength(1)
+    expect(summary.retracted).toEqual([])
+  })
+
+  it('a milestone the board wins back leaves retracted', () => {
+    const lines = [AGENT_LINE, LINK, CLOCK, AGENT_LINE]
+    expect(summarizeConsole(classify(lines)).retracted).toEqual(['link', 'clock'])
+    expect(summarizeConsole(classify([...lines, LINK])).retracted).toEqual(['clock'])
+    expect(summarizeConsole(classify([...lines, LINK, CLOCK])).retracted).toEqual([])
+    // Skipped (implied by a later milestone) is not retracted either.
+    expect(summarizeConsole(classify([...lines, ENROLL])).retracted).toEqual([])
+  })
+
+  it('Clear (no events) forgets everything', () => {
+    const summary = summarizeConsole([])
+    expect(summary.restarts).toEqual([])
+    expect(summary.retracted).toEqual([])
+    expect(summary.lastReset).toBeNull()
+  })
+})
+
+describe('describeRestarts', () => {
+  const restart = (over: Partial<Restart>): Restart => ({
+    reason: 'brownout',
+    rom: null,
+    at: 0,
+    stage: 'link',
+    ...over,
+  })
+
+  it('is null with nothing to say', () => {
+    expect(describeRestarts([])).toBeNull()
+  })
+
+  it('names the stage only when every restart agrees', () => {
+    expect(describeRestarts([restart({}), restart({})])).toBe(
+      'Rebooted 2\u00d7 during network startup: brownout',
+    )
+    expect(describeRestarts([restart({}), restart({ stage: 'clock' })])).toBe(
+      'Rebooted 2\u00d7: brownout',
+    )
+  })
+
+  it('groups mixed reasons, most frequent first', () => {
+    expect(
+      describeRestarts([
+        restart({ reason: 'brownout' }),
+        restart({ reason: 'panic' }),
+        restart({ reason: 'brownout' }),
+      ]),
+    ).toBe('Rebooted 3\u00d7 during network startup: brownout 2\u00d7, panic 1\u00d7')
+  })
+
+  it('shows the ROM name for a reason it cannot name', () => {
+    expect(describeRestarts([restart({ reason: 'unknown', rom: 'GLITCH_RTC_RST' })])).toBe(
+      'Rebooted 1\u00d7 during network startup: other (GLITCH_RTC_RST)',
+    )
   })
 })
