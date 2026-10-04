@@ -17,6 +17,7 @@ The properties worth holding, each one a class below:
 
 import hashlib
 from collections.abc import AsyncIterator, Iterator
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -216,6 +217,7 @@ class TestRefusedBeforeItCosts:
 
         assert response.status_code == 413
         assert str(EXPECTED_OTA_SLOT_SIZE) in response.json()["detail"]
+        assert "merged" in response.json()["detail"]
         assert store.puts == [], "an oversize upload must never reach the store"
 
     async def test_exactly_the_slot_size_fits(
@@ -301,3 +303,41 @@ class TestLabelsAreRejectedNeverNormalised:
         token = await login_admin(admin_app)
         response = await upload(admin_app, token, IMAGE, version=version)
         assert response.status_code == 201, response.text
+
+
+FIXTURES = Path(__file__).parent / "fixtures" / "firmware"
+
+
+class TestMergedImageIsRefused:
+    @pytest.mark.parametrize("chip", ["esp32", "esp32s3"])
+    async def test_a_real_merged_head_is_422_and_nothing_is_written(
+        self, admin_app: FastAPI, store: MemoryObjectStore, engine: AsyncEngine, chip: str
+    ) -> None:
+        token = await login_admin(admin_app)
+        data = (FIXTURES / f"{chip}.merged.head.bin").read_bytes()
+        response = await upload(admin_app, token, data, target=chip)
+
+        assert response.status_code == 422
+        detail = response.json()["detail"]
+        assert "merged full-flash image" in detail
+        assert "app .bin" in detail
+        assert store.puts == []
+        assert await rows(engine, "SELECT 1 FROM artifacts") == []
+        assert await rows(engine, "SELECT 1 FROM artifact_versions") == []
+
+    @pytest.mark.parametrize("chip", ["esp32", "esp32s3"])
+    async def test_a_real_app_head_is_accepted(
+        self, admin_app: FastAPI, store: MemoryObjectStore, chip: str
+    ) -> None:
+        token = await login_admin(admin_app)
+        data = (FIXTURES / f"{chip}.app.head.bin").read_bytes()
+        response = await upload(admin_app, token, data, target=chip)
+        assert response.status_code == 201, response.text
+
+    async def test_a_taken_label_is_still_422_not_409(
+        self, admin_app: FastAPI, store: MemoryObjectStore
+    ) -> None:
+        token = await login_admin(admin_app)
+        assert (await upload(admin_app, token, IMAGE)).status_code == 201
+        merged = (FIXTURES / "esp32.merged.head.bin").read_bytes()
+        assert (await upload(admin_app, token, merged)).status_code == 422

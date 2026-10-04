@@ -2174,7 +2174,7 @@ home of every sentence; `/deploy` raises the first refusal from it, unchanged.
 
 Warnings never block `/deploy`; no override field yet (that belongs to gating warnings,
 which do not exist). Not yet: weak RSSI (none stored, R4), `rollback_capable: false`
-(decided R2b-spec-2; R2b-be-7 builds it), merged-binary refusal (R2b-be-3 adds `merged_binary` here), R3 library
+(decided R2b-spec-2; R2b-be-7 builds it), merged-binary refusal (refused at upload instead, R2b-be-3), R3 library
 marker, and URL-configuration readiness (`/v1/readyz` owns it; the pre-check answers 200
 without it). The response carries `confirm_timeout_s` for the card. T2 on the dev stack:
 same-layout 200 deployable; Arduino label `layout_mismatch`; unknown label
@@ -2188,9 +2188,21 @@ sentence; `deploy_events` count unchanged.
 Implementation notes behind `spec/flows.md` Flow 2 and the 2026-10-04 entries in
 `DECISIONS.md`.
 
-- **Merged binary.** A `*.merged.bin` carries bootloader, partition table and app from
-  offset `0x0`. Refusing it at the pre-check needs a way to tell it from an app image in
-  the uploaded file; the app image header and size are the candidates.
+- **Merged binary (R2b-be-3, LANDED 2026-10-04).** A `*.merged.bin` carries bootloader,
+  partition table and app from offset `0x0`. `POST /v1/artifact` refuses it with a 422
+  before anything is stored or any row is written, so no merged label can reach the
+  pre-check or a deploy. Detection (`fleetforge/merged_image.py`) is two negative
+  signatures: `0xFF` x 4 KiB then `0xE9` at `0x1000` (esp32, esp32s2), or a partition
+  table at `0x8000` (magic `AA 50`, aligned non-zero offset, non-zero size; the only
+  signature that catches esp32s3/c3/c6, whose merged file starts with `0xE9` like an app).
+  The sentence and code `merged_binary` live in `deploy_precheck.py`, not in `refusals()`.
+  The 413 sentence also names the merged trap. Gaps, by design: artifacts uploaded before
+  this change are not re-checked, and `merge_bin --target-offset 0x1000` files are not
+  recognised. Fixtures: heads of real images in `tests/fixtures/firmware/`. T2 on the dev
+  stack: full esptool-merged esp32s3 and esp32 images got HTTP 422 (the sentence naming
+  "the partition table at 0x8000", and "the bootloader at 0x1000 and the partition table at
+  0x8000"), no rows written; the real app.bin files got 201; 1966081 bytes got 413 with
+  "merged".
 - **`rollback_capable`.** A warning, not a refusal. It is `null` before a board's first
   OTA and the `false` reading is unbenched (`DECISIONS.md` 2026-10-03), so it cannot guard
   a first OTA. The override must be explicit in the UI and in the API. Decided shape

@@ -2,7 +2,8 @@
 
 from fleetforge.clock import now_utc
 from fleetforge.db.models import Device
-from fleetforge.deploy_precheck import ResolvedArtifact, refusals, warnings
+from fleetforge.deploy_precheck import ResolvedArtifact, merged_binary, refusals, warnings
+from fleetforge.merged_image import MergedImage
 
 LAYOUT = "ab-4m-v1"
 
@@ -79,3 +80,18 @@ class TestWarnings:
     def test_sleepy_offline_has_both(self) -> None:
         d = device(power_class="sleepy", expected_wake_interval_s=60)
         assert codes(warnings(d, online=False)) == ["offline", "sleepy"]
+
+
+class TestMergedBinary:
+    def test_the_sentence_names_what_was_seen_and_what_to_pick(self) -> None:
+        evidence = ("the bootloader at 0x1000", "the partition table at 0x8000")
+        finding = merged_binary(MergedImage(evidence))
+        assert finding.code == "merged_binary"
+        assert "merged full-flash image" in finding.message
+        assert "the bootloader at 0x1000 and the partition table at 0x8000" in finding.message
+        for needle in ("app .bin", "firmware.ota.bin", ".ino.merged.bin"):
+            assert needle in finding.message
+        assert "`" not in finding.message
+
+    def test_refusals_is_unchanged(self) -> None:
+        assert refusals(device(), artifact(), version="1.5.0") == []

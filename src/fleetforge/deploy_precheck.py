@@ -19,6 +19,7 @@ not reword a sentence without reading `tests/test_api_deploy.py`.
 from dataclasses import dataclass
 
 from fleetforge.db.models import Device, PowerClass
+from fleetforge.merged_image import MergedImage
 
 OTA_CAPABILITY = "ota"
 
@@ -30,6 +31,7 @@ NO_OTA_CAPABILITY = "no_ota_capability"
 NEVER_CONNECTED = "never_connected"
 OFFLINE = "offline"
 SLEEPY = "sleepy"
+MERGED_BINARY = "merged_binary"  # refused at upload, not by refusals()
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,6 +47,19 @@ class ResolvedArtifact:
 class Finding:
     code: str
     message: str
+
+
+def merged_binary(merged: MergedImage) -> Finding:
+    """The upload refusal for a merged full-flash image. Plain text, no backticks."""
+    return Finding(
+        MERGED_BINARY,
+        "this file is a merged full-flash image, not an app image: it carries "
+        f"{' and '.join(merged.evidence)}. A merged image is written over USB from offset "
+        "0x0; an OTA update writes only the app, into a slot. Upload the app .bin from the "
+        "same build instead: idf.py build/<project>.bin, Arduino <sketch>.ino.bin (not "
+        ".ino.merged.bin), PlatformIO .pio/build/<env>/firmware.bin, ESPHome "
+        "firmware.ota.bin (not firmware.factory.bin).",
+    )
 
 
 def refusals(device: Device, artifact: ResolvedArtifact | None, *, version: str) -> list[Finding]:

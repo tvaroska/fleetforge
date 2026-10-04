@@ -21,7 +21,10 @@ same kind of object stored the same way.
 them. There is no ELF check, no image-header validation and no "is this really an ESP32
 app?" — `docs/features/ota-deploy.md` is explicit that users build with their own
 toolchain, and a server that understood the format would be a server that has opinions
-about which toolchains are allowed.
+about which toolchains are allowed. The one exception is a negative check: the server reads two
+signatures to refuse one known trap, a merged full-flash image (R2b-be-3,
+`fleetforge/merged_image.py`). That is never format validation; an unrecognised file is
+still accepted.
 
 **Raw body, not `multipart/form-data`.** `python-multipart` is not a dependency and an
 opaque blob does not need a form parser; the metadata is small enough to be query
@@ -61,7 +64,9 @@ from fleetforge.api.deps import (
 )
 from fleetforge.api.schemas import ArtifactList, ArtifactSummary, ArtifactUploaded
 from fleetforge.db.models import ArtifactKind
+from fleetforge.deploy_precheck import merged_binary
 from fleetforge.firmware.manifest import EXPECTED_PARTITION_LAYOUT, SUPPORTED_LAYOUTS, SafeSegment
+from fleetforge.merged_image import detect_merged
 from fleetforge.storage.blobs import digest_bytes, put_blob
 from fleetforge.storage.objectstore import ObjectStoreError
 
@@ -184,7 +189,9 @@ def _too_large(size: int, limit: int) -> HTTPException:
         status_code=status.HTTP_413_CONTENT_TOO_LARGE,
         detail=(
             f"artifact is {size} bytes; an OTA slot in this partition layout is {limit}. "
-            "The image must fit the slot it will be written into."
+            "The image must fit the slot it will be written into. "
+            "A merged full-flash image (bootloader, partition table and app) is bigger than "
+            "its app: upload the app .bin."
         ),
     )
 
@@ -223,6 +230,7 @@ async def upload_artifact(
     """Store an opaque firmware blob and label it `(target, version)`.
 
     201 with a new label, 200 when the same bytes are re-uploaded under the same label,
+    422 when the file is a merged full-flash image (refused before anything is stored),
     409 when the label already names *different* bytes — a version is a promise about
     which image it is, so silently re-pointing it would make every deploy record that
     mentions it ambiguous. Re-tagging the same bytes under a second label is fine and
@@ -248,6 +256,21 @@ async def upload_artifact(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="artifact is empty; a deploy that ships nothing is never intended",
+        )
+
+    merged = detect_merged(data)
+    if merged is not None:
+        finding = merged_binary(merged)
+        logger.info(
+            "artifact upload refused: %s (%s/%s, %d bytes) by %s",
+            finding.code,
+            target,
+            version,
+            len(data),
+            admin.token_id,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=finding.message
         )
 
     digest = digest_bytes(data)

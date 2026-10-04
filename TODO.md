@@ -265,7 +265,7 @@ are R3). Order inside each flow: the one-place status first, then the cards, the
       when sent. Expose the same reasons without sending: layout and slot-size mismatch,
       board offline, sleepy. Returns refusals and warnings as plain sentences. Reuse the
       checks in `api/routers/deploys.py`; one source of truth.
-- [ ] **R2b-be-3**: Refuse a merged full-flash binary (P1, 1d)
+- [x] **R2b-be-3**: Refuse a merged full-flash binary (P1, 1d) _(done 2026-10-04; see docs/features/ota-deploy.md)_
       A `*.merged.bin` carries bootloader and partition table at `0x0`; sending it as an
       app image overwrites them. Detect at upload from the image header and size and name the
       app `.bin` to pick. Nothing detects this today. Needs a fixture of a real merged image
@@ -294,7 +294,7 @@ are R3). Order inside each flow: the one-place status first, then the cards, the
       radio: `docs/runbooks/rollback-test.md`. Flow 2's "rolls back on its own" rests on it.
       Hardware-gated; needs the special fault-injection build.
 - [ ] **R2b-test-3**: Update flow end to end (P1, 1d)
-      Upload from the dashboard, pre-check refuses a wrong-layout build and the merged
+      Upload from the dashboard, pre-check refuses a wrong-layout build, upload refuses the merged
       binary, deploy a good build to `confirmed`, deploy a deliberately broken one to
       `rolled back`. Extends CUJ-1 steps 5 and 6.
 - [ ] **R2b-fw-2**: Agent announces `rollback_capable`, `partition_table_sha256`, `flash_chip_size` (P2, 1.5d)

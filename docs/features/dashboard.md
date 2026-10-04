@@ -32,8 +32,8 @@ new version is in every matching row's Deploy select with no reload. The runbook
   byte 0 `0xE9`, chip id (u16 at 12), and the `esp_app_desc_t` version / project name at
   0x30 / 0x50. Target and version are pre-filled from it; a file built for another chip than
   the one selected is refused in the browser (`upload-target-mismatch`, button disabled). That
-  is UI only: the server still treats the bytes as opaque. A merged image just reads as "no
-  version"; refusing it is R2b-be-3.
+  is UI only: the server still treats the bytes as opaque. The server refuses a merged image
+  with a 422 sentence (R2b-be-3) that the form shows verbatim.
 - **Target is a select** (fleet chips + `esp32`/`esp32c3`/`esp32c6`/`esp32s3`), because a
   typo'd target is accepted by the server and then matches no board. **Layout is a select**
   defaulting to the one the chip's boards report (deploy compatibility is layout equality).

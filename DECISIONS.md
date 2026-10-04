@@ -6,6 +6,21 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-04 — A merged full-flash image is refused at upload with a 422, from two signatures; the pre-check never sees one (R2b-be-3)
+
+**Decided: `POST /v1/artifact` answers 422 with one plain sentence when the body is a merged full-flash image. Details: `docs/features/ota-deploy.md`.**
+
+- **At upload, before the store and the DB.** A deploy never reads bytes (R1-be-3), and a verdict per artifact would need a migration. With upload refusing, no merged label can exist.
+- **Code and sentence in `deploy_precheck.py`** (`MERGED_BINARY`, `merged_binary()`), not in `refusals()`, which has no bytes and is unchanged.
+- **Narrow and negative.** Either signature means merged: `0xFF` x 4 KiB then `0xE9` at 0x1000, or a partition table at 0x8000. Unknown files are still accepted.
+- **Size.** An oversize merged file hits the existing 413 first; that sentence now names the merged trap and keeps both numbers.
+- **Status 422**, `detail` is a plain string the form already shows verbatim; no frontend change.
+- **Gaps.** Artifacts uploaded before this are not re-checked; `merge_bin --target-offset 0x1000` files are not recognised.
+
+Supersedes, from the R2b-be-2 entry, `merged_binary` (R2b-be-3 adds it to this module) as a pre-check refusal: the code and sentence are in `deploy_precheck.py`, the check is at upload. Refines R1-be-1's "bytes are opaque" and R2b-fe-7's "the server stays opaque to bytes": one negative check, never format validation.
+
+---
+
 ## 2026-10-04 — R2-spec-1 is amended, not applied as filed: `rollback_capable: false` is a gating warning with a per-code override, `flash_size` becomes `flash_chip_size`, and the spec defines `false` by its meaning (R2b-spec-2, proposed)
 
 **Decided: amend the 2026-10-03 R2-spec-1 proposal, then apply it. Not "apply as filed",
