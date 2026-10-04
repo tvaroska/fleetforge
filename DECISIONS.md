@@ -6,6 +6,20 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-04 — The update timeline reads the current transaction's steps off `GET /v1/devices`; stall text states the board's own deadlines and never ends a deploy (R2b-fe-9)
+
+**Decided: `DeploySummary` carries `steps` and `confirm_timeout_s`; `deployTimeline.ts` turns them into six milestones, elapsed seconds, a deadline and a stall sentence. Details: `docs/features/dashboard.md`.**
+
+- **Steps ride on `DeploySummary`**, not a new endpoint: every row of the newest transaction, `{state, at}` only (no detail, so no sha256), oldest first by `at, id`, capped at the newest 32 (`deploys.MAX_DEPLOY_STEPS`), never empty (a NULL `cmd_id` row is a transaction of one). `confirm_timeout_s` is `Settings.confirm_timeout_s`, the pre-check's number. SQL in `deploys.py`, no migration.
+- **Milestones are the spec's six**, raw states mapped by a lookup. A later milestone implies earlier ones ("not reported", never pending). `rolling_back` and unknown states map to none.
+- **Stall text states only the board's rules**: the 60-80 s silent-download give-up (R2-fw-5) and the confirm window anchored on `rebooting`. `requested` online ≥ 30 s and the 60 s report slack after the window are display thresholds, not policy. `awaiting_safe_window` gets no deadline and no stall, ever. Nothing changes the state label, verdict or styling; `terminal` is the server's `is_terminal`.
+- **Spec PROPOSAL (not applied):** Flow 2 step 4's "no data for 60 s; the board gives up at 80 s" implies the dashboard sees data flow. The agent publishes `downloading` once, so reword to "no word from the board for N; it gives up on its own 60 to 80 s after data stops".
+- **Rejected:** a `/v1/devices/{id}/deploys` endpoint (a second refresh engine); a progress bar from `pct` (a transition log); a server-side `stalled` flag (the server expires nothing, `deploys.py` rule 1).
+
+Supersedes nothing.
+
+---
+
 ## 2026-10-04 — The Deploy button opens the pre-check card; Send is a second click; refusals offer no Send; `override` is sent only when non-empty (R2b-fe-8)
 
 **Decided: Deploy runs `POST /deploy/precheck` and opens `PrecheckCard.tsx`; only the card's Send reaches `POST /deploy`. Details: `docs/features/dashboard.md`.**

@@ -275,7 +275,7 @@ are R3). Order inside each flow: the one-place status first, then the cards, the
       if it never reconnects". Warnings can be overridden; refusals cannot. Depends on
       `R2b-be-2`.
       Overriding a gating warning sends `override: [code]` in the deploy body; `needs_override` marks which (R2b-be-7).
-- [ ] **R2b-fe-9**: Update timeline with elapsed seconds and stall text (P1, 1.5d)
+- [x] **R2b-fe-9**: Update timeline with elapsed seconds and stall text (P1, 1.5d) _(done 2026-10-04; see docs/features/dashboard.md)_
       sent, downloading, staged, rebooting, confirming, confirmed, from `deploy.state` and
       `deploy_events`. **No percentage and no progress bar** (`deploy.ts`: `pct` is a
       transition log). A stall says what it is and when the board gives up (60 to 80 s for a

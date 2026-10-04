@@ -360,6 +360,29 @@ textarea.log {
   font-weight: 700;
 }
 
+/* R2b-fe-9, the update timeline: same ramp as the boot checklist. The ✗ glyph and the
+   word carry a failure; the underline is the `.bad` second axis, not a new colour. */
+.milestones li.current {
+  color: var(--ff-fg);
+  font-weight: 700;
+}
+
+.milestones li.implied {
+  color: var(--ff-dim);
+  font-weight: 400;
+}
+
+.milestones li.failed {
+  color: var(--ff-hi);
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.deploy-timeline summary {
+  cursor: pointer;
+}
+
 .issued {
   border: 2px solid var(--ff-line-hi);
   border-radius: 0;

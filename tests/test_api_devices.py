@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from fleetforge.clock import now_utc
 from fleetforge.db.models import DeployEvent, Device, DeviceProgress
+from fleetforge.deploys import MAX_DEPLOY_STEPS
 from tests.conftest import client_for, login_admin, settings_for_tests
 
 DEVICE_ID = "a4cf12b3de91"
@@ -413,7 +414,7 @@ async def add_deploy_event(
     device_id: str,
     state: str,
     *,
-    cmd_id: str,
+    cmd_id: str | None,
     at: dt.datetime | None = None,
     is_terminal: bool = False,
     artifact_version: str | None = "1.5.0",
@@ -614,3 +615,147 @@ async def test_a_decommissioned_board_with_deploy_history_stays_out_of_the_list(
     body = await list_devices(admin_app, await login_admin(admin_app))
 
     assert [row["device_id"] for row in body["devices"]] == ["a4cf12b3de33"]
+
+
+# ---------------------------------------------------------------------------
+# Deploy steps (R2b-fe-9) — the current transaction's transitions, for the timeline
+# ---------------------------------------------------------------------------
+
+
+async def test_steps_list_the_newest_transaction_only_oldest_first(
+    admin_app: FastAPI, fleet: AsyncSession
+) -> None:
+    await add_device(fleet)
+    now = now_utc()
+    await add_deploy_event(
+        fleet, DEVICE_ID, "confirmed", cmd_id="cmd-old", at=now - dt.timedelta(days=2)
+    )
+    for offset, state in [(30, "requested"), (28, "staging"), (25, "downloading")]:
+        await add_deploy_event(
+            fleet, DEVICE_ID, state, cmd_id="cmd-new", at=now - dt.timedelta(seconds=offset)
+        )
+
+    deploy = await deploy_of(admin_app)
+
+    assert [step["state"] for step in deploy["steps"]] == ["requested", "staging", "downloading"]
+    assert all(set(step) == {"state", "at"} for step in deploy["steps"])
+    ats = [dt.datetime.fromisoformat(step["at"]) for step in deploy["steps"]]
+    assert ats == sorted(ats)
+    assert deploy["steps"][-1] == {"state": deploy["state"], "at": deploy["at"]}
+
+
+async def test_steps_at_the_same_instant_keep_insertion_order(
+    admin_app: FastAPI, fleet: AsyncSession
+) -> None:
+    """The `id ASC` tie-break: `requested` and `staging` share a millisecond."""
+    await add_device(fleet)
+    same_instant = now_utc()
+    await add_deploy_event(fleet, DEVICE_ID, "requested", cmd_id="cmd-a", at=same_instant)
+    await add_deploy_event(fleet, DEVICE_ID, "staging", cmd_id="cmd-a", at=same_instant)
+    await add_deploy_event(fleet, DEVICE_ID, "downloading", cmd_id="cmd-a", at=same_instant)
+
+    deploy = await deploy_of(admin_app)
+
+    assert [step["state"] for step in deploy["steps"]] == ["requested", "staging", "downloading"]
+    assert deploy["state"] == "downloading"
+
+
+async def test_a_newest_row_without_a_cmd_id_is_a_transaction_of_one(
+    admin_app: FastAPI, fleet: AsyncSession
+) -> None:
+    """NULL `cmd_id` rows are not one transaction; `steps` is never empty."""
+    await add_device(fleet)
+    now = now_utc()
+    await add_deploy_event(
+        fleet, DEVICE_ID, "staging", cmd_id=None, at=now - dt.timedelta(seconds=10)
+    )
+    await add_deploy_event(fleet, DEVICE_ID, "downloading", cmd_id=None, at=now)
+
+    deploy = await deploy_of(admin_app)
+
+    assert deploy["steps"] == [{"state": "downloading", "at": deploy["at"]}]
+
+
+async def test_steps_are_capped_keeping_the_newest(admin_app: FastAPI, fleet: AsyncSession) -> None:
+    await add_device(fleet)
+    start = now_utc() - dt.timedelta(hours=1)
+    total = MAX_DEPLOY_STEPS + 5
+    for i in range(total):
+        await add_deploy_event(
+            fleet, DEVICE_ID, f"s{i}", cmd_id="cmd-a", at=start + dt.timedelta(seconds=i)
+        )
+
+    deploy = await deploy_of(admin_app)
+
+    assert len(deploy["steps"]) == MAX_DEPLOY_STEPS
+    assert [step["state"] for step in deploy["steps"]] == [
+        f"s{i}" for i in range(total - MAX_DEPLOY_STEPS, total)
+    ]
+    assert deploy["steps"][-1]["state"] == deploy["state"] == f"s{total - 1}"
+
+
+async def test_each_board_gets_its_own_steps(admin_app: FastAPI, fleet: AsyncSession) -> None:
+    await add_device(fleet, "a4cf12b3de40")
+    await add_device(fleet, "a4cf12b3de41")
+    now = now_utc()
+    for offset, (device, state) in enumerate(
+        [
+            ("a4cf12b3de40", "requested"),
+            ("a4cf12b3de41", "requested"),
+            ("a4cf12b3de40", "staging"),
+            ("a4cf12b3de41", "staging"),
+            ("a4cf12b3de41", "downloading"),
+        ]
+    ):
+        await add_deploy_event(
+            fleet, device, state, cmd_id=f"cmd-{device}", at=now + dt.timedelta(seconds=offset)
+        )
+
+    body = await list_devices(admin_app, await login_admin(admin_app))
+    steps = {
+        row["device_id"]: [step["state"] for step in row["deploy"]["steps"]]
+        for row in body["devices"]
+    }
+
+    assert steps == {
+        "a4cf12b3de40": ["requested", "staging"],
+        "a4cf12b3de41": ["requested", "staging", "downloading"],
+    }
+
+
+async def test_the_deploy_carries_the_servers_confirm_window(
+    admin_app: FastAPI, fleet: AsyncSession
+) -> None:
+    """The same number the pre-check shows, never a client-side guess."""
+    await add_device(fleet)
+    await add_deploy_event(fleet, DEVICE_ID, "rebooting", cmd_id="cmd-a")
+
+    deploy = await deploy_of(admin_app)
+
+    assert deploy["confirm_timeout_s"] == settings_for_tests().confirm_timeout_s
+
+
+async def test_a_requested_rows_sha256_appears_nowhere_in_the_steps(
+    admin_app: FastAPI, fleet: AsyncSession
+) -> None:
+    await add_device(fleet)
+    digest = "b" * 64
+    now = now_utc()
+    await add_deploy_event(
+        fleet,
+        DEVICE_ID,
+        "requested",
+        cmd_id="cmd-a",
+        at=now - dt.timedelta(seconds=3),
+        detail={"sha256": digest, "size_bytes": 220000, "target": "esp32c6", "apply": "auto"},
+    )
+    await add_deploy_event(fleet, DEVICE_ID, "staging", cmd_id="cmd-a", at=now)
+
+    async with client_for(admin_app) as client:
+        response = await client.get(
+            "/v1/devices", headers={"Authorization": f"Bearer {await login_admin(admin_app)}"}
+        )
+
+    assert response.status_code == 200
+    assert digest not in response.text
+    assert "sha256" not in response.text

@@ -72,7 +72,8 @@ persisted here, never logged and never echoed in an API response. Device-reporte
 detail is control-stripped, truncated and URL-redacted before it is stored, because it
 is device-controlled text landing in a table kept forever.
 
-**The reads live here too** (`latest_open_transaction`, `latest_deploys`). The
+**The reads live here too** (`latest_open_transaction`, `latest_deploys` and the
+current transaction's steps it carries for the dashboard's timeline, R2b-fe-9). The
 single-writer tripwire in `tests/test_invariants.py` bans other modules from writing
 this table; the *spirit* extends to reading it, for the same reason `progress.py` holds
 `latest_progress` next to `record_progress` and `api/routers/devices.py` merely calls
@@ -96,6 +97,11 @@ logger = logging.getLogger(__name__)
 # Same bound as `api/schemas.py::MAX_PROGRESS_DETAIL`, restated rather than imported:
 # this module is transport-agnostic and must not reach into the FastAPI side.
 MAX_OBSERVED_DETAIL = 200
+
+# The most steps of one transaction `latest_deploys` hands back per board (R2b-fe-9). Our
+# vocabulary has about a dozen states and rule 3 records each at most once, so 32 only
+# bites on a hostile or much newer agent emitting many distinct states.
+MAX_DEPLOY_STEPS = 32
 
 # The signed download URL is a bearer credential. Our agent does not echo it, but a
 # third-party one might, and `deploy_events` is kept forever — so redact by
@@ -417,6 +423,49 @@ _LATEST_DEPLOYS_SQL = text(
     """
 )
 
+# Every row of each board's newest transaction, oldest first — the dashboard's update
+# timeline (R2b-fe-9). Same `at, id` ordering as above and for the same reason, in both
+# directions: `requested` and `staging` (and `applying` and `rebooting`) share
+# milliseconds, and without the `id` tie-break the timeline would walk backwards. The
+# window function keeps the NEWEST `:max_steps` rows, so the cap never hides the current
+# state; the outer ORDER BY then turns them oldest-first. The join is `=`, not
+# `IS NOT DISTINCT FROM`: rows with a NULL `cmd_id` are not one transaction, so a newest
+# row without one yields nothing here and the caller falls back to that row alone.
+_TRANSACTION_STEPS_SQL = text(
+    """
+    WITH latest AS (
+        SELECT DISTINCT ON (device_id) device_id, cmd_id
+          FROM deploy_events
+         WHERE device_id = ANY(:device_ids)
+         ORDER BY device_id, at DESC, id DESC
+    ), ranked AS (
+        SELECT e.device_id, e.state, e.at, e.id,
+               row_number() OVER (
+                   PARTITION BY e.device_id ORDER BY e.at DESC, e.id DESC
+               ) AS rn
+          FROM deploy_events AS e
+          JOIN latest AS l ON l.device_id = e.device_id AND l.cmd_id = e.cmd_id
+    )
+    SELECT device_id, state, at
+      FROM ranked
+     WHERE rn <= :max_steps
+     ORDER BY device_id, at ASC, id ASC
+    """
+)
+
+
+@dataclass(frozen=True, slots=True)
+class DeployStepSnapshot:
+    """One transition of a board's current transaction, for the update timeline.
+
+    `state` is device-controlled text, like `DeploySnapshot.state`. There is no detail
+    on purpose: a `requested` row's blob carries `sha256`/`size_bytes`, which is not
+    what a timeline is about (the `_snapshot_detail` reasoning).
+    """
+
+    state: str
+    at: dt.datetime
+
 
 @dataclass(frozen=True, slots=True)
 class DeploySnapshot:
@@ -435,6 +484,10 @@ class DeploySnapshot:
     `pct` is a transition's progress reading, not a progress feed: the writer keeps the
     first `pct` it saw for a repeated state (rule 3 above), so a client that animated it
     would sit at one number through a whole download.
+
+    `steps` (R2b-fe-9) is every recorded transition of this same transaction, oldest
+    first, capped at the newest `MAX_DEPLOY_STEPS`. Never empty: its last entry is
+    always `(state, at)`, and a row with no `cmd_id` is a transaction of one.
     """
 
     cmd_id: str | None
@@ -445,6 +498,7 @@ class DeploySnapshot:
     from_version: str | None
     pct: int | None
     detail: str | None
+    steps: tuple[DeployStepSnapshot, ...]
 
 
 def _snapshot_pct(detail: Any) -> int | None:
@@ -485,8 +539,20 @@ async def latest_deploys(
     `device_ids` comes from the caller rather than being a full-table scan, so the read
     is bounded by whatever cap the caller's own list carries (`devices.LIST_LIMIT`) and
     an empty list costs one trivially-false query rather than a special case.
+
+    Two reads: the newest row per board, then the steps of that row's transaction
+    (R2b-fe-9), both bounded by the same ids.
     """
-    rows = (await session.execute(_LATEST_DEPLOYS_SQL, {"device_ids": list(device_ids)})).all()
+    ids = list(device_ids)
+    rows = (await session.execute(_LATEST_DEPLOYS_SQL, {"device_ids": ids})).all()
+    step_rows = (
+        await session.execute(
+            _TRANSACTION_STEPS_SQL, {"device_ids": ids, "max_steps": MAX_DEPLOY_STEPS}
+        )
+    ).all()
+    steps: dict[str, list[DeployStepSnapshot]] = {}
+    for step in step_rows:
+        steps.setdefault(step.device_id, []).append(DeployStepSnapshot(step.state, step.at))
     return {
         row.device_id: DeploySnapshot(
             cmd_id=row.cmd_id,
@@ -497,6 +563,7 @@ async def latest_deploys(
             from_version=row.from_version,
             pct=_snapshot_pct(row.detail),
             detail=_snapshot_detail(row.detail),
+            steps=tuple(steps.get(row.device_id) or [DeployStepSnapshot(row.state, row.at)]),
         )
         for row in rows
     }

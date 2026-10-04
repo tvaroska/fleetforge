@@ -105,7 +105,18 @@ export type DeploySummary = {
   from_version: string | null
   pct: number | null
   detail: string | null
+  // R2b-fe-9, both OPTIONAL: a dashboard served against an older API, and every fixture
+  // written before this, must keep working (the `?? []` posture of `arrivals`). Absent
+  // `steps` → the timeline falls back to the one summary row. Absent `confirm_timeout_s`
+  // → no rollback deadline at all; the client never invents that number.
+  steps?: DeployStep[]
+  confirm_timeout_s?: number
 }
+
+// Mirrors `DeployStep` in api/schemas.py: one recorded transition of the current
+// transaction, oldest first. `state` is DEVICE-CONTROLLED text; `at` is the server's
+// receipt time, never the board's clock. Exactly two keys — no detail, no sha256.
+export type DeployStep = { state: string; at: string }
 
 // Mirrors `ArrivalSummary` in api/schemas.py. A board that has reported a boot stage and
 // is NOT yet in the fleet — so `device_id` here may name a board with no row in `devices`

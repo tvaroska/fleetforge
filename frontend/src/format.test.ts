@@ -6,9 +6,11 @@
 //    updating, which is the one thing the fleet view has to make obvious.
 // 2. A missing or unparseable timestamp degrades to something readable, never to
 //    "Invalid Date" or "NaN s ago".
+// 3. `formatDuration` (R2b-fe-9) floors, keeps its seconds in the minute form, and reads
+//    a negative or NaN duration as `0 s`.
 
 import { describe, expect, it } from 'vitest'
-import { formatAgo, formatWhen } from './format'
+import { formatAgo, formatDuration, formatWhen } from './format'
 
 const NOW = Date.parse('2026-09-10T12:00:00Z')
 const ago = (seconds: number) => new Date(NOW - seconds * 1000).toISOString()
@@ -44,5 +46,22 @@ describe('formatAgo', () => {
   it('passes an unparseable timestamp through rather than rendering NaN', () => {
     expect(formatAgo('not a date', NOW)).toBe('not a date')
     expect(formatWhen('not a date')).toBe('not a date')
+  })
+})
+
+describe('formatDuration', () => {
+  it('floors and steps through seconds, minutes and hours', () => {
+    expect(formatDuration(0)).toBe('0 s')
+    expect(formatDuration(999)).toBe('0 s')
+    expect(formatDuration(59_999)).toBe('59 s')
+    expect(formatDuration(60_000)).toBe('1 min 0 s')
+    expect(formatDuration(134_000)).toBe('2 min 14 s')
+    expect(formatDuration(3_600_000)).toBe('1 h 0 min')
+    expect(formatDuration((49 * 3600 + 3 * 60 + 7) * 1000)).toBe('49 h 3 min')
+  })
+
+  it('never prints a negative or NaN duration', () => {
+    expect(formatDuration(-5_000)).toBe('0 s')
+    expect(formatDuration(Number.NaN)).toBe('0 s')
   })
 })

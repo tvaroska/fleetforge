@@ -23,8 +23,11 @@
 //    otherwise the body is exactly `{version, apply}` (today's server 422s on any extra key).
 // 10. A pre-check answer that arrives after the version changed, Cancel or a newer Deploy
 //    click is ignored.
+// 11. The timeline states only the board's own deadlines (R2b-fe-9): a stall sentence
+//    never restyles the state, never announces itself, and never appears for
+//    `awaiting_safe_window`.
 
-import { act, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { DeployCell } from './DeployCell'
@@ -628,6 +631,8 @@ describe('DeployCell — what the board says back', () => {
     expect(screen.getByTestId('deploy-state')).toHaveTextContent('waiting for a safe moment')
     expect(screen.getByTestId('deploy-state')).not.toHaveClass('bad')
     expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.queryByTestId('deploy-stall')).toBeNull()
+    expect(screen.queryByTestId('deploy-deadline')).toBeNull()
   })
 
   it('reports pct as text and never as a progress bar', () => {
@@ -746,5 +751,99 @@ describe('DeployCell — what the board says back', () => {
     renderCell({ device: device({ deploy: deploy({ state: 'confirming' }) }) })
 
     expect(screen.getByTestId('deploy-cell')).toHaveTextContent('confirming the new image → 1.5.0')
+  })
+})
+
+describe('DeployCell — the update timeline (R2b-fe-9)', () => {
+  const at = (secondsAgo: number) => new Date(NOW - secondsAgo * 1000).toISOString()
+  const step = (state: string, secondsAgo: number) => ({ state, at: at(secondsAgo) })
+
+  it('explains a silent download past the board’s give-up time, without restyling it', () => {
+    renderCell({
+      device: device({
+        deploy: deploy({
+          state: 'downloading',
+          at: at(100),
+          steps: [step('requested', 104), step('staging', 102), step('downloading', 100)],
+          confirm_timeout_s: 300,
+        }),
+      }),
+    })
+
+    const timeline = screen.getByTestId('deploy-timeline')
+    expect(timeline.tagName).toBe('DIV')
+    expect(screen.getByTestId('deploy-elapsed')).toHaveTextContent('elapsed 1 min 44 s')
+    expect(screen.getByTestId('deploy-stall')).toHaveTextContent(
+      'No word from the board for 1 min 40 s. It may still be downloading',
+    )
+    expect(screen.getByTestId('deploy-deadline')).toHaveTextContent('60 to 80 s after the last byte')
+    expect(screen.getByTestId('deploy-state')).not.toHaveClass('bad')
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.queryByRole('status')).toBeNull()
+    expect(screen.queryByRole('progressbar')).toBeNull()
+    expect(screen.getByTestId('deploy-cell')).not.toHaveTextContent('%')
+  })
+
+  it('folds a confirmed deploy into a closed "took N s" disclosure', () => {
+    renderCell({
+      device: device({
+        fw_version: '1.5.0',
+        deploy: deploy({
+          state: 'confirmed',
+          is_terminal: true,
+          at: at(10),
+          steps: [
+            step('requested', 40),
+            step('staging', 40),
+            step('downloading', 39),
+            step('verifying', 30),
+            step('staged', 29),
+            step('applying', 29),
+            step('rebooting', 29),
+            step('confirming', 15),
+            step('confirmed', 10),
+          ],
+          confirm_timeout_s: 300,
+        }),
+      }),
+    })
+
+    const timeline = screen.getByTestId('deploy-timeline')
+    expect(timeline.tagName).toBe('DETAILS')
+    expect(timeline).not.toHaveAttribute('open')
+    expect(screen.getByTestId('deploy-elapsed')).toHaveTextContent('took 30 s')
+    expect(timeline.querySelectorAll('li[data-state="done"]')).toHaveLength(6)
+    expect(screen.getByTestId('deploy-state')).toHaveTextContent('good')
+    expect(screen.queryByTestId('deploy-stall')).toBeNull()
+  })
+
+  it('moves the "for N s" counter with the shared tick', () => {
+    const d = device({
+      deploy: deploy({ state: 'staging', at: at(5), steps: [step('requested', 6), step('staging', 5)] }),
+    })
+    renderCell({ device: d })
+    expect(screen.getByTestId('deploy-timeline')).toHaveTextContent('starting for 5 s')
+    cleanup()
+
+    renderCell({ device: d, now: NOW + 7000 })
+    expect(screen.getByTestId('deploy-timeline')).toHaveTextContent('starting for 12 s')
+  })
+
+  it('shows awaiting_safe_window’s elapsed time, and no deadline or stall after ten minutes', () => {
+    renderCell({
+      device: device({
+        deploy: deploy({
+          state: 'awaiting_safe_window',
+          at: at(600),
+          steps: [step('requested', 610), step('staged', 605), step('awaiting_safe_window', 600)],
+          confirm_timeout_s: 300,
+        }),
+      }),
+    })
+
+    expect(screen.getByTestId('deploy-timeline')).toHaveTextContent('for 10 min 0 s')
+    expect(screen.queryByTestId('deploy-stall')).toBeNull()
+    expect(screen.queryByTestId('deploy-deadline')).toBeNull()
+    expect(screen.getByTestId('deploy-state')).not.toHaveClass('bad')
   })
 })

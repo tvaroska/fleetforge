@@ -19,6 +19,77 @@ When `/implement` finishes a task, it appends a completed entry below.
 <!-- Newest first. One entry per completed task. Capture what a future reader
      needs WITHOUT the local plan file. -->
 
+### 2026-10-04 — R2b-fe-9 Update timeline with elapsed seconds and stall text
+
+**What shipped:** the Deploy cell shows the update as the spec's six milestones (sent,
+downloading, staged, rebooting, confirming, confirmed) with server-time offsets, a live
+elapsed counter, the board's own deadline for the current state and, once that deadline has
+passed, a stall sentence. Pure rules in `deployTimeline.ts`; `DeployTimeline.tsx` renders
+under the unchanged verdict/drift line. In flight it is an open list; a terminal row folds
+into a closed `<details>` whose summary is `took N s`.
+
+- **Read model (D1).** `DeploySummary` on `GET /v1/devices` gains `steps` (every row of the
+  newest transaction, `{state, at}` only, oldest first by `at, id`, the newest 32 kept via
+  `deploys.MAX_DEPLOY_STEPS`, never empty: a NULL `cmd_id` row is a transaction of one) and
+  `confirm_timeout_s` (`Settings.confirm_timeout_s`, the pre-check's number). SQL lives in
+  `deploys.py`; no endpoint, no migration. Both fields are optional in `api.ts`.
+- **Milestones (D2).** Raw states map by lookup: `requested`→sent; `staging`, `downloading`,
+  `verifying`→downloading; `staged`, `awaiting_safe_window`, `applying`→staged; then
+  rebooting, confirming, confirmed. A milestone's time is its first step. A later milestone
+  implies earlier ones: shown as `– … — not reported`, never pending. A state on no
+  milestone (`rolling_back`, unknown) is appended as the current item with nothing promised
+  after it.
+- **Elapsed (D3).** `+N s` offsets from the first step; in flight `elapsed …` and
+  `{label} for …` tick with the shared 1 s `now`; terminal `took …`. `format.ts::formatDuration`
+  (`42 s`, `2 min 14 s`, `49 h 3 min`), clamped at 0.
+- **Deadlines and stalls (D4)**, only while the server's `is_terminal` is false, keyed by raw state:
+  - `requested`, offline: muted "Queued: the board is offline, and the broker holds the
+    command until it next connects." Never a stall.
+  - `requested`, online for ≥ 30 s: warn "No answer from the board after {d}. An online board
+    normally takes a command within seconds; the broker holds it until the board does."
+  - `downloading`: muted "The board says nothing more until the image is written. If data
+    stops arriving, it gives up on its own 60 to 80 s after the last byte and reports
+    “download stalled”." Past 80 s also warn "No word from the board for {d}. It may still be
+    downloading: it gives up only when no data has arrived for 60 to 80 s, and then reports
+    “download stalled”." (+ " The board is offline now; it reports what happened when it
+    reconnects.")
+  - `rebooting` / `confirming`, anchored on the `rebooting` step (else `applying`): muted "If
+    {v} never connects, the board rolls back on its own about {T} s after the reboot ({left}
+    left)" / "(due now)"; from T + 60 s warn "The {T} s rollback window has passed with no
+    result. A board that rolled back reports “rolled back” once the previous image
+    reconnects." + offline / "It now reports running {v}, but sent no result for this
+    update." / "It now reports running {from} again." No anchor or no `confirm_timeout_s` →
+    nothing.
+  - `rolling_back`: muted "The board is going back to {from}; it reports “rolled back” once
+    that image reconnects."
+  - **`awaiting_safe_window`: never a deadline or stall**, only its elapsed time.
+- **Failures (D6).** A terminal non-confirmed state ends the list with one `✗ {label} +N s`
+  item; nothing pending after it. Glyph and word carry it, not colour.
+- No `%`, no progress bar, no `role`/`aria-live` on the timeline; stall text never changes
+  the state label, verdict or its styling.
+
+**Spec proposal (not applied):** `spec/flows.md` Flow 2 step 4's example "no data for 60 s;
+the board gives up at 80 s" implies the dashboard observes data flow. Our agent publishes
+`downloading` once and nothing until the image is written, so the honest wording is "no word
+from the board for N; it gives up on its own 60 to 80 s after data stops".
+
+**T2 evidence (dev stack :8088, api recreated with the `.env.example` hash, headless
+Chromium, sims with `--capabilities ota`, artifact `1.5.0-t9-1791137786`):**
+good board: `steps` = requested, staging, downloading, verifying, staged, applying,
+rebooting, confirming, confirmed; keys `{at, state}`; `at` non-decreasing;
+`confirm_timeout_s: 300`; no `sha256` in `.deploy`. Row: "good — running 1.5.0-t9-…", closed
+`took 2 s` disclosure with six ✓ items (+0 s … +2 s), no `%`. `--confirm never
+--confirm-timeout 30` board: "If 1.5.0-t9-… never connects, the board rolls back on its own
+about 300 s after the reboot (4 min 36 s left)", then 35/34/33 s left sampled a second apart;
+after the rollback: verdict "rolled back", `took 34 s`, "✗ rolled back to the previous
+version +34 s". `--safe-window hold` board: staged current, "waiting for a safe moment … for
+N s" counting past 2 min, `deploy-stall` and `deploy-deadline` null, no `bad`. Seeded rows
+(cmd_ids `t9-seed-*-1791137786`, dev data left in place): downloading 125 s → the deadline
+and "No word from the board for 2 min 11 s…", then with the sim stopped "…The board is
+offline now; it reports what happened when it reconnects."; rebooting 400 s on a sim running
+1.4.2 → "The 300 s rollback window has passed … It now reports running 1.4.2 again.";
+requested 45 s online → "No answer from the board after …"; offline → "Queued: …", no stall.
+
 ### 2026-10-04 — R2b-fe-8 Pre-check card on the Deploy cell
 
 **What shipped:** The Deploy button no longer sends. It asks `POST /deploy/precheck` (R2b-be-2,

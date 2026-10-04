@@ -241,6 +241,17 @@ class DeviceSummary(BaseModel):
     deploy: "DeploySummary | None" = None
 
 
+class DeployStep(BaseModel):
+    """One transition of a board's current deploy transaction. R2b-fe-9.
+
+    Two keys only. `state` is device-controlled text; `at` is the server's receipt
+    time. No detail: a `requested` row's blob holds the artifact's sha256 and size.
+    """
+
+    state: str
+    at: dt.datetime
+
+
 class DeploySummary(BaseModel):
     """A board's newest deploy state, as the fleet view sees it. R1-fe-1.
 
@@ -263,6 +274,10 @@ class DeploySummary(BaseModel):
     writer keeps the first `pct` it saw for a repeated state, so an agent that publishes
     `downloading` once (ours does) reports one number for the whole download. Render it
     as text; a bar driven by it would sit still and read as a hang.
+
+    `steps` and `confirm_timeout_s` (R2b-fe-9) feed the update timeline: the transitions
+    of this same transaction, and the confirm window the server tells the board, so the
+    dashboard can state the board's own deadlines without inventing a number.
     """
 
     # NULL only for a row written before `cmd_id` was known — the column is nullable, so
@@ -278,6 +293,12 @@ class DeploySummary(BaseModel):
     from_version: str | None
     pct: int | None
     detail: str | None
+    # Every recorded transition of this transaction, oldest first, capped at the newest
+    # `deploys.MAX_DEPLOY_STEPS`; never empty, the last one is `(state, at)`.
+    steps: list[DeployStep]
+    # `Settings.confirm_timeout_s` — the same number the pre-check shows. The board's
+    # compiled rollback timer is authoritative and equal to it in a production build.
+    confirm_timeout_s: int
 
 
 class ArrivalSummary(BaseModel):

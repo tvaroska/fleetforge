@@ -1036,7 +1036,8 @@ fixed it by arming the confirm timer first thing in `app_main`, proven in QEMU. 
 radio (R2-test-2) cannot outrun the confirm timer, because the download and the timer
 never overlap. A silent peer mid-download used to hold the update slot until a power
 cycle; since agent 0.4.4 (R2-fw-5) it ends `failed` / `download stalled` after 60-80 s.
-Proven in QEMU, bench replay owed. See *Remaining failure modes (R2-test-1)*, *Arm the
+Proven in QEMU, bench replay owed. The dashboard's update timeline (R2b-fe-9) reads
+`DeploySummary.steps` and surfaces this 60-80 s rule as stall text (`docs/features/dashboard.md`). See *Remaining failure modes (R2-test-1)*, *Arm the
 confirm timer at boot (R2-fw-4)*, *Flaky link (R2-test-2)* and *A stalled download fails
 (R2-fw-5)* below.
 

@@ -15,6 +15,9 @@
 //    (`design/architecture.md` principle 5), the server has no sweeper, and this client
 //    must not invent one — no timeout, no "stuck?" badge after N minutes, no spinner.
 //    Its label says the wait is legitimate and unbounded, which is the whole point.
+//    The update timeline's stall text (R2b-fe-9, `deployTimeline.ts`) is not a client
+//    policy either: it states the BOARD's own deadlines, never ends a deploy, and never
+//    applies to `awaiting_safe_window`.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError, api, type ArtifactSummary, type DeploySummary } from './api'

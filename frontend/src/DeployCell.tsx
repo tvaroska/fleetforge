@@ -33,7 +33,10 @@
 //   at one number through a two-minute download and read as a hang — the precise failure
 //   this task exists to avoid. Text only, and no `role="progressbar"` anywhere.
 // * **No client-side timeout.** Nothing here expires `awaiting_safe_window`; see
-//   `deploy.ts`.
+//   `deploy.ts`. The timeline (R2b-fe-9) states the BOARD's own deadlines — the 60-80 s
+//   silent-download give-up and the confirm window — and says when one has passed; it
+//   never ends a deploy, never restyles the state, and never applies to
+//   `awaiting_safe_window`.
 
 import { useRef, useState } from 'react'
 import {
@@ -47,6 +50,7 @@ import {
 import { overrideFor } from './deployPrecheck'
 import { PrecheckCard } from './PrecheckCard'
 import { DEPLOY_BAD_STATES, DEPLOY_STATE_LABELS, deployOutcome } from './deploy'
+import { DeployTimeline } from './DeployTimeline'
 import { formatAgo, formatWhen } from './format'
 
 /** What the 202 body means, in the operator's terms. Only the two surprising cases. */
@@ -297,6 +301,7 @@ export function DeployCell({
       )}
 
       <LiveState device={device} now={now} />
+      {device.deploy !== null && <DeployTimeline deploy={device.deploy} device={device} now={now} />}
     </td>
   )
 }

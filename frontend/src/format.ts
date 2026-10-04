@@ -33,3 +33,18 @@ export function formatAgo(iso: string | null, now: number): string {
   if (seconds < 86400) return `${Math.floor(seconds / 3600)} h ago`
   return `${Math.floor(seconds / 86400)} d ago`
 }
+
+/**
+ * A duration, floored: `42 s` / `2 min 14 s` / `49 h 3 min` (R2b-fe-9).
+ *
+ * The minute form always carries its seconds (`2 min 0 s`) so a ticking counter keeps
+ * its width. Negative or NaN — a clock skew, an unparseable timestamp — reads `0 s`,
+ * never a minus sign or `NaN`.
+ */
+export function formatDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms <= 0) return '0 s'
+  const seconds = Math.floor(ms / 1000)
+  if (seconds < 60) return `${seconds} s`
+  if (seconds < 3600) return `${Math.floor(seconds / 60)} min ${seconds % 60} s`
+  return `${Math.floor(seconds / 3600)} h ${Math.floor((seconds % 3600) / 60)} min`
+}
