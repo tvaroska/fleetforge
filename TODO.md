@@ -130,6 +130,7 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       GCS_IMPERSONATE_SERVICE_ACCOUNT=fleetforge-artifacts@btvaroska.iam.gserviceaccount.com
       just agent-publish-all ; then `just agent-check-prod` must print CHECK-VERSION OK and
       this task flips to [x].)_
+      _(2026-10-04 re-check: bundles still fresh at 08de7b9, prod still 0.2.0/0.3.2; publish still owed, needs go-ahead)_
 - [x] **S0-test-3**: Someone who did not see the code onboards a board unaided — passed 2026-09-22 → [enrollment.md](docs/features/enrollment.md)
 - [x] **S0-fw-3**: A board that browns out during RF calibration cannot escape it — withdrawn 2026-09-23, not fixed → [enrollment.md](docs/features/enrollment.md)
 
