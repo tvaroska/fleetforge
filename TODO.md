@@ -219,7 +219,7 @@ are R3). Order inside each flow: the one-place status first, then the cards, the
 
 ### Flow 1 — Onboard a board
 
-- [ ] **R2b-fe-1**: One status strip: UI and API versions, board, firmware, state (P0, 1d)
+- [x] **R2b-fe-1**: One status strip: UI and API versions, board, firmware, state (P0, 1d) _(done 2026-10-04; see docs/features/enrollment.md)_
       Replaces the footer's split of UI and API versions from the table's firmware column.
       Read-only, from `buildInfo`, `GET /v1/healthz`, and the selected board's device row.
       Acceptance: after a deploy, one glance shows the running UI, API and the board's

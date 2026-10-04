@@ -11,7 +11,7 @@
 // * **The two URLs are derived from `window.location`, never compiled in.** See
 //   `defaultMqttUri` below.
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError, api, type AgentManifest } from './api'
 import { BoardConsolePanel } from './BoardConsole'
 import { type ConsoleFactory } from './boardConsole'
@@ -122,8 +122,12 @@ export function FlashBoard({
   onSessionExpired,
   createFlasher,
   createConsole,
+  onBoardIdentified,
 }: {
   onSessionExpired: () => void
+  // R2b-fe-1: tells the status strip which board this is, once detected and again once
+  // flashed. Optional; the flasher works the same without it.
+  onBoardIdentified?: (deviceId: string) => void
   // Injected by the tests only: jsdom has no `navigator.serial` (see `flasher.ts`).
   createFlasher?: FlasherFactory
   createConsole?: ConsoleFactory
@@ -174,6 +178,17 @@ export function FlashBoard({
       live = false
     }
   }, [supported, secure, onSessionExpired])
+
+  // Held in a ref so a parent passing a fresh closure never re-fires the effects below.
+  const identified = useRef(onBoardIdentified)
+  identified.current = onBoardIdentified
+  const predictedId = state.chip === null ? null : predictDeviceId(state.chip)
+  useEffect(() => {
+    if (predictedId !== null) identified.current?.(predictedId)
+  }, [predictedId])
+  useEffect(() => {
+    if (state.flashedDeviceId !== null) identified.current?.(state.flashedDeviceId)
+  }, [state.flashedDeviceId])
 
   // S0-fe-8. A dismissed chooser or a refused COM1 is what an operator with no driver
   // does next, so that is when the help opens by itself. Only ever opens it: closing is

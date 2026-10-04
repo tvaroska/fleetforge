@@ -6,6 +6,26 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-04 — The status strip's board is the one last picked, deployed to or flashed; "differ" compares version and commit (R2b-fe-1)
+
+**Decided: the strip shows the board the operator last picked in the Fleet table, deployed
+to, or detected/flashed; with nothing picked and one board, that board. "UI and API differ"
+is true when both versions are known and unequal, or both commits are known and their
+8-char prefixes are unequal.**
+
+- **Why a selection at all.** Nothing selected a board before; "after a deploy, one glance"
+  needs the deployed row to become the strip's board.
+- **Why both version and commit.** In prod the two images share a commit, so a stale bundle
+  at the same version is still caught. Unknown on either side means no claim.
+- **Scope cut.** The onboarding console state is not in the strip yet (R2b-fe-3/fe-5); the
+  state is presence, deploy state/verdict (`deployOutcome`), or the arrival stage.
+- **One fleet hook.** `Dashboard` owns the only `useFleet` (one SSE slot); `FleetTable`
+  takes it as a prop. `/v1/healthz` is polled every 60 s and never touches the session.
+- Supersedes nothing.
+
+
+---
+
 ## 2026-10-04 — Prod's flasher should serve the repo's agent; the 0.3.x baseline is not kept as the default (S0-infra-10)
 
 **Decided: publish 0.4.5 as the flasher default. A lag check now exists and `just build`

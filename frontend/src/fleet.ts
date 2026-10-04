@@ -71,6 +71,22 @@ export const POLL_MS = 10_000
 const RECONNECT_INITIAL_MS = 1000
 const RECONNECT_MAX_MS = 30_000
 
+// A lookup with a fallback, deliberately NOT a switch: `stage` is device-controlled and
+// the server whitelists no vocabulary, so an agent newer than this dashboard must render
+// its stage as itself rather than vanish from the list.
+export const STAGE_LABELS: Record<string, string> = {
+  link_up: 'network up',
+  time_synced: 'clock set',
+  enrolling: 'enrolling',
+  enrolled: 'enrolled',
+  mqtt_connected: 'connecting to the broker',
+  mqtt_refused: 'the broker refused its credential',
+  halted: 'stopped',
+  // Phrased in the past tense on purpose: this board is up. It is telling us the boot
+  // before this one died on a power fault, which is a supply to fix, not an outage.
+  brownout: 'recovered from a power fault',
+}
+
 export type StreamState = 'connecting' | 'live' | 'reconnecting' | 'offline'
 
 export type Fleet = {

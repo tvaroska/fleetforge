@@ -16,8 +16,8 @@
 
 import { type ArrivalSummary, type ArtifactSummary, type DeviceSummary } from './api'
 import { DeployCell } from './DeployCell'
-import { useArtifacts } from './deploy'
-import { useFleet, type EventSourceFactory } from './fleet'
+import { useArtifacts, type Artifacts } from './deploy'
+import { STAGE_LABELS, useFleet, type Fleet, type EventSourceFactory } from './fleet'
 import { formatAgo, formatWhen } from './format'
 
 // The glyph differs by state, and that is a requirement rather than a flourish (S0-fe-2).
@@ -44,6 +44,8 @@ function DeviceRow({
   artifactsLoaded,
   onDeployed,
   onSessionExpired,
+  selected,
+  onSelect,
 }: {
   device: DeviceSummary
   now: number
@@ -51,6 +53,8 @@ function DeviceRow({
   artifactsLoaded: boolean
   onDeployed: () => void
   onSessionExpired: () => void
+  selected: boolean
+  onSelect?: (deviceId: string) => void
 }) {
   // Why a sleepy board went offline is its wake interval, so put it where the pointer is.
   const power =
@@ -58,13 +62,33 @@ function DeviceRow({
       ? `wakes every ${device.expected_wake_interval_s} s`
       : device.power_class
 
+  const identity = device.name ?? <code>{device.device_id}</code>
+
   return (
-    <tr data-testid="device-row" data-device-id={device.device_id}>
+    <tr
+      data-testid="device-row"
+      data-device-id={device.device_id}
+      data-selected={selected ? 'true' : undefined}
+    >
       <td>
         <StatusCell device={device} />
       </td>
       <td>
-        {device.name ?? <code>{device.device_id}</code>}
+        {/* The marker is a glyph, not a colour: the theme is monochrome. */}
+        {selected && <span aria-hidden="true">▶ </span>}
+        {onSelect === undefined ? (
+          identity
+        ) : (
+          <button
+            type="button"
+            className="pick-board"
+            aria-pressed={selected}
+            title="Show this board in the status strip"
+            onClick={() => onSelect(device.device_id)}
+          >
+            {identity}
+          </button>
+        )}
         {device.name !== null && (
           <>
             <br />
@@ -82,28 +106,16 @@ function DeviceRow({
         device={device}
         artifacts={artifacts}
         artifactsLoaded={artifactsLoaded}
-        onDeployed={onDeployed}
+        // A deploy makes its row the strip's board: "after a deploy, one glance".
+        onDeployed={() => {
+          onDeployed()
+          onSelect?.(device.device_id)
+        }}
         onSessionExpired={onSessionExpired}
         now={now}
       />
     </tr>
   )
-}
-
-// A lookup with a fallback, deliberately NOT a switch: `stage` is device-controlled and
-// the server whitelists no vocabulary, so an agent newer than this dashboard must render
-// its stage as itself rather than vanish from the list.
-const STAGE_LABELS: Record<string, string> = {
-  link_up: 'network up',
-  time_synced: 'clock set',
-  enrolling: 'enrolling',
-  enrolled: 'enrolled',
-  mqtt_connected: 'connecting to the broker',
-  mqtt_refused: 'the broker refused its credential',
-  halted: 'stopped',
-  // Phrased in the past tense on purpose: this board is up. It is telling us the boot
-  // before this one died on a power fault, which is a supply to fix, not an outage.
-  brownout: 'recovered from a power fault',
 }
 
 function ArrivalRow({ arrival, now }: { arrival: ArrivalSummary; now: number }) {
@@ -132,6 +144,8 @@ function ArrivalRow({ arrival, now }: { arrival: ArrivalSummary; now: number }) 
   )
 }
 
+// One read of the artifact list for the whole table, not one per row. It is read once on
+// mount and never polled — see `deploy.ts`.
 export function FleetView({
   onSessionExpired,
   createEventSource,
@@ -140,13 +154,32 @@ export function FleetView({
   // Injected by the tests only: jsdom has no `EventSource` (see `fleet.ts`).
   createEventSource?: EventSourceFactory
 }) {
-  const { devices, arrivals, error, stream, now, refresh } = useFleet({
-    onSessionExpired,
-    createEventSource,
-  })
-  // One read of the artifact list for the whole table, not one per row. It is read once
-  // on mount and never polled — see `deploy.ts`.
+  const fleet = useFleet({ onSessionExpired, createEventSource })
   const artifacts = useArtifacts({ onSessionExpired })
+  return <FleetTable fleet={fleet} artifacts={artifacts} onSessionExpired={onSessionExpired} />
+}
+
+// The table without its own `useFleet`: the signed-in page opens ONE fleet hook (one
+// EventSource, one of the API's `sse_max_clients` slots) and shares it with the status
+// strip (R2b-fe-1). `onSelect` is passed only by that page; without it the rows render
+// exactly as before.
+//
+// Both hooks are read by the caller, fleet first: effects of a child run before its
+// parent's, and the devices read has always been the first request this table makes.
+export function FleetTable({
+  fleet,
+  artifacts,
+  onSessionExpired,
+  selectedDeviceId = null,
+  onSelect,
+}: {
+  fleet: Fleet
+  artifacts: Artifacts
+  onSessionExpired: () => void
+  selectedDeviceId?: string | null
+  onSelect?: (deviceId: string) => void
+}) {
+  const { devices, arrivals, error, stream, now, refresh } = fleet
 
   return (
     <section aria-labelledby="fleet-heading">
@@ -228,6 +261,8 @@ export function FleetView({
                 artifactsLoaded={artifacts.loaded}
                 onDeployed={refresh}
                 onSessionExpired={onSessionExpired}
+                selected={device.device_id === selectedDeviceId}
+                onSelect={onSelect}
               />
             ))}
           </tbody>

@@ -367,3 +367,14 @@ textarea.log {
   margin: 1.5rem 0;
   box-shadow: 4px 4px 0 var(--ff-line);
 }
+
+/* R2b-fe-1. One strip, on screen through the whole flow. Data, so mono. */
+.status-strip { position: sticky; top: 0; z-index: 1; background: var(--ff-panel);
+  border-bottom: 2px solid var(--ff-line); padding: 0.5rem 0; margin-bottom: 1rem;
+  font-family: var(--ff-mono); font-variant-numeric: tabular-nums; }
+/* A device id in a button is still data: undo `button`'s display font, frame and travel. */
+.pick-board { font-family: var(--ff-mono); font-size: inherit; line-height: inherit;
+  color: inherit; background: none; border: none; box-shadow: none; padding: 0;
+  text-decoration: underline dotted; text-underline-offset: 3px; }
+.pick-board:hover:not(:disabled) { background: none; }
+.pick-board:active:not(:disabled) { transform: none; }

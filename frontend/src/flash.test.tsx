@@ -14,7 +14,7 @@ import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { FlashBoard } from './FlashBoard'
-import { planWrite } from './flash'
+import { planWrite, predictDeviceId } from './flash'
 import type { AgentBuildInfo, AgentManifest } from './api'
 import type { BoardConsole, ConsoleFactory } from './boardConsole'
 import { BUILT_IN_PORT, checkChosenPort } from './flasher'
@@ -439,6 +439,25 @@ describe('FlashBoard — refusals, all before a token is minted', () => {
     expect(screen.getByRole('button', { name: /flash this board/i })).toBeDisabled()
     expect(calls).not.toContain('POST /v1/enrollment-tokens')
     expect(flasher.writes).toHaveLength(0)
+  })
+})
+
+describe('FlashBoard — onBoardIdentified', () => {
+  it('reports the predicted device id once a chip is detected', async () => {
+    mockFetch(await defaultRoutes())
+    const onBoardIdentified = vi.fn()
+    const flasher = new FakeFlasher(chipInfo())
+    render(
+      <FlashBoard
+        onSessionExpired={vi.fn()}
+        createFlasher={async () => flasher}
+        onBoardIdentified={onBoardIdentified}
+      />,
+    )
+    await userEvent.click(screen.getByRole('button', { name: /select port and detect/i }))
+    await screen.findByTestId('chip-info')
+    expect(onBoardIdentified).toHaveBeenCalledWith(predictDeviceId(chipInfo()))
+    expect(onBoardIdentified).toHaveBeenCalledWith('a4cf12b3de90')
   })
 })
 

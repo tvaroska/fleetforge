@@ -97,8 +97,12 @@ export function LoginForm({ onAuthenticated }: { onAuthenticated: () => void }) 
 
 export function SessionGate({
   children,
+  banner,
 }: {
   children: (session: { me: Me; expire: () => void; signOut: () => void }) => ReactNode
+  // Shown while checking and signed out (R2b-fe-1: the strip's versions-only form), so
+  // the login screen keeps its version line. The signed-in page renders its own.
+  banner?: ReactNode
 }) {
   const { state, refresh, expire } = useSession()
 
@@ -111,10 +115,18 @@ export function SessionGate({
     expire()
   }
 
-  if (state.phase === 'checking') return <main aria-busy="true">Checking session…</main>
+  if (state.phase === 'checking') {
+    return (
+      <>
+        {banner}
+        <main aria-busy="true">Checking session…</main>
+      </>
+    )
+  }
   if (state.phase === 'anonymous') {
     return (
       <>
+        {banner}
         {state.detail !== undefined && (
           <p className="bad" role="alert">
             {state.detail}

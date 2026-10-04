@@ -1281,6 +1281,21 @@ the same bridge-chip board on the same bench.
 Implementation notes behind `spec/flows.md` Flow 1 and the 2026-10-04 entries in
 `DECISIONS.md`. The spec says what the operator sees; this says what it would take.
 
+- **Status strip (R2b-fe-1, built).** One sticky strip, first element of the page, replaces
+  the footer's UI/API versions (the footer keeps only the Web Serial line). Sources:
+  `buildInfo`, `GET /v1/healthz` (polled every 60 s so a tab open across a server deploy
+  shows the mismatch), and the selected board's device row. "Selected" is the last board
+  picked in the Fleet table, deployed to, or detected/flashed in the flasher; with nothing
+  picked and exactly one board, that board. "UI and API differ" compares version and the
+  8-char commit prefix, and is a word, not a colour. Signed out it shows versions only. The
+  strip's state comes from the device row (presence, deploy state, `deployOutcome`) or the
+  arrival row; the onboarding console milestone ("Waiting for clock (18 s)") joins in
+  R2b-fe-3/fe-5. The page opens one `useFleet` (in `Dashboard`) shared by table and strip.
+  Observed on dev (real Chromium): signed out `[ UI 0.4.2 · API 0.4.2 ]`, footer
+  `Web Serial available`; rect top 0 after scrolling; stubbed healthz 0.4.3 shows "UI and
+  API differ", gone within 58 s of removing the stub; a deploy of 1.5.0 to a sim board
+  read `Board b26a938324ab · esp32c6 · fw 1.4.2 → 1.5.0 · online · updating: rebooting`,
+  then `fw 1.5.0 · online · last update good`, matching the row; one `/v1/events` stream.
 - **Layout profile.** Arduino IDE and PlatformIO hardcode the app offset (`0x10000`), which
   `ab-4m-v1` does not use. `ab-4m-arduino-v1` (`ff_cfg` at `0x3D0000`) exists for that
   case. Offering it at onboarding means the stock starter agent has to be built for each
