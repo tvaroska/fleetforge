@@ -2,37 +2,92 @@
 
 *Companion to [prd.md](prd.md), [design/architecture.md](../design/architecture.md) and [device-protocol.md](device-protocol.md). The two tasks that define the product from the user's chair.*
 
-## Flow 1 — Enroll a board into the registry
+## Flow 1 — Onboard the first board (and every board after it)
+
+*Persona order for this flow (2026-10-04, [DECISIONS.md](../DECISIONS.md)): **Alex** (hobbyist) is primary and the browser flow is built for them; **Marcus** (OEM) is second — the browser flow is their pilot board, and batch flashing reuses the same session resource; **Siddharth** (CI) and **Sarah** (HIL lab) are served by that resource without a second design; **Elena** (swarm) is deferred except for the clock-source line in step 5.*
+
+The operator sees **one flow with one result**, and a status strip that stays on screen for all of it:
 
 ```
-1. Dashboard → "Enroll a board" → generate scoped, revocable ENROLLMENT TOKEN
-2. Plug board into USB → click "Detect" (Web Serial; 1 click to grant port)
-3. esptool-js auto-detects: chip family + revision + flash size + PSRAM + MAC
-   → confirm board from a narrowed shortlist (always incl. "enter manually")
-4. Dashboard flashes the matching prebuilt agent + baked config:
-   broker URL + Wi-Fi creds + enrollment token          [USB config flash]
-   (config goes into the 4 KB `ff_cfg` partition — device-protocol.md
-    → *Partition layouts*; NVS is never written by the flasher)
-5. Board boots → POSTs /v1/enroll over HTTPS: token + identity
-   (device_id from eFuse MAC, platform_type, capabilities, link/power
-    class, partition layout, slot size, fw version)
-6. Token valid → AUTO-ENROLL: registry entry created, per-device broker
-   credential issued, TOKEN BURNED (single-use)
-   → agent stores credential in NVS and connects to the broker
-7. Dashboard: user names it, assigns a group/tag
-→ Managed, online device
+[ UI 0.4.2 · API 0.4.2 ]  Board 94a990dd09a4 · ESP32-S3 · COM3 · fw 0.3.1 → 0.4.5 · Waiting for clock (18 s)
+```
+
+```
+1. CONNECT   Dashboard → "Add a board" → plug into USB → one click grants the port (Web Serial).
+             A missing or wrong port gets the plain-language port help, never a raw error.
+2. IDENTIFY  esptool-js reads chip family + revision + flash size + PSRAM + MAC
+             → confirm board from a narrowed shortlist (always incl. "enter manually").
+             PRE-FLIGHT CARD, before anything is written: what is on the board now (enrolled?
+             which firmware?) and exactly what the flash will change. A board that is already
+             enrolled is offered "re-flash, keep identity" next to "re-flash and re-enrol".
+3. CONFIGURE Broker URL + link (Wi-Fi or Ethernet). Wi-Fi credentials are remembered in THIS
+             BROWSER only (never sent to or stored by the server), so the operator types
+             them once per browser, not once per flash.
+4. FLASH     Dashboard mints a scoped, revocable, single-use ENROLLMENT TOKEN, flashes the
+             matching prebuilt agent + baked config            [USB config flash]
+             (config goes into the 4 KB `ff_cfg` partition — device-protocol.md
+              → *Partition layouts*; NVS is never written by the flasher).
+             One progress bar. After the write the operator touches nothing.
+5. WATCH     The console re-acquires the board by itself and shows a MILESTONE TIMELINE:
+             Agent running → Network up → Clock set → Enrolled → On the fleet,
+             each with elapsed seconds. A stalled milestone says, in plain language, what
+             the board is doing and what happens next — e.g. "No time server reachable;
+             the board gives up after 15 s and carries on" — and names the clock source.
+             Reading a raw UART log is not a step in any outcome.
+6. RESULT    One card, success or failure: device id, firmware, link, clock source,
+             enrolled, on the fleet, UI and API versions. A failure shows ONE cause and ONE
+             next action. The card is the same data an API client reads (see below).
+→ Managed, online device. Name it and assign a group/tag from the card.
+```
+
+**On the board** (between steps 4 and 5; unchanged):
+
+```
+B1. Board boots → POSTs /v1/enroll over HTTPS: token + identity
+    (device_id from eFuse MAC, platform_type, capabilities, link/power
+     class, partition layout, slot size, fw version)
+B2. Token valid → AUTO-ENROLL: registry entry created, per-device broker
+    credential issued, TOKEN BURNED (single-use)
+    → agent stores credential in NVS and connects to the broker
 ```
 
 **Decisions:**
+- **One flow, one result, one status strip.** The versions, the selected board's firmware and the onboarding state are read in one place. Today they are split across a footer, a table and the flasher, and an operator has to compare them by hand.
+- **Pre-flight before anything destructive.** Step 2 says what will change before the flash. A flash that re-enrols a board ends its previous identity and baseline; the operator must be told first, not find out afterwards.
+- **"Re-flash, keep identity" is a requirement, not yet a mechanism.** Until it is built, every flash mints a fresh token and the board re-enrols (as today). How it keeps the credential and `ff_cfg` without burning a token is a design question, tracked in `docs/features/enrollment.md`.
+- **Onboarding is an API resource.** An *onboarding session* carries `state`, the milestone list with timestamps, the plain-language stall text, and the final result. The dashboard renders it; CI (Siddharth), a HIL rack (Sarah) and a batch CLI (Marcus, post-v1) read and drive the same resource. No second design for headless use.
 - **Detection/flashing = in-dashboard Web Serial** (`esptool-js`, the ESP Web Tools stack). Plug in → one click to grant the port → chip auto-detected → flash. Zero install.
   - *Caveats:* Chrome/Edge only; needs `localhost`/HTTPS — **satisfied in v1 by the
     hosted public domain** (Let's Encrypt), and by `localhost` for the dev loop; one mandatory click (browsers forbid silent port enumeration); no batch enrollment in v1 — **CLI flasher for batch/CI is post-v1.**
-- **ID granularity = chip-level auto + confirm board.** esptool reliably identifies the *silicon*; the exact dev board is a **heuristic shortlist** (chip + flash + PSRAM matched to a board DB) the user confirms — with "enter manually" always available. The running agent self-reports authoritative `platform_type` + capabilities anyway (step 5), so detection only needs to pick the right binary + seed identity.
+- **ID granularity = chip-level auto + confirm board.** esptool reliably identifies the *silicon*; the exact dev board is a **heuristic shortlist** (chip + flash + PSRAM matched to a board DB) the user confirms — with "enter manually" always available. The running agent self-reports authoritative `platform_type` + capabilities anyway (B1), so detection only needs to pick the right binary + seed identity.
 - **device_id = eFuse MAC** (stable, factory-unique) — satisfies the identity contract.
 - **Provisioning = USB config flash (v1).** Creds baked in at flash time. *SoftAP captive portal is post-v1* — until then, a Wi-Fi change means re-flash (accepted trade-off for a lean v1).
 - **Trust = auto-enroll via a single-use token, exchanged over HTTPS** — not over MQTT, so the broker never has to authenticate a client it has never heard of. Zero-friction and batch-friendly. Rationale, threat model and the exact exchange: [device-protocol.md](device-protocol.md) → *Enrolment happens over HTTPS*. Token lifetime and posture: [prd.md](prd.md) → *Security & data posture*.
+- **Clock visibility, not a field gateway.** Elena's offline gateway (local broker, artifact cache, time source) stays out of v1. What v1 owes her persona is only that step 5 names the clock source and explains the SNTP stall.
 
 ## Flow 2 — Put code onto a registered board
+
+*Persona order for this flow (2026-10-04, [DECISIONS.md](../DECISIONS.md)): **Alex** primary; **Marcus** second (audit record now, rings later); **Siddharth** and **Sarah** through the same API resource; **Elena** deferred — v1 only keeps "staged" distinct from "apply". v1 updates **one board at a time**; group and bulk deploy is V3.*
+
+What the operator sees is **one flow with one result**, under the same status strip as Flow 1:
+
+```
+1. PICK       Drop a .bin into the dashboard, or choose an already-uploaded build. Version and
+              target are read from the file where possible. No shell step.
+2. PRE-CHECK  A card before anything is sent: current → target version; the board's chip and
+              partition layout against the build's; whether the board is online; what happens
+              if the update fails ("rolls back on its own"). A build whose layout disagrees
+              with the board's is REFUSED here, in plain language, not sent.
+3. SEND       One button. An offline board is told so: "queued until it reconnects".
+              Idempotent: a repeated send is deduplicated, never a second download.
+4. WATCH      A timeline — sent → downloading → staged → rebooting → confirmed — with elapsed
+              seconds. A stall explains itself ("no data for 60 s; the board gives up at 80 s").
+              It reports only what the agent really reports: no invented percentage.
+5. RESULT     One card: firmware before → after, GOOD or ROLLED BACK with the reason, UI and
+              API versions, who sent it and when. A failure shows one cause and one next action.
+```
+
+**The transaction** (what the board and server do between steps 3 and 5; unchanged):
 
 ```
 1. Upload artifact (.bin) → declare version + platform_type
@@ -46,7 +101,15 @@
 7. Dashboard: per-device progress + final delivery-success / fleet-safety state
 ```
 
-**Decisions:**
+**Decisions (operator view):**
+- **One flow, one result, one status strip.** Before and after firmware, the verdict and the versions are read in one place, not compared by hand across a table row and a footer.
+- **Getting firmware in is a dashboard operation.** An upload form replaces `docs/runbooks/upload-artifact.sh` as the way in (`spec/standards.md` → *dashboard*).
+- **Pre-check before send.** The layout refusal that CUJ-1 requires happens at step 2, before any bytes move; the card also says what a failure will do.
+- **The deployment is an API resource.** The result card, an audit record (who, what, when) and a CI client read the same thing. This is the audit trail Marcus needs; rings and provenance build on it later.
+- **The timeline reports only what the agent reports.** No progress bar: `downloading` is published once, so a bar would sit still and read as a hang.
+- **Open, recorded not decided:** how a sleepy battery node avoids a false rollback from the confirm timer, and whether a failed update offers "send again".
+
+**Decisions (transaction):**
 - **Artifact source = user's own toolchain (v1).** They build the `.bin` (idf.py / PlatformIO / Arduino); the server never builds in v1. *V2 adds a server-side compiler as one more producer — see [build-pipeline.md](../docs/features/build-pipeline.md).* Artifacts are opaque + versioned.
 - **Self-test = default + optional custom.** Default self-test is **"boots and reconnects to the broker"** (catches boot-loops, zero user effort). Users may add a **custom self-test baked into firmware** — one entrypoint the agent calls after boot and the simulator calls as its gate: *write once, run in sim and on device, no drift.*
 - **Targeting = device or group/tag** (v1). Staged/canary rollout is post-v1.
@@ -75,4 +138,4 @@ VCS integration and the server-side compiler are **automated artifact producers*
 
 ## Where the pieces line up
 - The **self-test** appears in Flow 2 step 3 (sim gate) and step 6 (device confirm) — the same code, two enforcement points.
-- **Identity** announced in Flow 1 step 5 is the `platform_type` + capabilities the server matches against in Flow 2 step 2.
+- **Identity** announced in Flow 1 step B1 is the `platform_type` + capabilities the server matches against in Flow 2 step 2.

@@ -6,6 +6,75 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-04 — Firmware updates are one guided flow with one result; Alex first (flows.md Flow 2 operator view added)
+
+**Decided: `spec/flows.md` Flow 2 gains an operator view of five steps — Pick, Pre-check,
+Send, Watch, Result — above the existing 7-step transaction, which is unchanged and keeps its
+step numbers. Same persona order as the onboarding decision of the same date: Alex primary,
+Marcus second, Siddharth and Sarah via the same API resource, Elena deferred. Spec change
+only: no frontend, API, agent or schema change is built and no task is filed.**
+
+- **Why.** Today the pieces work (the `good` / `rolled back` verdict, deduplicated sends,
+  auto-rollback) but nothing says what will change or what happened: the version dropdown
+  and Deploy button never say whether the build fits the board, the result is a word on a
+  table row, and the before/after versions sit in different places. The only way to get a
+  build in is a shell script, against `spec/standards.md` → *dashboard*.
+- **Pre-check refuses a mismatched layout before sending.** CUJ-1 already lists "a wrong
+  flash layout is refused, not flashed" as a hard-fail trap; step 2 is where the operator
+  meets it, in plain language.
+- **The deployment is an API resource** carrying state, timeline, verdict, who and when.
+  The dashboard renders it; CI and a HIL rack read the same thing; it is the audit record
+  Marcus needs. Rings and provenance (V2) build on it.
+- **No progress bar, kept.** The agent publishes `downloading` once; the timeline shows
+  elapsed time and the stall rule, not a percentage.
+- **Still one board at a time in v1.** Groups and bulk deploy stay V3; Elena's
+  stage-in-air, apply-on-ground only requires that "staged" stay distinct from "apply".
+- **Open, not decided:** sleepy battery nodes and the confirm timer (a node that wakes,
+  reports and sleeps in seconds can be rolled back falsely), and a "send again" action after
+  a failed update.
+- Supersedes no earlier entry; extends the Flow 2 text in `spec/flows.md`.
+
+
+## 2026-10-04 — First-board onboarding is one guided flow with one result; Alex first (flows.md Flow 1 rewritten)
+
+**Decided: `spec/flows.md` Flow 1 is rewritten as six steps — Connect, Identify (with a
+pre-flight card), Configure, Flash, Watch (milestone timeline), Result — with a status strip
+that shows the UI version, API version, the board and its firmware, and the onboarding state
+in one place. Persona order for this flow: Alex (hobbyist) primary; Marcus (OEM) second;
+Siddharth (CI) and Sarah (HIL lab) served by the same API resource; Elena (swarm) deferred
+except for showing the clock source. This entry records the spec change only: no frontend,
+API, agent or schema change is built, and no task is filed yet.**
+
+- **Why now.** A bench session on 2026-10-04 (`S0-test-1` / `S0-test-2`) had the operator
+  hunting between the page footer (UI/API version), the Fleet table (firmware) and the flasher
+  (port, progress) to answer one question, "is this board on the version I just deployed?",
+  and a board waiting on "Clock set" gave no hint whether it was slow, retrying or failed.
+  `spec/standards.md` → *Unaided onboarding* already forbids reading a raw log as a step; the
+  flow did not yet say how.
+- **Pre-flight before destructive.** A flash that re-enrols a board ends its identity and
+  baseline (the 0.3.1 baseline on `94a990dd09a4` was given up this way). Step 2 must say what
+  will change first and offer "re-flash, keep identity". The requirement is spec'd; the
+  mechanism (keep the broker credential and `ff_cfg` without burning a token) is an open
+  design question for `docs/features/enrollment.md`. Until it is built every flash still
+  mints a fresh token.
+- **Wi-Fi credentials are remembered in the browser only.** Never sent to or stored by the
+  server. This removes the retype on every flash without widening what the server holds.
+- **Onboarding is an API resource.** An *onboarding session*: `state`, milestones with
+  timestamps, plain-language stall text, final result. The dashboard renders it; CI, a HIL
+  rack and the post-v1 batch CLI read the same thing. Headless use needs no second design.
+- **Persona order, and what it costs.** Alex first because the *Unaided onboarding*
+  standard describes them. Marcus's pilot board uses the browser flow, and batch flashing
+  stays post-v1. Elena's field gateway (local broker, artifact cache, time source) stays out
+  of v1: the only obligation is that step 5 names the clock source and explains the 15 s
+  SNTP stall.
+- **Cost of step 5.** A useful milestone timeline needs the agent to report clock and link
+  state more clearly than the log lines do today. That is an agent and protocol question;
+  nothing is decided about the wire format here.
+- **Left alone:** the old step numbers cited in `docs/features/dashboard.md` (step 7, naming,
+  now the end of step 6) and `docs/features/infrastructure.md` (step 4, the flash and its
+  partition) still resolve; the board-side exchange is unchanged and relabelled B1/B2.
+  Supersedes no earlier entry; it replaces the Flow 1 text in `spec/flows.md`.
+
 ## 2026-10-03 — rollback_capable is measured, never claimed; the partition fingerprint hashes geometry, not labels (R2-spec-1, proposed)
 
 **Decided: step 1 of board-profiles puts three additive fields on `up/announce`:
