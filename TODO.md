@@ -111,6 +111,7 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       tick S0-bug-1. Silent again after 2-4 min with nothing touched: firmware wedge, file a new
       S0 fw task (suspects: USB-Serial-JTAG console back-pressure, task WDT that does not
       reset) and tick S0-bug-1. If it never connects, re-flash from the flash page.
+      _(2026-10-04: still offline at 15:33 UTC per devices.last_seen 14:24:08, presence_reported = f; operator power-cycle still owed)_
 - [ ] **S0-infra-10**: Prod's flasher serves agent 0.3.2 (esp32s3) and 0.2.0 (esp32/c3/c6); the repo is at 0.4.5 (P1, 0.25d)
       Found by S0-bug-1 (2026-10-04): `gs://btvaroska/fleetforge/agent/index.json` was last
       published 2026-09-23. Every board flashed from bingo.tvaroska.sk gets a pre-R2 agent
