@@ -134,6 +134,16 @@ describe('FleetView', () => {
     expect(rows[1]).toHaveAttribute('data-device-id', 'b2000000dead')
   })
 
+  it('shows a named board as its name, with the device id beneath', async () => {
+    await renderFleet([device({ name: 'coop door' }), device({ device_id: 'b2000000dead' })])
+
+    const rows = screen.getAllByTestId('device-row')
+    expect(rows[0]).toHaveTextContent('coop door')
+    expect(within(rows[0]).getByText('a4cf12b3de90').tagName).toBe('CODE')
+    // An unnamed board is still its id.
+    expect(within(rows[1]).getByText('b2000000dead')).toBeInTheDocument()
+  })
+
   it('shows the announced firmware version, and an em dash before the board announces', async () => {
     await renderFleet([device({ fw_version: '1.4.2' }), device({ device_id: 'b2000000dead', fw_version: null })])
 

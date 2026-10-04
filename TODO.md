@@ -243,7 +243,7 @@ are R3). Order inside each flow: the one-place status first, then the cards, the
       device list or `GET /v1/events` even when the console lost the port. Built without waiting
       for the bench: the server's view is the truth either way. `S0-test-2` (Check F) tests it
       afterwards.
-- [ ] **R2b-be-1**: Set a device's name and tag (P1, 0.5d)
+- [x] **R2b-be-1**: Set a device's name and tag (P1, 0.5d) _(done 2026-10-04; see docs/features/dashboard.md)_
       `name` is in the schema and in `GET /v1/devices`, but nothing sets it, so every device
       is `null`. A `PATCH /v1/devices/{id}`, admin-only. Acceptance: round-trips and shows in
       the table.

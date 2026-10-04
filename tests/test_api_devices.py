@@ -10,20 +10,33 @@ cannot: the endpoint opens its own session against the same engine and would not
 uncommitted rows. So rows are committed and cleaned up by the `fleet` fixture.
 """
 
+import asyncio
 import datetime as dt
+import json
 import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 
+import asyncpg
+import httpx
 import pytest
 from fastapi import FastAPI
 from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from fleetforge.clock import now_utc
-from fleetforge.db.models import DeployEvent, Device, DeviceProgress
+from fleetforge.db.base import asyncpg_dsn
+from fleetforge.db.models import DeployEvent, Device, DeviceGroup, DeviceProgress
 from fleetforge.deploys import MAX_DEPLOY_STEPS
-from tests.conftest import client_for, login_admin, settings_for_tests
+from fleetforge.events import EVENTS_CHANNEL, EventType
+from tests.conftest import (
+    TEST_DB_NAME,
+    capture_logs,
+    client_for,
+    database_url_for,
+    login_admin,
+    settings_for_tests,
+)
 
 DEVICE_ID = "a4cf12b3de91"
 
@@ -40,6 +53,7 @@ async def fleet(engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
             # Before the devices: the FK is `ON DELETE RESTRICT`, which is the point.
             await session.execute(delete(DeployEvent))
             await session.execute(delete(Device))
+            await session.execute(delete(DeviceGroup))
             await session.commit()
 
 
@@ -759,3 +773,279 @@ async def test_a_requested_rows_sha256_appears_nowhere_in_the_steps(
     assert response.status_code == 200
     assert digest not in response.text
     assert "sha256" not in response.text
+
+
+# ---------------------------------------------------------------------------
+# PATCH /v1/devices/{device_id} (R2b-be-1)
+# ---------------------------------------------------------------------------
+
+OTHER_ID = "a4cf12b3de92"
+
+
+async def patch_device(app: FastAPI, token: str, device_id: str, body: Any) -> httpx.Response:
+    async with client_for(app) as client:
+        return await client.patch(
+            f"/v1/devices/{device_id}", json=body, headers={"Authorization": f"Bearer {token}"}
+        )
+
+
+async def row_of(app: FastAPI, token: str, device_id: str = DEVICE_ID) -> Any:
+    body = await list_devices(app, token)
+    return next(row for row in body["devices"] if row["device_id"] == device_id)
+
+
+async def add_group(session: AsyncSession) -> uuid.UUID:
+    group = DeviceGroup(name=f"bench-{uuid.uuid4().hex[:8]}")
+    session.add(group)
+    await session.commit()
+    return group.id
+
+
+async def test_patch_sets_a_name_that_the_fleet_list_then_shows(
+    admin_app: FastAPI, fleet: AsyncSession
+) -> None:
+    await add_device(fleet)
+    token = await login_admin(admin_app)
+
+    response = await patch_device(admin_app, token, DEVICE_ID, {"name": "coop door"})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["name"] == "coop door"
+    assert response.json()["device_id"] == DEVICE_ID
+    assert (await row_of(admin_app, token))["name"] == "coop door"
+
+
+async def test_patch_returns_the_same_row_shape_as_the_list(
+    admin_app: FastAPI, fleet: AsyncSession
+) -> None:
+    await add_device(fleet)
+    token = await login_admin(admin_app)
+
+    response = await patch_device(admin_app, token, DEVICE_ID, {"name": "coop door"})
+
+    assert response.json() == await row_of(admin_app, token)
+
+
+async def test_surrounding_whitespace_is_trimmed(admin_app: FastAPI, fleet: AsyncSession) -> None:
+    await add_device(fleet)
+    response = await patch_device(
+        admin_app, await login_admin(admin_app), DEVICE_ID, {"name": "  coop door  "}
+    )
+    assert response.json()["name"] == "coop door"
+
+
+@pytest.mark.parametrize("cleared", ["", "   ", None])
+async def test_a_blank_or_null_name_clears_it(
+    admin_app: FastAPI, fleet: AsyncSession, cleared: str | None
+) -> None:
+    await add_device(fleet, name="coop door")
+    token = await login_admin(admin_app)
+
+    response = await patch_device(admin_app, token, DEVICE_ID, {"name": cleared})
+
+    assert response.status_code == 200
+    assert (await row_of(admin_app, token))["name"] is None
+
+
+async def test_an_absent_key_leaves_its_field_alone(
+    admin_app: FastAPI, fleet: AsyncSession
+) -> None:
+    group_id = await add_group(fleet)
+    await add_device(fleet, name="coop door", group_id=group_id)
+    token = await login_admin(admin_app)
+
+    await patch_device(admin_app, token, DEVICE_ID, {"group_id": None})
+    row = await row_of(admin_app, token)
+    assert (row["name"], row["group_id"]) == ("coop door", None)
+
+    await patch_device(admin_app, token, DEVICE_ID, {"group_id": str(group_id)})
+    await patch_device(admin_app, token, DEVICE_ID, {"name": "x"})
+    row = await row_of(admin_app, token)
+    assert (row["name"], row["group_id"]) == ("x", str(group_id))
+
+
+async def test_an_empty_body_is_a_no_op(admin_app: FastAPI, fleet: AsyncSession) -> None:
+    await add_device(fleet, name="coop door")
+    token = await login_admin(admin_app)
+    before = await row_of(admin_app, token)
+
+    response = await patch_device(admin_app, token, DEVICE_ID, {})
+
+    assert response.status_code == 200
+    assert response.json() == before == await row_of(admin_app, token)
+
+
+async def test_a_group_can_be_assigned_and_cleared(admin_app: FastAPI, fleet: AsyncSession) -> None:
+    group_id = await add_group(fleet)
+    await add_device(fleet)
+    token = await login_admin(admin_app)
+
+    assert (
+        await patch_device(admin_app, token, DEVICE_ID, {"group_id": str(group_id)})
+    ).status_code == 200
+    assert (await row_of(admin_app, token))["group_id"] == str(group_id)
+
+    await patch_device(admin_app, token, DEVICE_ID, {"group_id": None})
+    assert (await row_of(admin_app, token))["group_id"] is None
+
+
+async def test_an_unknown_group_is_404_and_changes_nothing(
+    admin_app: FastAPI, fleet: AsyncSession
+) -> None:
+    await add_device(fleet)
+    token = await login_admin(admin_app)
+    missing = uuid.uuid4()
+
+    response = await patch_device(
+        admin_app, token, DEVICE_ID, {"group_id": str(missing), "name": "other"}
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == f"no such group: {missing}"
+    assert (await row_of(admin_app, token))["name"] is None
+
+
+async def test_an_unknown_device_is_404(admin_app: FastAPI, fleet: AsyncSession) -> None:
+    response = await patch_device(
+        admin_app, await login_admin(admin_app), "ffffffffffff", {"name": "x"}
+    )
+    assert response.status_code == 404
+    assert response.json()["detail"] == "no such device: ffffffffffff"
+
+
+async def test_a_decommissioned_device_is_404(admin_app: FastAPI, fleet: AsyncSession) -> None:
+    await add_device(fleet, decommissioned_at=now_utc())
+    response = await patch_device(admin_app, await login_admin(admin_app), DEVICE_ID, {"name": "x"})
+    assert response.status_code == 404
+    assert response.json()["detail"] == f"no such device: {DEVICE_ID}"
+
+
+async def test_unauthenticated_patch_is_401(admin_app: FastAPI, fleet: AsyncSession) -> None:
+    await add_device(fleet)
+    async with client_for(admin_app) as client:
+        response = await client.patch(f"/v1/devices/{DEVICE_ID}", json={"name": "x"})
+    assert response.status_code == 401
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        {"name": "x" * 65},
+        {"name": "a\nb"},
+        {"name": "a\u202eb"},
+        {"name": "A4CF12B3DE91"},
+        {"nmae": "x"},
+        {"device_id": "ffffffffffff"},
+        {"fw_version": "9"},
+        {"name": 5},
+    ],
+)
+async def test_a_bad_patch_body_is_422(
+    admin_app: FastAPI, fleet: AsyncSession, body: dict[str, Any]
+) -> None:
+    await add_device(fleet)
+    response = await patch_device(admin_app, await login_admin(admin_app), DEVICE_ID, body)
+    assert response.status_code == 422
+
+
+async def test_a_name_of_exactly_64_characters_passes(
+    admin_app: FastAPI, fleet: AsyncSession
+) -> None:
+    await add_device(fleet)
+    response = await patch_device(
+        admin_app, await login_admin(admin_app), DEVICE_ID, {"name": "x" * 64}
+    )
+    assert response.status_code == 200
+
+
+async def test_a_name_another_live_board_uses_is_409(
+    admin_app: FastAPI, fleet: AsyncSession
+) -> None:
+    await add_device(fleet, name="coop door")
+    await add_device(fleet, OTHER_ID)
+
+    response = await patch_device(
+        admin_app, await login_admin(admin_app), OTHER_ID, {"name": "Coop Door"}
+    )
+
+    assert response.status_code == 409
+    assert DEVICE_ID in response.json()["detail"]
+
+
+async def test_re_sending_a_boards_own_name_is_fine(
+    admin_app: FastAPI, fleet: AsyncSession
+) -> None:
+    await add_device(fleet, name="coop door")
+    response = await patch_device(
+        admin_app, await login_admin(admin_app), DEVICE_ID, {"name": "coop door"}
+    )
+    assert response.status_code == 200
+
+
+async def test_a_decommissioned_boards_name_does_not_block(
+    admin_app: FastAPI, fleet: AsyncSession
+) -> None:
+    await add_device(fleet, name="coop door", decommissioned_at=now_utc())
+    await add_device(fleet, OTHER_ID)
+    response = await patch_device(
+        admin_app, await login_admin(admin_app), OTHER_ID, {"name": "coop door"}
+    )
+    assert response.status_code == 200
+
+
+@pytest.fixture
+async def listener() -> AsyncIterator[asyncpg.Connection]:
+    connection = await asyncpg.connect(asyncpg_dsn(database_url_for(TEST_DB_NAME)))
+    try:
+        yield connection
+    finally:
+        await connection.close()
+
+
+async def test_a_rename_is_emitted_on_ff_events(
+    admin_app: FastAPI, fleet: AsyncSession, listener: asyncpg.Connection
+) -> None:
+    await add_device(fleet)
+    received: asyncio.Queue[str] = asyncio.Queue()
+    await listener.add_listener(EVENTS_CHANNEL, lambda *args: received.put_nowait(args[-1]))
+
+    response = await patch_device(
+        admin_app, await login_admin(admin_app), DEVICE_ID, {"name": "coop door"}
+    )
+    assert response.status_code == 200
+
+    payload = json.loads(await asyncio.wait_for(received.get(), timeout=5))
+    assert payload["type"] == EventType.DEVICE_UPDATED
+    assert payload["device_id"] == DEVICE_ID
+    assert "coop door" not in json.dumps(payload)
+
+
+async def test_a_refused_patch_emits_nothing(
+    admin_app: FastAPI, fleet: AsyncSession, listener: asyncpg.Connection
+) -> None:
+    await add_device(fleet, name="coop door")
+    await add_device(fleet, OTHER_ID)
+    received: asyncio.Queue[str] = asyncio.Queue()
+    await listener.add_listener(EVENTS_CHANNEL, lambda *args: received.put_nowait(args[-1]))
+
+    response = await patch_device(
+        admin_app, await login_admin(admin_app), OTHER_ID, {"name": "coop door"}
+    )
+    assert response.status_code == 409
+
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(received.get(), timeout=0.5)
+
+
+async def test_the_name_is_not_logged(admin_app: FastAPI, fleet: AsyncSession) -> None:
+    await add_device(fleet)
+    token = await login_admin(admin_app)
+
+    with capture_logs("fleetforge") as records:
+        assert (
+            await patch_device(admin_app, token, DEVICE_ID, {"name": "coop door"})
+        ).status_code == 200
+
+    messages = [record.getMessage() for record in records]
+    assert any(f"device {DEVICE_ID} updated" in message for message in messages)
+    assert not any("coop door" in message for message in messages)

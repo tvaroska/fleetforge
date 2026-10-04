@@ -6,6 +6,24 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-04 — A board's name and group are set with one PATCH; "tag" is the existing group, not a new column (R2b-be-1)
+
+**Decided: `PATCH /v1/devices/{id}` takes `{name?, group_id?}`, admin-only, merge-patch. Backend only; no migration, no spec edit.**
+
+- **"Tag" is `devices.group_id`.** `spec/flows.md` treats group and tag as one concept and `spec/standards.md` says naming must not grow into a second, weaker grouping. A free-text column would need a migration.
+- **Merge-patch.** Absent key: untouched. Explicit `null`: cleared. `{}` is a 200 no-op that writes and emits nothing. `extra="forbid"` so a typo is a 422.
+- **Name rules (422).** Stripped; blank becomes NULL; at most 64 chars after stripping; no `Cc`/`Cf` characters; not 12-hex (a MAC-shaped name on board B would read as board A's id).
+- **Unique among live boards, case-insensitively, in the app (409).** No DB constraint (would need a migration). Excludes the device itself and decommissioned rows.
+- **Unknown group: 404 `no such group`; unknown/decommissioned device: 404 `no such device`.** All checks run before any assignment, so a refused PATCH changes nothing.
+- **Response is the updated `DeviceSummary`.** Emits `device.updated` on `ff_events` in the same transaction; the name is not in the envelope. Logs carry field names only.
+- **T2 on the dev stack:** A-L all as expected (200 trimmed, round trip, 409 naming be101, 422 x2, atomic 404, 404, 401, null clears, log lines list field names, 0 log hits for the name).
+- **Rejected:** a `tag` column; a DB unique index on name; group CRUD (V3); the name in the event envelope.
+- **Proposed follow-up, not filed:** a read-only `GET /v1/groups` before R2b-fe-6 can offer a group picker.
+
+Supersedes nothing.
+
+---
+
 ## 2026-10-04 — The console panel also reads the server's view: Enrolled / On the fleet are marked from the device list against a snapshot taken when the flash starts (R2b-fe-5)
 
 **Decided: `serverWatch.ts` judges `Dashboard`'s one `useFleet` against a baseline; `BoardConsole.tsx` merges it into the console's summary. Frontend only. Details: `docs/features/enrollment.md` → *Two-source watch*.**

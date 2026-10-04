@@ -63,6 +63,11 @@ class EventType(StrEnum):
     # device-controlled text, and the consumer re-reads like every other type.
     DEVICE_PROGRESS = "device.progress"
 
+    # `PATCH /v1/devices/{id}` (R2b-be-1) changed an operator-set fact: name or group.
+    # The new values are NOT in the envelope: the name is operator text, and the
+    # consumer re-reads like every other type.
+    DEVICE_UPDATED = "device.updated"
+
 
 class DeviceEvent(BaseModel):
     """The `ff_events` envelope.

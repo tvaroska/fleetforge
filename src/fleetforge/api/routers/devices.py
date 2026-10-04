@@ -1,4 +1,4 @@
-"""`GET /v1/devices` — the fleet read model.
+"""`GET /v1/devices` — the fleet read model — and `PATCH /v1/devices/{device_id}`.
 
 The other half of the SSE contract. `fleetforge.events` and `fleetforge.presence`
 both define the rule as *"the event is a hint; the consumer re-reads
@@ -11,6 +11,12 @@ R0-fe-2, the CLI and Home Assistant all use it.
 `settings.presence_tolerance` — there is no `2.5` in this file and no `online`
 column in the database. One `now` serves the whole response: a list whose rows
 disagree about the current time is a confusing thing to debug.
+
+`PATCH /v1/devices/{device_id}` (R2b-be-1) sets the two operator-set facts, `name` and
+`group_id` (the *group/tag* of `spec/flows.md`), with merge-patch semantics. Device
+claims are not settable here: the board announces them. Names are unique among live
+boards, case-insensitively, checked in the app (no DB constraint, which would need a
+migration). The route emits `device.updated` so other open dashboards re-read.
 
 Deliberately absent, each with a reason:
 
@@ -49,8 +55,9 @@ for the dashboard's update timeline.
 
 import logging
 
-from fastapi import APIRouter, Depends
-from sqlalchemy import select
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 
 from fleetforge.api.deps import (
     AdminDep,
@@ -65,10 +72,12 @@ from fleetforge.api.schemas import (
     DeploySummary,
     DeviceList,
     DeviceSummary,
+    DeviceUpdate,
 )
 from fleetforge.clock import now_utc
-from fleetforge.db.models import Device
+from fleetforge.db.models import Device, DeviceGroup
 from fleetforge.deploys import DeploySnapshot, latest_deploys
+from fleetforge.events import DeviceEvent, EventType, emit
 from fleetforge.presence import is_online
 from fleetforge.progress import has_already_arrived, latest_progress
 
@@ -106,6 +115,30 @@ def _deploy_summary(
         detail=snapshot.detail,
         steps=[DeployStep(state=step.state, at=step.at) for step in snapshot.steps],
         confirm_timeout_s=confirm_timeout_s,
+    )
+
+
+def _device_summary(row: Device, *, online: bool, deploy: DeploySummary | None) -> DeviceSummary:
+    """One row as the fleet view sees it. Field by field, `from_attributes` stays off."""
+    return DeviceSummary(
+        device_id=row.device_id,
+        name=row.name,
+        group_id=row.group_id,
+        platform_type=row.platform_type,
+        fw_version=row.fw_version,
+        agent_version=row.agent_version,
+        link_type=row.link_type,
+        power_class=row.power_class,
+        expected_wake_interval_s=row.expected_wake_interval_s,
+        parent_device_id=row.parent_device_id,
+        partition_layout=row.partition_layout,
+        ota_slot_size=row.ota_slot_size,
+        capabilities=list(row.capabilities),
+        last_seen=row.last_seen,
+        enrolled_at=row.enrolled_at,
+        broker_provisioned_at=row.broker_provisioned_at,
+        online=online,
+        deploy=deploy,
     )
 
 
@@ -148,23 +181,8 @@ async def list_devices(
 
     return DeviceList(
         devices=[
-            DeviceSummary(
-                device_id=row.device_id,
-                name=row.name,
-                group_id=row.group_id,
-                platform_type=row.platform_type,
-                fw_version=row.fw_version,
-                agent_version=row.agent_version,
-                link_type=row.link_type,
-                power_class=row.power_class,
-                expected_wake_interval_s=row.expected_wake_interval_s,
-                parent_device_id=row.parent_device_id,
-                partition_layout=row.partition_layout,
-                ota_slot_size=row.ota_slot_size,
-                capabilities=list(row.capabilities),
-                last_seen=row.last_seen,
-                enrolled_at=row.enrolled_at,
-                broker_provisioned_at=row.broker_provisioned_at,
+            _device_summary(
+                row,
                 online=row.device_id in online_now,
                 deploy=_deploy_summary(
                     deploys.get(row.device_id), confirm_timeout_s=settings.confirm_timeout_s
@@ -190,3 +208,86 @@ async def list_devices(
             and not has_already_arrived(by_device_id.get(arrival.device_id), stage_at=arrival.at)
         ],
     )
+
+
+@router.patch(
+    "/{device_id}",
+    response_model=DeviceSummary,
+    summary="Set a device's name and group",
+)
+async def update_device(
+    device_id: str,
+    body: DeviceUpdate,
+    admin: AdminDep,
+    settings: SettingsDep,
+    sessionmaker: SessionMakerDep,
+) -> DeviceSummary:
+    """Merge-patch `name` / `group_id`; returns the updated row as the list shows it.
+
+    Atomic: every check runs before any assignment, so a refused PATCH changes
+    nothing and emits nothing. Only field *names* are logged, never the name text.
+    """
+    now = now_utc()
+    fields = body.model_fields_set
+    async with sessionmaker() as session:
+        device = await session.get(Device, device_id)
+        if device is None or device.decommissioned_at is not None:
+            raise HTTPException(status.HTTP_404_NOT_FOUND, f"no such device: {device_id}")
+
+        if "name" in fields and body.name is not None:
+            other = await session.scalar(
+                select(Device.device_id)
+                .where(
+                    func.lower(Device.name) == body.name.lower(),
+                    Device.device_id != device_id,
+                    Device.decommissioned_at.is_(None),
+                )
+                .limit(1)
+            )
+            if other is not None:
+                raise HTTPException(
+                    status.HTTP_409_CONFLICT,
+                    f"name already used by device {other}: {body.name}",
+                )
+
+        if "group_id" in fields and body.group_id is not None:
+            if await session.get(DeviceGroup, body.group_id) is None:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, f"no such group: {body.group_id}")
+
+        changed = {field for field in fields if getattr(device, field) != getattr(body, field)}
+        if changed:
+            for field in changed:
+                setattr(device, field, getattr(body, field))
+            await emit(
+                session,
+                DeviceEvent(
+                    type=EventType.DEVICE_UPDATED,
+                    device_id=device_id,
+                    at=now,
+                    online=is_online(device, now=now, tolerance=settings.presence_tolerance),
+                    fw_version=device.fw_version,
+                ),
+            )
+            try:
+                await session.commit()
+            except IntegrityError:
+                # The only FK being written is `group_id`: the group vanished between
+                # the check above and the commit (same reasoning as enrollment.py).
+                await session.rollback()
+                raise HTTPException(
+                    status.HTTP_404_NOT_FOUND, f"no such group: {body.group_id}"
+                ) from None
+
+        deploys = await latest_deploys(session, device_ids=[device_id])
+        summary = _device_summary(
+            device,
+            online=is_online(device, now=now, tolerance=settings.presence_tolerance),
+            deploy=_deploy_summary(
+                deploys.get(device_id), confirm_timeout_s=settings.confirm_timeout_s
+            ),
+        )
+
+    logger.info(
+        "device %s updated by %s: %s", device_id, admin.token_id, sorted(changed) or "no change"
+    )
+    return summary

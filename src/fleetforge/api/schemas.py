@@ -6,6 +6,7 @@ schema section inside each router.
 
 import datetime as dt
 import re
+import unicodedata
 import uuid
 from typing import Literal, Self
 
@@ -198,6 +199,43 @@ class EnrollResponse(BaseModel):
 # ---------------------------------------------------------------------------
 # Devices (R0-be-5)
 # ---------------------------------------------------------------------------
+
+
+NAME_MAX_LENGTH = 64
+
+
+class DeviceUpdate(BaseModel):
+    """`PATCH /v1/devices/{device_id}`: the operator-set facts, and nothing else.
+
+    Merge-patch: an absent key leaves the field alone, an explicit `null` clears it
+    (`model_fields_set` tells the two apart). `extra="forbid"`: this is an operator API,
+    unlike the device-facing bodies, and a typo such as `nmae` must be a 422, not a
+    silent no-op. No device claim (`fw_version`, `platform_type`, ...) is settable
+    here: the board announces those.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = None
+    group_id: uuid.UUID | None = None  # the "group/tag" of spec/flows.md
+
+    @field_validator("name")
+    @classmethod
+    def _normalize_name(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        # The length check lives here, after stripping: `Field(max_length=)` would
+        # measure the unstripped string.
+        stripped = value.strip()
+        if not stripped:
+            return None
+        if len(stripped) > NAME_MAX_LENGTH:
+            raise ValueError(f"a name is at most {NAME_MAX_LENGTH} characters")
+        if any(unicodedata.category(ch) in {"Cc", "Cf"} for ch in stripped):
+            raise ValueError("a name cannot contain control characters")
+        if is_valid_device_id(stripped.lower()):
+            raise ValueError("a name cannot look like a device id (12 hex characters)")
+        return stripped
 
 
 class DeviceSummary(BaseModel):
