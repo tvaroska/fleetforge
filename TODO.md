@@ -122,7 +122,7 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       console UART0 @ 115200). Check E re-flashes 94a990dd09a4 and ends its 0.3.1 baseline,
       so run it last.
 
-- [ ] **S0-test-2**: The native-USB re-acquire path, on a C3/C6/S3 (P2, 0.25d)
+- [!] **S0-test-2**: The native-USB re-acquire path, on a C3/C6/S3 (P2, 0.25d) _(⚠ failed 2026-10-03; blocker: Hardware-gated: Boris must run Check F on the Windows + Chrome bench with the ESP32-S3 (94a990dd09a4) on native USB (COM3). (after 2 attempts))_
       Split from S0-test-1 on 2026-09-11: the only board on hand is an ESP32-DevKit v1,
       whose bridge chip keeps the port alive across `hard_reset`. That exercises the
       *easy* half. The 8 s `getPorts()` poll in `serialConsole.ts` exists for the parts
