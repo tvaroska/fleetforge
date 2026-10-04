@@ -22,9 +22,11 @@ The operator sees **one flow with one result**, and a status strip that stays on
              board now (enrolled? which firmware and layout?) and exactly what the
              flash will change. A board that is already enrolled is offered "re-flash, keep
              identity" next to "re-flash and re-enrol".
-3. CONFIGURE Broker URL + link (Wi-Fi or Ethernet). Wi-Fi credentials are remembered in THIS
-             BROWSER only (never sent to or stored by the server), so the operator types
-             them once per browser, not once per flash. The board's partition layout is
+3. CONFIGURE Broker URL + link (Wi-Fi or Ethernet). For Wi-Fi the operator can add MORE THAN ONE
+             network ("home", then "add another: the shed"), so the board can later move between
+             them with no new flash (Flow 3). Passphrases are never stored by the server or by
+             this app (no browser storage); the field is marked for the browser's own password
+             manager, so the operator types each one once. The board's partition layout is
              chosen for the operator and shown only under "Advanced" (from R3, an Arduino /
              PlatformIO layout is the maker's default; until then the stock layout).
 4. FLASH     Dashboard mints a scoped, revocable, single-use ENROLLMENT TOKEN, flashes the
@@ -78,7 +80,7 @@ B2. Token valid → AUTO-ENROLL: registry entry created, per-device broker
     hosted public domain** (Let's Encrypt), and by `localhost` for the dev loop; one mandatory click (browsers forbid silent port enumeration); no batch enrollment in v1 — **CLI flasher for batch/CI is post-v1.**
 - **ID granularity = chip-level auto + confirm board.** esptool reliably identifies the *silicon*; the exact dev board is a **heuristic shortlist** (chip + flash + PSRAM matched to a board DB) the user confirms — with "enter manually" always available. The running agent self-reports authoritative `platform_type` + capabilities anyway (B1), so detection only needs to pick the right binary + seed identity.
 - **device_id = eFuse MAC** (stable, factory-unique) — satisfies the identity contract.
-- **Provisioning = USB config flash (v1).** Creds baked in at flash time. *SoftAP captive portal is post-v1* — until then, a Wi-Fi change means re-flash (accepted trade-off for a lean v1).
+- **Provisioning = USB config flash (v1).** Creds baked in at flash time, as a list of known networks (Flow 3). A network not on that list means a re-flash until Improv lands (Flow 3, later). *SoftAP captive portal is post-v1.*
 - **Trust = auto-enroll via a single-use token, exchanged over HTTPS** — not over MQTT, so the broker never has to authenticate a client it has never heard of. Zero-friction and batch-friendly. Rationale, threat model and the exact exchange: [device-protocol.md](device-protocol.md) → *Enrolment happens over HTTPS*. Token lifetime and posture: [prd.md](prd.md) → *Security & data posture*.
 - **Clock visibility, not a field gateway.** Elena's offline gateway (local broker, artifact cache, time source) stays out of v1. What v1 owes her persona is only that step 5 names the clock source and explains the SNTP stall.
 
@@ -167,6 +169,35 @@ VCS integration and the server-side compiler are **automated artifact producers*
 - **Deploy policy = configurable per group.** Dev fleet can auto-deploy on tag; prod fleet stays manual.
   - *Sequencing:* auto-deploy is only as safe as its rollback. Per-device auto-rollback makes it *survivable* in early V2; **enable auto-deploy-per-group with confidence only once canary/staged rollout lands.**
 - **Payoff = traceability.** Every device's firmware links to a commit: "what's running on device X?" and "roll back to tag v1.3" become first-class.
+
+## Flow 3 — Change the network a board uses
+
+*Persona order (2026-10-04, [DECISIONS.md](../DECISIONS.md)): **Alex** primary — the board is coded at home, then installed in the shed, a vehicle or a garden with a different Wi-Fi. **Marcus** (OEM) needs the customer to join their own Wi-Fi, which this flow does not serve yet (Improv over Bluetooth or a captive portal, later). **Sarah** (lab network) and **Siddharth** (CI) rarely change networks. **Elena** (field access point) is deferred.*
+
+**v1: the board knows several networks, so moving between them needs nothing.**
+
+```
+1. ADD     During Flow 1 step 3 the operator adds one or more networks (SSID + passphrase),
+           e.g. "home" and "the shed". No second flash, no extra screen.
+2. FLASH   All networks go into the board's config (`ff_cfg`) in the one flash.
+3. MOVE    The operator carries the board to the shed and powers it on.
+4. JOIN    The board scans, picks a known network it can see, and joins. The next
+           `announce` names the network by SSID (never the passphrase).
+5. SEE     The Fleet row and the result card show "on: shed" and "knows 2 networks".
+           If none is in range after a deadline, the card says so in plain language
+           ("none of its 2 known networks is in range") and the board keeps trying.
+```
+
+**Later, in this order** (planned, not specified here):
+1. **Improv over serial (USB)** — a "Change Wi-Fi" action beside the console adds or replaces a network without a re-flash and without re-enrolling. Needs the agent to be able to write its network list.
+2. **Improv over Bluetooth** — the same action with no cable, for a board sealed in a box. Chrome on desktop and Android can do it with no app; iPhone Safari cannot.
+
+**Decisions:**
+- **A list of known networks first.** It covers the maker's common case (desk to shed, home to travel router) with no new radio stack and no write path in the agent: the flasher already writes `ff_cfg`.
+- **A network that was not on the list needs a re-flash,** until Improv lands. This is the accepted limit of v1.
+- **Passphrases stay out of the server and out of browser storage.** Only the SSID is ever reported.
+- **The board's own code must keep the list.** A maker's firmware (R3) has to read the same network list and, later, carry the Improv handler; otherwise the OTA that made the board useful would strand it on its current network.
+- **Open, not decided:** how many networks, and the selection rule (a fixed priority order, or the strongest of those in range); the `ff_cfg` format change that carries a list (a proposal to `spec/device-protocol.md`, which is protected); how a board reports "no known network in range" (the announce cannot be sent without a link); whether a network list or credentials belong in NVS or `ff_cfg` once the agent can write them.
 
 ## Where the pieces line up
 - The **self-test** appears in Flow 2 step 3 (sim gate) and step 6 (device confirm) — the same code, two enforcement points.

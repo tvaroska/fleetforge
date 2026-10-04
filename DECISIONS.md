@@ -6,6 +6,33 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-04 — Flow 3: a board knows several Wi-Fi networks; Improv later (corrects the Wi-Fi wording of the entries below)
+
+**Decided: `spec/flows.md` gets Flow 3, "Change the network a board uses". v1 is a list of
+known networks added during onboarding, so a maker can move a board between home and the
+shed with no new flash. Improv over serial, then over Bluetooth, come after and are not
+specified. Spec only: nothing is built and no task is filed.**
+
+- **Corrects the two earlier entries of this date.** They said Wi-Fi credentials are
+  "remembered in this browser". `frontend/src/FlashBoard.tsx` already forbids `localStorage`
+  and `sessionStorage` for that feature, because the passphrase and the enrolment token are
+  credentials. The rule stands. The passphrase field is marked for the browser's own
+  password manager instead, so the operator types each one once and the app stores nothing.
+- **Why a list first.** The common maker move is between networks the maker already knows.
+  A list needs no radio stack and no write path in the agent: the flasher already writes
+  `ff_cfg`. A network not on the list still means a re-flash until Improv lands.
+- **Supersedes** the Flow 1 line "a Wi-Fi change means re-flash" for networks on the list.
+- **R3 consequence.** A maker's own firmware must read the same list and later carry the
+  Improv handler, or an OTA to it strands the board on its current network. Not yet in
+  `docs/releases.md` or `docs/features/ota-library.md`.
+- **Bluetooth needs no phone app** on Chrome for Android or desktop; iPhone Safari lacks Web
+  Bluetooth, so an iPhone needs an app or another browser. Marcus's customer-joins-their-own-
+  Wi-Fi case is not served until Bluetooth or a captive portal exists.
+- **Open:** network count and selection rule; the `ff_cfg` format change (to be proposed to
+  the protected `spec/device-protocol.md`); how a board reports "no known network in range";
+  `ff_cfg` or NVS once the agent can write its networks.
+
+
 ## 2026-10-04 — Flow edits reviewed: refusals gated or softened, implementation moved out of spec (supersedes parts of the two entries below)
 
 **Decided: the `spec/flows.md` additions of commit `624d218` stay, with six changes. This
