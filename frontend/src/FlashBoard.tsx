@@ -20,6 +20,9 @@ import { uriSecrets, type DiagnosticContext } from './diagnostics'
 import { OTHER_BOARD_ID, shortlist } from './boards'
 import { buildFfCfgFields, validateFfCfg, type FlashConfigInput } from './ffcfg'
 import { formatBytes, predictDeviceId, useFlashBoard } from './flash'
+import { type ResultContext } from './onboardingResult'
+import { ResultCard } from './ResultCard'
+import { type VersionLine } from './statusStrip'
 import {
   BUILT_IN_PORT,
   NO_BOARD_SELECTED,
@@ -127,6 +130,7 @@ export function FlashBoard({
   createConsole,
   onBoardIdentified,
   fleet,
+  versions,
 }: {
   onSessionExpired: () => void
   // R2b-fe-1: tells the status strip which board this is, once detected and again once
@@ -135,6 +139,9 @@ export function FlashBoard({
   // R2b-fe-2: the fleet from `Dashboard`'s single `useFleet` — never open a second one
   // here (one SSE slot each). Feeds the pre-flight card; absent means no card.
   fleet?: Pick<Fleet, 'devices' | 'arrivals' | 'error' | 'now'>
+  // R2b-fe-3: from `Dashboard`'s `useHealth` + `buildInfo` via `describeVersions` — never a
+  // second health poll here. Feeds the result card's UI/API row; absent means no row.
+  versions?: VersionLine
   // Injected by the tests only: jsdom has no `navigator.serial` (see `flasher.ts`).
   createFlasher?: FlasherFactory
   createConsole?: ConsoleFactory
@@ -245,6 +252,46 @@ export function FlashBoard({
   // fresh literal on every render, so a `useCallback` would churn and buy nothing — and
   // one with an honest dependency list would be rebuilt every render anyway.
   const recoverByReflash = () => state.reflash({ config, baudRate: form.baudRate })
+
+  // R2b-fe-3. What this page knows for the result card. A plain literal for the same
+  // reason as `diagnostics` below.
+  const resultContext: ResultContext = {
+    devices: fleet?.devices ?? null,
+    versions: versions ?? null,
+    flashed:
+      state.flashedDeviceId !== null || state.build !== null
+        ? {
+            deviceId: state.flashedDeviceId ?? predicted,
+            agentVersion: state.build?.agent_version ?? null,
+            layout: state.build?.partition_layout ?? null,
+            link: form.link,
+            ssid: form.link === 'wifi' && form.ssid !== '' ? form.ssid : null,
+          }
+        : null,
+  }
+
+  // R2b-fe-3. The one action on a flash-failed card. `onClick` is SYNCHRONOUS up to
+  // `reflash`: `requestPort()` needs the user gesture, so no `await` may come before it.
+  // `set('baudRate', …)` is a plain state update. A config error makes the retry a button
+  // that cannot work, so the reason is shown instead (S0-fe-6's idiom).
+  const failure = state.failure
+  const retryAction =
+    failure === null ? null : configError !== null ? (
+      <span className="muted">Fill in the network details in step 2 to try again.</span>
+    ) : (
+      <button
+        type="button"
+        className="remedy"
+        disabled={state.busy}
+        onClick={() => {
+          const baudRate = failure.retryBaud ?? form.baudRate
+          if (failure.retryBaud !== null) set('baudRate', baudRate)
+          void state.reflash({ config, baudRate })
+        }}
+      >
+        {failure.retryBaud !== null ? `Retry at ${failure.retryBaud}` : 'Try the flash again'}
+      </button>
+    )
 
   // S0-fe-7. A plain literal for the same reason `recoverByReflash` is: `config` is a
   // fresh object on every render, so a memo with an honest dependency list would be
@@ -527,10 +574,17 @@ export function FlashBoard({
         </button>
       </p>
 
-      {state.error !== null && (
-        <p className="bad" role="alert">
-          {state.error}
-        </p>
+      {/* R2b-fe-3. A failure thrown by the write itself gets the card: the plain cause,
+          what to try first, one action, and the raw text as details. Every failure before
+          the write (manifest, download, refusals, connect) keeps this paragraph as it was. */}
+      {failure !== null ? (
+        <ResultCard flashFailure={failure} details={state.error} action={retryAction} />
+      ) : (
+        state.error !== null && (
+          <p className="bad" role="alert">
+            {state.error}
+          </p>
+        )
       )}
 
       {state.step !== '' && (
@@ -584,6 +638,8 @@ export function FlashBoard({
         autoWatch={state.phase === 'done'}
         createConsole={createConsole}
         diagnostics={diagnostics}
+        result={resultContext}
+        hideResult={failure !== null}
         // No button when the form could not produce a valid blob — re-flashing the same
         // invalid config is a button that cannot work.
         onReflash={configError === null ? recoverByReflash : undefined}

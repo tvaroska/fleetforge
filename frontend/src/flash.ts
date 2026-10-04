@@ -35,6 +35,7 @@ import {
   type AgentPartInfo,
 } from './api'
 import { buildFfCfgFields, encodeFfCfg, validateFfCfg, type FlashConfigInput } from './ffcfg'
+import { describeWriteFailure, type FlashFailure } from './flashFailure'
 import type { BoardFlasher, ChipInfo, FlashPart, FlasherFactory } from './flasher'
 import { findPartition, parsePartitionTable } from './partitionTable'
 import { defaultFlasherFactory, explainFlashError } from './flasher'
@@ -236,6 +237,11 @@ export type FlashBoardState = {
   chip: ChipInfo | null
   build: AgentBuildInfo | null
   error: string | null
+  /**
+   * Set only when `flasher.write` itself threw (R2b-fe-3): the plain cause, what to try
+   * first, and whether the baud should drop. Failures before the write keep `error` alone.
+   */
+  failure: FlashFailure | null
   log: string[]
   progress: FlashProgress | null
   /** Set once a flash succeeds, so the done panel can point at the fleet table. */
@@ -272,6 +278,7 @@ export function useFlashBoard({
   const [chip, setChip] = useState<ChipInfo | null>(null)
   const [build, setBuild] = useState<AgentBuildInfo | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [failure, setFailure] = useState<FlashFailure | null>(null)
   const [log, setLog] = useState<string[]>([])
   const [progress, setProgress] = useState<FlashProgress | null>(null)
   const [flashedDeviceId, setFlashedDeviceId] = useState<string | null>(null)
@@ -293,6 +300,12 @@ export function useFlashBoard({
    * board that erases cleanly and never boots. `setChip` stays: the view renders from it.
    */
   const chipRef = useRef<ChipInfo | null>(null)
+  /**
+   * Write failures per board, this tab only (R2b-fe-3). In memory on purpose: no
+   * `localStorage`/`sessionStorage` anywhere in this feature (`FlashBoard.tsx` header).
+   * Keyed by predicted device id, or the chip name when no MAC was read.
+   */
+  const writeFailuresRef = useRef(new Map<string, number>())
 
   const appendLog = useCallback((line: string) => {
     setLog((lines) => {
@@ -330,6 +343,7 @@ export function useFlashBoard({
     setChip(null)
     setBuild(null)
     setError(null)
+    setFailure(null)
     setProgress(null)
     setLog([])
   }, [])
@@ -338,6 +352,7 @@ export function useFlashBoard({
     async (baudRate: number) => {
       setBusy(true)
       setError(null)
+      setFailure(null)
       setProgress(null)
       setFlashedDeviceId(null)
       setPhase('connecting')
@@ -388,6 +403,7 @@ export function useFlashBoard({
 
       setBusy(true)
       setError(null)
+      setFailure(null)
       setProgress(null)
       setPhase('flashing')
 
@@ -396,6 +412,12 @@ export function useFlashBoard({
       // the log, not the DOM. `tokenId` is not a secret and may be shown.
       let tokenId: string | null = null
       let minted = false
+      // R2b-fe-3: only a throw from `flasher.write` itself becomes a `failure`, and the last
+      // progress report says which part it died in. `plan` is hoisted so `catch` can read it.
+      const boardKey = predictDeviceId(detected) ?? detected.chipName
+      let plan: FlashPart[] = []
+      let writing = false
+      let lastPart: number | null = null
 
       try {
         // 1. Validate before anything is minted or downloaded — the ordering rule
@@ -429,11 +451,13 @@ export function useFlashBoard({
         minted = true
 
         const config = encodeFfCfg({ ...fields, token: issued.token })
-        const plan = planWrite(selected, downloaded, config)
+        plan = planWrite(selected, downloaded, config)
 
         setStep('Writing…')
+        writing = true
         await flasher.write(plan, {
           onProgress: (partIndex, written, total) => {
+            lastPart = partIndex
             setProgress({
               partIndex,
               partCount: plan.length,
@@ -443,15 +467,21 @@ export function useFlashBoard({
             })
           },
         })
+        writing = false
 
         setStep('Resetting the board…')
         await flasher.finish()
         flasherRef.current = null
+        writeFailuresRef.current.delete(boardKey)
         setFlashedDeviceId(predictDeviceId(detected))
         setPhase('done')
         setStep('')
       } catch (err) {
-        const message = handle(err)
+        // R2b-fe-3: a throw from the write itself keeps esptool's own words. The
+        // connect-time translation ("Hold BOOT while plugging it in") is wrong mid-write —
+        // the board is already in the stub loader — and the card says the plain cause.
+        const message =
+          writing && !(err instanceof ApiError) ? rawErrorText(err) : handle(err)
         let text = message
         if (minted && tokenId !== null) {
           // An orphan live token is a fleet-join credential nobody is tracking, and a
@@ -469,6 +499,20 @@ export function useFlashBoard({
           }
         }
         if (text !== null) setError(text)
+        // A 401 (`handle` returned null) bounced to the login gate: no card for it.
+        if (writing && text !== null && !(err instanceof ApiError)) {
+          const attempt = (writeFailuresRef.current.get(boardKey) ?? 0) + 1
+          writeFailuresRef.current.set(boardKey, attempt)
+          const part = lastPart === null ? undefined : plan[lastPart]
+          setFailure(
+            describeWriteFailure(err, {
+              attempt,
+              baudRate: request.baudRate,
+              part: part?.label ?? null,
+              address: part?.address ?? null,
+            }),
+          )
+        }
         setPhase('error')
         setStep('')
       } finally {
@@ -504,6 +548,7 @@ export function useFlashBoard({
     chip,
     build,
     error,
+    failure,
     log,
     progress,
     flashedDeviceId,
@@ -513,6 +558,13 @@ export function useFlashBoard({
     reflash,
     reset,
   }
+}
+
+/** An error's own message, read without `instanceof` (see `explainFlashError`). */
+function rawErrorText(error: unknown): string {
+  const fault = (error ?? {}) as { message?: unknown }
+  const message = typeof fault.message === 'string' ? fault.message : String(error)
+  return message === '' ? 'flashing failed' : message
 }
 
 /** Length + sha256 against the manifest. Anything else is a corrupt image on a board. */

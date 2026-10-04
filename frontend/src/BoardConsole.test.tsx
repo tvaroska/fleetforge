@@ -7,7 +7,7 @@
 //    busy" and the operator blames their cable.
 // 4. **One port at a time**, and the port goes back on unmount.
 
-import { act, render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, expect, it, vi } from 'vitest'
 import { BoardConsolePanel } from './BoardConsole'
@@ -19,6 +19,7 @@ import {
 } from './boardConsole'
 import { BENCH_2026_09_11 } from './fixtures/bench-2026-09-11'
 import { BENCH_2026_10_04 } from './fixtures/bench-2026-10-04'
+import { CAUSE_NEXT } from './onboardingResult'
 
 const HAPPY = [
   'rst:0x1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)',
@@ -529,5 +530,81 @@ describe('BoardConsolePanel — the diagnostic bundle', () => {
     expect((box as HTMLTextAreaElement).value).toContain('E BOD:')
     expect(screen.getByText(/would not give this page the clipboard/i)).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: /copied/i })).not.toBeInTheDocument()
+  })
+})
+
+// R2b-fe-3 — one card, success or failure. A failure names ONE cause and holds the ONE
+// action and the ONE copy click; the watch paragraphs above it keep the long story.
+describe('BoardConsolePanel — the result card (R2b-fe-3)', () => {
+  it('shows a success card with the facts the console gave', async () => {
+    const { factory } = fakeConsole(HAPPY)
+    render(<BoardConsolePanel autoWatch createConsole={factory} />)
+
+    const card = await screen.findByTestId('result-card')
+    await waitFor(() => expect(card).toHaveAttribute('data-outcome', 'success'))
+    expect(within(card).getByTestId('console-online')).toBeInTheDocument()
+    expect(card).toHaveTextContent('a4cf12b3de90')
+    expect(card).toHaveTextContent('NTP (pool.ntp.org)')
+  })
+
+  it('a spent token: one cause, one remedy and one copy click, all inside the card', async () => {
+    const { factory } = fakeConsole(SPENT_TOKEN)
+    const onReflash = vi.fn(async () => {})
+    render(<BoardConsolePanel autoWatch createConsole={factory} onReflash={onReflash} />)
+
+    const card = await screen.findByTestId('result-card')
+    await waitFor(() => expect(card).toHaveAttribute('data-outcome', 'failure'))
+    expect(within(card).getByTestId('result-headline')).toHaveTextContent(/^Enrolment refused/)
+    expect(screen.getAllByTestId('console-remedy')).toHaveLength(1)
+    expect(within(card).getByRole('button', { name: /re-flash the board/i })).toBe(
+      screen.getByTestId('console-remedy'),
+    )
+    const copies = screen.getAllByRole('button', { name: /copy diagnostic bundle/i })
+    expect(copies).toHaveLength(1)
+    expect(card).toContainElement(copies[0])
+    // The long story stays in the watch paragraph, with no button of its own.
+    expect(screen.getByTestId('console-fault')).toHaveTextContent(/single-use/)
+    expect(within(screen.getByTestId('console-fault')).queryByRole('button')).toBeNull()
+  })
+
+  it('the 2026-09-11 brownout: a power headline and a text next action, no button', async () => {
+    const { factory } = fakeConsole(BENCH_2026_09_11)
+    const onReflash = vi.fn(async () => {})
+    render(<BoardConsolePanel autoWatch createConsole={factory} onReflash={onReflash} />)
+
+    const card = await screen.findByTestId('result-card')
+    await waitFor(() => expect(card).toHaveAttribute('data-outcome', 'failure'))
+    expect(within(card).getByTestId('result-headline')).toHaveTextContent(/^Power/)
+    expect(within(card).getByTestId('result-next')).toHaveTextContent(CAUSE_NEXT.power)
+    expect(screen.queryByTestId('console-remedy')).not.toBeInTheDocument()
+  })
+
+  it('a silent Wi-Fi board past the link deadline gets a Wi-Fi headline', async () => {
+    vi.useFakeTimers()
+    try {
+      const { factory } = fakeConsole(SILENT_BOARD)
+      render(<BoardConsolePanel autoWatch createConsole={factory} />)
+      // Before the deadline: still progressing, so the checklist is the view.
+      await act(() => vi.advanceTimersByTimeAsync(1_000))
+      expect(screen.queryByTestId('result-card')).not.toBeInTheDocument()
+
+      await act(() => vi.advanceTimersByTimeAsync(MILESTONE_DEADLINE_MS.link + 2_000))
+      const card = screen.getByTestId('result-card')
+      expect(card).toHaveAttribute('data-outcome', 'failure')
+      expect(within(card).getByTestId('result-headline')).toHaveTextContent(/^Wi-Fi/)
+      expect(within(card).getByTestId('result-next')).toHaveTextContent(CAUSE_NEXT.wifi)
+      expect(screen.queryByTestId('console-remedy')).not.toBeInTheDocument()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('renders no card when the flasher is showing its own, and keeps the toolbar copy', async () => {
+    const { factory } = fakeConsole(SPENT_TOKEN)
+    render(<BoardConsolePanel autoWatch createConsole={factory} hideResult />)
+
+    await screen.findByTestId('console-fault')
+    expect(screen.queryByTestId('result-card')).not.toBeInTheDocument()
+    expect(screen.getAllByRole('button', { name: /copy diagnostic bundle/i })).toHaveLength(1)
   })
 })

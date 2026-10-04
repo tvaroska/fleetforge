@@ -1308,6 +1308,27 @@ Implementation notes behind `spec/flows.md` Flow 1 and the 2026-10-04 entries in
   mechanism yet). Hidden once the flash is done. Observed: `flash.test.tsx -t pre-flight`
   and `Dashboard.test.tsx` pass, one EventSource per page. Not run in a real browser (no
   board, so detect cannot run); detecting the enrolled bench S3 is folded into `R2b-test-1`.
+- **Result card (R2b-fe-3, built).** One card (`ResultCard.tsx`, `data-testid="result-card"`,
+  `data-outcome` = `success` / `failure` / `flash-failed`); the judgement is in
+  `onboardingResult.ts`. Sources: the console (preferred: it is what runs now; facts reset
+  at every boot marker), then the device row from the page's one fleet (layout, firmware
+  fallback, "server: online"), then what this tab flashed, and the UI/API `VersionLine`
+  from `Dashboard`. Rows: device id, firmware, partition layout, link (SSID · ip), clock
+  source ("NTP (server)", "Kept across the reset (no answer from server)" on the 2026-10-04
+  bench, "Not set (…)"), enrolled, on the fleet (+ server online/offline/not seen yet), UI
+  and API. Show rules: success when the console reaches `fleet`; failure when not, and the
+  fault has a remedy, a milestone is overdue, or the board is looping; otherwise no card
+  (the checklist is the view while the board progresses). One cause per failure, a
+  category chosen at the classifier (`Cause` on every specific hint: power, wifi, clock,
+  server, broker, token, download-mode, firmware), then power for an unexplained loop, then
+  the stalled milestone's. The card holds the ONE remedy button (moved out of the fault and
+  overdue paragraphs, which keep their text) or a text next action, and the ONE "Copy
+  diagnostic bundle" (the toolbar's is hidden while a failure card shows). The success card
+  absorbs "This board enrolled and is on the fleet". Server-truth success when the console
+  lost the port and the strip's onboarding segment are R2b-fe-5. Observed: `flash.test.tsx
+  -t "result card"`, `BoardConsole.test.tsx` and `onboardingResult.test.ts` pass, plus the
+  full suite, typecheck and build. Not run in a real browser (no board, so no console);
+  the bench S3 ending in the success card is folded into `R2b-test-1`.
 - **Layout profile.** Arduino IDE and PlatformIO hardcode the app offset (`0x10000`), which
   `ab-4m-v1` does not use. `ab-4m-arduino-v1` (`ff_cfg` at `0x3D0000`) exists for that
   case. Offering it at onboarding means the stock starter agent has to be built for each
@@ -1321,8 +1342,18 @@ Implementation notes behind `spec/flows.md` Flow 1 and the 2026-10-04 entries in
   (`rst:0x..`). A milestone that was reached and then a new banner appears retracts the
   milestones, and the boot counter increments. Naming "brownout" is only as good as the
   reset reason the chip reports.
-- **Flash failures.** A verify failure at a sector is more often a cable, hub or baud rate
-  than a bad chip. The copy should say what to try first and name the chip only on repeat.
+- **Flash failures (R2b-fe-3, built).** Only a throw from `flasher.write` gets the
+  flash-failed card; failures before the write keep the plain alert paragraph. The cause is
+  one of four kinds read off the esptool-js text (`flashFailure.ts`): the board
+  disconnected, stopped answering, rejected a block ("did not verify"), or other, plus the
+  part and address from the last progress report. The ladder, counted per board (predicted
+  id, else chip name) in memory only, never in storage, and reset by a good write:
+  attempt 1 says another cable or port first (and "retry at 115200" above that baud), with
+  "Try the flash again"; a repeat above 115200 offers "Retry at 115200" (one click lowers
+  the baud and re-flashes); a repeat at 115200 is the only place "the board's flash chip
+  may be defective" appears. The connect-time "Hold BOOT" advice is never shown mid-write:
+  the details line carries esptool's raw text and the token-revoked sentence. A deliberately
+  bad cable/hub on the bench is folded into `R2b-test-1`.
 - **Diagnostic bundle.** Must be redacted: no token, Wi-Fi passphrase or broker credential
   (the CUJ-1 hard-fail trap).
 

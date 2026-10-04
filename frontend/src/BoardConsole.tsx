@@ -5,7 +5,8 @@
 // between a bad SSID, an unset clock and a spent token, and the only way to find out was
 // `screen /dev/tty.usbserial-… 115200` in another window. That is the dead end this closes.
 //
-// All the judgement is in `boardConsole.ts`. This file renders it.
+// All the judgement is in `boardConsole.ts`. This file renders it. R2b-fe-3's result card
+// lives here too; its judgement is in `onboardingResult.ts`.
 
 import { useEffect, useRef, useState } from 'react'
 import {
@@ -20,6 +21,8 @@ import {
 } from './boardConsole'
 import { buildDiagnosticBundle, type DiagnosticContext } from './diagnostics'
 import { explainFlashError } from './flasher'
+import { describeOnboardingResult, type ResultContext } from './onboardingResult'
+import { ResultCard } from './ResultCard'
 
 const LEVEL_CLASS: Record<ConsoleLevel, string> = {
   error: 'bad',
@@ -71,6 +74,8 @@ export function BoardConsolePanel({
   onReflash,
   reflashBlockedReason = null,
   diagnostics,
+  result,
+  hideResult = false,
 }: {
   autoWatch: boolean
   // Injected by the tests only: jsdom has no `navigator.serial` (see `boardConsole.ts`).
@@ -93,6 +98,14 @@ export function BoardConsolePanel({
    * log, the fault and what the board says about itself all come off the events.
    */
   diagnostics?: DiagnosticContext
+  /**
+   * R2b-fe-3. What the flasher page knows for the result card: the fleet rows, the UI/API
+   * versions and what it just wrote. Absent in a standalone panel, and the card still
+   * renders from the console alone.
+   */
+  result?: ResultContext
+  /** R2b-fe-3. The flasher is showing its own (flash-failed) card; never show two. */
+  hideResult?: boolean
 }) {
   const state = useBoardConsole({ createConsole, explainError: explainFlashError })
   const { watch } = state
@@ -209,6 +222,22 @@ export function BoardConsolePanel({
 
   const { fault, rebootLoop, overdue } = state.summary
   const busy = state.opening
+  // Cheap, and `summary` already ticks at 1 Hz while watching.
+  const outcome = describeOnboardingResult({
+    events: state.events,
+    summary: state.summary,
+    context: result ?? null,
+  })
+  // `!hideResult` is part of it: with the card hidden, the toolbar keeps its copy button.
+  const failureCard = !hideResult && outcome?.outcome === 'failure'
+  const copyButton = (
+    // Never shortened to "Copy": Testing Library matches accessible names by
+    // substring, and `EnrollBoard` already renders a bare `Copy`. "Copied — secrets
+    // redacted" is likewise unique on purpose.
+    <button type="button" onClick={() => void copyBundle()}>
+      {copied === true ? 'Copied — secrets redacted' : 'Copy diagnostic bundle'}
+    </button>
+  )
 
   return (
     <section aria-labelledby="console-heading">
@@ -245,14 +274,10 @@ export function BoardConsolePanel({
             Clear
           </button>
         )}{' '}
-        {(state.watching || state.opening || state.events.length > 0) && (
-          // Never shortened to "Copy": Testing Library matches accessible names by
-          // substring, and `EnrollBoard` already renders a bare `Copy`. "Copied — secrets
-          // redacted" is likewise unique on purpose.
-          <button type="button" onClick={() => void copyBundle()}>
-            {copied === true ? 'Copied — secrets redacted' : 'Copy diagnostic bundle'}
-          </button>
-        )}
+        {/* R2b-fe-3: a failure card holds the one copy click, so the toolbar's goes. */}
+        {(state.watching || state.opening || state.events.length > 0) &&
+          !failureCard &&
+          copyButton}
       </p>
 
       {state.opening && <p className="muted">Opening the port…</p>}
@@ -270,16 +295,9 @@ export function BoardConsolePanel({
           <strong>{fault.text}</strong>
           <br />
           {fault.hint}
-          {/* At most ONE action on screen. Two identical buttons would be confusing and
-              an ambiguous `getByRole` in every future test, so the fault gets first
-              claim and the overdue banner below only renders one when the fault has
-              none. A `<button>` is phrasing content, so this `<p>` stays a `<p>`. */}
-          {fault.remedy !== null && (
-            <>
-              <br />
-              {remedyAction(fault.remedy)}
-            </>
-          )}
+          {/* At most ONE action on screen, and since R2b-fe-3 it lives in the result card
+              below, not here: every state that used to put a button in this paragraph
+              (or the overdue one) is a failure-card state. */}
         </p>
       )}
 
@@ -320,20 +338,22 @@ export function BoardConsolePanel({
           </strong>
           <br />
           {overdue.hint}
-          {/* Only when the fault above did not already claim the one action. */}
-          {fault?.remedy == null && overdue.remedy !== null && (
-            <>
-              <br />
-              {remedyAction(overdue.remedy)}
-            </>
-          )}
         </p>
       )}
 
-      {state.summary.reached.includes('fleet') && (
-        <p className="ok" role="status" data-testid="console-online">
-          This board enrolled and is on the fleet. You can release the port.
-        </p>
+      {/* R2b-fe-3. One card: success (it carries the on-fleet sentence) or failure (it
+          carries the one action and the one copy click). Never beside the flasher's own
+          flash-failed card. */}
+      {!hideResult && outcome !== null && (
+        <ResultCard
+          result={outcome}
+          action={
+            outcome.outcome === 'failure' && outcome.remedy !== null
+              ? remedyAction(outcome.remedy)
+              : null
+          }
+          copy={failureCard ? copyButton : null}
+        />
       )}
 
       {state.error !== null && <p className="warn">{state.error}</p>}

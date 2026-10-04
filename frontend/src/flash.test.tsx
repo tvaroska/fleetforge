@@ -10,7 +10,7 @@
 //    re-derive. Same discipline as `EnrollBoard.test.tsx`, extended to the passphrase.
 // 4. **The port is always released**, and a 401 bounces to the login gate.
 
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { FlashBoard } from './FlashBoard'
@@ -1043,5 +1043,197 @@ describe('FlashBoard — pre-flight card (R2b-fe-2)', () => {
   it('renders no card without the fleet prop', async () => {
     await detect(undefined)
     expect(screen.queryByTestId('preflight-card')).toBeNull()
+  })
+})
+
+// ── R2b-fe-3 ────────────────────────────────────────────────────────────────────────────
+//
+// One card, success or failure. A failed WRITE says what failed and what to try first —
+// cable, port, then a lower baud — and names the flash chip only when it keeps failing at
+// the lowest baud. Through the real `FlashBoard`, with both seams faked.
+describe('FlashBoard — result card (R2b-fe-3)', () => {
+  /** A factory that records each baud and hands out a flasher whose write may throw. */
+  function failingFactory(shouldFail: () => boolean, message = 'No serial data received.') {
+    const bauds: number[] = []
+    const createFlasher = async ({ baudRate }: { baudRate: number }) => {
+      bauds.push(baudRate)
+      const fail = shouldFail()
+      return new FakeFlasher(
+        chipInfo(),
+        fail
+          ? () => {
+              throw new Error(message)
+            }
+          : null,
+      )
+    }
+    return { bauds, createFlasher }
+  }
+
+  async function connectAndFlash(user: ReturnType<typeof userEvent.setup>) {
+    await user.click(screen.getByRole('button', { name: /select port and detect/i }))
+    await screen.findByTestId('chip-info')
+    await user.type(screen.getByLabelText(/ssid/i), SSID)
+    await user.type(screen.getByLabelText(/passphrase/i), PASSPHRASE)
+    await user.click(screen.getByRole('button', { name: /flash this board/i }))
+  }
+
+  it('a failed write at 921600 says cable and port first, never the chip, never BOOT', async () => {
+    const user = userEvent.setup()
+    const { calls } = mockFetch(await defaultRoutes())
+    const { createFlasher } = failingFactory(() => true)
+    render(<FlashBoard onSessionExpired={vi.fn()} createFlasher={createFlasher} />)
+    await connectAndFlash(user)
+
+    const card = await screen.findByTestId('result-card')
+    expect(card).toHaveAttribute('data-outcome', 'flash-failed')
+    expect(card).toHaveAttribute('role', 'alert')
+    expect(card).toHaveTextContent(/stopped answering/i)
+    expect(card).toHaveTextContent(/cable/i)
+    expect(card).toHaveTextContent(/port/i)
+    expect(card).toHaveTextContent(/retry at 115200/i)
+    expect(card).not.toHaveTextContent(/flash chip/i)
+    expect(card).not.toHaveTextContent(/hold boot/i)
+    // The raw text and the revoke sentence are still there, as details.
+    expect(card).toHaveTextContent(/No serial data received/)
+    expect(card).toHaveTextContent(/token was revoked/i)
+    expect(within(card).getByRole('button', { name: 'Try the flash again' })).toBeEnabled()
+    expect(calls.filter((c) => c === `POST /v1/enrollment-tokens/${TOKEN_ID}/revoke`)).toHaveLength(1)
+    expect(card.textContent ?? '').not.toContain(PLAINTEXT)
+  })
+
+  it('escalates: try again, then retry at 115200, then suspect the flash chip', async () => {
+    const user = userEvent.setup()
+    const { calls } = mockFetch(await defaultRoutes())
+    const { bauds, createFlasher } = failingFactory(() => true)
+    render(<FlashBoard onSessionExpired={vi.fn()} createFlasher={createFlasher} />)
+    await connectAndFlash(user)
+
+    // Attempt 1 at 921600.
+    let card = await screen.findByTestId('result-card')
+    await user.click(within(card).getByRole('button', { name: 'Try the flash again' }))
+
+    // Attempt 2 at 921600: lower the baud, still no chip.
+    await waitFor(() => expect(bauds).toEqual([921600, 921600]))
+    card = await screen.findByTestId('result-card')
+    const retry = await within(card).findByRole('button', { name: 'Retry at 115200' })
+    expect(card).toHaveTextContent(/failed again/i)
+    expect(card).not.toHaveTextContent(/flash chip/i)
+
+    // One click lowers the baud AND retries.
+    await user.click(retry)
+    await waitFor(() => expect(bauds).toEqual([921600, 921600, 115200]))
+    expect(screen.getByLabelText(/baud rate/i)).toHaveValue('115200')
+
+    // Attempt 3 at 115200: now, and only now, the chip.
+    await waitFor(() =>
+      expect(screen.getByTestId('result-card')).toHaveTextContent(/flash chip may be defective/i),
+    )
+    expect(screen.getByTestId('result-card')).toHaveTextContent(/failed 3 times/)
+    // And every failed write gave its token back.
+    expect(calls.filter((c) => c === `POST /v1/enrollment-tokens/${TOKEN_ID}/revoke`)).toHaveLength(3)
+  })
+
+  it('a successful write clears the card and resets the count', async () => {
+    const user = userEvent.setup()
+    mockFetch(await defaultRoutes())
+    let failNext = true
+    const { createFlasher } = failingFactory(() => {
+      const fail = failNext
+      failNext = false
+      return fail
+    })
+    const { factory: createConsole } = fakeConsoleSessions([[], []])
+    render(
+      <FlashBoard
+        onSessionExpired={vi.fn()}
+        createFlasher={createFlasher}
+        createConsole={createConsole}
+      />,
+    )
+    await connectAndFlash(user)
+
+    const card = await screen.findByTestId('result-card')
+    await user.click(within(card).getByRole('button', { name: 'Try the flash again' }))
+    await screen.findByRole('heading', { name: 'Flashed' })
+    expect(screen.queryByTestId('result-card')).toBeNull()
+
+    // A later single failure on the same board is attempt 1 again.
+    failNext = true
+    await user.click(screen.getByRole('button', { name: /flash another board/i }))
+    await user.click(screen.getByRole('button', { name: /select port and detect/i }))
+    await screen.findByTestId('chip-info')
+    await user.click(screen.getByRole('button', { name: /flash this board/i }))
+    const again = await screen.findByTestId('result-card')
+    expect(again).toHaveAttribute('data-outcome', 'flash-failed')
+    expect(within(again).getByRole('button', { name: 'Try the flash again' })).toBeInTheDocument()
+    expect(again).not.toHaveTextContent(/failed again/i)
+  })
+
+  it('keeps the plain alert paragraph for a failure before the write', async () => {
+    mockFetch(await defaultRoutes())
+    await flashWith(new FakeFlasher(chipInfo({ chipName: 'ESP32-S2' })))
+    expect(await screen.findByRole('alert')).toHaveTextContent(/no agent bundle for ESP32-S2/i)
+    expect(screen.queryByTestId('result-card')).toBeNull()
+  })
+
+  it('ends a good flash in one success card with every fact, and no secret', async () => {
+    const user = userEvent.setup()
+    mockFetch(await defaultRoutes())
+    const { factory: createConsole } = fakeConsoleSessions([RECOVERED_BOOT])
+    const device: DeviceSummary = {
+      device_id: 'a4cf12b3de90',
+      name: null,
+      group_id: null,
+      platform_type: 'esp32',
+      fw_version: '0.3.0',
+      agent_version: '0.3.0',
+      link_type: 'wifi',
+      power_class: 'always_on',
+      expected_wake_interval_s: null,
+      parent_device_id: null,
+      partition_layout: 'ab-4m-v1',
+      ota_slot_size: 1966080,
+      capabilities: ['ota'],
+      last_seen: '2026-09-11T08:15:30Z',
+      enrolled_at: '2026-09-11T08:15:20Z',
+      broker_provisioned_at: null,
+      online: true,
+      deploy: null,
+    }
+    render(
+      <FlashBoard
+        onSessionExpired={vi.fn()}
+        createFlasher={async () => new FakeFlasher(chipInfo())}
+        createConsole={createConsole}
+        fleet={{ devices: [device], arrivals: [], error: null, now: Date.now() }}
+        versions={{ ui: '0.4.2', uiTitle: '', api: '0.4.2', differ: false }}
+      />,
+    )
+    await user.click(screen.getByRole('button', { name: /select port and detect/i }))
+    await screen.findByTestId('chip-info')
+    await user.type(screen.getByLabelText(/ssid/i), SSID)
+    await user.type(screen.getByLabelText(/passphrase/i), PASSPHRASE)
+    await user.click(screen.getByRole('button', { name: /re-flash and re-enrol this board/i }))
+
+    const card = await screen.findByTestId('result-card')
+    await waitFor(() => expect(card).toHaveAttribute('data-outcome', 'success'))
+    const rows = within(card).getByTestId('result-rows')
+    const row = (label: string) =>
+      within(rows).getByText(label).nextElementSibling?.textContent ?? ''
+    expect(row('Device id')).toBe('a4cf12b3de90')
+    expect(row('Firmware')).toBe('0.3.0')
+    expect(row('Partition layout')).toBe('ab-4m-v1')
+    expect(row('Link')).toBe(`Wi-Fi ${SSID} · ip 192.168.1.40`)
+    expect(row('Clock source')).toBe('NTP (pool.ntp.org)')
+    expect(row('Enrolled')).toBe('yes')
+    expect(row('On the fleet')).toBe('yes · server: online')
+    expect(row('UI / API')).toBe('UI 0.4.2 · API 0.4.2')
+    expect(within(card).getByTestId('console-online')).toBeInTheDocument()
+    expect(screen.getAllByTestId('result-card')).toHaveLength(1)
+
+    const body = document.body.textContent ?? ''
+    expect(body).not.toContain(PLAINTEXT)
+    expect(body).not.toContain(PASSPHRASE)
   })
 })

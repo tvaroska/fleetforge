@@ -229,7 +229,7 @@ are R3). Order inside each flow: the one-place status first, then the cards, the
       known board with firmware, online state and "re-flashing issues a new token and
       re-enrols it; its current baseline ends". No backend change. Acceptance: flashing a
       known board shows the card first; a new board shows "new board".
-- [ ] **R2b-fe-3**: Onboarding result card, with plain-language flash failures (P0, 1.5d)
+- [x] **R2b-fe-3**: Onboarding result card, with plain-language flash failures (P0, 1.5d) _(done 2026-10-04; see docs/features/enrollment.md)_
       One card composed from the console summary, the device row and the versions: device id,
       firmware, link, clock source, enrolled, on the fleet; on failure one cause and one next
       action. Fold in the flash write/verify failure copy: say what to try first (cable,

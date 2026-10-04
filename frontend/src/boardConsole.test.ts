@@ -662,3 +662,39 @@ describe('summarizeConsole when a milestone line never printed', () => {
     expect(unset.hintKind).toBe('specific')
   })
 })
+
+// R2b-fe-3: the result card names ONE cause, and the classifier chooses it.
+describe('the cause a line carries', () => {
+  it.each([
+    ['E (2600) ff-enroll: enroll 409: this token is already used, revoked or expired.', 'token'],
+    ['W (5300) ff-wifi: disconnected (reason 201); reconnecting in 1000 ms', 'wifi'],
+    ['E BOD: Brownout detector was triggered', 'power'],
+    ['waiting for download', 'download-mode'],
+    ["Guru Meditation Error: Core  0 panic'ed (LoadProhibited). Exception was unhandled.", 'firmware'],
+    [
+      'W (17200) ff-time: sntp: no answer from pool.ntp.org within 15000 ms; clock is still 1970-01-01T00:00:17Z',
+      'clock',
+    ],
+    ['W (3000) ff-enroll: cannot reach https://bingo.tvaroska.sk/v1/enroll', 'server'],
+    ['E (3000) ff-mqtt: broker refused the connection (not authorized)', 'token'],
+  ])('%s -> %s', (line, cause) => {
+    expect(classifyConsoleLine(line, 0).cause).toBe(cause)
+  })
+
+  it('a generic hint carries no cause', () => {
+    expect(classifyConsoleLine('Backtrace: 0x400d1234:0x3ffb1230', 0).cause).toBeNull()
+    expect(classifyConsoleLine('W (6300) ff-agent: no network yet; waiting for the link', 0).cause).toBeNull()
+    expect(
+      classifyConsoleLine(
+        'W (17200) ff-time: sntp: no answer from pool.ntp.org within 15000 ms; clock is still 2026-10-04T14:19:59Z',
+        0,
+      ).cause,
+    ).toBeNull()
+    expect(panelNotice('— resetting', 0).cause).toBeNull()
+  })
+
+  it('the fault follows the staged brownout (power)', () => {
+    const events = classify(BENCH_2026_09_11)
+    expect(summarizeConsole(events, at(events)).fault?.cause).toBe('power')
+  })
+})

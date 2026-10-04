@@ -5,7 +5,8 @@
 //
 // Which board the strip shows: the last one picked in the table, deployed to, or
 // detected/flashed in the flasher; with nothing picked and exactly one board, that one.
-// The flasher also reads the shared fleet (pre-flight card, R2b-fe-2).
+// The flasher also reads the shared fleet (pre-flight card, R2b-fe-2) and the versions
+// (result card, R2b-fe-3) — from the props this page already has, with no new hooks.
 
 import { useState } from 'react'
 import { type Me } from './api'
@@ -18,7 +19,7 @@ import { FleetTable } from './FleetView'
 import { useFleet, type EventSourceFactory } from './fleet'
 import { type HealthState } from './health'
 import { StatusStrip } from './StatusStrip'
-import { describeBoard } from './statusStrip'
+import { describeBoard, describeVersions } from './statusStrip'
 
 export function Dashboard({
   me,
@@ -72,6 +73,7 @@ export function Dashboard({
         onSessionExpired={expire}
         onBoardIdentified={setSelected}
         fleet={fleet}
+        versions={describeVersions(ui, health)}
         createFlasher={createFlasher}
       />
       <EnrollBoard onSessionExpired={expire} />

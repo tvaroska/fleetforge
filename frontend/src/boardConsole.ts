@@ -33,6 +33,21 @@ export type ConsoleLevel = 'error' | 'warn' | 'info' | 'plain'
 export type Remedy = 'reboot' | 'reflash'
 
 /**
+ * What kind of thing went wrong, in one word. R2b-fe-3: the result card names ONE cause, and
+ * it is chosen here, at the classifier, where the evidence is. Every specific hint carries
+ * one; a generic hint carries none, because it is never the cause (see `hintKind`).
+ */
+export type Cause =
+  | 'power'
+  | 'wifi'
+  | 'clock'
+  | 'server'
+  | 'broker'
+  | 'token'
+  | 'download-mode'
+  | 'firmware'
+
+/**
  * Button copy for a remedy. Exported because the panel and the tests must agree on it.
  *
  * Short on purpose: `button` is set in Press Start 2P (see index.css rule 2), which is
@@ -101,6 +116,8 @@ export type ConsoleEvent = {
    * know has to travel in-band rather than as a second argument.
    */
   remedy: Remedy | null
+  /** The category of `hint` when it is specific (R2b-fe-3); null for a generic hint. */
+  cause: Cause | null
   /** Who printed this line: the board over UART, or this panel narrating what it did. */
   source: 'board' | 'panel'
   /**
@@ -141,7 +158,7 @@ export type ConsoleSummary = {
    * something that happened; the reset it caused does not make it untrue, and a panic's
    * cause is printed immediately *before* the reset that hides it.
    */
-  fault: { text: string; hint: string; remedy: Remedy | null } | null
+  fault: { text: string; hint: string; remedy: Remedy | null; cause: Cause | null } | null
   /** Boots seen since this panel started watching. */
   boots: number
   /**
@@ -221,6 +238,15 @@ export const MILESTONE_REMEDY: Record<Milestone, Remedy | null> = {
   fleet: null,
 }
 
+/** The cause a stall at each milestone names when no line explained it (R2b-fe-3). */
+export const MILESTONE_CAUSE: Record<Milestone, Cause> = {
+  boot: 'firmware',
+  link: 'wifi',
+  clock: 'clock',
+  enroll: 'server',
+  fleet: 'broker',
+}
+
 /**
  * `esp_wifi`'s `wifi_err_reason_t`, for the handful that actually reach a bench.
  *
@@ -248,7 +274,12 @@ const LOG_LINE = /^([IWED])\s+\((\d+)\)\s+([A-Za-z0-9_.-]+):\s?(.*)$/
 
 const LEVELS: Record<string, ConsoleLevel> = { E: 'error', W: 'warn', I: 'info', D: 'info' }
 
-type Hint = { text: string; kind: 'generic' | 'specific'; remedy: Remedy | null }
+type Hint = {
+  text: string
+  kind: 'generic' | 'specific'
+  remedy: Remedy | null
+  cause: Cause | null
+}
 /**
  * A named diagnosis, optionally with a fix the panel can perform.
  *
@@ -257,10 +288,11 @@ type Hint = { text: string; kind: 'generic' | 'specific'; remedy: Remedy | null 
  * retries the link forever and backs off 60 s → 15 min on a 503, so a button that only
  * restarts a retry already in progress is a button that cannot work.
  */
-const specific = (text: string, remedy: Remedy | null = null): Hint => ({
+const specific = (cause: Cause, text: string, remedy: Remedy | null = null): Hint => ({
   text,
   kind: 'specific',
   remedy,
+  cause,
 })
 
 /** First year the agent treats as a real clock: `FF_TIME_SANE_YEAR`, `agent/main/ff_time.c:24`. */
@@ -292,6 +324,7 @@ const PHY_FULL_CALIBRATION = /falling back to full calibration/i
  * and rebooting into the same full calibration is the one action guaranteed not to.
  */
 const BROWNOUT_DURING_CALIBRATION = specific(
+  'power',
   'The 3.3 V rail collapsed during radio calibration — before this board ever tried to ' +
     'join the network, so the network settings are not the problem. This board has no ' +
     'stored RF calibration, so every boot runs the full calibration, which draws more ' +
@@ -332,6 +365,7 @@ const BARE_RULES: { match: RegExp; level: ConsoleLevel; hint: Hint }[] = [
     match: BROWNOUT_LINE,
     level: 'error',
     hint: specific(
+      'power',
       'The board reset because its 3.3 V rail sagged below about 2.43 V, which is where ' +
         'the brownout detector trips. That is a real collapse, not a marginal reading. The ' +
         'usual cause is the USB supply — a thin or long cable, a hub, or a keyboard or ' +
@@ -344,6 +378,7 @@ const BARE_RULES: { match: RegExp; level: ConsoleLevel; hint: Hint }[] = [
     match: /Guru Meditation Error|assert failed:/,
     level: 'error',
     hint: specific(
+      'firmware',
       'The firmware crashed. Flash the board again; if it crashes in the same place a second ' +
         'time, this is a bug in the firmware rather than anything the cable can fix.',
       // The hint already says "flash the board again" — S0-fe-6 makes that a button.
@@ -361,6 +396,7 @@ const BARE_RULES: { match: RegExp; level: ConsoleLevel; hint: Hint }[] = [
       text: 'The board printed a crash backtrace. The line above names what it crashed on.',
       kind: 'generic',
       remedy: null,
+      cause: null,
     },
   },
   {
@@ -368,6 +404,7 @@ const BARE_RULES: { match: RegExp; level: ConsoleLevel; hint: Hint }[] = [
     match: /waiting for download/,
     level: 'error',
     hint: specific(
+      'download-mode',
       'The board came up in its flashing bootloader instead of running the agent. Unplug it, ' +
         'plug it back in, and press "Reboot the board".',
       // An EN pulse with DTR low is exactly the fix the prose already asks for.
@@ -378,6 +415,7 @@ const BARE_RULES: { match: RegExp; level: ConsoleLevel; hint: Hint }[] = [
     match: /invalid header: 0x|flash read err/,
     level: 'error',
     hint: specific(
+      'firmware',
       'There is no usable firmware in the slot the board tried to boot. Flash the board again.',
       'reflash',
     ),
@@ -390,6 +428,7 @@ function resetBannerRule(reason: string): { level: ConsoleLevel; hint: Hint | nu
     return {
       level: 'error',
       hint: specific(
+        'power',
         'This board reset because its 3.3 V rail collapsed. Most often that is the USB ' +
           'supply — a thin or long cable, a hub, or a keyboard or monitor port — but a ' +
           'board that cannot meet the radio’s current peaks does it on a good cable too.',
@@ -400,6 +439,7 @@ function resetBannerRule(reason: string): { level: ConsoleLevel; hint: Hint | nu
     return {
       level: 'warn',
       hint: specific(
+        'firmware',
         'The board stopped responding and a watchdog reset it. If it keeps happening, flash ' +
           'the board again.',
         'reflash',
@@ -415,6 +455,7 @@ function resetBannerRule(reason: string): { level: ConsoleLevel; hint: Hint | nu
         text: 'The firmware restarted itself. Anything printed just above this says why.',
         kind: 'generic',
         remedy: null,
+        cause: null,
       },
     }
   }
@@ -455,6 +496,7 @@ export function classifyConsoleLine(raw: string, seq: number, at = Date.now()): 
     hint: hint?.text ?? null,
     hintKind: hint?.kind ?? 'specific',
     remedy: hint?.remedy ?? null,
+    cause: hint?.cause ?? null,
     source: 'board',
     commandedReset: false,
   }
@@ -480,6 +522,7 @@ export function panelNotice(
     hint: null,
     hintKind: 'specific',
     remedy: null,
+    cause: null,
     source: 'panel',
     commandedReset: options.commandedReset ?? false,
   }
@@ -506,6 +549,7 @@ function hintFor(tag: string | null, text: string): Hint | null {
   // looks flawless here.
   if (tag === 'ff-agent' && text.includes('the previous boot ended in a BROWNOUT')) {
     return specific(
+      'power',
       'This boot is fine, but the one before it died when the 3.3 V rail collapsed — the ' +
         'agent read that off the reset reason rather than guessing. The supply is marginal ' +
         'for this board: it will do this again on a cold boot, an OTA, or anything else ' +
@@ -531,6 +575,7 @@ function hintFor(tag: string | null, text: string): Hint | null {
       // from, and a board that parks with nothing named above it — `no usable ff_cfg
       // partition`, `no eFuse MAC` — is fixed by exactly this button and nothing else.
       remedy: 'reflash',
+      cause: null,
     }
   }
 
@@ -539,11 +584,13 @@ function hintFor(tag: string | null, text: string): Hint | null {
     if (reason !== null) {
       const code = Number(reason[1])
       return specific(
+        'wifi',
         WIFI_REASONS[code] ?? `the AP dropped this board (esp_wifi reason ${code})`,
       )
     }
     if (text.includes('carries no ssid')) {
       return specific(
+        'wifi',
         'This board was flashed with link=wifi but no SSID. Re-flash it with one.',
       )
     }
@@ -551,6 +598,7 @@ function hintFor(tag: string | null, text: string): Hint | null {
 
   if (tag === 'ff-net' && text.startsWith('no IP address after')) {
     return specific(
+      'wifi',
       'Associated, but DHCP never answered. The AP may be isolating this client.',
     )
   }
@@ -567,9 +615,11 @@ function hintFor(tag: string | null, text: string): Hint | null {
             'network may be blocking UDP/123.',
           kind: 'generic',
           remedy: null,
+          cause: null,
         }
       }
       return specific(
+        'clock',
         'The clock is still unset, so TLS cannot check a certificate: enrolment over ' +
           'https:// and mqtts:// will fail until the clock is set. The network may be ' +
           'blocking UDP/123.',
@@ -577,23 +627,26 @@ function hintFor(tag: string | null, text: string): Hint | null {
     }
     if (text.includes('no ntp server configured')) {
       return specific(
+        'clock',
         'No NTP server in ff_cfg. Any https:// or mqtts:// URI will fail to verify.',
       )
     }
     if (text.includes('the clock is still before')) {
-      return specific('SNTP answered with a nonsense time. TLS will fail.')
+      return specific('clock', 'SNTP answered with a nonsense time. TLS will fail.')
     }
   }
 
   if (tag === 'ff-enroll') {
     if (/^enroll 401\b/.test(text)) {
       return specific(
+        'token',
         'The server does not know this ffe_ token. Flash the board again to mint a new one.',
         'reflash',
       )
     }
     if (/^enroll 409\b/.test(text)) {
       return specific(
+        'token',
         'This token was already spent, revoked or has expired. Tokens are single-use: ' +
           'flash the board again to mint a fresh one.',
         // S0-fe-6's flagship case: the three manual steps this sentence describes are
@@ -603,22 +656,26 @@ function hintFor(tag: string | null, text: string): Hint | null {
     }
     if (/^enroll 429\b/.test(text)) {
       return specific(
+        'server',
         'Rate limited. The limiter counts failures, so something before this is wrong too.',
       )
     }
     if (/^enroll 503\b/.test(text)) {
       return specific(
+        'server',
         'The broker would not provision this device. This is a server-side fault, not the board.',
       )
     }
     if (text.startsWith('cannot reach ')) {
       return specific(
+        'server',
         'The board has a network but could not reach the API. If the clock milestone is ' +
           'still open this is a TLS failure caused by the unset clock, not a routing problem.',
       )
     }
     if (text.includes('carries no enrollment')) {
       return specific(
+        'token',
         'This board holds no credential and no ffe_ token. It can never join; re-flash it.',
         'reflash',
       )
@@ -627,6 +684,7 @@ function hintFor(tag: string | null, text: string): Hint | null {
 
   if (tag === 'ff-mqtt' && text.startsWith('broker refused the connection')) {
     return specific(
+      'token',
       'The stored credential is no longer valid — the device was probably deleted or ' +
         'reset on the server. Re-flash the board to enrol it again.',
       // Only an erase clears it: `ff_store_load()` short-circuits enrolment while a
@@ -645,6 +703,7 @@ function hintFor(tag: string | null, text: string): Hint | null {
       // Generic hints never carry a remedy, and this one names its own reason why: the
       // agent is already retrying, so no button of ours changes the outcome.
       remedy: null,
+      cause: null,
     }
   }
 
@@ -654,7 +713,7 @@ function hintFor(tag: string | null, text: string): Hint | null {
 /** Fold the events into the checklist and the current fault. Pure; the UI renders this. */
 export function summarizeConsole(events: ConsoleEvent[], now = Date.now()): ConsoleSummary {
   let reached = new Set<Milestone>()
-  let fault: { text: string; hint: string; remedy: Remedy | null } | null = null
+  let fault: ConsoleSummary['fault'] = null
   let faultKind: 'generic' | 'specific' = 'generic'
   let boots = 0
   let rebootLoop: { boots: number } | null = null
@@ -719,6 +778,7 @@ export function summarizeConsole(events: ConsoleEvent[], now = Date.now()): Cons
       text: event.text,
       hint: staged ? BROWNOUT_DURING_CALIBRATION.text : event.hint,
       remedy: staged ? BROWNOUT_DURING_CALIBRATION.remedy : event.remedy,
+      cause: staged ? BROWNOUT_DURING_CALIBRATION.cause : event.cause,
     }
     faultKind = event.hintKind
   }

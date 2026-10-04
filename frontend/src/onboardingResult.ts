@@ -1,0 +1,264 @@
+// The onboarding result card's judgement (R2b-fe-3). Pure: no React, no fetch.
+// `ResultCard.tsx` renders what this returns and decides nothing.
+//
+// `spec/flows.md` Flow 1 step 6: "One card, success or failure: device id, firmware,
+// partition layout, link, clock source, enrolled, on the fleet, UI and API versions. A
+// failure shows ONE cause, ONE in-place recovery action, and ONE click to copy a redacted
+// diagnostic bundle."
+//
+// Where each value comes from. The console is preferred, because it is what is running
+// right now; the device row can be stale for a re-enrolled board until its next announce.
+// Success itself comes from the console reaching `fleet`. Deciding it from the server when
+// the console lost the port is R2b-fe-5's, not this file's: the device row only ENRICHES
+// rows here (firmware fallback, layout, "server: online").
+
+import {
+  MILESTONE_CAUSE,
+  MILESTONE_LABELS,
+  type Cause,
+  type ConsoleEvent,
+  type ConsoleSummary,
+  type Remedy,
+} from './boardConsole'
+import { type DeviceSummary } from './api'
+import { type Tone, type VersionLine } from './statusStrip'
+
+/** `FF_TIME_SANE_YEAR`, `agent/main/ff_time.c:24` — the same bound `boardConsole.ts` uses. */
+const SANE_YEAR = 2024
+
+/** What the board said about itself, THIS boot only. */
+export type ConsoleFacts = {
+  deviceId: string | null
+  agentVersion: string | null
+  ssid: string | null
+  link: { type: 'wifi' | 'ethernet'; ip: string | null } | null
+  /**
+   * `set`: the clock milestone line was seen ("sntp: a -> b (via server)").
+   * Otherwise the `sntp: no answer` line, with the year the clock still held.
+   */
+  ntp: { server: string; set: true } | { server: string; set: false; keptYear: number | null } | null
+}
+
+const EMPTY_FACTS: ConsoleFacts = {
+  deviceId: null,
+  agentVersion: null,
+  ssid: null,
+  link: null,
+  ntp: null,
+}
+
+/**
+ * Folds the board's own lines into facts, resetting at every boot marker: a reset retracts
+ * everything an earlier boot said, for the same reason `summarizeConsole` clears `reached`.
+ * The agent banner IS a boot marker and carries the version, so its own fact is applied
+ * after the reset. Matches on `tag` + `text` the way `milestoneFor` does; every format is
+ * an `ESP_LOGx` string in `agent/main/*.c`.
+ */
+export function consoleFacts(events: ConsoleEvent[]): ConsoleFacts {
+  let facts: ConsoleFacts = { ...EMPTY_FACTS }
+  for (const event of events) {
+    if (event.source !== 'board') continue
+    if (event.bootMarker !== null) facts = { ...EMPTY_FACTS }
+    const { tag, text } = event
+    if (tag === 'ff-agent') {
+      // `agent_main.c:129` — "fleetforge agent <ver> (idf …), built …".
+      const version = /^fleetforge agent (\S+)/.exec(text)?.[1]
+      if (version !== undefined) facts.agentVersion = version
+    } else if (tag === 'ff-id') {
+      // `ff_identity.c:64` — "device_id <12 hex>".
+      const id = /^device_id ([0-9a-fA-F]{12})\b/.exec(text)?.[1]
+      if (id !== undefined) facts.deviceId = id.toLowerCase()
+    } else if (tag === 'ff-wifi') {
+      // `ff_net_wifi.c:228` — "wifi sta starting, ssid <ssid>". Not a secret.
+      const ssid = /^wifi sta starting, ssid (.+)$/.exec(text)?.[1]
+      if (ssid !== undefined) facts.ssid = ssid
+    } else if (tag === 'ff-net' && / link up/.test(text)) {
+      // `ff_net.c:29/33` — "<what> link up, ip A gw B mask C" or "(address unavailable)".
+      const ip = /link up, ip (\d+\.\d+\.\d+\.\d+)/.exec(text)?.[1] ?? null
+      facts.link = { type: text.startsWith('eth') ? 'ethernet' : 'wifi', ip }
+    } else if (tag === 'ff-time') {
+      // `ff_time.c:82` — "sntp: <before> -> <after> (via <server>)".
+      const via = /^sntp: .* -> .*\(via ([^)]+)\)/.exec(text)?.[1]
+      if (via !== undefined) {
+        facts.ntp = { server: via, set: true }
+      } else {
+        // `ff_time.c:75` — "sntp: no answer from <server> within N ms; clock is still <iso>".
+        const miss = /^sntp: no answer from (\S+) within/.exec(text)
+        if (miss !== null) {
+          const year = /clock is still (\d{4})-/.exec(text)?.[1]
+          facts.ntp = { server: miss[1], set: false, keptYear: year === undefined ? null : Number(year) }
+        }
+      }
+    } else if (tag === 'ff-mqtt' && facts.deviceId === null) {
+      // "mqtt connected as <id> (<uri>)" names the id too, for a log that missed `ff-id`.
+      const id = /^mqtt connected as ([0-9a-fA-F]{12})\b/.exec(text)?.[1]
+      if (id !== undefined) facts.deviceId = id.toLowerCase()
+    }
+  }
+  return facts
+}
+
+export type ResultContext = {
+  /** Dashboard's one `useFleet`; null while loading or when there is no fleet. */
+  devices: DeviceSummary[] | null
+  /** `describeVersions(ui, health)`; null means no versions row (standalone panel). */
+  versions: VersionLine | null
+  /** What this tab just wrote, or null when nothing was flashed here. */
+  flashed: {
+    deviceId: string | null
+    agentVersion: string | null
+    layout: string | null
+    link: string
+    ssid: string | null
+  } | null
+}
+
+export type ResultRow = { label: string; value: string; tone: Tone }
+
+export type OnboardingResult =
+  | { outcome: 'success'; rows: ResultRow[]; versionsDiffer: boolean }
+  | {
+      outcome: 'failure'
+      cause: Cause | null
+      headline: string
+      next: string
+      remedy: Remedy | null
+      rows: ResultRow[]
+      versionsDiffer: boolean
+    }
+
+/** The one cause, as a headline. Short: the watch paragraphs above keep the long story. */
+export const CAUSE_LABELS: Record<Cause, string> = {
+  power: "Power: the board's supply is collapsing (brownout)",
+  wifi: 'Wi-Fi: the board could not join the network',
+  clock: 'Clock: the board could not get the time',
+  server: 'Server: the board could not enrol',
+  broker: 'Broker: enrolled, but the message broker is unreachable',
+  token: 'Enrolment refused: the token or credential is not valid',
+  'download-mode': 'Stuck in download mode',
+  firmware: 'Firmware: the agent crashed or is not on the board',
+}
+
+/** The one next action as text, shown only when no button renders for it. */
+export const CAUSE_NEXT: Record<Cause, string> = {
+  power:
+    'Use a short, thick USB cable straight into the computer (no hub). If nothing changes, ' +
+    "suspect the board's own supply.",
+  wifi: 'Check the network name and passphrase in step 2 (2.4 GHz only), then re-flash.',
+  clock:
+    'Use a network that lets the board reach a time server (UDP port 123), for example a ' +
+    'phone hotspot.',
+  server: 'Check that this network can reach the fleetforge server, then reboot the board.',
+  broker: 'Allow outbound port 8883 on this network, or try another network.',
+  token: 'Re-flash the board: every flash mints a fresh single-use token.',
+  'download-mode': 'Unplug the board, plug it back in, and press Watch a board.',
+  firmware: 'Flash the board again.',
+}
+
+const NO_CAUSE_NEXT = 'Copy the diagnostic bundle and send it to whoever is helping you.'
+
+function clockRow(facts: ConsoleFacts): ResultRow {
+  const ntp = facts.ntp
+  if (ntp === null) return { label: 'Clock source', value: '—', tone: null }
+  if (ntp.set) return { label: 'Clock source', value: `NTP (${ntp.server})`, tone: null }
+  if (ntp.keptYear !== null && ntp.keptYear >= SANE_YEAR) {
+    // The 2026-10-04 bench: the RTC kept a sane time across the flasher's reset.
+    return {
+      label: 'Clock source',
+      value: `Kept across the reset (no answer from ${ntp.server})`,
+      tone: null,
+    }
+  }
+  return { label: 'Clock source', value: `Not set (no answer from ${ntp.server})`, tone: 'bad' }
+}
+
+function linkValue(facts: ConsoleFacts, flashed: ResultContext['flashed']): string {
+  const link = facts.link
+  if (link === null) return '—'
+  const ip = link.ip === null ? 'address unavailable' : `ip ${link.ip}`
+  if (link.type === 'ethernet') return `Ethernet · ${ip}`
+  const ssid = facts.ssid ?? flashed?.ssid ?? null
+  return ssid === null ? `Wi-Fi · ${ip}` : `Wi-Fi ${ssid} · ${ip}`
+}
+
+export function describeOnboardingResult(input: {
+  events: ConsoleEvent[]
+  summary: ConsoleSummary
+  context: ResultContext | null
+}): OnboardingResult | null {
+  const { events, summary } = input
+  if (events.length === 0) return null
+
+  const success = summary.reached.includes('fleet')
+  const failure =
+    !success &&
+    (summary.fault?.remedy != null || summary.overdue !== null || summary.rebootLoop !== null)
+  // While the board is still progressing the checklist is the view: a transient
+  // `disconnected (reason 2)` that recovers must never flash a failure card.
+  if (!success && !failure) return null
+
+  const facts = consoleFacts(events)
+  const devices = input.context?.devices ?? null
+  const versions = input.context?.versions ?? null
+  const flashed = input.context?.flashed ?? null
+
+  const deviceId = facts.deviceId ?? flashed?.deviceId ?? null
+  const row =
+    deviceId === null || devices === null
+      ? undefined
+      : devices.find((d) => d.device_id.toLowerCase() === deviceId.toLowerCase())
+
+  const firmware =
+    facts.agentVersion ??
+    row?.fw_version ??
+    (flashed?.agentVersion != null ? `${flashed.agentVersion} (written)` : null)
+  const enrolled = summary.reached.includes('enroll') || summary.skipped.includes('enroll')
+
+  let fleetValue = success ? 'yes' : 'no'
+  if (devices !== null) {
+    fleetValue +=
+      row === undefined
+        ? ' · server: not seen yet'
+        : row.online
+          ? ' · server: online'
+          : ' · server: offline'
+  }
+
+  const rows: ResultRow[] = [
+    { label: 'Device id', value: deviceId ?? '—', tone: null },
+    { label: 'Firmware', value: firmware ?? '—', tone: null },
+    { label: 'Partition layout', value: row?.partition_layout ?? flashed?.layout ?? '—', tone: null },
+    { label: 'Link', value: linkValue(facts, flashed), tone: null },
+    clockRow(facts),
+    { label: 'Enrolled', value: enrolled ? 'yes' : 'no', tone: enrolled ? 'ok' : 'bad' },
+    { label: 'On the fleet', value: fleetValue, tone: success ? 'ok' : 'bad' },
+  ]
+  if (versions !== null) {
+    rows.push({ label: 'UI / API', value: `UI ${versions.ui} · API ${versions.api}`, tone: null })
+  }
+  const versionsDiffer = versions?.differ ?? false
+
+  if (success) return { outcome: 'success', rows, versionsDiffer }
+
+  const { fault, rebootLoop, overdue, waitingFor } = summary
+  const cause: Cause | null =
+    fault?.cause ??
+    (rebootLoop !== null && fault === null ? 'power' : null) ??
+    (waitingFor !== null ? MILESTONE_CAUSE[waitingFor] : null)
+  const headline =
+    cause !== null
+      ? CAUSE_LABELS[cause]
+      : waitingFor !== null
+        ? `Stopped before ${MILESTONE_LABELS[waitingFor]}`
+        : 'Stopped short of the fleet'
+  return {
+    outcome: 'failure',
+    cause,
+    headline,
+    next: cause !== null ? CAUSE_NEXT[cause] : NO_CAUSE_NEXT,
+    // The same precedence the panel always had: the fault's action first, then the stall's.
+    remedy: fault?.remedy ?? overdue?.remedy ?? null,
+    rows,
+    versionsDiffer,
+  }
+}

@@ -6,6 +6,54 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-04 — The onboarding result card names one cause and holds the one action; flash write failures say cable, port, baud first and name the chip only on repeat (R2b-fe-3)
+
+**Decided: one result card (`ResultCard.tsx`) renders a pure `OnboardingResult`
+(`onboardingResult.ts`) or a `FlashFailure` (`flashFailure.ts`) and decides nothing. The
+console panel renders the success/failure card; `FlashBoard` renders the flash-failed card
+for throws from `flasher.write` only, and hides the console card while it shows. Never two
+cards.** Details: `docs/features/enrollment.md` → *Operator-flow additions*.
+
+- **When the console card shows.** Success: the console reached `fleet`. Failure: not, and
+  the fault has a remedy, a milestone is overdue, or the board is looping. Otherwise none:
+  while the board progresses the checklist is the view, so a transient disconnect that
+  recovers never flashes a failure card. None with no events.
+- **One cause, set at the classifier.** `Cause` (power, wifi, clock, server, broker, token,
+  download-mode, firmware) rides on every specific hint and on `fault`; generic hints carry
+  none. The card's cause: `fault.cause`, else power for a loop with no fault, else
+  `MILESTONE_CAUSE[waitingFor]`, else "Stopped before …".
+- **The card says the headline and one next action, not the long hint.** The watch
+  paragraphs keep their text and test ids.
+- **The one action moved into the card.** `remedyAction(fault.remedy ?? overdue.remedy)`,
+  same precedence as before; text `CAUSE_NEXT` when no button renders. This refines
+  S0-fe-6's placement (the button left the fault/overdue paragraphs); the one-button rule
+  and its test are unchanged.
+- **One copy click.** A failure card holds "Copy diagnostic bundle"; the toolbar's is hidden
+  meanwhile. The flash-failed card offers none (the console has nothing yet).
+- **The success card absorbs "This board enrolled and is on the fleet"** and its test id.
+- **Sources, console first.** Device id: `ff-id` (or `mqtt connected as`) → prediction.
+  Firmware: agent banner → device row → manifest "(written)". Layout: device row → build.
+  Link: console SSID → form SSID, console ip. Clock: "NTP (server)" / "Kept across the
+  reset (no answer from server)" / "Not set (…)". Facts are this boot only.
+- **Flash write failures.** Four kinds (lost, no-answer, rejected, other) plus the part and
+  address. Attempt 1: another cable or port first; "retry at 115200" above that baud.
+  Repeat above 115200: "Retry at 115200" (sets the baud and re-flashes in the same click,
+  no await before `reflash`). Repeat at 115200: the only mention of "flash chip". The
+  count is per board, in memory (`useRef`), never storage; a good write deletes it.
+- **Write failures keep esptool's own words in `error`.** Deviation from the plan, which
+  kept `explainFlashError` there: it maps `No serial data received` to "Hold BOOT while
+  plugging it in", which is right at connect and wrong mid-write, and the card shows
+  `error` as its details line. Connect and pre-write failures are translated as before.
+- **Labels** "Try the flash again" and "Retry at 115200" collide with no existing button
+  name regex.
+- **Out of scope:** the strip's onboarding segment and server-truth success when the
+  console lost the port (R2b-fe-5); boot count/reset reason rows (R2b-fe-4); naming from
+  the card (R2b-fe-6); known-networks rows (R2b-fe-12/13).
+
+Supersedes nothing.
+
+---
+
 ## 2026-10-04 — A board knows up to four Wi-Fi networks, joins the first it can see, and announces only the one it is on (R2b-spec-1, proposed)
 
 **Decided: `ff_cfg` keeps its top-level `ssid` / `psk` as the first network and gains an
