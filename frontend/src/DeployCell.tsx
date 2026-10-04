@@ -189,7 +189,9 @@ export function DeployCell({
       ) : artifactsLoaded ? (
         // Never a disabled button with no explanation: name the chip and the diagnosis
         // (S0-fe-4). The operator's next action is an upload for THIS target.
-        <span className="muted">No {device.platform_type} image has been uploaded yet.</span>
+        <span className="muted">
+          No {device.platform_type} image has been uploaded yet. Upload one under “Upload a build”.
+        </span>
       ) : (
         <span className="muted">Loading…</span>
       )}

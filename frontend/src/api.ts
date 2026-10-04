@@ -182,6 +182,17 @@ export type ArtifactSummary = {
 
 export type ArtifactList = { artifacts: ArtifactSummary[] }
 
+// Mirrors `ArtifactUploaded` in api/schemas.py, field for field and in its order. `created`
+// is `false` for an idempotent re-upload of the same bytes under the same label (HTTP 200).
+export type ArtifactUploaded = {
+  sha256: string
+  size_bytes: number
+  target: string
+  version: string
+  partition_layout: string
+  created: boolean
+}
+
 // Mirrors `DeployAccepted` in api/schemas.py — the 202 body of a deploy POST.
 //
 // `reused: true` means this POST re-published an in-flight intent under the same
@@ -315,6 +326,28 @@ export const api = {
   // the same `/v1/artifact` path is ALSO a public download route, but only with a
   // signature and a `/{sha256}/bin` suffix (`api/routers/artifact_download.py`).
   listArtifacts: () => request<ArtifactList>('/v1/artifact'),
+
+  // Upload one firmware image (R2b-fe-7). The body is the RAW file with
+  // `application/octet-stream`, never multipart: the server has no form parser and would
+  // store the boundary lines as "firmware". The browser sets `Content-Length` from the
+  // Blob, which the server requires (411 without it). Only target/version/layout are in
+  // the URL; the session is the HttpOnly cookie, so no credential ever is. The lowercase
+  // `content-type` key is what overrides `request()`'s JSON default.
+  uploadArtifact: (
+    file: Blob,
+    meta: { target: string; version: string; partitionLayout: string },
+  ) => {
+    const query = new URLSearchParams({
+      target: meta.target,
+      version: meta.version,
+      partition_layout: meta.partitionLayout,
+    })
+    return request<ArtifactUploaded>(`/v1/artifact?${query}`, {
+      method: 'POST',
+      body: file,
+      headers: { 'content-type': 'application/octet-stream' },
+    })
+  },
 
   // Deploy one labelled version to one board. 202 means the command reached the broker,
   // and nothing more; the states that follow arrive on `up/status` and ride back to this

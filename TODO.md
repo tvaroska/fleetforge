@@ -33,8 +33,7 @@ build is caught before the fleet, and any device that gets one recovers itself.
   goes silent before the first 1 KB of body is still not caught.
 - An OTA'd image that hangs before its broker session rolls back by itself since agent
   0.4.3 (R2-fw-4): proven in QEMU, bench replay owed.
-- No upload form in the dashboard (`docs/runbooks/upload-artifact.sh` is the only way in),
-  and every device has `name: null`. Now `R2b-fe-7` and `R2b-be-1` / `R2b-fe-6`.
+- Every device has `name: null`. Now `R2b-be-1` / `R2b-fe-6`.
 - The operator experience (onboard, update, change Wi-Fi) is specified as three flows in
   `spec/flows.md` (2026-10-04) and is **R2b** below. Almost all of it is dashboard work that
   needs no new protocol; only the known-networks list touches the agent and `ff_cfg`.
@@ -256,7 +255,7 @@ are R3). Order inside each flow: the one-place status first, then the cards, the
 
 ### Flow 2 — Update a board
 
-- [ ] **R2b-fe-7**: Upload a build from the dashboard (P0, 1.5d)
+- [x] **R2b-fe-7**: Upload a build from the dashboard (P0, 1.5d) _(done 2026-10-04; see docs/features/dashboard.md)_
       Replaces `docs/runbooks/upload-artifact.sh` as the way in (`spec/standards.md` →
       *dashboard*). `POST /v1/artifact` exists, so this is the form: file, version, target.
       Acceptance: an admin holding only the password uploads a `.bin` and sees it in the

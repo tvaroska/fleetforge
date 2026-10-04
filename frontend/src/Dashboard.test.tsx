@@ -54,9 +54,20 @@ function json(body: unknown, status = 200) {
 }
 
 function mockApi(devices: DeviceSummary[]) {
+  // Once an upload has been POSTed the list read returns the newer version first, the
+  // way the server's `created_at DESC` does.
+  let uploaded = false
   return vi.spyOn(globalThis, 'fetch').mockImplementation(async (input?: unknown, init?: RequestInit) => {
     const url = String(input)
-    if (url === '/v1/artifact') return json({ artifacts: [artifact] })
+    if (init?.method === 'POST' && url.startsWith('/v1/artifact?')) {
+      uploaded = true
+      return json({ ...artifact, version: '1.6.0', created: true }, 201)
+    }
+    if (url === '/v1/artifact') {
+      return json({
+        artifacts: uploaded ? [{ ...artifact, version: '1.6.0', sha256: 'b'.repeat(64) }, artifact] : [artifact],
+      })
+    }
     if (url.startsWith('/v1/devices/') && init?.method === 'POST') {
       return json({ cmd_id: 'c', device_id: 'x', version: '1.5.0', apply: 'auto', reused: false })
     }
@@ -129,6 +140,30 @@ describe('Dashboard', () => {
     await waitFor(() =>
       expect(screen.getByTestId('strip-board')).toHaveTextContent('b26a938324ab'),
     )
+  })
+
+  it('offers an uploaded build in the Deploy select with no remount (R2b-fe-7)', async () => {
+    mockApi([device()])
+    renderDashboard()
+    const select = (await screen.findByLabelText('Version for a4cf12b3de90')) as HTMLSelectElement
+    expect(select).toHaveValue('1.5.0')
+
+    const bytes = new Uint8Array(512)
+    bytes[0] = 0xe9
+    new DataView(bytes.buffer).setUint16(12, 13, true)
+    await userEvent.upload(
+      screen.getByLabelText(/Build \(\.bin\)/),
+      new File([bytes], 'app.bin'),
+    )
+    await waitFor(() => expect(screen.getByLabelText('Chip target')).toHaveValue('esp32c6'))
+    await userEvent.type(screen.getByLabelText('Version'), '1.6.0')
+    await userEvent.click(screen.getByRole('button', { name: 'Upload' }))
+
+    expect(await screen.findByTestId('upload-result')).toHaveTextContent('Uploaded esp32c6 1.6.0')
+    await waitFor(() => expect(select).toHaveValue('1.6.0'))
+    expect(Array.from(select.options).map((o) => o.value)).toEqual(['1.6.0', '1.5.0'])
+    // The very same element: the row was updated in place, not remounted.
+    expect(screen.getByLabelText('Version for a4cf12b3de90')).toBe(select)
   })
 
   it('opens exactly one event stream', async () => {

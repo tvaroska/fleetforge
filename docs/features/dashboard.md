@@ -19,6 +19,53 @@ When `/implement` finishes a task, it appends a completed entry below.
 <!-- Newest first. One entry per completed task. Capture what a future reader
      needs WITHOUT the local plan file. -->
 
+### 2026-10-04 — R2b-fe-7 Upload a build from the dashboard
+
+**What shipped:** An "Upload a build" section between the Fleet table and the flasher
+(`UploadBuild.tsx`). File, chip target, version and partition layout; `POST /v1/artifact`
+with the raw file as the body (`application/octet-stream`, metadata in the query string, no
+credential anywhere). A finished upload calls the page's one `useArtifacts().reload`, so the
+new version is in every matching row's Deploy select with no reload. The runbook
+`docs/runbooks/upload-artifact.sh` is deleted; `rollback-test.md` now points at the form.
+
+- **The header pre-fills, the server decides.** `appImage.ts` reads the first 256 bytes:
+  byte 0 `0xE9`, chip id (u16 at 12), and the `esp_app_desc_t` version / project name at
+  0x30 / 0x50. Target and version are pre-filled from it; a file built for another chip than
+  the one selected is refused in the browser (`upload-target-mismatch`, button disabled). That
+  is UI only: the server still treats the bytes as opaque. A merged image just reads as "no
+  version"; refusing it is R2b-be-3.
+- **Target is a select** (fleet chips + `esp32`/`esp32c3`/`esp32c6`/`esp32s3`), because a
+  typo'd target is accepted by the server and then matches no board. **Layout is a select**
+  defaulting to the one the chip's boards report (deploy compatibility is layout equality).
+- **Server sentences render verbatim** (409, 413 carry the numbers and the next action). Only
+  an empty or HTML body (a proxy page) is replaced, by status, in `uploadErrorMessage`.
+- **Finding: prod nginx capped bodies at 1 MiB.** `frontend/nginx.conf` set no
+  `client_max_body_size`, so any image over 1 MiB would have got nginx's own HTML 413 in
+  prod; the old runbook only worked because the esp32s3 agent (998,672 B) fits. The Vite dev
+  proxy hides this. Fixed with an exact-match `location = /v1/artifact` at 4m (the API stays
+  the size authority at 1966080); `/v1/` keeps the default. Guarded by
+  `tests/test_frontend_nginx.py`.
+- **Not done:** drag-and-drop, upload progress (fetch has none), the dry-run pre-check
+  (R2b-be-2 / R2b-fe-8).
+
+**T2 evidence (dev stack, real Chromium; nginx path via the production image):**
+- `agent/dist/esp32c6/app.bin` (1,106,384 B): line "app.bin — 1,106,384 bytes · built as
+  fleetforge-agent 0.4.5 for esp32c6", target `esp32c6`, version `0.4.5` pre-filled. Version
+  set to `0.4.5-t2-1791133925`: "Uploaded esp32c6 0.4.5-t2-1791133925 (1106384 bytes). It is
+  in the Deploy list of every esp32c6 board." POST `/v1/artifact?target=esp32c6&version=…&partition_layout=ab-4m-v1`,
+  `application/octet-stream`, 201. With no reload (`window.__ffT2` still 1) the esp32c6
+  rows' Deploy selects offered and had selected the new version first.
+- Same file and version again: "Already uploaded: these exact bytes are esp32c6 … Nothing
+  changed." (200), no duplicate option.
+- Version `1.5.0`, different bytes: the server's 409 sentence verbatim. 2,000,000 B file: "artifact
+  is 2000000 bytes; an OTA slot in this partition layout is 1966080. …" (413). esp32s3 image
+  with target esp32c6: `upload-target-mismatch`, Upload disabled, no request. 4 KB random
+  file: "Not recognised as an ESP-IDF app image; the version and target were not read from it."
+- Through nginx (`docker build --target production`, port 18080): login 200; 1,500,000 B
+  upload 201 `created:true`; 2,000,000 B upload 413 with the API's JSON detail (not nginx
+  HTML); `/v1/artifact/{sha}/bin` still answered by the API (403 `this download link is not
+  valid`). `docker logs fleetforge-api` carried no password.
+
 ### 2026-09-10 — S0-fe-2 Monochrome pixel-art theme
 
 **What shipped:** A whole-app restyle to a monochrome pixel-art theme — login, fleet,
@@ -110,18 +157,6 @@ _Tracked in `TODO.md` (live status lives there, not here)._
 ## Planned Work
 
 _Use `/new-feature` / `/new-task`. Requirements land in `spec/`._
-
-### Upload a `.bin` from the dashboard (Priority: P2)
-- **Problem:** Alex's unit of work is a `.bin` that the IDE just produced. The server accepted uploads since `R1-be-2` (`POST /v1/artifact`, `api/routers/artifacts.py:205`).
-  But `frontend/src/api.ts` has no upload method. It has `listArtifacts` and
-  `deployDevice` only. So the only way to get something deployable into the fleet is
-  `docs/runbooks/upload-artifact.sh`: curl, plus the admin password on stdin. The runbook
-  says as much ("until it grows a form this script is the only way"). The dashboard is
-  meant to *be* the operator manual. A shell script in the middle of the one path that
-  matters is the manual admitting it is not.
-- **Scope note:** this is a frontend surface over an endpoint that already exists and is
-  already authorized, not new backend capability. It retires the runbook.
-- **Added:** 2026-09-23
 
 ### Name a board (Priority: P2)
 - **Problem:** `spec/flows.md` Flow 1 step 7 specifies naming, and nothing implements it.

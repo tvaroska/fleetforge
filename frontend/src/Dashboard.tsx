@@ -7,6 +7,7 @@
 // detected/flashed in the flasher; with nothing picked and exactly one board, that one.
 // The flasher also reads the shared fleet (pre-flight card, R2b-fe-2) and the versions
 // (result card, R2b-fe-3) — from the props this page already has, with no new hooks.
+// The upload form (R2b-fe-7) shares the one artifact list: it calls `artifacts.reload`.
 
 import { useState } from 'react'
 import { type Me } from './api'
@@ -20,6 +21,7 @@ import { useFleet, type EventSourceFactory } from './fleet'
 import { type HealthState } from './health'
 import { StatusStrip } from './StatusStrip'
 import { describeBoard, describeVersions } from './statusStrip'
+import { UploadBuild } from './UploadBuild'
 
 export function Dashboard({
   me,
@@ -66,6 +68,13 @@ export function Dashboard({
         onSessionExpired={expire}
         selectedDeviceId={effective}
         onSelect={setSelected}
+      />
+      {/* Flow 2 step 1 sits next to the table whose Deploy column it feeds; a finished
+          upload re-reads the one artifact list, so the new version shows with no reload. */}
+      <UploadBuild
+        devices={fleet.devices}
+        onUploaded={artifacts.reload}
+        onSessionExpired={expire}
       />
       {/* Flashing mints its own token, so it sits above the manual token screen:
           the common path is "plug a board in", not "copy a string somewhere". */}

@@ -63,10 +63,9 @@ python3 agent/tools/verify_bundle.py /tmp/rbtest-esp32s3   # expect "agent <ver>
 
 Upload as a deployable **artifact** only:
 
-```bash
-FF_TARGET=esp32s3 FF_BIN=/tmp/rbtest-esp32s3/app.bin \
-  FF_VERSION=<version>-rbtest docs/runbooks/upload-artifact.sh
-```
+Upload `/tmp/rbtest-esp32s3/app.bin` from the dashboard (*Upload a build*): target
+`esp32s3`, version `<version>-rbtest`. The form pre-fills the version from the image header,
+which the rbtest build has already renamed to `<version>-rbtest`; check it says so.
 
 > **Never `just agent-publish` a rollback-test build**. That writes the flasher catalog,
 > which is the USB onboarding path. It would make a deliberately broken image the one

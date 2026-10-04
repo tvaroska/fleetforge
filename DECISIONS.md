@@ -6,6 +6,35 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-04 — Upload is a dashboard form over the raw-body endpoint; the header pre-fills target and version and a chip mismatch is refused in the browser; nginx takes 4m on `/v1/artifact` only (R2b-fe-7)
+
+**Decided: `UploadBuild.tsx` posts the file itself to `POST /v1/artifact` and the retired
+runbook is deleted. Details: `docs/features/dashboard.md`.**
+
+- **Raw body, not multipart.** The server has no form parser; `FormData` would store the
+  boundary lines as "firmware". `api.uploadArtifact` sends the `File` with
+  `application/octet-stream`; only target/version/layout ride in the URL.
+- **Target is a select, not free text.** A typo'd target is accepted and then matches no
+  board, so the build never appears in any Deploy list. Options: fleet chips plus the agent's
+  four targets.
+- **Layout is a select**, defaulting to the one layout the chip's boards report: deploy
+  compatibility is layout equality, so an Arduino board would 409 against an `ab-4m-v1`
+  label.
+- **The mismatch refusal is UI only.** A file whose header chip differs from the chosen
+  target is refused in the browser; the server stays opaque to bytes. The header read is
+  advisory, and refusing merged binaries stays R2b-be-3.
+- **No client-side version regex.** The server's `VERSION_PATTERN` sentence is shown verbatim.
+- **nginx's default body limit is 1m** and would have 413'd every image over 1 MiB in prod
+  (the Vite dev proxy hides it). `location = /v1/artifact` takes 4m; the API stays the size
+  authority (1966080). The general `/v1/` block is unchanged;
+  `tests/test_frontend_nginx.py` guards both.
+- **Runbook deleted;** `rollback-test.md` now uses the form.
+
+Supersedes nothing.
+
+
+---
+
 ## 2026-10-04 — The onboarding result card names one cause and holds the one action; flash write failures say cable, port, baud first and name the chip only on repeat (R2b-fe-3)
 
 **Decided: one result card (`ResultCard.tsx`) renders a pure `OnboardingResult`

@@ -162,7 +162,9 @@ describe('DeployCell — choosing a version', () => {
   it('names the chip when nothing has been uploaded for it, rather than a dead button', () => {
     renderCell({ device: device({ platform_type: 'esp32c6' }), artifacts: [] })
 
-    expect(screen.getByText('No esp32c6 image has been uploaded yet.')).toBeInTheDocument()
+    expect(screen.getByText(
+        'No esp32c6 image has been uploaded yet. Upload one under “Upload a build”.',
+      )).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Deploy' })).toBeNull()
   })
 
