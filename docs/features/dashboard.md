@@ -334,7 +334,9 @@ _Tracked in `TODO.md` (live status lives there, not here)._
 _Use `/new-feature` / `/new-task`. Requirements land in `spec/`._
 
 ### Name a board (Priority: P2)
-- **Progress:** the API landed in R2b-be-1 (`PATCH /v1/devices/{id}`, `{name?, group_id?}`); the UI is R2b-fe-6.
+- **Progress:** the API landed in R2b-be-1 (`PATCH /v1/devices/{id}`, `{name?, group_id?}`); the result-card UI landed in R2b-fe-6
+  (`NameBoard.tsx`, name only, on the success card). Not built: renaming from the fleet
+  table, and a group picker (there is no `GET /v1/groups`).
 - **Problem:** `spec/flows.md` Flow 1 step 7 specifies naming, and nothing implements it.
   `GET /v1/devices` returns `name: null` for every row and `api/routers/devices.py` has
   exactly one route — a GET. There is no PATCH. Confirmed live 2026-09-23: all 41 rows in

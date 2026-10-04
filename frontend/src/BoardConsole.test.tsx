@@ -899,3 +899,216 @@ describe('BoardConsolePanel — the console and the server together (R2b-fe-5)',
     expect(screen.queryByTestId('boot-milestones')).not.toBeInTheDocument()
   })
 })
+
+// ── R2b-fe-6 ────────────────────────────────────────────────────────────────────────────
+//
+// The last line of Flow 1: name the board from the success card. Only with the `naming`
+// capability and a fleet row for the board; the body is `{"name": ...}` and never a group.
+describe('BoardConsolePanel — name the board (R2b-fe-6)', () => {
+  const ID = 'a4cf12b3de90'
+
+  const row = (over: Partial<DeviceSummary> = {}): DeviceSummary => ({
+    device_id: ID,
+    name: null,
+    group_id: null,
+    platform_type: 'esp32',
+    fw_version: '0.1.0',
+    agent_version: '0.1.0',
+    link_type: 'wifi',
+    power_class: 'always_on',
+    expected_wake_interval_s: null,
+    parent_device_id: null,
+    partition_layout: 'ab-4m-v1',
+    ota_slot_size: 1966080,
+    capabilities: ['ota'],
+    last_seen: '2026-10-04T12:00:09Z',
+    enrolled_at: '2026-10-04T12:00:00Z',
+    broker_provisioned_at: '2026-10-04T12:00:01Z',
+    online: true,
+    deploy: null,
+    ...over,
+  })
+
+  const ctx = (devices: DeviceSummary[] | null): ResultContext => ({
+    devices,
+    versions: null,
+    flashed: null,
+    flashBaseline: null,
+  })
+
+  const json = (status: number, body: unknown) =>
+    new Response(JSON.stringify(body), { status })
+
+  function setup(
+    options: {
+      script?: string[]
+      devices?: DeviceSummary[] | null
+      naming?: boolean
+    } = {},
+  ) {
+    const { factory } = fakeConsole(options.script ?? HAPPY)
+    const onSessionExpired = vi.fn()
+    const onSaved = vi.fn()
+    const naming = options.naming === false ? undefined : { onSessionExpired, onSaved }
+    const devices = options.devices === undefined ? [row()] : options.devices
+    const view = (d: DeviceSummary[] | null) => (
+      <BoardConsolePanel autoWatch createConsole={factory} result={ctx(d)} naming={naming} />
+    )
+    const utils = render(view(devices))
+    return { ...utils, view, onSessionExpired, onSaved }
+  }
+
+  const form = () => screen.findByTestId('name-board')
+  const input = () => screen.getByLabelText('Board name') as HTMLInputElement
+  const save = () => screen.getByRole('button', { name: 'Save name' })
+
+  it('shows the form on the success card, last, empty for an unnamed board', async () => {
+    setup()
+    const card = await screen.findByTestId('result-card')
+    await waitFor(() => expect(card).toHaveAttribute('data-outcome', 'success'))
+    const named = await form()
+    expect(card).toContainElement(named)
+    expect(card.lastElementChild).toBe(named)
+    expect(input().value).toBe('')
+  })
+
+  it('pre-fills the name of a board that already has one', async () => {
+    setup({ devices: [row({ name: 'coop door' })] })
+    await form()
+    expect(input().value).toBe('coop door')
+  })
+
+  it('saves the trimmed name: one PATCH, only {"name"}, then the fleet is re-read', async () => {
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(json(200, row({ name: 'coop door' })))
+    const { onSaved } = setup()
+    await form()
+
+    await userEvent.type(input(), '  coop door  ')
+    await userEvent.click(save())
+
+    const message = await screen.findByTestId('name-board-message')
+    expect(message).toHaveTextContent('Saved. The fleet table shows “coop door”')
+    expect(message).toHaveAttribute('role', 'status')
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+    const [url, init] = fetchSpy.mock.calls[0]
+    expect(url).toBe(`/v1/devices/${ID}`)
+    expect(init?.method).toBe('PATCH')
+    expect(init?.body).toBe('{"name":"coop door"}')
+    expect(onSaved).toHaveBeenCalledTimes(1)
+    expect(input().value).toBe('coop door')
+  })
+
+  it('clearing the field sends {"name":null}', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(json(200, row()))
+    setup({ devices: [row({ name: 'coop door' })] })
+    await form()
+
+    await userEvent.clear(input())
+    await userEvent.click(save())
+
+    expect(await screen.findByTestId('name-board-message')).toHaveTextContent('Name cleared')
+    expect(fetchSpy.mock.calls[0][1]?.body).toBe('{"name":null}')
+    expect(input().value).toBe('')
+  })
+
+  it('shows a 409 verbatim, keeps the draft and does not re-read the fleet', async () => {
+    const detail = 'name already used by device a4cf12b3de91: hen house'
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(json(409, { detail }))
+    const { onSaved } = setup()
+    await form()
+
+    await userEvent.type(input(), 'hen house')
+    await userEvent.click(save())
+
+    expect(await screen.findByTestId('name-board-message')).toHaveTextContent(detail)
+    expect(screen.getByTestId('name-board-message')).toHaveClass('bad')
+    expect(onSaved).not.toHaveBeenCalled()
+    expect(input().value).toBe('hen house')
+  })
+
+  it('a 401 drops to the login gate and shows nothing', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(json(401, { detail: 'not authenticated' }))
+    const { onSessionExpired, onSaved } = setup()
+    await form()
+
+    await userEvent.type(input(), 'coop door')
+    await userEvent.click(save())
+
+    await waitFor(() => expect(onSessionExpired).toHaveBeenCalledTimes(1))
+    expect(screen.queryByTestId('name-board-message')).not.toBeInTheDocument()
+    expect(onSaved).not.toHaveBeenCalled()
+  })
+
+  it('a MAC-shaped or over-long name is refused on the client with no request', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch')
+    setup()
+    await form()
+
+    await userEvent.type(input(), 'A4CF12B3DE91')
+    await userEvent.click(save())
+    expect(await screen.findByTestId('name-board-message')).toHaveTextContent(
+      'cannot look like a device id',
+    )
+
+    await userEvent.clear(input())
+    await userEvent.paste('a'.repeat(65))
+    await userEvent.click(save())
+    expect(screen.getByTestId('name-board-message')).toHaveTextContent(
+      'a name is at most 64 characters',
+    )
+    expect(fetchSpy).not.toHaveBeenCalled()
+  })
+
+  it('a double click while the request is pending sends one PATCH', async () => {
+    let resolve: (r: Response) => void = () => {}
+    const pending = new Promise<Response>((r) => {
+      resolve = r
+    })
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockReturnValue(pending)
+    setup()
+    await form()
+
+    await userEvent.type(input(), 'coop door')
+    await userEvent.dblClick(save())
+
+    const busy = screen.getByRole('button', { name: 'Saving…' })
+    expect(busy).toBeDisabled()
+    expect(fetchSpy).toHaveBeenCalledTimes(1)
+
+    resolve(json(200, row({ name: 'coop door' })))
+    expect(await screen.findByRole('button', { name: 'Save name' })).toBeEnabled()
+  })
+
+  it('renders no form without the naming capability', async () => {
+    setup({ naming: false })
+    const card = await screen.findByTestId('result-card')
+    await waitFor(() => expect(card).toHaveAttribute('data-outcome', 'success'))
+    expect(screen.queryByTestId('name-board')).not.toBeInTheDocument()
+  })
+
+  it('renders no form when the fleet has no row for the board', async () => {
+    setup({ devices: [row({ device_id: '0000000fe699' })] })
+    const card = await screen.findByTestId('result-card')
+    await waitFor(() => expect(card).toHaveAttribute('data-outcome', 'success'))
+    expect(screen.queryByTestId('name-board')).not.toBeInTheDocument()
+  })
+
+  it('renders no form on a failure card, even with a row', async () => {
+    setup({ script: SPENT_TOKEN })
+    const card = await screen.findByTestId('result-card')
+    await waitFor(() => expect(card).toHaveAttribute('data-outcome', 'failure'))
+    expect(screen.queryByTestId('name-board')).not.toBeInTheDocument()
+  })
+
+  it('a re-read of the fleet never clobbers what is being typed', async () => {
+    const { rerender, view } = setup()
+    await form()
+    await userEvent.type(input(), 'half typed')
+
+    rerender(view([row({ name: 'someone else renamed it' })]))
+
+    expect(input().value).toBe('half typed')
+  })
+})

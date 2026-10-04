@@ -4,13 +4,16 @@
 //
 // No `aria-live` on the console card: the console ticks at 1 Hz. All device-controlled
 // strings (ssid, ids, versions, error text) go through React's escaping.
+//
+// The `naming` slot (R2b-fe-6) renders only on success, as the card's last element; the
+// caller decides whether it exists at all.
 
 import { Fragment, useId, type ReactNode } from 'react'
 import { type FlashFailure } from './flashFailure'
 import { type OnboardingResult, type ResultRow } from './onboardingResult'
 
 type Props =
-  | { result: OnboardingResult; action?: ReactNode; copy?: ReactNode }
+  | { result: OnboardingResult; action?: ReactNode; copy?: ReactNode; naming?: ReactNode }
   | { flashFailure: FlashFailure; details: string | null; action: ReactNode }
 
 function Rows({ rows }: { rows: ResultRow[] }) {
@@ -65,6 +68,7 @@ export function ResultCard(props: Props) {
         </p>
         <Rows rows={result.rows} />
         {result.versionsDiffer && <p className="warn">UI and API differ.</p>}
+        {props.naming}
       </section>
     )
   }

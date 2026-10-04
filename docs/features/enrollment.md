@@ -1330,6 +1330,14 @@ Implementation notes behind `spec/flows.md` Flow 1 and the 2026-10-04 entries in
   -t "result card"`, `BoardConsole.test.tsx` and `onboardingResult.test.ts` pass, plus the
   full suite, typecheck and build. Not run in a real browser (no board, so no console);
   the bench S3 ending in the success card is folded into `R2b-test-1`.
+- **Name from the card (R2b-fe-6, built).** Frontend only. The success result card ends with
+  a "Board name" form (`NameBoard.tsx`) that calls `PATCH /v1/devices/{id}` with exactly
+  `{"name": ...}` (blank clears it with `null`; `group_id` is never sent). It renders only
+  when the page gave the panel the `naming` capability (`FlashBoard` with a fleet) and the
+  fleet holds a row for the board, so a standalone panel and a failure card get no form.
+  `boardName.ts` checks the name before the round trip (64 code points, no control
+  characters, not 12 hex); duplicates are the server's 409, shown verbatim. `api.ts::detailOf`
+  now turns a FastAPI 422 array into its messages. The group/tag half of Flow 1 is not built.
 - **Layout profile.** Arduino IDE and PlatformIO hardcode the app offset (`0x10000`), which
   `ab-4m-v1` does not use. `ab-4m-arduino-v1` (`ff_cfg` at `0x3D0000`) exists for that
   case. Offering it at onboarding means the stock starter agent has to be built for each

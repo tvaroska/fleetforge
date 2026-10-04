@@ -1236,6 +1236,65 @@ describe('FlashBoard — result card (R2b-fe-3)', () => {
     expect(body).not.toContain(PLAINTEXT)
     expect(body).not.toContain(PASSPHRASE)
   })
+
+  // R2b-fe-6: the last line of Flow 1, through the real `FlashBoard`.
+  it('names the board from the success card: one PATCH with only the name, then a re-read', async () => {
+    const user = userEvent.setup()
+    const device: DeviceSummary = {
+      device_id: 'a4cf12b3de90',
+      name: null,
+      group_id: null,
+      platform_type: 'esp32',
+      fw_version: '0.3.0',
+      agent_version: '0.3.0',
+      link_type: 'wifi',
+      power_class: 'always_on',
+      expected_wake_interval_s: null,
+      parent_device_id: null,
+      partition_layout: 'ab-4m-v1',
+      ota_slot_size: 1966080,
+      capabilities: ['ota'],
+      last_seen: '2026-09-11T08:15:30Z',
+      enrolled_at: '2026-09-11T08:15:20Z',
+      broker_provisioned_at: null,
+      online: true,
+      deploy: null,
+    }
+    const { calls, spy } = mockFetch(
+      await defaultRoutes({
+        'PATCH /v1/devices/a4cf12b3de90': () => json({ ...device, name: 'coop door' }),
+      }),
+    )
+    const refresh = vi.fn()
+    const { factory: createConsole } = fakeConsoleSessions([RECOVERED_BOOT])
+    render(
+      <FlashBoard
+        onSessionExpired={vi.fn()}
+        createFlasher={async () => new FakeFlasher(chipInfo())}
+        createConsole={createConsole}
+        fleet={{ devices: [device], arrivals: [], error: null, now: Date.now(), refresh }}
+      />,
+    )
+    await user.click(screen.getByRole('button', { name: /select port and detect/i }))
+    await screen.findByTestId('chip-info')
+    await user.type(screen.getByLabelText(/ssid/i), SSID)
+    await user.type(screen.getByLabelText(/passphrase/i), PASSPHRASE)
+    await user.click(screen.getByRole('button', { name: /re-flash and re-enrol this board/i }))
+
+    const card = await screen.findByTestId('result-card')
+    await waitFor(() => expect(card).toHaveAttribute('data-outcome', 'success'))
+    await user.type(within(card).getByLabelText('Board name'), 'coop door')
+    await user.click(within(card).getByRole('button', { name: 'Save name' }))
+
+    expect(await within(card).findByTestId('name-board-message')).toHaveTextContent(
+      'Saved. The fleet table shows “coop door”',
+    )
+    expect(calls.filter((c) => c.startsWith('PATCH '))).toEqual(['PATCH /v1/devices/a4cf12b3de90'])
+    expect(refresh).toHaveBeenCalledTimes(1)
+    // (The token POST legitimately carries `group_id: null`; the PATCH must not.)
+    const patches = spy.mock.calls.filter(([, init]) => init?.method === 'PATCH')
+    expect(patches.map(([, init]) => init?.body)).toEqual(['{"name":"coop door"}'])
+  })
 })
 
 // ── R2b-fe-5 ────────────────────────────────────────────────────────────────────────────

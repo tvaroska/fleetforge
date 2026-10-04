@@ -8,7 +8,8 @@
 // All the judgement is in `boardConsole.ts`. This file renders it. R2b-fe-3's result card
 // lives here too; its judgement is in `onboardingResult.ts`. R2b-fe-5's server view (the
 // fleet's rows, so a native-USB port loss never reads as "no board") is judged in
-// `serverWatch.ts` and merged into the console's summary here.
+// `serverWatch.ts` and merged into the console's summary here. R2b-fe-6's name form
+// (`NameBoard.tsx`) hangs off the success card when the page gave the panel `naming`.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import {
@@ -27,6 +28,7 @@ import {
 import { buildDiagnosticBundle, type DiagnosticContext } from './diagnostics'
 import { explainFlashError } from './flasher'
 import { describeOnboardingResult, type ResultContext } from './onboardingResult'
+import { NameBoard } from './NameBoard'
 import { ResultCard } from './ResultCard'
 import {
   SERVER_WAIT_MS,
@@ -119,6 +121,7 @@ export function BoardConsolePanel({
   diagnostics,
   result,
   hideResult = false,
+  naming,
 }: {
   autoWatch: boolean
   // Injected by the tests only: jsdom has no `navigator.serial` (see `boardConsole.ts`).
@@ -149,6 +152,14 @@ export function BoardConsolePanel({
   result?: ResultContext
   /** R2b-fe-3. The flasher is showing its own (flash-failed) card; never show two. */
   hideResult?: boolean
+  /**
+   * R2b-fe-6. The capability to name the board from the success card: re-read the fleet
+   * after a save, drop to the login gate on a 401. Absent in a standalone panel (nothing
+   * to re-read, no session to lose), and then no form renders: a form that cannot work is
+   * what this codebase forbids. It also needs a fleet row for the board, or the PATCH
+   * would be a 404.
+   */
+  naming?: { onSessionExpired: () => void; onSaved: () => void }
 }) {
   const state = useBoardConsole({ createConsole, explainError: explainFlashError })
   const { watch: watchConsole } = state
@@ -331,6 +342,12 @@ export function BoardConsolePanel({
     context: result ?? null,
     fromServer,
   })
+  // R2b-fe-6. The fleet row the success card's name form edits, matched by id like
+  // everywhere else (the device list is lowercase hex). No row, no form.
+  const namedRow =
+    outcome?.outcome === 'success' && deviceId !== null && devices !== null
+      ? devices.find((d) => d.device_id.toLowerCase() === deviceId.toLowerCase())
+      : undefined
   // `!hideResult` is part of it: with the card hidden, the toolbar keeps its copy button.
   const failureCard = !hideResult && outcome?.outcome === 'failure'
   const copyButton = (
@@ -499,6 +516,17 @@ export function BoardConsolePanel({
               : null
           }
           copy={failureCard ? copyButton : null}
+          naming={
+            naming !== undefined && namedRow !== undefined ? (
+              <NameBoard
+                key={namedRow.device_id}
+                deviceId={namedRow.device_id}
+                currentName={namedRow.name}
+                onSessionExpired={naming.onSessionExpired}
+                onSaved={naming.onSaved}
+              />
+            ) : null
+          }
         />
       )}
 

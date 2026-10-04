@@ -6,6 +6,24 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-04 — A board is named from the success card; name only, no group picker; 422 details are made readable once in detailOf (R2b-fe-6)
+
+**Decided: `NameBoard.tsx` hangs off the success result card and sends `PATCH /v1/devices/{id}` with `{"name": ...}` only. Frontend only; no backend, migration or spec edit.**
+
+- **Name only, no group picker (1).** There is no `GET /v1/groups` and group CRUD is V3, so a picker would have nothing to list. The group/tag half of the flows.md line is deferred. The body is exactly `{"name": ...}`: never `group_id`, because merge-patch reads an explicit `null` as "ungroup".
+- **Where it shows (2, 3).** Only on the success card, only when `BoardConsolePanel` got the optional `naming` prop (`FlashBoard` passes it when it has a fleet) and the fleet holds a row for the board (else the PATCH would 404). Capability by prop, the `DeployCell` pattern: `onSessionExpired` (401 drops to login) and `onSaved` (`fleet.refresh`). No callbacks in `ResultContext`, which stays data for the pure judgement. `ResultCard` takes a `naming` slot and decides nothing.
+- **Draft (6).** Module-level component, keyed by device id (the panel re-renders at 1 Hz). Initialised from the row's name at mount and never resynced from props, so an SSE re-read cannot clobber typing; after a 200 it takes the server's normalised value.
+- **Client check (7).** `boardName.ts::checkBoardName` mirrors the server (trim, blank to null, 64 code points, no `Cc`/`Cf`, not 12 hex) for a message before the round trip. The card sends the normalised value. Duplicates are not pre-checked: the 409 detail names the other board and is shown verbatim. JS `trim()` vs Python `strip()` differ at the edges; the server decides.
+- **Readable 422s (8).** FastAPI's 422 `detail` is an array; `api.ts::detailOf` now joins each item's string `msg` (minus `Value error, `) with `; `. A string `detail` is unchanged byte for byte (DeployCell renders it verbatim); an array with no string `msg` still falls back to the raw body. Shared module, so the full frontend suite ran.
+- **Messages and controls (9, 10).** `Saved. The fleet table shows “<name>”, with the id beneath it.` / `Name cleared. The fleet table shows the device id.`; errors are `ApiError.message` verbatim; a `role="status"` line (a discrete event, unlike the 1 Hz card). Button reads `Saving…` and is disabled while in flight, with a ref guard against a double submit. No `maxLength` attribute, no logging of the name.
+- **T2 on the dev stack, real API + DB, Chromium with a fake `navigator.serial`.** Contract: the real 422 body (65 chars) is the `api.test.ts` fixture and reads `a name is at most 64 characters`; the 409 reads `name already used by device 0000000fe602: Hen House`. Browser: C form on the success card (empty input); D `  coop door  ` + Enter sent one PATCH `{"name":"coop door"}`, DB `coop door`; E fleet row showed `coop door` over the id with no reload; F `hen house` showed the 409 verbatim, DB unchanged; G a MAC-shaped name and H 65 characters gave client messages and no PATCH; I clearing sent `{"name":null}`, DB NULL, table back to the id; J no PATCH carried `group_id`.
+- **Rejected:** a group picker with no list endpoint; a client duplicate pre-check; `maxLength` on the input; callbacks in `ResultContext`.
+- **Proposed follow-ups, not filed:** rename from the fleet table (`NameBoard` takes `deviceId`, `currentName` and two callbacks, so it can be reused); a group picker after a read-only `GET /v1/groups`.
+
+Supersedes nothing.
+
+---
+
 ## 2026-10-04 — A board's name and group are set with one PATCH; "tag" is the existing group, not a new column (R2b-be-1)
 
 **Decided: `PATCH /v1/devices/{id}` takes `{name?, group_id?}`, admin-only, merge-patch. Backend only; no migration, no spec edit.**

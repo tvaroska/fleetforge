@@ -139,7 +139,8 @@ export function FlashBoard({
   onBoardIdentified?: (deviceId: string) => void
   // R2b-fe-2: the fleet from `Dashboard`'s single `useFleet` — never open a second one
   // here (one SSE slot each). Feeds the pre-flight card; absent means no card.
-  fleet?: Pick<Fleet, 'devices' | 'arrivals' | 'error' | 'now'>
+  // R2b-fe-6: `refresh` re-reads the list after a rename from the result card.
+  fleet?: Pick<Fleet, 'devices' | 'arrivals' | 'error' | 'now'> & Partial<Pick<Fleet, 'refresh'>>
   // R2b-fe-3: from `Dashboard`'s `useHealth` + `buildInfo` via `describeVersions` — never a
   // second health poll here. Feeds the result card's UI/API row; absent means no row.
   versions?: VersionLine
@@ -675,6 +676,13 @@ export function FlashBoard({
         diagnostics={diagnostics}
         result={resultContext}
         hideResult={failure !== null}
+        // R2b-fe-6. Naming needs the fleet's row, so it exists only with a fleet. A plain
+        // literal, as with `resultContext`: nothing downstream depends on its identity.
+        naming={
+          fleet === undefined
+            ? undefined
+            : { onSessionExpired, onSaved: fleet.refresh ?? (() => {}) }
+        }
         // No button when the form could not produce a valid blob — re-flashing the same
         // invalid config is a button that cannot work.
         onReflash={configError === null ? recoverByReflash : undefined}

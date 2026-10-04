@@ -247,7 +247,7 @@ are R3). Order inside each flow: the one-place status first, then the cards, the
       `name` is in the schema and in `GET /v1/devices`, but nothing sets it, so every device
       is `null`. A `PATCH /v1/devices/{id}`, admin-only. Acceptance: round-trips and shows in
       the table.
-- [ ] **R2b-fe-6**: Name a board from the result card (P1, 0.5d)
+- [x] **R2b-fe-6**: Name a board from the result card (P1, 0.5d) _(done 2026-10-04; see docs/features/dashboard.md)_
       Last line of Flow 1. Depends on `R2b-be-1`.
 - [ ] **R2b-test-1**: Re-run the unaided onboarding test against the new flow (P1, 0.5d)
       Extends `S0-test-3`, which passed 2026-09-22 on the old UI. Someone who has not seen

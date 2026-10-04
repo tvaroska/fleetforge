@@ -80,6 +80,11 @@ export type DeviceSummary = {
   deploy: DeploySummary | null
 }
 
+// Mirrors `DeviceUpdate` in api/schemas.py (R2b-be-1). MERGE-PATCH: an absent key leaves the
+// field alone and an explicit `null` CLEARS it, so `group_id: null` ungroups a board. Send
+// only the keys you mean to change.
+export type DeviceUpdate = { name?: string | null; group_id?: string | null }
+
 // Mirrors `DeploySummary` in api/schemas.py. The newest deploy transaction's current
 // state, or `null` for a board that has never been deployed to.
 //
@@ -314,13 +319,29 @@ async function requestBytes(path: string): Promise<Uint8Array> {
   return new Uint8Array(await response.arrayBuffer())
 }
 
-/** FastAPI puts the human-readable reason in `detail`; fall back to the raw body. */
+/**
+ * FastAPI puts the human-readable reason in `detail`: a string from an `HTTPException`, or
+ * (422, request validation) an array of `{msg, ...}` items. A string is returned as it is,
+ * byte for byte, because callers render it verbatim on purpose. An array becomes its
+ * messages joined by `; `, minus pydantic's `Value error, ` prefix. Anything else falls
+ * back to the raw body.
+ */
 function detailOf(body: string): string | null {
   try {
     const parsed: unknown = JSON.parse(body)
     if (parsed && typeof parsed === 'object' && 'detail' in parsed) {
       const detail = (parsed as { detail: unknown }).detail
       if (typeof detail === 'string') return detail
+      if (Array.isArray(detail)) {
+        const messages = (detail as unknown[]).flatMap((item) => {
+          if (item && typeof item === 'object' && 'msg' in item) {
+            const msg = (item as { msg: unknown }).msg
+            if (typeof msg === 'string') return [msg.replace(/^Value error, /, '')]
+          }
+          return []
+        })
+        if (messages.length > 0) return messages.join('; ')
+      }
     }
   } catch {
     /* not JSON — fall through */
@@ -346,6 +367,15 @@ export const api = {
   // The fleet read model, and the ONLY source of device state in this app. A frame on
   // `/v1/events` is a hint that says "go re-read"; this is the re-read.
   listDevices: () => request<DeviceList>('/v1/devices'),
+
+  // R2b-fe-6. Set a board's operator-set facts; returns the updated row as the list shows
+  // it. `PATCH` must be upper-case: fetch normalises GET/POST/PUT/DELETE/HEAD/OPTIONS but
+  // NOT `patch`, and a lower-case method goes on the wire as-is.
+  updateDevice: (deviceId: string, patch: DeviceUpdate) =>
+    request<DeviceSummary>(`/v1/devices/${encodeURIComponent(deviceId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    }),
 
   listEnrollmentTokens: () => request<{ tokens: EnrollmentTokenSummary[] }>('/v1/enrollment-tokens'),
 
