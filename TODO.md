@@ -238,7 +238,7 @@ are R3). Order inside each flow: the one-place status first, then the cards, the
       (`RESET_BANNER`, commanded-reset handling), so this may be small. Acceptance: a board
       that reboots during watch shows the count and reason ("rebooted 3x: brownout") and the
       milestones it had reached are retracted.
-- [ ] **R2b-fe-5**: Watch the console and the server together (P1, 1d)
+- [x] **R2b-fe-5**: Watch the console and the server together (P1, 1d) _(done 2026-10-04; see docs/features/enrollment.md)_
       A native-USB reset must not read as "no board": mark Enrolled / On the fleet from the
       device list or `GET /v1/events` even when the console lost the port. Built without waiting
       for the bench: the server's view is the truth either way. `S0-test-2` (Check F) tests it

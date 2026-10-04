@@ -6,9 +6,11 @@
 // `screen /dev/tty.usbserial-… 115200` in another window. That is the dead end this closes.
 //
 // All the judgement is in `boardConsole.ts`. This file renders it. R2b-fe-3's result card
-// lives here too; its judgement is in `onboardingResult.ts`.
+// lives here too; its judgement is in `onboardingResult.ts`. R2b-fe-5's server view (the
+// fleet's rows, so a native-USB port loss never reads as "no board") is judged in
+// `serverWatch.ts` and merged into the console's summary here.
 
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   MILESTONES,
   MILESTONE_LABELS,
@@ -16,6 +18,7 @@ import {
   describeRestarts,
   resetLabel,
   useBoardConsole,
+  type ConsoleAcquire,
   type ConsoleFactory,
   type ConsoleLevel,
   type Milestone,
@@ -25,6 +28,14 @@ import { buildDiagnosticBundle, type DiagnosticContext } from './diagnostics'
 import { explainFlashError } from './flasher'
 import { describeOnboardingResult, type ResultContext } from './onboardingResult'
 import { ResultCard } from './ResultCard'
+import {
+  SERVER_WAIT_MS,
+  describeServerView,
+  lastDeviceId,
+  mergeServerView,
+  takeBaseline,
+  type FleetBaseline,
+} from './serverWatch'
 
 const LEVEL_CLASS: Record<ConsoleLevel, string> = {
   error: 'bad',
@@ -38,12 +49,15 @@ function Checklist({
   skipped,
   retracted,
   waitingFor,
+  fromServer,
 }: {
   reached: Milestone[]
   skipped: Milestone[]
   /** Reached by an earlier boot and lost at an uncommanded restart (R2b-fe-4). */
   retracted: Milestone[]
   waitingFor: Milestone | null
+  /** Marked from the server's view, not the console's (R2b-fe-5). */
+  fromServer: Milestone[]
 }) {
   return (
     <ol className="milestones" data-testid="boot-milestones">
@@ -62,12 +76,14 @@ function Checklist({
               : lost
                 ? 'retracted'
                 : 'pending'
+        const server = done && fromServer.includes(milestone)
         return (
           <li
             key={milestone}
             className={state}
             data-state={state}
             data-retracted={state === 'waiting' && lost ? 'true' : undefined}
+            data-source={server ? 'server' : undefined}
           >
             <span aria-hidden="true">
               {done
@@ -81,6 +97,7 @@ function Checklist({
                       : '·'}
             </span>{' '}
             {MILESTONE_LABELS[milestone]}
+            {server && <span className="muted"> — from the server</span>}
             {state === 'skipped' && <span className="muted"> — not logged</span>}
             {state === 'waiting' && (
               <span className="muted">{lost ? ' — waiting (lost at the restart)' : ' — waiting'}</span>
@@ -134,7 +151,43 @@ export function BoardConsolePanel({
   hideResult?: boolean
 }) {
   const state = useBoardConsole({ createConsole, explainError: explainFlashError })
-  const { watch } = state
+  const { watch: watchConsole } = state
+
+  // R2b-fe-5. The watch anchor: a board flashed elsewhere, watched with no flash in this tab.
+  // Taken on the first watch and kept across re-watches (a re-taken baseline after the board
+  // re-enrolled would never show the change); Clear drops it. A flash in this tab supplies
+  // its own baseline (`result.flashBaseline`, owned by `FlashBoard`), which always wins.
+  const [watchBaseline, setWatchBaseline] = useState<FleetBaseline | null>(null)
+  const [baselineWanted, setBaselineWanted] = useState(false)
+  // When the console last stopped (acquire failed, stream ended, or released); null while a
+  // watch runs. Starts the server-wait deadline. Set when `watch()` settles rather than off
+  // the `opening` flag: a fast acquire failure sets `opening` true and false in one batch.
+  const [consoleStoppedAt, setConsoleStoppedAt] = useState<number | null>(null)
+  const flashBaseline = result?.flashBaseline ?? null
+  const devices = result?.devices ?? null
+  const anchor = useRef({ flashBaseline, devices, watchBaseline })
+  anchor.current = { flashBaseline, devices, watchBaseline }
+  const watch = useCallback(
+    (acquire: ConsoleAcquire) => {
+      const held = anchor.current
+      if (held.flashBaseline === null && held.watchBaseline === null) {
+        if (held.devices !== null) setWatchBaseline(takeBaseline(held.devices))
+        else setBaselineWanted(true)
+      }
+      setConsoleStoppedAt(null)
+      return watchConsole(acquire).finally(() => setConsoleStoppedAt(Date.now()))
+    },
+    [watchConsole],
+  )
+  // A fleet that had not loaded at the first watch: capture on the first render that has it.
+  // Accepted limit: it could already hold the new enrolment.
+  useEffect(() => {
+    if (!baselineWanted || devices === null) return
+    setBaselineWanted(false)
+    setWatchBaseline((current) => current ?? takeBaseline(devices))
+  }, [baselineWanted, devices])
+
+  const running = state.watching || state.opening
   const [recovering, setRecovering] = useState(false)
   /**
    * The bundle as it was at the moment of the click, and what the clipboard got.
@@ -246,14 +299,37 @@ export function BoardConsolePanel({
     if (element !== null) element.scrollTop = element.scrollHeight
   }, [state.events.length])
 
-  const { fault, rebootLoop, overdue, lastReset, restarts } = state.summary
+  // R2b-fe-5. The server's view, merged into the console's summary. Null (and the summary
+  // untouched) without a fleet, an id or a baseline — the standalone panel is unchanged.
+  const deviceId = lastDeviceId(state.events) ?? result?.flashed?.deviceId ?? null
+  const server = describeServerView({
+    deviceId,
+    devices,
+    baseline: flashBaseline ?? watchBaseline,
+    expectEnroll: flashBaseline !== null,
+  })
+  const { summary, fromServer } = mergeServerView(state.summary, server, !running)
+  // The console has stopped after trying (an error, or lines then a stop): the server is
+  // what the operator watches now, so the checklist stays on screen.
+  const serverShown =
+    server !== null && !running && (state.error !== null || state.events.length > 0)
+  const now = result?.now ?? null
+  const serverOverdue =
+    serverShown &&
+    !server.onFleet &&
+    consoleStoppedAt !== null &&
+    now !== null &&
+    now - consoleStoppedAt >= SERVER_WAIT_MS
+
+  const { fault, rebootLoop, overdue, lastReset, restarts } = summary
   const restartSentence = describeRestarts(restarts)
   const busy = state.opening
   // Cheap, and `summary` already ticks at 1 Hz while watching.
   const outcome = describeOnboardingResult({
     events: state.events,
-    summary: state.summary,
+    summary,
     context: result ?? null,
+    fromServer,
   })
   // `!hideResult` is part of it: with the card hidden, the toolbar keeps its copy button.
   const failureCard = !hideResult && outcome?.outcome === 'failure'
@@ -271,7 +347,8 @@ export function BoardConsolePanel({
       <h3 id="console-heading">4 · Watch the board</h3>
       <p className="muted">
         Reads the board's own log over the same USB cable at 115200 baud — the boot, the
-        Wi-Fi join, the enrolment. Nothing here talks to the server.
+        Wi-Fi join, the enrolment. When the page has the fleet, it also follows the server&rsquo;s
+        view of the board, so a board that drops off USB when it resets can still finish here.
       </p>
 
       <p>
@@ -294,6 +371,8 @@ export function BoardConsolePanel({
             type="button"
             onClick={() => {
               state.clear()
+              setWatchBaseline(null)
+              setBaselineWanted(false)
               setBundle(null)
               setCopied(null)
             }}
@@ -316,13 +395,33 @@ export function BoardConsolePanel({
         </p>
       )}
 
-      {state.watching && (
+      {(state.watching || serverShown) && (
         <Checklist
-          reached={state.summary.reached}
-          skipped={state.summary.skipped}
-          retracted={state.summary.retracted}
-          waitingFor={state.summary.waitingFor}
+          reached={summary.reached}
+          skipped={summary.skipped}
+          retracted={summary.retracted}
+          waitingFor={summary.waitingFor}
+          fromServer={fromServer}
         />
+      )}
+
+      {serverShown && (
+        <p className={server.onFleet ? 'ok' : undefined} data-testid="console-server-view">
+          {server.onFleet
+            ? `The server sees ${server.deviceId} on the fleet.`
+            : server.enrolled
+              ? `The server has enrolled ${server.deviceId}; waiting for it to reach the broker.`
+              : `Watching the server for ${server.deviceId}: not enrolled yet.`}
+        </p>
+      )}
+
+      {/* No unbounded wait on the server either (spec/standards.md). */}
+      {serverOverdue && (
+        <p className="warn" data-testid="console-server-overdue">
+          The server has not seen {server.deviceId} on the fleet in{' '}
+          {Math.round(SERVER_WAIT_MS / 1000)} s. Press &ldquo;Watch a board&rdquo; to read its
+          log, or re-flash it.
+        </p>
       )}
 
       {fault !== null && (
@@ -403,7 +502,11 @@ export function BoardConsolePanel({
         />
       )}
 
-      {state.error !== null && <p className="warn">{state.error}</p>}
+      {/* The text is unchanged (the bench's Check F fail signatures match on it); once the
+          server has enrolled the board it is evidently fine, so it is muted. */}
+      {state.error !== null && (
+        <p className={serverShown && server.enrolled ? 'muted' : 'warn'}>{state.error}</p>
+      )}
 
       {(state.watching || state.opening || state.events.length > 0) && (
         <>

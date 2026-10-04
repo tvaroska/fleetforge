@@ -6,6 +6,24 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-04 — The console panel also reads the server's view: Enrolled / On the fleet are marked from the device list against a snapshot taken when the flash starts (R2b-fe-5)
+
+**Decided: `serverWatch.ts` judges `Dashboard`'s one `useFleet` against a baseline; `BoardConsole.tsx` merges it into the console's summary. Frontend only. Details: `docs/features/enrollment.md` → *Two-source watch*.**
+
+- **Baseline, never the browser clock (D1).** Server times are one clock (models.py rule 3); comparing them to `Date.now()` would depend on the operator's skew. A `FleetBaseline` is `{enrolled_at, last_seen}` per lowercased id.
+- **Two anchors, only one re-taken (D2).** The flash anchor is owned by `FlashBoard`: taken on every entry into `flashing` (token minted inside it), cleared on `idle`. **Gotcha:** pressing "Watch a board" after a drop must not re-take it; the board may already have re-enrolled and a re-taken baseline would never show it. The watch anchor (no flash here) is taken by the panel on the first watch, kept across re-watches, dropped by Clear. A fleet still loading at the anchor is captured on first arrival (accepted limit: it could already hold the new enrolment).
+- **Rules (D3).** After a flash: Enrolled = `broker_provisioned_at` set and `enrolled_at` changed from the baseline (or no prior row); On the fleet = Enrolled, `online`, and `last_seen > enrolled_at`. No flash: a held credential is Enrolled; On the fleet also needs `last_seen` to move past the baseline. This closes the re-flash trap: a known board's stale row says `online: true` with the old `enrolled_at` until `/v1/enroll` runs. `online` is read as-is (`fleet.ts` rule 1).
+- **Only Enrolled and On the fleet (D4).** Arrival stages are not used for Network up / Clock set (arrival filtering makes them a poor per-session signal).
+- **Merged, not forked (D5).** `mergeServerView` adds `enroll` / `fleet`, re-applies the furthest-reached rule, clears `overdue` when the board is on the fleet, the milestone was passed, or the console stopped (its deadline clock froze with the port), and clears `fault` only on the fleet. The classifier and `summarizeConsole` are unchanged.
+- **What shows (D6).** Once the console stopped after trying, the checklist stays with `— from the server` items, a `console-server-view` line, the console's error text unchanged (Check F matches on it) but muted once enrolled, and a success card even with zero console lines. Never a failure card from a lost port alone.
+- **No unbounded wait (D7).** `SERVER_WAIT_MS` = enroll + fleet deadlines (90 s) after the console stopped, on the fleet's 1 Hz `now`: `console-server-overdue`. The stop time is set when `watch()` settles, not off `opening`, because a fast acquire failure flips `opening` true and false in one React batch (deviation from the plan's effect).
+- **Status strip and bundle unchanged (D9).** The strip already shows the flashed board's server state (R2b-fe-1); an onboarding-console segment is not built and no task is filed.
+- **Rejected:** comparing server times to the browser clock; a second EventSource or `useFleet`; arrival stages for Network up / Clock set; a status-strip segment.
+
+Supersedes nothing.
+
+---
+
 ## 2026-10-04 — Agent-learned networks belong in an NVS overlay keyed to the ff_cfg it extends; keep identity is a flash that mints no token; Improv needs an RX path the S3 console does not give (R2b-spec-3, findings)
 
 **Found: findings only, nothing built, `spec/` untouched. Details and the QEMU transcripts: `docs/features/enrollment.md` → *spike findings (R2b-spec-3)*.**

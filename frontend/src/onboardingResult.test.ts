@@ -21,6 +21,7 @@ import {
   type OnboardingResult,
   type ResultContext,
 } from './onboardingResult'
+import { mergeServerView } from './serverWatch'
 
 const HAPPY = [
   'rst:0x1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)',
@@ -238,5 +239,58 @@ describe('describeOnboardingResult', () => {
     expect(
       describeOnboardingResult({ events: [], summary: summarizeConsole([], T0), context: null }),
     ).toBeNull()
+  })
+})
+
+describe('describeOnboardingResult — the server view (R2b-fe-5)', () => {
+  const flashed: ResultContext['flashed'] = {
+    deviceId: 'a4cf12b3de90',
+    agentVersion: '0.4.0',
+    layout: 'ab-4m-v1',
+    link: 'wifi',
+    ssid: 'shed',
+  }
+  const context: ResultContext = {
+    devices: [device({ broker_provisioned_at: '2026-10-04T12:00:01Z' })],
+    versions: null,
+    flashed,
+  }
+
+  it('a success card from zero console events once the server sees the board on the fleet', () => {
+    const { summary, fromServer } = mergeServerView(
+      summarizeConsole([], T0),
+      { deviceId: 'a4cf12b3de90', enrolled: true, onFleet: true },
+      true,
+    )
+    const result = describeOnboardingResult({ events: [], summary, context, fromServer })
+    expect(result?.outcome).toBe('success')
+    expect(value(result, 'Device id')).toBe('a4cf12b3de90')
+    expect(value(result, 'Enrolled')).toBe('yes (from the server)')
+    expect(value(result, 'On the fleet')).toBe(
+      'yes · server: online (the console did not see it)',
+    )
+    expect(result?.rows.find((row) => row.label === 'On the fleet')?.tone).toBe('ok')
+  })
+
+  it('the console reached enroll itself, the server added the fleet', () => {
+    const events = eventsOf(HAPPY.slice(0, 7))
+    const { summary, fromServer } = mergeServerView(
+      summarizeConsole(events, T0 + 1_000),
+      { deviceId: 'a4cf12b3de90', enrolled: true, onFleet: true },
+      true,
+    )
+    const result = describeOnboardingResult({ events, summary, context, fromServer })
+    expect(result?.outcome).toBe('success')
+    expect(value(result, 'Enrolled')).toBe('yes')
+    expect(value(result, 'On the fleet')).toContain('the console did not see it')
+  })
+
+  it('zero events and only Enrolled from the server: still no card', () => {
+    const { summary, fromServer } = mergeServerView(
+      summarizeConsole([], T0),
+      { deviceId: 'a4cf12b3de90', enrolled: true, onFleet: false },
+      true,
+    )
+    expect(describeOnboardingResult({ events: [], summary, context, fromServer })).toBeNull()
   })
 })

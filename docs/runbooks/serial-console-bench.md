@@ -179,6 +179,9 @@ Fail signatures (each becomes a new S0 task via `/new-task`, with the observed t
   `sdkconfig.resolved`.
 - T > 6000 ms: a pass, but with under 2 s of margin. Record it as a finding: the window is
   too tight for this OS/driver.
+- Since R2b-fe-5, after either of the first two signatures the panel must still show
+  *Enrolled* and *On the fleet* marked `from the server` and the success card; record
+  whether it did.
 
 Reading the notice: `try 1` at 0-50 ms means the port never left the list, so the
 "different `SerialPort`" path was not exercised. `try N > 1` means the window mattered.

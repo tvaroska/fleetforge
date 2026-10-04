@@ -1237,3 +1237,90 @@ describe('FlashBoard — result card (R2b-fe-3)', () => {
     expect(body).not.toContain(PASSPHRASE)
   })
 })
+
+// ── R2b-fe-5 ────────────────────────────────────────────────────────────────────────────
+//
+// Through the real `FlashBoard`: the baseline is taken when the flash starts, survives the
+// operator pressing "Watch a board" again, and clears on "Flash another board".
+describe('FlashBoard — the console and the server together (R2b-fe-5)', () => {
+  const E0 = '2026-10-04T10:00:00Z'
+  const E1 = '2026-10-04T12:00:00Z'
+  const NO_BOARD =
+    'No board is available to watch. Plug it back in, then use “Watch a board” to pick the port.'
+  const known: DeviceSummary = {
+    device_id: 'a4cf12b3de90',
+    name: null,
+    group_id: null,
+    platform_type: 'esp32',
+    fw_version: '0.3.0',
+    agent_version: '0.3.0',
+    link_type: 'wifi',
+    power_class: 'always_on',
+    expected_wake_interval_s: null,
+    parent_device_id: null,
+    partition_layout: 'ab-4m-v1',
+    ota_slot_size: 1966080,
+    capabilities: ['ota'],
+    last_seen: '2026-10-04T11:59:00Z',
+    enrolled_at: E0,
+    broker_provisioned_at: '2026-10-04T10:00:01Z',
+    online: true,
+    deploy: null,
+  }
+
+  it('re-flash of a known online board: success only after the new enrolment, from the server', async () => {
+    const user = userEvent.setup()
+    mockFetch(await defaultRoutes())
+    let acquires = 0
+    const createConsole: ConsoleFactory = async () => {
+      acquires += 1
+      throw new Error(NO_BOARD)
+    }
+    const page = (devices: DeviceSummary[]) => (
+      <FlashBoard
+        onSessionExpired={vi.fn()}
+        createFlasher={async () => new FakeFlasher(chipInfo())}
+        createConsole={createConsole}
+        fleet={{ devices, arrivals: [], error: null, now: Date.now() }}
+      />
+    )
+    const { rerender } = render(page([known]))
+    await user.click(screen.getByRole('button', { name: /select port and detect/i }))
+    await screen.findByTestId('chip-info')
+    await user.type(screen.getByLabelText(/ssid/i), SSID)
+    await user.type(screen.getByLabelText(/passphrase/i), PASSPHRASE)
+    await user.click(screen.getByRole('button', { name: /re-flash and re-enrol this board/i }))
+
+    // The console lost the port; the stale row (online, old enrolled_at) proves nothing.
+    const view = await screen.findByTestId('console-server-view')
+    expect(view).toHaveTextContent('Watching the server for a4cf12b3de90')
+    expect(screen.queryByTestId('result-card')).toBeNull()
+    expect(document.querySelector('[data-source="server"]')).toBeNull()
+
+    // The board re-enrolled and spoke after it.
+    const reEnrolled: DeviceSummary = {
+      ...known,
+      enrolled_at: E1,
+      broker_provisioned_at: '2026-10-04T12:00:01Z',
+      last_seen: '2026-10-04T12:00:09Z',
+    }
+    rerender(page([reEnrolled]))
+    const card = screen.getByTestId('result-card')
+    expect(card).toHaveAttribute('data-outcome', 'success')
+    expect(within(card).getByTestId('console-online')).toBeInTheDocument()
+    expect(within(card).getByText('On the fleet').nextElementSibling).toHaveTextContent(
+      'the console did not see it',
+    )
+
+    // Watching again must NOT re-take the baseline: it would now hold E1 and never show it.
+    await user.click(screen.getByRole('button', { name: 'Watch a board' }))
+    await waitFor(() => expect(acquires).toBe(2))
+    await waitFor(() =>
+      expect(screen.getByTestId('result-card')).toHaveAttribute('data-outcome', 'success'),
+    )
+
+    // "Flash another board" clears it: no flash, no server view.
+    await user.click(screen.getByRole('button', { name: /flash another board/i }))
+    expect(screen.queryByTestId('console-server-view')).toBeNull()
+  })
+})

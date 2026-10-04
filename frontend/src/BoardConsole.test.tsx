@@ -20,7 +20,9 @@ import {
 import { BENCH_2026_09_11 } from './fixtures/bench-2026-09-11'
 import { BENCH_2026_10_04 } from './fixtures/bench-2026-10-04'
 import { REBOOT_DURING_WATCH } from './fixtures/reboot-during-watch'
-import { CAUSE_NEXT } from './onboardingResult'
+import { CAUSE_NEXT, type ResultContext } from './onboardingResult'
+import type { DeviceSummary } from './api'
+import { SERVER_WAIT_MS, takeBaseline, type FleetBaseline } from './serverWatch'
 
 const HAPPY = [
   'rst:0x1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)',
@@ -653,5 +655,247 @@ describe('BoardConsolePanel — the result card (R2b-fe-3)', () => {
     await screen.findByTestId('console-fault')
     expect(screen.queryByTestId('result-card')).not.toBeInTheDocument()
     expect(screen.getAllByRole('button', { name: /copy diagnostic bundle/i })).toHaveLength(1)
+  })
+})
+
+// ── R2b-fe-5 ────────────────────────────────────────────────────────────────────────────
+//
+// A native-USB board re-enumerates when it is reset, so the console can lose the port while
+// the board enrols perfectly well. The server's device list is the truth either way.
+describe('BoardConsolePanel — the console and the server together (R2b-fe-5)', () => {
+  const ID = 'a4cf12b3de90'
+  const E0 = '2026-10-04T10:00:00Z'
+  const E1 = '2026-10-04T12:00:00Z'
+  /** The exact `serialConsole.ts` error after its 8 s `getPorts()` window. */
+  const NO_BOARD =
+    'No board is available to watch. Plug it back in, then use \u201cWatch a board\u201d to pick the port.'
+
+  const row = (over: Partial<DeviceSummary> = {}): DeviceSummary => ({
+    device_id: ID,
+    name: null,
+    group_id: null,
+    platform_type: 'esp32',
+    fw_version: '0.4.0',
+    agent_version: '0.4.0',
+    link_type: 'wifi',
+    power_class: 'always_on',
+    expected_wake_interval_s: null,
+    parent_device_id: null,
+    partition_layout: 'ab-4m-v1',
+    ota_slot_size: 1966080,
+    capabilities: ['ota'],
+    last_seen: null,
+    enrolled_at: E1,
+    broker_provisioned_at: null,
+    online: false,
+    deploy: null,
+    ...over,
+  })
+  const enrolledRow = row({ broker_provisioned_at: '2026-10-04T12:00:01Z' })
+  const onlineRow = { ...enrolledRow, online: true, last_seen: '2026-10-04T12:00:09Z' }
+
+  const context = (
+    devices: DeviceSummary[] | null,
+    flashBaseline: FleetBaseline | null = { rows: {} },
+    now?: number,
+  ): ResultContext => ({
+    devices,
+    versions: null,
+    flashed: { deviceId: ID, agentVersion: '0.4.0', layout: 'ab-4m-v1', link: 'wifi', ssid: null },
+    flashBaseline,
+    now,
+  })
+
+  const failingAcquire: ConsoleFactory = async () => {
+    throw new Error(NO_BOARD)
+  }
+
+  /** Opens, yields the first lines, then the stream ENDS: the board dropped off the bus. */
+  function droppingConsole(script: string[]): ConsoleFactory {
+    return async () => ({
+      async *lines() {
+        for (const line of script) yield line
+      },
+      async reboot() {},
+      async close() {},
+    })
+  }
+
+  const item = (label: string) =>
+    within(screen.getByTestId('boot-milestones')).getByText(label).closest('li') as HTMLElement
+
+  it('acquire fails after flashing a new board: the server drives it to the success card', async () => {
+    const { rerender } = render(
+      <BoardConsolePanel autoWatch createConsole={failingAcquire} result={context([])} />,
+    )
+    const view = await screen.findByTestId('console-server-view')
+    expect(view).toHaveTextContent(`Watching the server for ${ID}`)
+    expect(screen.queryByTestId('result-card')).not.toBeInTheDocument()
+    expect(screen.getByText(NO_BOARD)).toHaveClass('warn')
+
+    rerender(
+      <BoardConsolePanel autoWatch createConsole={failingAcquire} result={context([enrolledRow])} />,
+    )
+    expect(item('Enrolled')).toHaveAttribute('data-state', 'done')
+    expect(item('Enrolled')).toHaveAttribute('data-source', 'server')
+    expect(item('Enrolled')).toHaveTextContent('from the server')
+    expect(item('On the fleet')).toHaveAttribute('data-state', 'waiting')
+    expect(screen.getByTestId('console-server-view')).toHaveTextContent('has enrolled')
+    expect(screen.queryByTestId('result-card')).not.toBeInTheDocument()
+
+    rerender(
+      <BoardConsolePanel autoWatch createConsole={failingAcquire} result={context([onlineRow])} />,
+    )
+    const card = screen.getByTestId('result-card')
+    expect(card).toHaveAttribute('data-outcome', 'success')
+    expect(within(card).getByTestId('console-online')).toBeInTheDocument()
+    const fleetRow = within(card).getByText('On the fleet').nextElementSibling
+    expect(fleetRow).toHaveTextContent('the console did not see it')
+    expect(item('On the fleet')).toHaveAttribute('data-source', 'server')
+    // The text is unchanged (Check F matches on it), muted now the board is evidently fine.
+    expect(screen.getByText(NO_BOARD)).toHaveClass('muted')
+  })
+
+  it('the stream ends after the EN pulse: the drop text stays, the server finishes the job', async () => {
+    const factory = droppingConsole(HAPPY.slice(0, 3))
+    const { rerender } = render(
+      <BoardConsolePanel autoWatch createConsole={factory} result={context([])} />,
+    )
+    const drop = await screen.findByText(/dropped off the USB bus/)
+    expect(drop).toHaveClass('warn')
+    expect(screen.getByTestId('console-server-view')).toBeInTheDocument()
+    expect(screen.getByTestId('boot-milestones')).toBeInTheDocument()
+
+    rerender(
+      <BoardConsolePanel autoWatch createConsole={factory} result={context([enrolledRow])} />,
+    )
+    expect(screen.getByText(/dropped off the USB bus/)).toHaveClass('muted')
+
+    rerender(<BoardConsolePanel autoWatch createConsole={factory} result={context([onlineRow])} />)
+    expect(screen.getByTestId('result-card')).toHaveAttribute('data-outcome', 'success')
+    expect(screen.getByText(/dropped off the USB bus/)).toHaveClass('muted')
+    expect(item('Agent running')).not.toHaveAttribute('data-source')
+    expect(item('Enrolled')).toHaveAttribute('data-source', 'server')
+  })
+
+  it('re-flashing a known online board: its stale row marks nothing until it re-enrols', async () => {
+    const stale = row({
+      enrolled_at: E0,
+      broker_provisioned_at: '2026-10-04T10:00:01Z',
+      online: true,
+      last_seen: '2026-10-04T11:59:00Z',
+    })
+    const baseline = takeBaseline([stale])
+    const { rerender } = render(
+      <BoardConsolePanel
+        autoWatch
+        createConsole={failingAcquire}
+        result={context([stale], baseline)}
+      />,
+    )
+    await screen.findByTestId('console-server-view')
+    expect(document.querySelector('[data-source="server"]')).toBeNull()
+    expect(screen.queryByTestId('result-card')).not.toBeInTheDocument()
+    expect(screen.getByTestId('console-server-view')).toHaveTextContent('not enrolled yet')
+
+    // Re-enrolled, but last_seen still predates the new enrolment: Enrolled, not On the fleet.
+    const reEnrolled = { ...stale, enrolled_at: E1, broker_provisioned_at: '2026-10-04T12:00:01Z' }
+    rerender(
+      <BoardConsolePanel
+        autoWatch
+        createConsole={failingAcquire}
+        result={context([reEnrolled], baseline)}
+      />,
+    )
+    expect(item('Enrolled')).toHaveAttribute('data-source', 'server')
+    expect(item('On the fleet')).not.toHaveAttribute('data-source')
+    expect(screen.queryByTestId('result-card')).not.toBeInTheDocument()
+
+    rerender(
+      <BoardConsolePanel
+        autoWatch
+        createConsole={failingAcquire}
+        result={context([{ ...reEnrolled, last_seen: '2026-10-04T12:00:09Z' }], baseline)}
+      />,
+    )
+    expect(screen.getByTestId('result-card')).toHaveAttribute('data-outcome', 'success')
+  })
+
+  it('says so after the server wait, and never before (no unbounded wait)', async () => {
+    const { rerender } = render(
+      <BoardConsolePanel
+        autoWatch
+        createConsole={failingAcquire}
+        result={context([], { rows: {} }, Date.now())}
+      />,
+    )
+    await screen.findByTestId('console-server-view')
+    const stoppedBy = Date.now()
+    rerender(
+      <BoardConsolePanel
+        autoWatch
+        createConsole={failingAcquire}
+        result={context([], { rows: {} }, stoppedBy + SERVER_WAIT_MS - 5_000)}
+      />,
+    )
+    expect(screen.queryByTestId('console-server-overdue')).not.toBeInTheDocument()
+
+    rerender(
+      <BoardConsolePanel
+        autoWatch
+        createConsole={failingAcquire}
+        result={context([], { rows: {} }, stoppedBy + SERVER_WAIT_MS + 1_000)}
+      />,
+    )
+    expect(screen.getByTestId('console-server-overdue')).toHaveTextContent(
+      `The server has not seen ${ID} on the fleet in 90 s.`,
+    )
+    expect(screen.queryByTestId('result-card')).not.toBeInTheDocument()
+  })
+
+  it('a manual watch with no flash: On the fleet from the server once last_seen moves', async () => {
+    const user = userEvent.setup()
+    const held = row({
+      enrolled_at: E0,
+      broker_provisioned_at: '2026-10-04T10:00:01Z',
+      online: true,
+      last_seen: '2026-10-04T11:00:00Z',
+    })
+    const factory = droppingConsole(HAPPY.slice(0, 3))
+    const manual = (devices: DeviceSummary[]): ResultContext => ({
+      devices,
+      versions: null,
+      flashed: null,
+    })
+    const { rerender } = render(
+      <BoardConsolePanel autoWatch={false} createConsole={factory} result={manual([held])} />,
+    )
+    await user.click(screen.getByRole('button', { name: 'Watch a board' }))
+    await screen.findByText(/dropped off the USB bus/)
+    // A held credential is enrolled; the unchanged last_seen is not proof of this session.
+    expect(item('Enrolled')).toHaveAttribute('data-source', 'server')
+    expect(item('On the fleet')).toHaveAttribute('data-state', 'waiting')
+
+    // Watching again keeps the first baseline.
+    rerender(
+      <BoardConsolePanel
+        autoWatch={false}
+        createConsole={factory}
+        result={manual([{ ...held, last_seen: '2026-10-04T11:00:20Z' }])}
+      />,
+    )
+    expect(item('On the fleet')).toHaveAttribute('data-source', 'server')
+    expect(screen.getByTestId('result-card')).toHaveAttribute('data-outcome', 'success')
+    await user.click(screen.getByRole('button', { name: 'Watch a board' }))
+    await waitFor(() =>
+      expect(screen.getByTestId('result-card')).toHaveAttribute('data-outcome', 'success'),
+    )
+  })
+
+  it('with no fleet the panel is the console alone, as before', async () => {
+    render(<BoardConsolePanel autoWatch createConsole={failingAcquire} />)
+    await screen.findByText(NO_BOARD)
+    expect(screen.queryByTestId('console-server-view')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('boot-milestones')).not.toBeInTheDocument()
   })
 })

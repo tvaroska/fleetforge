@@ -2,8 +2,9 @@
 // testable without a DOM. `StatusStrip.tsx` renders the result and nothing else.
 //
 // Nothing here is derived from device state: `online` and `deploy.is_terminal` are the
-// server's answers, and the verdict is `deployOutcome` (the CUJ-1 drift rule). A later
-// task (R2b-fe-3/-5) can append an onboarding-console segment to `state`.
+// server's answers, and the verdict is `deployOutcome` (the CUJ-1 drift rule). An
+// onboarding-console segment is not built and no task is filed (R2b-fe-5 left the strip
+// alone: it already shows the flashed board's server state).
 
 import { type ArrivalSummary, type DeviceSummary } from './api'
 import { UNKNOWN, describeBuild, type BuildInfo } from './buildInfo'

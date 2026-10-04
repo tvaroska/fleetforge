@@ -1325,7 +1325,8 @@ Implementation notes behind `spec/flows.md` Flow 1 and the 2026-10-04 entries in
   overdue paragraphs, which keep their text) or a text next action, and the ONE "Copy
   diagnostic bundle" (the toolbar's is hidden while a failure card shows). The success card
   absorbs "This board enrolled and is on the fleet". Server-truth success when the console
-  lost the port and the strip's onboarding segment are R2b-fe-5. Observed: `flash.test.tsx
+  lost the port is R2b-fe-5 (built); a status-strip onboarding segment is not built and no
+  task is filed. Observed: `flash.test.tsx
   -t "result card"`, `BoardConsole.test.tsx` and `onboardingResult.test.ts` pass, plus the
   full suite, typecheck and build. Not run in a real browser (no board, so no console);
   the bench S3 ending in the success card is folded into `R2b-test-1`.
@@ -1335,9 +1336,37 @@ Implementation notes behind `spec/flows.md` Flow 1 and the 2026-10-04 entries in
   (chip, layout) pair and published as a bundle, so the build matrix grows. It depends on
   R3's library, so until R3 the flasher defaults to `ab-4m-v1` and shows the choice only
   under "Advanced".
-- **Two-source watch.** The console (Web Serial) is one source; the other is the server's
-  view of the board's enrolment. Check whether a server-side stream or a poll already
-  exists before designing one; the console's milestone classifier is unchanged.
+- **Two-source watch (R2b-fe-5, built).** Frontend only (`serverWatch.ts`, `BoardConsole.tsx`,
+  `FlashBoard.tsx`, `onboardingResult.ts`); no server, agent, spec or endpoint change, and no
+  new EventSource. The second source already existed: `Dashboard`'s one `useFleet`
+  (`GET /v1/devices` re-read on every `/v1/events` frame, plus the 10 s poll), already handed
+  to the panel as `ResultContext.devices`. Rules (`describeServerView`), judged against a
+  baseline snapshot of the fleet, never the browser clock: after a flash in this tab,
+  *Enrolled* needs `broker_provisioned_at` set and an `enrolled_at` that differs from the
+  baseline's; *On the fleet* also needs `online` and `last_seen > enrolled_at` (the board
+  spoke after THIS enrolment; same server clock). With no flash here (a manual "Watch a
+  board"), a held credential is enrolled and *On the fleet* needs `last_seen` to move past
+  the baseline. That closes the re-flash trap: a known board's stale row says `online: true`
+  with the old `enrolled_at` until `/v1/enroll` runs. The flash baseline is taken by
+  `FlashBoard` on every entry into `flashing` and cleared on "Flash another board"; pressing
+  "Watch a board" after a drop does NOT re-take it. The watch baseline is taken by the panel
+  on the first watch with no flash baseline, kept across re-watches, dropped by Clear. A
+  fleet not yet loaded at the anchor is captured on first arrival (accepted limit: it could
+  already hold the new enrolment). `mergeServerView` adds `enroll` / `fleet` to the
+  console's summary and re-applies the furthest-reached rule; the classifier is unchanged.
+  What shows once the console stopped (acquire failed, or the stream ended): the checklist
+  stays, server-marked items read `— from the server` (`data-source="server"`), a
+  `console-server-view` line (`Watching the server for <id>: not enrolled yet.` / `has
+  enrolled` / `sees <id> on the fleet`), the console's error text unchanged but muted once
+  the server has enrolled the board, and the success card (zero console lines allowed) with
+  `Enrolled: yes (from the server)` and `On the fleet: yes · server: online (the console did
+  not see it)`. 90 s (`SERVER_WAIT_MS` = enroll + fleet deadlines) after the console stopped
+  with the board not on the fleet, `console-server-overdue` says so. Arrival stages are not
+  used for Network up / Clock set; the status strip and the diagnostic bundle are unchanged.
+  Observed: `vitest run src/serverWatch.test.ts`, `src/BoardConsole.test.tsx -t "R2b-fe-5"`,
+  `src/flash.test.tsx -t "R2b-fe-5"`, `src/onboardingResult.test.ts -t "R2b-fe-5"` and
+  `src/Dashboard.test.tsx` (one EventSource) pass, plus the full suite, typecheck and build.
+  Not run against a real board; the bench proof is `S0-test-2` Check F.
 - **Boot count and reset reason (R2b-fe-4, built).** Frontend only (`boardConsole.ts`,
   `BoardConsole.tsx`, `onboardingResult.ts`, `diagnostics.ts`); no agent, server or spec change.
   `summarizeConsole` now returns `lastReset` (why the current boot started), `restarts`
@@ -1368,7 +1397,8 @@ Implementation notes behind `spec/flows.md` Flow 1 and the 2026-10-04 entries in
   `src/BoardConsole.test.tsx -t "reboots during watch"` (real panel, "rebooted 3×: brownout",
   `Boot 4 · reset: brownout`, Clock set retracted, Network up waiting + retracted). Not run
   against a real board or browser; a real reboot during watch is folded into `R2b-test-1`.
-  Out of scope: the status strip's boot count (the strip's onboarding segment is R2b-fe-5);
+  Out of scope: the status strip's boot count (a strip onboarding segment is not built and no
+  task is filed);
   the server-side onboarding session resource (`spec/flows.md` "Onboarding is an API
   resource") is a gap with no task filed.
 - **Flash failures (R2b-fe-3, built).** Only a throw from `flasher.write` gets the

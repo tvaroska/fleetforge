@@ -22,6 +22,7 @@ import { buildFfCfgFields, validateFfCfg, type FlashConfigInput } from './ffcfg'
 import { formatBytes, predictDeviceId, useFlashBoard } from './flash'
 import { type ResultContext } from './onboardingResult'
 import { ResultCard } from './ResultCard'
+import { takeBaseline, type FleetBaseline } from './serverWatch'
 import { type VersionLine } from './statusStrip'
 import {
   BUILT_IN_PORT,
@@ -204,6 +205,38 @@ export function FlashBoard({
     if (state.flashedDeviceId !== null) identified.current?.(state.flashedDeviceId)
   }, [state.flashedDeviceId])
 
+  // R2b-fe-5. The flash anchor: the fleet as it was when this tab started writing, so the
+  // console panel can tell a NEW enrolment from a known board's stale row. Taken on every
+  // entry into 'flashing' (the token is minted inside it, so the snapshot is strictly before
+  // the new enrolment) and cleared on "Flash another board". Owned here, not by the panel:
+  // the operator pressing "Watch a board" after a drop must NOT re-take it, because by then
+  // the board may already have re-enrolled. The devices ride in a ref so the fleet's
+  // re-reads never re-fire the phase effect.
+  const [flashBaseline, setFlashBaseline] = useState<FleetBaseline | null>(null)
+  const [flashBaselineWanted, setFlashBaselineWanted] = useState(false)
+  const fleetDevices = fleet?.devices ?? null
+  const devicesRef = useRef(fleetDevices)
+  devicesRef.current = fleetDevices
+  const hasFleet = fleet !== undefined
+  useEffect(() => {
+    if (state.phase === 'flashing') {
+      if (!hasFleet) return
+      const devices = devicesRef.current
+      setFlashBaseline(devices === null ? null : takeBaseline(devices))
+      setFlashBaselineWanted(devices === null)
+    } else if (state.phase === 'idle') {
+      setFlashBaseline(null)
+      setFlashBaselineWanted(false)
+    }
+  }, [state.phase, hasFleet])
+  // A fleet still loading when the flash started: capture on the first render that has it.
+  // Accepted limit: by then it could already hold the new enrolment.
+  useEffect(() => {
+    if (!flashBaselineWanted || fleetDevices === null) return
+    setFlashBaselineWanted(false)
+    setFlashBaseline(takeBaseline(fleetDevices))
+  }, [flashBaselineWanted, fleetDevices])
+
   // S0-fe-8. A dismissed chooser or a refused COM1 is what an operator with no driver
   // does next, so that is when the help opens by itself. Only ever opens it: closing is
   // the operator's call.
@@ -268,6 +301,8 @@ export function FlashBoard({
             ssid: form.link === 'wifi' && form.ssid !== '' ? form.ssid : null,
           }
         : null,
+    flashBaseline,
+    now: fleet?.now,
   }
 
   // R2b-fe-3. The one action on a flash-failed card. `onClick` is SYNCHRONOUS up to

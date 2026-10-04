@@ -8,9 +8,11 @@
 //
 // Where each value comes from. The console is preferred, because it is what is running
 // right now; the device row can be stale for a re-enrolled board until its next announce.
-// Success itself comes from the console reaching `fleet`. Deciding it from the server when
-// the console lost the port is R2b-fe-5's, not this file's: the device row only ENRICHES
-// rows here (firmware fallback, layout, "server: online").
+// Success comes from the MERGED summary reaching `fleet`: the console's own milestone, or
+// (R2b-fe-5) the server's view of the board, judged in `serverWatch.ts` and merged in by the
+// panel before it calls this. A board whose console lost the port (a native-USB reset) can
+// therefore succeed with zero console lines. The device row otherwise only ENRICHES rows
+// here (firmware fallback, layout, "server: online").
 
 import {
   MILESTONE_CAUSE,
@@ -19,10 +21,17 @@ import {
   type Cause,
   type ConsoleEvent,
   type ConsoleSummary,
+  type Milestone,
   type Remedy,
 } from './boardConsole'
 import { type DeviceSummary } from './api'
 import { type Tone, type VersionLine } from './statusStrip'
+import { type FleetBaseline } from './serverWatch'
+
+/** `ff_identity.c:64` — "device_id <12 hex>". Shared with `serverWatch.ts::lastDeviceId`. */
+export const DEVICE_ID_LINE = /^device_id ([0-9a-fA-F]{12})\b/
+/** `ff_mqtt.c` — "mqtt connected as <id> (<uri>)". Shared with `serverWatch.ts::lastDeviceId`. */
+export const MQTT_CONNECTED_LINE = /^mqtt connected as ([0-9a-fA-F]{12})\b/
 
 /** `FF_TIME_SANE_YEAR`, `agent/main/ff_time.c:24` — the same bound `boardConsole.ts` uses. */
 const SANE_YEAR = 2024
@@ -67,7 +76,7 @@ export function consoleFacts(events: ConsoleEvent[]): ConsoleFacts {
       if (version !== undefined) facts.agentVersion = version
     } else if (tag === 'ff-id') {
       // `ff_identity.c:64` — "device_id <12 hex>".
-      const id = /^device_id ([0-9a-fA-F]{12})\b/.exec(text)?.[1]
+      const id = DEVICE_ID_LINE.exec(text)?.[1]
       if (id !== undefined) facts.deviceId = id.toLowerCase()
     } else if (tag === 'ff-wifi') {
       // `ff_net_wifi.c:228` — "wifi sta starting, ssid <ssid>". Not a secret.
@@ -92,7 +101,7 @@ export function consoleFacts(events: ConsoleEvent[]): ConsoleFacts {
       }
     } else if (tag === 'ff-mqtt' && facts.deviceId === null) {
       // "mqtt connected as <id> (<uri>)" names the id too, for a log that missed `ff-id`.
-      const id = /^mqtt connected as ([0-9a-fA-F]{12})\b/.exec(text)?.[1]
+      const id = MQTT_CONNECTED_LINE.exec(text)?.[1]
       if (id !== undefined) facts.deviceId = id.toLowerCase()
     }
   }
@@ -112,6 +121,14 @@ export type ResultContext = {
     link: string
     ssid: string | null
   } | null
+  /**
+   * R2b-fe-5. The fleet as it was when this tab started the flash (`FlashBoard` owns it).
+   * Present means this tab flashed the board and minted a fresh token, so the server must
+   * show a NEW enrolment before Enrolled is marked from it. Absent or null: no flash here.
+   */
+  flashBaseline?: FleetBaseline | null
+  /** R2b-fe-5. The fleet's 1 Hz clock (`Fleet.now`); drives the server-wait deadline. */
+  now?: number
 }
 
 export type ResultRow = { label: string; value: string; tone: Tone }
@@ -186,9 +203,14 @@ export function describeOnboardingResult(input: {
   events: ConsoleEvent[]
   summary: ConsoleSummary
   context: ResultContext | null
+  /** R2b-fe-5. Milestones in `summary` that only the server saw (`mergeServerView`). */
+  fromServer?: Milestone[]
 }): OnboardingResult | null {
   const { events, summary } = input
-  if (events.length === 0) return null
+  const fromServer = input.fromServer ?? []
+  // With no console line at all, only the server's "on the fleet" earns a card: a console
+  // that lost the port is never a failure on its own.
+  if (events.length === 0 && !summary.reached.includes('fleet')) return null
 
   const success = summary.reached.includes('fleet')
   const failure =
@@ -216,7 +238,9 @@ export function describeOnboardingResult(input: {
   const enrolled = summary.reached.includes('enroll') || summary.skipped.includes('enroll')
 
   let fleetValue = success ? 'yes' : 'no'
-  if (devices !== null) {
+  if (fromServer.includes('fleet')) {
+    fleetValue = 'yes · server: online (the console did not see it)'
+  } else if (devices !== null) {
     fleetValue +=
       row === undefined
         ? ' · server: not seen yet'
@@ -231,7 +255,11 @@ export function describeOnboardingResult(input: {
     { label: 'Partition layout', value: row?.partition_layout ?? flashed?.layout ?? '—', tone: null },
     { label: 'Link', value: linkValue(facts, flashed), tone: null },
     clockRow(facts),
-    { label: 'Enrolled', value: enrolled ? 'yes' : 'no', tone: enrolled ? 'ok' : 'bad' },
+    {
+      label: 'Enrolled',
+      value: fromServer.includes('enroll') ? 'yes (from the server)' : enrolled ? 'yes' : 'no',
+      tone: enrolled ? 'ok' : 'bad',
+    },
     { label: 'On the fleet', value: fleetValue, tone: success ? 'ok' : 'bad' },
   ]
   // R2b-fe-4: a board that restarted while watched says so, success or not. Bad while it is
