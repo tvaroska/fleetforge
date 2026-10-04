@@ -45,8 +45,8 @@ new version is in every matching row's Deploy select with no reload. The runbook
   proxy hides this. Fixed with an exact-match `location = /v1/artifact` at 4m (the API stays
   the size authority at 1966080); `/v1/` keeps the default. Guarded by
   `tests/test_frontend_nginx.py`.
-- **Not done:** drag-and-drop, upload progress (fetch has none), the dry-run pre-check
-  (R2b-be-2 / R2b-fe-8).
+- **Not done:** drag-and-drop, upload progress (fetch has none), the pre-check card
+  (R2b-fe-8; the API is R2b-be-2).
 
 **T2 evidence (dev stack, real Chromium; nginx path via the production image):**
 - `agent/dist/esp32c6/app.bin` (1,106,384 B): line "app.bin — 1,106,384 bytes · built as

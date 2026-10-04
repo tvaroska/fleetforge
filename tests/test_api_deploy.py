@@ -21,6 +21,7 @@
 
 import ast
 import hashlib
+import inspect
 import re
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
@@ -162,6 +163,22 @@ async def deploy(
     async with client_for(app, base_url="https://testserver") as client:
         return await client.post(
             f"/v1/devices/{device_id}/deploy",
+            json=payload,
+            headers={"authorization": f"Bearer {token}"},
+        )
+
+
+async def precheck(
+    app: FastAPI,
+    token: str,
+    device_id: str = DEVICE_ID,
+    **body: Any,
+) -> httpx.Response:
+    payload: dict[str, Any] = {"version": VERSION}
+    payload.update(body)
+    async with client_for(app, base_url="https://testserver") as client:
+        return await client.post(
+            f"/v1/devices/{device_id}/deploy/precheck",
             json=payload,
             headers={"authorization": f"Bearer {token}"},
         )
@@ -761,6 +778,210 @@ class TestPresenceIsReportedNotEnforced:
         assert len(publisher.published) == 1
 
 
+class TestPrecheck:
+    """R2b-be-2: a dry run that answers what `POST /deploy` would refuse, and sends nothing."""
+
+    async def test_a_clean_board_is_deployable(
+        self,
+        admin_app: FastAPI,
+        db: AsyncSession,
+        store: MemoryObjectStore,
+        publisher: FakeCommandPublisher,
+    ) -> None:
+        await add_device(db)
+        await add_artifact(db)
+        token = await login_admin(admin_app)
+
+        response = await precheck(admin_app, token)
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["deployable"] is True
+        assert body["refusals"] == []
+        assert body["warnings"] == []
+        assert body["from_version"] == "1.4.2"
+        assert body["sha256"] == SHA256
+        assert body["size_bytes"] == len(IMAGE)
+        assert body["artifact_partition_layout"] == LAYOUT
+        assert body["device_partition_layout"] == LAYOUT
+        assert body["confirm_timeout_s"] == CONFIRM_TIMEOUT_S
+        assert body["device_online"] is True
+
+    @pytest.mark.parametrize(
+        ("overrides", "code", "deploy_status"),
+        [
+            ({"partition_layout": "single-2m-v1"}, "layout_mismatch", 409),
+            ({"ota_slot_size": 100}, "slot_too_small", 409),
+            ({"capabilities": ["telemetry"]}, "no_ota_capability", 409),
+            ({"platform_type": "esp32c6"}, "no_artifact_for_target", 404),
+        ],
+    )
+    async def test_every_refusal_matches_the_deploy_word_for_word(
+        self,
+        admin_app: FastAPI,
+        db: AsyncSession,
+        store: MemoryObjectStore,
+        publisher: FakeCommandPublisher,
+        overrides: dict[str, Any],
+        code: str,
+        deploy_status: int,
+    ) -> None:
+        await add_device(db, **overrides)
+        await add_artifact(db)
+        token = await login_admin(admin_app)
+
+        checked = await precheck(admin_app, token)
+        sent = await deploy(admin_app, token)
+
+        assert checked.status_code == 200
+        body = checked.json()
+        assert body["deployable"] is False
+        assert body["refusals"][0]["code"] == code
+        assert sent.status_code == deploy_status
+        assert sent.json()["detail"] == body["refusals"][0]["message"]
+
+    async def test_all_reasons_arrive_at_once_in_order(
+        self,
+        admin_app: FastAPI,
+        db: AsyncSession,
+        store: MemoryObjectStore,
+        publisher: FakeCommandPublisher,
+    ) -> None:
+        await add_device(
+            db, partition_layout="single-2m-v1", ota_slot_size=100, capabilities=["telemetry"]
+        )
+        await add_artifact(db)
+        token = await login_admin(admin_app)
+
+        body = (await precheck(admin_app, token)).json()
+
+        assert [r["code"] for r in body["refusals"]] == [
+            "layout_mismatch",
+            "slot_too_small",
+            "no_ota_capability",
+        ]
+
+    @pytest.mark.parametrize(
+        ("overrides", "codes"),
+        [
+            ({"presence_reported": False}, ["offline"]),
+            ({"presence_reported": None, "last_seen": None}, ["never_connected"]),
+            (
+                {"power_class": "sleepy", "expected_wake_interval_s": 60, "last_seen": now_utc()},
+                ["sleepy"],
+            ),
+        ],
+    )
+    async def test_warnings_are_reported_and_do_not_block(
+        self,
+        admin_app: FastAPI,
+        db: AsyncSession,
+        store: MemoryObjectStore,
+        publisher: FakeCommandPublisher,
+        overrides: dict[str, Any],
+        codes: list[str],
+    ) -> None:
+        await add_device(db, **overrides)
+        await add_artifact(db)
+        token = await login_admin(admin_app)
+
+        body = (await precheck(admin_app, token)).json()
+
+        assert body["deployable"] is True
+        assert [w["code"] for w in body["warnings"]] == codes
+
+    async def test_a_malformed_version_is_400_with_the_deploys_sentence(
+        self, admin_app: FastAPI, db: AsyncSession, publisher: FakeCommandPublisher
+    ) -> None:
+        await add_device(db)
+        token = await login_admin(admin_app)
+
+        checked = await precheck(admin_app, token, version="../x")
+        sent = await deploy(admin_app, token, version="../x")
+
+        assert checked.status_code == 400
+        assert checked.json()["detail"] == sent.json()["detail"]
+
+    async def test_an_unknown_device_is_404(
+        self, admin_app: FastAPI, db: AsyncSession, publisher: FakeCommandPublisher
+    ) -> None:
+        token = await login_admin(admin_app)
+
+        response = await precheck(admin_app, token, device_id="ffffffffffff")
+
+        assert response.status_code == 404
+        assert "ffffffffffff" in response.json()["detail"]
+
+    async def test_a_decommissioned_device_is_404(
+        self, admin_app: FastAPI, db: AsyncSession, publisher: FakeCommandPublisher
+    ) -> None:
+        await add_device(db, decommissioned_at=now_utc())
+        await add_artifact(db)
+        token = await login_admin(admin_app)
+
+        assert (await precheck(admin_app, token)).status_code == 404
+
+    async def test_it_needs_an_admin(
+        self, admin_app: FastAPI, db: AsyncSession, publisher: FakeCommandPublisher
+    ) -> None:
+        async with client_for(admin_app, base_url="https://testserver") as client:
+            response = await client.post(
+                f"/v1/devices/{DEVICE_ID}/deploy/precheck", json={"version": VERSION}
+            )
+
+        assert response.status_code == 401
+
+
+class TestPrecheckSendsNothing:
+    @pytest.mark.parametrize("overrides", [{}, {"partition_layout": "single-2m-v1"}])
+    async def test_nothing_is_minted_recorded_or_published(
+        self,
+        admin_app: FastAPI,
+        db: AsyncSession,
+        store: MemoryObjectStore,
+        publisher: FakeCommandPublisher,
+        overrides: dict[str, Any],
+    ) -> None:
+        await add_device(db, **overrides)
+        await add_artifact(db)
+        token = await login_admin(admin_app)
+
+        response = await precheck(admin_app, token)
+
+        assert response.status_code == 200
+        assert publisher.published == []
+        assert await events(db) == []
+        assert store.signed_urls == []
+        assert "http" not in response.text
+        assert "sig=" not in response.text
+
+    async def test_it_answers_without_any_url_configuration(
+        self,
+        admin_app: FastAPI,
+        db: AsyncSession,
+        store: MemoryObjectStore,
+        publisher: FakeCommandPublisher,
+    ) -> None:
+        await add_device(db)
+        await add_artifact(db)
+        token = await login_admin(admin_app)
+        previous = admin_app.dependency_overrides.get(get_settings)
+        admin_app.dependency_overrides[get_settings] = lambda: settings_for_tests(
+            artifact_url_secret=None, public_base_url=None
+        )
+        try:
+            checked = await precheck(admin_app, token)
+            sent = await deploy(admin_app, token)
+        finally:
+            if previous is None:
+                admin_app.dependency_overrides.pop(get_settings, None)
+            else:
+                admin_app.dependency_overrides[get_settings] = previous
+
+        assert checked.status_code == 200
+        assert sent.status_code == 503
+
+
 class TestNoSchedulerLivesHere:
     """Source tripwires. `design/architecture.md` principle 5: the device owns the reboot.
 
@@ -796,7 +1017,9 @@ class TestNoSchedulerLivesHere:
                 node.body = node.body[1:] or [ast.Pass()]
         return ast.unparse(tree)
 
-    @pytest.mark.parametrize("module", ["deploys.py", "api/routers/deploys.py"])
+    @pytest.mark.parametrize(
+        "module", ["deploys.py", "api/routers/deploys.py", "deploy_precheck.py"]
+    )
     @pytest.mark.parametrize(
         "forbidden", ["asyncio.sleep", "create_task", "BackgroundTasks", "timedelta"]
     )
@@ -848,3 +1071,29 @@ class TestNoSchedulerLivesHere:
     def test_the_deploy_router_mints_exactly_one_url(self) -> None:
         """And the mint has one call site too, for the same reason."""
         assert self._source("api/routers/deploys.py").count("mint_artifact_url(") == 1
+
+    @pytest.mark.parametrize(
+        "sentence",
+        [
+            "An image written into the wrong partition table",
+            "The image must fit the slot",
+            "did not announce the `ota` capability",
+            "The target is this device's chip",
+        ],
+    )
+    def test_every_refusal_sentence_lives_in_one_place(self, sentence: str) -> None:
+        assert sentence in self._source("deploy_precheck.py")
+        assert sentence not in self._source("api/routers/deploys.py")
+
+    def test_the_precheck_route_has_no_side_effects(self) -> None:
+        from fleetforge.api.routers import deploys
+
+        source = inspect.getsource(deploys.precheck_deploy)
+        for forbidden in (
+            "_artifact_url",
+            "record_requested",
+            "latest_open_transaction",
+            "publish",
+            "commit",
+        ):
+            assert forbidden not in source

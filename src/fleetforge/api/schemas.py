@@ -493,3 +493,37 @@ class DeployAccepted(BaseModel):
     apply: str
     reused: bool
     device_online: bool
+
+
+class PrecheckFinding(BaseModel):
+    code: str
+    message: str
+
+
+class DeployPrecheck(BaseModel):
+    """What `POST /v1/devices/{device_id}/deploy/precheck` returns: a dry run of a deploy.
+
+    200 always for a resolved check. `refusals` cannot be overridden and match
+    `POST /deploy`'s `detail` word for word; `warnings` are reported, never enforced.
+    No URL and no `cmd_id`: nothing was minted, recorded or published.
+
+    `code` is the stable field a client branches on; `message` is lifted verbatim into the
+    UI the way `detail` is (`api.ts::detailOf`).
+    """
+
+    device_id: str
+    target: str
+    version: str
+    from_version: str | None
+    sha256: str | None
+    size_bytes: int | None
+    artifact_partition_layout: str | None
+    device_partition_layout: str | None
+    ota_slot_size: int | None
+    power_class: str
+    expected_wake_interval_s: int | None
+    device_online: bool
+    confirm_timeout_s: int
+    deployable: bool
+    refusals: list[PrecheckFinding]
+    warnings: list[PrecheckFinding]

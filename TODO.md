@@ -260,7 +260,7 @@ are R3). Order inside each flow: the one-place status first, then the cards, the
       *dashboard*). `POST /v1/artifact` exists, so this is the form: file, version, target.
       Acceptance: an admin holding only the password uploads a `.bin` and sees it in the
       Deploy dropdown, with no shell.
-- [ ] **R2b-be-2**: Dry-run pre-check for a deploy (P0, 1d)
+- [x] **R2b-be-2**: Dry-run pre-check for a deploy (P0, 1d) _(done 2026-10-04; see docs/features/ota-deploy.md)_
       `POST /v1/devices/{id}/deploy` already refuses a mismatched build with a 409, but only
       when sent. Expose the same reasons without sending: layout and slot-size mismatch,
       board offline, sleepy. Returns refusals and warnings as plain sentences. Reuse the

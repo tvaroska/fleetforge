@@ -6,6 +6,27 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-04 — The deploy pre-check is a side-effect-free twin of the deploy: same body, every reason at once, one module owns every sentence; warnings never block a send (R2b-be-2)
+
+**Decided: `POST /v1/devices/{id}/deploy/precheck` takes `DeployRequest` and answers 200 with
+`DeployPrecheck`. Details: `docs/features/ota-deploy.md`.**
+
+- **Refusals travel in the 200 body**, so the card shows all of them. Only a bad version
+  (400) and an unknown or decommissioned device (404) keep a status.
+- **`no_artifact_for_target` is a refusal here** and stays a 404 on the deploy.
+- **One source: `fleetforge/deploy_precheck.py`** (pure). Not `deploycheck.py`, which is the
+  unrelated release gate. `/deploy` raises the first refusal, same statuses and `detail`.
+- **Warnings** `never_connected` / `offline` / `sleepy`, computed from the router's `online`.
+  They never block `/deploy`; no override field yet, since that belongs to gating warnings.
+- **Not yet:** weak RSSI (not stored, R4); `rollback_capable: false` (R2b-spec-2);
+  `merged_binary` (R2b-be-3 adds it to this module); R3 library marker; URL-configuration
+  readiness (`/v1/readyz`).
+- **`confirm_timeout_s` is in the body** for the card's "rolls back on its own" line.
+
+Supersedes nothing.
+
+---
+
 ## 2026-10-04 — Upload is a dashboard form over the raw-body endpoint; the header pre-fills target and version and a chip mismatch is refused in the browser; nginx takes 4m on `/v1/artifact` only (R2b-fe-7)
 
 **Decided: `UploadBuild.tsx` posts the file itself to `POST /v1/artifact` and the retired

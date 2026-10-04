@@ -41,10 +41,14 @@ bucket, a key, a URL or a traceback.
 Validation order is deliberate: cheap and caller-fixable first (bad version), then
 existence (device, artifact), then compatibility (layout, size, capability). A board
 that cannot take this image must be refused before anything is minted or recorded.
+
+**The pre-check (R2b-be-2)** is `POST /{device_id}/deploy/precheck`: the same body, the
+same reasons, answered 200 with all of them at once and nothing sent. Every sentence lives
+in `fleetforge/deploy_precheck.py`, which this endpoint turns into its first HTTP error.
+The pre-check has no side effects and its warnings (offline, sleepy) are never enforced.
 """
 
 import logging
-from dataclasses import dataclass
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -60,12 +64,24 @@ from fleetforge.api.deps import (
     cookie_scheme,
 )
 from fleetforge.api.routers.artifacts import VERSION_PATTERN
-from fleetforge.api.schemas import DeployAccepted, DeployRequest
+from fleetforge.api.schemas import (
+    DeployAccepted,
+    DeployPrecheck,
+    DeployRequest,
+    PrecheckFinding,
+)
 from fleetforge.artifact_urls import mint_artifact_url
 from fleetforge.broker import CommandPublisher, CommandPublishError, new_command_id, stage_payload
 from fleetforge.clock import now_utc
 from fleetforge.config import Settings
 from fleetforge.db.models import Device
+from fleetforge.deploy_precheck import (
+    NO_ARTIFACT_FOR_TARGET,
+    Finding,
+    ResolvedArtifact,
+    refusals,
+    warnings,
+)
 from fleetforge.deploys import latest_open_transaction, record_publish_failure, record_requested
 from fleetforge.presence import is_online
 
@@ -88,18 +104,6 @@ _ARTIFACT_FOR_TARGET_SQL = text(
      WHERE v.target = :target AND v.version = :version
     """
 )
-
-OTA_CAPABILITY = "ota"
-
-
-@dataclass(frozen=True, slots=True)
-class _ResolvedArtifact:
-    """The bytes a label names, for one chip. Read once, used by every check below."""
-
-    sha256: str
-    size_bytes: int
-    partition_layout: str | None
-
 
 URL_NOT_CONFIGURED = (
     "this server cannot hand out firmware download links, so no board could fetch the "
@@ -180,45 +184,11 @@ async def deploy_device(
     honestly claim — a denied one is invisible (`broker/commands.py`). Progress arrives
     later as `up/status`.
     """
-    if not VERSION_PATTERN.match(body.version):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                "version must be 1-64 characters of letters, digits, '.', '_', '+' or "
-                "'-', starting with a letter or digit"
-            ),
-        )
+    _require_valid_version(body.version)
 
     async with sessionmaker() as session:
-        device = await session.get(Device, device_id)
-        if device is None or device.decommissioned_at is not None:
-            # One answer for both, deliberately: a decommissioned board is gone from
-            # the fleet view and from the ingestor, and a deploy to it is the same
-            # mistake as a deploy to a device id that was never enrolled.
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail=f"no such device: {device_id}"
-            )
-
-        row = (
-            await session.execute(
-                _ARTIFACT_FOR_TARGET_SQL,
-                {"target": device.platform_type, "version": body.version},
-            )
-        ).first()
-        if row is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=(
-                    f"no {device.platform_type} artifact labelled {body.version}. "
-                    "The target is this device's chip, not a choice: upload the image "
-                    f"built for {device.platform_type} under that version."
-                ),
-            )
-        artifact = _ResolvedArtifact(
-            sha256=row.sha256, size_bytes=row.size_bytes, partition_layout=row.partition_layout
-        )
-
-        _check_compatible(device, artifact, version=body.version)
+        device, found_artifact = await _resolve(session, device_id, body.version)
+        artifact = _accept(device, found_artifact, version=body.version)
 
         # The reuse window is the minted URL's lifetime: past it the first URL has
         # expired, so a board that never acted on the first command cannot act on it
@@ -294,47 +264,113 @@ async def deploy_device(
     )
 
 
-def _check_compatible(device: Device, artifact: _ResolvedArtifact, *, version: str) -> None:
-    """Refuse an image this board cannot take, naming what did not match.
+def _require_valid_version(version: str) -> None:
+    if not VERSION_PATTERN.match(version):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "version must be 1-64 characters of letters, digits, '.', '_', '+' or "
+                "'-', starting with a letter or digit"
+            ),
+        )
 
-    Three independent reasons, all 409, all checked before anything is minted:
-    the partition layout, the OTA slot size, and the announced `ota` capability. The
-    layout and the slot size are only checked when both sides are known — an R0 board
-    that announced neither is not refused for being old.
+
+async def _resolve(
+    session: AsyncSession, device_id: str, version: str
+) -> tuple[Device, ResolvedArtifact | None]:
+    """The device (404 if gone) and the artifact its chip has under `version`, if any."""
+    device = await session.get(Device, device_id)
+    if device is None or device.decommissioned_at is not None:
+        # One answer for both, deliberately: a decommissioned board is gone from
+        # the fleet view and from the ingestor, and a deploy to it is the same
+        # mistake as a deploy to a device id that was never enrolled.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"no such device: {device_id}"
+        )
+
+    row = (
+        await session.execute(
+            _ARTIFACT_FOR_TARGET_SQL,
+            {"target": device.platform_type, "version": version},
+        )
+    ).first()
+    if row is None:
+        return device, None
+    return device, ResolvedArtifact(
+        sha256=row.sha256, size_bytes=row.size_bytes, partition_layout=row.partition_layout
+    )
+
+
+def _accept(device: Device, artifact: ResolvedArtifact | None, *, version: str) -> ResolvedArtifact:
+    """Return the artifact, or raise the first refusal: 404 for no artifact, else 409."""
+    found: list[Finding] = refusals(device, artifact, version=version)
+    if found:
+        raise HTTPException(
+            status_code=(
+                status.HTTP_404_NOT_FOUND
+                if found[0].code == NO_ARTIFACT_FOR_TARGET
+                else status.HTTP_409_CONFLICT
+            ),
+            detail=found[0].message,
+        )
+    if artifact is None:  # unreachable: a missing artifact is always a refusal
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="no such artifact")
+    return artifact
+
+
+@router.post(
+    "/{device_id}/deploy/precheck",
+    response_model=DeployPrecheck,
+    summary="Dry-run a deploy: what would be refused or warned, without sending",
+)
+async def precheck_deploy(
+    device_id: str,
+    body: DeployRequest,
+    admin: AdminDep,
+    settings: SettingsDep,
+    sessionmaker: SessionMakerDep,
+) -> DeployPrecheck:
+    """Answer what `POST /deploy` would refuse and warn about, and send nothing.
+
+    Read-only: no URL is minted, no row written, nothing sent. Request-level errors
+    keep their status (400 bad version, 404 unknown device); every other reason is in the
+    200 body.
     """
-    if (
-        device.partition_layout is not None
-        and artifact.partition_layout is not None
-        and device.partition_layout != artifact.partition_layout
-    ):
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=(
-                f"this device runs partition layout {device.partition_layout} and "
-                f"{version} was built for {artifact.partition_layout}. "
-                "An image written into the wrong partition table does not boot."
-            ),
+    _require_valid_version(body.version)
+
+    async with sessionmaker() as session:
+        device, artifact = await _resolve(session, device_id, body.version)
+        online = is_online(device, now=now_utc(), tolerance=settings.presence_tolerance)
+        found = refusals(device, artifact, version=body.version)
+        warned = warnings(device, online=online)
+        response = DeployPrecheck(
+            device_id=device_id,
+            target=device.platform_type,
+            version=body.version,
+            from_version=device.fw_version,
+            sha256=artifact.sha256 if artifact else None,
+            size_bytes=artifact.size_bytes if artifact else None,
+            artifact_partition_layout=artifact.partition_layout if artifact else None,
+            device_partition_layout=device.partition_layout,
+            ota_slot_size=device.ota_slot_size,
+            power_class=str(device.power_class),
+            expected_wake_interval_s=device.expected_wake_interval_s,
+            device_online=online,
+            confirm_timeout_s=settings.confirm_timeout_s,
+            deployable=not found,
+            refusals=[PrecheckFinding(code=f.code, message=f.message) for f in found],
+            warnings=[PrecheckFinding(code=f.code, message=f.message) for f in warned],
         )
 
-    if device.ota_slot_size is not None and artifact.size_bytes > device.ota_slot_size:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=(
-                f"{version} is {artifact.size_bytes} bytes and this device's OTA slot "
-                f"is {device.ota_slot_size}. The image must fit the slot it is "
-                "written into."
-            ),
-        )
-
-    if OTA_CAPABILITY not in device.capabilities:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=(
-                "this device did not announce the `ota` capability, so it has no agent "
-                "that can stage an update. It announced: "
-                f"{', '.join(device.capabilities) or 'nothing'}."
-            ),
-        )
+    logger.info(
+        "deploy precheck %s -> %s: refused=%s warned=%s by %s",
+        device_id,
+        body.version,
+        [f.code for f in found],
+        [f.code for f in warned],
+        admin.token_id,
+    )
+    return response
 
 
 async def _publish(

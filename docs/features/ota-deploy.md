@@ -2155,6 +2155,34 @@ mqtt went through an all-pass proxy, and the store went through its own process,
 only while the board was stopped. A = 0.4.5 (`--fresh`), B = 0.4.70 (`50f6f2fb…`),
 C = 0.4.71 (`58f5e5a7…`), all normal builds of this tree.
 
+### Deploy pre-check, `POST /v1/devices/{id}/deploy/precheck` (R2b-be-2), LANDED 2026-10-04
+
+Same body as `/deploy`, answers 200 with every refusal and warning at once and sends
+nothing (no URL minted, no row, no publish). 400 bad version and 404 unknown or
+decommissioned device keep their status. `src/fleetforge/deploy_precheck.py` is the one
+home of every sentence; `/deploy` raises the first refusal from it, unchanged.
+
+| kind | code | when |
+|---|---|---|
+| refusal | `no_artifact_for_target` | no label for the device's chip (404 on deploy) |
+| refusal | `layout_mismatch` | both layouts known and differ (409) |
+| refusal | `slot_too_small` | image larger than a known slot (409) |
+| refusal | `no_ota_capability` | `ota` not announced (409) |
+| warning | `never_connected` | no `last_seen` and no presence report |
+| warning | `offline` | not online (never both with `never_connected`) |
+| warning | `sleepy` | power class sleepy; names the wake interval |
+
+Warnings never block `/deploy`; no override field yet (that belongs to gating warnings,
+which do not exist). Not yet: weak RSSI (none stored, R4), `rollback_capable: false`
+(R2b-spec-2), merged-binary refusal (R2b-be-3 adds `merged_binary` here), R3 library
+marker, and URL-configuration readiness (`/v1/readyz` owns it; the pre-check answers 200
+without it). The response carries `confirm_timeout_s` for the card. T2 on the dev stack:
+same-layout 200 deployable; Arduino label `layout_mismatch`; unknown label
+`no_artifact_for_target` with null sha; offline `[offline]`; never connected
+`[never_connected]`; sleepy `[sleepy]` ("about every 60 s"); unknown device 404; bad
+version 400; no auth 401; the real deploy of the refused label 409 with the identical
+sentence; `deploy_events` count unchanged.
+
 ## Operator-flow additions (2026-10-04, planned, nothing built)
 
 Implementation notes behind `spec/flows.md` Flow 2 and the 2026-10-04 entries in
