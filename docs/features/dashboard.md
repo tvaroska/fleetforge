@@ -19,6 +19,58 @@ When `/implement` finishes a task, it appends a completed entry below.
 <!-- Newest first. One entry per completed task. Capture what a future reader
      needs WITHOUT the local plan file. -->
 
+### 2026-10-04 — R2b-fe-10 Update result card
+
+**What shipped:** a finished deploy renders one "Update result" card inside the Deploy
+cell, in place of the one-line verdict: Before and After as two rows, the verdict word and
+`deployOutcome`'s note, one reason sentence, one next action for a rollback or failure, the
+board's own words (`Board says`), Sent, Finished (with a ticking "N s ago") and `UI / API`
+(the status strip's versions). Frontend only; no API change, no migration. Pure judgement
+in `deployResult.ts`, markup in `DeployResultCard.tsx`, wiring in `DeployCell.tsx`.
+
+**Decisions (also in DECISIONS.md):**
+* D1 placement: inside the Deploy cell, replacing `LiveState` for a terminal transaction
+  (`is_terminal` from the server) while no pre-check card is open. The timeline stays below.
+  Never two cards: Deploy hides the result and leaves the compact line; Cancel brings it back.
+* D3 verdicts: `good` only while the announce equals the confirmed artifact; otherwise
+  `confirmed by the board` plus the drift line (never `good`, never "running"). `rolled
+  back`. `failed before reboot` only when the steps are known and none reached the reboot,
+  else plain `failed`. An unknown terminal state still gets a card labelled as itself.
+* D4 reason and next: the rollback reason names both causes (no reconnect within the
+  board's window, or a reset before confirming) and says the board does not say which; the
+  next action is "Do not send X again as it is", never "send again". Failures use a lookup
+  keyed by the detail up to the first colon (`Object.hasOwn`), from the agent's own strings
+  (`download stalled`, `download failed`, `truncated download`, `size mismatch`, `sha256
+  mismatch`, `cannot open the artifact`, `artifact larger than the ota slot`, `the running
+  image is not confirmed yet`, `an update is already staged and waits for a reboot`, `image
+  validation failed`), with a fallback for other words and one for a null detail. The
+  board's exact words are always shown too.
+* D5 rows: no arrows and no "running" in any row (R2-fe-1's tests forbid an arrow beside a
+  verdict); no `role`/`aria-live` (the cell re-renders every second).
+* D6/D7: `Dashboard` computes `describeVersions` once and passes it to the table; the drift
+  sentence moved to `deploy.ts::driftText` so the compact line and the card say the same words.
+
+**Not built:** who sent it (`R2b-be-4`, no data yet; that task adds a `Sent by` row); the
+"Send again" button (`R2b-fe-11`); the failed boot's crash reason and last milestone after a
+rollback (the agent does not report them).
+
+**T2 evidence (dev stack, headless Chromium, simulators with `--capabilities ota`):**
+good board: no card in flight; then `data-outcome=good`, `good — running 1.5.0-t10-1791140201`,
+rows Before 1.4.2 / After / Sent / Finished (ticking) / `UI 0.4.2 · API 0.4.2` equal to the
+strip, no `[role]` inside, no arrow or percent, timeline `took 2 s` directly below. Deploy on
+that row hid the card (compact `good — running` line stayed); Cancel restored it.
+`--confirm never --confirm-timeout 30` board: no card for 16 s in flight, then
+`rolled-back` with `rolled back — … did not confirm; back on 1.4.2`, "went back to 1.4.2 on
+its own", "within 300 s of its reboot", `Next: Do not send … again as it is`, `After 1.4.2
+again`. Seeded failures (dev-DB observation fixtures, `t10-seed-1791140201`, `t10-seed2-1791140201`,
+`t10-seed3-1791140201` on device a63fe57b3f2a): `failed before reboot`, class `bad`, the stalled
+cause and Wi-Fi next action, `After 1.4.2, unchanged: … was not installed`, `Board says
+download stalled`; a null-detail failure says "The update failed and no reason was
+reported." with no `Board says` row. Drift (sim restarted with `--fw-version 9.9.9`):
+`data-outcome=drift`, `confirmed by the board` (no `ok` class), "the board has since
+reported 9.9.9, so this is not what it runs now", `After … when it was confirmed`, and the
+strip with that board selected showed no `last update good`.
+
 ### 2026-10-04 — R2b-fe-9 Update timeline with elapsed seconds and stall text
 
 **What shipped:** the Deploy cell shows the update as the spec's six milestones (sent,

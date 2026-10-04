@@ -280,7 +280,7 @@ are R3). Order inside each flow: the one-place status first, then the cards, the
       `deploy_events`. **No percentage and no progress bar** (`deploy.ts`: `pct` is a
       transition log). A stall says what it is and when the board gives up (60 to 80 s for a
       silent download, R2-fw-5).
-- [ ] **R2b-fe-10**: Update result card (P1, 1d)
+- [x] **R2b-fe-10**: Update result card (P1, 1d) _(done 2026-10-04; see docs/features/dashboard.md)_
       Firmware before to after, good or rolled back with the reason, UI and API versions,
       when. Extends R2-fe-1's verdict. Depends on `R2b-fe-1`.
 - [ ] **R2b-be-4**: Record who sent a deploy (P2, 0.5d)

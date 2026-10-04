@@ -15,6 +15,11 @@
 // of a label with an arrow and a percentage. The verdict is withheld when the board's own
 // announce contradicts it (`deploy.ts::deployOutcome`).
 //
+// A finished transaction (R2b-fe-10) renders the update result card (`DeployResultCard`:
+// before and after, verdict, reason, one next action, UI and API versions, when) in place
+// of the one-line verdict above — except while the pre-check card is open, because the cell
+// never shows two cards; the compact line renders then.
+//
 // Nothing is sent without the pre-check card (R2b-fe-8). **Deploy** asks
 // `POST /deploy/precheck` (a dry run with no side effects) and opens `PrecheckCard`:
 // current to target, what is refused or warned, the board's own rollback window. **Send**
@@ -49,7 +54,10 @@ import {
 } from './api'
 import { overrideFor } from './deployPrecheck'
 import { PrecheckCard } from './PrecheckCard'
-import { DEPLOY_BAD_STATES, DEPLOY_STATE_LABELS, deployOutcome } from './deploy'
+import { DEPLOY_BAD_STATES, DEPLOY_STATE_LABELS, deployOutcome, driftText } from './deploy'
+import { deployResult } from './deployResult'
+import { DeployResultCard } from './DeployResultCard'
+import { type VersionLine } from './statusStrip'
 import { DeployTimeline } from './DeployTimeline'
 import { formatAgo, formatWhen } from './format'
 
@@ -103,9 +111,7 @@ function LiveState({ device, now }: { device: DeviceSummary; now: number }) {
         {deploy.artifact_version !== null && <> → {deploy.artifact_version}</>} {age}
         <br />
         <span className="muted" data-testid="deploy-drift">
-          {outcome.reported === null
-            ? 'the board has not reported a version since'
-            : `the board has since reported ${outcome.reported}, so this is not what it runs now`}
+          {driftText(outcome.reported)}
         </span>
         {detail}
       </p>
@@ -141,6 +147,8 @@ export type DeployCellProps = {
   onSessionExpired: () => void
   /** The table's shared tick, so every relative age on the page agrees. */
   now: number
+  /** `describeVersions(ui, health)` for the result card's UI / API row; absent → no row. */
+  versions?: VersionLine | null
 }
 
 export function DeployCell({
@@ -150,6 +158,7 @@ export function DeployCell({
   onDeployed,
   onSessionExpired,
   now,
+  versions = null,
 }: DeployCellProps) {
   const [chosen, setChosen] = useState<string | null>(null)
   const [phase, setPhase] = useState<'idle' | 'checking' | 'sending'>('idle')
@@ -241,6 +250,7 @@ export function DeployCell({
   }
 
   const name = device.name ?? device.device_id
+  const result = deployResult(device.deploy, device, versions, now)
 
   return (
     <td data-testid="deploy-cell">
@@ -300,7 +310,11 @@ export function DeployCell({
         </p>
       )}
 
-      <LiveState device={device} now={now} />
+      {result !== null && precheck === null ? (
+        <DeployResultCard result={result} />
+      ) : (
+        <LiveState device={device} now={now} />
+      )}
       {device.deploy !== null && <DeployTimeline deploy={device.deploy} device={device} now={now} />}
     </td>
   )

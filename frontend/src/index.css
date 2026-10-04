@@ -398,12 +398,15 @@ textarea.log {
 
 /* R2b-fe-8. The pre-check card inside a Deploy cell: hard-edged like `.issued`, but
    small, because it sits in a table cell. */
-.precheck {
+/* R2b-fe-10. The update result card is cell-sized like it. */
+.precheck, .deploy-result {
   border: 2px solid var(--ff-line-hi);
   border-radius: 0;
   padding: 0 0.75rem 0.5rem;
   margin: 0.5rem 0;
 }
+
+.deploy-result dl { margin: 0.25rem 0; }
 
 /* R2b-fe-1. One strip, on screen through the whole flow. Data, so mono. */
 .status-strip { position: sticky; top: 0; z-index: 1; background: var(--ff-panel);

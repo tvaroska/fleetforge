@@ -19,6 +19,7 @@ import { DeployCell } from './DeployCell'
 import { useArtifacts, type Artifacts } from './deploy'
 import { STAGE_LABELS, useFleet, type Fleet, type EventSourceFactory } from './fleet'
 import { formatAgo, formatWhen } from './format'
+import { type VersionLine } from './statusStrip'
 
 // The glyph differs by state, and that is a requirement rather than a flourish (S0-fe-2).
 // The theme is monochrome — one hue ramp — so green-vs-grey no longer says anything, and
@@ -46,6 +47,7 @@ function DeviceRow({
   onSessionExpired,
   selected,
   onSelect,
+  versions = null,
 }: {
   device: DeviceSummary
   now: number
@@ -55,6 +57,7 @@ function DeviceRow({
   onSessionExpired: () => void
   selected: boolean
   onSelect?: (deviceId: string) => void
+  versions?: VersionLine | null
 }) {
   // Why a sleepy board went offline is its wake interval, so put it where the pointer is.
   const power =
@@ -113,6 +116,7 @@ function DeviceRow({
         }}
         onSessionExpired={onSessionExpired}
         now={now}
+        versions={versions}
       />
     </tr>
   )
@@ -172,12 +176,15 @@ export function FleetTable({
   onSessionExpired,
   selectedDeviceId = null,
   onSelect,
+  versions = null,
 }: {
   fleet: Fleet
   artifacts: Artifacts
   onSessionExpired: () => void
   selectedDeviceId?: string | null
   onSelect?: (deviceId: string) => void
+  // The update result card's UI / API row (R2b-fe-10); the standalone `FleetView` has none.
+  versions?: VersionLine | null
 }) {
   const { devices, arrivals, error, stream, now, refresh } = fleet
 
@@ -263,6 +270,7 @@ export function FleetTable({
                 onSessionExpired={onSessionExpired}
                 selected={device.device_id === selectedDeviceId}
                 onSelect={onSelect}
+                versions={versions}
               />
             ))}
           </tbody>

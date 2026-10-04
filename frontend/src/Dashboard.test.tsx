@@ -189,6 +189,30 @@ describe('Dashboard', () => {
     expect(screen.getByLabelText('Version for a4cf12b3de90')).toBe(select)
   })
 
+  it('gives each finished update the status strip’s UI and API versions (R2b-fe-10)', async () => {
+    mockApi([
+      device({
+        fw_version: '1.5.0',
+        deploy: {
+          cmd_id: 'cmd-a',
+          state: 'confirmed',
+          at: '2026-09-10T11:59:50Z',
+          is_terminal: true,
+          artifact_version: '1.5.0',
+          from_version: '1.4.2',
+          pct: null,
+          detail: null,
+        },
+      }),
+    ])
+    renderDashboard()
+    const card = await screen.findByTestId('deploy-result')
+    expect(card).toHaveAttribute('data-outcome', 'good')
+    expect(within(card).getByTestId('deploy-result-rows')).toHaveTextContent(
+      'UI / APIUI 0.4.2 · API 0.4.2',
+    )
+  })
+
   it('opens exactly one event stream', async () => {
     mockApi([device()])
     const { sources } = renderDashboard()

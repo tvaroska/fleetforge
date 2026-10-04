@@ -6,7 +6,8 @@
 // Which board the strip shows: the last one picked in the table, deployed to, or
 // detected/flashed in the flasher; with nothing picked and exactly one board, that one.
 // The flasher also reads the shared fleet (pre-flight card, R2b-fe-2) and the versions
-// (result card, R2b-fe-3) — from the props this page already has, with no new hooks.
+// (result card, R2b-fe-3), and the table's update result cards (R2b-fe-10) read the same
+// versions — all from the props this page already has, with no new hooks.
 // The upload form (R2b-fe-7) shares the one artifact list: it calls `artifacts.reload`.
 
 import { useState } from 'react'
@@ -47,6 +48,8 @@ export function Dashboard({
   const [selected, setSelected] = useState<string | null>(null)
   const board = describeBoard(selected, fleet.devices, fleet.arrivals)
   const effective = board.kind === 'board' ? board.deviceId : null
+  // One read for the flasher's result card and the table's update result cards (R2b-fe-10).
+  const versions = describeVersions(ui, health)
 
   return (
     <>
@@ -68,6 +71,7 @@ export function Dashboard({
         onSessionExpired={expire}
         selectedDeviceId={effective}
         onSelect={setSelected}
+        versions={versions}
       />
       {/* Flow 2 step 1 sits next to the table whose Deploy column it feeds; a finished
           upload re-reads the one artifact list, so the new version shows with no reload. */}
@@ -82,7 +86,7 @@ export function Dashboard({
         onSessionExpired={expire}
         onBoardIdentified={setSelected}
         fleet={fleet}
-        versions={describeVersions(ui, health)}
+        versions={versions}
         createFlasher={createFlasher}
       />
       <EnrollBoard onSessionExpired={expire} />

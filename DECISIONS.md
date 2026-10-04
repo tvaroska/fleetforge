@@ -6,6 +6,22 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-04 — The update result card replaces the one-line verdict for a finished transaction; before and after are two rows, no arrows; failures get one cause and one next action from the board's own words (R2b-fe-10)
+
+**Decided: `deployResult.ts` judges a terminal `DeploySummary`, `DeployResultCard.tsx` renders it inside the Deploy cell. Details: `docs/features/dashboard.md`.**
+
+- **Placement (D1).** Inside the Deploy cell, in place of `LiveState`, while `is_terminal` (the server's flag) and no pre-check card is open; the timeline stays below. Never two cards: Deploy hides the result and the compact line stands in, Cancel restores it. It lasts while the newest transaction is terminal; a new send replaces it. Rejected: a card below the table for the strip's board (far from the cell); a server-side `last_outcome` (already rejected by R2-fe-1).
+- **Verdicts (D3).** `good` only while the announce equals the confirmed artifact, else `confirmed by the board` and the drift line, never "running". `failed before reboot` only when the steps are known and none reached rebooting, otherwise plain `failed`. Unknown terminal states still get a card. `deployOutcome` and `DEPLOY_OUTCOMES` are unchanged, so the status strip is unchanged.
+- **Reason and next (D4).** The failure lookup is keyed by the detail up to the first colon (`Object.hasOwn`, since the key is device-controlled), and the board's exact words are always shown in `Board says`. The rollback reason names both causes and says the board does not say which; its next action is "Do not send X again as it is", never "send again" (spec).
+- **No arrows (D5).** R2-fe-1's tests forbid `→` beside a verdict, so Before and After are separate rows. No `role`/`aria-live`: the cell re-renders every second.
+- **Versions (D6).** `Dashboard` computes `describeVersions` once and passes it down; the standalone `FleetView` has none, so no `UI / API` row there.
+- **One drift sentence (D7).** `deploy.ts::driftText`, used by the compact line and the card.
+- **Out of scope.** Who sent it (`R2b-be-4`, no data; it adds a `Sent by` row); the Send again button (`R2b-fe-11`); the failed boot's crash reason and last milestone (the agent does not report them).
+
+Supersedes nothing; refines R2-fe-1's placement (the verdict word now sits in the card).
+
+---
+
 ## 2026-10-04 — A reboot during watch is counted as a restart with a reason; reached milestones are shown as lost, not silently reset (R2b-fe-4)
 
 **Decided: `summarizeConsole` returns `lastReset`, `restarts` and `retracted`; the panel, result card and bundle show them. Details: `docs/features/enrollment.md`.**

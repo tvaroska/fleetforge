@@ -26,6 +26,9 @@
 // 11. The timeline states only the board's own deadlines (R2b-fe-9): a stall sentence
 //    never restyles the state, never announces itself, and never appears for
 //    `awaiting_safe_window`.
+// 12. A finished update is one card — before, after, verdict, reason, one next action,
+//    versions, when — that never announces itself and never shows beside the pre-check
+//    card.
 
 import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -170,6 +173,7 @@ function renderCell(props: Partial<Parameters<typeof DeployCell>[0]> = {}) {
             onDeployed={props.onDeployed ?? onDeployed}
             onSessionExpired={props.onSessionExpired ?? onSessionExpired}
             now={props.now ?? NOW}
+            versions={props.versions}
           />
         </tr>
       </tbody>
@@ -845,5 +849,117 @@ describe('DeployCell — the update timeline (R2b-fe-9)', () => {
     expect(screen.queryByTestId('deploy-stall')).toBeNull()
     expect(screen.queryByTestId('deploy-deadline')).toBeNull()
     expect(screen.getByTestId('deploy-state')).not.toHaveClass('bad')
+  })
+})
+
+describe('DeployCell — the update result card (R2b-fe-10)', () => {
+  const at = (secondsAgo: number) => new Date(NOW - secondsAgo * 1000).toISOString()
+  const step = (state: string, secondsAgo: number) => ({ state, at: at(secondsAgo) })
+  const versions = { ui: '0.4.2 · abcdef12', uiTitle: 'built x', api: '0.4.2 · abcdef12', differ: false }
+  const confirmed = (overrides: Partial<DeviceSummary> = {}) =>
+    device({
+      fw_version: '1.5.0',
+      deploy: deploy({
+        state: 'confirmed',
+        is_terminal: true,
+        at: at(10),
+        steps: [step('requested', 40), step('downloading', 39), step('rebooting', 29), step('confirmed', 10)],
+        confirm_timeout_s: 300,
+      }),
+      ...overrides,
+    })
+
+  it('shows one card for a confirmed deploy that never announces itself', () => {
+    renderCell({ device: confirmed(), versions })
+
+    const card = screen.getByTestId('deploy-result')
+    expect(card).toHaveAttribute('data-outcome', 'good')
+    expect(within(card).getByRole('heading', { name: 'Update result' })).toBeInTheDocument()
+    expect(screen.getByTestId('deploy-state')).toHaveTextContent('good')
+    const rows = screen.getByTestId('deploy-result-rows')
+    expect(rows).toHaveTextContent('Before1.4.2')
+    expect(rows).toHaveTextContent('After1.5.0')
+    expect(rows).toHaveTextContent('UI / APIUI 0.4.2 · abcdef12 · API 0.4.2 · abcdef12')
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.queryByRole('status')).toBeNull()
+    expect(card.querySelector('[role], [aria-live]')).toBeNull()
+    expect(card.textContent).not.toMatch(/%|→/)
+    // The timeline stays below the card.
+    expect(screen.getByTestId('deploy-timeline')).toBeInTheDocument()
+  })
+
+  it('has no card while the update is in flight', () => {
+    renderCell({
+      device: device({ deploy: deploy({ state: 'downloading', steps: [step('requested', 5)] }) }),
+      versions,
+    })
+    expect(screen.queryByTestId('deploy-result')).toBeNull()
+    expect(screen.getByTestId('deploy-state')).toHaveTextContent('downloading the image')
+  })
+
+  it('has no UI / API row without versions', () => {
+    renderCell({ device: confirmed() })
+    expect(screen.getByTestId('deploy-result-rows')).not.toHaveTextContent('UI / API')
+  })
+
+  it('names one next action for a rollback, and it is not to send it again', () => {
+    renderCell({
+      device: device({
+        fw_version: '1.4.2',
+        deploy: deploy({
+          state: 'rolled_back',
+          is_terminal: true,
+          detail: 'returned to 1.4.2; the new image did not confirm',
+          steps: [step('requested', 90), step('rebooting', 70), step('rolled_back', 10)],
+          confirm_timeout_s: 300,
+        }),
+      }),
+      versions,
+    })
+    expect(screen.getByTestId('deploy-result')).toHaveAttribute('data-outcome', 'rolled-back')
+    expect(screen.getByTestId('deploy-result-next').textContent).toMatch(/^Next: Do not send 1\.5\.0 again/)
+    expect(screen.getByTestId('deploy-result-reason')).toHaveTextContent('within 300 s of its reboot')
+  })
+
+  it('says failed before reboot with one cause and one next action', () => {
+    renderCell({
+      device: device({
+        deploy: deploy({
+          state: 'failed',
+          is_terminal: true,
+          detail: 'download stalled',
+          steps: [step('requested', 120), step('downloading', 115), step('failed', 35)],
+        }),
+      }),
+      versions,
+    })
+    const state = screen.getByTestId('deploy-state')
+    expect(state).toHaveTextContent('failed before reboot')
+    expect(state).toHaveClass('bad')
+    expect(screen.getByTestId('deploy-result-reason')).toHaveTextContent(
+      'The download stopped: no data arrived for about a minute, so the board gave up.',
+    )
+    expect(screen.getByTestId('deploy-result-next')).toHaveTextContent('then send it again.')
+  })
+
+  it('warns when the UI and the API differ', () => {
+    renderCell({ device: confirmed(), versions: { ...versions, differ: true } })
+    expect(screen.getByTestId('deploy-result')).toHaveTextContent('UI and API differ.')
+  })
+
+  it('never shows two cards: the pre-check hides the result and Cancel brings it back', async () => {
+    routes()
+    renderCell({ device: confirmed(), versions })
+    expect(screen.getByTestId('deploy-result')).toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Deploy' }))
+    await screen.findByTestId('precheck-card')
+    expect(screen.queryByTestId('deploy-result')).toBeNull()
+    // The compact line stands in.
+    expect(screen.getByTestId('deploy-state')).toHaveTextContent('good')
+
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(screen.queryByTestId('precheck-card')).toBeNull()
+    expect(screen.getByTestId('deploy-result')).toBeInTheDocument()
   })
 })

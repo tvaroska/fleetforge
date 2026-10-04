@@ -112,6 +112,16 @@ export function deployOutcome(
   return null
 }
 
+/**
+ * The one sentence for a confirmed deploy whose board has since announced something else
+ * (R2b-fe-10 moved it here so `LiveState` and the update result card say the same words).
+ */
+export function driftText(reported: string | null): string {
+  return reported === null
+    ? 'the board has not reported a version since'
+    : `the board has since reported ${reported}, so this is not what it runs now`
+}
+
 export type Artifacts = {
   /** Deployable versions per chip target, each group already newest-first. */
   byTarget: Map<string, ArtifactSummary[]>

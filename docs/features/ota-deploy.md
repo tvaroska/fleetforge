@@ -857,6 +857,11 @@ the next connect"). The version flip is observed by making the board reconnect
 > simulator now ends its own session on apply. Thus, the version converges unaided. See
 > *The simulator never reconnected after `apply`* below.
 
+**Update result card (R2b-fe-10).** A terminal transaction is rendered as one card from
+`DeploySummary` and `device.fw_version` alone (before, after, verdict, reason, one next
+action, UI and API versions, when); see `dashboard.md`. Who sent it waits on `R2b-be-4`, and
+the failed boot's crash reason after a rollback is not reported by the agent.
+
 **Deliberately not in R1:** an upload UI (curl only), a deploy history/timeline, group
 deploy, cancel (there is no server-authored cancel), and a rollback button (R2).
 
