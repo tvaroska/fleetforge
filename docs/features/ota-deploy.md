@@ -2174,7 +2174,7 @@ home of every sentence; `/deploy` raises the first refusal from it, unchanged.
 
 Warnings never block `/deploy`; no override field yet (that belongs to gating warnings,
 which do not exist). Not yet: weak RSSI (none stored, R4), `rollback_capable: false`
-(R2b-spec-2), merged-binary refusal (R2b-be-3 adds `merged_binary` here), R3 library
+(decided R2b-spec-2; R2b-be-7 builds it), merged-binary refusal (R2b-be-3 adds `merged_binary` here), R3 library
 marker, and URL-configuration readiness (`/v1/readyz` owns it; the pre-check answers 200
 without it). The response carries `confirm_timeout_s` for the card. T2 on the dev stack:
 same-layout 200 deployable; Arduino label `layout_mismatch`; unknown label
@@ -2193,7 +2193,15 @@ Implementation notes behind `spec/flows.md` Flow 2 and the 2026-10-04 entries in
   the uploaded file; the app image header and size are the candidates.
 - **`rollback_capable`.** A warning, not a refusal. It is `null` before a board's first
   OTA and the `false` reading is unbenched (`DECISIONS.md` 2026-10-03), so it cannot guard
-  a first OTA. The override must be explicit in the UI and in the API.
+  a first OTA. The override must be explicit in the UI and in the API. Decided shape
+  (R2b-spec-2; built by R2b-be-7, after R2b-be-6 stores the field): warning code
+  `rollback_incapable`, a **gating** warning. The pre-check reports it with
+  `PrecheckFinding.needs_override: true` (the existing warnings stay `false`), and
+  `POST /v1/devices/{id}/deploy` answers 409 with the same sentence unless the body
+  carries `override: ["rollback_incapable"]` (`DeployRequest.override:
+  list[Literal["rollback_incapable"]] = []`, per code, never a blanket `force`; an unknown
+  code is a 422; refusals are never overridable). `null` or absent never warns.
+  Details: `board-profiles.md` → *Server semantics*.
 - **Library marker.** R3 only. How it is encoded in the app binary is open; until it is,
   no refusal can be implemented.
 - **Crash reason after a rollback.** Open question, not a design. After the bootloader

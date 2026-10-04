@@ -195,7 +195,7 @@ Opened 2026-10-04 from `spec/flows.md` (Flow 1, 2, 3) and the 2026-10-04 entries
 `DECISIONS.md`. Between R2 (safe deploy, done) and R3 (the library). Alex first, then Marcus;
 Siddharth and Sarah are served by API shape; Elena deferred. **Almost all dashboard work, and
 nothing here changes the wire protocol except the known-networks list** (`R2b-spec-1`,
-`R2b-fw-1`). The stock layout stays the default until R3 (Arduino layout and library marker
+`R2b-fw-1`) and the board measurements (`R2b-spec-2`, `R2b-fw-2`). The stock layout stays the default until R3 (Arduino layout and library marker
 are R3). Order inside each flow: the one-place status first, then the cards, then the rest.
 
 ### Foundations
@@ -207,7 +207,7 @@ are R3). Order inside each flow: the one-place status first, then the cards, the
       how many networks, the selection rule (fixed order or strongest in range), and what a
       board with no known network does. Record in `DECISIONS.md`. Blocks `R2b-fw-1`,
       `R2b-fe-12`, `R2b-be-5`.
-- [ ] **R2b-spec-2**: Decide `R2-spec-1`: apply, amend or drop (P2, 0.25d)
+- [x] **R2b-spec-2**: Decide `R2-spec-1`: apply, amend or drop (P2, 0.25d) _(done 2026-10-04; reviewed; decided: amend; proposal amended, spec not applied; see DECISIONS.md and docs/features/board-profiles.md)_
       The pre-check warns on `rollback_capable: false` (Flow 2), and that field exists only if
       the 2026-10-03 proposal is applied. Until decided, the warning is skipped.
 - [ ] **R2b-spec-3**: Spike: how the agent writes its network list, and what "keep identity" needs (P2, 1d)
@@ -274,6 +274,7 @@ are R3). Order inside each flow: the one-place status first, then the cards, the
       Shows the dry run: current to target, what is refused or warned, "rolls back on its own
       if it never reconnects". Warnings can be overridden; refusals cannot. Depends on
       `R2b-be-2`.
+      Overriding a gating warning sends `override: [code]` in the deploy body; `needs_override` marks which (R2b-be-7).
 - [ ] **R2b-fe-9**: Update timeline with elapsed seconds and stall text (P1, 1.5d)
       sent, downloading, staged, rebooting, confirming, confirmed, from `deploy.state` and
       `deploy_events`. **No percentage and no progress bar** (`deploy.ts`: `pct` is a
@@ -296,6 +297,29 @@ are R3). Order inside each flow: the one-place status first, then the cards, the
       Upload from the dashboard, pre-check refuses a wrong-layout build and the merged
       binary, deploy a good build to `confirmed`, deploy a deliberately broken one to
       `rolled back`. Extends CUJ-1 steps 5 and 6.
+- [ ] **R2b-fw-2**: Agent announces `rollback_capable`, `partition_table_sha256`, `flash_chip_size` (P2, 1.5d)
+      CRITICAL (`ff_identity.c::announce_object`, `ff_mqtt.c::classify_txn` confirm path).
+      Emit in the spec's key order; persist the observation in NVS; `true` from the
+      `TXN_CONFIRMING` branch; give `NEW`-at-target a terminal outcome instead of "stale
+      transaction record — discarded" (leaves the deploy at `rebooting`); emit `false` only
+      after `R2b-test-5`. Applies Patch B in the same commit. QEMU proof: an OTA'd image
+      announces `rollback_capable: true` and the `ab-4m-v1` fingerprint. New agent version.
+      **Blocked:** waits for the owner to accept and apply the R2-spec-1 proposal as amended by R2b-spec-2 (Patch A; fw-2 also applies Patch B). See docs/features/board-profiles.md → *Step 1 wire proposal*.
+- [ ] **R2b-be-6**: Ingest and store the three board measurements (P2, 1d)
+      `AnnouncePayload`, `ingestor/store.py`, `EnrollRequest` (store, never reject: malformed
+      → null + log), `IDENTITY_FIELDS`, `Device` columns + Alembic migration (CRITICAL),
+      simulator flags `--rollback-capable {true,false}`, `--partition-sha`,
+      `--flash-chip-size`.
+      **Blocked:** waits for the owner to accept and apply the R2-spec-1 proposal as amended by R2b-spec-2 (Patch A; fw-2 also applies Patch B). See docs/features/board-profiles.md → *Step 1 wire proposal*.
+- [ ] **R2b-be-7**: Pre-check and deploy gate on the measurements (P2, 1d)
+      `deploy_precheck.py`: `partition_table_mismatch` refusal, `rollback_incapable` gating
+      warning; `DeployRequest.override`; `PrecheckFinding.needs_override`;
+      `SUPPORTED_LAYOUTS` → `{layout: {ota_slot_size, partition_table_sha256}}` with a pin in
+      `tests/test_agent_partitions.py`. Depends on `R2b-be-6`.
+      **Blocked:** waits for the owner to accept and apply the R2-spec-1 proposal as amended by R2b-spec-2 (Patch A; fw-2 also applies Patch B). See docs/features/board-profiles.md → *Step 1 wire proposal*.
+- [ ] **R2b-test-5**: Bench a rollback-less bootloader to settle `rollback_capable: false` (P2, 0.5d)
+      What an OTA'd image observes (`NEW` or `VALID`) when the bootloader has no rollback.
+      Gates `R2b-fw-2` emitting `false`. Hardware-gated.
 
 ### Flow 3 — Change the network (known networks)
 
@@ -399,5 +423,6 @@ re-flash `94a990dd09a4`).
 
 1. `S0-bug-1` (Sprint 0). 2. `R2b-fe-1`, `-2`, `-3`, `-7` and `R2b-be-2`, `-3` (no dependencies).
 3. `R2b-fe-8`..`fe-10`, `R2b-fe-4`, `R2b-fe-5`, `R2b-be-1`/`fe-6`. 4. `R2b-spec-1`, then `R2b-fw-1`,
-`fe-12`, `be-5`, `fe-13`. 5. The `R2b-test-*` tasks and the bench verification (`S0-test-1`,
+`fe-12`, `be-5`, `fe-13`; `R2b-spec-2`'s follow-ups (`be-6`, `be-7`, `fw-2`) once the owner
+applies Patch A; `R2b-test-5` with the bench runs. 5. The `R2b-test-*` tasks and the bench verification (`S0-test-1`,
 `S0-test-2`) last, on the final flows. `R2b-spec-3` can run any time and gates future Improv work.

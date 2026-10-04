@@ -13,6 +13,18 @@ finishes a task, it appends a completed entry below.
 
 ## Completed Work
 
+### R2b-spec-2 (2026-10-04): R2-spec-1 amended; spec not applied
+
+Decided: amend the R2-spec-1 proposal, then apply it (not as filed, not dropped). Three
+amendments, now in *Planned Work → Step 1 wire proposal*: `rollback_capable: false` is a
+gating pre-check warning `rollback_incapable` that `/deploy` enforces as a 409 unless the
+body carries `override: ["rollback_incapable"]` (was: a 409 with no override); the chip-size
+field is `flash_chip_size` (was `flash_size`, which the bundle manifest already uses for the
+image header's claim); and the spec defines `false` by its meaning, leaving the `NEW`
+mechanism here. Application order: Patch A ((b), (c), (d)) after the owner accepts, Patch B
+((a)) only in `R2b-fw-2`'s commit. Follow-ups filed and blocked: `R2b-fw-2`, `R2b-be-6`,
+`R2b-be-7`; `R2b-test-5` is hardware-gated. Nothing is built and `spec/` is untouched.
+
 ### R2-spec-1 (2026-10-03): step-1 wire proposal filed; spec not applied
 
 Proposed three additive `up/announce` fields: `rollback_capable` (`true | false | null`,
@@ -104,13 +116,21 @@ sources**. This is the only arrangement that catches the failure above.
 That buys the safety net and the validation for two columns: no new UI, no migrations
 beyond the columns, no seeding, and no "who can define a profile" auth question.
 
-#### Step 1 wire proposal (R2-spec-1, 2026-10-03) — PROPOSED, not applied
+#### Step 1 wire proposal (R2-spec-1, 2026-10-03) — PROPOSED, amended by R2b-spec-2 (2026-10-04), not applied
 
 `spec/` is protected during `/implement`, so this is the wire half of step 1 written as
 paste-ready text for a later `spec:` commit (the route `43675b8` took). **Nothing here is
-built.** No agent, server, schema, migration, simulator or test change has been made, and
-no TODO ids exist for the follow-ups below (they wait here until the proposal is accepted).
+built.** No agent, server, schema, migration, simulator or test change has been made. The
+follow-ups below are filed in `TODO.md` and blocked until the proposal is accepted.
 The design choice is logged in `DECISIONS.md` (2026-10-03, R2-spec-1), as proposed only.
+
+*Amended 2026-10-04 (R2b-spec-2).* A1: `rollback_capable: false` is a gating pre-check
+warning (`rollback_incapable`) that `/deploy` enforces as a 409 unless the request lists it
+in `override`, not a refusal with no override (`spec/flows.md` Flow 2 asks for a warning
+with an explicit override). A2: the chip-size field is `flash_chip_size`, not `flash_size`.
+A3: the spec text defines `false` by its meaning only; the `NEW`-at-target mechanism stays
+in this file, and the agent does not emit `false` until `R2b-test-5` benches it. The text
+below is already amended; see `DECISIONS.md` (2026-10-04, R2b-spec-2).
 
 **What the announce carries today.** `agent/main/ff_identity.c::announce_object()` builds
 the object in one place, and the enroll body is the same cJSON object plus `token`. So any
@@ -159,7 +179,13 @@ drop-in).
      says such an app marks itself valid at startup, which could make the observable state
      `VALID`, not `NEW`, and that is indistinguishable from "confirmed, then reset before
      the PUBACK" (`TXN_ALREADY_CONFIRMED`). The implementation task must bench this on a
-     board with a rollback-less bootloader before `false` goes on the wire.
+     board with a rollback-less bootloader before `false` goes on the wire. The spec
+     defines `false` by meaning only (R2b-spec-2); this mechanism is the agent's, and
+     `false` is not emitted until `R2b-test-5` benches it. (In IDF v5.5.5 an app built with
+     `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE` writes `ESP_OTA_IMG_NEW` on set-boot and only
+     the bootloader moves it to `PENDING_VERIFY`, per
+     `app_update/esp_ota_ops.c::set_new_state_otadata`, so `NEW` at the target is plausible
+     for our agent, but still unbenched.)
    - **Persistence.** Once observed, the agent stores it in its NVS namespace so it
      survives the reboots after the observing one. A re-flash through our flasher already
      erases it (`nvs_erase_all` on a token-fingerprint change, DECISIONS 2026-09-14
@@ -257,8 +283,10 @@ drop-in).
    # -> 1fa67e6bbd034e434d04e9d6f4f52bbe899361602cd498573eb3bde97d1559ed
    ```
 
-3. **`flash_size`: integer bytes, the physical chip size detected at runtime.** Not the
-   image header's configured size. `esp_flash_get_physical_size(esp_flash_default_chip,
+3. **`flash_chip_size`: integer bytes, the physical chip size detected at runtime.** Not the
+   image header's configured size. Not `flash_size`: the bundle manifest already uses that
+   name for the image header's configured size (`"4MB"`, `firmware/manifest.py`), the claim
+   this field must not be (renamed by R2b-spec-2). `esp_flash_get_physical_size(esp_flash_default_chip,
    &size)` exists in v5.5.5 (`spi_flash/include/esp_flash.h`), and its header says
    `esp_flash_get_size()` returns "the size in the binary image header". **If the physical
    call fails, omit the field.** Do not fall back to `esp_flash_get_size()`: that value is
@@ -267,31 +295,43 @@ drop-in).
    fallback.) The value: a layout that ends past the physical chip is a board that cannot
    work, and it is step 2's (R3) input for a `detected` profile.
 
-**Size budget.** Today's announce is about 350 B. The three fields add about 140 B
-(`"flash_size":4194304,` 21 B; `"partition_table_sha256":"<64 hex>",` 93 B;
+**Size budget.** Today's announce is about 350 B. The three fields add about 142 B
+(`"flash_chip_size":4194304,` 26 B; `"partition_table_sha256":"<64 hex>",` 93 B;
 `"rollback_capable":true` 23 B), so about 490 B, under esp-mqtt's default 1024 B buffer
-(`agent/main` sets no MQTT buffer size of its own).
+(`agent/main` sets no MQTT buffer size of its own). With R2b-spec-1's `ssid` and
+`known_networks` as well, about 590 B.
 
 **Enroll gotcha: store, never reject.** `EnrollRequest` is validated after the token is
 read, and its docstring explains why a validation failure must never cost a token. A 400
 there would burn a single-use token because an optional measurement was malformed. So on
 `/v1/enroll` and in the ingestor, a malformed new field is stored as null and logged, never
 refused. The deploy gate is where the fields take effect, and nowhere else. "Malformed"
-means: `flash_size` not a positive integer; `partition_table_sha256` not 64 lowercase hex
+means: `flash_chip_size` not a positive integer; `partition_table_sha256` not 64 lowercase hex
 characters; `rollback_capable` not a boolean.
 
 **Server semantics (policy, not protocol).** These settle the open question "the precedence
 rule when claim and measurement disagree".
 
-- **Refuse-and-flag, not adopt-and-warn, for step 1.** Adopting the measurement needs a
-  fingerprint-to-layout mapping, which is step 2's profile table. Step 1 has only the
-  name, so the honest move is a 409 in the existing name-what-did-not-match style, for
-  example: "this device announces partition layout ab-4m-v1 but its partition table
-  fingerprint is X, not the Y that ab-4m-v1 has. The device disagrees with its profile."
-- `rollback_capable: false` gives a deploy 409 naming that this board's bootloader cannot
-  roll back. `null` or absent is not refused ("an R0 board that announced neither is not
-  refused for being old"); the dashboard may say "rollback unverified". An override for a
-  deliberate unprotected deploy is out of scope.
+- **Refuse-and-flag, not adopt-and-warn, for the fingerprint in step 1.** Adopting the
+  measurement needs a fingerprint-to-layout mapping, which is step 2's profile table. Step
+  1 has only the name, so the honest move is a refusal, code `partition_table_mismatch`, a
+  409 in the existing name-what-did-not-match style, for example: "this device announces
+  partition layout ab-4m-v1 but its partition table fingerprint is X, not the Y that
+  ab-4m-v1 has. The device disagrees with its profile." It is a partition-layout mismatch,
+  which `spec/flows.md` refuses, so it is never overridable.
+- **`rollback_capable: false` is a gating warning, code `rollback_incapable`** (amended by
+  R2b-spec-2; the filed text made it a 409 with no override). The pre-check reports it as
+  a warning naming that this board's bootloader cannot roll back. `POST
+  /v1/devices/{id}/deploy` answers 409 with the same sentence unless the body overrides
+  it: `DeployRequest.override: list[Literal["rollback_incapable"]] = []`. Per code, never a
+  blanket `force` (the `DeployRequest` docstring's "no `force`" stays true); an unknown code
+  is a 422; listing a code whose warning is not raised is a no-op; refusals can never be
+  overridden. `PrecheckFinding` gains `needs_override: bool = False` so the card knows which
+  warnings gate; `never_connected`, `offline` and `sleepy` stay non-gating. The R3
+  library-marker warning will be the second gating code. `null` or absent never warns and
+  is never refused ("an R0 board that announced neither is not refused for being old"),
+  because that is every board before its first OTA and a warning on every board teaches
+  the operator to ignore warnings; the dashboard may say "rollback unverified".
 - `partition_table_sha256` absent: no fingerprint check (the status quo). Present for a
   layout with no known fingerprint: no check, logged.
 - `SUPPORTED_LAYOUTS` becomes `{layout: {ota_slot_size, partition_table_sha256}}`, still in
@@ -317,9 +357,11 @@ rule when claim and measurement disagree".
 - **A compiled-in `rollback_capable` claim.** Rejected, see field 1.
 
 **Paste-ready spec text.** Everything below is for `spec/device-protocol.md` and
-`spec/open-questions.md`, to be applied in a separate `spec:` commit.
+`spec/open-questions.md`, to be applied in two patches (see *Application order* after (d)):
+**Patch A** is (b), (c) and (d); **Patch B** is (a).
 
-*(a) `up/announce` example.* Replace the JSON block. The three new keys follow
+*(a) `up/announce` example.* This is **Patch B**: apply it only in `R2b-fw-2`'s commit (see
+*Application order*). Replace the JSON block. The three new keys follow
 `ota_slot_size`; the existing keys keep their order, and `proto` stays `1`. The
 substrings `"ota_slot_size": 1966080` and `"partition_layout": "ab-4m-v1"` must stay
 byte-for-byte (one space after the colon, same quoting), because
@@ -339,39 +381,40 @@ matches them as text.
   "parent_device_id": null,
   "partition_layout": "ab-4m-v1",
   "ota_slot_size": 1966080,
-  "flash_size": 4194304,
+  "flash_chip_size": 4194304,
   "partition_table_sha256": "1fa67e6bbd034e434d04e9d6f4f52bbe899361602cd498573eb3bde97d1559ed",
   "rollback_capable": true,
   "capabilities": ["ota", "selftest", "identify"]
 }
 ```
 
-*(b) A paragraph under the existing `partition_layout` + `ota_slot_size` paragraph:*
+*(b) A paragraph under the existing `partition_layout` + `ota_slot_size` paragraph (Patch A):*
 
-> `flash_size`, `partition_table_sha256` and `rollback_capable` are measurements, where
-> `partition_layout` is a name. `flash_size` is the physical flash chip size in bytes, not
+> `flash_chip_size`, `partition_table_sha256` and `rollback_capable` are measurements, where
+> `partition_layout` is a name. `flash_chip_size` is the physical flash chip size in bytes, not
 > the size in the image header; a device that cannot read it omits the field.
 > `partition_table_sha256` is the lowercase hex SHA-256 of the device's decoded partition
 > table: one line `{type}:{subtype}:{offset}:{size}\n` per entry the table contains,
 > all four in decimal, sorted by offset ascending, with labels and flags left out. The
 > expected value for each layout id is in the *Partition layouts* table below.
-> `rollback_capable` is `true` once the board has booted an OTA-written image in
-> `PENDING_VERIFY`, `false` once it has booted one that stayed `NEW` (the bootloader does
-> not roll back), and `null` until either has been observed, which includes every board
-> that has never completed an OTA. It is never derived from how the firmware was built. All
+> `rollback_capable` is `true` once the board has booted an OTA-written image that its
+> bootloader put into `PENDING_VERIFY`, `false` once it has booted one that its bootloader
+> never put into `PENDING_VERIFY` (the bootloader cannot roll back), and `null` until either
+> has been observed, which includes every board that has never completed an OTA. It is
+> never derived from how the firmware was built. All
 > three are additive under *Evolution rules*, rule 2, and `proto` stays `1`. An absent
 > field means unknown, and the server never refuses a device for omitting one. The enroll
 > body carries the same fields, and the server stores a malformed value as null rather
 > than refusing the request.
 
-*(c) A new column for the *Partition layouts* table,* `partition_table_sha256`:
+*(c) A new column for the *Partition layouts* table (Patch A),* `partition_table_sha256`:
 `ab-4m-v1` gets `1fa67e6bbd034e434d04e9d6f4f52bbe899361602cd498573eb3bde97d1559ed`, and
 `ab-4m-arduino-v1` gets `05528998ae17fb6a7a5741443f9a7a4720c766f370fefc30814cbc3e391c1fc4`
 (re-derive the latter from the real CSV when R3 checks it in). A new layout id adds its
 own value; an existing row's value is never edited.
 
-*(d) `spec/open-questions.md`.* Delete the entry *Bootloader attestation on the Arduino
-path* once (a) to (c) are applied, per that file's rule ("Answering one means moving it
+*(d) `spec/open-questions.md` (Patch A).* Delete the entry *Bootloader attestation on the
+Arduino path* once (b) and (c) are applied, per that file's rule ("Answering one means moving it
 into spec/ proper and deleting it here"). Refile the residue as a narrower question:
 
 > **Attestation before the first OTA.** `rollback_capable` is measured by an OTA, so a
@@ -383,21 +426,38 @@ into spec/ proper and deleting it here"). Refile the residue as a narrower quest
 > write time. The same digest would invalidate a stale persisted `rollback_capable` after
 > an Arduino IDE upload.
 
-**Follow-ups once the spec change is applied (no ids yet).**
+**Application order (R2b-spec-2).** Patch A ((b), (c), (d)) can be applied any time after
+the owner accepts the proposal. Patch B ((a), the three new keys in the `up/announce`
+example) goes in **only in `R2b-fw-2`'s commit**:
+`tests/test_ff_cfg.py::TestAnnounceMatchesTheSpec::test_the_firmware_builds_exactly_the_spec_keys`
+requires `agent/main/ff_identity.c` to contain every key in that example, so applying
+Patch B before the agent emits the keys turns `just test` red. In (a),
+`"ota_slot_size": 1966080` and `"partition_layout": "ab-4m-v1"` stay byte-for-byte. Patch
+B also coexists with R2b-spec-1's Patch B (`ssid`, `known_networks`, in
+`docs/features/enrollment.md`); whichever lands second rebases on the other. Combined, the
+announce is about 590 B, under esp-mqtt's 1024 B default buffer.
 
-- **agent:** emit the three fields from `announce_object()` in the spec's key order;
-  persist the `rollback_capable` observation in `classify_txn()` (a CRITICAL
-  confirm/rollback path); and give the `NEW`-at-target case a terminal outcome instead of
-  "stale, discarded", which leaves the deploy parked at `rebooting`. Whether that is a new
-  status or an existing one is a question, since the status vocabulary is open (DECISIONS
-  2026-10-02).
-- **server:** `AnnouncePayload`, `store.py`, `EnrollRequest` (store, never reject),
-  `IDENTITY_FIELDS`, `Device` columns plus an Alembic migration (CRITICAL), the
-  `SUPPORTED_LAYOUTS` profile dict, two new `_check_compatible()` 409s, and simulator
-  flags (for example `--rollback-capable`, `--partition-sha`).
-- **test:** a pin in `tests/test_agent_partitions.py` for the `ab-4m-v1` fingerprint; a
-  bench run of a rollback-less bootloader to settle the `false` signal; a QEMU proof that
-  an OTA'd image reports `rollback_capable: true`.
+**Follow-ups once the spec change is applied (filed in `TODO.md`, blocked on the owner).**
+
+- **agent (`R2b-fw-2`):** emit the three fields from `announce_object()` in the spec's key
+  order; persist the `rollback_capable` observation in NVS from `classify_txn()` (a
+  CRITICAL confirm/rollback path), `true` from the `TXN_CONFIRMING` branch; and give the
+  `NEW`-at-target case a terminal outcome instead of "stale, discarded", which leaves the
+  deploy parked at `rebooting`. Whether that is a new status or an existing one is a
+  question, since the status vocabulary is open (DECISIONS 2026-10-02). Emits `false` only
+  after `R2b-test-5`. Applies Patch B in the same commit.
+- **server, ingest (`R2b-be-6`):** `AnnouncePayload`, `store.py`, `EnrollRequest` (store,
+  never reject), `IDENTITY_FIELDS`, `Device` columns plus an Alembic migration (CRITICAL),
+  and simulator flags `--rollback-capable {true,false}`, `--partition-sha`,
+  `--flash-chip-size`.
+- **server, gate (`R2b-be-7`):** in `deploy_precheck.py`, the `partition_table_mismatch`
+  refusal and the `rollback_incapable` gating warning; `DeployRequest.override`;
+  `PrecheckFinding.needs_override`; the `SUPPORTED_LAYOUTS` profile dict
+  `{layout: {ota_slot_size, partition_table_sha256}}` with the `ab-4m-v1` fingerprint
+  pinned in `tests/test_agent_partitions.py`.
+- **test (`R2b-test-5`):** a bench run of a rollback-less bootloader to settle the `false`
+  signal (hardware-gated). The QEMU proof that an OTA'd image reports
+  `rollback_capable: true` is part of `R2b-fw-2`.
 
 **Step 2 — R3, and not before.** Move the catalog into the table, seed the builtins, allow
 user-defined profiles via API/UI. The trigger is evidence, not the calendar: R3 produces
@@ -445,7 +505,8 @@ global (for step 2, R3). The precedence rule when claim and measurement disagree
 proposed as refuse-and-flag; see *Step 1 wire proposal (R2-spec-1)* above. The choice of
 this design over the two alternatives gets a `DECISIONS.md` entry when step 1 lands, not
 before — it is a plan until something is built. The R2-spec-1 entry covers the wire
-proposal only.
+proposal only. The `rollback_capable: false` half of refuse-and-flag was amended to a
+gating warning with an override (R2b-spec-2); the fingerprint half stands.
 
 **Out of scope:** a board *name* database. All three neighbors converge on chip variant +
 flash geometry as the only schema that carries weight — ESPHome's 298-entry esp32 board

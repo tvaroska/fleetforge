@@ -6,6 +6,64 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-04 — R2-spec-1 is amended, not applied as filed: `rollback_capable: false` is a gating warning with a per-code override, `flash_size` becomes `flash_chip_size`, and the spec defines `false` by its meaning (R2b-spec-2, proposed)
+
+**Decided: amend the 2026-10-03 R2-spec-1 proposal, then apply it. Not "apply as filed",
+not "drop". This entry covers the amended PROPOSAL only. Nothing is built: no agent,
+server, frontend, migration, simulator or test change, and `spec/` is untouched; the owner
+applies it in a separate `spec:` commit.** The amended text and the paste-ready patches are
+in `docs/features/board-profiles.md` → *Step 1 wire proposal*.
+
+- **Why not drop.** `spec/flows.md` Flow 2 step 2 (commit `2390029`) already requires a
+  warning, with an explicit override, on `rollback_capable: false`; dropping the field
+  leaves that requirement with no data source. And `partition_table_sha256` is the only
+  check that catches two different tables that both announce `ab-4m-v1` (R3 makers bring
+  their own `partitions.csv`).
+- **Why not as filed: three conflicts.** (1) Policy: the filed server semantics make
+  `false` a deploy 409 with no override; *Flow edits reviewed* (2026-10-04) and
+  `spec/flows.md` made it a warning with an explicit override (bench racks must send).
+  (2) Mechanism in a near-frozen spec: paste-ready (b) defined `false` as "stayed `NEW`",
+  an unbenched signal. (3) Name collision: `flash_size` is already the bundle manifest's
+  image-header string (`"4MB"`, `firmware/manifest.py`), the very claim the announce field
+  must not be.
+- **A1: `rollback_capable: false` is a gating warning, code `rollback_incapable`.**
+  `POST /v1/devices/{id}/deploy` answers 409 with the same sentence unless the body carries
+  `override: ["rollback_incapable"]`. Shape: `DeployRequest.override:
+  list[Literal["rollback_incapable"]] = []`, per code, never a blanket `force` (the
+  docstring's "no `force`" stays true); an unknown code is a 422; listing a code that is not
+  raised is a no-op; refusals are never overridable. `PrecheckFinding` gains
+  `needs_override: bool = False` so the card knows which warnings gate; `never_connected`,
+  `offline`, `sleepy` stay non-gating. The R3 library marker will be the second gating code.
+- **`null` / absent never warns and never refuses.** That is every board before its first
+  OTA; a warning there would fire on every board and teach the operator to ignore warnings.
+- **A2: the announce field is `flash_chip_size`** (integer bytes), in field 3, paste-ready
+  (a) and (b), and the size budget.
+- **A3: the spec defines `false` by meaning only:** the board booted an OTA-written image
+  that its bootloader never put into `PENDING_VERIFY`. The `NEW`-at-`target_addr`
+  mechanism stays in the feature doc. The agent emits `false` only after `R2b-test-5`
+  benches it; until then it emits `true` or nothing, and the warning is exercised through
+  the simulator.
+- **A4: application order. Patch A (paste-ready (b), (c), (d)) any time after the owner
+  accepts; Patch B ((a), the three new keys in the `up/announce` example) only in
+  `R2b-fw-2`'s commit.** `test_the_firmware_builds_exactly_the_spec_keys` requires
+  `ff_identity.c` to emit every key in that example, so Patch B first turns `just test` red.
+  `"ota_slot_size": 1966080` and `"partition_layout": "ab-4m-v1"` stay byte-for-byte. Patch
+  B coexists with R2b-spec-1's Patch B; whichever lands second rebases (≈ 590 B combined,
+  under esp-mqtt's 1024 B).
+- **Kept as filed:** three flat optional fields, `proto` 1, the geometry-only fingerprint
+  rule and `ab-4m-v1` = `1fa67e6b...59ed` (re-computed 2026-10-04, matches), a fingerprint
+  mismatch stays a refusal (now named `partition_table_mismatch`), enroll stores and never
+  rejects, no fallback for the chip size, `ota_slots` / `bootloader_sha256` deferred.
+- **Dependents filed and blocked on the owner:** `R2b-fw-2`, `R2b-be-6`, `R2b-be-7`
+  (marked in `TODO.md`); `R2b-test-5` is hardware-gated. Until they land, the pre-check
+  keeps skipping the `rollback_capable` warning.
+
+Supersedes, from the 2026-10-03 R2-spec-1 entry, the `rollback_capable: false` half of
+*Refuse-and-flag* (a 409 becomes a gating warning with an override) and the field name
+`flash_size`. The rest of that entry stands.
+
+---
+
 ## 2026-10-04 — The deploy pre-check is a side-effect-free twin of the deploy: same body, every reason at once, one module owns every sentence; warnings never block a send (R2b-be-2)
 
 **Decided: `POST /v1/devices/{id}/deploy/precheck` takes `DeployRequest` and answers 200 with
