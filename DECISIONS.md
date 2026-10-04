@@ -6,6 +6,22 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-04 — Agent-learned networks belong in an NVS overlay keyed to the ff_cfg it extends; keep identity is a flash that mints no token; Improv needs an RX path the S3 console does not give (R2b-spec-3, findings)
+
+**Found: findings only, nothing built, `spec/` untouched. Details and the QEMU transcripts: `docs/features/enrollment.md` → *spike findings (R2b-spec-3)*.**
+
+- **Keep identity already works on the device.** An `ff_cfg` with no token never erases the credential (`ff_store_sync_token` returns on an empty token) and the flasher never writes `nvs`. Shown in QEMU: a tokenless `agent-qemu-recfg`, and the browser flasher's full write plan minus the token, both boot to `reusing the stored credential (no enrollment)` with no `ff-enroll` line, the used-token count and `enrolled_at` unchanged. Every flash re-enrols today only because `flash.ts` mints; `validateFfCfg` does not require a token.
+- **When NVS is gone the board parks, once, and the server hears nothing** (no token means no stage reports). The console classifier already names the `carries no enrollment` line. The following `halted:` reason wrongly says the token "was refused for good"; a wording fix, not filed.
+- **Keep identity is offered only for a live row on this server with an unchanged layout.** `ab-4m-arduino-v1`'s `nvs` is 0x5000 not 0x6000 and its `otadata` sits inside `ab-4m-v1`'s `nvs`. The `api_base` must be the one the credential carries (the agent only warns). A stale `ff_txn` record is discarded without an outcome, exactly as on a re-enrol. After a whole-chip erase only a new token helps.
+- **A list the agent edits goes in NVS, not `ff_cfg`.** `ff_cfg` is one sector: an erase+write cut by power leaves a board that parks with no server address, USB-only recovery; and the flasher rewrites it on every flash. The overlay lives in its own namespace (not `ff`, which the credential eraser owns), tagged with the `ff_cfg` header CRC it was learned on: a different CRC at boot discards it, an OTA never moves it. Effective list = overlay (newest first) then `ff_cfg`, deduplicated by SSID, cut at 4; `known_networks` counts it.
+- **Improv over serial needs no protocol change** but needs an input path: IDF v5.5's default S3 secondary console (USB-Serial-JTAG) is output-only, so the native-USB bench board needs a console change (`sdkconfig.defaults*`, CRITICAL) or an app-installed reader. Try a network before persisting it, fall back on failure, refuse during an open OTA transaction. The dashboard must share `SerialConsole`'s one reader.
+- *Rejected:* the agent rewriting `ff_cfg`; the overlay inside `ff`; copying `ssid`/`psk` to NVS at enrolment with `dn/cmd set_cfg` (a second source of truth, and passphrases through the server); a server-issued "re-flash token" that re-issues the same broker credential (new endpoint, protected spec, a credential oracle).
+- **Follow-ups proposed, not filed:** frontend "Re-flash, keep identity"; spec for the overlay contract (CRITICAL); agent overlay reader (after R2b-fw-1); agent Improv; dashboard Improv client; agent wording and two stale comments. Proposed spec wording for `spec/flows.md` and `spec/open-questions.md` is prose, to apply after R2b-spec-1 Patch A.
+
+Answers the *Still open* items of the 2026-10-04 R2b-spec-1, Flow 3 and Flow-edits entries, and the pre-flight card's "keep identity is not offered". Supersedes nothing.
+
+---
+
 ## 2026-10-04 — The update result card replaces the one-line verdict for a finished transaction; before and after are two rows, no arrows; failures get one cause and one next action from the board's own words (R2b-fe-10)
 
 **Decided: `deployResult.ts` judges a terminal `DeploySummary`, `DeployResultCard.tsx` renders it inside the Deploy cell. Details: `docs/features/dashboard.md`.**

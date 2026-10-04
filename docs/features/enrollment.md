@@ -1305,7 +1305,7 @@ Implementation notes behind `spec/flows.md` Flow 1 and the 2026-10-04 entries in
   `unknown-id` (no MAC). Sources: `predictDeviceId`, the page's one fleet (passed to
   `FlashBoard` as a prop) and the manifest. It never blocks Flash; the button reads
   "Re-flash and re-enrol this board" for `known`. "Keep identity" is not offered (no
-  mechanism yet). Hidden once the flash is done. Observed: `flash.test.tsx -t pre-flight`
+  mechanism yet); mechanism found, see the R2b-spec-3 spike findings below. Hidden once the flash is done. Observed: `flash.test.tsx -t pre-flight`
   and `Dashboard.test.tsx` pass, one EventSource per page. Not run in a real browser (no
   board, so detect cannot run); detecting the enrolled bench S3 is folded into `R2b-test-1`.
 - **Result card (R2b-fe-3, built).** One card (`ResultCard.tsx`, `data-testid="result-card"`,
@@ -1487,7 +1487,7 @@ R2b-spec-1), as proposed only. `R2b-fw-1`, `R2b-fe-12` and `R2b-be-5` are marked
    repeats every session. Enroll carries both by construction; the server stores them and
    never rejects them (a malformed value is stored as null, as R2-spec-1 decided for enroll).
 7. **Storage: `ff_cfg` only in v1. The agent never writes the list.** NVS vs `ff_cfg` for a
-   list the agent edits stays open (R2b-spec-3 / Improv).
+   list the agent edits stays open (R2b-spec-3 / Improv). Answered below (R2b-spec-3): NVS overlay.
 8. **Downgrade safety.** An OTA that puts a pre-list agent, or a maker image without the list,
    on a board in range of only `nets[...]` can join only network 1. It never reaches the
    broker and never confirms, so the R2 confirm timer rolls it back unattended. The R3
@@ -1643,3 +1643,259 @@ index f40e4ec..9f56aba 100644
    "expected_wake_interval_s": null,
    "parent_device_id": null,
 ```
+
+### Agent-written networks and keep identity: spike findings (R2b-spec-3, 2026-10-04) — FINDINGS, nothing built
+
+No agent, server, frontend, schema, migration, simulator or test change was made, and
+`spec/` is untouched. The decision is logged in `DECISIONS.md` (2026-10-04, R2b-spec-3).
+The three answers, up front: **(1)** a list the running agent edits goes in an **NVS
+overlay**, in its own namespace, keyed to the `ff_cfg` it extends; `ff_cfg` stays the
+flasher-written base list. **(2)** "Re-flash, keep identity" already works on the device:
+a flash that leaves `nvs` alone and writes an `ff_cfg` **with no token** keeps the
+credential and spends nothing. It was shown in QEMU below. What is missing is a flasher mode
+that does not mint. **(3)** Improv over serial needs an **input path the agent does not have**
+(and on the S3's native USB the default console cannot read), a frame parser that shares the
+port with the log, and the overlay from (1) as its write path. It needs no protocol change.
+
+**Q1. `ff_cfg` or NVS for a list the agent edits.** NVS, as an overlay on top of a read-only
+`ff_cfg`. The TODO's reason ("NVS is lost on Erase All Flash") does not tell the two apart:
+a whole-chip erase wipes `ff_cfg` too (`0x12000` in `ab-4m-v1`, `0x3D0000` in
+`ab-4m-arduino-v1`). The differences that do decide it:
+
+| | `ff_cfg` (agent rewrites it) | NVS overlay |
+|---|---|---|
+| Crash safety | One 4 KB sector (`FF_CFG_PARTITION_SIZE`, frozen in `agent/partitions.csv`). A rewrite is erase + write; a power cut between them leaves an erased sector, `ff_cfg.c::ff_cfg_load` returns `ESP_ERR_NOT_SUPPORTED` and `agent_main.c::app_main` parks ("no usable ff_cfg partition"). The board has also lost `api_base`, `mqtt_uri`, link. USB is the only recovery. No in-place A/B without a format change: readers take the header at offset 0 and refuse `version != 1` | Journaled per entry; `nvs_commit` is the atomic point (S0-fw-4 already relies on it for erase + `tok_fp`) |
+| Who owns it | The browser flasher rewrites it on **every** flash (the operator's declared intent). An agent edit is silently lost on the next flash | Never touched by the flasher (`frontend/src/flash.ts::assertLeavesNvsAlone`). Survives a flash, so it needs a "new flash wins" rule (below) |
+| Survives OTA | yes | yes |
+| Survives Arduino upload (no erase) | yes | yes |
+| Survives whole-chip erase | no | no |
+| Cost | none extra | NVS is already linked and used by the agent (`ff_store`, `ff_txn`); the +7460 B in `ota-library.md` was the R3 library's cost, not the agent's. 4 entries are roughly 400 B of the 24 KB partition shared with IDF's `phy` calibration |
+
+- **The "new flash wins" rule: tag the overlay with the fingerprint of the `ff_cfg` it was
+  learned on.** Store the `ff_cfg` header `crc32` (the payload CRC `ff_cfg_load` already
+  checks) beside the entries. At boot a different CRC means the operator flashed a new config,
+  so the overlay is discarded; an equal CRC keeps it. It is the S0-fw-4 `tok_fp` pattern and
+  inherits its "absent ⇒ adopt" lesson: an OTA never writes `ff_cfg`, so the CRC does not move
+  on OTA and nothing is lost. A keep-identity re-flash with **identical** fields keeps what the
+  board learned; one that changes any field (a network, a URL, a token) supersedes it. Small
+  agent change needed: `ff_cfg_t` does not expose the header CRC today.
+- **Merge rule against the cap of 4** (R2b-spec-1 decision 2). Effective list = overlay
+  entries (newest first) then the `ff_cfg` networks in their order, deduplicated by SSID (an
+  overlay entry replaces a base entry's `psk`), cut at 4. What falls off is the lowest-priority
+  base entry; it is logged and comes back on the next flash. The Improv-provided network goes
+  first because the operator just said "this is where the board is", and since the board never
+  leaves a working association (R2b-spec-1 decision 4), priority only matters after a link
+  loss. `known_networks` in the announce counts the merged list after the cut.
+- **Namespace: not `ff`.** `ff_store.c::ff_store_sync_token` erases `ff` on a token change,
+  and a new token is about trust, not Wi-Fi. A separate namespace (e.g. `ff_net`, keys such as
+  `cfg_crc`, `n`, `ssid0`/`psk0`… — namespace and key names ≤ 15 chars) keeps the credential
+  eraser's blast radius as it is, and lets the R3 library read the overlay without reading the
+  credential layout. The names never trip
+  `tests/test_agent_partitions.py::test_agent_holds_no_credential` (`wifi[_-]?(ssid|password)`).
+- **Consequences.** The R3 library must read the overlay too, so its namespace and keys become
+  a contract: a spec proposal (a "board-written state" section in `spec/device-protocol.md`,
+  which is CRITICAL). The R2b-spec-1 redaction obligation extends to it: no overlay `psk` in a
+  log, `ff_cfg_log()`, the diagnostic bundle or an error message.
+- *Rejected:* the agent rewrites `ff_cfg` (crash safety above, and the next flash erases the
+  edit). *Rejected:* the overlay inside `ff` (erased with the credential; mixes two contracts).
+  *Rejected:* the `spec/open-questions.md` candidate, copy `ssid`/`psk` to NVS at enrolment and
+  let `dn/cmd set_cfg` rewrite them. The copy is a second source of truth that still needs the
+  fingerprint rule to let a later flash win; boards already enrolled have no copy; and
+  `set_cfg` would carry passphrases through the server, against Flow 3's "passphrases stay out
+  of the server". Remote Wi-Fi change, if ever wanted, is a separate protocol proposal.
+
+**Q2. Re-flash, keep identity.** The device already does it: a flash that writes no token
+into `ff_cfg` and leaves `nvs` alone keeps the credential; the flasher only has to not mint.
+
+- **Why it works** (all read, none changed). The credential (`dev_id`, `mqtt_user`,
+  `mqtt_pass`, `api_base`, `enrolled_at`, `tok_fp`) is in NVS namespace `ff`
+  (`agent/main/ff_store.h`). The flasher erases nothing and refuses a plan that lands in `nvs`
+  (`flash.ts::assertLeavesNvsAlone`, table read by `partitionTable.ts`). `ff_store_sync_token`
+  returns at once on an empty token ("a config with no token never erases anything").
+  `ff_store_load` then finds the credential and logs `reusing the stored credential (no
+  enrollment)`, with no HTTP. `device_id` is the eFuse MAC, stable across any flash.
+- **What makes every flash re-enrol today is only the frontend.** `flash.ts` mints on every
+  flash (`FlashBoard.tsx`: "Every flash mints a fresh single-use token"). Nothing else stands
+  in the way: `ffcfg.ts::validateFfCfg` does not require a token, `buildFfCfgFields` omits a
+  blank one, and `encodeFfCfg` requires only `api_base` and `mqtt_uri`. `agent/tools/ff_cfg.py
+  --token` defaults to `""`.
+- **Server side needs nothing.** No enroll call happens, so `registry.py::enroll_device`'s
+  upsert and the broker password rotation never run: `enrolled_at`, `group_id`, `name` and the
+  broker client are kept. The next `up/announce` refreshes the identity on its own:
+  `ingestor/store.py::apply_announce` writes every `ANNOUNCE_FIELDS` entry (`proto`,
+  `platform_type`, `fw_version`, `agent_version`, `link_type`, `partition_layout`,
+  `ota_slot_size`, `capabilities`) plus `power_class`/`expected_wake_interval_s`, so a
+  keep-identity flash to a new agent version shows correctly. **Finding:** only
+  `parent_device_id` (and `group_id`, from the token) is enroll-only in `IDENTITY_FIELDS`; no
+  direct-connected ESP32 sets a parent, so nothing is lost.
+- **When NVS is gone, the board parks; it does not retry.** `ff_enroll.c::ff_enroll` logs
+  `this board has no credential and its ff_cfg carries no enrollment token: it cannot join a
+  fleet` and returns `ESP_ERR_INVALID_ARG`; `agent_main.c::enroll_until_credentialed` parks on
+  it (no backoff), and `park()` repeats the `halted:` line every 300 s forever. Stage reporting
+  is off without a token (`ff_progress.c::ff_progress_init`), so **the server hears nothing**:
+  the device row just goes offline. The console classifier already names it
+  (`frontend/src/boardConsole.ts`, `carries no enrollment` → cause `token`, remedy `reflash`);
+  a keep-identity result card would offer "re-enrol instead" on that line. **Finding:** the
+  `halted:` reason that follows reads "this board's enrollment token was refused for good",
+  which is wrong for a tokenless board (`ESP_ERR_INVALID_ARG` shares the branch with a refused
+  token). A wording fix in the agent, not filed.
+- **Gotchas for any keep-identity task.**
+  1. **Layout change ⇒ refuse keep-identity.** `ab-4m-v1` has `nvs` at `0x9000`/`0x6000`
+     (`agent/partitions.csv`); `ab-4m-arduino-v1` has `0x9000`/`0x5000` and its `otadata` at
+     `0xe000`, inside `ab-4m-v1`'s `nvs` (`design/decisions/arduino-gets-its-own-layout-id.md`).
+     Either direction leaves a credential that is partly cut off or an NVS that
+     `nvs_ready()` erases wholesale. The pre-flight already computes `layoutChange`
+     (`preflight.ts::describePreflight`): with one, offer re-enrol only.
+  2. **`api_base` must match.** `ff_store_matches_api_base` only warns; a credential from
+     server A used against server B fails broker auth forever. Offer keep-identity only for a
+     board that is a live row on THIS server (pre-flight `known`; a retired board is not in
+     `GET /v1/devices`, and its broker client may be gone), and write the same `api_base`. The
+     browser cannot read NVS to check which server issued it.
+  3. **otadata reset + stale transaction record.** The bundle writes `ota-data-initial.bin` at
+     `0xF000`, so a board that had OTA'd to `ota_1` boots `ota_0` after the flash, while
+     namespace `ff_txn` (`FF_TXN_NAMESPACE`, not `ff`) still holds any open record.
+     `ff_mqtt.c::classify_txn` finds no evidence and logs `stale transaction record for … —
+     discarded`; a torn record is `incomplete transaction record … — discarded`
+     (`ff_txn.c`). No outcome is reported, so the server's open deploy stays non-terminal.
+     A re-enrol has exactly the same exposure (`enroll.py` does not touch deploys), so
+     keep-identity is no worse; the pre-flight's `updating` should warn or block either way.
+  4. **The browser cannot see NVS.** Options: (a) trust the server row (live, same layout) and,
+     if the board prints the no-credential line, offer a one-click re-enrol; (b) `esptool-js`
+     `readFlash` of the `nvs` range and parse NVS pages for `ff/mqtt_pass` before choosing:
+     read-only, but more code and another flash read. Recommend (a); nothing read blocks it.
+  5. **A whole-chip erase** (Arduino "Erase All Flash", `esptool erase_flash`) loses NVS and
+     `ff_cfg`. Keep-identity after it is impossible by construction; only a new token helps.
+     That is acceptable and the copy should say so plainly.
+- *Rejected:* a server-side "re-flash token" bound to a `device_id` that re-issues the same
+  broker credential. It needs a new endpoint and a protocol section (protected spec), and it
+  turns a lost board into a credential oracle. The NVS-preserving path needs none of it.
+
+**Evidence (QEMU, `docs/runbooks/agent-qemu.md`, esp32, agent 0.4.5 bundle `ab-4m-v1`).**
+On this dev box the stack's HTTP port is 8088 (`FF_HTTP_PORT` in `.env`; 8080 belongs to
+another container), so `BASE=http://localhost:8088` and `--api-base http://10.0.2.2:8088`.
+Token plaintext never left the shell; the board prints fingerprints only.
+
+```text
+# E0 baseline: fresh token, just agent-cfg … --link ethernet --hb 10 --token "$FFE",
+#    just agent-qemu esp32 --fresh                    used tokens before: 111
+I (4452) ff-store: recording the ff_cfg enrollment token as a49bb787c7f99071; nothing was stored to invalidate
+I (7322) ff-enroll: enroll 200 http://10.0.2.2:8088/v1/enroll
+I (7972) ff-store: credential stored in NVS
+I (8232) ff-mqtt: announce acknowledged by the broker
+#    used: 112; enrolled_at 2026-10-04T19:23:56.138597Z, online   (a re-enrol costs a token and moves enrolled_at)
+
+# E1 keep identity, ff_cfg only: just agent-qemu-stop esp32;
+#    just agent-cfg … --link ethernet --hb 10   (no --token); just agent-qemu-recfg esp32; just agent-qemu esp32
+wrote ff_cfg at 0x12000 — NVS untouched
+I (4913) ff-cfg:   secrets   token 0 chars, passphrase 0 chars (never printed)
+I (8433) ff-store: reusing the stored credential (no enrollment): 000000000000, issued 2026-10-04T19:23:56Z by http://10.0.2.2:8088
+I (8513) ff-mqtt: mqtt connected as 000000000000 (mqtt://10.0.2.2:8883)
+I (8553) ff-mqtt: announce acknowledged by the broker
+#    ff-enroll lines: 0; used: 112 -> 112; enrolled_at unchanged; online
+
+# E2 the browser flasher's write plan minus the token: board stopped, a throwaway script
+#    wrote every manifest part (bootloader 0x1000, partition-table 0x8000, ota-data 0xf000,
+#    app 0x20000) plus the tokenless ff_cfg at 0x12000 into .qemu/flash-esp32.bin,
+#    asserting no part overlaps nvs 0x9000..0xf000 (read from the table) and that the nvs
+#    bytes were unchanged afterwards; then just agent-qemu esp32
+I (4706) ff-cfg:   secrets   token 0 chars, passphrase 0 chars (never printed)
+I (9286) ff-store: reusing the stored credential (no enrollment): 000000000000, issued 2026-10-04T19:23:56Z by http://10.0.2.2:8088
+I (9366) ff-mqtt: mqtt connected as 000000000000 (mqtt://10.0.2.2:8883)
+I (9416) ff-mqtt: announce acknowledged by the broker
+#    ff-enroll lines: 0; used: 112 -> 112; enrolled_at unchanged; online
+
+# E3 no NVS: just agent-qemu esp32 --fresh with the tokenless ff_cfg, watched 100 s
+E (5852) ff-enroll: this board has no credential and its ff_cfg carries no enrollment token: it cannot join a fleet. Re-flash ff_cfg with --token ffe_…
+E (5852) ff-agent: halted: this board's enrollment token was refused for good — re-flash ff_cfg with a fresh ffe_ token (POST /v1/enrollment-tokens)
+#    parked: one attempt, no retry line, no HTTP; used: 112 -> 112; the server row just went offline
+```
+
+The board was then restored with a new token (`--fresh`, `enroll 200`, used 112 → 113,
+enrolled_at 2026-10-04T19:31:44.326993Z) and E1 was repeated: `reusing the stored credential
+(no enrollment)`, no `ff-enroll` line, used 113 → 113, enrolled_at unchanged, online.
+
+**Q3. Improv over serial on the agent.** The agent needs an RX path, a frame parser that
+coexists with the log on one port, and the Q1 overlay as its write path; on the S3's native
+USB the default console cannot take input, so that part of the work is a console decision.
+
+- **Protocol** (primary source: <https://www.improv-wifi.com/serial/>, flow at
+  <https://www.improv-wifi.com/>). A frame is `IMPROV`, version `1`, type, length, data,
+  checksum byte. Types: `0x01` current state, `0x02` error state (device → client), `0x03` RPC
+  command (client → device), `0x04` RPC result. States: `0x00` stopped, `0x02` ready, `0x03`
+  provisioning, `0x04` provisioned (the result of "send Wi-Fi settings" carries a redirect URL
+  as its first string, possibly empty). Errors: `0x01` invalid RPC, `0x02` unknown command,
+  `0x03` unable to connect, `0x05` bad hostname, `0xFF` unknown. RPCs: `0x01` send Wi-Fi
+  settings (**one** SSID + password), `0x02` current state, `0x03` device info (firmware name,
+  version, chip, device name), `0x04` scanned networks (SSID, RSSI, auth; an empty result ends
+  the list), `0x05` hostname, `0x06` device name, `0x07` network state (optional; unknown
+  command is a valid reply). On each command the device first sends error state `0x00`. The
+  serial page does not spell out the checksum algorithm; take it from the reference
+  implementation, not from memory. The flow is: device powered, client sends credentials,
+  device joins and returns a URL.
+- **An RX path.** Today nothing reads the console. `agent/sdkconfig.defaults*` set no
+  `CONFIG_ESP_CONSOLE_*`, so the IDF v5.5.5 defaults apply: UART0 primary and, on chips with
+  USB-Serial-JTAG (S3, C3, C6), `ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG`, which IDF's own
+  Kconfig (`components/esp_system/Kconfig`, read in the pinned image) says "currently only
+  supports non-blocking mode" output, and "input through USB_SERIAL_JTAG port" needs it to be
+  the primary console. The bench S3 is on native USB (no UART bridge), so Improv there needs
+  either the console moved to USB-Serial-JTAG primary (an `sdkconfig.defaults*` edit: a
+  CRITICAL path, auto-escalated, though not partition or eFuse: the app's console choice
+  ships inside the app image, so it reaches fielded boards by OTA; the bootloader's own output
+  is a separate, flash-time setting) or the `usb_serial_jtag` driver installed by the app for reads alongside the
+  secondary output (to measure on the bench before choosing). The esp32 dev boards with a
+  UART bridge need only a UART0 reader.
+- **Framing next to `ESP_LOG`.** Frames are binary between text lines on the same port. The
+  agent must write a frame atomically with respect to log output (one lock or a single
+  write), and the dashboard's line splitter and classifier must skip `IMPROV` frames.
+- **The write path is Q1's overlay.** "Send Wi-Fi settings" means "connect to this now": the
+  board must try it, which drops the current broker session. Refuse with an error state while
+  an OTA transaction is open (a `ff_txn` record exists or `ff_ota` is handling a stage, the
+  check `ff_ota_is_handling` already does). Persist the entry only after the new network gives
+  an address; on failure, report `0x03` unable to connect and fall back to the old list, so a
+  typo never strands the board. On ethernet (QEMU) answer state stopped.
+- **Budget.** A task with a ~4 KB stack that blocks on the reader, plus a parser and the
+  overlay writer: an estimate of 3–6 KB of app (more if the `usb_serial_jtag` driver is not
+  already linked), no build. The ratcheted per-target gate is
+  `tests/test_agent_power_and_size.py::APP_SIZE_BUDGET_BYTES` (esp32 1,018,304 B against a
+  1,966,080 B slot), so the Improv task raises it to the measured byte, as R2-fw-6 did.
+- **Dashboard side.** The Web Serial port is held by `BoardConsole` through
+  `serialConsole.ts::SerialConsole`, one reader on `port.readable`. An Improv client must share
+  that reader (a demultiplexer that hands frames to Improv and lines to the console), never
+  open a second one. On native USB, `esptool-js` resets by DTR/RTS and the port re-enumerates
+  (S0-test-2 Check F context), so Improv must start only after the console has the port back.
+- **Security.** Anyone with USB can already re-flash the board, so Improv over serial adds no
+  exposure. Improv over Bluetooth does (proximity, no cable); that is for its own design.
+- **No protocol change** for Improv over serial itself (it never touches MQTT or HTTP); the
+  overlay contract from Q1 is the only spec-facing piece.
+
+**Proposed follow-up tasks (not filed).** Filing is the owner's call (`/new-feature`,
+`/replan`); none is in `TODO.md`.
+
+- *Frontend: "Re-flash, keep identity".* For pre-flight `known` with no `layoutChange` (and
+  no open `updating`), offer it beside re-enrol; write `ff_cfg` without a token and the same
+  `api_base`; the result card offers re-enrol on the `carries no enrollment` line. Not CRITICAL
+  (no token is minted; token issuance itself is unchanged).
+- *Spec: the NVS overlay contract* (namespace, keys, the CRC rule, merge rule) for the agent and
+  the R3 library, plus Flow 3's open item. **CRITICAL** (`spec/device-protocol.md`).
+- *Agent: overlay reader and merge* (depends on R2b-fw-1 and the spec above). **CRITICAL**
+  path class (agent firmware), and it must expose the `ff_cfg` header CRC.
+- *Agent: Improv over serial* (RX path, parser, try-then-persist, OTA refusal). **CRITICAL**
+  if it touches `agent/sdkconfig.defaults*` (the S3 console).
+- *Dashboard: Improv client* sharing `SerialConsole`'s reader; a "Change Wi-Fi" action.
+- *Agent wording:* the `halted:` reason for a tokenless board without a credential (Q2), and the
+  stale comments `ff_cfg.h` (`token` "\"\" once used up") and `ff_progress.c` ("a board that has
+  already enrolled has an empty token") that describe a convention nothing writes today.
+
+**Proposed spec wording (not applied).** Prose, not a `git apply` patch: R2b-spec-1 Patch A
+edits the same `spec/open-questions.md` paragraph, so a second patch would collide. Apply
+after Patch A, as an amendment to it.
+
+- `spec/flows.md`, Flow 1 decision "Re-flash, keep identity is a requirement, not yet a
+  mechanism": "**Re-flash, keep identity** is a flash that mints no token. The board keeps its
+  credential in NVS, which the flasher never writes, and an `ff_cfg` without a token never
+  erases it. It is offered only for a board on this server's fleet with an unchanged
+  partition layout; after a whole-chip erase only a new token helps."
+- `spec/open-questions.md`, *Field Wi-Fi change*: "Networks the board learns after the flash
+  (Improv) are kept in NVS as an overlay on `ff_cfg`, tagged with the `ff_cfg` CRC they were
+  learned on; a flash with a different `ff_cfg` discards them. `ff_cfg` stays flasher-written.
+  `dn/cmd set_cfg` is not the way in: it would carry passphrases through the server."

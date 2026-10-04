@@ -210,7 +210,7 @@ are R3). Order inside each flow: the one-place status first, then the cards, the
 - [x] **R2b-spec-2**: Decide `R2-spec-1`: apply, amend or drop (P2, 0.25d) _(done 2026-10-04; reviewed; decided: amend; proposal amended, spec not applied; see DECISIONS.md and docs/features/board-profiles.md)_
       The pre-check warns on `rollback_capable: false` (Flow 2), and that field exists only if
       the 2026-10-03 proposal is applied. Until decided, the warning is skipped.
-- [ ] **R2b-spec-3**: Spike: how the agent writes its network list, and what "keep identity" needs (P2, 1d)
+- [x] **R2b-spec-3**: Spike: how the agent writes its network list, and what "keep identity" needs (P2, 1d) _(done 2026-10-04; findings only, spec not applied; see DECISIONS.md and docs/features/enrollment.md)_
       Findings only, in `docs/features/enrollment.md`. Questions: `ff_cfg` or NVS for a list
       the running agent edits (NVS is lost on "Erase All Flash"); how a re-flash keeps the
       broker credential without burning a token; what Improv over serial needs on the agent.
