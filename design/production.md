@@ -1,6 +1,6 @@
 # Fleetforge — Architecture & Tech Stack
 
-*The concrete topology: what runs where, on what, and why. [design/architecture.md](architecture.md) holds the platform-agnostic contracts; this file holds the actual components. Requirements it must satisfy: [prd.md](../spec/prd.md) → Requirements & targets.*
+*The concrete topology: what runs where, on what, and why. [design/architecture.md](architecture.md) holds the platform-agnostic contracts. This file holds the actual components. Requirements it must satisfy: [prd.md](../spec/prd.md) → Requirements & targets.*
 
 ## Deployment context
 
@@ -10,18 +10,18 @@ same conventions as `content` and `boris` (Artifact Registry image, digest-pinne
 `env_file`, healthcheck, resource limits, `frontend` + `backend` networks).
 
 **Domain: `bingo.tvaroska.sk`**, inherited from the retired bingo app (see *Retiring
-bingo* below). Expedient, not branded — **Fleetforge is not a public product until V3**,
-so the domain is an operational detail. A proper domain lands when it goes public.
+bingo* below). Expedient, not branded — **Fleetforge is not a public product until V3**.
+Thus, the domain is an operational detail. A proper domain lands when it goes public.
 
 *This does not weaken the single-tenant hosted model:* it is still a real public domain
-with a real Let's Encrypt certificate, which is what the devices and Web Serial need. It
-is "not public" in the product sense — no signup, one admin — which SPEC already states.
+with a real Let us Encrypt certificate. This is what the devices and Web Serial need. It
+is "not public" in the product sense (no signup, one admin) which SPEC already states.
 
 ## Components
 
 | Component | Tech | Notes |
 |---|---|---|
-| **API** | FastAPI (Python 3.12), uvicorn | house standard; async fits SSE |
+| **API** | FastAPI (Python 3.12), uvicorn | house standard. Async fits SSE |
 | **Ingestor** | Python, `aiomqtt` | **separate process** — see *The single-subscriber rule* |
 | **Frontend** | React + Vite, nginx-served | mirrors `bingo-frontend`'s nginx-proxy shape |
 | **Broker** | Mosquitto + dynamic-security plugin | **new to this host** — nothing here runs a broker today |
@@ -29,8 +29,8 @@ is "not public" in the product sense — no signup, one admin — which SPEC alr
 | **Artifact store** | **GCS** (`gs://btvaroska/fleetforge/`) behind an adapter | MinIO for self-host later |
 | **Ingress** | shared Traefik v3.6 | needs a new entrypoint — see *Port 8883* |
 | **Migrations** | Alembic, `RUN_MIGRATIONS=true` | bingo's pattern |
-| **Agent build** | pinned ESP-IDF container | `R0-INFRA-2`; images served by the API |
-| **Tests** | pytest, pytest-asyncio; `pytest-embedded` from R5 | plus the Python device simulator (`R0-TEST-1`) |
+| **Agent build** | pinned ESP-IDF container | `R0-INFRA-2`. Images served by the API |
+| **Tests** | pytest, pytest-asyncio. `pytest-embedded` from R5 | plus the Python device simulator (`R0-TEST-1`) |
 
 **TimescaleDB is already preloaded on the shared Postgres** (`shared_preload_libraries=timescaledb`).
 R4 telemetry is a hypertable and SPEC's 30-day retention is a Timescale retention policy —
@@ -38,7 +38,7 @@ not a cron job. This is free and was not previously noticed.
 
 ## The single-subscriber rule
 
-**The ingestor is a separate, single-instance process. The API never subscribes to MQTT.**
+**The ingestor is a separate, single-instance process. The API never subscribes to MQTT**.
 
 If the API ran N uvicorn workers and each opened its own MQTT subscription, every message
 would be ingested N times, and an SSE client attached to worker A would never see an event
@@ -62,7 +62,7 @@ volume forces a second worker.
 
 DESIGN requires the dashboard and API on **one origin** (no CORS, SameSite=Strict is then
 sufficient against CSRF). nginx in the frontend container serves the SPA and proxies
-`/v1/*` to the API — the same shape `bingo-frontend` used with `BACKEND_URL`.
+`/v1/*` to the API. The same shape `bingo-frontend` used with `BACKEND_URL`.
 
 ```
 bingo.tvaroska.sk:443  ──► Traefik ──► frontend (nginx) ──┬── /        → SPA
@@ -82,7 +82,7 @@ over TLS needs:
    ``HostSNI(`bingo.tvaroska.sk`)`` → `mosquitto:1883` (plaintext internally, on the
    `backend` network only).
 
-HTTP-01 still issues the certificate over 80/443; the TCP router reuses it, so no DNS-01
+HTTP-01 still issues the certificate over 80/443. The TCP router reuses it, so no DNS-01
 and no new credentials. **But this is the first non-HTTP port in this stack** — the change
 lands in the `services` repo and touches every app's ingress path. It is not a
 fleetforge-local edit.
@@ -96,38 +96,38 @@ touching the API process.
 
 Access goes through a narrow **object-store adapter** (`put`, `get`, `signed_url`,
 `delete`) so nothing above it knows which backend is underneath. **MinIO is the
-self-hosted backend** when V2's turnkey self-hosting arrives: S3-compatible, so it is a
+self-hosted backend** when V2's turnkey self-hosting arrives: S3-compatible. Thus, it is a
 second adapter implementation rather than a redesign — the same move as the device-side
 platform adapters.
 
 *Consequence, stated plainly:* v1 has a cloud dependency for artifact storage. That is
-acceptable while v1 is a single hosted instance, and MinIO is what removes it. The
+acceptable while v1 is a single hosted instance, and MinIO is what deletes it. The
 adapter boundary is what keeps that a configuration change.
 
 *Consequence for the box:* artifact bytes never occupy the VM's 5.5 GB of free disk, and
 device downloads do not consume the VM's bandwidth. This meaningfully de-risks the
 capacity problem below.
 
-Since **R1-be-3** the device is not handed the store's URL directly: it gets
+Since **R1-be-3** the device is not handed the store's URL directly. It gets
 `GET /v1/artifact/{sha256}/bin?exp=…&sig=…` on **our** origin, whose HMAC signature is its
 authorization, and the API answers **307** to a cached store URL rather than proxying the
-bytes — so the backend stays invisible to the fleet while "served without touching the API
+bytes. Thus, the backend stays invisible to the fleet while "served without touching the API
 process" remains true, and range/resume stays the store's own RFC-correct implementation.
 It needs `ARTIFACT_URL_SECRET` and `PUBLIC_BASE_URL` in the production environment.
 
-## Retiring bingo
+## Retire bingo
 
-Bingo is unfinished and is being retired to make room. Removing it frees **384 MB** of
+Bingo is unfinished and is being retired to make room. Deleting it frees **384 MB** of
 declared container limits (`bingo` 256 M + `bingo-frontend` 128 M) and the
 `bingo.tvaroska.sk` route.
 
 Removal steps (in the `services` repo, plus the registry):
 1. Drop the `bingo` and `bingo-frontend` services from `services/prod/docker-compose.yml`.
-2. Remove `bingo.env` and `BINGO_PASSWORD` from `db.env` / prod env; `just backup`.
-3. Remove `bingo` from the deploy registry variables in `scripts/deploy.sh`.
+2. Delete `bingo.env` and `BINGO_PASSWORD` from `db.env` / prod env. `just backup`.
+3. Delete `bingo` from the deploy registry variables in `scripts/deploy.sh`.
 4. **Back up the bingo database before dropping the role/schema** — the app is unfinished,
-   not worthless, and the drop is the one irreversible step here.
-5. Leave the `bingo` git repo and its Artifact Registry images alone; retiring the
+   not worthless. The drop is the one irreversible step here.
+5. Leave the `bingo` git repo and its Artifact Registry images alone. Retiring the
    deployment is not deleting the project.
 
 ## Capacity — Measured 2026-09-10 (R0-infra-4)
@@ -135,7 +135,7 @@ Removal steps (in the `services` repo, plus the registry):
 **Measurement tool:** `scripts/capacity_snapshot.py` (see `docs/runbooks/capacity.md`).
 
 **Key insight:** Swap *used* is a stock, not a flow. A gigabyte of cold anonymous pages
-parked in swap and never read back costs nothing; what costs is the *rate* of `pswpin` /
+parked in swap and never read back costs nothing. What costs is the *rate* of `pswpin` /
 `pgmajfault`. The definitive under-provisioning signal is `memory.events max` — it counts
 forced reclaims at the limit, long before an OOM kill.
 
@@ -184,7 +184,7 @@ container has `memory.events max > 0` under idle load.
 
 **Follow-up:** Re-run `just capacity-check-prod` after `R0-infra-5` deploys the app to prod,
 to confirm this projection against live measurements. The dev-box measurement is in the
-production *shape* but not at production *scale* — a real 25-board fleet may differ.
+production *shape* but not at production *scale*. A real 25-board fleet can differ.
 
 **Triggers for resize:**
 - Any container shows `memory.events max > 0` (reclaim at the limit)
@@ -193,13 +193,13 @@ production *shape* but not at production *scale* — a real 25-board fleet may d
 
 See `docs/runbooks/capacity.md` for the resize procedure (requires owner, Cloud Shell).
 
-Disk is helped considerably by artifacts living in GCS; the remaining growth is the
-ESP-IDF builder image, which is large (~2–3 GB). **Build agent images off-box** (locally
+Disk is helped considerably by artifacts living in GCS. The remaining growth is the
+ESP-IDF builder image. This is large (~2–3 GB). **Build agent images off-box** (locally
 or in CI, pushed to Artifact Registry) rather than building on the prod VM.
 
 ## Two deployment artifacts, deliberately
 
-SPEC promises a turnkey Compose stack; reality is a fragment of a shared stack. Both are
+SPEC promises a turnkey Compose stack. Reality is a fragment of a shared stack. Both are
 real and both are maintained:
 
 | Artifact | Used by | Contains |
@@ -208,12 +208,12 @@ real and both are maintained:
 | service fragment in `services/prod` | production | api, ingestor, frontend, mosquitto only — Traefik, Postgres and GCS are shared/external |
 
 The standalone stack will rot if only the fragment is ever deployed, so **the standalone
-stack is the dev loop** — it is exercised every day by construction. That is the whole
+stack is the dev loop**. It is exercised every day by construction. That is the whole
 reason to make it the dev environment rather than a documented afterthought.
 
 ## Open decisions
 
-- Mosquitto persistence volume sizing and whether `persistence true` is needed at all
+- Mosquitto persistence volume sizing and whether `persistence true` is necessary at all
   (persistent sessions must survive a broker restart, so: yes).
 - Whether the ingestor and API ship as one image with two entrypoints (simpler CI, one
   build) or two images. **One image, two commands** is the recommendation.

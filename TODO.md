@@ -9,11 +9,10 @@ build is caught before the fleet, and any device that gets one recovers itself.
 **Works on metal** — device `94a990dd09a4`, an ESP32-S3, against prod (`bingo.tvaroska.sk`):
 
 - **Enroll** (R0, closed 2026-09-22). Browser flash → enrolled → live on the broker in
-  13 s, and `S0-test-3` passed an unaided run by someone who had never seen the code.
+  13 s. `S0-test-3` passed an unaided run by someone who never saw the code.
   Write-up: [docs/features/enrollment.md](docs/features/enrollment.md).
 - **OTA of the agent** (R1, `R1-test-1` passed 2026-09-23). A dashboard-driven deploy
-  took the board `0.3.2 → 0.3.1` in ~25 s. Getting there fixed three prod defects that had
-  made deploy impossible (`../docs/ops-log.md` F-2026-09-23-001/002/003, all deployed).
+  took the board `0.3.2 → 0.3.1` in ~25 s. Getting there fixed three prod defects that made deploy impossible (`../docs/ops-log.md` F-2026-09-23-001/002/003, all deployed).
   Write-up: [docs/features/ota-deploy.md](docs/features/ota-deploy.md).
 - **Auto-rollback of "boots, joins, never confirms"** (2026-09-23). A deliberately broken
   `0.3.2-rbtest` came back on 0.3.1 in 71 s, unattended
@@ -49,7 +48,7 @@ run could show, so the pass rests on the deterministic judge. Task list below; b
   path; see the task); `S0-test-2` needs the S3 on the
   bench. Both are hardware sessions on the Windows + Chrome bench (settled 2026-10-02).
 - **R3 (thin OTA library)** waits on R2 by decision
-  (`design/decisions/ota-library-ships-after-safe-deploy.md`); its task list lives in
+  (`design/decisions/ota-library-ships-after-safe-deploy.md`). Its task list lives in
   [docs/features/ota-library.md](docs/features/ota-library.md) until it opens.
 - **A dev box with pruned images cannot `just up`**: `minio/minio` and `minio/mc` no
   longer pull (`DECISIONS.md` 2026-10-01). No task filed yet.
@@ -71,7 +70,7 @@ attempted-but-failed. `spec/` and `design/` are status-free.
 > Completed work: [docs/features/](docs/features/) · Decisions: `DECISIONS.md`
 
 > **Task IDs:** fleetforge is release-driven, so IDs are `R{N}-{category}-{number}`
-> (e.g. `R0-be-1`). Sprint 0 uses `S0-{category}-{number}`.
+> (for example,`R0-be-1`). Sprint 0 uses `S0-{category}-{number}`.
 > Categories: db, be, fe, test, qa, sec, infra, fw, spec, rel, perf, ops.
 
 **Deployment (v1):** single hosted instance at `bingo.tvaroska.sk` (domain reused from
@@ -87,34 +86,34 @@ Bricking risks, broker auth and security issues get filed here as they surface.
 
 - [!] **S0-test-1**: Bench-verify the serial console on real hardware (P1, 0.5d) _(⚠ failed 2026-10-03; blocker: Hardware-gated. Boris must run Checks A–E at the Windows + Chrome bench and fill in the results table. Check E re-flashes prod board 94a990dd09a4 and ends its 0.3.1 baseline, so it runs last. (after 2)_
       Filed 2026-09-10, when S0-fe-1 shipped. Its software half is proven in jsdom against
-      replays of real `agent/main/*.c` output; these four cannot be, because they are
+      replays of real `agent/main/*.c` output. These four cannot be, because they are
       properties of a USB bridge chip and an OS, not of the classifier. The bench is
-      Windows + Chrome (settled 2026-10-02) — the Linux dev box does not enumerate boards
+      Windows + Chrome (settled 2026-10-02). The Linux dev box does not enumerate boards
       over WebSerial.
-      * **Re-acquire after `hard_reset`, bridge-chip path.** `serialConsole.ts` re-reads
+      * **Re-acquire after `hard_reset`, bridge-chip path**. `serialConsole.ts` re-reads
         `navigator.serial.getPorts()` every 250 ms for 8 s. On a classic esp32 the port
         *survives* the reset, so this must reconnect without ever showing "No board is
-        available to watch". The native-USB half of this check is **S0-test-2** — no
+        available to watch". The native-USB half of this check is **S0-test-2**. No
         C3/C6/S3 board is on hand (2026-09-11).
-      * **115200 decodes cleanly.** `sdkconfig.defaults` sets no
-        `CONFIG_ESP_CONSOLE_UART_BAUDRATE` so this should be right, but a wrong baud
-        yields plausible-looking mojibake rather than an error, and the classifier would
+      * **115200 decodes cleanly**. `sdkconfig.defaults` sets no
+        `CONFIG_ESP_CONSOLE_UART_BAUDRATE` so this must be right, but a wrong baud
+        yields plausible-looking mojibake rather than an error. The classifier would
         then silently match nothing.
-      * **The EN pulse boots the app, not the ROM loader.** `SerialConsole.reboot()`
+      * **The EN pulse boots the app, not the ROM loader**. `SerialConsole.reboot()`
         drives RTS high with DTR low. If the wiring inverts, the board lands in download
         mode and prints `waiting for download` forever.
-      * **Release really releases.** After the button, the COM port must open in another
-        terminal (e.g. PuTTY, 115200). If it reports "Access denied" / port in use,
+      * **Release really releases**. After the button, the COM port must open in another
+        terminal (for example,PuTTY, 115200). If it reports "Access denied" / port in use,
         `port.close()` is not being reached.
       Acceptance: all four confirmed against **any** bridge-chip board (CP2102 or CH340) —
       retargeted 2026-09-23, since the DevKit v1 is out of consideration and this task
       tests the bridge-chip *path*, not that board. Anything that fails comes back as a
-      new S0 task with the observed behaviour.
-      The bench host is Windows + Chrome (settled 2026-10-02; earlier entries said the Mac).
+      new S0 task with the observed behavior.
+      The bench host is Windows + Chrome (settled 2026-10-02, earlier entries said the Mac).
       Re-acquire is an OS-and-driver property — record the driver and COM port used.
-      * **Folded in from S0-fe-8 (accepted 2026-10-01 without a bench run).** On Windows,
+      * **Folded in from S0-fe-8 (accepted 2026-10-01 without a bench run)**. On Windows,
         with the board's VCP driver *not* installed, an operator who has never installed one
-        reaches a working COM port using only "My board isn't listed" on the flash page:
+        reaches a working COM port using only "My board does not appear" on the flash page:
         no Device Manager, no asking. Also confirm that picking COM1 gets refused by name
         and that the Silicon Labs driver link resolves (the dev box gets a 403 from Akamai).
       Bench script: docs/runbooks/serial-console-bench.md (2026-10-03). Proposed board,
@@ -126,11 +125,11 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       Split from S0-test-1 on 2026-09-11: the only board on hand is an ESP32-DevKit v1,
       whose bridge chip keeps the port alive across `hard_reset`. That exercises the
       *easy* half. The 8 s `getPorts()` poll in `serialConsole.ts` exists for the parts
-      that come back as a **different** `SerialPort`, and nothing has ever tested it on
-      metal — a too-short window shows "No board is available to watch" on a board that
-      is merely rebooting, which is the exact false negative the console exists to
-      remove. ~~**Blocked on acquiring a C3, C6 or S3.**~~
-      **Unblocked 2026-09-22.** An **ESP32-S3** is on hand and has already enrolled against
+      that come back as a **different** `SerialPort`. Nothing has ever tested it on
+      metal. A too-short window shows "No board is available to watch" on a board that
+      is merely rebooting. This is the exact false negative the console exists to
+      delete. ~~**Blocked on acquiring a C3, C6 or S3.**~~
+      **Unblocked 2026-09-22**. An **ESP32-S3** is on hand and enrolled against
       prod — device `94a990dd09a4`, the board that passed `R0-test-2` on 2026-09-19. This
       task's premise ("the only board on hand is an ESP32-DevKit v1") is simply out of
       date. Cheap to run now, since the board is already flashed and known-good.
@@ -144,7 +143,7 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       once. Unplug the `UART` socket first. The panel's `watching …: opened on try N, T ms`
       notice needs the frontend release after this commit on prod.
 
-- [x] **S0-test-3**: Someone who has not seen the code onboards a board unaided — passed 2026-09-22 → [enrollment.md](docs/features/enrollment.md)
+- [x] **S0-test-3**: Someone who did not see the code onboards a board unaided — passed 2026-09-22 → [enrollment.md](docs/features/enrollment.md)
 - [x] **S0-fw-3**: A board that browns out during RF calibration cannot escape it — withdrawn 2026-09-23, not fixed → [enrollment.md](docs/features/enrollment.md)
 
 ---

@@ -1,7 +1,7 @@
 # Capacity Check Runbook
 
 **Tool:** `scripts/capacity_snapshot.py`  
-**Purpose:** Measure host + container memory/swap/disk; detect capacity problems before they cause failures.
+**Purpose:** Measure host + container memory/swap/disk. Detect capacity problems before they cause failures.
 
 ---
 
@@ -21,7 +21,7 @@ just capacity-check-prod
 just capacity-check --match fleetforge
 ```
 
-**Critical:** Measure in the **production shape** (`just up-prod`). `just up` runs the Vite dev server in the frontend container (~48 M against a 64 M limit); prod runs nginx (~6 M). Measuring the dev shape produces a false "frontend needs more memory" alarm.
+**Critical:** Measure in the **production shape** (`just up-prod`). `just up` runs the Vite dev server in the frontend container (~48 M against a 64 M limit). Prod runs nginx (~6 M). Measuring the dev shape produces a false "frontend needs more memory" alarm.
 
 ---
 
@@ -32,8 +32,8 @@ just capacity-check --match fleetforge
 | Metric | Source | What It Means |
 |---|---|---|
 | **MemAvailable floor** | `/proc/meminfo`, min over window | Real headroom — the lowest it got during the run |
-| **pswpin/pswpout/pgmajfault deltas** | `/proc/vmstat`, first vs last | Is it *thrashing* (pswpin > 0) or just parking cold pages (pswpout only) |
-| **Swap used** | `/proc/meminfo` | Stock, not flow — 1 GB of cold pages in swap costs nothing; the *rate* costs |
+| **pswpin/pswpout/pgmajfault deltas** | `/proc/vmstat`, first versus last | Is it *thrashing* (pswpin > 0) or just parking cold pages (pswpout only) |
+| **Swap used** | `/proc/meminfo` | Stock, not flow — 1 GB of cold pages in swap costs nothing. The *rate* costs |
 
 ### Container Metrics (cgroup v2)
 
@@ -74,7 +74,7 @@ Exit code: `0` for OK/TIGHT, `1` for FAIL.
 
 ---
 
-## Interpreting the Output
+## Interpret the Output
 
 ### Good
 
@@ -93,22 +93,22 @@ VERDICT: TIGHT
   - memory.events max > 0: fleetforge-ingestor
 ```
 
-**Action:** Watch it. The api is close to its limit; the ingestor has hit its limit and forced a reclaim (but didn't OOM). If load is expected to grow, resize or raise limits.
+**Action:** Watch it. The api is close to its limit. The ingestor has hit its limit and forced a reclaim (but did not OOM). If load must grow, resize or raise limits.
 
-### Failing
+### Failure Cases
 
 ```
 VERDICT: FAIL
   - OOM kill: fleetforge-api
 ```
 
-**Action:** The api was OOM-killed. Either the limit is too low for the workload, or there's a memory leak. Raise the limit **and** investigate.
+**Action:** The api was OOM-killed. Either the limit is too low for the workload, or there is a memory leak. Raise the limit **and** investigate.
 
 ---
 
-## Resizing the VM
+## Resize the VM
 
-**The agent cannot do this.** Neither `devserver@btvaroska` nor `mainsite@sites-470716` has `compute.instances.*` on `sites-470716`. Run from **Cloud Shell** as the owner:
+**The agent cannot do this**. Neither `devserver@btvaroska` nor `mainsite@sites-470716` has `compute.instances.*` on `sites-470716`. Run from **Cloud Shell** as the owner:
 
 ### 1. Check the External IP (Critical)
 
@@ -144,9 +144,9 @@ gcloud compute instances set-machine-type main --zone us-central1-c --project si
 gcloud compute instances start main --zone us-central1-c --project sites-470716
 ```
 
-### 3. Verify
+### 3. Check
 
-`restart: unless-stopped` brings every container back on boot. Verify:
+`restart: unless-stopped` brings every container back on boot. Check:
 
 ```bash
 ssh prod 'docker ps --format "{{.Names}} {{.Status}}"'
@@ -174,9 +174,9 @@ All containers `Up`, all domains 200 (or their normal auth code), mosquitto `(he
 
 ## Technical Notes
 
-- **Swap *used* is a stock, not a flow.** A gigabyte of cold anonymous pages parked in swap and never read back costs nothing; what costs is the *rate* of `pswpin` / `pgmajfault`. A verdict built on "swap used is 1 G, therefore resize" would be wrong. A verdict built on the window deltas is defensible.
-- **`memory.events max` is the signal that matters.** It counts forced reclaims at the limit — which happen long before an OOM kill and are otherwise invisible. A container with `max > 0` is under-provisioned even if it never crashes.
-- **`docker stats` is not used.** It's slow (~1 s/container even with `--no-stream`), gives no peak and no `memory.events`. This script reads cgroup v2 directly.
+- **Swap *used* is a stock, not a flow**. A gigabyte of cold anonymous pages parked in swap and never read back costs nothing. What costs is the *rate* of `pswpin` / `pgmajfault`. A verdict built on "swap used is 1 G, thus resize" would be wrong. A verdict built on the window deltas is defensible.
+- **`memory.events max` is the signal that matters**. It counts forced reclaims at the limit — which happen long before an OOM kill and are otherwise invisible. A container with `max > 0` is under-provisioned even if it never crashes.
+- **`docker stats` is not used**. It is slow (~1 s/container even with `--no-stream`), gives no peak and no `memory.events`. This script reads cgroup v2 directly.
 - **The script imports stdlib only** — no `uv`, no project venv, so the same script runs here and on prod over ssh. It must stay that way (prod has `python3 3.11` and nothing else).
 
 ---

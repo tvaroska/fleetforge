@@ -9,19 +9,19 @@
 
 An **automated artifact producer** feeding the same deploy pipeline — CI builds a `.bin`
 and **pushes** it to Fleetforge with provenance (repo + commit SHA + tag + build URL).
-The capability-check / sim / pull / confirm / rollback pipeline (R1–R6) is unchanged.
+The capability-check / sim / pull / confirm / rollback pipeline (R1–R6) stays the same.
 
-Payoff = **traceability**: every device's firmware links to a commit — "what's running
+Payoff = **traceability**: every device's firmware links to a commit — "what is running
 on device X?" and "roll back to tag v1.3" become first-class.
 
 ## Decisions (from flows.md)
 
-- **Ingestion = push first.** CI POSTs the artifact (ship a GitHub Action; templates for
+- **Ingestion = push first**. CI POSTs the artifact (ship a GitHub Action, templates for
   GitLab/Gitea/Forgejo). Provider-agnostic, holds no repo secrets, air-gap-friendly.
   Pull adapters (Fleetforge watches releases) come later.
-- **Provider scope = provider-agnostic API.** One generic upload endpoint + provenance
+- **Provider scope = provider-agnostic API**. One generic upload endpoint + provenance
   schema.
-- **Deploy policy = per group.** Dev fleet auto-deploys on tag; prod fleet stays manual.
+- **Deploy policy = per group**. Dev fleet auto-deploys on tag. Prod fleet stays manual.
   - *Sequencing:* enable auto-deploy-per-group with confidence only once canary/staged
     rollout lands — auto-deploy is only as safe as its rollback.
 
@@ -30,7 +30,7 @@ on device X?" and "roll back to tag v1.3" become first-class.
 | ID | Task | Priority | Effort |
 |----|------|----------|--------|
 | R7-BE-1 | Upload API accepts `.bin` + provenance (repo/commit/tag/build URL) | P0 | 1.5d |
-| R7-DB-1 | Provenance schema; link version → commit | P0 | 0.5d |
+| R7-DB-1 | Provenance schema. Link version → commit | P0 | 0.5d |
 | R7-FE-1 | Dashboard shows provenance per version | P1 | 1d |
 
 ## Phase 2: R8 — Push ingestion (GitHub Action + templates)
@@ -47,7 +47,7 @@ on device X?" and "roll back to tag v1.3" become first-class.
 
 | ID | Task | Priority | Effort |
 |----|------|----------|--------|
-| R11-BE-1 | Per-group deploy policy: manual vs auto-deploy-on-matching-tag | P0 | 1.5d |
+| R11-BE-1 | Per-group deploy policy: manual versus auto-deploy-on-matching-tag | P0 | 1.5d |
 | R11-FE-1 | Group policy config UI | P1 | 1d |
 
 **Done when:** you can continuous-deploy a dev fleet while prod stays manual. **v2 complete.**

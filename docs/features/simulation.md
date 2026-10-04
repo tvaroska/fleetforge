@@ -7,7 +7,7 @@
 
 ## Overview
 
-Catch bad builds **before any device is touched**, at zero device cost. Boot the
+Catch bad builds **before any device receives it**, at zero device cost. Boot the
 artifact in an emulator and run the user's self-test → **warn + override** in the UI
 (advisory-only, because sim ≠ reality for hardware/RF/timing bugs).
 
@@ -17,10 +17,10 @@ self-test → pass/fail`) so no single engine locks us in across the platform la
 ## Decisions (from design/architecture.md)
 
 - **Harness:** `pytest-embedded` — same self-test runs on host, in sim, and on real
-  hardware (the R5 self-test is reused verbatim).
+  hardware (the R5 self-test stays in use verbatim).
 - **v1 backend (ESP32):** Espressif's QEMU fork via `pytest-embedded-qemu` —
   first-party, self-hostable, mature, multi-DUT.
-- **Growth backend:** Renode (MIT) — widest arch reach; spike ESP32 completeness
+- **Growth backend:** Renode (MIT) — widest arch reach. Spike ESP32 completeness
   before relying on it.
 - **Rejected:** Wokwi (SaaS, no real self-host) · Velxio (AGPL + license-gated QEMU,
   ESP32-only OSS path).
@@ -35,7 +35,7 @@ self-test → pass/fail`) so no single engine locks us in across the platform la
 | R9-FE-1 | Deploy UI: sim result + warn/override control | P0 | 1d |
 | R9-TEST-1 | E2E: upload a boot-crashing build → sim warns before deploy | P0 | 1d |
 
-**Done when:** you can catch bad builds before any device is touched.
+**Done when:** you can catch bad builds before any device receives it.
 
 ## Post-v1 (fidelity layer)
 

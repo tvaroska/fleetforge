@@ -1,13 +1,13 @@
-# Proving the confirm/rollback pair on real hardware
+# Prove the confirm/rollback pair on real hardware
 
 The live test of `agent/main/ff_mqtt.c`'s confirm/rollback pair — CRITICAL.md's
 *"Device-side confirm timer / rollback path"*, described there as **"the whole bricking
 gamble. A bug here means a board that cannot recover itself — the one failure the product
 must never have."**
 
-**Run this at the bench, with USB in reach.** Its failure mode is a board that does not
-come back, and the only recovery is a serial re-flash. That is not a reason to skip it;
-it is the reason to do it while you can still recover, because the alternative is
+**Run this at the bench, with USB in reach**. Its failure mode is a board that does not
+come back. The only recovery is a serial re-flash. That is not a reason to skip it.
+It is the reason to do it while you can still recover. This is because the alternative is
 discovering the same thing remotely on a board you cannot reach.
 
 ## Why it needs a special build
@@ -15,12 +15,12 @@ discovering the same thing remotely on a board you cannot reach.
 Both halves of the pair are guarded by `ESP_OTA_IMG_PENDING_VERIFY`, which only an image
 written **by OTA** ever enters. Every serially flashed board boots `ota_0` in state
 `UNDEFINED` with no rollback timer armed, so on a bench board the whole mechanism is
-inert — you cannot provoke it by rebooting, power-cycling or re-flashing.
+inert. You cannot provoke it by rebooting, power-cycling or re-flashing.
 
 The positive branch (`confirm_this_image()`) first ran in production on 2026-09-23, when
-`R1-test-1` deployed to `94a990dd09a4`. The negative branch — `confirm_timeout_cb()` →
-`esp_ota_mark_app_invalid_rollback_and_reboot()` — is what this runbook exists to
-exercise. Do **not** try to provoke it by forcing the partition state by hand; that tests
+`R1-test-1` deployed to `94a990dd09a4`. The negative branch (`confirm_timeout_cb()` →
+`esp_ota_mark_app_invalid_rollback_and_reboot()`) is what this runbook exists to
+exercise. Do **not** try to provoke it by forcing the partition state by hand. That tests
 a state the bootloader never produces.
 
 ## The injected fault
@@ -29,21 +29,20 @@ a state the bootloader never produces.
 (`agent/CMakeLists.txt`, `agent/main/CMakeLists.txt`, `agent/Dockerfile`). It changes two
 things and nothing else:
 
-1. **The announce ack is discarded.** `ctx->announce_msg_id = -1` after the publish, so
-   the PUBACK can never match and `session_confirmed` stays false. The announce itself is
-   still published and still retained — the board genuinely joins the fleet on the bad
-   version, which is what makes the rollback visible in the dashboard rather than only on
+1. **The announce ack drops**. `ctx->announce_msg_id = -1` after the publish. Thus,
+   the PUBACK can never match and `session_confirmed` stays false. The announce itself still publishes with the retain flag — the board genuinely joins the fleet on the bad
+   version. This is what makes the rollback visible in the dashboard rather than only on
    a console.
-2. **`CONFIRM_TIMEOUT_S` drops 300 → 60.** This does not weaken the test: the timer under
-   test is the one compiled into the *new* image, so the mechanism is identical and only
+2. **`CONFIRM_TIMEOUT_S` drops 300 → 60**. This does not weaken the test. The timer under
+   test is the one compiled into the *new* image. Thus, the mechanism is identical and only
    the wait is shorter.
 
 The flag also appends `-rbtest` to `PROJECT_VER`, which travels through
 `esp_app_get_description()->version` into every `up/announce`. One switch, so there is no
-half-configured state, and a test image cannot be mistaken for a shippable one.
+half-configured state. A test image cannot be mistaken for a shippable one.
 
-The resolved sdkconfig is **byte-identical** to a normal build (`config_sha256` matches),
-so the bootloader posture — `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`, no eFuse burns — is
+The resolved sdkconfig is **byte-identical** to a normal build (`config_sha256` matches).
+Thus, the bootloader posture (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`, no eFuse burns) is
 the production one. That is what makes the result transferable to the fleet.
 
 ## Procedure
@@ -69,8 +68,8 @@ FF_TARGET=esp32s3 FF_BIN=/tmp/rbtest-esp32s3/app.bin \
   FF_VERSION=<version>-rbtest docs/runbooks/upload-artifact.sh
 ```
 
-> **Never `just agent-publish` a rollback-test build.** That writes the flasher catalog,
-> which is the USB onboarding path — it would make a deliberately broken image the one
+> **Never `just agent-publish` a rollback-test build**. That writes the flasher catalog,
+> which is the USB onboarding path. It would make a deliberately broken image the one
 > every new board gets flashed with. The artifact store and the flasher catalog are
 > different stores for exactly this reason (`artifact-storage.md`).
 
@@ -86,11 +85,10 @@ t+~85s   no acked session -> mark_app_invalid_rollback_and_reboot()
 t+~95s   board returns announcing the PREVIOUS version
 ```
 
-**Pass = the board comes home on the previous version, unattended.** Nobody touches it.
+**Pass = the board comes home on the previous version, unattended**. Nobody touches it.
 
-Still on `-rbtest` after ~2 minutes means the negative branch did not fire, and the board
-is running an image the bootloader was waiting on. Recover over USB and treat it as a P0:
-until it is fixed, no board can be deployed to unless someone can physically reach it.
+Still on `-rbtest` after ~2 minutes means the negative branch did not fire. The board is running an image the bootloader was waiting on. Recover over USB and treat it as a P0:
+until we fix it, no board can be deployed to unless someone can physically reach it.
 
 ## Boot loop (R2-test-1)
 

@@ -4,21 +4,21 @@
 questions that are deliberately not v1's problem.
 **Source specs:** [prd.md](../spec/prd.md) · [design/architecture.md](../design/architecture.md) · [architecture.md](../design/production.md) · [flows.md](../spec/flows.md) · [device-protocol.md](../spec/device-protocol.md) · [releases.md](releases.md)
 
-> This file is an **index**. Requirements and targets live in [prd.md](../spec/prd.md);
-> release contents in [releases.md](releases.md); task history in `features/*.md`.
-> **Where each release stands — closed, active, blocked — lives only in
-> [TODO.md](../TODO.md).** Nothing here carries live state.
+> This file is an **index**. Requirements and targets live in [prd.md](../spec/prd.md).
+> Release contents in [releases.md](releases.md). Task history in `features/*.md`.
+> **Where each release stands (closed, active, blocked) lives only in
+> [TODO.md](../TODO.md)**. Nothing here carries live state.
 
 ## Strategic vision
 
 **Safe remote firmware updates for a fleet of ESP32 devices** — where "safe" means a bad
-build is caught *before* the fleet, and any device that does get a bad update recovers
+build triggers a catch *before* the fleet. Any device that does get a bad update recovers
 itself. Architected around **two thin waists**:
 
 1. **Device-facing:** opaque, versioned artifact + a 4-verb update contract
    (`stage → apply → confirm → rollback`). Lets ESP32 → Pi → FPGA reuse one core.
 2. **User-facing:** headless, API-first core (stable public API + SSE event stream).
-   Every UI — including the built-in dashboard — is just a client.
+   Every UI (including the built-in dashboard) is just a client.
 
 ---
 
@@ -33,7 +33,7 @@ ordered to retire the biggest risk (bricking) first. Contents in [releases.md](r
 |---------|-------|--------------|--------------|
 | **R0** ⭐ | Enroll a board (UI + recognition + flash + connect) | Onboarding, recognition, device↔server connection | [enrollment](features/enrollment.md) |
 | R1 | Upload new code (OTA deploy) | OTA transport works end-to-end | [ota-deploy](features/ota-deploy.md) |
-| R2 ⭐ | Safe deploy: verify + auto-rollback | **Bricking** (the whole gamble) | [ota-deploy](features/ota-deploy.md) |
+| R2 ⭐ | Safe deploy: check + auto-rollback | **Bricking** (the whole gamble) | [ota-deploy](features/ota-deploy.md) |
 | R3 | Thin OTA library + first CUJ | Hobbyists can only update the demo agent, not their own firmware | [ota-library](features/ota-library.md) |
 | R4 | Health & telemetry view | Fleet visibility | [health-telemetry](features/health-telemetry.md) |
 | R5 | Custom self-test confirm | "boots but app logic broken" | [self-test](features/self-test.md) |
@@ -94,25 +94,25 @@ Two constraints bite regardless of radio: ~10–50 kbps in practice makes a 1.5 
 **Delta updates**, **airtime-aware scheduling** and the **V3 edge cache** are the three
 answers.
 
-Hardware note: ESP32-C6 has Wi-Fi 6 + 802.15.4; ESP32-H2 is 802.15.4-only; classic ESP32
+Hardware note: ESP32-C6 has Wi-Fi 6 + 802.15.4. ESP32-H2 is 802.15.4-only. Classic ESP32
 and S3 have no 802.15.4 at all. A Thread path is a new-hardware path.
 
 ---
 
 ## Growth-stage risks
 
-*v1's own risks are in [prd.md](../spec/prd.md) → Key risks. These become real later.*
+*v1's own risks are in [prd.md](../spec/prd.md) → Key risks. These become real later*.
 
 1. **Scale ceiling** — Wi-Fi will not reach a 100+ low-power swarm, and 802.15.4
    bandwidth makes full-image OTA energetically expensive. Mitigated in advance by
    keeping the link abstract (`esp_netif`, `link_type`) so Thread and delta updates stay
    additive rather than a rewrite.
 2. **Sim ≠ reality** *(V2/R9)* — simulation reduces logic and boot bugs but not
-   hardware, RF or timing bugs; hence advisory-only, with canary as the next layer.
+   hardware, RF or timing bugs. Hence advisory-only, with canary as the next layer.
 3. **Sim-engine lock-in / licensing** *(V2/R9)* — mitigate by keeping simulation
    pluggable behind the `sim-runner` contract. See [design/architecture.md](../design/architecture.md).
 4. **Server-side build is arbitrary code execution** *(V2/R10)* — single-tenant keeps the
-   blast radius to your own code; multi-tenant hosting would change the threat model
+   blast radius to your own code. Multi-tenant hosting would change the threat model
    entirely. See [build-pipeline.md](features/build-pipeline.md).
 5. **Self-host onboarding returns at V2** — TLS without public DNS is the unsolved part,
    deferred rather than answered.
