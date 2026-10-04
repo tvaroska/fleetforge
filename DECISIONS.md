@@ -6,6 +6,71 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-03 — rollback_capable is measured, never claimed; the partition fingerprint hashes geometry, not labels (R2-spec-1, proposed)
+
+**Decided: step 1 of board-profiles puts three additive fields on `up/announce`:
+`rollback_capable` (`true | false | null`), `partition_table_sha256` and `flash_size`. This
+entry covers the PROPOSAL only. Nothing is built: no agent, server, schema, migration,
+simulator or test change, and `spec/` is untouched.** The full text, with worked values and
+paste-ready spec edits, is in `docs/features/board-profiles.md` → *Step 1 wire proposal
+(R2-spec-1)*. The three-way choice of design in that file stays a plan until step 1 is built.
+
+- **`rollback_capable` is a reading, not a claim.** `true` = the board has booted an
+  OTA-written image in `PENDING_VERIFY`. `false` = an OTA-written image runs at the
+  transaction's target slot in `ESP_OTA_IMG_NEW`, so the bootloader did not transition it
+  (the case `classify_txn()` drops today as "stale, discarded", leaving the deploy parked at
+  `rebooting`). `null`/absent = not yet observed, which is every board before its first OTA.
+  It is never derived from the app's `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`: that describes
+  a build, not the bootloader in flash. Distinct from `up/hb` `boot_ok`, which is per-boot.
+- **The limit, accepted.** A board cannot measure its bootloader before its first OTA, so
+  the first OTA to a rollback-less board is unprotected and the field only says so
+  afterwards. The `false` signal itself is unmeasured on a real rollback-less bootloader
+  (the 6.2 migration note says the app marks itself valid, which would look like `VALID`),
+  and must be benched before it goes on the wire.
+- **The fingerprint hashes geometry.** SHA-256 over `{type}:{subtype}:{offset}:{size}\n`
+  lines, decimal, sorted by offset, for every entry in the decoded table. Labels are out
+  (behaviour-identical tables must match; the agent finds `ff_cfg` by subtype) and flags are
+  out (the runtime `encrypted` flag is not the table's). Decoded, not the raw sector, so the
+  server and tests recompute it from a CSV with no ESP-IDF tooling. Worked values:
+  `ab-4m-v1` = `1fa67e6b...59ed` (from `agent/partitions.csv`), `ab-4m-arduino-v1` =
+  `05528998...1fc4` (from the ADR's table, until R3 checks in a CSV).
+- **Verified against ESP-IDF v5.5.5, and two planning assumptions were wrong.**
+  `esp_bootloader_get_description()` exists but returns the **app's** compiled-in descriptor
+  ("intended for use by the bootloader"), so it cannot detect a swapped bootloader: the
+  Arduino-IDE-upload staleness of a persisted `rollback_capable` is an accepted, named gap.
+  Bootloader / partition-table types `0x02`/`0x03` are ordinary table entries, not runtime
+  pseudo-entries, so the fingerprint rule is simply "every entry". `flash_size` uses
+  `esp_flash_get_physical_size()` and is omitted on failure, with no fallback to
+  `esp_flash_get_size()`, which is the image header's claim.
+- **Refuse-and-flag, not adopt-and-warn.** Step 1 has only the layout name, and adopting a
+  measurement needs step 2's fingerprint-to-profile table. So a fingerprint mismatch and
+  `rollback_capable: false` are each a deploy 409 that names what did not match. `null`,
+  absent, or a layout with no known fingerprint is never refused. Per-fleet vs global
+  `detected` profiles stays open for R3.
+- **Enroll stores, never rejects.** The enroll body is the announce object plus `token`, so
+  the new fields reach `POST /v1/enroll`. A malformed value is stored as null and logged:
+  a 400 there comes after the token is read and would cost it.
+- **Deferred, with reasons.** `ota_slots` / a full partition list (the fingerprint covers
+  step 1; a nested list strains the flat, CBOR drop-in rule; additive later). And
+  `bootloader_sha256`, the only pre-first-OTA attestation and the only sound invalidation
+  key for a persisted `rollback_capable`: esptool rewrites the image header's flash
+  parameters at write time, so the on-flash digest need not equal the bundle file's, and it
+  needs a bench measurement first. Rejected outright: a compiled-in claim.
+- **No follow-up tasks filed.** `/implement-all` would pick them up and build against an
+  unapproved spec change. They wait in `docs/features/board-profiles.md` until the spec
+  proposal is applied.
+- **Spec proposal (not applied).** `spec/device-protocol.md` → `up/announce`: add
+  `"flash_size": 4194304, "partition_table_sha256": "1fa67e6b...59ed",
+  "rollback_capable": true` after `ota_slot_size` (keep `"ota_slot_size": 1966080` and
+  `"partition_layout": "ab-4m-v1"` byte-for-byte, `tests/test_agent_partitions.py` matches
+  them), a paragraph defining the three fields under the `partition_layout` paragraph, and a
+  `partition_table_sha256` column on the *Partition layouts* table. `spec/open-questions.md`:
+  delete *Bootloader attestation on the Arduino path* and refile *Attestation before the
+  first OTA* (`bootloader_sha256`). Paste-ready text for all four is in the board-profiles
+  section above.
+
+---
+
 ## 2026-10-03 — a re-delivered stage for the update in progress is ignored, not failed (R2-fw-6)
 
 **Decided: a `stage` whose `id` is the update this board is already carrying out is logged

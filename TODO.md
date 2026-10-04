@@ -196,6 +196,6 @@ after the reboot.
       in progress" for the cmd that is running. The server marks it terminal and drops the
       real outcome when it arrives. CRITICAL (`ff_mqtt.c`/`ff_ota.c`). Shape: if the
       stage's cmd_id is the one in progress, log and ignore it.
-- [ ] **R2-spec-1**: Propose `rollback_capable` + partition fingerprint in `up/announce` (P1, 0.5d)
+- [x] **R2-spec-1**: Propose `rollback_capable` + partition fingerprint in `up/announce` (P1, 0.5d) _(done 2026-10-03; proposal filed, spec not applied; see DECISIONS.md and docs/features/board-profiles.md)_
       Proposal only (`spec/` is protected). Shape: `docs/features/board-profiles.md` step 1
       and `spec/open-questions.md` → *Bootloader attestation on the Arduino path*.
