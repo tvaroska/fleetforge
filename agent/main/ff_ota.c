@@ -5,7 +5,7 @@
  * already walks `staging → downloading → verifying → staged → applying → rebooting`, the
  * ingestor parses what it publishes, and this file repeats that walk on real flash. What
  * happens after the reboot (`confirming` → `confirmed` | `rolling_back` → `rolled_back`) is
- * reported by ff_mqtt.c from the record this file writes at `staged` (ff_txn.h). Six
+ * reported by ff_mqtt.c from the record this file writes at `staged` (ff_txn.h). Seven
  * properties are worth stating out loud, because each one is a silent wrong answer rather
  * than an error:
  *
@@ -52,6 +52,12 @@
  *    usually ends a dead radio first (`download failed`). Known residual: IDF's
  *    read_header() loops inside the FIRST perform() until it has 1 KB of body, so a peer
  *    silent before that is not seen here (DECISIONS 2026-10-03, R2-fw-5).
+ * 7. **A re-delivered stage is not a second update** (R2-fw-6). The broker and a re-POST
+ *    (`reused: true`) can hand the board the same cmd_id again after other commands, past
+ *    ff_mqtt's one-id dedupe. ff_ota_is_handling() answers whether that id is the download
+ *    in flight or the image staged and waiting, and the command seam drops it without a
+ *    status. Before, it was refused against itself (`failed`), which ended the server's row
+ *    while the update carried on (DECISIONS 2026-10-03, R2-fw-6).
  */
 
 #include "ff_ota.h"
@@ -123,6 +129,18 @@ _Static_assert(OTA_STALL_MS >= 2 * OTA_HTTP_TIMEOUT_MS,
 /* One update at a time, for the whole life of the process. Not a mutex: a second `stage`
  * must be REFUSED and reported, not queued behind the first — see ff_ota_start(). */
 static volatile bool s_running;
+
+/* The cmd_id of the update `s_running` is about (R2-fw-6), for ff_ota_is_handling().
+ * Single writer: ff_ota_start(), immediately BEFORE `s_running = true`. Never cleared and
+ * never touched by ota_task, so it is meaningful only while `s_running` is true. Both
+ * ff_ota_start() and ff_ota_is_handling() run on the esp-mqtt task (on_stage() in the event
+ * handler), so the only variable shared with ota_task is `s_running` itself, which ota_task
+ * only ever moves true -> false at `done:`. If that happens between the predicate and
+ * ff_ota_start(), the stage simply runs again — the pre-existing behaviour for a finished
+ * cmd. No mutex. Not the task's heap copy of the cmd either: that is freed at `done:`. */
+static char s_running_cmd_id[sizeof(((ff_ota_cmd_t *)0)->cmd_id)];
+_Static_assert(sizeof(s_running_cmd_id) == FF_TXN_MAX_CMD_ID,
+               "s_running_cmd_id, ff_ota_cmd_t.cmd_id and the ff_txn record hold the same ids");
 
 static void fail(const ff_ota_cmd_t *cmd, const char *detail)
 {
@@ -707,7 +725,8 @@ esp_err_t ff_ota_start(const ff_ota_cmd_t *cmd)
     if (s_running) {
         /* Refused, not queued. Two concurrent writers to one slot corrupt it, and a
          * deploy that silently waits behind another is a deploy the server cannot
-         * explain. The caller publishes `failed` for the NEW cmd_id. */
+         * explain. This is a DIFFERENT cmd_id: the same one was dropped by
+         * ff_ota_is_handling(). The caller publishes `failed` for the NEW cmd_id. */
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -717,6 +736,9 @@ esp_err_t ff_ota_start(const ff_ota_cmd_t *cmd)
     }
     memcpy(copy, cmd, sizeof(*copy));
 
+    /* Before `s_running = true`, so the predicate never sees the flag with a stale id.
+     * cmd_id is NUL-terminated and fits: on_stage() refused a longer one. */
+    strlcpy(s_running_cmd_id, cmd->cmd_id, sizeof(s_running_cmd_id));
     s_running = true;
     if (xTaskCreate(ota_task, "ff_ota", OTA_TASK_STACK, copy, OTA_TASK_PRIO, NULL) != pdPASS) {
         s_running = false;
@@ -724,4 +746,35 @@ esp_err_t ff_ota_start(const ff_ota_cmd_t *cmd)
         return ESP_ERR_NO_MEM;
     }
     return ESP_OK;
+}
+
+bool ff_ota_is_handling(const char *cmd_id)
+{
+    if (cmd_id == NULL || cmd_id[0] == '\0') {
+        return false;
+    }
+    /* 1. In flight. A running update for a DIFFERENT id answers false right here and never
+     *    falls through: between finish() and `done:` the boot pointer already names the
+     *    new slot and the ff_txn record holds the RUNNING update's id, and that id is the
+     *    only one this board is carrying out. */
+    if (s_running) {
+        return strcmp(cmd_id, s_running_cmd_id) == 0;
+    }
+    /* 2. Staged by `apply: "on_command"` and waiting for a reboot: the boot pointer names a
+     *    slot that is not the running one, and the record ota_task saved at `staged` is for
+     *    this id. Both go false by themselves: once the staged image boots, boot == running,
+     *    and a reset mid-download never wrote a record, so a reused id after a reset runs
+     *    again (the recovery path). Read-only — no publish, no otadata write, no ff_txn
+     *    save or clear. ff_txn_load() does clear a TORN record (missing a key), as it does
+     *    at boot; that transaction's report was already lost, so it changes nothing. */
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    const esp_partition_t *boot = esp_ota_get_boot_partition();
+    if (running == NULL || boot == NULL || boot == running) {
+        return false;
+    }
+    ff_txn_t rec;
+    if (ff_txn_load(&rec) != ESP_OK) {
+        return false;
+    }
+    return strcmp(rec.cmd_id, cmd_id) == 0;
 }

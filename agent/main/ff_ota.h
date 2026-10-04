@@ -19,6 +19,9 @@
  * One slot, chosen once (R2-fw-2): a stage is refused before any I/O while the running
  * image is unconfirmed or a staged image waits for a reboot, so no slot the boot pointer
  * names is ever written.
+ *
+ * A re-delivered stage (R2-fw-6): ff_ota_is_handling() lets the command seam drop a stage
+ * for the transaction already in flight or staged, instead of failing it.
  */
 
 #pragma once
@@ -60,10 +63,21 @@ typedef struct {
  *
  * Takes a COPY of *cmd: the caller's struct lives on the event-handler stack.
  *
- * ESP_ERR_INVALID_STATE — an update is already running; the caller publishes `failed`
- *                         for the new cmd_id, which is the honest answer.
+ * ESP_ERR_INVALID_STATE — an update for a DIFFERENT cmd_id is already running (the
+ *                         caller has already dropped the same cmd_id via
+ *                         ff_ota_is_handling()); the caller publishes `failed` for the new
+ *                         cmd_id, which is the honest answer.
  * ESP_ERR_NO_MEM        — the task or its copy could not be allocated. */
 esp_err_t ff_ota_start(const ff_ota_cmd_t *cmd);
+
+/* True when `cmd_id` is the update this board is already carrying out: the download in
+ * progress, or the image staged by `apply: "on_command"` that waits for a reboot (the
+ * boot pointer names it and the ff_txn record is for this cmd_id). The caller drops such
+ * a `stage` without a status (R2-fw-6): it is a re-delivery of a transaction this board
+ * already has (spec/device-protocol.md → "A retried command reuses its id"), and a
+ * `failed` against it would end the server's row while the update carries on.
+ * Read-only. Call from the same task as ff_ota_start() (the esp-mqtt task). */
+bool ff_ota_is_handling(const char *cmd_id);
 
 #ifdef __cplusplus
 }

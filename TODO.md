@@ -189,7 +189,7 @@ after the reboot.
       cycle. Safe (the running image stays VALID), not live. CRITICAL (`ff_ota.c`). Shape:
       abort after K consecutive empty reads (no bytes for ~60 s) → `failed` /
       `download stalled`. Replay: docs/runbooks/agent-qemu.md → *Driving a flaky link*, D3.
-- [ ] **R2-fw-6**: A re-delivered in-flight stage must not report `failed` against itself (P2, 0.5d)
+- [x] **R2-fw-6**: A re-delivered in-flight stage must not report `failed` against itself (P2, 0.5d) _(done 2026-10-03; reviewed; proven in QEMU (esp32) S1-S3; agent 0.4.5; see docs/features/ota-deploy.md)_
       Found by R2-test-2 (D3). The agent dedupes on the last command id only, so after any
       other command a re-POST of the running deploy (`reused: true`, same cmd_id) hits
       `ff_ota_start()` → `ESP_ERR_INVALID_STATE` → `failed` / "another update is already

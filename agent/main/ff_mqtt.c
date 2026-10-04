@@ -599,6 +599,18 @@ static void on_stage(const cJSON *root, const char *id)
         return;
     }
 
+    /* A re-delivery of the transaction this board already has (R2-fw-6). on_command()'s
+     * dedupe remembers one id, so after any other command the broker's redelivery or the
+     * server's re-POST (`reused: true`, same id) gets here. Refusing it would publish
+     * `failed` against the update that is running or staged, and the server would end the
+     * row and drop the real outcome. Nothing in it is parsed or acted on. */
+    if (ff_ota_is_handling(cmd.cmd_id)) {
+        ESP_LOGW(TAG, "stage id=%s is the update this board is already carrying out — "
+                      "ignored (re-delivery); its outcome is reported when it ends",
+                 cmd.cmd_id);
+        return;
+    }
+
     const cJSON *artifact = cJSON_GetObjectItemCaseSensitive(root, "artifact");
     if (!cJSON_IsObject(artifact)) {
         ff_mqtt_publish_status(cmd.cmd_id, FF_STATUS_FAILED, FF_STATUS_PCT_NONE,
@@ -673,8 +685,9 @@ static void on_stage(const cJSON *root, const char *id)
 
     esp_err_t err = ff_ota_start(&cmd);
     if (err == ESP_ERR_INVALID_STATE) {
-        /* Reported against the NEW cmd_id, which is the honest answer and keeps
-         * deploy_events truthful: this command was received and will not be carried out. */
+        /* Reported against the NEW cmd_id — a different one; the same id never gets here
+         * (ff_ota_is_handling() above). The honest answer, and it keeps deploy_events
+         * truthful: this command was received and will not be carried out. */
         ff_mqtt_publish_status(cmd.cmd_id, FF_STATUS_FAILED, FF_STATUS_PCT_NONE,
                                "another update is already in progress");
     } else if (err != ESP_OK) {

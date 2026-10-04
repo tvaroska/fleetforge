@@ -1946,7 +1946,7 @@ P3  stage 0.4.51 (cmd acacc9f2), stop; one proxy "0=pass,5=blackhole" --repeat 3
   and publishes `failed` / `another update is already in progress` **against the cmd that
   is running**. The server marks that row terminal, and drops the real outcome when it
   arrives (`download failed` here; a `staged` would be lost the same way). The board itself
-  is unaffected. It is a reporting defect in CRITICAL `ff_mqtt.c`.
+  is unaffected. It is a reporting defect in CRITICAL `ff_mqtt.c`. → fixed by R2-fw-6 (agent 0.4.5).
 - **The QEMU openeth panic (harness, not product).** One D2 run panicked about a second
   after the link returned: `Cache error`, decoded against the image's ELF (`0e8f70a9a`) to
   `emac_opencores_isr_handler (esp_eth_mac_openeth.c:66)` ← `_xt_lowint1` ←
@@ -2076,6 +2076,98 @@ A peer that goes silent before the first 1 KB of body never returns control to
 `fetch_headers()` timeout fails `esp_https_ota_begin()`). A trickle peer (1 byte every
 19 s) counts as progress and is not caught either. The simulator is unchanged: its
 `urlopen(timeout=30)` already ends a silent download as `download failed: TimeoutError`.
+
+### A re-delivered stage is ignored, not failed (R2-fw-6)
+
+**A `stage` whose `id` is the update the board is already carrying out is logged and
+ignored: no status, nothing parsed, nothing started.** "Carrying out" means the download in
+flight, or the image staged by `apply: "on_command"` that waits for a reboot. Agent 0.4.5.
+Proof status: **proven in QEMU (esp32, dev stack)**. No bench replay is owed beyond a normal
+deploy, because this is command-seam logic with no radio dependency. Decision: DECISIONS.md
+2026-10-03 (R2-fw-6). Fixes the *re-POST* finding of *Flaky link (R2-test-2)* above.
+
+**The change.** `ff_ota.c` gains a read-only predicate, `ff_ota_is_handling(cmd_id)`. It
+answers true if `s_running` is set and `cmd_id` is the id `ff_ota_start()` recorded in
+`s_running_cmd_id` (a single writer, set just before `s_running = true`). It also answers
+true if the boot pointer names a slot other than the running one and the ff_txn record is
+for `cmd_id`. A running update for a different id answers false and never reaches the
+staged check. `ff_mqtt.c::on_stage()` calls it right after the id length check, before the
+artifact is parsed, and returns with one WARN line. `on_command()`'s one-id dedupe,
+`ota_task()`, `choose_target_slot()` and the confirm timer are untouched. A different id
+still gets its honest `failed` in both cases. A reset clears the in-flight answer, and a
+booted image (boot == running) never matches, so a reused id after a reset runs again.
+
+| # | Scenario | Observed in QEMU | Pass |
+|---|---|---|---|
+| S1 | In flight. Board 0.4.5 fresh, store `throttle:8192`. POST B (0.4.70, `on_command`) → X. At 10 %: POST C (0.4.71) → Y; POST B again. | Y: `failed` / `another update is already in progress`, terminal (unchanged). Re-POST: `reused: true`, X. Serial: `stage id=X is the update this board is already carrying out — ignored (re-delivery)`. No `failed` for X on the topic or in rows. The download went on to `matches what is on flash` and `staged`. Stop/start: `confirming`, `confirmed\|t`, fw 0.4.70. | yes |
+| S2 | Staged and waiting. Board 0.4.70, store `pass`. POST C `on_command` → X2 `staged`. POST B → Y2; POST C again. | Y2: `staging, failed "an update is already staged and waits for a reboot"` (unchanged). Re-POST: `reused: true`, X2, `… already carrying out — ignored`. No `staging` and no `failed` for X2. Stop/start: `confirmed\|t`, fw 0.4.71. | yes |
+| S3 | A reused id after a reset still runs. Board 0.4.71, store `throttle:8192`. POST B `on_command` → X3. Stop at 20 %, start, POST B again. | `reused: true`, X3. No `already carrying out` this boot. `staging version 0.4.70`, 0 % → 100 %, `staged`. Stop/start: `confirmed\|t`, fw 0.4.70. | yes |
+
+**Transcripts (trimmed).** App lines are `I (ms since boot)`; cmd ids shortened.
+
+```
+S1  store throttle:8192   X = 64b980cf (0.4.70), Y = 889379d8 (0.4.71)
+      I (63311)  ff-mqtt: …/dn/cmd id=64b980cf… type=stage
+      I (76611)  ff-ota: update 64b980cf…: 10% (103424 bytes)
+      I (77511)  ff-mqtt: …/dn/cmd id=889379d8… type=stage          <- POST C, reused:false
+      I (81661)  ff-mqtt: …/dn/cmd id=64b980cf… type=stage          <- POST B again, reused:true
+      W (81671)  ff-mqtt: stage id=64b980cf… is the update this board is already carrying out — ignored (re-delivery); its outcome is reported when it ends
+      I (89201)  ff-ota: update 64b980cf…: 20% (205824 bytes)
+      I (188781) ff-ota: update 64b980cf…: 100% (1018304 bytes)
+      I (199711) ff-ota: update 64b980cf…: sha256 50f6f2fb… matches what is on flash in ota_1; switching the boot partition
+      I (202701) ff-ota: update 64b980cf…: ota_1 is staged and bootable
+      topic: 64b980cf staging, downloading | 889379d8 failed "another update is already in progress" | 64b980cf verifying, staged
+    stop, start: Loaded app … 0x200000, 0.4.70 pending_verify, confirming on ota_1, CONFIRMED
+      rows 64b980cf: requested, staging, downloading, verifying, staged, confirming, confirmed|t
+      rows 889379d8: requested, failed|t
+
+S2  store pass   X2 = 45c9e138 (0.4.71), Y2 = 17f1a80e (0.4.70)
+      W (122237) ff-ota: update 45c9e138…: apply=on_command — staged and waiting …
+      I (124647) ff-mqtt: …/dn/cmd id=17f1a80e… type=stage          <- POST B
+      E (125557) ff-ota: update 17f1a80e…: refused — the boot partition names ota_0 (ota state new) while ota_1 is running; …
+      I (128727) ff-mqtt: …/dn/cmd id=45c9e138… type=stage          <- POST C again, reused:true
+      W (128967) ff-mqtt: stage id=45c9e138… is the update this board is already carrying out — ignored (re-delivery); …
+    stop, start: Loaded app … 0x20000, 0.4.71 pending_verify, confirming on ota_0, CONFIRMED
+      rows 45c9e138: requested, staging, downloading, verifying, staged, confirming, confirmed|t
+      rows 17f1a80e: requested, staging, failed|t
+
+S3  store throttle:8192   X3 = 485d5872 (0.4.70)
+      I (75404)  ff-ota: update 485d5872…: 20% (205824 bytes)       <- just agent-qemu-stop
+    start (0.4.71, ota state valid, no transaction line), POST B again -> reused:true
+      I (22130)  ff-mqtt: …/dn/cmd id=485d5872… type=stage
+      I (22190)  ff-ota: update 485d5872…: staging version 0.4.70 …
+      I (147470) ff-ota: update 485d5872…: 100% (1018304 bytes)
+      I (161200) ff-ota: update 485d5872…: ota_1 is staged and bootable
+      'already carrying out' in this boot: 0
+    stop, start: Loaded app … 0x200000, confirming on ota_1, CONFIRMED
+      rows 485d5872: requested, staging, downloading, verifying, staged, confirming, confirmed|t
+```
+
+**T1.** `tests/test_agent_redelivery.py` has 7 text tripwires over the comment-stripped
+source:
+- the predicate is declared in `ff_ota.h`;
+- `on_stage` calls it before any `ff_mqtt_publish_status`, before `ff_ota_start` and before
+  the artifact parse, and the ignore branch publishes nothing, starts nothing and does not
+  name the URL;
+- a different id still gets `another update is already in progress`;
+- the predicate reads `s_running`, `s_running_cmd_id`, both partitions and `ff_txn_load`,
+  never calls `fail`, a publish, `ff_txn_save`/`ff_txn_clear_if`, a boot-partition write,
+  `esp_ota_begin`, an erase or `esp_restart`, and never assigns `s_running`;
+- the in-flight check comes first and returns there;
+- `s_running_cmd_id` has exactly one writer, in `ff_ota_start` before `s_running = true`,
+  and `ota_task` never names it;
+- `ff_ota_start` still returns `ESP_ERR_INVALID_STATE` while running.
+
+`just agent-build esp32` and `esp32s3` (`-Werror`) end `BUNDLE OK`.
+`APP_SIZE_BUDGET_BYTES` is raised to the measured bytes (esp32 1 018 304, +288 B; esp32s3
+998 672, +320 B). `just test` is green.
+
+**T2 setup.** The flaky-link rig, the same one R2-fw-5 used. The api was recreated with
+`FF_PUBLIC_BASE_URL=http://10.0.2.2:18088`, `FF_S3_PUBLIC_ENDPOINT_URL=http://10.0.2.2:19000`
+and the `.env.example` dev hash, and put back afterwards. `.env` was not touched. api and
+mqtt went through an all-pass proxy, and the store went through its own process, changed
+only while the board was stopped. A = 0.4.5 (`--fresh`), B = 0.4.70 (`50f6f2fb…`),
+C = 0.4.71 (`58f5e5a7…`), all normal builds of this tree.
 
 ## De-risking
 

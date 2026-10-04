@@ -6,6 +6,66 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-03 — a re-delivered stage for the update in progress is ignored, not failed (R2-fw-6)
+
+**Decided: a `stage` whose `id` is the update this board is already carrying out is logged
+and ignored. Nothing is published, parsed or started.** Agent 0.4.5. Fixes the
+"Re-POST finding" of the R2-test-2 entry below, which stays as written. Proof status:
+**proven in QEMU (esp32)**. A bench replay beyond a normal deploy is not needed: this is pure
+command-seam logic with no radio or timing dependency. Transcripts:
+`docs/features/ota-deploy.md` → *A re-delivered stage is ignored, not failed (R2-fw-6)*.
+
+- **The rule. "Carrying out" means exactly one of two things.**
+  1. *In flight:* `s_running` is true and its cmd_id equals the stage's id.
+  2. *Staged and waiting:* `esp_ota_get_boot_partition() != esp_ota_get_running_partition()`
+     and `ff_txn_load()` returns a record whose `cmd_id` is the stage's id.
+     `apply: "on_command"` leaves the board in this state. Its server row is still
+     non-terminal, so a re-POST is `reused: true` with the same id. Before the fix it got
+     `staging, failed "an update is already staged and waits for a reboot"` against
+     **its own** id, and the `confirmed` after the reboot was dropped. spec/device-protocol.md
+     already says a device that has the transaction treats a repeat as a duplicate, so this
+     is a conformance fix and the spec does not change.
+- **A predicate in ff_ota, not a new return code.** `bool ff_ota_is_handling(const char *)`
+  lives in ff_ota.c, the owner of "what is running". `ff_mqtt.c::on_stage()` calls it right
+  after the id length check, before the artifact is parsed. That gives three things:
+  `ff_ota_start()`'s contract stays as it was (`ESP_ERR_INVALID_STATE` = a *different* id is
+  running); a re-delivery cannot produce a parse-time `failed` either; and nothing depends
+  on a return code IDF v5.5.5 may lack. on_command()'s one-id dedupe is untouched.
+- **Concurrency, with no mutex.** `static char s_running_cmd_id[64]` is written only in
+  `ff_ota_start()`, immediately before `s_running = true`. It is never cleared, and
+  `ota_task` never touches it. The predicate and `ff_ota_start()` both run on the esp-mqtt
+  task, so the only variable shared across tasks is the existing `volatile bool s_running`,
+  which ota_task moves true → false at `done:`. If that move lands between the predicate and
+  `ff_ota_start()`, the stage simply runs again, which is the pre-existing behaviour for a
+  finished cmd. When `s_running` is true for a different id the predicate returns false and
+  never falls through to the staged check. Between finish() and `done:`, the record and the
+  boot pointer belong to the running update.
+- **Read-only.** No publish, no `fail()`, no `ff_txn_save`/`ff_txn_clear_if`, no otadata
+  write. `ff_txn_load()` does clear a torn record, as it does at boot. A torn record's
+  report is already lost, so that clear changes nothing.
+- **Deliberately not a "seen in this boot" set.** A re-delivery of a cmd whose run already
+  ENDED (failed, or reset mid-download) runs again. That is the recovery path that
+  rollback-test.md (power-cut step 4) and ota-deploy.md D2 rely on, and QEMU S3 re-proves
+  it. A seen-set would turn a lost report into a stuck deploy. The simulator's `seen` set
+  is broader. That divergence is accepted: the simulator has no lost-publish path.
+- **No re-publish of `staged` on an ignored re-delivery.** The server already has the row's
+  last state, and the outcome after the reboot comes from the ff_txn record. An `apply`
+  mismatch between the original and the re-POST is ignored too, because the repeat is a
+  duplicate and not a new instruction.
+- **Unchanged.** A different id while a download runs still gets `failed` / `another update
+  is already in progress`. A different id while an image is staged still gets `an update is
+  already staged and waits for a reboot`. Both are honest, because that cmd will not be
+  carried out. After a reset both predicates are false.
+- **Size.** esp32 app +288 B (1,018,304), esp32s3 +320 B (998,672).
+- **Spec proposal (not applied).** `spec/device-protocol.md` → `dn/cmd`, after "A retried
+  command reuses its `id`": "Deduplication covers the transaction the device is carrying
+  out, not only the last command received: a `stage` whose `id` is the download in
+  progress, or the image staged and waiting for a reboot, is ignored without a status,
+  whatever arrived in between. A device that no longer has the transaction (e.g. after a
+  reset mid-download) carries the repeat out."
+
+---
+
 ## 2026-10-03 — a download that stops making progress fails after 60 s (R2-fw-5)
 
 **Decided: `ff_ota.c::ota_task()` abandons a download whose image length has not grown for
