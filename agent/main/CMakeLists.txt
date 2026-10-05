@@ -28,6 +28,7 @@ idf_component_register(SRCS "agent_main.c"
                                 esp_http_client
                                 esp_https_ota
                                 esp_partition
+                                spi_flash
                                 app_update
                                 mqtt
                                 json

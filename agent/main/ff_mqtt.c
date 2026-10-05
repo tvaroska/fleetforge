@@ -99,7 +99,14 @@ typedef enum {
     TXN_CONFIRMING,        /* running the recorded slot, PENDING_VERIFY: confirm or roll back */
     TXN_ALREADY_CONFIRMED, /* running the recorded slot, VALID: `confirmed` is owed */
     TXN_ROLLED_BACK,       /* the recorded slot was rejected; we are what it fell back to */
+    TXN_BOOTED_NEW,        /* running the recorded slot, still NEW: the bootloader never armed
+                            * verification. Nothing can roll it back. `confirmed` (with a
+                            * detail) is owed once the session works. (R2b-fw-2) */
 } txn_kind_t;
+
+/* R2b-fw-2. The `detail` of a NEW-at-target `confirmed`. A constant (50 chars) so it can
+ * never truncate against s_txn.detail[64]. */
+#define DETAIL_BOOTED_NEW "the bootloader never armed rollback for this image"
 
 static struct {
     txn_kind_t kind;
@@ -160,6 +167,30 @@ static bool confirm_this_image(void)
     }
     ESP_LOGE(TAG, "cannot confirm this OTA image (%s) — the bootloader will roll back "
                   "on the next reset",
+             esp_err_to_name(err));
+    return false;
+}
+
+/* R2b-fw-2. The TXN_BOOTED_NEW twin of confirm_this_image(): true only when THIS call moved
+ * the running image from NEW to VALID, so `confirmed` still follows a successful
+ * mark-valid and nothing else. Re-reads the state rather than trusting classify_txn(). In
+ * IDF 5.5 mark-valid moves any non-VALID running entry to VALID; on a bootloader without
+ * rollback the state is never consulted, so this changes nothing about how it boots. */
+static bool accept_unverified_image(void)
+{
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    esp_ota_img_states_t state = ESP_OTA_IMG_UNDEFINED;
+    if (running == NULL || esp_ota_get_state_partition(running, &state) != ESP_OK ||
+        state != ESP_OTA_IMG_NEW) {
+        return false;
+    }
+    esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
+    if (err == ESP_OK) {
+        ESP_LOGW(TAG, "this image was written by OTA and booted without rollback armed; the "
+                      "broker accepted us, so it is now marked valid and CONFIRMED");
+        return true;
+    }
+    ESP_LOGE(TAG, "cannot mark this unverified OTA image valid (%s) — not reporting confirmed",
              esp_err_to_name(err));
     return false;
 }
@@ -298,6 +329,17 @@ static void classify_txn(void)
     s_txn.confirming_sent = false;
     s_txn.terminal_msg_id = -1;
 
+    /* R2b-fw-2: the measurement behind `rollback_capable: true`. Only the bootloader ever
+     * writes PENDING_VERIFY (NEW -> PENDING_VERIFY; the app side never does), so booting in
+     * it proves this board's bootloader rolls back — with or without a transaction record.
+     * Deliberately before the record: an image OTA'd by an agent older than 0.4.0 left no
+     * record, and its first boot of this agent must still learn it. TXN_CONFIRMING below
+     * implies PENDING_VERIFY, so that branch is covered too. Main task, before
+     * esp_mqtt_client_start(): every announce is built after this. */
+    if (pending_verify()) {
+        ff_identity_note_rollback_capable();
+    }
+
     ff_txn_t rec;
     esp_err_t err = ff_txn_load(&rec);
     if (err == ESP_ERR_NVS_NOT_FOUND) {
@@ -326,6 +368,22 @@ static void classify_txn(void)
                 s_txn.kind = TXN_ALREADY_CONFIRMED;
                 ESP_LOGW(TAG, "transaction %s: already confirmed on %s", s_txn.cmd_id,
                          running->label);
+                return;
+            }
+            if (state == ESP_OTA_IMG_NEW) {
+                /* R2b-fw-2. The image applied and is running, but the bootloader never put
+                 * it in PENDING_VERIFY: no rollback is armed and none can happen. Not
+                 * `failed` — fw_version already shows the target — and not `confirming`,
+                 * which would promise a deadline that does not exist. `confirmed` with a
+                 * detail at the announce ack. Nothing is stored or announced about the
+                 * board here: `false` waits for R2b-test-5 (DECISIONS 2026-10-04 A3). */
+                s_txn.kind = TXN_BOOTED_NEW;
+                strlcpy(s_txn.detail, DETAIL_BOOTED_NEW, sizeof(s_txn.detail));
+                ESP_LOGW(TAG, "transaction %s: running %s in state new — the bootloader never "
+                              "put it in pending_verify; rollback_capable would be false, "
+                              "which this agent does not report until it is benched "
+                              "(R2b-test-5)",
+                         s_txn.cmd_id, running->label);
                 return;
             }
         }
@@ -360,9 +418,17 @@ static void report_txn_on_connect(void)
         }
         break;
     case TXN_ALREADY_CONFIRMED:
+        /* `detail` is empty on every path but a NEW-at-target confirm (R2b-fw-2), which a
+         * reconnect before the PUBACK must repeat word for word. */
         if (s_txn.terminal_msg_id <= 0) {
-            s_txn.terminal_msg_id = enqueue_status(s_txn.cmd_id, FF_STATUS_CONFIRMED, 100, NULL);
+            s_txn.terminal_msg_id =
+                enqueue_status(s_txn.cmd_id, FF_STATUS_CONFIRMED, 100,
+                               s_txn.detail[0] != '\0' ? s_txn.detail : NULL);
         }
+        break;
+    case TXN_BOOTED_NEW:
+        /* Nothing on connect: `confirming` would promise a rollback deadline this image
+         * does not have. `confirmed` follows the announce ack (mqtt_event_handler). */
         break;
     case TXN_ROLLED_BACK:
         if (s_txn.terminal_msg_id <= 0) {
@@ -786,6 +852,12 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base, int32_t event_i
                 s_txn.kind = TXN_ALREADY_CONFIRMED;
                 s_txn.terminal_msg_id =
                     enqueue_status(s_txn.cmd_id, FF_STATUS_CONFIRMED, 100, NULL);
+            } else if (s_txn.kind == TXN_BOOTED_NEW && accept_unverified_image()) {
+                /* R2b-fw-2. The same gate, for an image the bootloader never armed: the
+                 * deploy ends `confirmed`, with the detail naming what was missing. */
+                s_txn.kind = TXN_ALREADY_CONFIRMED;
+                s_txn.terminal_msg_id =
+                    enqueue_status(s_txn.cmd_id, FF_STATUS_CONFIRMED, 100, s_txn.detail);
             }
         }
         /* The terminal state is delivered: the transaction is closed, and only now is the

@@ -26,17 +26,151 @@
 
 #include "cJSON.h"
 #include "esp_app_desc.h"
+#include "esp_flash.h"
 #include "esp_log.h"
 #include "esp_mac.h"
 #include "esp_ota_ops.h"
+#include "esp_partition.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "ff_net.h"
+#include "ff_store.h"
+#include "mbedtls/sha256.h"
 
 static const char *TAG = "ff-id";
 
 static char s_device_id[FF_DEVICE_ID_SIZE];
 static bool s_mac_is_blank;
+
+/* R2b-fw-2: the three board measurements of spec/device-protocol.md -> up/announce. The
+ * first two are flash-time immutables, taken once in ff_identity_init() and cached. */
+static uint32_t s_flash_chip_size;
+static bool s_have_flash_chip_size;
+static char s_partition_sha256[65];
+static bool s_have_partition_sha256;
+/* Loaded in ff_identity_init(), set by ff_identity_note_rollback_capable() from
+ * ff_mqtt.c::classify_txn() — main task, before esp_mqtt_client_start(). The announce is
+ * built in the mqtt task after that start, so the client start orders the write before
+ * every read and no lock is needed. */
+static bool s_rollback_capable;
+
+/* 32 entries is twice what any table we know of carries (ab-4m-v1 has six). Static, so a
+ * 384-byte array never lands on the main task's stack. */
+#define FF_PT_MAX_ENTRIES 32
+
+typedef struct {
+    uint8_t type;
+    uint8_t subtype;
+    uint32_t address;
+    uint32_t size;
+} ff_pt_entry_t;
+
+static ff_pt_entry_t s_pt_entries[FF_PT_MAX_ENTRIES];
+
+/* `partition_table_sha256`, spec/device-protocol.md -> up/announce: sha256 over one line
+ * per partition on the default flash chip, `type:subtype:offset:size\n` in DECIMAL, sorted
+ * by offset. Geometry only — never the label, never the flags — so two tables that put the
+ * same partitions in the same places hash alike whatever they are called. The worked value
+ * for ab-4m-v1 is in the spec's *Partition layouts* table and is re-derived from
+ * agent/partitions.csv by tests/test_agent_board_measurements.py. */
+static bool partition_fingerprint(char out[65])
+{
+    size_t count = 0;
+    esp_partition_iterator_t it =
+        esp_partition_find(ESP_PARTITION_TYPE_ANY, ESP_PARTITION_SUBTYPE_ANY, NULL);
+    while (it != NULL) {
+        const esp_partition_t *p = esp_partition_get(it);
+        /* External flash (esp_partition_register_external) is not part of the table the
+         * bootloader reads. */
+        if (p != NULL && p->flash_chip == esp_flash_default_chip) {
+            if (count == FF_PT_MAX_ENTRIES) {
+                esp_partition_iterator_release(it);
+                ESP_LOGW(TAG, "the partition table has more than %d entries; "
+                              "partition_table_sha256 is announced as null",
+                         FF_PT_MAX_ENTRIES);
+                return false;
+            }
+            s_pt_entries[count].type = (uint8_t)p->type;
+            s_pt_entries[count].subtype = (uint8_t)p->subtype;
+            s_pt_entries[count].address = p->address;
+            s_pt_entries[count].size = p->size;
+            count++;
+        }
+        /* Frees the iterator when it returns NULL; only the early exit above releases. */
+        it = esp_partition_next(it);
+    }
+    if (count == 0) {
+        ESP_LOGW(TAG, "no partition found on the flash chip; partition_table_sha256 is "
+                      "announced as null");
+        return false;
+    }
+
+    /* The iterator yields table order; the spec hashes offset order. */
+    for (size_t i = 1; i < count; i++) {
+        ff_pt_entry_t key = s_pt_entries[i];
+        size_t j = i;
+        while (j > 0 && s_pt_entries[j - 1].address > key.address) {
+            s_pt_entries[j] = s_pt_entries[j - 1];
+            j--;
+        }
+        s_pt_entries[j] = key;
+    }
+
+    mbedtls_sha256_context ctx;
+    mbedtls_sha256_init(&ctx);
+    int rc = mbedtls_sha256_starts(&ctx, 0);
+    for (size_t i = 0; rc == 0 && i < count; i++) {
+        char line[40]; /* the longest possible line is 30 characters */
+        int len = snprintf(line, sizeof line, "%u:%u:%" PRIu32 ":%" PRIu32 "\n",
+                           (unsigned)s_pt_entries[i].type, (unsigned)s_pt_entries[i].subtype,
+                           s_pt_entries[i].address, s_pt_entries[i].size);
+        if (len < 0 || (size_t)len >= sizeof line) {
+            rc = -1;
+            break;
+        }
+        rc = mbedtls_sha256_update(&ctx, (const unsigned char *)line, (size_t)len);
+    }
+    uint8_t digest[32];
+    if (rc == 0) {
+        rc = mbedtls_sha256_finish(&ctx, digest);
+    }
+    mbedtls_sha256_free(&ctx);
+    if (rc != 0) {
+        ESP_LOGW(TAG, "cannot hash the partition table (%d); partition_table_sha256 is "
+                      "announced as null",
+                 rc);
+        return false;
+    }
+
+    /* By hand, lowercase, as ff_store.c::token_fingerprint does: nothing to truncate. */
+    static const char HEX[] = "0123456789abcdef";
+    for (size_t i = 0; i < sizeof digest; i++) {
+        out[i * 2] = HEX[digest[i] >> 4];
+        out[i * 2 + 1] = HEX[digest[i] & 0x0f];
+    }
+    out[64] = '\0';
+    return true;
+}
+
+/* The two flash-time measurements. Neither may come from the image header or the build
+ * config: those are claims made by whoever built THIS image, and the point of the fields
+ * is what the board itself is. So no fallback to esp_flash_get_size() (the header's
+ * flash size) when the physical read fails: the field is left out instead. */
+static void measure_board(void)
+{
+    uint32_t size = 0;
+    esp_err_t err = esp_flash_get_physical_size(esp_flash_default_chip, &size);
+    if (err == ESP_OK && size > 0) {
+        s_flash_chip_size = size;
+        s_have_flash_chip_size = true;
+    } else {
+        ESP_LOGW(TAG, "cannot read the physical flash size (%s); flash_chip_size is left out "
+                      "of the announce",
+                 err != ESP_OK ? esp_err_to_name(err) : "the chip reported 0 bytes");
+    }
+
+    s_have_partition_sha256 = partition_fingerprint(s_partition_sha256);
+}
 
 esp_err_t ff_identity_init(void)
 {
@@ -62,7 +196,37 @@ esp_err_t ff_identity_init(void)
     }
 
     ESP_LOGI(TAG, "device_id %s", s_device_id);
+
+    /* R2b-fw-2. After the MAC, and never fatal: an unknown measurement is announced as
+     * unknown, while a failed init parks the board. */
+    measure_board();
+    s_rollback_capable = ff_store_load_rollback_capable();
+
+    char chip[16];
+    if (s_have_flash_chip_size) {
+        snprintf(chip, sizeof(chip), "%" PRIu32, s_flash_chip_size);
+    } else {
+        strlcpy(chip, "unknown", sizeof(chip));
+    }
+    ESP_LOGI(TAG, "board: flash chip %s bytes (physical), partition table sha256 %s, "
+                  "rollback_capable %s",
+             chip, s_have_partition_sha256 ? s_partition_sha256 : "unknown",
+             s_rollback_capable ? "true" : "unknown");
     return ESP_OK;
+}
+
+void ff_identity_note_rollback_capable(void)
+{
+    if (s_rollback_capable) {
+        return; /* already measured and stored: no NVS write on every OTA boot */
+    }
+    /* True for this boot whatever the save does: the observation is real. A failed save is
+     * logged by ff_store and retried at the next PENDING_VERIFY boot. */
+    s_rollback_capable = true;
+    const bool stored = ff_store_save_rollback_capable() == ESP_OK;
+    ESP_LOGW(TAG, "rollback_capable: true — this OTA-written image booted in pending_verify, "
+                  "so this board's bootloader rolls back (%s)",
+             stored ? "stored" : "NOT stored; announced for this boot only");
 }
 
 const char *ff_device_id(void)
@@ -160,6 +324,24 @@ static cJSON *announce_object(const ff_cfg_t *cfg)
     cJSON_AddNullToObject(root, "parent_device_id");
     cJSON_AddStringToObject(root, "partition_layout", FF_PARTITION_LAYOUT);
     cJSON_AddNumberToObject(root, "ota_slot_size", running_slot_size());
+    /* R2b-fw-2: the three board measurements, in spec order, measured on this board and
+     * never taken from the build. `flash_chip_size` is OMITTED when unreadable ("a device
+     * that cannot read it omits the field"); the other two go out as explicit null, as
+     * `ssid` does. cJSON prints 4194304 as an integer, which the server requires. */
+    if (s_have_flash_chip_size) {
+        cJSON_AddNumberToObject(root, "flash_chip_size", s_flash_chip_size);
+    }
+    if (s_have_partition_sha256) {
+        cJSON_AddStringToObject(root, "partition_table_sha256", s_partition_sha256);
+    } else {
+        cJSON_AddNullToObject(root, "partition_table_sha256");
+    }
+    /* `true` or null, never `false`, until R2b-test-5 (DECISIONS 2026-10-04 A3). */
+    if (s_rollback_capable) {
+        cJSON_AddTrueToObject(root, "rollback_capable");
+    } else {
+        cJSON_AddNullToObject(root, "rollback_capable");
+    }
     /* `["ota"]` since R1-fw-1: this agent downloads through the signed URL, writes the
      * inactive slot, verifies the digest and reboots into it (ff_ota.c). The list is a
      * claim about what the board can be asked to DO, so it stays as short as the truth —

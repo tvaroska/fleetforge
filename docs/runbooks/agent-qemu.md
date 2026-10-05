@@ -439,6 +439,21 @@ right after `"link_type":"ethernet"`, and a config written with `--net` adds one
 `link`: `networks  N in ff_cfg, unused (link is ethernet)`. That line is the only QEMU proof
 that the known-networks parser ran; there is no radio to select with.
 
+Since agent 0.4.7 (R2b-fw-2) the announce also carries the three board measurements right
+after `ota_slot_size`: `"flash_chip_size":4194304,"partition_table_sha256":"1fa67e6b…59ed","rollback_capable":null`
+on a serially flashed board. The boot prints one line after `device_id`:
+`I ff-id: board: flash chip 4194304 bytes (physical), partition table sha256 1fa67e6b…59ed, rollback_capable unknown`.
+An OTA'd image that boots in `pending_verify` logs
+`W ff-id: rollback_capable: true — this OTA-written image booted in pending_verify, so this board's bootloader rolls back (stored)`
+before `transaction <cmd>: confirming on ota_N`, and every later boot announces
+`"rollback_capable":true` with no `(stored)` line, until a re-flash with a new token clears
+it. A boot that finds its recorded slot running in state `new` (a bootloader that never
+armed rollback) now ends `confirmed` with the detail `the bootloader never armed rollback
+for this image` instead of `stale transaction record … discarded`. That cannot happen in
+QEMU: our bootloader always arms rollback, and forging otadata is not a test. The torn
+otadata row above is unchanged: a torn newest sector boots the *previous* slot, so it is
+still `stale … discarded`.
+
 **No token and no password appear anywhere in that transcript, by design**. If one ever
 does, that is a bug in the firmware's logging, not a detail of the harness.
 

@@ -309,3 +309,38 @@ bool ff_store_matches_api_base(const ff_cred_t *cred, const char *api_base)
     }
     return strcmp(cred->api_base, api_base) == 0;
 }
+
+bool ff_store_load_rollback_capable(void)
+{
+    nvs_handle_t handle;
+    if (nvs_open(FF_STORE_NAMESPACE, NVS_READONLY, &handle) != ESP_OK) {
+        return false; /* no namespace (factory-fresh) or no NVS: unknown */
+    }
+    uint8_t value = 0;
+    esp_err_t err = nvs_get_u8(handle, FF_STORE_KEY_ROLLBACK_CAPABLE, &value);
+    nvs_close(handle);
+    if (err != ESP_OK && err != ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGW(TAG, "cannot read '%s' (%s); rollback_capable is unknown",
+                 FF_STORE_KEY_ROLLBACK_CAPABLE, esp_err_to_name(err));
+    }
+    return err == ESP_OK && value == 1;
+}
+
+esp_err_t ff_store_save_rollback_capable(void)
+{
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(FF_STORE_NAMESPACE, NVS_READWRITE, &handle);
+    if (err == ESP_OK) {
+        err = nvs_set_u8(handle, FF_STORE_KEY_ROLLBACK_CAPABLE, 1);
+        if (err == ESP_OK) {
+            err = nvs_commit(handle);
+        }
+        nvs_close(handle);
+    }
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "cannot store rollback_capable (%s); it is announced for this boot and "
+                      "stored at the next OTA boot",
+                 esp_err_to_name(err));
+    }
+    return err;
+}

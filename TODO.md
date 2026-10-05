@@ -309,7 +309,7 @@ are R3). Order inside each flow: the one-place status first, then the cards, the
       Upload from the dashboard, pre-check refuses a wrong-layout build, upload refuses the merged
       binary, deploy a good build to `confirmed`, deploy a deliberately broken one to
       `rolled back`. Extends CUJ-1 steps 5 and 6.
-- [ ] **R2b-fw-2**: Agent announces `rollback_capable`, `partition_table_sha256`, `flash_chip_size` (P2, 1.5d)
+- [x] **R2b-fw-2**: Agent announces `rollback_capable`, `partition_table_sha256`, `flash_chip_size` (P2, 1.5d) _(done 2026-10-05; reviewed; see docs/features/board-profiles.md)_
       CRITICAL (`ff_identity.c::announce_object`, `ff_mqtt.c::classify_txn` confirm path).
       Emit in the spec's key order; persist the observation in NVS; `true` from the
       `TXN_CONFIRMING` branch; give `NEW`-at-target a terminal outcome instead of "stale
@@ -317,6 +317,7 @@ are R3). Order inside each flow: the one-place status first, then the cards, the
       after `R2b-test-5`. Applies Patch B in the same commit. QEMU proof: an OTA'd image
       announces `rollback_capable: true` and the `ab-4m-v1` fingerprint. New agent version.
       Spec applied in 8cb5335 (Patch A). Apply Patch B (announce example keys) in this task's commit. See docs/features/board-profiles.md → *Step 1 wire proposal*.
+      Patch B is owed as the owner's `spec:` commit right after this lands, never before (the harness may not edit spec/; DECISIONS 2026-10-05 R2b-fw-2 amends A4).
 - [x] **R2b-be-6**: Ingest and store the three board measurements (P2, 1d) _(done 2026-10-05; reviewed; see docs/features/board-profiles.md)_
       `AnnouncePayload`, `ingestor/store.py`, `EnrollRequest` (store, never reject: malformed
       → null + log), `IDENTITY_FIELDS`, `Device` columns + Alembic migration (CRITICAL),

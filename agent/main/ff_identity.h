@@ -38,8 +38,26 @@ extern "C" {
  * adapt per device, forever, to an agent it can never update. */
 #define FF_PROTO_VERSION 1
 
-/* Read the eFuse MAC and format the device id once. Call before anything publishes. */
+/* Read the eFuse MAC and format the device id once. Call before anything publishes, and
+ * after ff_store_sync_token() (it reads the stored rollback_capable observation, which a
+ * token change erases).
+ *
+ * R2b-fw-2: it also takes the board's two flash-time measurements once — the physical
+ * flash chip size and the partition table fingerprint — and loads `rollback_capable`. A
+ * measurement that fails is logged and left unknown; it never fails this function, which
+ * parks the board on failure. */
 esp_err_t ff_identity_init(void);
+
+/* R2b-fw-2. `rollback_capable` is MEASURED, never claimed (DECISIONS 2026-10-03 R2-spec-1):
+ * it is never derived from CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE or any build setting,
+ * because the bootloader is a flash-time immutable this image did not bring with it. The
+ * one observation that proves it is an OTA-written image booting in PENDING_VERIFY — only
+ * the bootloader ever writes that state. Call this when that has been seen: it sets the
+ * announced value to true and persists it (once; no NVS write when it is already true).
+ *
+ * There is no way to note `false`: this agent emits `true` or null until R2b-test-5
+ * benches what a rollback-less bootloader leaves behind (DECISIONS 2026-10-04 A3). */
+void ff_identity_note_rollback_capable(void);
 
 /* The 12-hex-digit device id. Valid after ff_identity_init(); "" before. */
 const char *ff_device_id(void);

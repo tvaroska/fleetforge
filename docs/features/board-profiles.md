@@ -13,6 +13,88 @@ finishes a task, it appends a completed entry below.
 
 ## Completed Work
 
+### R2b-fw-2 (2026-10-05): agent 0.4.7 announces the three measurements
+
+CRITICAL (agent wire format, the confirm path). Decision: `DECISIONS.md` 2026-10-05
+(R2b-fw-2). No server, simulator, migration or frontend change: R2b-be-6 already ingests
+all three. `agent/partitions.csv` and `agent/sdkconfig.defaults*` untouched.
+
+As built:
+
+- **Measurements (`ff_identity.c`).** Taken once in `ff_identity_init()`, after the MAC,
+  never fatal. `flash_chip_size` from `esp_flash_get_physical_size(esp_flash_default_chip)`,
+  with no fallback to `esp_flash_get_size()` (the image header's claim); unreadable means
+  the key is **omitted**. `partition_table_sha256` from `partition_fingerprint()`:
+  `esp_partition_find(ESP_PARTITION_TYPE_ANY, ESP_PARTITION_SUBTYPE_ANY, NULL)`, entries
+  on the default chip only, a static 32-entry array, insertion sort by address, decimal
+  `type:subtype:offset:size\n` lines into incremental mbedTLS SHA-256, hex by hand. No
+  label, no flags. One boot line: `board: flash chip … bytes (physical), partition table
+  sha256 …, rollback_capable true|unknown`. `spi_flash` added to the component's REQUIRES.
+- **`rollback_capable`.** `true` or null, never `false` (A3). Observed at the top of
+  `ff_mqtt.c::classify_txn()` from `pending_verify()`, before the record is read: a
+  deliberate superset of the `TXN_CONFIRMING` branch, so a board OTA'd by 0.3.1 (no
+  record) learns it on its first 0.4.7 boot. Stored as `rb_cap` (u8 1) in the "ff"
+  credential namespace (cleared by a token change, kept by an OTA), written once.
+  `ff_store_save_rollback_capable(void)` takes no argument. The confirm/rollback functions
+  are unchanged and NVS-free.
+- **NEW-at-target.** `TXN_BOOTED_NEW`: the recorded slot runs in state `new` (the
+  bootloader never armed rollback). Nothing on connect; at the announce ack, after the
+  byte-identical TXN_CONFIRMING branch and behind `s_rollback_decided`,
+  `accept_unverified_image()` marks valid only from NEW and `confirmed` is queued only on
+  ESP_OK, with the detail `the bootloader never armed rollback for this image`. It used to
+  be "stale transaction record … discarded", which left the deploy at `rebooting`. Not
+  `failed` (the image is running; `fw_version` shows the target). **Not reachable in QEMU
+  or on the bench S3** (our bootloader always arms rollback; forging otadata is
+  forbidden): proven by `tests/test_agent_board_measurements.py` and the review. The bench
+  run, and emitting `false`, belong to R2b-test-5.
+- **Announce.** The keys follow `ota_slot_size` in spec order; enroll carries them too
+  (same object; `rollback_capable` is null at enroll on a fresh board). 465 B in QEMU.
+- **Budgets.** Raised to the measured bytes: esp32 1,029,440 (+2,848), esp32s3 1,009,488
+  (+2,784), esp32c3 1,069,008 (+3,104), esp32c6 1,118,544 (+3,120).
+- **Patch B owed.** `spec/` is untouched by design: Patch B is owed as the owner's `spec:`
+  commit right after this one, never before (DECISIONS 2026-10-05 R2b-fw-2 amends A4).
+  The three lines go after `"ota_slot_size": 1966080,` in the `up/announce` example:
+  `"flash_chip_size": 4194304,`,
+  `"partition_table_sha256": "1fa67e6bbd034e434d04e9d6f4f52bbe899361602cd498573eb3bde97d1559ed",`,
+  `"rollback_capable": true,`. Proved safe in memory: the patched example still parses as
+  JSON, all 16 keys are emitted by `ff_identity.c`, and the five keys from `ota_slot_size`
+  to `capabilities` appear in spec order (`PATCH-B-SAFE 16`), so
+  `test_the_firmware_builds_exactly_the_spec_keys` is green with and without it.
+
+T2 evidence (QEMU esp32, dev stack on 8088, api recreated with
+`FF_PUBLIC_BASE_URL=http://10.0.2.2:8088 FF_S3_PUBLIC_ENDPOINT_URL=http://10.0.2.2:9000`,
+restored afterwards; trimmed):
+
+```
+1  fresh 0.4.7:  I ff-id: board: flash chip 4194304 bytes (physical), partition table sha256
+                 1fa67e6bbd034e434d04e9d6f4f52bbe899361602cd498573eb3bde97d1559ed, rollback_capable unknown
+   announce:     …"ota_slot_size":1966080,"flash_chip_size":4194304,"partition_table_sha256":"1fa6…59ed",
+                 "rollback_capable":null,"capabilities":["ota"]}   (465 bytes, agent_version 0.4.7)
+   /v1/devices:  {"fw_version":"0.4.7","ota_slot_size":1966080,"flash_chip_size":4194304,"partition_table_sha256":"1fa6…59ed","rollback_capable":null}
+2  deploy 0.4.7-fw2b on_command -> staged; stop/start:
+     ff-agent: running image: fw_version 0.4.7-fw2b, ota state pending_verify
+     ff-id:    board: … rollback_capable unknown
+     ff-id:    rollback_capable: true — this OTA-written image booted in pending_verify, so this board's bootloader rolls back (stored)
+     ff-mqtt:  transaction 3f06…d441: confirming on ota_1
+     ff-mqtt:  this image was written by OTA and is now CONFIRMED: …
+     ff-txn:   transaction 3f06…d441 closed — record cleared
+   status rows: …, staged, confirming, confirmed;  announce "fw_version":"0.4.7-fw2b" … "rollback_capable":true
+   /v1/devices: {"fw_version":"0.4.7-fw2b",…,"rollback_capable":true}
+3  stop/start:   ota state valid; board: … rollback_capable true; no transaction, no (stored) line;
+                 announce still "rollback_capable":true
+4  new token, agent-qemu-recfg, start:  "the ff_cfg enrollment token has changed (780a… -> b463…): erasing …";
+                 board: … rollback_capable unknown; enroll 200; announce "rollback_capable":null, sha and size present;
+                 /v1/devices rollback_capable null
+```
+
+QEMU's flash model answers the physical-size read (4194304), so the "key omitted" path
+was not exercised live; it is pinned by the text tests.
+
+Re-verified 2026-10-05 (attempt 2), identical (build B labelled `0.4.7-fw2c`; announce
+465 B; status rows staged, confirming, confirmed).
+Re-verified again in the mandatory review, identical: all four builds reproduced the budgets
+byte for byte, and QEMU steps 1-4 passed with build B labelled `0.4.7-fw2r`.
+
 ### R2b-be-6 (2026-10-05): board measurements ingested and stored
 
 Backend only, migration `0006`. Decision: `DECISIONS.md` 2026-10-05 (R2b-be-6). `spec/`
@@ -180,6 +262,11 @@ That buys the safety net and the validation for two columns: no new UI, no migra
 beyond the columns, no seeding, and no "who can define a profile" auth question.
 
 #### Step 1 wire proposal (R2-spec-1, 2026-10-03) — PROPOSED, amended by R2b-spec-2 (2026-10-04), not applied
+
+*Status 2026-10-05 (R2b-fw-2).* Patch A is applied (8cb5335). The server side is built
+(R2b-be-6) and the agent emits all three fields from 0.4.7 (R2b-fw-2). Patch B (block (a),
+the three keys in the `up/announce` example) is owed as the owner's `spec:` commit right after
+R2b-fw-2's, never before it (DECISIONS 2026-10-05 R2b-fw-2, amending A4). The text below is the proposal as written.
 
 `spec/` is protected during `/implement`, so this is the wire half of step 1 written as
 paste-ready text for a later `spec:` commit (the route `43675b8` took). **Nothing here is

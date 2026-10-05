@@ -137,16 +137,24 @@ FORBIDDEN_OPTIONS = [
 # in ff_cfg.c, the scan/selection loop in ff_net_wifi.c (the driver's scan path it links
 # in, the DHCP watchdog esp_timer, the per-attempt config), the announce's two fields and
 # their log strings. 1,115,424 B (esp32c6) is 57% of the slot.
+#
+# Raised 2026-10-05 (R2b-fw-2) for **all four targets**, all rebuilt, to the exact measured
+# byte: esp32 1,026,592 -> 1,029,440 (+2,848 B), esp32s3 1,006,704 -> 1,009,488 (+2,784 B),
+# esp32c3 1,065,904 -> 1,069,008 (+3,104 B), esp32c6 1,115,424 -> 1,118,544 (+3,120 B). The
+# added code is the board measurements in ff_identity.c (the physical flash-size read, the
+# partition-table walk, sort and incremental SHA-256), the rb_cap load/save in ff_store.c,
+# the NEW-at-target branch and accept_unverified_image() in ff_mqtt.c, the three announce
+# keys and their log strings. 1,118,544 B (esp32c6) is 57% of the slot.
 APP_SIZE_BUDGET_BYTES = {
-    "esp32": 1_026_592,
+    "esp32": 1_029_440,
     # Raised from 973_136 for the OTA-capable agent (R1-fw-1/R1-fw-2), which cost every
     # target ~18 KB. Only esp32 was raised at the time: this gate reads whatever is in
     # `agent/dist/`, so a target nobody had built locally is not checked and does not
     # fail. The other two were still carrying 0.2.0-era numbers until R2b-fw-1 raised
     # them — that was a gap in the gate, not slack here.
-    "esp32s3": 1_006_704,
-    "esp32c3": 1_065_904,
-    "esp32c6": 1_115_424,
+    "esp32s3": 1_009_488,
+    "esp32c3": 1_069_008,
+    "esp32c6": 1_118_544,
 }
 
 # An app may occupy at most this much of an OTA slot. Not a style rule: R2 downloads the
