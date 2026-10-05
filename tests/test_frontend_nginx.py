@@ -43,7 +43,7 @@ def test_the_upload_route_takes_at_least_one_ota_slot() -> None:
     block = _block("location = /v1/artifact")
     limit = _body_limit(block)
     assert limit is not None, "no client_max_body_size: nginx falls back to 1m"
-    assert limit >= max(SUPPORTED_LAYOUTS.values())
+    assert limit >= max(p.ota_slot_size for p in SUPPORTED_LAYOUTS.values())
     assert "proxy_pass http://api:8000" in block
 
 

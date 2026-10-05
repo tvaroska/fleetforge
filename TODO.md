@@ -324,7 +324,7 @@ are R3). Order inside each flow: the one-place status first, then the cards, the
       simulator flags `--rollback-capable {true,false}`, `--partition-sha`,
       `--flash-chip-size`.
       Spec applied in 8cb5335 (Patch A). Patch B not applied here: it goes in only in R2b-fw-2's commit (DECISIONS 2026-10-04 A4). See docs/features/board-profiles.md → *Step 1 wire proposal*.
-- [ ] **R2b-be-7**: Pre-check and deploy gate on the measurements (P2, 1d)
+- [x] **R2b-be-7**: Pre-check and deploy gate on the measurements (P2, 1d) _(done 2026-10-05; reviewed; see docs/features/ota-deploy.md)_
       `deploy_precheck.py`: `partition_table_mismatch` refusal, `rollback_incapable` gating
       warning; `DeployRequest.override`; `PrecheckFinding.needs_override`;
       `SUPPORTED_LAYOUTS` → `{layout: {ota_slot_size, partition_table_sha256}}` with a pin in

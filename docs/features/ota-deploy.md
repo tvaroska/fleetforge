@@ -2173,15 +2173,18 @@ home of every sentence; `/deploy` raises the first refusal from it, unchanged.
 | refusal | `no_artifact_for_target` | no label for the device's chip (404 on deploy) |
 | refusal | `layout_mismatch` | both layouts known and differ (409) |
 | refusal | `slot_too_small` | image larger than a known slot (409) |
+| refusal | `partition_table_mismatch` | device fingerprint present, layout has a known one, they differ (409; never overridable; R2b-be-7) |
 | refusal | `no_ota_capability` | `ota` not announced (409) |
 | warning | `never_connected` | no `last_seen` and no presence report |
 | warning | `offline` | not online (never both with `never_connected`) |
 | warning | `sleepy` | power class sleepy; names the wake interval |
+| warning (gating) | `rollback_incapable` | `rollback_capable` is false; `/deploy` 409 unless `override` lists it (R2b-be-7) |
 
-Warnings never block `/deploy`; no override field yet (that belongs to gating warnings,
-which do not exist). Not yet: weak RSSI (none stored, R4), `rollback_capable: false`
-(decided R2b-spec-2; R2b-be-7 builds it), merged-binary refusal (refused at upload instead, R2b-be-3), R3 library
-marker, and URL-configuration readiness (`/v1/readyz` owns it; the pre-check answers 200
+Plain warnings never block `/deploy`. Gating warnings (`needs_override: true`, today only
+`rollback_incapable`) are enforced: `/deploy` answers 409 with the warning's own sentence
+unless the body carries `override: [code]`, per code (R2b-be-7). Refusals ignore `override`.
+Not yet: weak RSSI (none stored, R4), merged-binary refusal (refused at upload instead,
+R2b-be-3), R3 library marker, and URL-configuration readiness (`/v1/readyz` owns it; the pre-check answers 200
 without it). The response carries `confirm_timeout_s` for the card. T2 on the dev stack:
 same-layout 200 deployable; Arduino label `layout_mismatch`; unknown label
 `no_artifact_for_target` with null sha; offline `[offline]`; never connected
@@ -2211,7 +2214,7 @@ Implementation notes behind `spec/flows.md` Flow 2 and the 2026-10-04 entries in
   "the partition table at 0x8000", and "the bootloader at 0x1000 and the partition table at
   0x8000"), no rows written; the real app.bin files got 201; 1966081 bytes got 413 with
   "merged".
-- **`rollback_capable`.** A warning, not a refusal. It is `null` before a board's first
+- **`rollback_capable` (LANDED 2026-10-05, R2b-be-7).** A warning, not a refusal. It is `null` before a board's first
   OTA and the `false` reading is unbenched (`DECISIONS.md` 2026-10-03), so it cannot guard
   a first OTA. The override must be explicit in the UI and in the API. Decided shape
   (R2b-spec-2; built by R2b-be-7, after R2b-be-6 stores the field): warning code
@@ -2273,6 +2276,55 @@ token id equal to the API log line and the `ffa_` cookie id, no other row had `s
 in `detail`; after `confirmed` the API gave the two-key `sent_by`; a second login session's
 repeat deploy returned `reused: true` with one row and the first session's id; boards with older
 transactions gave null; Chromium showed `admin · dashboard session (172.18.0.1)` in the card.
+
+## R2b-be-7: the deploy gate on the board measurements (2026-10-05)
+
+`deploy_precheck.py` gains one refusal and one gating warning, both on the R2b-be-6
+columns, both fail-open on NULL:
+
+- **`partition_table_mismatch`** (refusal, never overridable). The device's announced
+  `partition_table_sha256` against its own layout's profile in `SUPPORTED_LAYOUTS`, not
+  against the artifact, so it runs with or without one. Order: `no_artifact_for_target |
+  layout_mismatch, slot_too_small`, `partition_table_mismatch`, `no_ota_capability`. Checked
+  only when the device sent a fingerprint AND its layout has a known one; an unknown layout
+  or a profile with `None` is logged (`… not checked`) and passes.
+- **`rollback_incapable`** (gating warning, `needs_override: true`). `rollback_capable is
+  False` only; `None` is silent. Appended after the plain warnings. `deployable` keeps its
+  meaning ("no refusals"), and the pre-check ignores `override` so the card always sees
+  the tick it must render. `/deploy` raises it as a 409 with the identical sentence, after
+  the refusals and before the reuse lookup, the mint and the INSERT.
+- **`DeployRequest.override: list[OverrideCode]`** (`Literal["rollback_incapable"]`,
+  default `[]`, max 8). Unknown code: 422. Listed but not raised: no-op. A tripwire keeps
+  the literal equal to `deploy_precheck.GATING_CODES`. The deploy log line carries
+  `override=[…]`; `deploy_events` does not (follow-up).
+- **`SUPPORTED_LAYOUTS: dict[str, LayoutProfile]`** (frozen dataclass: `ota_slot_size`,
+  `partition_table_sha256`), equal to the spec's *Partition layouts* table (tested). The
+  `ab-4m-v1` fingerprint is pinned against `agent/partitions.csv` in
+  `tests/test_agent_partitions.py`; the Arduino one is computed from the ADR table (no CSV
+  until R3) and refuses nobody today.
+
+**T2 on the dev stack** (run `1791239821`, one random 8 KiB esp32c6 label, five simulator
+boards with `--capabilities ota`, all online):
+
+| # | Board | Observed |
+|---|---|---|
+| A | `--rollback-capable false`, ab sha | pre-check `deployable:true`, `refusals:[]`, warnings `[{rollback_incapable, needs_override:true}]` |
+| B | same, no override | `HTTP 409`, `detail` byte-identical to A's message; 0 `deploy_events` rows |
+| C | same, `override:["rollback_incapable"]` | `HTTP 202` `cmd_id 2f346d4d…`; 9 rows; the sim logged `type=stage`, `staging`, `downloading`, `download 8192 bytes` |
+| D | `override:["force"]` | `HTTP 422` (`literal_error`, expected `'rollback_incapable'`) |
+| E | Arduino sha on `ab-4m-v1`, `false` | `[false,["partition_table_mismatch"],["rollback_incapable"]]`; the message names `ab-4m-v1`, `05528998…1fc4` and `1fa67e6b…59ed` |
+| F | same, `override:["rollback_incapable"]` | `HTTP 409` with the mismatch sentence; 0 rows |
+| G | ab sha, `true` | pre-check clean; deploy `HTTP 202` |
+| H | no flags (all three NULL in `devices`) | pre-check clean; deploy `HTTP 202` |
+| I | `ab-4m-arduino-v1` with the Arduino sha | `["layout_mismatch"]` only (positive control for the Arduino fingerprint) |
+| J | `override:[]` on G's board | `HTTP 202`, `reused:true` |
+| K | `just update-e2e` | exit 0, 6/6 pass (null measurements, nothing gates) |
+
+The API log line read `reused=False, override=['rollback_incapable']) requested by …` for C.
+
+**Stale, not edited (follow-up):** the comments in `frontend/src/api.ts`,
+`deployPrecheck.ts` and `DeployCell.tsx` that say `needs_override` does not exist on the
+server yet. The card itself already handles it (R2b-fe-8).
 
 ## Update flow end to end (R2b-test-3, 2026-10-05)
 

@@ -145,7 +145,7 @@ def _slot_size(partition_layout: str) -> int:
     — never a number typed in here.
     """
     try:
-        return SUPPORTED_LAYOUTS[partition_layout]
+        return SUPPORTED_LAYOUTS[partition_layout].ota_slot_size
     except KeyError:
         known = ", ".join(sorted(SUPPORTED_LAYOUTS))
         raise HTTPException(

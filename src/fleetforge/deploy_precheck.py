@@ -10,16 +10,30 @@ Not `deploycheck.py`: `fleetforge/deploycheck.py` is the unrelated S0-infra-9 re
 Pure: takes the `Device` row, the resolved artifact and the derived `online` flag. It never
 reads settings, a clock or the DB, and never re-derives presence (`presence.py` owns that).
 
-Refusals cannot be overridden. Warnings are reported and never block a send: an offline
-board is still deployed to, because the QoS-1 command waits in its persistent session.
+Refusals cannot be overridden, not even by `override`. Warnings are reported and never
+block a send: an offline board is still deployed to, because the QoS-1 command waits in
+its persistent session. **Except gating warnings** (`needs_override`, R2b-be-7):
+`/deploy` answers them with a 409 carrying the warning's own sentence unless the body
+names their code in `override`. Per code, never a blanket `force`; the pre-check reports
+them regardless of `override`, so the dashboard can render the tick.
+
+The board measurements are fail-open (R2b-be-6): a NULL `partition_table_sha256` never
+refuses and a NULL `rollback_capable` never warns. Every board before its first OTA, and
+every agent at or below 0.4.6, reports NULL, and an old board is not refused for being old.
+
 The `detail` text of a refused deploy is lifted verbatim into the dashboard banner, so do
 not reword a sentence without reading `tests/test_api_deploy.py`.
 """
 
+import logging
+from collections.abc import Collection
 from dataclasses import dataclass
 
 from fleetforge.db.models import Device, PowerClass
+from fleetforge.firmware.manifest import SUPPORTED_LAYOUTS
 from fleetforge.merged_image import MergedImage
+
+logger = logging.getLogger(__name__)
 
 OTA_CAPABILITY = "ota"
 
@@ -27,11 +41,17 @@ OTA_CAPABILITY = "ota"
 NO_ARTIFACT_FOR_TARGET = "no_artifact_for_target"
 LAYOUT_MISMATCH = "layout_mismatch"
 SLOT_TOO_SMALL = "slot_too_small"
+PARTITION_TABLE_MISMATCH = "partition_table_mismatch"
 NO_OTA_CAPABILITY = "no_ota_capability"
 NEVER_CONNECTED = "never_connected"
 OFFLINE = "offline"
 SLEEPY = "sleepy"
 MERGED_BINARY = "merged_binary"  # refused at upload, not by refusals()
+ROLLBACK_INCAPABLE = "rollback_incapable"
+
+# The warnings `/deploy` enforces unless `override` names them. `api/schemas.py`'s
+# `OverrideCode` literal is kept equal to this by `tests/test_deploy_precheck.py`.
+GATING_CODES: tuple[str, ...] = (ROLLBACK_INCAPABLE,)
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,6 +67,8 @@ class ResolvedArtifact:
 class Finding:
     code: str
     message: str
+    # A gating warning: `/deploy` refuses it (409) unless `override` lists `code`.
+    needs_override: bool = False
 
 
 def merged_binary(merged: MergedImage) -> Finding:
@@ -69,6 +91,12 @@ def refusals(device: Device, artifact: ResolvedArtifact | None, *, version: str)
     capability check does not need an artifact, so it still runs; layout and slot size are
     skipped. Layout and slot size are only checked when both sides are known: an R0 board
     that announced neither is not refused for being old.
+
+    The partition-table fingerprint is a property of the device against its own profile,
+    not of the artifact, so it runs without one too. It is checked only when the device
+    sent a fingerprint AND its layout has a known one (`SUPPORTED_LAYOUTS`): a board that
+    has not reported one yet is not refused for being old, and an unknown layout is
+    logged, not guessed at.
     """
     found: list[Finding] = []
 
@@ -105,6 +133,29 @@ def refusals(device: Device, artifact: ResolvedArtifact | None, *, version: str)
                 )
             )
 
+    announced = device.partition_table_sha256
+    layout = device.partition_layout
+    if announced is not None and layout is not None:
+        profile = SUPPORTED_LAYOUTS.get(layout)
+        expected = profile.partition_table_sha256 if profile is not None else None
+        if expected is None:
+            logger.info(
+                "device %s announces a partition table fingerprint for layout %s, which has "
+                "no known fingerprint; not checked",
+                device.device_id,
+                layout,
+            )
+        elif announced != expected:
+            found.append(
+                Finding(
+                    PARTITION_TABLE_MISMATCH,
+                    f"this device announces partition layout {layout} but its partition "
+                    f"table fingerprint is {announced}, not the {expected} that {layout} "
+                    "has. The device disagrees with its profile, so an image built for "
+                    f"{layout} could be written over the wrong partitions.",
+                )
+            )
+
     if OTA_CAPABILITY not in device.capabilities:
         found.append(
             Finding(
@@ -118,7 +169,11 @@ def refusals(device: Device, artifact: ResolvedArtifact | None, *, version: str)
 
 
 def warnings(device: Device, *, online: bool) -> list[Finding]:
-    """What the operator should know before sending. Never blocks a send."""
+    """What the operator should know before sending.
+
+    Never blocks a send, except the gating warnings (`needs_override`), which come last
+    and which `/deploy` enforces through `unmet_gates`.
+    """
     found: list[Finding] = []
 
     if device.last_seen is None and device.presence_reported is None:
@@ -149,4 +204,31 @@ def warnings(device: Device, *, online: bool) -> list[Finding]:
                 "queue and starts at its next wake.",
             )
         )
+
+    found.extend(gating_warnings(device))
     return found
+
+
+def gating_warnings(device: Device) -> list[Finding]:
+    """The warnings `/deploy` refuses unless overridden. Pure, NULL-silent.
+
+    `rollback_capable is False`, never `not rollback_capable`: `None` (no OTA observed yet,
+    or an agent too old to report) must stay silent.
+    """
+    if device.rollback_capable is False:
+        return [
+            Finding(
+                ROLLBACK_INCAPABLE,
+                "this board's bootloader cannot roll back: it booted an earlier update "
+                "without arming the safety net. If this build fails to boot or never "
+                "reconnects, the board stays broken until someone reflashes it over USB. "
+                "Send it only if losing this board to a bad build is acceptable.",
+                needs_override=True,
+            )
+        ]
+    return []
+
+
+def unmet_gates(device: Device, override: Collection[str]) -> list[Finding]:
+    """The gating warnings `override` does not name, in order. Empty means the gate opens."""
+    return [f for f in gating_warnings(device) if f.code not in override]

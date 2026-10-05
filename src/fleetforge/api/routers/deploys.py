@@ -45,7 +45,16 @@ that cannot take this image must be refused before anything is minted or recorde
 **The pre-check (R2b-be-2)** is `POST /{device_id}/deploy/precheck`: the same body, the
 same reasons, answered 200 with all of them at once and nothing sent. Every sentence lives
 in `fleetforge/deploy_precheck.py`, which this endpoint turns into its first HTTP error.
-The pre-check has no side effects and its warnings (offline, sleepy) are never enforced.
+The pre-check has no side effects, and its plain warnings (offline, sleepy) are never
+enforced.
+
+**The gate (R2b-be-7).** A gating warning (`needs_override`, today only
+`rollback_incapable`) is the one warning `/deploy` enforces: after the refusals (a refusal
+always wins, and `override` never clears one), `_accept` answers 409 with the warning's
+own sentence unless the body names its code in `override`. It runs before the reuse
+lookup, the mint and the INSERT, so a gated deploy writes no row and publishes nothing.
+The pre-check ignores `override` and always reports the warning, so the card can render
+the tick.
 
 **Who sent it (R2b-be-4)** is recorded on the `requested` row (`detail.sent_by`): the
 subject, the token id and a snapshot of the token's label. The sender is whoever opened
@@ -53,6 +62,7 @@ the transaction; a reuse writes no row, so the original sender stands.
 """
 
 import logging
+from collections.abc import Collection
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -85,6 +95,7 @@ from fleetforge.deploy_precheck import (
     Finding,
     ResolvedArtifact,
     refusals,
+    unmet_gates,
     warnings,
 )
 from fleetforge.deploys import (
@@ -208,7 +219,7 @@ async def deploy_device(
 
     async with sessionmaker() as session:
         device, found_artifact = await _resolve(session, device_id, body.version)
-        artifact = _accept(device, found_artifact, version=body.version)
+        artifact = _accept(device, found_artifact, version=body.version, override=body.override)
 
         # The reuse window is the minted URL's lifetime: past it the first URL has
         # expired, so a board that never acted on the first command cannot act on it
@@ -260,7 +271,7 @@ async def deploy_device(
         online = is_online(device, now=now_utc(), tolerance=settings.presence_tolerance)
 
     logger.info(
-        "deploy %s: %s -> %s (%s, %d bytes, apply=%s, reused=%s) requested by %s",
+        "deploy %s: %s -> %s (%s, %d bytes, apply=%s, reused=%s, override=%s) requested by %s",
         cmd_id,
         device_id,
         body.version,
@@ -268,6 +279,7 @@ async def deploy_device(
         artifact.size_bytes,
         body.apply,
         reused,
+        body.override,
         admin.token_id,
     )
     return DeployAccepted(
@@ -323,8 +335,18 @@ async def _resolve(
     )
 
 
-def _accept(device: Device, artifact: ResolvedArtifact | None, *, version: str) -> ResolvedArtifact:
-    """Return the artifact, or raise the first refusal: 404 for no artifact, else 409."""
+def _accept(
+    device: Device,
+    artifact: ResolvedArtifact | None,
+    *,
+    version: str,
+    override: Collection[str],
+) -> ResolvedArtifact:
+    """Return the artifact, or raise the first refusal: 404 for no artifact, else 409.
+
+    Then the gate: the first gating warning `override` does not name is a 409 with its
+    own sentence. Refusals come first, so `override` can never clear one.
+    """
     found: list[Finding] = refusals(device, artifact, version=version)
     if found:
         raise HTTPException(
@@ -335,6 +357,9 @@ def _accept(device: Device, artifact: ResolvedArtifact | None, *, version: str) 
             ),
             detail=found[0].message,
         )
+    gated = unmet_gates(device, override)
+    if gated:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=gated[0].message)
     if artifact is None:  # unreachable: a missing artifact is always a refusal
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="no such artifact")
     return artifact
@@ -380,8 +405,14 @@ async def precheck_deploy(
             device_online=online,
             confirm_timeout_s=settings.confirm_timeout_s,
             deployable=not found,
-            refusals=[PrecheckFinding(code=f.code, message=f.message) for f in found],
-            warnings=[PrecheckFinding(code=f.code, message=f.message) for f in warned],
+            refusals=[
+                PrecheckFinding(code=f.code, message=f.message, needs_override=f.needs_override)
+                for f in found
+            ],
+            warnings=[
+                PrecheckFinding(code=f.code, message=f.message, needs_override=f.needs_override)
+                for f in warned
+            ],
         )
 
     logger.info(

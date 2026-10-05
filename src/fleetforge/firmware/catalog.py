@@ -196,12 +196,13 @@ def _bundle_from_manifest(entry: AgentIndexEntry, manifest: BundleManifest) -> A
             f"manifest says layout {manifest.partition_layout!r} but the index filed it as "
             f"{entry.partition_layout!r}"
         )
-    expected_slot = SUPPORTED_LAYOUTS.get(manifest.partition_layout)
-    if expected_slot is None:
+    profile = SUPPORTED_LAYOUTS.get(manifest.partition_layout)
+    if profile is None:
         raise ValueError(
             f"partition_layout {manifest.partition_layout!r} is not one of "
             f"{list(SUPPORTED_LAYOUTS)} (spec/device-protocol.md)"
         )
+    expected_slot = profile.ota_slot_size
     if manifest.ota_slot_size != expected_slot:
         raise ValueError(
             f"ota_slot_size {manifest.ota_slot_size} is not the {expected_slot} that layout "

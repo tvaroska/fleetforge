@@ -25,13 +25,16 @@ Every assertion below is a specific way the fleet has already been able to break
 * `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE` dropped (R2 auto-rollback silently impossible
   on every board already in the field);
 * anti-rollback / secure boot / flash encryption turned on (each one an irreversible
-  eFuse burn, each explicitly *off* in the v1 posture).
+  eFuse burn, each explicitly *off* in the v1 posture);
+* a table that fingerprints differently from what the server's profile expects (every
+  board flashed with it is refused by the deploy gate).
 
 Expected values are **retyped literally** here on purpose: a tripwire must not import the
 constant it guards. The single exception is `spec/device-protocol.md`, which is read as
 text — the spec is the contract, and this is the one place the two are allowed to meet.
 """
 
+import hashlib
 import re
 from pathlib import Path
 
@@ -57,6 +60,13 @@ EXPECTED_PARTITIONS = [
 OTA_SLOT_SIZE = 1966080
 # The smallest flash design/architecture.md budgets for. Everything must fit under it.
 FLASH_SIZE_4MB = 0x400000
+# spec/device-protocol.md → Partition layouts: the `ab-4m-v1` partition_table_sha256, the
+# geometry-only fingerprint a board announces and the deploy gate compares (R2b-be-7).
+EXPECTED_PARTITION_TABLE_SHA256 = "1fa67e6bbd034e434d04e9d6f4f52bbe899361602cd498573eb3bde97d1559ed"
+
+# The spec's fingerprint rule: numeric type and subtype, as ESP-IDF encodes them.
+_FINGERPRINT_TYPES = {"app": 0, "data": 1}
+_FINGERPRINT_DATA_SUBTYPES = {"ota": 0, "phy": 1, "nvs": 2}
 
 # Present, and each one an option no OTA can add later.
 REQUIRED_SDKCONFIG = [
@@ -97,6 +107,29 @@ def _rows(path: Path) -> list[tuple[str, str, str, int, int]]:
         name, ptype, subtype, offset, size = fields[0], fields[1], fields[2], fields[3], fields[4]
         parsed.append((name, ptype, subtype, int(offset, 0), int(size, 0)))
     return parsed
+
+
+def _fingerprint_subtype(ptype: str, subtype: str) -> int:
+    """The numeric subtype. An unknown name raises (KeyError); it is never guessed."""
+    if subtype.startswith("0x") or subtype.isdigit():
+        return int(subtype, 0)
+    if ptype == "app":
+        if subtype == "factory":
+            return 0
+        match = re.fullmatch(r"ota_(\d+)", subtype)
+        if match is None:
+            raise KeyError(subtype)
+        return 0x10 + int(match.group(1))
+    return _FINGERPRINT_DATA_SUBTYPES[subtype]
+
+
+def _fingerprint(rows: list[tuple[str, str, str, int, int]]) -> str:
+    """spec/device-protocol.md's rule: `type:subtype:offset:size\n`, decimal, by offset."""
+    lines = [
+        f"{_FINGERPRINT_TYPES[ptype]}:{_fingerprint_subtype(ptype, subtype)}:{offset}:{size}\n"
+        for _name, ptype, subtype, offset, size in sorted(rows, key=lambda row: row[3])
+    ]
+    return hashlib.sha256("".join(lines).encode("ascii")).hexdigest()
 
 
 def _config_lines(path: Path) -> list[str]:
@@ -145,6 +178,25 @@ class TestPartitionTable:
         spec_text = DEVICE_PROTOCOL.read_text()
         assert f'"ota_slot_size": {OTA_SLOT_SIZE}' in spec_text
         assert '"partition_layout": "ab-4m-v1"' in spec_text
+
+    def test_partition_table_fingerprint_is_the_frozen_value(self) -> None:
+        """The table hashes to the value the server's `ab-4m-v1` profile expects.
+
+        The hashed serialization, verified 2026-10-05: `1:2:36864:24576`,
+        `1:0:61440:8192`, `1:1:69632:4096`, `1:64:73728:4096`, `0:16:131072:1966080`,
+        `0:17:2097152:1966080`. A different table here means every board flashed with it
+        announces a fingerprint the deploy gate refuses.
+        """
+        assert _fingerprint(_rows(PARTITIONS_CSV)) == EXPECTED_PARTITION_TABLE_SHA256
+
+    def test_the_fingerprint_is_the_one_in_the_protocol_spec(self) -> None:
+        spec_text = DEVICE_PROTOCOL.read_text()
+        row = f"| `ab-4m-v1` | {OTA_SLOT_SIZE} | `{EXPECTED_PARTITION_TABLE_SHA256}` |"
+        assert row in spec_text
+
+    def test_an_unknown_subtype_name_is_never_guessed(self) -> None:
+        with pytest.raises(KeyError):
+            _fingerprint([("x", "data", "mystery", 0x9000, 0x1000)])
 
     def test_slots_are_adjacent_and_fit_in_4mb(self) -> None:
         rows = _rows(PARTITIONS_CSV)

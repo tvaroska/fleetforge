@@ -177,12 +177,13 @@ def load_bundle_dir(bundle_dir: Path | str) -> LocalBundle:
     # The protocol contract. A bundle that disagrees would be flashed onto a board that
     # then announces a layout the server does not support — spec/device-protocol.md.
     known_layouts = list(SUPPORTED_LAYOUTS.keys())
-    expected_slot = SUPPORTED_LAYOUTS.get(manifest.partition_layout)
-    if expected_slot is None:
+    profile = SUPPORTED_LAYOUTS.get(manifest.partition_layout)
+    if profile is None:
         raise AgentBundleError(
             f"partition_layout {manifest.partition_layout!r} is not one of {known_layouts} "
             "(spec/device-protocol.md)"
         )
+    expected_slot = profile.ota_slot_size
     if manifest.ota_slot_size != expected_slot:
         raise AgentBundleError(
             f"ota_slot_size {manifest.ota_slot_size} is not the {expected_slot} that layout "

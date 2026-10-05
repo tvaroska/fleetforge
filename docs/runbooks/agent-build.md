@@ -223,6 +223,13 @@ more than one exists for a target:
 
 **Adding a layout** means a `SUPPORTED_LAYOUTS` entry in `src/fleetforge/firmware/manifest.py`,
 a `spec/device-protocol.md` change documenting it, and a new `agent/partitions.csv` id.
+The entry is a `LayoutProfile(ota_slot_size, partition_table_sha256)`: the slot size AND
+the table fingerprint, computed by the spec's rule (one decimal `type:subtype:offset:size`
+line per partition, sorted by offset, SHA-256 hex; no labels, no flags), and the same two
+values go into the spec's *Partition layouts* row. `tests/test_deploy_precheck.py` keeps
+the code table equal to the spec table, and the deploy gate refuses a board whose announced
+fingerprint differs from its layout's (R2b-be-7), so a wrong value here refuses every board
+carrying the layout. `None` means "no known fingerprint": logged, never checked.
 A new layout is **never** an edit to an existing row (DECISIONS.md 2026-09-09).
 
 | Shape | Where the bytes come from |

@@ -12,6 +12,7 @@ at `0x0` on the S3/C3/C6 and a wrong one flashes cleanly and never boots.
 the structure to the browser flasher without a translation table of its own.
 """
 
+from dataclasses import dataclass
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -29,19 +30,45 @@ MANIFEST_SCHEMA = 1
 EXPECTED_PARTITION_LAYOUT = "ab-4m-v1"
 EXPECTED_OTA_SLOT_SIZE = 1966080
 
-# Every layout this server understands, and the slot size a bundle claiming it MUST
-# declare. Both rows are frozen: a new layout is a new id plus an entry here plus a
+
+@dataclass(frozen=True, slots=True)
+class LayoutProfile:
+    """What a layout id promises: its OTA slot size and its partition-table fingerprint."""
+
+    ota_slot_size: int
+    # spec/device-protocol.md → Partition layouts. None = no known fingerprint: no check.
+    partition_table_sha256: str | None
+
+
+# Every layout this server understands: the slot size a bundle claiming it MUST declare,
+# and the partition-table fingerprint a board announcing it must match (R2b-be-7). Both
+# rows are frozen: a new layout is a new id plus an entry here plus a
 # `spec/device-protocol.md` → *Partition layouts* row — never an edit to an existing one.
 # The mapping is what keeps `partition_layout` and `ota_slot_size` from drifting apart:
 # a bundle cannot claim `ab-4m-v1` with a 4 MB slot.
 #
+# The fingerprint is the geometry-only SHA-256 `spec/device-protocol.md` defines (one
+# `type:subtype:offset:size` line per partition, sorted by offset; no labels, no flags).
+# `tests/test_agent_partitions.py` pins the `ab-4m-v1` value against `agent/partitions.csv`,
+# and `tests/test_deploy_precheck.py` keeps this whole table equal to the spec's.
+#
 # `ab-4m-arduino-v1` is the OTA library's map (design/decisions/arduino-gets-its-own-
 # layout-id.md): same slot size, different offsets, because the Arduino upload recipe
 # cannot reach `ab-4m-v1`'s. The prebuilt agent never ships it, so EXPECTED_* stay put.
+# Its fingerprint was computed from the ADR's table, because R3 has not checked in a CSV
+# yet. No Arduino board announces a fingerprint today, so it refuses nobody.
+#
+# A plain, mutable dict on purpose: tests `monkeypatch.setitem` it.
 ARDUINO_PARTITION_LAYOUT = "ab-4m-arduino-v1"
-SUPPORTED_LAYOUTS: dict[str, int] = {
-    EXPECTED_PARTITION_LAYOUT: EXPECTED_OTA_SLOT_SIZE,
-    ARDUINO_PARTITION_LAYOUT: 1966080,
+SUPPORTED_LAYOUTS: dict[str, LayoutProfile] = {
+    EXPECTED_PARTITION_LAYOUT: LayoutProfile(
+        EXPECTED_OTA_SLOT_SIZE,
+        "1fa67e6bbd034e434d04e9d6f4f52bbe899361602cd498573eb3bde97d1559ed",
+    ),
+    ARDUINO_PARTITION_LAYOUT: LayoutProfile(
+        1966080,
+        "05528998ae17fb6a7a5741443f9a7a4720c766f370fefc30814cbc3e391c1fc4",
+    ),
 }
 
 # Logical part ids, and the only values `GET /v1/agent/{target}/{part}` will resolve.

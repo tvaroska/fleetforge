@@ -76,6 +76,7 @@ from fleetforge.firmware.manifest import (
     AgentPartInfo,
     BundleManifest,
     ConfigPartition,
+    LayoutProfile,
     PartManifest,
 )
 
@@ -97,6 +98,7 @@ __all__ = [
     "EXPECTED_PARTITION_LAYOUT",
     "FirmwareCatalog",
     "INDEX_SCHEMA",
+    "LayoutProfile",
     "LocalBundle",
     "LocalPart",
     "MANIFEST_SCHEMA",

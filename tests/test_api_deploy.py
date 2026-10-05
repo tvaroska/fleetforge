@@ -60,6 +60,9 @@ OTHER_SHA256 = hashlib.sha256(OTHER_IMAGE).hexdigest()
 VERSION = "1.5.0"
 TARGET = "esp32"
 LAYOUT = "ab-4m-v1"
+# spec/device-protocol.md → Partition layouts, retyped (R2b-be-7).
+AB_SHA = "1fa67e6bbd034e434d04e9d6f4f52bbe899361602cd498573eb3bde97d1559ed"
+ARDUINO_SHA = "05528998ae17fb6a7a5741443f9a7a4720c766f370fefc30814cbc3e391c1fc4"
 # Read from the defaults rather than retyped: the URL's lifetime is also the reuse
 # window, and a literal here would keep passing while the setting drifted.
 TTL_S = settings_for_tests().signed_url_ttl_s
@@ -887,6 +890,7 @@ class TestPrecheck:
             ({"ota_slot_size": 100}, "slot_too_small", 409),
             ({"capabilities": ["telemetry"]}, "no_ota_capability", 409),
             ({"platform_type": "esp32c6"}, "no_artifact_for_target", 404),
+            ({"partition_table_sha256": ARDUINO_SHA}, "partition_table_mismatch", 409),
         ],
     )
     async def test_every_refusal_matches_the_deploy_word_for_word(
@@ -1003,6 +1007,183 @@ class TestPrecheck:
             )
 
         assert response.status_code == 401
+
+
+class TestTheGate:
+    """R2b-be-7: `rollback_incapable` gates `/deploy` unless `override` names it.
+
+    Refusals are never overridable; a gated deploy writes no row and publishes nothing.
+    """
+
+    async def test_the_precheck_reports_the_gating_warning(
+        self,
+        admin_app: FastAPI,
+        db: AsyncSession,
+        store: MemoryObjectStore,
+        publisher: FakeCommandPublisher,
+    ) -> None:
+        await add_device(db, rollback_capable=False)
+        await add_artifact(db)
+        token = await login_admin(admin_app)
+
+        response = await precheck(admin_app, token)
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["deployable"] is True
+        assert body["refusals"] == []
+        assert [(w["code"], w["needs_override"]) for w in body["warnings"]] == [
+            ("rollback_incapable", True)
+        ]
+        assert "cannot roll back" in body["warnings"][0]["message"]
+
+    async def test_a_deploy_without_the_override_is_409_with_the_warnings_sentence(
+        self,
+        admin_app: FastAPI,
+        db: AsyncSession,
+        store: MemoryObjectStore,
+        publisher: FakeCommandPublisher,
+    ) -> None:
+        await add_device(db, rollback_capable=False)
+        await add_artifact(db)
+        token = await login_admin(admin_app)
+
+        warned = (await precheck(admin_app, token)).json()["warnings"][0]
+        sent = await deploy(admin_app, token)
+
+        assert sent.status_code == 409
+        assert sent.json()["detail"] == warned["message"]
+        assert publisher.published == []
+        assert await events(db) == []
+
+    async def test_naming_the_code_opens_the_gate(
+        self,
+        admin_app: FastAPI,
+        db: AsyncSession,
+        store: MemoryObjectStore,
+        publisher: FakeCommandPublisher,
+    ) -> None:
+        await add_device(db, rollback_capable=False)
+        await add_artifact(db)
+        token = await login_admin(admin_app)
+
+        sent = await deploy(admin_app, token, override=["rollback_incapable"])
+
+        assert sent.status_code == 202
+        assert len(publisher.published) == 1
+        assert [e["state"] for e in await events(db)] == ["requested"]
+
+    @pytest.mark.parametrize("override", [["rollback_incapable"], []])
+    async def test_an_override_with_nothing_to_override_is_a_no_op(
+        self,
+        admin_app: FastAPI,
+        db: AsyncSession,
+        store: MemoryObjectStore,
+        publisher: FakeCommandPublisher,
+        override: list[str],
+    ) -> None:
+        await add_device(db)
+        await add_artifact(db)
+        token = await login_admin(admin_app)
+
+        sent = await deploy(admin_app, token, override=override)
+
+        assert sent.status_code == 202
+        assert len(publisher.published) == 1
+
+    @pytest.mark.parametrize("override", [["force"], "rollback_incapable", ["x"] * 9])
+    async def test_an_unknown_code_or_shape_is_422(
+        self,
+        admin_app: FastAPI,
+        db: AsyncSession,
+        store: MemoryObjectStore,
+        publisher: FakeCommandPublisher,
+        override: Any,
+    ) -> None:
+        await add_device(db, rollback_capable=False)
+        await add_artifact(db)
+        token = await login_admin(admin_app)
+
+        sent = await deploy(admin_app, token, override=override)
+
+        assert sent.status_code == 422
+        assert publisher.published == []
+        assert await events(db) == []
+
+    async def test_a_refusal_beats_an_override(
+        self,
+        admin_app: FastAPI,
+        db: AsyncSession,
+        store: MemoryObjectStore,
+        publisher: FakeCommandPublisher,
+    ) -> None:
+        await add_device(db, partition_table_sha256=ARDUINO_SHA, rollback_capable=False)
+        await add_artifact(db)
+        token = await login_admin(admin_app)
+
+        checked = (await precheck(admin_app, token)).json()
+        sent = await deploy(admin_app, token, override=["rollback_incapable"])
+
+        assert [r["code"] for r in checked["refusals"]] == ["partition_table_mismatch"]
+        assert [w["code"] for w in checked["warnings"]] == ["rollback_incapable"]
+        assert sent.status_code == 409
+        assert sent.json()["detail"] == checked["refusals"][0]["message"]
+        assert "partition table fingerprint" in sent.json()["detail"]
+        assert publisher.published == []
+        assert await events(db) == []
+
+    async def test_a_board_that_matches_its_profile_and_can_roll_back_is_clean(
+        self,
+        admin_app: FastAPI,
+        db: AsyncSession,
+        store: MemoryObjectStore,
+        publisher: FakeCommandPublisher,
+    ) -> None:
+        await add_device(db, partition_table_sha256=AB_SHA, rollback_capable=True)
+        await add_artifact(db)
+        token = await login_admin(admin_app)
+
+        checked = (await precheck(admin_app, token)).json()
+        sent = await deploy(admin_app, token)
+
+        assert checked["deployable"] is True
+        assert checked["refusals"] == [] and checked["warnings"] == []
+        assert sent.status_code == 202
+
+    async def test_the_precheck_ignores_override(
+        self,
+        admin_app: FastAPI,
+        db: AsyncSession,
+        store: MemoryObjectStore,
+        publisher: FakeCommandPublisher,
+    ) -> None:
+        await add_device(db, rollback_capable=False)
+        await add_artifact(db)
+        token = await login_admin(admin_app)
+
+        response = await precheck(admin_app, token, override=["rollback_incapable"])
+
+        assert response.status_code == 200
+        assert [w["code"] for w in response.json()["warnings"]] == ["rollback_incapable"]
+        assert publisher.published == []
+
+    async def test_plain_warnings_do_not_need_an_override(
+        self,
+        admin_app: FastAPI,
+        db: AsyncSession,
+        store: MemoryObjectStore,
+        publisher: FakeCommandPublisher,
+    ) -> None:
+        await add_device(db, presence_reported=False, rollback_capable=False)
+        await add_artifact(db)
+        token = await login_admin(admin_app)
+
+        warned = (await precheck(admin_app, token)).json()["warnings"]
+
+        assert [(w["code"], w["needs_override"]) for w in warned] == [
+            ("offline", False),
+            ("rollback_incapable", True),
+        ]
 
 
 class TestPrecheckSendsNothing:
@@ -1152,6 +1333,8 @@ class TestNoSchedulerLivesHere:
             "The image must fit the slot",
             "did not announce the `ota` capability",
             "The target is this device's chip",
+            "partition table fingerprint",
+            "cannot roll back",
         ],
     )
     def test_every_refusal_sentence_lives_in_one_place(self, sentence: str) -> None:

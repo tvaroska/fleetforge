@@ -604,7 +604,8 @@ announce is about 590 B, under esp-mqtt's 1024 B default buffer.
   refusal and the `rollback_incapable` gating warning; `DeployRequest.override`;
   `PrecheckFinding.needs_override`; the `SUPPORTED_LAYOUTS` profile dict
   `{layout: {ota_slot_size, partition_table_sha256}}` with the `ab-4m-v1` fingerprint
-  pinned in `tests/test_agent_partitions.py`.
+  pinned in `tests/test_agent_partitions.py`. **LANDED 2026-10-05**; see
+  [ota-deploy.md](ota-deploy.md) → *R2b-be-7*.
 - **test (`R2b-test-5`):** a bench run of a rollback-less bootloader to settle the `false`
   signal (hardware-gated). The QEMU proof that an OTA'd image reports
   `rollback_capable: true` is part of `R2b-fw-2`.

@@ -6,6 +6,26 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-05 — The deploy gate reads the board measurements: `partition_table_mismatch` is a device-vs-profile refusal, `rollback_incapable` is a gating warning cleared only by naming it in `override` (R2b-be-7)
+
+**Decided: `deploy_precheck.py` gains the refusal `partition_table_mismatch` and the gating warning `rollback_incapable`; `DeployRequest.override: list[OverrideCode]`; `PrecheckFinding.needs_override`; `SUPPORTED_LAYOUTS` becomes `dict[str, LayoutProfile(ota_slot_size, partition_table_sha256)]`. Details and T2 evidence: `docs/features/ota-deploy.md` → *R2b-be-7*.**
+
+- **The fingerprint check is device vs profile, independent of the artifact.** It compares the announced `partition_table_sha256` with the profile of the layout the device announces, so it runs even when the label names nothing for the chip, the same way the capability check does. Order: `no_artifact_for_target | layout_mismatch, slot_too_small`, `partition_table_mismatch`, `no_ota_capability`.
+- **Known fingerprints only, NULL fail-open (R2b-be-6).** It refuses only when the device sent a fingerprint AND its layout has a known one AND they differ. An unknown layout, or a profile whose sha is `None`, is logged at INFO (`… not checked`) and passes. `rollback_incapable` fires on `rollback_capable is False` only; `None` is silent.
+- **Gating is appended last, and `deployable` is unchanged** ("no refusals"); the card's `canSend()` already combines it with the ticks. The pre-check accepts `override` (same body) and ignores it, so it always reports the gating warning with `needs_override: true`.
+- **The 409 sentence is the warning's own**, byte for byte, raised in `_accept` after the refusals (a refusal always wins; `override` never clears one) and before the reuse lookup, the mint and the INSERT: a gated deploy writes no row and publishes nothing.
+- **`override: []` is legal** (the default; the card omits the key when empty). An unknown code is a 422 (pydantic `Literal`); a listed code that is not raised is a no-op. Max 8 entries.
+- **`OverrideCode` is a literal in `api/schemas.py`**, so it cannot reference the constant; `tests/test_deploy_precheck.py::TestOverrideCodes` keeps it equal to `deploy_precheck.GATING_CODES`. The R3 library marker will be the second entry of both.
+- **`LayoutProfile` is a frozen dataclass inside a plain mutable dict**, so tests can `monkeypatch.setitem` a row. `TestLayoutProfiles` keeps the dict equal to the spec's *Partition layouts* table; `tests/test_agent_partitions.py` pins the `ab-4m-v1` value against `agent/partitions.csv` by the spec's rule (retyped, imports nothing from `fleetforge`).
+- **The Arduino sha comes from the ADR's table** (`design/decisions/arduino-gets-its-own-layout-id.md`): R3 has not checked in a CSV. No Arduino board announces a fingerprint today, so it refuses nobody; T2 row I is its positive control.
+- **Observability.** The deploy log line carries `override=[…]`. The sentences are plain text (no backticks), shown verbatim in the banner and the card.
+- **Patch B is still owed** as the owner's `spec:` commit (the `up/announce` example in `spec/device-protocol.md` lacks the three keys). The TODO line's "apply Patch B in this task's commit" is stale (DECISIONS 2026-10-05 R2b-fw-2); nothing here needs it.
+- **Rejected:** recording `override` in `deploy_events.detail` (useful for an audit of who overrode what; a follow-up, out of scope here); a blanket `force`; making a gating warning set `deployable=false` (breaks the card); editing the stale frontend comments in `api.ts`, `deployPrecheck.ts` and `DeployCell.tsx` that say `needs_override` does not exist yet (be-6 precedent: no `frontend/` edits in a backend task; follow-up); an `ab-4m-v1` fingerprint check against the artifact (the artifact carries no table).
+
+Supersedes, from 2026-10-04 (R2b-be-2): "warnings never block `/deploy`; no override field yet". Gating warnings now block unless overridden.
+
+---
+
 ## 2026-10-05 — The agent announces the three measurements; `rollback_capable` is observed from any PENDING_VERIFY boot and stored in the credential namespace; a NEW-at-target boot ends `confirmed` with a detail; `false` waits for R2b-test-5 (R2b-fw-2)
 
 **Decided: agent 0.4.7 emits `flash_chip_size`, `partition_table_sha256` and `rollback_capable` right after `ota_slot_size`, in spec order. Details and T2 evidence: `docs/features/board-profiles.md` → *R2b-fw-2*.**

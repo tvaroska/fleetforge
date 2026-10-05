@@ -592,8 +592,14 @@ class ArtifactList(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+# The gating warnings an operator may override, one by one (R2b-be-7). A literal, so it
+# cannot reference `deploy_precheck.GATING_CODES`; `tests/test_deploy_precheck.py` keeps
+# the two equal. An unknown code is a 422.
+OverrideCode = Literal["rollback_incapable"]
+
+
 class DeployRequest(BaseModel):
-    """Deploy one labelled version to one device. Two fields, and both are choices.
+    """Deploy one labelled version to one device. Every field is a choice.
 
     There is deliberately **no `target`**: the chip is the device's own
     `platform_type` (`spec/flows.md` Flow 2 → "reject on chip mismatch"). Making it a
@@ -603,6 +609,10 @@ class DeployRequest(BaseModel):
     There is also no `url`, no `sha256` and no `force`. The artifact is resolved from
     `(platform_type, version)` server-side, so the command can never carry bytes the
     server has not stored and checked.
+
+    `override` (R2b-be-7) names gating warnings one by one, never a blanket force: an
+    unknown code is a 422, a listed code that is not raised is a no-op, and refusals
+    ignore it entirely. The pre-check accepts the same body and ignores `override`.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -613,6 +623,13 @@ class DeployRequest(BaseModel):
     # `on_command` deploy parks the board in `staged` until R2 — accepted on purpose,
     # because the wire field exists and refusing it would be inventing a restriction.
     apply: Literal["auto", "on_command"] = "auto"
+    override: list[OverrideCode] = Field(
+        default_factory=list,
+        max_length=8,
+        description=(
+            "gating warning codes the operator explicitly overrides; refusals are never overridable"
+        ),
+    )
 
 
 class DeployAccepted(BaseModel):
@@ -648,13 +665,18 @@ class DeployAccepted(BaseModel):
 class PrecheckFinding(BaseModel):
     code: str
     message: str
+    # A gating warning: `/deploy` answers 409 with `message` unless `override` lists `code`.
+    needs_override: bool = False
 
 
 class DeployPrecheck(BaseModel):
     """What `POST /v1/devices/{device_id}/deploy/precheck` returns: a dry run of a deploy.
 
     200 always for a resolved check. `refusals` cannot be overridden and match
-    `POST /deploy`'s `detail` word for word; `warnings` are reported, never enforced.
+    `POST /deploy`'s `detail` word for word. `warnings` are reported; the ones with
+    `needs_override` are enforced by `/deploy` (409, the same sentence) unless the body
+    names their code in `override`, and the rest are never enforced. `deployable` is still
+    "no refusals": a gating warning does not clear it.
     No URL and no `cmd_id`: nothing was minted, recorded or published.
 
     `code` is the stable field a client branches on; `message` is lifted verbatim into the
