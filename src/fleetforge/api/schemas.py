@@ -19,7 +19,13 @@ from pydantic import (
     model_validator,
 )
 
-from fleetforge.announce_fields import normalize_known_networks, normalize_ssid
+from fleetforge.announce_fields import (
+    normalize_flash_chip_size,
+    normalize_known_networks,
+    normalize_partition_table_sha256,
+    normalize_rollback_capable,
+    normalize_ssid,
+)
 from fleetforge.auth.enrollment import EnrollmentTokenStatus
 from fleetforge.auth.tokens import MAX_TOKEN_LENGTH
 from fleetforge.db.models import PowerClass
@@ -165,6 +171,12 @@ class EnrollRequest(BaseModel):
     parent_device_id: str | None = None
     partition_layout: str | None = Field(default=None, max_length=64)
     ota_slot_size: int | None = Field(default=None, gt=0)
+    # The board measurements (R2b-be-6). Stored, never rejected, like `ssid` — a 422
+    # here would come after the token was read, and the spec forbids it. The validators
+    # below coerce, never raise. Declared after `device_id`, which the log line needs.
+    flash_chip_size: int | None = None
+    partition_table_sha256: str | None = None
+    rollback_capable: bool | None = None
     capabilities: list[str] = Field(default_factory=list, max_length=32)
 
     @field_validator("device_id", "parent_device_id")
@@ -191,6 +203,24 @@ class EnrollRequest(BaseModel):
     def _usable_known_networks(cls, value: object, info: ValidationInfo) -> int | None:
         """A plausible count, or `None` — never a 422."""
         return normalize_known_networks(value, device_id=_logged_device_id(info))
+
+    @field_validator("flash_chip_size", mode="before")
+    @classmethod
+    def _usable_flash_chip_size(cls, value: object, info: ValidationInfo) -> int | None:
+        """A positive size that fits the agent's `uint32_t`, or `None` — never a 422."""
+        return normalize_flash_chip_size(value, device_id=_logged_device_id(info))
+
+    @field_validator("partition_table_sha256", mode="before")
+    @classmethod
+    def _usable_partition_table_sha256(cls, value: object, info: ValidationInfo) -> str | None:
+        """64 lowercase hex characters, or `None` — never a 422."""
+        return normalize_partition_table_sha256(value, device_id=_logged_device_id(info))
+
+    @field_validator("rollback_capable", mode="before")
+    @classmethod
+    def _usable_rollback_capable(cls, value: object, info: ValidationInfo) -> bool | None:
+        """A real JSON boolean, or `None` — never a 422, and `"true"` is not coerced."""
+        return normalize_rollback_capable(value, device_id=_logged_device_id(info))
 
     @field_validator("power_class")
     @classmethod
@@ -302,6 +332,13 @@ class DeviceSummary(BaseModel):
     parent_device_id: str | None
     partition_layout: str | None
     ota_slot_size: int | None
+    # The board measurements (R2b-be-6), device-reported, the last value seen; NULL =
+    # unknown. That includes `rollback_capable` on every board before its first OTA,
+    # which a dashboard may show as "rollback unverified". Defaulted only so no other
+    # constructor breaks; `_device_summary` always sets all three.
+    flash_chip_size: int | None = None
+    partition_table_sha256: str | None = None
+    rollback_capable: bool | None = None
     capabilities: list[str]
     last_seen: dt.datetime | None
     enrolled_at: dt.datetime

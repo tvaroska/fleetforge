@@ -272,6 +272,14 @@ class Device(Base):
     )
     partition_layout: Mapped[str | None] = mapped_column(Text, nullable=True)
     ota_slot_size: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # The board measurements (R2b-be-6), device-reported, as last announced; NULL =
+    # unknown. No CHECK, as for `ssid`: both edges normalise first. Physical flash chip
+    # size in bytes. BIGINT, because the agent's `uint32_t` passes int4 above 2 GiB.
+    flash_chip_size: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # Lowercase hex SHA-256 of the decoded partition table (spec → *Partition layouts*).
+    partition_table_sha256: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # NULL until the board has booted an OTA-written image, either way.
+    rollback_capable: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     capabilities: Mapped[list[str]] = mapped_column(
         ARRAY(Text), nullable=False, server_default=text("'{}'::text[]")
     )

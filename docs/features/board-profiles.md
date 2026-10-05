@@ -13,6 +13,69 @@ finishes a task, it appends a completed entry below.
 
 ## Completed Work
 
+### R2b-be-6 (2026-10-05): board measurements ingested and stored
+
+Backend only, migration `0006`. Decision: `DECISIONS.md` 2026-10-05 (R2b-be-6). `spec/`
+and `agent/` untouched: Patch A was already applied (8cb5335), and Patch B (the three keys
+in the spec's `up/announce` example) goes in only with `R2b-fw-2`, because
+`tests/test_ff_cfg.py` requires the agent to emit every key in that example.
+
+As built:
+
+- **Columns.** `devices.flash_chip_size BIGINT NULL` (the agent's `uint32_t` passes int4),
+  `devices.partition_table_sha256 TEXT NULL`, `devices.rollback_capable BOOLEAN NULL`, right
+  after `ota_slot_size`. No default, no CHECK. NULL is "unknown".
+- **Normalisers.** `announce_fields.py` gained `normalize_flash_chip_size` (an `int`, not a
+  `bool`, in `1..FLASH_CHIP_SIZE_MAX = 2^32 - 1`), `normalize_partition_table_sha256`
+  (`fullmatch` of `[0-9a-f]{64}`, never lowercased) and `normalize_rollback_capable`
+  (`isinstance(value, bool)` only). Nothing is coerced, and nothing raises. A malformed
+  value becomes NULL plus one INFO line with the field, the reason and the device id,
+  never the value. The flash ceiling is load-bearing: past int64, asyncpg raises inside
+  the transaction and the announce is lost.
+- **Announce.** `AnnouncePayload` has the three fields, each with a `mode="before"`
+  validator. `store.py::_measurement_values` writes the triple on **every** announce, so a
+  key that is absent clears the stored value (the second exception to "absent means no
+  change", after `_network_values`). This is also the fail-open direction for R2b-be-7's
+  gate: NULL never refuses and never warns.
+- **Enroll.** `EnrollRequest` has the same three fields and validators, so a malformed
+  value never yields a 422, before or after the burn. `IDENTITY_FIELDS` gained them, so a
+  re-enrolment without them stores NULL. `api/routers/enroll.py` is unchanged.
+- **Read model.** `DeviceSummary` exposes the three right after `ota_slot_size`, and
+  `deploy` stays last. `frontend/src/api.ts` is unchanged: a later frontend task adds the
+  mirror.
+- **Simulator.** `DeviceIdentity` always announces the three, null when unset, between
+  `ota_slot_size` and `capabilities`. New flags: `--flash-chip-size`, `--partition-sha`
+  (sent verbatim, junk included) and `--rollback-capable {true,false}`. With no flags the
+  sim announces null for all three, as every agent ≤ 0.4.6 does.
+
+T2 evidence (dev stack on 8088; api restarted first and migrated 0005 -> 0006, then the
+ingestor; trimmed):
+
+```
+0  alembic_version -> 0006; flash_chip_size|bigint  partition_table_sha256|text  rollback_capable|boolean
+A  just sim --token … --name be6a --flash-chip-size 4194304 --partition-sha 1fa6…59ed --rollback-capable true
+     -> {"flash_chip_size":4194304,"partition_table_sha256":"1fa6…59ed","rollback_capable":true}
+B  just sim --name be6a --rollback-capable false      -> {"flash_chip_size":null,"partition_table_sha256":null,"rollback_capable":false}
+C  just sim --name be6a                                -> all three null
+D  curl enroll be6d00000001 (valid values stored), then mqtt-pub announce
+   {"fw_version":"9.9.9","flash_chip_size":18446744073709551616,"partition_table_sha256":"1FA6…59ED","rollback_capable":"true"}
+     -> {"fw_version":"9.9.9","flash_chip_size":null,"partition_table_sha256":null,"rollback_capable":null}
+   ingestor: "device be6d00000001 announced an unusable flash_chip_size (out of range); stored as null"
+             "… unusable partition_table_sha256 (not 64 lowercase hex characters) …"
+             "… unusable rollback_capable (not a boolean) …"
+             no DataError / OverflowError / Traceback; neither the number nor the uppercase sha in the log
+E  curl POST /v1/enroll be6e00000001 with valid values -> 200, all three stored
+F  curl POST /v1/enroll be6f00000001 "4MB" / "xyz" / 1  -> 200 (never 422), all three null,
+   three "unusable … stored as null" lines in the api log, no values
+G  .devices[0] | keys_unsorted -> […,"ota_slot_size","flash_chip_size","partition_table_sha256","rollback_capable","capabilities",…,"deploy"]
+```
+
+**Release note (deploy order).** As for R2b-be-5: the ingestor's ORM maps the new
+columns, so a new-image ingestor on a `0005` schema fails every message, the retained
+replay included, with `UndefinedColumnError`. `services/scripts/deploy.sh` recreates the
+ingestor before `docker rollout fleetforge-api` migrates. Restart `fleetforge-ingestor`
+after the api rollout.
+
 ### R2b-spec-2 (2026-10-04): R2-spec-1 amended; spec not applied
 
 Decided: amend the R2-spec-1 proposal, then apply it (not as filed, not dropped). Three

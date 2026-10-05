@@ -335,6 +335,134 @@ async def test_a_retained_announce_also_writes_the_network(session: AsyncSession
     assert device.last_seen is None
 
 
+# --- board measurements (R2b-be-6) -------------------------------------------
+
+SHA = "1fa67e6bbd034e434d04e9d6f4f52bbe899361602cd498573eb3bde97d1559ed"
+MEASURED = {"flash_chip_size": 4194304, "partition_table_sha256": SHA, "rollback_capable": True}
+
+
+def measurements(device: Device) -> tuple[int | None, str | None, bool | None]:
+    return (device.flash_chip_size, device.partition_table_sha256, device.rollback_capable)
+
+
+async def test_announce_stores_the_board_measurements(session: AsyncSession) -> None:
+    await seed_device(session)
+
+    await publish(session, "announce", {**ANNOUNCE, **MEASURED})
+
+    assert measurements(await reload(session)) == (4194304, SHA, True)
+
+
+async def test_the_measurements_are_written_as_a_triple_on_every_announce(
+    session: AsyncSession,
+) -> None:
+    """Absent means "unknown", not "no change": a board that OTAs back to an agent that
+    does not send the keys must not keep a reading it no longer vouches for. It is also
+    the fail-open direction for R2b-be-7's gate: NULL never refuses."""
+    await seed_device(session)
+
+    await publish(session, "announce", {**ANNOUNCE, **MEASURED})
+    await publish(session, "announce", ANNOUNCE)
+
+    device = await reload(session)
+    assert measurements(device) == (None, None, None)
+    assert device.fw_version == "1.4.2"
+
+
+async def test_rollback_capable_false_is_a_value_not_an_absence(session: AsyncSession) -> None:
+    await seed_device(session, rollback_capable=True)
+
+    await publish(session, "announce", {**ANNOUNCE, "rollback_capable": False})
+
+    device = await reload(session)
+    assert device.rollback_capable is False
+    assert (device.flash_chip_size, device.partition_table_sha256) == (None, None)
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        {"flash_chip_size": "4MB", "partition_table_sha256": SHA.upper(), "rollback_capable": 1},
+        {"flash_chip_size": 0, "partition_table_sha256": SHA[:63], "rollback_capable": "true"},
+        {"flash_chip_size": 4194304.0, "partition_table_sha256": 123, "rollback_capable": []},
+        {"flash_chip_size": True, "partition_table_sha256": "", "rollback_capable": "false"},
+    ],
+)
+async def test_malformed_measurements_never_lose_the_announce(
+    session: AsyncSession, malformed: dict[str, object]
+) -> None:
+    """A `ValidationError` would drop the `fw_version` that says the OTA landed."""
+    await seed_device(session, flash_chip_size=4194304, partition_table_sha256=SHA)
+
+    event = await publish(session, "announce", {**ANNOUNCE, "fw_version": "9.9.9", **malformed})
+
+    assert event is not None
+    device = await reload(session)
+    assert device.fw_version == "9.9.9"
+    assert measurements(device) == (None, None, None)
+
+
+async def test_measurements_the_database_would_refuse_are_stored_as_null(
+    session: AsyncSession,
+) -> None:
+    """A size past int64 makes asyncpg raise; a NUL makes PostgreSQL raise. Either
+    would roll back the whole announce. Raw bytes, so the test reads like the wire."""
+    await seed_device(session)
+    raw = (
+        b'{"proto":1,"device_id":"' + DEVICE_ID.encode() + b'","fw_version":"9.9.11",'
+        b'"link_type":"wifi","power_class":"always_on",'
+        b'"flash_chip_size":18446744073709551616,'
+        b'"partition_table_sha256":"' + SHA[:63].encode() + b'\\u0000",'
+        b'"rollback_capable":false}'
+    )
+
+    event = await publish(session, "announce", raw=raw)
+
+    assert event is not None
+    device = await reload(session)
+    assert device.fw_version == "9.9.11"
+    assert measurements(device) == (None, None, False)
+
+
+async def test_malformed_measurements_are_logged_without_their_values(
+    session: AsyncSession,
+) -> None:
+    await seed_device(session)
+    with capture_logs() as records:
+        await publish(
+            session,
+            "announce",
+            {
+                **ANNOUNCE,
+                "flash_chip_size": 2**64,
+                "partition_table_sha256": SHA.upper(),
+                "rollback_capable": "true",
+            },
+        )
+
+    unusable = [record for record in records if "unusable" in record.getMessage()]
+    messages = [record.getMessage() for record in unusable]
+    assert len(messages) == 3, messages
+    expected = f"device {DEVICE_ID} announced an unusable flash_chip_size (out of range)"
+    assert any(expected in m for m in messages)
+    assert any("partition_table_sha256 (not 64 lowercase hex characters)" in m for m in messages)
+    assert any("rollback_capable (not a boolean)" in m for m in messages)
+    assert all(record.levelno == logging.INFO for record in unusable)
+    everything = " ".join(record.getMessage() for record in records)
+    assert str(2**64) not in everything
+    assert SHA.upper() not in everything
+
+
+async def test_a_retained_announce_also_writes_the_measurements(session: AsyncSession) -> None:
+    await seed_device(session, flash_chip_size=8388608, rollback_capable=False)
+
+    await publish(session, "announce", {**ANNOUNCE, **MEASURED}, retained=True)
+
+    device = await reload(session)
+    assert measurements(device) == (4194304, SHA, True)
+    assert device.last_seen is None
+
+
 # --- presence ---------------------------------------------------------------
 
 

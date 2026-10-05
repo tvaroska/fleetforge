@@ -34,7 +34,9 @@ logger = logging.getLogger(__name__)
 # layout and its capabilities, and a stale value silently selects the wrong presence
 # rule or the wrong OTA slot size. `ssid` / `known_networks` follow the same rule, so
 # a re-enrolment without them (an older agent, an ethernet board) stores NULL — the
-# spec's "not reported", never a stale network.
+# spec's "not reported", never a stale network. So do the three board measurements
+# (R2b-be-6): a re-flash may have changed the bootloader and the partition table, so a
+# re-enrolment without them stores NULL ("unknown"), never the old reading.
 IDENTITY_FIELDS = (
     "platform_type",
     "proto",
@@ -48,6 +50,9 @@ IDENTITY_FIELDS = (
     "parent_device_id",
     "partition_layout",
     "ota_slot_size",
+    "flash_chip_size",
+    "partition_table_sha256",
+    "rollback_capable",
     "capabilities",
 )
 

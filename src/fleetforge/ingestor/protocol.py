@@ -6,9 +6,10 @@ is a reading of it, never an extension of it.
 **Tolerate everything, reject nothing on vocabulary** (*Evolution rules*: additive
 changes only, both sides ignore unknown fields). So every payload model has
 `extra="ignore"`, **every field is optional** — a missing field means "no change",
-not "set to NULL" (the one exception, `ssid` / `known_networks`, is explained in
-`store.py::_network_values`) — and an unknown `up/` channel is logged and dropped rather than
-raising. A `ValidationError` escaping into the message loop would be a
+not "set to NULL" (the exceptions, `ssid` / `known_networks` and the three board
+measurements, are explained in `store.py::_network_values` and
+`store.py::_measurement_values`) — and an unknown `up/` channel is logged and dropped
+rather than raising. A `ValidationError` escaping into the message loop would be a
 fleet-visibility outage caused by one board's firmware bug.
 """
 
@@ -19,7 +20,13 @@ from enum import StrEnum
 
 from pydantic import BaseModel, ConfigDict, ValidationError, ValidationInfo, field_validator
 
-from fleetforge.announce_fields import normalize_known_networks, normalize_ssid
+from fleetforge.announce_fields import (
+    normalize_flash_chip_size,
+    normalize_known_networks,
+    normalize_partition_table_sha256,
+    normalize_rollback_capable,
+    normalize_ssid,
+)
 from fleetforge.identity import DEVICE_ID_RE
 
 logger = logging.getLogger(__name__)
@@ -103,6 +110,11 @@ class AnnouncePayload(_TolerantPayload):
     absent and null alike meaning "not reported" (`store.py::_network_values`); a
     malformed value **coerces to `None`** rather than raising, for the reason
     `StatusPayload` gives — a `ValidationError` here would lose the `fw_version` too.
+
+    `flash_chip_size` / `partition_table_sha256` / `rollback_capable` (R2b-be-6) follow
+    the same two rules: written as a triple on every announce, absent meaning "unknown"
+    (`store.py::_measurement_values`), and malformed coercing to `None`. They are
+    declared after `device_id` so a log line can name the board.
     """
 
     proto: int | None = None
@@ -117,6 +129,9 @@ class AnnouncePayload(_TolerantPayload):
     expected_wake_interval_s: int | None = None
     partition_layout: str | None = None
     ota_slot_size: int | None = None
+    flash_chip_size: int | None = None
+    partition_table_sha256: str | None = None
+    rollback_capable: bool | None = None
     capabilities: list[str] | None = None
 
     @field_validator("ssid", mode="before")
@@ -130,6 +145,24 @@ class AnnouncePayload(_TolerantPayload):
     def _usable_known_networks(cls, value: object, info: ValidationInfo) -> int | None:
         """A plausible count, or `None` — never a `ValidationError`."""
         return normalize_known_networks(value, device_id=_logged_device_id(info))
+
+    @field_validator("flash_chip_size", mode="before")
+    @classmethod
+    def _usable_flash_chip_size(cls, value: object, info: ValidationInfo) -> int | None:
+        """A positive size that fits the agent's `uint32_t`, or `None` — never raises."""
+        return normalize_flash_chip_size(value, device_id=_logged_device_id(info))
+
+    @field_validator("partition_table_sha256", mode="before")
+    @classmethod
+    def _usable_partition_table_sha256(cls, value: object, info: ValidationInfo) -> str | None:
+        """64 lowercase hex characters, or `None` — never a `ValidationError`."""
+        return normalize_partition_table_sha256(value, device_id=_logged_device_id(info))
+
+    @field_validator("rollback_capable", mode="before")
+    @classmethod
+    def _usable_rollback_capable(cls, value: object, info: ValidationInfo) -> bool | None:
+        """A real JSON boolean, or `None` — `"true"` and `1` are not coerced."""
+        return normalize_rollback_capable(value, device_id=_logged_device_id(info))
 
 
 class PresencePayload(_TolerantPayload):

@@ -316,12 +316,12 @@ are R3). Order inside each flow: the one-place status first, then the cards, the
       after `R2b-test-5`. Applies Patch B in the same commit. QEMU proof: an OTA'd image
       announces `rollback_capable: true` and the `ab-4m-v1` fingerprint. New agent version.
       Spec applied in 8cb5335 (Patch A). Apply Patch B (announce example keys) in this task's commit. See docs/features/board-profiles.md → *Step 1 wire proposal*.
-- [ ] **R2b-be-6**: Ingest and store the three board measurements (P2, 1d)
+- [x] **R2b-be-6**: Ingest and store the three board measurements (P2, 1d) _(done 2026-10-05; reviewed; see docs/features/board-profiles.md)_
       `AnnouncePayload`, `ingestor/store.py`, `EnrollRequest` (store, never reject: malformed
       → null + log), `IDENTITY_FIELDS`, `Device` columns + Alembic migration (CRITICAL),
       simulator flags `--rollback-capable {true,false}`, `--partition-sha`,
       `--flash-chip-size`.
-      Spec applied in 8cb5335 (Patch A). Apply Patch B (announce example keys) in this task's commit. See docs/features/board-profiles.md → *Step 1 wire proposal*.
+      Spec applied in 8cb5335 (Patch A). Patch B not applied here: it goes in only in R2b-fw-2's commit (DECISIONS 2026-10-04 A4). See docs/features/board-profiles.md → *Step 1 wire proposal*.
 - [ ] **R2b-be-7**: Pre-check and deploy gate on the measurements (P2, 1d)
       `deploy_precheck.py`: `partition_table_mismatch` refusal, `rollback_incapable` gating
       warning; `DeployRequest.override`; `PrecheckFinding.needs_override`;

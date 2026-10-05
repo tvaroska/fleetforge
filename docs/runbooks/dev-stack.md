@@ -263,6 +263,10 @@ just sim --token "$(newtoken)" --name frame --power-class sleepy --wake-interval
 # told otherwise; ethernet announces null / null. The next session overwrites both.
 just sim --name blinker --ssid shed --known-networks 2 --duration 10
 
+# The board measurements (R2b-be-6). A no-flag sim announces all three as null, like
+# agent <= 0.4.6; the next session overwrites all three, so a dropped flag clears it.
+just sim --name blinker --flash-chip-size 4194304 --partition-sha 1fa67e6bbd034e434d04e9d6f4f52bbe899361602cd498573eb3bde97d1559ed --rollback-capable true --duration 10
+
 # A bad link: seeded latency before every publish, so a run is reproducible.
 just sim --name blinker --link slow --seed 7 --heartbeat-interval 5
 

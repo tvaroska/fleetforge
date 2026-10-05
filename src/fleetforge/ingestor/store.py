@@ -35,8 +35,9 @@ logger = logging.getLogger(__name__)
 # Identity fields an announce is allowed to move, each only when present. `device_id`,
 # `group_id`, `name`, `parent_device_id`, `enrolled_at` and `broker_provisioned_at` are
 # operator or enrollment facts, never device claims, so they are absent on purpose.
-# `ssid` / `known_networks` are absent too, but for the opposite reason: they are
-# written on *every* announce, present or not — see `_network_values`.
+# `ssid` / `known_networks` and the three board measurements are absent too, but for
+# the opposite reason: they are written on *every* announce, present or not — see
+# `_network_values` and `_measurement_values`.
 ANNOUNCE_FIELDS = (
     "proto",
     "platform_type",
@@ -103,9 +104,10 @@ async def apply_announce(
     """Apply the identity fields an announce actually carried.
 
     Fields absent from the payload mean "no change" and are not written
-    (`spec/device-protocol.md` → *Evolution rules*) — except `ssid` /
-    `known_networks`, written as a pair on every announce because the spec reads
-    absent as "not reported" (`_network_values`). `link_type` is written straight
+    (`spec/device-protocol.md` → *Evolution rules*) — with two exceptions, both
+    written on every announce because the spec reads absent as "not reported" /
+    "unknown": `ssid` / `known_networks` (`_network_values`) and the board
+    measurements (`_measurement_values`). `link_type` is written straight
     through however odd it looks — the column is TEXT and there are no PG enums, so a
     board on a link nobody has invented yet still shows up in the dashboard.
     """
@@ -116,6 +118,7 @@ async def apply_announce(
     }
     values.update(_power_class_values(device_id, payload))
     values.update(_network_values(payload))
+    values.update(_measurement_values(payload))
     if advance_last_seen:
         values["last_seen"] = _last_seen_value(at)
     if not values:
@@ -129,7 +132,7 @@ async def apply_announce(
 def _network_values(payload: AnnouncePayload) -> dict[str, Any]:
     """`ssid` and `known_networks`: written as a pair on **every** announce.
 
-    The one exception to "absent means no change". `spec/device-protocol.md` →
+    An exception to "absent means no change" (the other is `_measurement_values`). `spec/device-protocol.md` →
     `up/announce`: "The server treats absent and `null` alike, as 'not reported'", and
     the announce is the full identity, republished on every broker connect. A board
     that OTAs back to a pre-0.4.6 agent, or is re-flashed onto ethernet, stops sending
@@ -142,6 +145,31 @@ def _network_values(payload: AnnouncePayload) -> dict[str, Any]:
     No DB CHECK either, so there is nothing for this pair to violate.
     """
     return {"ssid": payload.ssid, "known_networks": payload.known_networks}
+
+
+def _measurement_values(payload: AnnouncePayload) -> dict[str, Any]:
+    """The three board measurements: written as a triple on **every** announce.
+
+    The second exception to "absent means no change", for the same reasons as
+    `_network_values`. `spec/device-protocol.md` → `up/announce`: "An absent field
+    means unknown". The announce is the full identity, republished on every broker
+    connect, and the retained copy is always the latest. A board that OTAs back to an
+    agent that does not send the keys must read as "unknown", not repeat a reading it
+    no longer vouches for.
+
+    It is also the fail-open direction for the deploy pre-check (R2b-be-7): NULL never
+    refuses and never warns, while a stale fingerprint or a stale `rollback_capable`
+    could raise a false refusal or warning. Clearing can only relax the gate.
+
+    The payload already normalised all three (`fleetforge.announce_fields`): a malformed
+    value is `None` here, and `flash_chip_size` fits BIGINT. `rollback_capable=False`
+    is a value, not an absence — nothing here tests truthiness.
+    """
+    return {
+        "flash_chip_size": payload.flash_chip_size,
+        "partition_table_sha256": payload.partition_table_sha256,
+        "rollback_capable": payload.rollback_capable,
+    }
 
 
 def _power_class_values(device_id: str, payload: AnnouncePayload) -> dict[str, Any]:

@@ -279,6 +279,12 @@ class DeviceIdentity:
     parent_device_id: str | None = None
     partition_layout: str = "ab-4m-v1"
     ota_slot_size: int = 1966080
+    # The board measurements (R2b-be-6). Unset is null, as every agent <= 0.4.6 sends.
+    # Typed loosely and not checked by `validate()`: the server refuses none of them,
+    # and sending junk is how its tolerance is tested.
+    flash_chip_size: int | None = None
+    partition_table_sha256: str | None = None
+    rollback_capable: bool | None = None
     capabilities: tuple[str, ...] = ()
     proto: int = 1
 
@@ -331,6 +337,10 @@ class DeviceIdentity:
             "parent_device_id": self.parent_device_id,
             "partition_layout": self.partition_layout,
             "ota_slot_size": self.ota_slot_size,
+            # Always present, null when unset (R2b-be-6), in spec order.
+            "flash_chip_size": self.flash_chip_size,
+            "partition_table_sha256": self.partition_table_sha256,
+            "rollback_capable": self.rollback_capable,
             "capabilities": list(self.capabilities),
         }
 

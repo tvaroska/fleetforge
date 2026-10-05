@@ -23,12 +23,25 @@ anything reaches the database.
 malformed value logs its field name, a reason and the device id, at INFO: one line per
 board session, so a buggy fleet does not flood.
 
+**The board measurements (R2b-be-6).** `flash_chip_size`, `partition_table_sha256` and
+`rollback_capable` follow right after `ota_slot_size`; an absent field "means unknown,
+and the server never refuses a device for omitting one". Malformed means: a
+`flash_chip_size` that is not a positive integer, a `partition_table_sha256` that is not
+64 lowercase hex characters, a `rollback_capable` that is not a boolean
+(`docs/features/board-profiles.md` → *Step 1 wire proposal*). Nothing is coerced: not
+`"4194304"` or `4194304.0` to an int, not an uppercase digest to lowercase (uppercase is
+malformed by definition), not `"true"` or `1` to a bool. `flash_chip_size` also has a
+ceiling, the `uint32_t` the agent reads it into. It is load-bearing: an integer past
+int64 (`2**63`, or a JSON literal like `1e30` written out in full) makes asyncpg raise
+inside the transaction, and the announce it rode in on is lost.
+
 This lives outside both `fleetforge.api` and `fleetforge.ingestor` because the API may
 not import from the ingestor (the precedent is `identity.py`). It is named for
-announced fields in general: R2b-be-6 adds the board measurements here.
+announced fields in general.
 """
 
 import logging
+import re
 import unicodedata
 
 logger = logging.getLogger(__name__)
@@ -40,6 +53,16 @@ SSID_MAX_BYTES = 32
 # A plausibility ceiling, not the protocol cap (4 today). A later writer may raise the
 # cap, and its boards must still be stored.
 KNOWN_NETWORKS_MAX = 64
+
+# The `uint32_t` that `esp_flash_get_physical_size` writes. Also keeps every stored value
+# inside the BIGINT column: past int64, asyncpg raises and the announce is lost.
+FLASH_CHIP_SIZE_MAX = 0xFFFF_FFFF
+
+# Exactly 64 lowercase hex characters, used with `fullmatch`. An explicit class on
+# purpose: `\d` would accept Unicode digits such as "٠", and `re.match(...$)` would
+# accept a trailing newline. The class also keeps out NUL and lone surrogates, which
+# PostgreSQL TEXT and asyncpg would refuse.
+_SHA256_HEX = re.compile(r"[0-9a-f]{64}")
 
 
 def _unusable(field: str, reason: str, device_id: str | None) -> None:
@@ -95,3 +118,50 @@ def normalize_known_networks(value: object, *, device_id: str | None = None) -> 
         _unusable("known_networks", "out of range", device_id)
         return None
     return value
+
+
+def normalize_flash_chip_size(value: object, *, device_id: str | None = None) -> int | None:
+    """The physical flash chip size in bytes, or `None` if it is not a positive integer.
+
+    `bool` is an `int` in Python and is not a size. Floats and strings are not coerced.
+    No power-of-two rule: the spec says only "positive integer".
+    """
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        _unusable("flash_chip_size", "not an integer", device_id)
+        return None
+    if not 1 <= value <= FLASH_CHIP_SIZE_MAX:
+        _unusable("flash_chip_size", "out of range", device_id)
+        return None
+    return value
+
+
+def normalize_partition_table_sha256(value: object, *, device_id: str | None = None) -> str | None:
+    """The partition table fingerprint, or `None` if it is not 64 lowercase hex characters.
+
+    Never lowercased: the spec defines the value as lowercase hex, so an uppercase digest
+    comes from a broken writer. `""` is malformed too, not "not reported".
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        _unusable("partition_table_sha256", "not a string", device_id)
+        return None
+    if _SHA256_HEX.fullmatch(value) is None:
+        _unusable("partition_table_sha256", "not 64 lowercase hex characters", device_id)
+        return None
+    return value
+
+
+def normalize_rollback_capable(value: object, *, device_id: str | None = None) -> bool | None:
+    """`True` / `False` as reported, or `None` if the value is not a JSON boolean.
+
+    `1`, `0`, `"true"` and `"false"` are not booleans here. This returns a real `bool`
+    or `None`, so pydantic's lax `bool` coercion after a `mode="before"` validator has
+    nothing left to coerce.
+    """
+    if value is None or isinstance(value, bool):
+        return value
+    _unusable("rollback_capable", "not a boolean", device_id)
+    return None

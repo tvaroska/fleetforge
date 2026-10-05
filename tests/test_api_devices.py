@@ -41,20 +41,29 @@ from tests.conftest import (
 DEVICE_ID = "a4cf12b3de91"
 
 
+async def _wipe_fleet(session: AsyncSession) -> None:
+    await session.execute(delete(DeviceProgress))
+    # Before the devices: the FK is `ON DELETE RESTRICT`, which is the point.
+    await session.execute(delete(DeployEvent))
+    await session.execute(delete(Device))
+    await session.execute(delete(DeviceGroup))
+    await session.commit()
+
+
 @pytest.fixture
 async def fleet(engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
-    """A committed-writes session whose devices are deleted afterwards."""
+    """A committed-writes session whose devices are deleted before and afterwards.
+
+    Before too: `test_enroll.py` commits devices it never deletes, so this module only
+    started from an empty fleet when it happened to run first.
+    """
     async with AsyncSession(engine, expire_on_commit=False) as session:
+        await _wipe_fleet(session)
         try:
             yield session
         finally:
             await session.rollback()
-            await session.execute(delete(DeviceProgress))
-            # Before the devices: the FK is `ON DELETE RESTRICT`, which is the point.
-            await session.execute(delete(DeployEvent))
-            await session.execute(delete(Device))
-            await session.execute(delete(DeviceGroup))
-            await session.commit()
+            await _wipe_fleet(session)
 
 
 async def add_device(session: AsyncSession, device_id: str = DEVICE_ID, **overrides: Any) -> Device:
@@ -185,6 +194,9 @@ async def test_the_summary_carries_the_fleet_view_and_no_presence_ingredients(
         "parent_device_id",
         "partition_layout",
         "ota_slot_size",
+        "flash_chip_size",
+        "partition_table_sha256",
+        "rollback_capable",
         "capabilities",
         "last_seen",
         "enrolled_at",
@@ -217,6 +229,34 @@ async def test_the_network_the_board_last_reported_is_shown(
     keys = list(by_id[DEVICE_ID])
     link = keys.index("link_type")
     assert keys[link : link + 3] == ["link_type", "ssid", "known_networks"]
+    assert keys[-1] == "deploy", "frontend/src/api.ts mirrors this order; deploy stays last"
+
+
+async def test_the_board_measurements_are_shown_in_spec_order(
+    admin_app: FastAPI, fleet: AsyncSession
+) -> None:
+    """R2b-be-6: last value seen, NULL as "unknown"; `false` round-trips as `false`."""
+    sha = "1fa67e6bbd034e434d04e9d6f4f52bbe899361602cd498573eb3bde97d1559ed"
+    await add_device(
+        fleet,
+        ota_slot_size=1966080,
+        flash_chip_size=4194304,
+        partition_table_sha256=sha,
+        rollback_capable=False,
+    )
+    await add_device(fleet, "a4cf12b3de93")
+
+    devices = (await list_devices(admin_app, await login_admin(admin_app)))["devices"]
+    by_id = {row["device_id"]: row for row in devices}
+
+    measured, unknown = by_id[DEVICE_ID], by_id["a4cf12b3de93"]
+    fields = ("flash_chip_size", "partition_table_sha256", "rollback_capable")
+    assert tuple(measured[f] for f in fields) == (4194304, sha, False)
+    assert measured["rollback_capable"] is False
+    assert tuple(unknown[f] for f in fields) == (None, None, None)
+    keys = list(measured)
+    slot = keys.index("ota_slot_size")
+    assert keys[slot : slot + 4] == ["ota_slot_size", *fields]
     assert keys[-1] == "deploy", "frontend/src/api.ts mirrors this order; deploy stays last"
 
 
@@ -795,7 +835,8 @@ async def test_a_requested_rows_sha256_appears_nowhere_in_the_steps(
 
     assert response.status_code == 200
     assert digest not in response.text
-    assert "sha256" not in response.text
+    # The quoted key: `partition_table_sha256` (R2b-be-6) is a device column, not a leak.
+    assert '"sha256"' not in response.text
 
 
 # ---------------------------------------------------------------------------

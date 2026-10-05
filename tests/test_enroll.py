@@ -466,9 +466,112 @@ async def test_a_malformed_network_is_stored_as_null_never_refused(
     assert token_status(row, now_utc()) is EnrollmentTokenStatus.USED
 
 
+SHA = "1fa67e6bbd034e434d04e9d6f4f52bbe899361602cd498573eb3bde97d1559ed"
+
+
+async def test_the_board_measurements_are_stored(enroll_app: FastAPI, engine: AsyncEngine) -> None:
+    """The enroll body carries the same three measurements as the announce (R2b-be-6)."""
+    device_id = "a4cf12b3de35"
+    issued = await issue_token(enroll_app)
+    body = enroll_body(
+        issued["token"],
+        device_id,
+        flash_chip_size=4194304,
+        partition_table_sha256=SHA,
+        rollback_capable=False,
+    )
+
+    assert (await post_enroll(enroll_app, body)).status_code == 200
+
+    device = await fetch_device(engine, device_id)
+    assert device is not None
+    assert (device.flash_chip_size, device.partition_table_sha256, device.rollback_capable) == (
+        4194304,
+        SHA,
+        False,
+    )
+
+
+@pytest.mark.parametrize(
+    ("flash_chip_size", "partition_table_sha256", "rollback_capable"),
+    [
+        ("4MB", "xyz", 1),
+        (2**64, SHA.upper(), "true"),
+        (0, SHA + "\n", []),
+        (4194304.0, "a" * 63 + "\x00", "false"),
+        (True, 123, 0),
+    ],
+)
+async def test_malformed_measurements_are_stored_as_null_never_refused(
+    enroll_app: FastAPI,
+    engine: AsyncEngine,
+    flash_chip_size: object,
+    partition_table_sha256: object,
+    rollback_capable: object,
+) -> None:
+    """Never a 422: the spec says the server "stores a malformed value as null rather
+    than refusing the request", and the token is burned exactly once."""
+    device_id = "a4cf12b3de36"
+    issued = await issue_token(enroll_app)
+    body = enroll_body(
+        issued["token"],
+        device_id,
+        flash_chip_size=flash_chip_size,
+        partition_table_sha256=partition_table_sha256,
+        rollback_capable=rollback_capable,
+    )
+
+    with capture_logs() as records:
+        response = await post_enroll(enroll_app, body)
+
+    assert response.status_code == 200, response.text
+    device = await fetch_device(engine, device_id)
+    assert device is not None
+    assert (device.flash_chip_size, device.partition_table_sha256, device.rollback_capable) == (
+        None,
+        None,
+        None,
+    )
+    row = await fetch_token(engine, issued["id"])
+    assert token_status(row, now_utc()) is EnrollmentTokenStatus.USED
+    assert row.used_by_device_id == device_id
+    unusable = [r.getMessage() for r in records if "unusable" in r.getMessage()]
+    assert len(unusable) == 3, unusable
+    assert all(device_id in message for message in unusable)
+
+
 # ---------------------------------------------------------------------------
 # Re-enrollment
 # ---------------------------------------------------------------------------
+
+
+async def test_re_enrollment_without_measurements_stores_unknown(
+    enroll_app: FastAPI, engine: AsyncEngine
+) -> None:
+    """A re-flash may have changed the bootloader and the table: NULL, never stale."""
+    device_id = "a4cf12b3de42"
+    first = await issue_token(enroll_app)
+    body = enroll_body(
+        first["token"],
+        device_id,
+        flash_chip_size=4194304,
+        partition_table_sha256=SHA,
+        rollback_capable=True,
+    )
+    assert (await post_enroll(enroll_app, body)).status_code == 200
+
+    second = await issue_token(enroll_app)
+    assert (await post_enroll(enroll_app, enroll_body(second["token"], device_id))).status_code == (
+        200
+    )
+
+    device = await fetch_device(engine, device_id)
+    assert device is not None
+    assert (device.flash_chip_size, device.partition_table_sha256, device.rollback_capable) == (
+        None,
+        None,
+        None,
+    )
 
 
 async def test_re_enrollment_without_a_network_stores_not_reported(

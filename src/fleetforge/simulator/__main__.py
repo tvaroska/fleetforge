@@ -4,6 +4,7 @@
 just sim --token ffe_… --name blinker --heartbeat-interval 5
 just sim --name blinker --duration 10                  # reuses .sim/, enrolls nothing
 just sim --name blinker --ssid shed --known-networks 2  # announces the network it is on
+just sim --name blinker --flash-chip-size 4194304 --partition-sha 1fa6… --rollback-capable true
 just sim --token ffe_… --power-class sleepy --wake-interval 20 --awake-s 3
 just sim --name blinker --crash-after 15                # ungraceful: the LWT fires
 just sim-fleet 3 --heartbeat-interval 5                 # issues its own tokens
@@ -104,12 +105,19 @@ def _now_iso() -> str:
     return dt.datetime.now(dt.UTC).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+# `--rollback-capable` → the announced value; no flag announces null ("unknown").
+_ROLLBACK_CAPABLE: dict[str | None, bool | None] = {"true": True, "false": False, None: None}
+
+
 def _identity_for(args: argparse.Namespace, device_id: str) -> DeviceIdentity:
     """Build the announce identity from the flags. No I/O, no validation yet.
 
     A wifi board always joined *something*, so it announces `sim-wifi` / 1 unless told
     otherwise; any other link announces what the flags say (null unless forced), as
     agent 0.4.6 does on ethernet.
+
+    The board measurements default to null, as every agent <= 0.4.6 announces them;
+    `--partition-sha` is sent verbatim, junk included.
     """
     ssid: str | None = args.ssid
     known_networks: int | None = args.known_networks
@@ -128,6 +136,9 @@ def _identity_for(args: argparse.Namespace, device_id: str) -> DeviceIdentity:
         expected_wake_interval_s=args.wake_interval,
         partition_layout=args.partition_layout,
         ota_slot_size=args.ota_slot_size,
+        flash_chip_size=args.flash_chip_size,
+        partition_table_sha256=args.partition_sha,
+        rollback_capable=_ROLLBACK_CAPABLE[args.rollback_capable],
         capabilities=tuple(args.capabilities or ()),
     )
 
@@ -398,6 +409,23 @@ def _shared(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--partition-layout", default="ab-4m-v1")
     parser.add_argument("--ota-slot-size", type=int, default=1966080)
+    parser.add_argument(
+        "--flash-chip-size",
+        type=int,
+        default=None,
+        help="physical flash bytes announced (default: null, as agent <= 0.4.6)",
+    )
+    parser.add_argument(
+        "--partition-sha",
+        default=None,
+        help="partition_table_sha256 announced, sent verbatim, junk included (default: null)",
+    )
+    parser.add_argument(
+        "--rollback-capable",
+        choices=["true", "false"],
+        default=None,
+        help="rollback_capable announced (default: null, no OTA observed yet)",
+    )
     parser.add_argument("--power-class", default="always_on", choices=POWER_CLASSES)
     parser.add_argument(
         "--wake-interval",

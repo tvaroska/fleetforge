@@ -264,6 +264,9 @@ ANNOUNCE_KEYS = {
     "parent_device_id",
     "partition_layout",
     "ota_slot_size",
+    "flash_chip_size",
+    "partition_table_sha256",
+    "rollback_capable",
     "capabilities",
 }
 
@@ -300,6 +303,61 @@ def test_announce_carries_the_network_in_spec_order() -> None:
     assert (bare["ssid"], bare["known_networks"]) == (None, None)
 
 
+MEASUREMENTS = ["flash_chip_size", "partition_table_sha256", "rollback_capable"]
+
+
+def test_announce_carries_the_board_measurements_in_spec_order() -> None:
+    """R2b-be-6: after `ota_slot_size`, before `capabilities`; null when unset."""
+    sha = "1fa67e6bbd034e434d04e9d6f4f52bbe899361602cd498573eb3bde97d1559ed"
+    device = DeviceIdentity(
+        device_id="a4cf12b3de90",
+        flash_chip_size=4194304,
+        partition_table_sha256=sha,
+        rollback_capable=False,
+    )
+    body = device.announce()
+    keys = list(body)
+    slot = keys.index("ota_slot_size")
+    assert keys[slot : slot + 5] == ["ota_slot_size", *MEASUREMENTS, "capabilities"]
+
+    parsed = AnnouncePayload.model_validate(json.loads(json.dumps(body)))
+    assert (parsed.flash_chip_size, parsed.partition_table_sha256, parsed.rollback_capable) == (
+        4194304,
+        sha,
+        False,
+    )
+
+    bare = DeviceIdentity(device_id="a4cf12b3de90").announce()
+    assert [bare[key] for key in MEASUREMENTS] == [None, None, None]
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        ([], (None, None, None)),
+        (["--rollback-capable", "true"], (None, None, True)),
+        (["--rollback-capable", "false"], (None, None, False)),
+        (["--flash-chip-size", "4194304", "--partition-sha", "abc"], (4194304, "abc", None)),
+    ],
+)
+def test_the_cli_announces_measurements_only_when_told(
+    argv: list[str], expected: tuple[int | None, str | None, bool | None]
+) -> None:
+    """No flag is null, as every agent <= 0.4.6 sends; junk is passed through verbatim."""
+    args = cli.build_parser().parse_args(["run", *argv])
+    identity = cli._identity_for(args, "a4cf12b3de90")
+    assert (
+        identity.flash_chip_size,
+        identity.partition_table_sha256,
+        identity.rollback_capable,
+    ) == expected
+
+
+def test_the_cli_refuses_a_rollback_capable_that_is_not_true_or_false() -> None:
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["run", "--rollback-capable", "maybe"])
+
+
 @pytest.mark.parametrize(
     ("argv", "expected"),
     [
@@ -326,6 +384,12 @@ def test_the_cli_announces_a_network_on_wifi_and_none_on_ethernet(
             device_id="a4cf12b3de91", power_class="sleepy", expected_wake_interval_s=300
         ),
         DeviceIdentity(device_id="a4cf12b3de92", ssid="shed", known_networks=2),
+        DeviceIdentity(
+            device_id="a4cf12b3de93",
+            flash_chip_size=4194304,
+            partition_table_sha256="1fa67e6bbd034e434d04e9d6f4f52bbe899361602cd498573eb3bde97d1559ed",
+            rollback_capable=True,
+        ),
     ],
 )
 def test_enroll_body_is_flat_and_validates_against_enrollrequest(device: DeviceIdentity) -> None:
@@ -337,6 +401,11 @@ def test_enroll_body_is_flat_and_validates_against_enrollrequest(device: DeviceI
     assert parsed.device_id == device.device_id
     assert parsed.power_class == device.power_class
     assert (parsed.ssid, parsed.known_networks) == (device.ssid, device.known_networks)
+    assert (parsed.flash_chip_size, parsed.partition_table_sha256, parsed.rollback_capable) == (
+        device.flash_chip_size,
+        device.partition_table_sha256,
+        device.rollback_capable,
+    )
 
 
 def test_heartbeat_body_is_the_spec_body() -> None:
