@@ -340,7 +340,7 @@ are R3). Order inside each flow: the one-place status first, then the cards, the
       version; `just agent-verify` and the QEMU run unchanged. Depends on `R2b-spec-1`
       being accepted.
       Spec applied in 8cb5335 (Patch A). Apply Patch B (announce example keys) in this task's commit. See docs/features/enrollment.md → *Known networks: wire proposal*.
-- [ ] **R2b-fe-12**: Flasher takes several networks, passphrase field uses the password manager (P1, 1d)
+- [x] **R2b-fe-12**: Flasher takes several networks, passphrase field uses the password manager (P1, 1d) _(done 2026-10-05; see docs/features/enrollment.md)_
       `ffcfg.ts` encodes the list; "add another network". The no-browser-storage rule in
       `FlashBoard.tsx` stays: the field is marked for the browser's own password manager,
       and nothing is written to storage. Depends on `R2b-spec-1`.

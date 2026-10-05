@@ -82,6 +82,10 @@ export function consoleFacts(events: ConsoleEvent[]): ConsoleFacts {
       // `ff_net_wifi.c:228` — "wifi sta starting, ssid <ssid>". Not a secret.
       const ssid = /^wifi sta starting, ssid (.+)$/.exec(text)?.[1]
       if (ssid !== undefined) facts.ssid = ssid
+      // `ff_net_wifi.c:450` (agent ≥ 0.4.6, several known networks) — `joined "<ssid>"
+      // (known network K of N)`. The only line that names the network it is actually on.
+      const joined = /^joined "(.+)" \(known network \d+ of \d+\)$/.exec(text)?.[1]
+      if (joined !== undefined) facts.ssid = joined
     } else if (tag === 'ff-net' && / link up/.test(text)) {
       // `ff_net.c:29/33` — "<what> link up, ip A gw B mask C" or "(address unavailable)".
       const ip = /link up, ip (\d+\.\d+\.\d+\.\d+)/.exec(text)?.[1] ?? null

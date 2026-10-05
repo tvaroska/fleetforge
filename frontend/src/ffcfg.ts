@@ -16,9 +16,11 @@
 //     0x00c  4  crc32       u32, IEEE (the same polynomial zlib.crc32 uses)
 //     0x010  N  payload     compact UTF-8 JSON object
 //
-// `frontend/src/ffcfg.vector.json` is a golden vector both this file's tests and
-// `tests/test_ff_cfg.py` assert against, so the two writers cannot drift while both
-// suites stay green. It is ASCII-only on purpose: Python's `json.dumps` defaults to
+// `frontend/src/ffcfg.vector.json` (one network) and `frontend/src/ffcfg.nets.vector.json`
+// (known networks: the top-level `ssid`/`psk` are network 1, `nets` holds networks 2..N)
+// are golden vectors both this file's tests and `tests/test_ff_cfg.py` assert against, so
+// the two writers cannot drift while both suites stay green. Both digests come from the
+// Python writer, never from this one. It is ASCII-only on purpose: Python's `json.dumps` defaults to
 // `ensure_ascii=True` and `JSON.stringify` does not, so a non-ASCII SSID produces
 // *different bytes* from the two writers even though both decode to the same object.
 // The contract is the decoded object; the vector can only pin bytes where they agree.
@@ -55,6 +57,7 @@ export const KEY_ORDER = [
   'hb_s',
   'power',
   'wake_s',
+  'nets',
 ] as const
 
 /** The two the firmware cannot invent a default for: nowhere to enroll, nowhere to connect. */
@@ -63,8 +66,23 @@ export const REQUIRED_KEYS = ['api_base', 'mqtt_uri'] as const
 export const LINKS = ['wifi', 'ethernet'] as const
 export const POWER_CLASSES = ['always_on', 'sleepy'] as const
 
+// Known-network limits, retyped from `agent/main/ff_cfg.h` (`FF_CFG_MAX_NETS`, and
+// `FF_CFG_MAX_SSID` 33 / `FF_CFG_MAX_PSK` 65 minus the NUL) and `agent/tools/ff_cfg.py`.
+// UTF-8 bytes, not JS string length. `tests/test_ff_cfg.py` greps for these three lines.
+export const MAX_NETWORKS = 4
+export const MAX_SSID_BYTES = 32
+export const MAX_PSK_BYTES = 64
+
+/** The first agent that reads `nets`. Older agents join network 1 only. */
+export const NETS_MIN_AGENT = '0.4.6'
+
 export type FfCfgKey = (typeof KEY_ORDER)[number]
-export type FfCfgFields = Partial<Record<FfCfgKey, string | number>>
+/** One entry of `nets`. `psk` is ABSENT for an open network, never `""`. */
+export type FfCfgNet = { ssid: string; psk?: string }
+type FfCfgScalarKey = Exclude<FfCfgKey, 'nets'>
+export type FfCfgFields = Partial<Record<FfCfgScalarKey, string | number>> & { nets?: FfCfgNet[] }
+/** One extra network as the operator typed it; a blank `psk` means an open network. */
+export type FlashNetworkInput = { ssid: string; psk?: string }
 
 /** Always fatal, and never carries a secret value — lengths only, like `ff_cfg.py:describe`. */
 export class FfCfgError extends Error {
@@ -95,6 +113,8 @@ export type FlashConfigInput = {
   hbS?: string
   power?: string
   wakeS?: string
+  /** Networks 2..N, in priority order (`ssid`/`psk` above are network 1). */
+  nets?: FlashNetworkInput[]
 }
 
 /** A blank-tolerant integer parse. `field` names the *key*, never the value. */
@@ -129,7 +149,91 @@ export function buildFfCfgFields(input: FlashConfigInput): FfCfgFields {
   if (input.power) fields.power = input.power
   const wake = intOrUndefined(input.wakeS, 'wake interval')
   if (wake !== undefined) fields.wake_s = wake
+  // Last, as in `KEY_ORDER` and `ff_cfg.py:fields_from_args`. No extra rows → no key, so a
+  // one-network flash is byte-identical to the format before `nets`. Rows are neither
+  // trimmed nor dropped: a blank row the operator added is refused by `validateFfCfg`.
+  if (input.nets && input.nets.length > 0) {
+    fields.nets = input.nets.map((n) => (n.psk ? { ssid: n.ssid, psk: n.psk } : { ssid: n.ssid }))
+  }
   return fields
+}
+
+const utf8Length = (s: string): number => new TextEncoder().encode(s).length
+
+/**
+ * The known-network rules — `ff_cfg.py:_validate_networks` branch for branch. Messages
+ * name a network by its position on the form ("network 1" is the top level, `nets[i]` is
+ * "network i+2"), NEVER by value: the value may be a passphrase.
+ */
+function validateNetworks(fields: FfCfgFields): void {
+  const ssid: unknown = fields.ssid
+  const psk: unknown = fields.psk
+  if (ssid !== undefined && (typeof ssid !== 'string' || utf8Length(ssid) > MAX_SSID_BYTES)) {
+    throw new FfCfgError(`network 1's SSID is over ${MAX_SSID_BYTES} bytes (UTF-8)`)
+  }
+  if (psk !== undefined && (typeof psk !== 'string' || utf8Length(psk) > MAX_PSK_BYTES)) {
+    throw new FfCfgError(`network 1's passphrase is over ${MAX_PSK_BYTES} bytes (UTF-8)`)
+  }
+  const nets: unknown = fields.nets
+  if (nets === undefined || nets === null) return
+  if (!Array.isArray(nets)) {
+    throw new FfCfgError('the extra networks must be a list of {ssid, psk} entries')
+  }
+  if (!ssid) {
+    throw new FfCfgError(
+      `more networks need network 1: its SSID is the one agents older than ${NETS_MIN_AGENT} join`,
+    )
+  }
+  if (1 + nets.length > MAX_NETWORKS) {
+    throw new FfCfgError(
+      `at most ${MAX_NETWORKS} networks: network 1 plus ${MAX_NETWORKS - 1} more; this config ` +
+        `lists ${1 + nets.length}`,
+    )
+  }
+  const seen = new Set<string>([ssid as string])
+  nets.forEach((entry: unknown, index: number) => {
+    const where = `network ${index + 2}`
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) {
+      throw new FfCfgError(`${where} must be an object with an SSID`)
+    }
+    const { ssid: entrySsid, psk: entryPsk } = entry as { ssid?: unknown; psk?: unknown }
+    if (typeof entrySsid !== 'string' || entrySsid === '') {
+      throw new FfCfgError(`${where} needs an SSID, or remove it`)
+    }
+    if (utf8Length(entrySsid) > MAX_SSID_BYTES) {
+      throw new FfCfgError(`${where}'s SSID is over ${MAX_SSID_BYTES} bytes (UTF-8)`)
+    }
+    if (entryPsk !== undefined && entryPsk !== null) {
+      if (typeof entryPsk !== 'string') {
+        throw new FfCfgError(`${where}'s passphrase must be text`)
+      }
+      if (utf8Length(entryPsk) > MAX_PSK_BYTES) {
+        throw new FfCfgError(`${where}'s passphrase is over ${MAX_PSK_BYTES} bytes (UTF-8)`)
+      }
+    }
+    if (seen.has(entrySsid)) {
+      throw new FfCfgError(`${where} repeats an SSID already listed`)
+    }
+    seen.add(entrySsid)
+  })
+}
+
+/**
+ * Whether an agent version reads `nets` (≥ `NETS_MIN_AGENT`). Any suffix after the
+ * `X.Y.Z` is ignored (`0.4.6-rbtest` reads it). Unparseable → `null`: no claim either way.
+ */
+export function agentReadsNets(version: string): boolean | null {
+  const parse = (v: string) => {
+    const m = /^(\d+)\.(\d+)\.(\d+)/.exec(v)
+    return m ? [Number(m[1]), Number(m[2]), Number(m[3])] : null
+  }
+  const have = parse(version)
+  const need = parse(NETS_MIN_AGENT)
+  if (have === null || need === null) return null
+  for (let i = 0; i < 3; i += 1) {
+    if (have[i] !== need[i]) return have[i] > need[i]
+  }
+  return true
 }
 
 /**
@@ -160,6 +264,7 @@ export function validateFfCfg(fields: FfCfgFields): void {
   if (fields.hb_s !== undefined && !(Number(fields.hb_s) > 0)) {
     throw new FfCfgError('the heartbeat interval must be positive')
   }
+  validateNetworks(fields)
   for (const [scheme, key] of [
     ['http', 'api_base'],
     ['mqtt', 'mqtt_uri'],

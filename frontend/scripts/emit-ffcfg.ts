@@ -10,6 +10,10 @@
 //       --api-base http://10.0.2.2:8080 --mqtt-uri mqtt://10.0.2.2:8883 \
 //       --link ethernet --hb 10 --ntp pool.ntp.org --token "$FFE"
 //
+// Known networks (R2b-fe-12): `--ssid`/`--psk` are network 1, and each repeatable
+// `--net SSID [PSK]` adds the next one in priority order (omit PSK for an open network),
+// exactly as `agent/tools/ff_cfg.py --net` does.
+//
 // It imports the app's encoder rather than copying it. A second copy here would agree
 // with itself forever and prove nothing.
 //
@@ -19,22 +23,49 @@
 
 import { chmodSync, mkdirSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
-import { buildFfCfgFields, encodeFfCfg, validateFfCfg, type FlashConfigInput } from '../src/ffcfg'
+import {
+  buildFfCfgFields,
+  encodeFfCfg,
+  validateFfCfg,
+  type FlashConfigInput,
+  type FlashNetworkInput,
+} from '../src/ffcfg'
 
 const FILE_MODE = 0o600
 const SECRET_KEYS = new Set(['token', 'psk'])
 
 const USAGE = `usage: vite-node scripts/emit-ffcfg.ts -- --out FILE --api-base URL --mqtt-uri URI
              [--token T] [--ssid S] [--psk P] [--link wifi|ethernet]
-             [--ntp HOST | --no-ntp] [--hb N] [--power always_on|sleepy] [--wake N]`
+             [--ntp HOST | --no-ntp] [--hb N] [--power always_on|sleepy] [--wake N]
+             [--net SSID [PSK]]...   (networks 2..N; at most 4 networks in all)`
 
-/** `--flag value` pairs and bare `--flag` switches. Deliberately tiny; no dependency. */
-function parseArgs(argv: string[]): Map<string, string> {
+/**
+ * `--flag value` pairs and bare `--flag` switches, plus the repeatable `--net SSID [PSK]`
+ * collected in order. Deliberately tiny; no dependency.
+ */
+function parseArgs(argv: string[]): { args: Map<string, string>; nets: FlashNetworkInput[] } {
   const args = new Map<string, string>()
+  const nets: FlashNetworkInput[] = []
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i]
-    if (!arg.startsWith('--')) throw new Error(`unexpected argument "${arg}"\n${USAGE}`)
+    // Never echo the argument: after `--net` it may be a passphrase.
+    if (!arg.startsWith('--')) throw new Error(`unexpected argument at position ${i + 1}\n${USAGE}`)
     const name = arg.slice(2)
+    if (name === 'net') {
+      const ssid = argv[i + 1]
+      if (ssid === undefined || ssid.startsWith('--')) {
+        throw new Error(`--net number ${nets.length + 1} needs an SSID\n${USAGE}`)
+      }
+      i += 1
+      const psk = argv[i + 1]
+      if (psk !== undefined && !psk.startsWith('--')) {
+        nets.push({ ssid, psk })
+        i += 1
+      } else {
+        nets.push({ ssid })
+      }
+      continue
+    }
     const next = argv[i + 1]
     if (next === undefined || next.startsWith('--')) {
       args.set(name, '')
@@ -43,11 +74,18 @@ function parseArgs(argv: string[]): Map<string, string> {
       i += 1
     }
   }
-  return args
+  return { args, nets }
 }
 
 function main(argv: string[]): number {
-  const args = parseArgs(argv)
+  let args: Map<string, string>
+  let nets: FlashNetworkInput[]
+  try {
+    ;({ args, nets } = parseArgs(argv))
+  } catch (err) {
+    process.stderr.write(`ff_cfg: ${err instanceof Error ? err.message : String(err)}\n`)
+    return 2
+  }
   const out = args.get('out')
   const apiBase = args.get('api-base')
   const mqttUri = args.get('mqtt-uri')
@@ -69,6 +107,7 @@ function main(argv: string[]): number {
     hbS: args.get('hb'),
     power: args.get('power'),
     wakeS: args.get('wake'),
+    nets,
   }
 
   let blob: Uint8Array
@@ -90,7 +129,13 @@ function main(argv: string[]): number {
   chmodSync(out, FILE_MODE)
 
   const keys = Object.keys(fields)
-  const shown = keys.filter((key) => !SECRET_KEYS.has(key))
+  // `nets` carries nested passphrases: it is reported as a count, never rendered.
+  const shown = keys
+    .filter((key) => !SECRET_KEYS.has(key))
+    .map((key) =>
+      key === 'nets' ? `nets=<${fields.nets?.length ?? 0} networks, passphrases not shown>` : key,
+    )
+  // Top-level `token`/`psk` only — the only keys whose values are strings to measure.
   const secret = keys.filter((key) => SECRET_KEYS.has(key))
   process.stdout.write(`ff_cfg: wrote ${blob.length} bytes to ${out} (0${FILE_MODE.toString(8)})\n`)
   process.stdout.write(

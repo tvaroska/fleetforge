@@ -1848,6 +1848,69 @@ migrated. In prod, `services/scripts/deploy.sh` recreates `INFRA_SERVICES` (whic
 window opens there. Restart `fleetforge-ingestor` after the api rollout so it re-subscribes
 and replays the retained set against the migrated schema. See DECISIONS.
 
+### Known networks: built in the flasher (R2b-fe-12, 2026-10-05)
+
+Frontend only (plus `tests/test_ff_cfg.py`). Decision: `DECISIONS.md` 2026-10-05 (R2b-fe-12).
+`spec/` untouched.
+
+As built:
+
+- **The form.** Step 2 → *Network* → Wi-Fi shows one row (*Network 1*: SSID, Passphrase) and
+  "Add another network", up to 4 rows; at the cap the button disables and "A board knows at
+  most 4 networks." shows. Rows 2..N have a *Remove* button; network 1 cannot be removed. A
+  muted line says the priority rule: network 1 is tried first; the board joins the first
+  network on the list it can see and stays on it until the link drops. Rows carry a stable
+  React key, so removing row 2 never shifts a typed passphrase into another row.
+- **Encoder (`ffcfg.ts`).** `KEY_ORDER` ends with `'nets'`; `MAX_NETWORKS = 4`,
+  `MAX_SSID_BYTES = 32`, `MAX_PSK_BYTES = 64` (retyped; a Python tripwire greps them).
+  `buildFfCfgFields` writes `nets` only when there are extra rows, so one network is
+  byte-identical to the old format (tested against `ffcfg.vector.json`). An empty passphrase
+  omits the entry's `psk` (open network), never `""`. Blank rows are not dropped: they are
+  refused by number. `validateFfCfg` mirrors `ff_cfg.py::_validate_networks` branch for
+  branch (top-level lengths in UTF-8 bytes, list type, network 1 required, cap, entry object,
+  SSID non-empty/≤ 32 bytes, psk text/≤ 64 bytes, duplicates including network 1). Messages
+  say "network N" in form numbering and never quote a value.
+- **Ethernet writes no Wi-Fi fields.** A leftover SSID/passphrase typed before switching is not
+  baked in, and a hidden row cannot block Flash. The encoder still accepts `nets` on
+  ethernet (as Python does), which is what the QEMU proof uses.
+- **Password manager.** Each row is its own `<form noValidate>` whose submit does nothing; the
+  SSID is `autocomplete="username"` and the passphrase `type=password
+  autocomplete="current-password"`, so Chrome saves each network as its own credential for
+  this origin. Nothing is written by the app: no `localStorage`, `sessionStorage`,
+  `indexedDB`, cookie or URL. **Autofill hazard:** the admin login on the same origin is a
+  password-only form, so the browser may offer the dashboard password in a Wi-Fi field; a
+  hint under the rows says to check it filled the Wi-Fi passphrase.
+- **Old-agent warning.** With ≥ 2 networks and a known build older than 0.4.6
+  (`agentReadsNets`, from `installFor(manifest, chip)`), a non-blocking warn line: "This board
+  gets agent X, which joins only network 1. Networks 2-N need agent 0.4.6 or later."
+- **Result card.** With several networks the page claims no SSID (`flashed.ssid = null`);
+  `consoleFacts` reads `joined "<ssid>" (known network K of N)` (`ff_net_wifi.c:450`).
+- **Diagnostic bundle.** `networks     N known: a, b, c` right after the `link` line on wifi
+  with more than one network (as `ff_cfg_log()`); the secrets line keeps network 1's
+  passphrase length; every row's passphrase is scrubbed.
+- **Second golden vector.** `frontend/src/ffcfg.nets.vector.json` (3 networks, one open),
+  digest computed by `agent/tools/ff_cfg.py`; both suites reproduce it, and
+  `buildFfCfgFields` reproduces its fields byte for byte. `emit-ffcfg.ts` takes repeatable
+  `--net SSID [PSK]` and prints `nets=<K networks, passphrases not shown>`.
+
+T2 evidence (dev, agent 0.4.6, QEMU esp32, keep identity), a blob written by the browser's
+encoder with `--link ethernet --ssid home --psk … --net shed … --net bench`:
+
+```
+I (5001) ff-cfg: ff_cfg v1 loaded (crc ok), 200 byte payload from 0x12000
+I (5011) ff-cfg:   networks  3 in ff_cfg, unused (link is ethernet)
+I (8811) ff-store: reusing the stored credential (no enrollment): …
+I (8951) ff-mqtt: announce acknowledged by the broker
+```
+
+No passphrase in the log or emit output; no `halted:`. emit-ffcfg refuses 5 networks, a
+duplicate of network 1 and `nets` without network 1 (rc=1, no passphrase echoed). Headless
+Chromium against the dev page: 1 → 4 rows then disabled, per-row `username` /
+`current-password` forms, the duplicate in row 3 named without a passphrase and Flash
+disabled, storage and IndexedDB empty, Enter does not navigate. **Not proven here:** Chrome's
+actual save/fill bubble (needs headed Chrome at the bench) and a real join of network 2 (no
+radio in QEMU; R2b-test-4).
+
 ### Agent-written networks and keep identity: spike findings (R2b-spec-3, 2026-10-04) — FINDINGS, nothing built
 
 No agent, server, frontend, schema, migration, simulator or test change was made, and

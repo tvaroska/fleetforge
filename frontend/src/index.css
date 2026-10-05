@@ -191,6 +191,12 @@ legend {
   padding: 0 0.4rem;
 }
 
+/* R2b-fe-12. One `<form>` per known network (for the password manager); the form itself
+   has no box, its inner fieldset does. */
+.network-row {
+  margin: 0.5rem 0;
+}
+
 /* Radios and checkboxes: the label is the hit target, one per line. */
 .choice {
   display: block;

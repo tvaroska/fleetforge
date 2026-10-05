@@ -10,7 +10,7 @@
 //    re-derive. Same discipline as `EnrollBoard.test.tsx`, extended to the passphrase.
 // 4. **The port is always released**, and a 401 bounces to the login gate.
 
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { FlashBoard } from './FlashBoard'
@@ -1381,5 +1381,185 @@ describe('FlashBoard — the console and the server together (R2b-fe-5)', () => 
     // "Flash another board" clears it: no flash, no server view.
     await user.click(screen.getByRole('button', { name: /flash another board/i }))
     expect(screen.queryByTestId('console-server-view')).toBeNull()
+  })
+})
+
+describe('FlashBoard — known networks (R2b-fe-12)', () => {
+  const SHED_PSK = 's3cr3t-shed-passphrase'
+  const CAR_PSK = 's3cr3t-car-passphrase'
+
+  function row(n: number) {
+    return within(screen.getByRole('group', { name: `Network ${n}` }))
+  }
+
+  async function detect(routes?: Routes) {
+    const fetched = mockFetch(routes ?? (await defaultRoutes()))
+    const flasher = new FakeFlasher(chipInfo())
+    render(<FlashBoard onSessionExpired={vi.fn()} createFlasher={async () => flasher} />)
+    await userEvent.click(screen.getByRole('button', { name: /select port and detect/i }))
+    await screen.findByTestId('chip-info')
+    return { flasher, fetched }
+  }
+
+  /** Network 1 as `flashWith` types it, plus `extra` rows via "Add another network". */
+  async function fillNetworks(extra: Array<{ ssid: string; psk?: string }>) {
+    await userEvent.type(row(1).getByLabelText('SSID'), SSID)
+    await userEvent.type(row(1).getByLabelText('Passphrase'), PASSPHRASE)
+    for (const [i, net] of extra.entries()) {
+      await userEvent.click(screen.getByRole('button', { name: 'Add another network' }))
+      await userEvent.type(row(i + 2).getByLabelText('SSID'), net.ssid)
+      if (net.psk) await userEvent.type(row(i + 2).getByLabelText('Passphrase'), net.psk)
+    }
+  }
+
+  function payloadOf(flasher: FakeFlasher): Record<string, unknown> {
+    const config = flasher.writes[0].find((part) => part.address === CONFIG_OFFSET)!
+    const view = new DataView(config.data.buffer, config.data.byteOffset, config.data.byteLength)
+    const length = view.getUint32(8, true)
+    return JSON.parse(new TextDecoder().decode(config.data.slice(16, 16 + length)))
+  }
+
+  it('writes three networks into the blob, in form order, an open one without a psk', async () => {
+    const { flasher } = await detect()
+    await fillNetworks([{ ssid: 'shed', psk: SHED_PSK }, { ssid: 'bench' }])
+    await userEvent.click(screen.getByRole('button', { name: /flash this board/i }))
+    await waitFor(() => expect(flasher.writes).toHaveLength(1))
+
+    const payload = payloadOf(flasher)
+    expect(payload.ssid).toBe(SSID)
+    expect(payload.psk).toBe(PASSPHRASE)
+    expect(payload.token).toBe(PLAINTEXT)
+    expect(payload.nets).toEqual([{ ssid: 'shed', psk: SHED_PSK }, { ssid: 'bench' }])
+  })
+
+  it('stops at four networks and says so', async () => {
+    await detect()
+    const add = screen.getByRole('button', { name: 'Add another network' })
+    expect(screen.queryByText(/at most 4 networks\./)).toBeNull()
+    for (let i = 0; i < 3; i += 1) await userEvent.click(add)
+    expect(screen.getByRole('group', { name: 'Network 4' })).toBeInTheDocument()
+    expect(add).toBeDisabled()
+    expect(screen.getByText(/A board knows at most 4 networks/)).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Remove network 1' })).toBeNull()
+  })
+
+  it('removing a row keeps every typed value attached to its own network', async () => {
+    await detect()
+    await fillNetworks([
+      { ssid: 'shed', psk: SHED_PSK },
+      { ssid: 'car', psk: CAR_PSK },
+    ])
+    await userEvent.click(screen.getByRole('button', { name: 'Remove network 2' }))
+    expect(screen.queryByRole('group', { name: 'Network 3' })).toBeNull()
+    expect(row(2).getByLabelText('SSID')).toHaveValue('car')
+    expect(row(2).getByLabelText('Passphrase')).toHaveValue(CAR_PSK)
+    expect(row(1).getByLabelText('SSID')).toHaveValue(SSID)
+  })
+
+  it('refuses a duplicate SSID by its network number, without a passphrase, before any mint', async () => {
+    const { fetched } = await detect()
+    await fillNetworks([
+      { ssid: 'shed', psk: SHED_PSK },
+      { ssid: 'shed', psk: CAR_PSK },
+    ])
+    const error = screen.getByTestId('config-error')
+    expect(error).toHaveTextContent(/network 3/)
+    expect(error).toHaveTextContent(/repeats/)
+    for (const secret of [PASSPHRASE, SHED_PSK, CAR_PSK]) {
+      expect(error.textContent).not.toContain(secret)
+    }
+    expect(screen.getByRole('button', { name: /flash this board/i })).toBeDisabled()
+    expect(fetched.calls).not.toContain('POST /v1/enrollment-tokens')
+  })
+
+  it('refuses a blank extra row rather than silently dropping it', async () => {
+    await detect()
+    await userEvent.type(row(1).getByLabelText('SSID'), SSID)
+    await userEvent.click(screen.getByRole('button', { name: 'Add another network' }))
+    expect(screen.getByTestId('config-error')).toHaveTextContent(/network 2 needs an SSID/)
+  })
+
+  it('marks each network for the password manager, one form per row, and Enter does nothing', async () => {
+    const { flasher, fetched } = await detect()
+    await fillNetworks([{ ssid: 'shed', psk: SHED_PSK }, { ssid: 'bench' }])
+
+    const forms = new Set<Element>()
+    for (const n of [1, 2, 3]) {
+      const ssid = row(n).getByLabelText('SSID')
+      const psk = row(n).getByLabelText('Passphrase')
+      expect(ssid).toHaveAttribute('autocomplete', 'username')
+      expect(psk).toHaveAttribute('type', 'password')
+      expect(psk).toHaveAttribute('autocomplete', 'current-password')
+      const form = ssid.closest('form')
+      expect(form).not.toBeNull()
+      expect(psk.closest('form')).toBe(form)
+      forms.add(form!)
+    }
+    expect(forms.size).toBe(3)
+    expect(document.querySelectorAll('input[autocomplete="off"]')).toHaveLength(0)
+
+    const before = fetched.calls.length
+    for (const form of forms) fireEvent.submit(form)
+    expect(fetched.calls.length).toBe(before)
+    expect(flasher.writes).toHaveLength(0)
+    expect(row(2).getByLabelText('Passphrase')).toHaveValue(SHED_PSK)
+  })
+
+  it('stores nothing: no Storage write, no cookie, no passphrase on the page', async () => {
+    const setItem = vi.spyOn(Storage.prototype, 'setItem')
+    const { flasher } = await detect()
+    await fillNetworks([
+      { ssid: 'shed', psk: SHED_PSK },
+      { ssid: 'car', psk: CAR_PSK },
+    ])
+    await userEvent.click(screen.getByRole('button', { name: /flash this board/i }))
+    await waitFor(() => expect(flasher.writes).toHaveLength(1))
+
+    expect(setItem).not.toHaveBeenCalled()
+    expect(window.localStorage.length).toBe(0)
+    expect(window.sessionStorage.length).toBe(0)
+    for (const secret of [PASSPHRASE, SHED_PSK, CAR_PSK]) {
+      expect(document.cookie).not.toContain(secret)
+      expect(document.body.textContent ?? '').not.toContain(secret)
+      expect(screen.queryByTestId('flash-log')?.textContent ?? '').not.toContain(secret)
+    }
+  })
+
+  it('writes no Wi-Fi field on Ethernet, whatever was typed before switching', async () => {
+    const { flasher } = await detect()
+    await fillNetworks([{ ssid: 'shed', psk: SHED_PSK }])
+    await userEvent.click(screen.getByRole('radio', { name: 'Ethernet' }))
+    await userEvent.click(screen.getByRole('button', { name: /flash this board/i }))
+    await waitFor(() => expect(flasher.writes).toHaveLength(1))
+
+    const payload = payloadOf(flasher)
+    expect(payload.link).toBe('ethernet')
+    expect('ssid' in payload).toBe(false)
+    expect('psk' in payload).toBe(false)
+    expect('nets' in payload).toBe(false)
+  })
+
+  it('warns, without blocking, that an older agent joins only network 1', async () => {
+    const old = await manifest({ agent_version: '0.4.5' })
+    await detect(await defaultRoutes({ 'GET /v1/agent/manifest': () => json(old) }))
+    await userEvent.type(row(1).getByLabelText('SSID'), SSID)
+    // The manifest may still be in flight; wait for it before asserting "no warning".
+    await screen.findByTestId('agent-targets')
+    expect(screen.queryByTestId('old-agent-warning')).toBeNull()
+
+    await userEvent.click(screen.getByRole('button', { name: 'Add another network' }))
+    await userEvent.type(row(2).getByLabelText('SSID'), 'shed')
+    expect(screen.getByTestId('old-agent-warning')).toHaveTextContent(
+      'This board gets agent 0.4.5, which joins only network 1. Networks 2-2 need agent 0.4.6 or later.',
+    )
+    expect(screen.getByRole('button', { name: /flash this board/i })).toBeEnabled()
+  })
+
+  it('does not warn when the build this board gets reads the list', async () => {
+    const current = await manifest({ agent_version: '0.4.6' })
+    await detect(await defaultRoutes({ 'GET /v1/agent/manifest': () => json(current) }))
+    await screen.findByTestId('agent-targets')
+    await fillNetworks([{ ssid: 'shed' }])
+    expect(screen.queryByTestId('old-agent-warning')).toBeNull()
   })
 })

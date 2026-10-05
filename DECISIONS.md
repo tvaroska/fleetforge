@@ -6,6 +6,27 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-05 — The flasher writes up to four networks, one `<form>` per network marked username/current-password; Ethernet writes no Wi-Fi fields; nothing is stored (R2b-fe-12)
+
+**Decided: `ffcfg.ts` writes `nets` (networks 2..N) and validates it exactly as `ff_cfg.py::_validate_networks` does; `FlashBoard.tsx` has up to 4 network rows. Frontend plus `tests/test_ff_cfg.py`; no agent, backend, spec or `session.tsx` change.**
+
+- **Format.** `KEY_ORDER` gains `'nets'` last (Python `KNOWN_KEYS` order), which removes the strict xfail in the TS key test. `MAX_NETWORKS = 4`, `MAX_SSID_BYTES = 32`, `MAX_PSK_BYTES = 64` retyped and tripwired. One network writes today's bytes (no `nets` key, never `"nets": []`); an empty entry passphrase omits `psk`. Second golden vector `ffcfg.nets.vector.json`, digest from the Python writer.
+- **Every extra row counts.** A blank added row is refused ("network 2 needs an SSID, or remove it"), never silently dropped, so message numbering equals form numbering. Messages say "network N" (top level is 1) and never contain a value. The TS also gained the top-level psk ≤ 64 bytes check it lacked.
+- **Ethernet writes no Wi-Fi fields** (small intended change: a leftover passphrase used to be baked in). The encoder still accepts `nets` on ethernet, as Python does.
+- **Password manager.** One `<form noValidate onSubmit=preventDefault>` per row (Chrome treats a form with 2+ password fields as sign-up/change-password), SSID `autocomplete="username"`, passphrase `current-password` (`new-password` would offer a generated one and suppress fill). `autocomplete="off"` removed (Chrome ignores it for passwords). The app still writes nothing to any storage.
+- **Autofill hazard.** The admin login is a password-only form on the same origin, so Chrome may offer/fill the admin password into a Wi-Fi field, which would be baked into the board's ff_cfg (readable over USB). Pre-existing (Chrome ignored `off`); mitigated by a hint under the rows. `session.tsx` untouched (CRITICAL, admin auth).
+- **Old-agent warning.** ≥ 2 networks and a known build older than `NETS_MIN_AGENT = '0.4.6'` (`agentReadsNets`, numeric, suffix ignored, unparseable → no warning) shows a non-blocking warn line.
+- **Result card / bundle.** `flashed.ssid` is null with several networks; `consoleFacts` reads `joined "<ssid>" (known network K of N)`. The bundle prints `networks  N known: …` after `link` on wifi when N > 1 (as `ff_cfg_log()`), keeps network 1's passphrase length only, and scrubs every passphrase.
+- **emit-ffcfg.** Repeatable `--net SSID [PSK]`; prints `nets=<K networks, passphrases not shown>`; a parse error no longer echoes the argument.
+- **Gotcha.** `flash.ts` appends `token` after the built fields, so the real blob's key order is `…, nets, token`, not `KEY_ORDER`. Harmless (JSON), left as is; the byte-exact proof is on `buildFfCfgFields` + `encodeFfCfg`.
+- **Rejected:** dropping blank rows; one form for all rows; `new-password`; `navigator.credentials.store(PasswordCredential)`; a show/hide toggle labelled with "passphrase" (ambiguous `getByLabelText`); editing `session.tsx`.
+- **Proposed follow-ups, not filed:** a hidden `autocomplete="username"` field (value `admin`) on the login form so the two credentials are distinguishable (CRITICAL, admin auth); `PasswordCredential.store` if the bench shows Chrome never offers to save.
+- **Not proven here:** Chrome's actual save/fill bubble (headless has no password-manager UI; rides on R2b-test-4 / R2b-test-1) and a real Wi-Fi join of network 2 (R2b-test-4).
+
+Supersedes nothing.
+
+---
+
 ## 2026-10-05 — The board's ssid and known_networks are stored as last reported, written as a pair on every announce; malformed is null, never a lost announce (R2b-be-5)
 
 **Decided: `devices.ssid TEXT NULL` + `devices.known_networks SMALLINT NULL` (migration `0005`). Both edges, `up/announce` and `POST /v1/enroll`, normalise through one never-raising module, `src/fleetforge/announce_fields.py`. `DeviceSummary` exposes both right after `link_type`.**

@@ -47,6 +47,7 @@ FF_OTA_C = AGENT_DIR / "main" / "ff_ota.c"
 # The third implementation and the vector both writers are pinned to (R0-fe-3).
 FF_CFG_TS = REPO_ROOT / "frontend" / "src" / "ffcfg.ts"
 FF_CFG_VECTOR = REPO_ROOT / "frontend" / "src" / "ffcfg.vector.json"
+FF_CFG_NETS_VECTOR = REPO_ROOT / "frontend" / "src" / "ffcfg.nets.vector.json"
 DEVICE_PROTOCOL = REPO_ROOT / "spec" / "device-protocol.md"
 
 # Retyped from the format's documentation, never imported from the module under test.
@@ -359,37 +360,53 @@ class TestTypeScriptWriterAgrees:
     object; a byte-exact vector is only possible where the two encodings coincide.
     """
 
-    def _vector(self) -> dict[str, object]:
-        return json.loads(FF_CFG_VECTOR.read_text())
+    VECTORS = pytest.mark.parametrize(
+        "vector_path",
+        [
+            pytest.param(FF_CFG_VECTOR, id="single"),
+            pytest.param(FF_CFG_NETS_VECTOR, id="nets"),
+        ],
+    )
 
-    def test_the_python_writer_reproduces_the_vector_digest(self) -> None:
-        vector = self._vector()
+    @staticmethod
+    def _vector(path: Path) -> dict[str, object]:
+        return json.loads(path.read_text())
+
+    @VECTORS
+    def test_the_python_writer_reproduces_the_vector_digest(self, vector_path: Path) -> None:
+        vector = self._vector(vector_path)
         blob = ff_cfg.encode(vector["fields"])  # type: ignore[arg-type]
         assert hashlib.sha256(blob).hexdigest() == vector["sha256"]
 
-    def test_the_vector_is_ascii_only(self) -> None:
+    @VECTORS
+    def test_the_vector_is_ascii_only(self, vector_path: Path) -> None:
         """Non-ASCII would make the two writers disagree on bytes while agreeing on fields."""
-        assert json.dumps(self._vector()["fields"]).isascii()
+        assert vector_path.read_text().isascii()
+        assert json.dumps(self._vector(vector_path)["fields"]).isascii()
 
-    def test_the_vector_is_a_config_both_sides_would_accept(self) -> None:
-        ff_cfg.validate(self._vector()["fields"])  # type: ignore[arg-type]
+    @VECTORS
+    def test_the_vector_is_a_config_both_sides_would_accept(self, vector_path: Path) -> None:
+        ff_cfg.validate(self._vector(vector_path)["fields"])  # type: ignore[arg-type]
 
-    @pytest.mark.parametrize(
-        "key",
-        [
-            pytest.param(
-                key,
-                marks=pytest.mark.xfail(
-                    strict=True, reason="R2b-fe-12 teaches ffcfg.ts to write nets"
-                ),
-            )
-            if key == "nets"
-            else key
-            for key in ff_cfg.KNOWN_KEYS
-        ],
-    )
+    def test_the_nets_vector_carries_an_open_network(self) -> None:
+        """Pins the "psk absent, never empty" rule in bytes both writers must reproduce."""
+        nets = self._vector(FF_CFG_NETS_VECTOR)["fields"]["nets"]  # type: ignore[index]
+        assert any("psk" not in entry for entry in nets)  # type: ignore[union-attr]
+
+    @pytest.mark.parametrize("key", ff_cfg.KNOWN_KEYS)
     def test_every_field_name_is_written_by_the_browser(self, key: str) -> None:
         assert f"'{key}'" in FF_CFG_TS.read_text()
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            f"export const MAX_NETWORKS = {ff_cfg.MAX_NETWORKS}",
+            f"export const MAX_SSID_BYTES = {ff_cfg.MAX_SSID_BYTES}",
+            f"export const MAX_PSK_BYTES = {ff_cfg.MAX_PSK_BYTES}",
+        ],
+    )
+    def test_the_known_network_limits_are_retyped_in_the_browser(self, line: str) -> None:
+        assert line in FF_CFG_TS.read_text()
 
     @pytest.mark.parametrize(
         "constant",

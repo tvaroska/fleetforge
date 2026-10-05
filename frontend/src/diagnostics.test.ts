@@ -268,3 +268,31 @@ describe('uriSecrets', () => {
     expect(uriSecrets('')).toEqual([])
   })
 })
+
+describe('buildDiagnosticBundle — known networks (R2b-fe-12)', () => {
+  const SHED = 's3cret-shed-passphrase'
+  const BENCH = 's3cret-bench-passphrase'
+  const withNetworks = (link: string, networks: string[]) =>
+    bundleOf(BENCH_2026_09_11, {
+      config: { ...context().config!, link, networks },
+      knownSecrets: [PASSPHRASE, SHED, BENCH, ...uriSecrets(MQTT_URI)],
+    })
+
+  it('prints every SSID right after the link line, as ff_cfg_log() does', () => {
+    const lines = withNetworks('wifi', ['bench-2g', 'shed', 'bench']).split('\n')
+    const link = lines.indexOf('  link         wifi, ssid bench-2g')
+    expect(link).toBeGreaterThan(-1)
+    expect(lines[link + 1]).toBe('  networks     3 known: bench-2g, shed, bench')
+  })
+
+  it('prints no networks line for one network, or on ethernet', () => {
+    expect(withNetworks('wifi', ['bench-2g'])).not.toMatch(/^ {2}networks/m)
+    expect(withNetworks('ethernet', ['bench-2g', 'shed'])).not.toMatch(/^ {2}networks/m)
+    expect(bundleOf(BENCH_2026_09_11)).not.toMatch(/^ {2}networks/m)
+  })
+
+  it('carries none of the passphrases', () => {
+    const bundle = withNetworks('wifi', ['bench-2g', 'shed', 'bench'])
+    for (const secret of [PASSPHRASE, SHED, BENCH]) expect(bundle).not.toContain(secret)
+  })
+})

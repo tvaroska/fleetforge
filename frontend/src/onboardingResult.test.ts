@@ -294,3 +294,32 @@ describe('describeOnboardingResult — the server view (R2b-fe-5)', () => {
     expect(describeOnboardingResult({ events: [], summary, context, fromServer })).toBeNull()
   })
 })
+
+describe('describeOnboardingResult — known networks (R2b-fe-12)', () => {
+  const flashed: ResultContext['flashed'] = {
+    deviceId: 'a4cf12b3de90',
+    agentVersion: '0.4.6',
+    layout: 'ab-4m-v1',
+    link: 'wifi',
+    // Several networks were flashed, so the page claims none of them.
+    ssid: null,
+  }
+  const MULTI = HAPPY.filter((line) => !line.includes('ff-wifi'))
+
+  it('names the network the board says it joined, not network 1', () => {
+    const lines = [
+      ...MULTI.slice(0, 3),
+      'I (300) ff-wifi: wifi sta starting, 3 known networks; scanning',
+      'I (900) ff-wifi: joined "shed" (known network 2 of 3)',
+      ...MULTI.slice(3),
+    ]
+    expect(consoleFacts(eventsOf(lines)).ssid).toBe('shed')
+    const result = judge(lines, T0 + 1_000, { devices: [], versions: null, flashed })
+    expect(value(result, 'Link')).toBe('Wi-Fi shed · ip 192.168.1.40')
+  })
+
+  it('claims no SSID when neither the page nor the console knows which one', () => {
+    const result = judge(MULTI, T0 + 1_000, { devices: [], versions: null, flashed })
+    expect(value(result, 'Link')).toBe('Wi-Fi · ip 192.168.1.40')
+  })
+})

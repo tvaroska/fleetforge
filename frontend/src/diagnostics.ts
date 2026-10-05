@@ -45,12 +45,20 @@ export type DiagnosticConfig = {
   apiBase: string
   mqttUri: string
   link: string
+  /** Network 1's SSID. */
   ssid: string
+  /**
+   * Every SSID, network 1 first, in priority order (R2b-fe-12). Printed only on wifi with
+   * more than one, as `ff_cfg_log()` prints its `networks  N known: …` line. Optional so
+   * every other constructor stays valid.
+   */
+  networks?: string[]
   ntp: string | null
   hbS: string | null
   power: string
   wakeS: string | null
-  /** `psk.length`. The value itself goes in `knownSecrets` and nowhere else. */
+  /** Network 1's `psk.length` (the firmware prints only `nets[0].psk`'s). Every
+   *  passphrase's value goes in `knownSecrets` and nowhere else. */
   pskLength: number
 }
 
@@ -289,11 +297,16 @@ function configSection(config: DiagnosticConfig | null): string[] {
   if (config === null) {
     return [heading, '  not available — this console was opened without the flasher form']
   }
+  const networks = config.networks ?? []
   return [
     heading,
     field('api_base', config.apiBase),
     field('mqtt_uri', config.mqttUri),
     field('link', config.link === 'wifi' ? `wifi, ssid ${config.ssid}` : config.link),
+    // Right after `link`, as `ff_cfg_log()` prints it. SSIDs only, never a passphrase.
+    ...(config.link === 'wifi' && networks.length > 1
+      ? [field('networks', `${networks.length} known: ${networks.join(', ')}`)]
+      : []),
     field('ntp', config.ntp === null ? '(firmware default)' : config.ntp || '(disabled)'),
     field('hb_s', config.hbS ?? '(firmware default)'),
     field(

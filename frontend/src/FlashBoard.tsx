@@ -8,6 +8,11 @@
 // * **No `localStorage`, no `sessionStorage`, anywhere in this feature.** The Wi-Fi
 //   passphrase and the enrollment token are both credentials, and the token is a
 //   fleet-join credential the server cannot re-derive. One rule, easy to review.
+//   Nothing here calls `localStorage`, `sessionStorage`, `indexedDB`, cookies or the URL.
+//   The passphrase inputs ARE marked for the browser's own password manager (R2b-fe-12:
+//   one `<form>` per network, SSID = `username`, passphrase = `current-password`), so the
+//   operator types each one once — that is the browser's store, offered by the browser,
+//   never written by this app.
 // * **The two URLs are derived from `window.location`, never compiled in.** See
 //   `defaultMqttUri` below.
 
@@ -18,7 +23,14 @@ import { BoardConsolePanel } from './BoardConsole'
 import { type ConsoleFactory } from './boardConsole'
 import { uriSecrets, type DiagnosticContext } from './diagnostics'
 import { OTHER_BOARD_ID, shortlist } from './boards'
-import { buildFfCfgFields, validateFfCfg, type FlashConfigInput } from './ffcfg'
+import {
+  MAX_NETWORKS,
+  NETS_MIN_AGENT,
+  agentReadsNets,
+  buildFfCfgFields,
+  validateFfCfg,
+  type FlashConfigInput,
+} from './ffcfg'
 import { formatBytes, predictDeviceId, useFlashBoard } from './flash'
 import { type ResultContext } from './onboardingResult'
 import { ResultCard } from './ResultCard'
@@ -58,11 +70,14 @@ function defaultApiBase(): string {
   return typeof window === 'undefined' ? '' : window.location.origin
 }
 
+/** One Wi-Fi network row. `key` is stable for the row's life — never the array index. */
+type NetworkRow = { key: number; ssid: string; psk: string }
+
 type FormState = {
   mqttUri: string
   link: string
-  ssid: string
-  psk: string
+  /** Network 1 first, in priority order; at most `MAX_NETWORKS`. Never empty. */
+  networks: NetworkRow[]
   hbS: string
   power: string
   wakeS: string
@@ -72,8 +87,7 @@ type FormState = {
 const INITIAL_FORM: FormState = {
   mqttUri: defaultMqttUri(),
   link: 'wifi',
-  ssid: '',
-  psk: '',
+  networks: [{ key: 0, ssid: '', psk: '' }],
   // Blank on purpose: an absent `hb_s` leaves the firmware's own default in place rather
   // than freezing today's number into every board flashed today.
   hbS: '',
@@ -162,6 +176,32 @@ export function FlashBoard({
 
   const set = useCallback(<K extends keyof FormState>(key: K, value: FormState[K]) => {
     setForm((current) => ({ ...current, [key]: value }))
+  }, [])
+
+  // R2b-fe-12. Row keys come from a counter so removing row 2 of 3 cannot shift a typed
+  // passphrase into another row's field. 0 is the initial row.
+  const nextNetworkKey = useRef(1)
+  const setNetwork = useCallback((index: number, patch: Partial<Omit<NetworkRow, 'key'>>) => {
+    setForm((current) => ({
+      ...current,
+      networks: current.networks.map((row, i) => (i === index ? { ...row, ...patch } : row)),
+    }))
+  }, [])
+  const addNetwork = useCallback(() => {
+    setForm((current) => {
+      if (current.networks.length >= MAX_NETWORKS) return current
+      const key = nextNetworkKey.current
+      nextNetworkKey.current += 1
+      return { ...current, networks: [...current.networks, { key, ssid: '', psk: '' }] }
+    })
+  }, [])
+  const removeNetwork = useCallback((index: number) => {
+    // Network 1 cannot be removed: it is the one an agent older than 0.4.6 joins.
+    if (index === 0) return
+    setForm((current) => ({
+      ...current,
+      networks: current.networks.filter((_, i) => i !== index),
+    }))
   }, [])
 
   useEffect(() => {
@@ -253,6 +293,7 @@ export function FlashBoard({
   const mixedVersions =
     manifest !== null && new Set(manifest.builds.map((b) => b.agent_version)).size > 1
   const predicted = chip === null ? null : predictDeviceId(chip)
+  const install = chip === null ? null : installFor(manifest, chip)
   const preflight =
     chip !== null && fleet !== undefined
       ? describePreflight({
@@ -260,16 +301,25 @@ export function FlashBoard({
           devices: fleet.devices,
           arrivals: fleet.arrivals,
           fleetError: fleet.error,
-          install: installFor(manifest, chip),
+          install,
         })
       : null
   const apiBase = defaultApiBase()
+  // R2b-fe-12. What is not shown is not written: on Ethernet no Wi-Fi field reaches the
+  // blob, so a leftover passphrase is not baked in and a hidden row cannot block Flash.
+  const wifi = form.link === 'wifi'
+  const [firstNetwork, ...extraNetworks] = form.networks
+  const readsNets = install === null ? null : agentReadsNets(install.agentVersion)
   const config: FlashConfigInput = {
     apiBase,
     mqttUri: form.mqttUri,
     link: form.link,
-    ssid: form.ssid,
-    psk: form.psk,
+    ssid: wifi ? firstNetwork.ssid : undefined,
+    psk: wifi ? firstNetwork.psk : undefined,
+    nets:
+      wifi && extraNetworks.length > 0
+        ? extraNetworks.map(({ ssid, psk }) => ({ ssid, psk }))
+        : undefined,
     hbS: form.hbS,
     power: form.power,
     wakeS: form.wakeS,
@@ -299,7 +349,12 @@ export function FlashBoard({
             agentVersion: state.build?.agent_version ?? null,
             layout: state.build?.partition_layout ?? null,
             link: form.link,
-            ssid: form.link === 'wifi' && form.ssid !== '' ? form.ssid : null,
+            // With several networks the board may be on any of them: claim none, and let
+            // the console's `joined "…" (known network K of N)` line say which.
+            ssid:
+              wifi && form.networks.length === 1 && firstNetwork.ssid !== ''
+                ? firstNetwork.ssid
+                : null,
           }
         : null,
     flashBaseline,
@@ -342,16 +397,23 @@ export function FlashBoard({
       apiBase,
       mqttUri: form.mqttUri,
       link: form.link,
-      ssid: form.ssid,
+      ssid: firstNetwork.ssid,
+      networks: form.networks.map((row) => row.ssid),
       ntp: null,
       hbS: form.hbS || null,
       power: form.power,
       wakeS: form.wakeS || null,
-      pskLength: form.psk.length,
+      // Network 1's only, as `ff_cfg_log()` prints only `nets[0].psk`.
+      pskLength: firstNetwork.psk.length,
     },
-    // Scrub input only. The passphrase, plus any password typed into either URI — a broker
-    // password must be scrubbed out of every section, not only out of the URI that carried it.
-    knownSecrets: [form.psk, ...uriSecrets(form.mqttUri), ...uriSecrets(apiBase)],
+    // Scrub input only. Every network's passphrase, plus any password typed into either URI —
+    // a broker password must be scrubbed out of every section, not only out of the URI that
+    // carried it.
+    knownSecrets: [
+      ...form.networks.map((row) => row.psk),
+      ...uriSecrets(form.mqttUri),
+      ...uriSecrets(apiBase),
+    ],
   }
 
   return (
@@ -511,27 +573,85 @@ export function FlashBoard({
           />{' '}
           Ethernet
         </label>
-        {form.link === 'wifi' && (
-          <p>
-            <label>
-              SSID{' '}
-              <input
-                type="text"
-                value={form.ssid}
-                onChange={(event) => set('ssid', event.target.value)}
-                autoComplete="off"
-              />
-            </label>{' '}
-            <label>
-              Passphrase{' '}
-              <input
-                type="password"
-                value={form.psk}
-                onChange={(event) => set('psk', event.target.value)}
-                autoComplete="off"
-              />
-            </label>
-          </p>
+        {wifi && (
+          <>
+            <p className="muted">
+              Network 1 is tried first. The board joins the first network on this list it can
+              see and stays on it until the link drops. At most {MAX_NETWORKS}.
+            </p>
+            {form.networks.map((row, index) => (
+              // One `<form>` per network, so the browser's password manager pairs each SSID
+              // (username) with its own passphrase. Submitting does nothing — Enter in a
+              // field must not flash, reload or navigate.
+              <form
+                key={row.key}
+                className="network-row"
+                onSubmit={(event) => event.preventDefault()}
+                noValidate
+              >
+                <fieldset>
+                  <legend>Network {index + 1}</legend>
+                  <label>
+                    SSID{' '}
+                    <input
+                      type="text"
+                      name="ssid"
+                      value={row.ssid}
+                      onChange={(event) => setNetwork(index, { ssid: event.target.value })}
+                      autoComplete="username"
+                      autoCapitalize="none"
+                      autoCorrect="off"
+                      spellCheck={false}
+                    />
+                  </label>{' '}
+                  <label>
+                    Passphrase{' '}
+                    <input
+                      type="password"
+                      name="psk"
+                      value={row.psk}
+                      onChange={(event) => setNetwork(index, { psk: event.target.value })}
+                      autoComplete="current-password"
+                    />
+                  </label>
+                  {index > 0 && (
+                    <>
+                      {' '}
+                      <button
+                        type="button"
+                        aria-label={`Remove network ${index + 1}`}
+                        onClick={() => removeNetwork(index)}
+                      >
+                        Remove
+                      </button>
+                    </>
+                  )}
+                </fieldset>
+              </form>
+            ))}
+            <p>
+              <button
+                type="button"
+                onClick={addNetwork}
+                disabled={form.networks.length >= MAX_NETWORKS}
+              >
+                Add another network
+              </button>{' '}
+              {form.networks.length >= MAX_NETWORKS && (
+                <span className="muted">A board knows at most {MAX_NETWORKS} networks.</span>
+              )}
+            </p>
+            <p className="muted" data-testid="password-manager-hint">
+              Your browser&apos;s password manager can fill these in. Check it filled the Wi-Fi
+              passphrase, not your dashboard password.
+            </p>
+            {form.networks.length > 1 && readsNets === false && install !== null && (
+              <p className="warn" data-testid="old-agent-warning">
+                This board gets agent {install.agentVersion}, which joins only network 1. Networks
+                2-{form.networks.length} need agent {NETS_MIN_AGENT} or later.
+              </p>
+            )}
+          </>
         )}
       </fieldset>
 

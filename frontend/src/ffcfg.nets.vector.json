@@ -1,0 +1,14 @@
+{
+  "note": "Byte-exact ff_cfg contract vector for known networks (the top-level ssid/psk are network 1; nets holds networks 2..N, psk absent for an open network). Read by BOTH frontend/src/ffcfg.test.ts and tests/test_ff_cfg.py; the digest was computed by agent/tools/ff_cfg.py, never by the TypeScript writer. ASCII only, for the same reason as ffcfg.vector.json. The token is a syntactically valid FAKE and enrolls nothing.",
+  "fields": {
+    "api_base": "http://10.0.2.2:8080",
+    "mqtt_uri": "mqtt://10.0.2.2:8883",
+    "token": "ffe_00000000-0000-4000-8000-000000000000.AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "ssid": "fleetforge-test",
+    "psk": "not-a-real-passphrase",
+    "link": "wifi",
+    "hb_s": 60,
+    "nets": [{ "ssid": "fleetforge-shed", "psk": "also-not-a-real-one" }, { "ssid": "fleetforge-open" }]
+  },
+  "sha256": "96be7e24130af5a1405c1c30e4a746a0e91d31794a23613082bc7b3bc0f999aa"
+}
