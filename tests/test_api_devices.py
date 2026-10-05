@@ -178,6 +178,8 @@ async def test_the_summary_carries_the_fleet_view_and_no_presence_ingredients(
         "fw_version",
         "agent_version",
         "link_type",
+        "ssid",
+        "known_networks",
         "power_class",
         "expected_wake_interval_s",
         "parent_device_id",
@@ -195,6 +197,27 @@ async def test_the_summary_carries_the_fleet_view_and_no_presence_ingredients(
     # NULL until the broker credential exists — R0-sec-1's reconcile list.
     assert row["broker_provisioned_at"] is None
     assert row["online"] is True
+
+
+async def test_the_network_the_board_last_reported_is_shown(
+    admin_app: FastAPI, fleet: AsyncSession
+) -> None:
+    """R2b-be-5: last value seen, NULL as "not reported"; spec order, `deploy` last."""
+    await add_device(fleet, ssid="shed", known_networks=2)
+    await add_device(fleet, "a4cf12b3de93", link_type="ethernet")
+
+    devices = (await list_devices(admin_app, await login_admin(admin_app)))["devices"]
+    by_id = {row["device_id"]: row for row in devices}
+
+    assert (by_id[DEVICE_ID]["ssid"], by_id[DEVICE_ID]["known_networks"]) == ("shed", 2)
+    assert (by_id["a4cf12b3de93"]["ssid"], by_id["a4cf12b3de93"]["known_networks"]) == (
+        None,
+        None,
+    )
+    keys = list(by_id[DEVICE_ID])
+    link = keys.index("link_type")
+    assert keys[link : link + 3] == ["link_type", "ssid", "known_networks"]
+    assert keys[-1] == "deploy", "frontend/src/api.ts mirrors this order; deploy stays last"
 
 
 # ---------------------------------------------------------------------------

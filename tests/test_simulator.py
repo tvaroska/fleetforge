@@ -257,6 +257,8 @@ ANNOUNCE_KEYS = {
     "fw_version",
     "agent_version",
     "link_type",
+    "ssid",
+    "known_networks",
     "power_class",
     "expected_wake_interval_s",
     "parent_device_id",
@@ -283,6 +285,39 @@ def test_announce_decodes_through_the_ingestors_own_model() -> None:
     assert parsed.capabilities == ["ota"]
 
 
+def test_announce_carries_the_network_in_spec_order() -> None:
+    """Agent 0.4.6: `ssid`, `known_networks` right after `link_type`, null when unset."""
+    device = DeviceIdentity(device_id="a4cf12b3de90", ssid="shed", known_networks=2)
+    body = device.announce()
+    keys = list(body)
+    link = keys.index("link_type")
+    assert keys[link : link + 3] == ["link_type", "ssid", "known_networks"]
+
+    parsed = AnnouncePayload.model_validate(json.loads(json.dumps(body)))
+    assert (parsed.ssid, parsed.known_networks) == ("shed", 2)
+
+    bare = DeviceIdentity(device_id="a4cf12b3de90").announce()
+    assert (bare["ssid"], bare["known_networks"]) == (None, None)
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        ([], ("sim-wifi", 1)),
+        (["--ssid", "shed", "--known-networks", "2"], ("shed", 2)),
+        (["--known-networks", "0"], ("sim-wifi", 0)),
+        (["--link-type", "ethernet"], (None, None)),
+        (["--link-type", "ethernet", "--ssid", "odd", "--known-networks", "3"], ("odd", 3)),
+    ],
+)
+def test_the_cli_announces_a_network_on_wifi_and_none_on_ethernet(
+    argv: list[str], expected: tuple[str | None, int | None]
+) -> None:
+    args = cli.build_parser().parse_args(["run", *argv])
+    identity = cli._identity_for(args, "a4cf12b3de90")
+    assert (identity.ssid, identity.known_networks) == expected
+
+
 @pytest.mark.parametrize(
     "device",
     [
@@ -290,6 +325,7 @@ def test_announce_decodes_through_the_ingestors_own_model() -> None:
         DeviceIdentity(
             device_id="a4cf12b3de91", power_class="sleepy", expected_wake_interval_s=300
         ),
+        DeviceIdentity(device_id="a4cf12b3de92", ssid="shed", known_networks=2),
     ],
 )
 def test_enroll_body_is_flat_and_validates_against_enrollrequest(device: DeviceIdentity) -> None:
@@ -300,6 +336,7 @@ def test_enroll_body_is_flat_and_validates_against_enrollrequest(device: DeviceI
     parsed = EnrollRequest.model_validate(body)
     assert parsed.device_id == device.device_id
     assert parsed.power_class == device.power_class
+    assert (parsed.ssid, parsed.known_networks) == (device.ssid, device.known_networks)
 
 
 def test_heartbeat_body_is_the_spec_body() -> None:

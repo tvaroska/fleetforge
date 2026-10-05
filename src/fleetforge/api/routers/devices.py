@@ -134,6 +134,8 @@ def _device_summary(row: Device, *, online: bool, deploy: DeploySummary | None) 
         fw_version=row.fw_version,
         agent_version=row.agent_version,
         link_type=row.link_type,
+        ssid=row.ssid,
+        known_networks=row.known_networks,
         power_class=row.power_class,
         expected_wake_interval_s=row.expected_wake_interval_s,
         parent_device_id=row.parent_device_id,

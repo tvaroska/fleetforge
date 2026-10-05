@@ -32,9 +32,11 @@ from fleetforge.ingestor.protocol import AnnouncePayload
 
 logger = logging.getLogger(__name__)
 
-# Identity fields an announce is allowed to move. `device_id`, `group_id`, `name`,
-# `parent_device_id`, `enrolled_at` and `broker_provisioned_at` are operator or
-# enrollment facts, never device claims, so they are absent on purpose.
+# Identity fields an announce is allowed to move, each only when present. `device_id`,
+# `group_id`, `name`, `parent_device_id`, `enrolled_at` and `broker_provisioned_at` are
+# operator or enrollment facts, never device claims, so they are absent on purpose.
+# `ssid` / `known_networks` are absent too, but for the opposite reason: they are
+# written on *every* announce, present or not — see `_network_values`.
 ANNOUNCE_FIELDS = (
     "proto",
     "platform_type",
@@ -101,7 +103,9 @@ async def apply_announce(
     """Apply the identity fields an announce actually carried.
 
     Fields absent from the payload mean "no change" and are not written
-    (`spec/device-protocol.md` → *Evolution rules*). `link_type` is written straight
+    (`spec/device-protocol.md` → *Evolution rules*) — except `ssid` /
+    `known_networks`, written as a pair on every announce because the spec reads
+    absent as "not reported" (`_network_values`). `link_type` is written straight
     through however odd it looks — the column is TEXT and there are no PG enums, so a
     board on a link nobody has invented yet still shows up in the dashboard.
     """
@@ -111,13 +115,33 @@ async def apply_announce(
         if getattr(payload, field) is not None
     }
     values.update(_power_class_values(device_id, payload))
+    values.update(_network_values(payload))
     if advance_last_seen:
         values["last_seen"] = _last_seen_value(at)
     if not values:
-        # A retained announce carrying nothing we map changes nothing; `UPDATE … SET`
-        # needs at least one column, so read the row instead of writing a no-op.
+        # Unreachable from an announce since R2b-be-5 (`_network_values` always writes
+        # the pair), kept as the guard it was: `UPDATE … SET` needs at least one
+        # column, so read the row instead of writing a no-op.
         return await fetch_live_device(session, device_id)
     return await _apply(session, device_id, values)
+
+
+def _network_values(payload: AnnouncePayload) -> dict[str, Any]:
+    """`ssid` and `known_networks`: written as a pair on **every** announce.
+
+    The one exception to "absent means no change". `spec/device-protocol.md` →
+    `up/announce`: "The server treats absent and `null` alike, as 'not reported'", and
+    the announce is the full identity, republished on every broker connect. A board
+    that OTAs back to a pre-0.4.6 agent, or is re-flashed onto ethernet, stops sending
+    the keys; keeping the old value would leave the Fleet row saying "on: shed" about a
+    board that no longer says so. "Last on: shed" for an offline board still holds,
+    because nothing clears the pair between announces.
+
+    The payload already normalised both (`fleetforge.announce_fields`): a malformed
+    value is `None` here and never reaches the database as a NUL or a lone surrogate.
+    No DB CHECK either, so there is nothing for this pair to violate.
+    """
+    return {"ssid": payload.ssid, "known_networks": payload.known_networks}
 
 
 def _power_class_values(device_id: str, payload: AnnouncePayload) -> dict[str, Any]:

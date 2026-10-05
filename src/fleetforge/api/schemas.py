@@ -10,8 +10,16 @@ import unicodedata
 import uuid
 from typing import Literal, Self
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
+from fleetforge.announce_fields import normalize_known_networks, normalize_ssid
 from fleetforge.auth.enrollment import EnrollmentTokenStatus
 from fleetforge.auth.tokens import MAX_TOKEN_LENGTH
 from fleetforge.db.models import PowerClass
@@ -106,6 +114,16 @@ class EnrollmentTokenList(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+def _logged_device_id(info: ValidationInfo) -> str | None:
+    """The body's `device_id` for a log line, only once it has passed its own check.
+
+    `device_id` is declared before `ssid`, so a valid one is already in `info.data`; an
+    invalid one is not, and the request is about to be refused for it anyway.
+    """
+    value = info.data.get("device_id")
+    return value if isinstance(value, str) else None
+
+
 class EnrollRequest(BaseModel):
     """The device-facing enrollment body. **Flat, and it stays flat forever.**
 
@@ -134,6 +152,10 @@ class EnrollRequest(BaseModel):
     platform_type: str = Field(min_length=1, max_length=64)
     # TEXT column, no PG enum: a board on a link nobody has invented yet still enrolls.
     link_type: str = Field(min_length=1, max_length=32)
+    # Agent 0.4.6. Stored, never rejected (spec: "the server stores a malformed value as
+    # null rather than refusing the request") — the validators below coerce, never raise.
+    ssid: str | None = None
+    known_networks: int | None = None
     power_class: str
     # Stored, never rejected — "the server must tolerate agents it cannot update".
     proto: int = 1
@@ -157,6 +179,18 @@ class EnrollRequest(BaseModel):
         if value is None or is_valid_device_id(value):
             return value
         raise ValueError("device_id must be 12 lowercase hex digits (the eFuse MAC)")
+
+    @field_validator("ssid", mode="before")
+    @classmethod
+    def _usable_ssid(cls, value: object, info: ValidationInfo) -> str | None:
+        """The SSID as reported, or `None` — never a 422 (`fleetforge.announce_fields`)."""
+        return normalize_ssid(value, device_id=_logged_device_id(info))
+
+    @field_validator("known_networks", mode="before")
+    @classmethod
+    def _usable_known_networks(cls, value: object, info: ValidationInfo) -> int | None:
+        """A plausible count, or `None` — never a 422."""
+        return normalize_known_networks(value, device_id=_logged_device_id(info))
 
     @field_validator("power_class")
     @classmethod
@@ -257,6 +291,12 @@ class DeviceSummary(BaseModel):
     fw_version: str | None
     agent_version: str | None
     link_type: str
+    # Device-reported, the last value seen (agent 0.4.6; NULL = not reported). For an
+    # offline board this is where it *was*, not a claim that it is out of range — the
+    # server cannot tell out of range from powered off (R2b-spec-1). Defaulted only so
+    # no other constructor breaks; `_device_summary` always sets both.
+    ssid: str | None = None
+    known_networks: int | None = None
     power_class: str
     expected_wake_interval_s: int | None
     parent_device_id: str | None

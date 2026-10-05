@@ -1786,6 +1786,68 @@ loop, the DHCP watchdog, the "no known network in range" line on real radio and 
 strongest-AP choice are proven only by build (-Werror on four toolchains) and the text
 tripwires in `tests/test_agent_known_networks.py` until the bench run.
 
+### Known networks: ingested and exposed (R2b-be-5, 2026-10-05)
+
+Backend only, migration `0005`. Decision: `DECISIONS.md` 2026-10-05 (R2b-be-5). `spec/`
+untouched (Patch B had already landed with R2b-fw-1).
+
+As built:
+
+- **Columns.** `devices.ssid TEXT NULL`, `devices.known_networks SMALLINT NULL`, no default,
+  no CHECK. NULL is "not reported". Existing rows start NULL; the broker's retained
+  announces fill 0.4.6 boards back in when the ingestor reconnects.
+- **One normaliser, two edges.** `src/fleetforge/announce_fields.py`
+  (`normalize_ssid`, `normalize_known_networks`) is called by `mode="before"` validators on
+  `AnnouncePayload` and `EnrollRequest`, and it never raises. `ssid`: a `str`, 1-32 UTF-8
+  bytes, no control character (NUL included), encodable (no lone surrogate), stored exactly
+  as sent; `""` is "not reported". `known_networks`: an `int`, not a `bool`, `0..64`. Anything
+  else is NULL and one INFO line naming the field, the reason and the device id, never the
+  value: `device 0000000be502 announced an unusable ssid (33 bytes > 32); stored as null`.
+- **Announce.** The pair is written on **every** announce (`store.py::_network_values`),
+  so a key that is absent or null clears the stored value. This is the one exception to
+  "absent means no change". The value stays between announces, so an offline board keeps
+  its last network.
+- **Enroll.** `IDENTITY_FIELDS` gained both, so a re-enrolment without them stores NULL. A
+  malformed value is stored as NULL and returns 200, never 422.
+- **Read model.** `DeviceSummary.ssid` / `.known_networks` come right after `link_type`,
+  and `deploy` stays last. The PATCH response comes from the same builder. `frontend/src/api.ts` is
+  unchanged: its mirror gains the two fields in R2b-fe-13.
+- **Simulator.** `DeviceIdentity.ssid` / `.known_networks` always appear in the announce, in spec
+  order. `just sim --ssid … --known-networks …`. A wifi sim with no flags announces
+  `sim-wifi` / 1, and ethernet announces null / null.
+
+T2 evidence (dev stack on 8088, api migrated on restart; trimmed):
+
+```
+$ psql -c "SELECT version_num FROM alembic_version"                       -> 0005
+  ... information_schema.columns ...                                        -> known_networks|smallint  ssid|text
+A  just sim --token … --name be5a --ssid shed --known-networks 2           -> {"link_type":"wifi","ssid":"shed","known_networks":2}
+B  just sim --name be5a --ssid home --known-networks 3  (reuses .sim/)     -> {"link_type":"wifi","ssid":"home","known_networks":3}
+C  mqtt-pub announce without the keys                                      -> {"link_type":"wifi","ssid":null,"known_networks":null}
+D  mqtt-pub {"fw_version":"9.9.9",…,"ssid":42,"known_networks":-1}       -> psql: 9.9.9||
+   ingestor: "device ? announced an unusable ssid (not a string); stored as null"
+             "device ? announced an unusable known_networks (out of range); stored as null"
+             (no "42" anywhere in the ingestor log; "?" because that payload had no device_id)
+E  mqtt-pub {…,"device_id":"82616fc9cb49","fw_version":"9.9.10","ssid":"a\u0000b","known_networks":1}
+                                                                            -> psql: 9.9.10||1, no asyncpg error
+   ingestor: "device 82616fc9cb49 announced an unusable ssid (control character); stored as null"
+F  just sim --token … --name be5e --link-type ethernet                     -> {"link_type":"ethernet","ssid":null,"known_networks":null}
+G  curl POST /v1/enroll …"ssid":"bench","known_networks":1                 -> HTTP 200, {"ssid":"bench","known_networks":1}
+H  curl POST /v1/enroll …"ssid":"aaa…(33)","known_networks":"two"          -> HTTP 200, {"ssid":null,"known_networks":null}
+   api: "… unusable ssid (33 bytes > 32) …", "… unusable known_networks (not an integer) …"
+I  .devices[0] | keys_unsorted -> […,"link_type","ssid","known_networks","power_class",…,"online","deploy"]
+J  git diff --stat main -- spec/                                           -> (empty)
+```
+
+**Release note (deploy order).** When the ingestor runs this image against a schema older
+than `0005`, every ingest fails with `UndefinedColumnError: column devices.ssid does not
+exist`. The ORM maps the column in every `RETURNING` and `SELECT`. T2 hit this on dev for
+about a minute: the ingestor was recreated on the new code before the api restarted and
+migrated. In prod, `services/scripts/deploy.sh` recreates `INFRA_SERVICES` (which includes
+`fleetforge-ingestor`) **before** `docker rollout fleetforge-api` migrates, so the same
+window opens there. Restart `fleetforge-ingestor` after the api rollout so it re-subscribes
+and replays the retained set against the migrated schema. See DECISIONS.
+
 ### Agent-written networks and keep identity: spike findings (R2b-spec-3, 2026-10-04) — FINDINGS, nothing built
 
 No agent, server, frontend, schema, migration, simulator or test change was made, and

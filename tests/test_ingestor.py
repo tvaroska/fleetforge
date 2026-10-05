@@ -210,6 +210,131 @@ async def test_unknown_link_type_is_written_through(session: AsyncSession) -> No
     assert (await reload(session)).link_type == "satellite"
 
 
+# --- ssid / known_networks (R2b-be-5) ----------------------------------------
+
+
+async def test_announce_stores_the_network_the_board_is_on(session: AsyncSession) -> None:
+    await seed_device(session)
+
+    await publish(session, "announce", {**ANNOUNCE, "ssid": "shed", "known_networks": 2})
+
+    device = await reload(session)
+    assert device.ssid == "shed"
+    assert device.known_networks == 2
+
+
+async def test_the_network_is_written_as_a_pair_on_every_announce(session: AsyncSession) -> None:
+    """Absent means "not reported", not "no change": a stale network is a wrong row.
+
+    A board that moved reports it next session; one that OTAs back to a pre-0.4.6
+    agent stops sending the keys, and must not keep saying "on: home".
+    """
+    await seed_device(session)
+
+    await publish(session, "announce", {**ANNOUNCE, "ssid": "shed", "known_networks": 2})
+    await publish(session, "announce", {**ANNOUNCE, "ssid": "home", "known_networks": 3})
+    device = await reload(session)
+    assert (device.ssid, device.known_networks) == ("home", 3)
+
+    await publish(session, "announce", ANNOUNCE)
+    device = await reload(session)
+    assert (device.ssid, device.known_networks) == (None, None)
+    assert device.fw_version == "1.4.2"
+
+
+async def test_ethernet_reports_no_network(session: AsyncSession) -> None:
+    await seed_device(session, ssid="shed", known_networks=2)
+
+    await publish(
+        session,
+        "announce",
+        {**ANNOUNCE, "link_type": "ethernet", "ssid": None, "known_networks": None},
+    )
+
+    device = await reload(session)
+    assert device.link_type == "ethernet"
+    assert (device.ssid, device.known_networks) == (None, None)
+
+
+@pytest.mark.parametrize(
+    ("ssid", "known_networks"),
+    [(42, True), ("a" * 33, -1), (["shed"], 2.0), ("", "2")],
+)
+async def test_a_malformed_network_never_loses_the_announce(
+    session: AsyncSession, ssid: object, known_networks: object
+) -> None:
+    """A `ValidationError` would drop the `fw_version` that says the OTA landed — and,
+    the announce being retained, drop it again on every reconnect."""
+    await seed_device(session, ssid="shed", known_networks=2)
+
+    event = await publish(
+        session,
+        "announce",
+        {**ANNOUNCE, "fw_version": "9.9.9", "ssid": ssid, "known_networks": known_networks},
+    )
+
+    assert event is not None
+    device = await reload(session)
+    assert device.fw_version == "9.9.9"
+    assert (device.ssid, device.known_networks) == (None, None)
+
+
+@pytest.mark.parametrize(
+    "raw_ssid",
+    [
+        b'"a\\u0000b"',  # NUL: PostgreSQL refuses it in TEXT and rolls the whole write back
+        b'"\\ud800"',  # a lone surrogate: valid JSON, not encodable as UTF-8
+        b'"tab\\there"',
+    ],
+)
+async def test_an_ssid_the_database_would_refuse_is_stored_as_null(
+    session: AsyncSession, raw_ssid: bytes
+) -> None:
+    await seed_device(session)
+    raw = (
+        b'{"proto":1,"device_id":"' + DEVICE_ID.encode() + b'","fw_version":"9.9.10",'
+        b'"link_type":"wifi","power_class":"always_on","ssid":' + raw_ssid + b","
+        b'"known_networks":1}'
+    )
+
+    event = await publish(session, "announce", raw=raw)
+
+    assert event is not None
+    device = await reload(session)
+    assert device.fw_version == "9.9.10"
+    assert device.ssid is None
+    assert device.known_networks == 1
+
+
+async def test_a_malformed_network_is_logged_without_its_value(session: AsyncSession) -> None:
+    await seed_device(session)
+    ssid = "this-ssid-is-thirty-three-bytes!!"
+    assert len(ssid) == 33
+
+    with capture_logs() as records:
+        await publish(session, "announce", {**ANNOUNCE, "ssid": ssid, "known_networks": -1})
+
+    messages = [record.getMessage() for record in records if "unusable" in record.getMessage()]
+    assert len(messages) == 2, messages
+    assert any("ssid" in m and "33 bytes > 32" in m and DEVICE_ID in m for m in messages)
+    assert any("known_networks" in m and "out of range" in m for m in messages)
+    assert all(record.levelno == logging.INFO for record in records if "unusable" in record.msg)
+    assert not any(ssid in record.getMessage() for record in records)
+
+
+async def test_a_retained_announce_also_writes_the_network(session: AsyncSession) -> None:
+    """The retained announce is the board's latest identity; only liveness is withheld."""
+    await seed_device(session, ssid="old", known_networks=4)
+
+    await publish(
+        session, "announce", {**ANNOUNCE, "ssid": "shed", "known_networks": 2}, retained=True
+    )
+
+    device = await reload(session)
+    assert (device.ssid, device.known_networks) == ("shed", 2)
+    assert device.last_seen is None
+
+
 # --- presence ---------------------------------------------------------------
 
 

@@ -259,6 +259,10 @@ sleep 3 && curl -sS "$BASE/v1/devices" -H "Authorization: Bearer $TOKEN" | jq -c
 # ~25 s and flips with NO message and NO SSE event — presence is computed on read.
 just sim --token "$(newtoken)" --name frame --power-class sleepy --wake-interval 10 --awake-s 3
 
+# The network a board is on (agent 0.4.6). A wifi sim announces sim-wifi / 1 unless
+# told otherwise; ethernet announces null / null. The next session overwrites both.
+just sim --name blinker --ssid shed --known-networks 2 --duration 10
+
 # A bad link: seeded latency before every publish, so a run is reproducible.
 just sim --name blinker --link slow --seed 7 --heartbeat-interval 5
 

@@ -3,6 +3,7 @@
 ```
 just sim --token ffe_… --name blinker --heartbeat-interval 5
 just sim --name blinker --duration 10                  # reuses .sim/, enrolls nothing
+just sim --name blinker --ssid shed --known-networks 2  # announces the network it is on
 just sim --token ffe_… --power-class sleepy --wake-interval 20 --awake-s 3
 just sim --name blinker --crash-after 15                # ungraceful: the LWT fires
 just sim-fleet 3 --heartbeat-interval 5                 # issues its own tokens
@@ -104,13 +105,25 @@ def _now_iso() -> str:
 
 
 def _identity_for(args: argparse.Namespace, device_id: str) -> DeviceIdentity:
-    """Build the announce identity from the flags. No I/O, no validation yet."""
+    """Build the announce identity from the flags. No I/O, no validation yet.
+
+    A wifi board always joined *something*, so it announces `sim-wifi` / 1 unless told
+    otherwise; any other link announces what the flags say (null unless forced), as
+    agent 0.4.6 does on ethernet.
+    """
+    ssid: str | None = args.ssid
+    known_networks: int | None = args.known_networks
+    if args.link_type == "wifi":
+        ssid = ssid or "sim-wifi"
+        known_networks = known_networks if known_networks is not None else 1
     return DeviceIdentity(
         device_id=device_id,
         platform_type=args.platform_type,
         fw_version=args.fw_version,
         agent_version=args.agent_version,
         link_type=args.link_type,
+        ssid=ssid,
+        known_networks=known_networks,
         power_class=args.power_class,
         expected_wake_interval_s=args.wake_interval,
         partition_layout=args.partition_layout,
@@ -374,6 +387,15 @@ def _shared(parser: argparse.ArgumentParser) -> None:
         help="says -sim on purpose: a fake board must be identifiable in the fleet list",
     )
     parser.add_argument("--link-type", default="wifi")
+    parser.add_argument(
+        "--ssid", default=None, help="the network announced (wifi default: sim-wifi)"
+    )
+    parser.add_argument(
+        "--known-networks",
+        type=int,
+        default=None,
+        help="how many networks ff_cfg lists (wifi default: 1)",
+    )
     parser.add_argument("--partition-layout", default="ab-4m-v1")
     parser.add_argument("--ota-slot-size", type=int, default=1966080)
     parser.add_argument("--power-class", default="always_on", choices=POWER_CLASSES)

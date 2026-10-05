@@ -269,6 +269,11 @@ class DeviceIdentity:
     fw_version: str = "1.4.2"
     agent_version: str = "0.1.0-sim"
     link_type: str = "wifi"
+    # Agent 0.4.6: the network joined and how many ff_cfg lists. Not checked by
+    # `validate()`: the server refuses neither, and sending junk is how its tolerance
+    # is tested.
+    ssid: str | None = None
+    known_networks: int | None = None
     power_class: str = "always_on"
     expected_wake_interval_s: int | None = None
     parent_device_id: str | None = None
@@ -318,6 +323,9 @@ class DeviceIdentity:
             "fw_version": self.fw_version,
             "agent_version": self.agent_version,
             "link_type": self.link_type,
+            # Always present, null when unset, as agent 0.4.6 sends them.
+            "ssid": self.ssid,
+            "known_networks": self.known_networks,
             "power_class": self.power_class,
             "expected_wake_interval_s": self.expected_wake_interval_s,
             "parent_device_id": self.parent_device_id,

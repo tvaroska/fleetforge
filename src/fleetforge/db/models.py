@@ -256,6 +256,12 @@ class Device(Base):
     fw_version: Mapped[str | None] = mapped_column(Text, nullable=True)
     agent_version: Mapped[str | None] = mapped_column(Text, nullable=True)
     link_type: Mapped[str] = mapped_column(Text, nullable=False)
+    # Device-reported, as last announced (agent 0.4.6); NULL = not reported. No CHECK:
+    # both edges normalise first (`fleetforge.announce_fields`), and a CHECK would turn
+    # a normaliser bug into an `IntegrityError` that loses the whole announce.
+    ssid: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # How many networks the board's ff_cfg lists. NULL = not reported. No CHECK, as above.
+    known_networks: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
     power_class: Mapped[str] = mapped_column(Text, nullable=False)
     expected_wake_interval_s: Mapped[int | None] = mapped_column(Integer, nullable=True)
     parent_device_id: Mapped[str | None] = mapped_column(

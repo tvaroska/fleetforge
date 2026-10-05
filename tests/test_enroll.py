@@ -427,9 +427,67 @@ async def test_an_unknown_parent_device_is_400_not_500(
     assert row.used_at is None
 
 
+async def test_the_network_the_board_joined_is_stored(
+    enroll_app: FastAPI, engine: AsyncEngine
+) -> None:
+    """Agent 0.4.6 sends `ssid` / `known_networks` in the enroll body too (R2b-be-5)."""
+    device_id = "a4cf12b3de33"
+    issued = await issue_token(enroll_app)
+    body = enroll_body(issued["token"], device_id, ssid="bench", known_networks=1)
+
+    assert (await post_enroll(enroll_app, body)).status_code == 200
+
+    device = await fetch_device(engine, device_id)
+    assert device is not None
+    assert (device.ssid, device.known_networks) == ("bench", 1)
+
+
+@pytest.mark.parametrize(
+    ("ssid", "known_networks"),
+    [(7, "two"), ("a" * 33, -1), ("a\x00b", True), ("", 2.5)],
+)
+async def test_a_malformed_network_is_stored_as_null_never_refused(
+    enroll_app: FastAPI, engine: AsyncEngine, ssid: object, known_networks: object
+) -> None:
+    """The spec: "the server stores a malformed value as null rather than refusing the
+    request". A 422 here would send a board that can do nothing about it back to the
+    flasher."""
+    device_id = "a4cf12b3de34"
+    issued = await issue_token(enroll_app)
+    body = enroll_body(issued["token"], device_id, ssid=ssid, known_networks=known_networks)
+
+    response = await post_enroll(enroll_app, body)
+
+    assert response.status_code == 200, response.text
+    device = await fetch_device(engine, device_id)
+    assert device is not None
+    assert (device.ssid, device.known_networks) == (None, None)
+    row = await fetch_token(engine, issued["id"])
+    assert token_status(row, now_utc()) is EnrollmentTokenStatus.USED
+
+
 # ---------------------------------------------------------------------------
 # Re-enrollment
 # ---------------------------------------------------------------------------
+
+
+async def test_re_enrollment_without_a_network_stores_not_reported(
+    enroll_app: FastAPI, engine: AsyncEngine
+) -> None:
+    """An older agent (or an ethernet board) re-enrols without the keys: NULL, not stale."""
+    device_id = "a4cf12b3de41"
+    first = await issue_token(enroll_app)
+    body = enroll_body(first["token"], device_id, ssid="shed", known_networks=2)
+    assert (await post_enroll(enroll_app, body)).status_code == 200
+
+    second = await issue_token(enroll_app)
+    assert (await post_enroll(enroll_app, enroll_body(second["token"], device_id))).status_code == (
+        200
+    )
+
+    device = await fetch_device(engine, device_id)
+    assert device is not None
+    assert (device.ssid, device.known_networks) == (None, None)
 
 
 async def test_re_enrollment_upserts_and_keeps_the_operator_s_name(

@@ -6,7 +6,8 @@ is a reading of it, never an extension of it.
 **Tolerate everything, reject nothing on vocabulary** (*Evolution rules*: additive
 changes only, both sides ignore unknown fields). So every payload model has
 `extra="ignore"`, **every field is optional** — a missing field means "no change",
-not "set to NULL" — and an unknown `up/` channel is logged and dropped rather than
+not "set to NULL" (the one exception, `ssid` / `known_networks`, is explained in
+`store.py::_network_values`) — and an unknown `up/` channel is logged and dropped rather than
 raising. A `ValidationError` escaping into the message loop would be a
 fleet-visibility outage caused by one board's firmware bug.
 """
@@ -16,8 +17,9 @@ import logging
 from dataclasses import dataclass
 from enum import StrEnum
 
-from pydantic import BaseModel, ConfigDict, ValidationError, field_validator
+from pydantic import BaseModel, ConfigDict, ValidationError, ValidationInfo, field_validator
 
+from fleetforge.announce_fields import normalize_known_networks, normalize_ssid
 from fleetforge.identity import DEVICE_ID_RE
 
 logger = logging.getLogger(__name__)
@@ -80,12 +82,27 @@ class _TolerantPayload(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
 
+def _logged_device_id(info: ValidationInfo) -> str | None:
+    """The payload's `device_id` for a log line, only if it is a canonical one.
+
+    The topic is authoritative and the body's copy is unvalidated board text; a log
+    line must not echo arbitrary bytes from it.
+    """
+    value = info.data.get("device_id")
+    return value if isinstance(value, str) and DEVICE_ID_RE.match(value) else None
+
+
 class AnnouncePayload(_TolerantPayload):
     """`up/announce` — full identity, republished on every boot, retained.
 
     `parent_device_id` is deliberately **not** mapped: parentage is an enrollment-time
     fact (R0-be-4), and letting a board reparent itself over MQTT is a V3 authz
     question. `boot_ok` / `uptime_s` / `rssi` / `free_heap` are R4 telemetry.
+
+    `ssid` / `known_networks` (agent 0.4.6) are written as a pair on every announce,
+    absent and null alike meaning "not reported" (`store.py::_network_values`); a
+    malformed value **coerces to `None`** rather than raising, for the reason
+    `StatusPayload` gives — a `ValidationError` here would lose the `fw_version` too.
     """
 
     proto: int | None = None
@@ -94,11 +111,25 @@ class AnnouncePayload(_TolerantPayload):
     fw_version: str | None = None
     agent_version: str | None = None
     link_type: str | None = None
+    ssid: str | None = None
+    known_networks: int | None = None
     power_class: str | None = None
     expected_wake_interval_s: int | None = None
     partition_layout: str | None = None
     ota_slot_size: int | None = None
     capabilities: list[str] | None = None
+
+    @field_validator("ssid", mode="before")
+    @classmethod
+    def _usable_ssid(cls, value: object, info: ValidationInfo) -> str | None:
+        """The SSID as reported, or `None` — never a `ValidationError`."""
+        return normalize_ssid(value, device_id=_logged_device_id(info))
+
+    @field_validator("known_networks", mode="before")
+    @classmethod
+    def _usable_known_networks(cls, value: object, info: ValidationInfo) -> int | None:
+        """A plausible count, or `None` — never a `ValidationError`."""
+        return normalize_known_networks(value, device_id=_logged_device_id(info))
 
 
 class PresencePayload(_TolerantPayload):

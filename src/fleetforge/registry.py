@@ -32,13 +32,17 @@ logger = logging.getLogger(__name__)
 # Everything the freshly flashed agent is authoritative about. Overwritten on
 # re-enrollment: firmware genuinely changes a board's `power_class`, its partition
 # layout and its capabilities, and a stale value silently selects the wrong presence
-# rule or the wrong OTA slot size.
+# rule or the wrong OTA slot size. `ssid` / `known_networks` follow the same rule, so
+# a re-enrolment without them (an older agent, an ethernet board) stores NULL — the
+# spec's "not reported", never a stale network.
 IDENTITY_FIELDS = (
     "platform_type",
     "proto",
     "fw_version",
     "agent_version",
     "link_type",
+    "ssid",
+    "known_networks",
     "power_class",
     "expected_wake_interval_s",
     "parent_device_id",
