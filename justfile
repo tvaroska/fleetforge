@@ -186,6 +186,22 @@ bench-judge $scenario $ref $where="prod":
         printf '%s\n' "$sql" | docker compose exec -T postgres psql -U fleetforge fleetforge -v ON_ERROR_STOP=1 -At -F '|'
     fi | python3 scripts/bench_judge.py "$scenario"
 
+# ── Known networks bench (R2b-test-4) ────────────────────────────────────────
+#
+# Is the board online on the expected network? Polls one device row (psql: over ssh
+# for prod, in the dev stack for dev) until it is, prints each change of the row, and
+# grades it (docs/runbooks/known-networks-bench.md). The SSID is compared exactly and
+# never enters SQL; a device that is not 12 hex is refused before anything runs.
+# Exit: 0 NET PASS, 1 NET FAIL (wrong flash), 2 usage/refused/no device/fetch error,
+# 3 NET WAIT / NET TIMEOUT. timeout 0 reads once.
+#
+#     just bench-net 94a990dd09a4 "bench-ap" 2            # prod, waits up to 300 s
+#     just bench-net 94a990dd09a4 "bench-ap" 2 prod 0     # one read, for the record sheet
+#
+# Wait until a board is online on SSID with `known` networks configured (prod: a read-only SELECT over ssh).
+bench-net $device $ssid $known="2" $where="prod" $timeout="300":
+    python3 scripts/bench_net.py watch "$device" --ssid="$ssid" --known="$known" --where="$where" --timeout="$timeout"
+
 # ── Update flow end to end (R2b-test-3) ──────────────────────────────────────
 #
 # Flow 2 (upload, pre-check, deploy to confirmed, deploy to rolled back) played through

@@ -75,6 +75,10 @@ carries only the newest transaction's summary, not every row.
    hotspot's SSID, which needs a re-flash, which re-enrols the board (a new device baseline).
    That is why the radio steps come last. The alternative is the home AP: its power plug is
    "AP off", its WAN cable is "WAN cut".
+   If the board was flashed with two networks for R2b-test-4
+   ([known-networks-bench.md](known-networks-bench.md)), "AP off" makes it fail over to the other
+   network instead of losing the link. During these radio steps keep network 2 switched off, or
+   re-flash with one network.
 
 ## The images
 

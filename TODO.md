@@ -358,6 +358,11 @@ are R3). Order inside each flow: the one-place status first, then the cards, the
 - [ ] **R2b-test-4**: Move a board between two networks on the bench (P1, 0.5d)
       Flash with two networks, power it where only the second is in range, see it join and
       the row change. Hardware-gated. Depends on `R2b-fw-1`.
+      _(2026-10-05: bench script docs/runbooks/known-networks-bench.md and checker `just bench-net`;
+      rehearsed on dev with the simulator (a to b move incl. a half-open old session: NET PASS);
+      esp32s3 0.4.7 bundle at 8cf4475 for the esptool route. Bench run owed: waits on the R2b
+      release to prod (be-5/fe-12/fe-13, migration 0005), an agent ≥ 0.4.6 on the flash path
+      (S0-infra-10 or the esptool route), S0-bug-1, and a second 2.4 GHz network at the bench.)_
 
 ### Bench verification — after the flows land
 
