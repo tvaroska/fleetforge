@@ -184,8 +184,11 @@ VCS integration and the server-side compiler are **automated artifact producers*
 4. JOIN    The board scans, picks a known network it can see, and joins. The next
            `announce` names the network by SSID (never the passphrase).
 5. SEE     The Fleet row and the result card show "on: shed" and "knows 2 networks".
-           If none is in range after a deadline, the card says so in plain language
-           ("none of its 2 known networks is in range") and the board keeps trying.
+           If none is in range after a deadline, the result card (which reads the
+           console) says so in plain language ("none of its 2 known networks is in
+           range") and the board keeps trying. With no link the server cannot tell
+           out of range from powered off, so the Fleet row says only "offline, last
+           on: shed".
 ```
 
 **Later, in this order** (planned, not specified here):
@@ -197,7 +200,8 @@ VCS integration and the server-side compiler are **automated artifact producers*
 - **A network that was not on the list needs a re-flash,** until Improv lands. This is the accepted limit of v1.
 - **Passphrases stay out of the server and out of browser storage.** Only the SSID is ever reported.
 - **The board's own code must keep the list.** A maker's firmware (R3) has to read the same network list and, later, carry the Improv handler; otherwise the OTA that made the board useful would strand it on its current network.
-- **Open, not decided:** how many networks, and the selection rule (a fixed priority order, or the strongest of those in range); the `ff_cfg` format change that carries a list (a proposal to `spec/device-protocol.md`, which is protected); how a board reports "no known network in range" (the announce cannot be sent without a link); whether a network list or credentials belong in NVS or `ff_cfg` once the agent can write them.
+- **Decided (R2b-spec-1):** up to four networks, in the operator's order; the first one in range wins, and a board that has joined one stays on it until the link drops; with none in range the board keeps trying and says so on its console. Format and selection rule: [device-protocol.md](device-protocol.md) → *Known networks*.
+- **Still open:** whether a network list or credentials belong in NVS or `ff_cfg` once the agent can write them (R2b-spec-3); and how "no known network in range" could ever reach the server, since the board has no link to send it over.
 
 ## Where the pieces line up
 - The **self-test** appears in Flow 2 step 3 (sim gate) and step 6 (device confirm) — the same code, two enforcement points.

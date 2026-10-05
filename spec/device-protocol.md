@@ -117,6 +117,32 @@ own receipt time**, never the device's timestamp — see *Clock* below.
 has no data source. `partition_layout` also lets the server detect and quarantine boards
 flashed with a superseded layout.
 
+`flash_chip_size`, `partition_table_sha256` and `rollback_capable` are measurements, where
+`partition_layout` is a name. `flash_chip_size` is the physical flash chip size in bytes, not
+the size in the image header; a device that cannot read it omits the field.
+`partition_table_sha256` is the lowercase hex SHA-256 of the device's decoded partition
+table: one line `{type}:{subtype}:{offset}:{size}\n` per entry the table contains,
+all four in decimal, sorted by offset ascending, with labels and flags left out. The
+expected value for each layout id is in the *Partition layouts* table below.
+`rollback_capable` is `true` once the board has booted an OTA-written image that its
+bootloader put into `PENDING_VERIFY`, `false` once it has booted one that its bootloader
+never put into `PENDING_VERIFY` (the bootloader cannot roll back), and `null` until either
+has been observed, which includes every board that has never completed an OTA. It is
+never derived from how the firmware was built. All
+three are additive under *Evolution rules*, rule 2, and `proto` stays `1`. An absent
+field means unknown, and the server never refuses a device for omitting one. The enroll
+body carries the same fields, and the server stores a malformed value as null rather
+than refusing the request.
+
+`ssid` and `known_networks` say which network the board is on, never how it joined it.
+`ssid` is the SSID of the network this broker session runs over, as written in `ff_cfg`.
+`known_networks` is how many networks the board will try (after any it dropped for room).
+Both are `null` when `link_type` is `ethernet` and absent from agents older than the
+known-networks list. The server treats absent and `null` alike, as "not reported". The
+announce is republished on every broker connect, so a board that moved to another network
+reports it in its next session. The passphrase and the other networks' SSIDs are never
+sent.
+
 #### Partition layouts
 
 A layout id names a **whole flash map**, and it is a flash-time immutable: no OTA can
@@ -125,10 +151,10 @@ change it. A new map is a new id, never an edit to an existing row
 different layouts, and the server supports every id below for as long as boards carrying
 it exist.
 
-| `partition_layout` | `ota_slot_size` | Who flashes it | Map |
-|---|---|---|---|
-| `ab-4m-v1` | 1966080 | the prebuilt agent (browser flasher) | [design/partitions.md](../design/partitions.md) §1 |
-| `ab-4m-arduino-v1` | 1966080 | the OTA library, as a sketch-local `partitions.csv` | [design/decisions/arduino-gets-its-own-layout-id.md](../design/decisions/arduino-gets-its-own-layout-id.md) |
+| `partition_layout` | `ota_slot_size` | `partition_table_sha256` | Who flashes it | Map |
+|---|---|---|---|---|
+| `ab-4m-v1` | 1966080 | `1fa67e6bbd034e434d04e9d6f4f52bbe899361602cd498573eb3bde97d1559ed` | the prebuilt agent (browser flasher) | [design/partitions.md](../design/partitions.md) §1 |
+| `ab-4m-arduino-v1` | 1966080 | `05528998ae17fb6a7a5741443f9a7a4720c766f370fefc30814cbc3e391c1fc4` | the OTA library, as a sketch-local `partitions.csv` | [design/decisions/arduino-gets-its-own-layout-id.md](../design/decisions/arduino-gets-its-own-layout-id.md) |
 
 The two share a slot size and differ in offsets. `ab-4m-v1`'s offsets cannot be reached
 from the Arduino upload recipe, which writes `boot_app0` at `0xe000` and the app at
@@ -139,6 +165,36 @@ at `0x12000` on `ab-4m-v1`, and at `0x3D0000` on `ab-4m-arduino-v1`. It carries 
 board needs before it has ever spoken to the server: API origin, broker URI, link
 credentials and the enrollment token. The flasher writes it per board. A board finds it
 by subtype through the partition table, never by a hardcoded offset.
+
+**Known networks.** A Wi-Fi board may know several networks:
+
+```
+"ssid": "home", "psk": "…", "nets": [{"ssid": "shed", "psk": "…"}, {"ssid": "bench"}]
+```
+
+- The top-level `ssid` / `psk` are the first, highest-priority network, so an old blob is a
+  list of one. `nets` (optional) holds the rest, in priority order.
+- At most 4 networks in all. Writers refuse more. A reader that finds more uses the first
+  ones it has room for, logs a warning, and never refuses to boot over length.
+- `psk` absent or `""` is an open network. Unknown keys inside an entry are ignored. A
+  malformed `nets` (not an array, an entry that is not an object, a missing or empty
+  `ssid`, a non-string field, an over-length `ssid` / `psk`) is a bad config: the board
+  idles.
+- The `ff_cfg` header `version` stays `1`. Readers refuse any other version, so a bump
+  would idle every fielded board; readers that predate `nets` ignore it and join the
+  top-level network.
+- Selection is fixed priority: the board joins the first known network its scan sees, and
+  the strongest AP of that SSID. It never leaves a working association for a
+  higher-priority network; it re-selects only after losing the link. A visible network
+  that does not get it an address does not block the next one. Networks the scan did not
+  see are then tried directly (hidden SSIDs), and it rescans. With one network it
+  connects directly, with no scan.
+- With no known network in range the board says so on its console once per attempt cycle
+  and keeps trying on the 1 s → 30 s backoff. It never reboots, never opens an access
+  point and never falls back to anything else. With no link it cannot tell the server,
+  which sees an offline board and nothing more.
+- Passphrases are never logged, announced or sent. In v1 the agent never writes the list;
+  only the flasher does.
 
 ### `up/hb` — heartbeat
 

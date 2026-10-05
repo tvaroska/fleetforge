@@ -70,14 +70,18 @@ airborne drone does not roll back for being in the air. The real question is whe
 sleepy node confirms within its first wake; `confirm_timeout_s` is already per-command.
 Needs a statement in `device-protocol.md`, not new fields.
 
-**Bootloader attestation on the Arduino path.** `verify_bundle.py` proves
-`APP_ROLLBACK_ENABLE=y` for the prebuilt agent only. Boards on `ab-4m-arduino-v1` run
-the Arduino core's precompiled bootloader; `design/decisions/arduino-gets-its-own-layout-id.md`
-records the intended posture, but nothing on the wire confirms it. A `rollback_capable`
-boolean in `up/announce` is additive and would let the server quarantine a board that
-lies. Unverified against a real Arduino-built board.
+**Attestation before the first OTA.** `rollback_capable` is measured by an OTA, so a
+board's first OTA runs unprotected if its bootloader lacks rollback, and nothing on the
+wire says so beforehand. Candidate: a `bootloader_sha256` in `up/announce`, compared
+with a catalogue of known-good bootloader digests (the agent bundle's, and the Arduino
+core's per core version). Blocked on a bench measurement of whether the on-flash digest
+equals the bundle file's, since esptool rewrites the image header's flash parameters at
+write time. The same digest would invalidate a stale persisted `rollback_capable` after
+an Arduino IDE upload.
 
-**Field Wi-Fi change.** `flows.md` accepts re-flash for a credential change. Whether
-that holds once boards are sealed in boxes (CUJ-1) is open; see the *repeat path*
-question above. Candidate: copy `ssid`/`psk` from `ff_cfg` to NVS on enrolment and
-let `dn/cmd` `set_cfg` rewrite them. Not decided.
+**Field Wi-Fi change.** Partly answered (R2b-spec-1). A board flashed with a list of
+known networks moves between them with no re-flash ([device-protocol.md](device-protocol.md)
+→ *Known networks*, `flows.md` Flow 3). A network not on the list still needs a re-flash,
+and whether that holds once boards are sealed in boxes (CUJ-1) is open; see the *repeat
+path* question above. The writable store (NVS or `ff_cfg`), and `dn/cmd` `set_cfg` versus
+Improv as the way in, move to R2b-spec-3. Not decided.
