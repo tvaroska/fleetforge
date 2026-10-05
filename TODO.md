@@ -315,19 +315,19 @@ are R3). Order inside each flow: the one-place status first, then the cards, the
       transaction record — discarded" (leaves the deploy at `rebooting`); emit `false` only
       after `R2b-test-5`. Applies Patch B in the same commit. QEMU proof: an OTA'd image
       announces `rollback_capable: true` and the `ab-4m-v1` fingerprint. New agent version.
-      **Blocked:** waits for the owner to accept and apply the R2-spec-1 proposal as amended by R2b-spec-2 (Patch A; fw-2 also applies Patch B). See docs/features/board-profiles.md → *Step 1 wire proposal*.
+      Spec applied in 8cb5335 (Patch A). Apply Patch B (announce example keys) in this task's commit. See docs/features/board-profiles.md → *Step 1 wire proposal*.
 - [ ] **R2b-be-6**: Ingest and store the three board measurements (P2, 1d)
       `AnnouncePayload`, `ingestor/store.py`, `EnrollRequest` (store, never reject: malformed
       → null + log), `IDENTITY_FIELDS`, `Device` columns + Alembic migration (CRITICAL),
       simulator flags `--rollback-capable {true,false}`, `--partition-sha`,
       `--flash-chip-size`.
-      **Blocked:** waits for the owner to accept and apply the R2-spec-1 proposal as amended by R2b-spec-2 (Patch A; fw-2 also applies Patch B). See docs/features/board-profiles.md → *Step 1 wire proposal*.
+      Spec applied in 8cb5335 (Patch A). Apply Patch B (announce example keys) in this task's commit. See docs/features/board-profiles.md → *Step 1 wire proposal*.
 - [ ] **R2b-be-7**: Pre-check and deploy gate on the measurements (P2, 1d)
       `deploy_precheck.py`: `partition_table_mismatch` refusal, `rollback_incapable` gating
       warning; `DeployRequest.override`; `PrecheckFinding.needs_override`;
       `SUPPORTED_LAYOUTS` → `{layout: {ota_slot_size, partition_table_sha256}}` with a pin in
       `tests/test_agent_partitions.py`. Depends on `R2b-be-6`.
-      **Blocked:** waits for the owner to accept and apply the R2-spec-1 proposal as amended by R2b-spec-2 (Patch A; fw-2 also applies Patch B). See docs/features/board-profiles.md → *Step 1 wire proposal*.
+      Spec applied in 8cb5335 (Patch A). Apply Patch B (announce example keys) in this task's commit. See docs/features/board-profiles.md → *Step 1 wire proposal*.
 - [ ] **R2b-test-5**: Bench a rollback-less bootloader to settle `rollback_capable: false` (P2, 0.5d)
       What an OTA'd image observes (`NEW` or `VALID`) when the bootloader has no rollback.
       Gates `R2b-fw-2` emitting `false`. Hardware-gated.
@@ -339,15 +339,15 @@ are R3). Order inside each flow: the one-place status first, then the cards, the
       `ssid` in `announce`. States "no known network in range" and keeps trying. New agent
       version; `just agent-verify` and the QEMU run unchanged. Depends on `R2b-spec-1`
       being accepted.
-      **Blocked:** waits for the owner to accept and apply the R2b-spec-1 proposal (Patch A; fw-1 also applies Patch B). See docs/features/enrollment.md → *Known networks: wire proposal*.
+      Spec applied in 8cb5335 (Patch A). Apply Patch B (announce example keys) in this task's commit. See docs/features/enrollment.md → *Known networks: wire proposal*.
 - [ ] **R2b-fe-12**: Flasher takes several networks, passphrase field uses the password manager (P1, 1d)
       `ffcfg.ts` encodes the list; "add another network". The no-browser-storage rule in
       `FlashBoard.tsx` stays: the field is marked for the browser's own password manager,
       and nothing is written to storage. Depends on `R2b-spec-1`.
-      **Blocked:** waits for the owner to accept and apply the R2b-spec-1 proposal (Patch A; fw-1 also applies Patch B). See docs/features/enrollment.md → *Known networks: wire proposal*.
+      Spec applied in 8cb5335 (Patch A). Apply Patch B (announce example keys) in this task's commit. See docs/features/enrollment.md → *Known networks: wire proposal*.
 - [ ] **R2b-be-5**: Ingest and expose the board's `ssid` and `known_networks` (P1, 0.5d)
       Additive fields on the device read model. Depends on `R2b-spec-1`.
-      **Blocked:** waits for the owner to accept and apply the R2b-spec-1 proposal (Patch A; fw-1 also applies Patch B). See docs/features/enrollment.md → *Known networks: wire proposal*.
+      Spec applied in 8cb5335 (Patch A). Apply Patch B (announce example keys) in this task's commit. See docs/features/enrollment.md → *Known networks: wire proposal*.
 - [ ] **R2b-fe-13**: Fleet row shows the network: "on: shed", "knows 2 networks" (P1, 0.5d)
       An offline board shows "offline, last on: shed": the server cannot tell out of range
       from powered off (R2b-spec-1). Only the result card, which reads the console, names
