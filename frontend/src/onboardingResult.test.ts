@@ -86,6 +86,8 @@ const device = (over: Partial<DeviceSummary> = {}): DeviceSummary => ({
   fw_version: '9.9.9',
   agent_version: '0.3.0',
   link_type: 'wifi',
+  ssid: null,
+  known_networks: null,
   power_class: 'always_on',
   expected_wake_interval_s: null,
   parent_device_id: null,
@@ -315,11 +317,97 @@ describe('describeOnboardingResult — known networks (R2b-fe-12)', () => {
     ]
     expect(consoleFacts(eventsOf(lines)).ssid).toBe('shed')
     const result = judge(lines, T0 + 1_000, { devices: [], versions: null, flashed })
-    expect(value(result, 'Link')).toBe('Wi-Fi shed · ip 192.168.1.40')
+    expect(value(result, 'Link')).toBe('Wi-Fi shed · knows 3 networks · ip 192.168.1.40')
   })
 
   it('claims no SSID when neither the page nor the console knows which one', () => {
     const result = judge(MULTI, T0 + 1_000, { devices: [], versions: null, flashed })
     expect(value(result, 'Link')).toBe('Wi-Fi · ip 192.168.1.40')
+  })
+})
+
+describe('describeOnboardingResult — known networks in range (R2b-fe-13)', () => {
+  const BOOT = [
+    'rst:0x1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)',
+    'I (100) ff-agent: fleetforge agent 0.4.6 (idf v5.5.5), built Oct 05 2026 00:00:00',
+    'I (120) ff-id: device_id a4cf12b3de90',
+  ]
+  const NO_KNOWN_2 = [
+    ...BOOT,
+    'I (300) ff-wifi: wifi sta starting, 2 known networks; scanning',
+    'I (900) ff-wifi: scan: 0 access points, 0 of 2 known networks in range',
+    'W (1000) ff-wifi: disconnected (reason 201); trying "shed" next',
+    'W (1100) ff-wifi: disconnected (reason 201); that was the last known network',
+    'W (1200) ff-wifi: no known network in range (2 known); scanning again in 30 s',
+    'W (31200) ff-wifi: disconnected (reason 201); trying "shed" next',
+  ]
+  const late = T0 + MILESTONE_DEADLINE_MS.link + 2_000
+
+  it('names "none of its 2 known networks is in range" after the deadline', () => {
+    const result = judge(NO_KNOWN_2, late)
+    expect(result?.outcome).toBe('failure')
+    if (result?.outcome !== 'failure') return
+    expect(result.cause).toBe('wifi')
+    expect(result.remedy).toBeNull()
+    expect(result.headline).toBe('Wi-Fi: none of its 2 known networks is in range')
+    expect(result.next).toMatch(/keeps trying/)
+    expect(result.headline + result.next).not.toMatch(/reason 201|\(2 known\)/)
+  })
+
+  it('shows no card before the deadline', () => {
+    expect(judge(NO_KNOWN_2, T0 + 1_000)).toBeNull()
+  })
+
+  it('names the one network of a single-network 0.4.6 board', () => {
+    const result = judge(
+      [
+        ...BOOT,
+        'I (300) ff-wifi: wifi sta starting, ssid home',
+        'W (5300) ff-wifi: disconnected (reason 201); reconnecting in 1000 ms',
+        'W (5400) ff-wifi: no known network in range (1 known); trying again in 2 s',
+      ],
+      late,
+    )
+    expect(result?.outcome === 'failure' && result.headline).toBe('Wi-Fi: its one network is not in range')
+  })
+
+  it('says a visible network would not take the board', () => {
+    const result = judge(
+      [
+        ...BOOT,
+        'I (300) ff-wifi: wifi sta starting, 2 known networks; scanning',
+        'W (1200) ff-wifi: none of the 1 known networks in range could be joined (2 known); scanning again in 4 s',
+      ],
+      late,
+    )
+    expect(result?.outcome === 'failure' && result.headline).toMatch(/1 of its 2 known networks is in range/)
+    expect(result?.outcome === 'failure' && result.next).toMatch(/passphrase/)
+  })
+
+  it('a join after the cycle line clears it, and a reset forgets it', () => {
+    const joined = [
+      ...BOOT,
+      'I (300) ff-wifi: wifi sta starting, 2 known networks; scanning',
+      'W (1200) ff-wifi: no known network in range (2 known); scanning again in 30 s',
+      'I (2000) ff-wifi: joined "shed" (known network 2 of 2)',
+      'I (2100) ff-net: wifi link up, ip 192.168.1.40 gw 192.168.1.1 mask 255.255.255.0',
+    ]
+    expect(consoleFacts(eventsOf(joined)).unjoined).toBeNull()
+    const result = judge([...joined, ...HAPPY.slice(5)], T0 + 1_000)
+    expect(result?.outcome).toBe('success')
+    expect(consoleFacts(eventsOf([...NO_KNOWN_2, ...HAPPY.slice(0, 2)])).unjoined).toBeNull()
+  })
+
+  it('keeps the generic wifi copy when no cycle line was printed', () => {
+    const result = judge(SILENT_BOARD, late)
+    expect(result?.outcome === 'failure' && result.next).toBe(CAUSE_NEXT.wifi)
+  })
+
+  it('leaves a one-network success card without a count', () => {
+    const result = judge(
+      [...HAPPY.slice(0, 3), 'I (300) ff-wifi: wifi sta starting, ssid shed', ...HAPPY.slice(3)],
+      T0 + 1_000,
+    )
+    expect(value(result, 'Link')).toBe('Wi-Fi shed · ip 192.168.1.40')
   })
 })

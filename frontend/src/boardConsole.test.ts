@@ -938,3 +938,50 @@ describe('describeRestarts', () => {
     )
   })
 })
+
+// R2b-fe-13: the agent 0.4.6 scan-cycle lines and the reason-201 demotion.
+describe('known-network wifi lines (R2b-fe-13)', () => {
+  const W = (text: string) => classifyConsoleLine(`W (1000) ff-wifi: ${text}`, 0)
+
+  it.each([
+    'no known network in range (2 known); scanning again in 30 s',
+    'no known network in range (1 known); trying again in 2 s',
+    'none of the 1 known networks in range could be joined (2 known); scanning again in 4 s',
+    'disconnected (reason 201); reconnecting in 1000 ms',
+    'disconnected (reason 15); trying "shed" next',
+  ])('%s is specific wifi', (text) => {
+    const event = W(text)
+    expect(event.hintKind).toBe('specific')
+    expect(event.cause).toBe('wifi')
+    expect(event.remedy).toBeNull()
+  })
+
+  it('a single network keeps the spelling and 2.4 GHz advice', () => {
+    const hint = W('no known network in range (1 known); trying again in 2 s').hint
+    expect(hint).toMatch(/spelling/)
+    expect(hint).toMatch(/2\.4 GHz/)
+  })
+
+  it.each([
+    'disconnected (reason 201); trying "shed" next',
+    'disconnected (reason 201); that was the last known network',
+  ])('%s is generic: it only says that network was not seen', (text) => {
+    const event = W(text)
+    expect(event.hintKind).toBe('generic')
+    expect(event.cause).toBeNull()
+  })
+
+  it('the fault settles on the cycle line across cycles', () => {
+    const cycle = [
+      'W (1000) ff-wifi: disconnected (reason 201); trying "shed" next',
+      'W (1100) ff-wifi: no known network in range (2 known); scanning again in 30 s',
+    ]
+    const events = classify([
+      'I (100) ff-agent: fleetforge agent 0.4.6 (idf v5.5.5), built Oct 05 2026 00:00:00',
+      'I (300) ff-wifi: wifi sta starting, 2 known networks; scanning',
+      ...cycle,
+      'W (31000) ff-wifi: disconnected (reason 201); trying "shed" next',
+    ])
+    expect(summarizeConsole(events, at(events)).fault?.hint).toMatch(/None of its 2 known networks/)
+  })
+})

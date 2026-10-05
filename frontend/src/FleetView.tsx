@@ -8,6 +8,10 @@
 // to tell "the fleet is quiet" from "this page stopped updating" — that distinction is
 // the entire reason the backend sends keepalives.
 //
+// The Status cell also carries the board's last announced network (R2b-fe-13). It says
+// "last on" for an offline board because the server cannot tell out of range from powered
+// off; no cause is ever claimed here.
+//
 // "Arriving" above the table is the same idea one step earlier (S0-fw-1): a board between
 // "flashed" and "online" used to render as nothing at all, which is indistinguishable
 // from a board that was never flashed. It is a separate list rather than a table row
@@ -19,6 +23,7 @@ import { DeployCell } from './DeployCell'
 import { useArtifacts, type Artifacts } from './deploy'
 import { STAGE_LABELS, useFleet, type Fleet, type EventSourceFactory } from './fleet'
 import { formatAgo, formatWhen } from './format'
+import { LAST_ON_TITLE, knowsNetworks, networkPlace } from './network'
 import { type VersionLine } from './statusStrip'
 
 // The glyph differs by state, and that is a requirement rather than a flourish (S0-fe-2).
@@ -35,6 +40,29 @@ function StatusCell({ device }: { device: DeviceSummary }) {
       <span aria-hidden="true">{device.online ? '█' : '░'} </span>
       {label}
     </span>
+  )
+}
+
+function NetworkNote({ device }: { device: DeviceSummary }) {
+  const place = networkPlace(device)
+  const knows = knowsNetworks(device.known_networks)
+  if (place === null && knows === null) return null
+  return (
+    <>
+      {place !== null && (
+        <span data-testid="device-network" title={place.current ? undefined : LAST_ON_TITLE}>
+          , {place.label} <bdi>{place.ssid}</bdi>
+        </span>
+      )}
+      {knows !== null && (
+        <>
+          <br />
+          <span className="muted" data-testid="device-networks-known">
+            {knows}
+          </span>
+        </>
+      )}
+    </>
   )
 }
 
@@ -75,6 +103,7 @@ function DeviceRow({
     >
       <td>
         <StatusCell device={device} />
+        <NetworkNote device={device} />
       </td>
       <td>
         {/* The marker is a glyph, not a colour: the theme is monochrome. */}

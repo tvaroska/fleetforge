@@ -12,6 +12,7 @@ import { render, screen, within } from '@testing-library/react'
 import { act } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { FleetView } from './FleetView'
+import { LAST_ON_TITLE } from './network'
 import { type EventSourceLike } from './fleet'
 
 const NOW = new Date('2026-09-10T12:00:00Z')
@@ -25,6 +26,8 @@ function device(overrides: Partial<Record<string, unknown>> = {}) {
     fw_version: '0.1.0',
     agent_version: '0.1.0',
     link_type: 'wifi',
+    ssid: null,
+    known_networks: null,
     power_class: 'always_on',
     expected_wake_interval_s: null,
     parent_device_id: null,
@@ -276,5 +279,42 @@ describe('FleetView', () => {
 
     expect(onSessionExpired).toHaveBeenCalledTimes(1)
     expect(screen.queryByRole('alert')).toBeNull()
+  })
+})
+
+describe('the network (R2b-fe-13)', () => {
+  const rowOf = () => screen.getAllByTestId('device-row')[0]
+
+  it('says where an online board is, and how many networks it knows', async () => {
+    await renderFleet([device({ ssid: 'shed', known_networks: 2 })])
+    expect(within(rowOf()).getByTestId('device-network').textContent).toBe(', on: shed')
+    expect(rowOf()).toHaveTextContent('online, on: shed')
+    expect(rowOf()).toHaveTextContent('knows 2 networks')
+    expect(within(rowOf()).getByLabelText('online')).toBeInTheDocument()
+  })
+
+  it('says "last on" for an offline board and never a cause', async () => {
+    await renderFleet([device({ ssid: 'shed', known_networks: 2, online: false })])
+    expect(rowOf()).toHaveTextContent('offline, last on: shed')
+    expect(within(rowOf()).getByTestId('device-network')).toHaveAttribute('title', LAST_ON_TITLE)
+    expect(rowOf().textContent).not.toMatch(/in range|out of range|no network/i)
+  })
+
+  it('says nothing when the board reported nothing', async () => {
+    await renderFleet([device({ online: false })])
+    expect(within(rowOf()).queryByTestId('device-network')).toBeNull()
+    expect(within(rowOf()).queryByTestId('device-networks-known')).toBeNull()
+    expect(within(rowOf()).getByLabelText('offline')).toBeInTheDocument()
+  })
+
+  it('uses the singular for one network', async () => {
+    await renderFleet([device({ ssid: 'shed', known_networks: 1 })])
+    expect(rowOf()).toHaveTextContent('knows 1 network')
+    expect(rowOf().textContent).not.toMatch(/knows 1 networks/)
+  })
+
+  it('isolates a device-controlled SSID in <bdi>', async () => {
+    await renderFleet([device({ ssid: '\u202Eevil', known_networks: 1 })])
+    expect(within(rowOf()).getByText('\u202Eevil').tagName).toBe('BDI')
   })
 })

@@ -35,6 +35,8 @@ const row = (over: Partial<DeviceSummary> = {}): DeviceSummary => ({
   fw_version: '0.4.0',
   agent_version: '0.4.0',
   link_type: 'wifi',
+  ssid: null,
+  known_networks: null,
   power_class: 'always_on',
   expected_wake_interval_s: null,
   parent_device_id: null,

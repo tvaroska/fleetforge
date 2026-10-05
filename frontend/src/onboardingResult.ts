@@ -13,10 +13,17 @@
 // panel before it calls this. A board whose console lost the port (a native-USB reset) can
 // therefore succeed with zero console lines. The device row otherwise only ENRICHES rows
 // here (firmware fallback, layout, "server: online").
+//
+// R2b-fe-13 (Flow 3 step 5): when the board's last scan cycle ended without an address, the
+// failure names it in plain words ("none of its 2 known networks is in range"). That comes
+// from the cycle line read into `ConsoleFacts`, not from `summary.fault`, so it cannot
+// flicker between cycles.
 
 import {
   MILESTONE_CAUSE,
   MILESTONE_LABELS,
+  NONE_JOINED_LINE,
+  NO_KNOWN_NETWORK_LINE,
   describeRestarts,
   type Cause,
   type ConsoleEvent,
@@ -25,6 +32,7 @@ import {
   type Remedy,
 } from './boardConsole'
 import { type DeviceSummary } from './api'
+import { knowsNetworks } from './network'
 import { type Tone, type VersionLine } from './statusStrip'
 import { type FleetBaseline } from './serverWatch'
 
@@ -41,6 +49,13 @@ export type ConsoleFacts = {
   deviceId: string | null
   agentVersion: string | null
   ssid: string | null
+  /** N of "N known networks" (agent >= 0.4.6; 1 for the single-network form). */
+  knownNetworks: number | null
+  /**
+   * The last scan cycle ended with no address: `known` networks, `inRange` of them seen.
+   * Read from the cycle line, not from `summary.fault`, so it cannot flicker.
+   */
+  unjoined: { known: number; inRange: number } | null
   link: { type: 'wifi' | 'ethernet'; ip: string | null } | null
   /**
    * `set`: the clock milestone line was seen ("sntp: a -> b (via server)").
@@ -53,6 +68,8 @@ const EMPTY_FACTS: ConsoleFacts = {
   deviceId: null,
   agentVersion: null,
   ssid: null,
+  knownNetworks: null,
+  unjoined: null,
   link: null,
   ntp: null,
 }
@@ -81,15 +98,38 @@ export function consoleFacts(events: ConsoleEvent[]): ConsoleFacts {
     } else if (tag === 'ff-wifi') {
       // `ff_net_wifi.c:228` — "wifi sta starting, ssid <ssid>". Not a secret.
       const ssid = /^wifi sta starting, ssid (.+)$/.exec(text)?.[1]
-      if (ssid !== undefined) facts.ssid = ssid
+      if (ssid !== undefined) {
+        facts.ssid = ssid
+        facts.knownNetworks = 1
+      }
+      // `ff_net_wifi.c:553` — "wifi sta starting, N known networks; scanning".
+      const starting = /^wifi sta starting, (\d+) known networks/.exec(text)?.[1]
+      if (starting !== undefined) facts.knownNetworks = Number(starting)
+      // `trying "x" (known network K of N…)` and `joined "x" (known network K of N)`.
+      const ofN = /\(known network \d+ of (\d+)/.exec(text)?.[1]
+      if (ofN !== undefined) facts.knownNetworks = Number(ofN)
+      const none = NO_KNOWN_NETWORK_LINE.exec(text)
+      if (none !== null) {
+        facts.knownNetworks = Number(none[1])
+        facts.unjoined = { known: Number(none[1]), inRange: 0 }
+      }
+      const noneJoined = NONE_JOINED_LINE.exec(text)
+      if (noneJoined !== null) {
+        facts.knownNetworks = Number(noneJoined[2])
+        facts.unjoined = { known: Number(noneJoined[2]), inRange: Number(noneJoined[1]) }
+      }
       // `ff_net_wifi.c:450` (agent ≥ 0.4.6, several known networks) — `joined "<ssid>"
       // (known network K of N)`. The only line that names the network it is actually on.
       const joined = /^joined "(.+)" \(known network \d+ of \d+\)$/.exec(text)?.[1]
-      if (joined !== undefined) facts.ssid = joined
+      if (joined !== undefined) {
+        facts.ssid = joined
+        facts.unjoined = null
+      }
     } else if (tag === 'ff-net' && / link up/.test(text)) {
       // `ff_net.c:29/33` — "<what> link up, ip A gw B mask C" or "(address unavailable)".
       const ip = /link up, ip (\d+\.\d+\.\d+\.\d+)/.exec(text)?.[1] ?? null
       facts.link = { type: text.startsWith('eth') ? 'ethernet' : 'wifi', ip }
+      facts.unjoined = null
     } else if (tag === 'ff-time') {
       // `ff_time.c:82` — "sntp: <before> -> <after> (via <server>)".
       const via = /^sntp: .* -> .*\(via ([^)]+)\)/.exec(text)?.[1]
@@ -194,13 +234,47 @@ function clockRow(facts: ConsoleFacts): ResultRow {
   return { label: 'Clock source', value: `Not set (no answer from ${ntp.server})`, tone: 'bad' }
 }
 
-function linkValue(facts: ConsoleFacts, flashed: ResultContext['flashed']): string {
+/** The failure copy when the last scan cycle ended without an address (R2b-fe-13). */
+export function unjoinedCopy(u: { known: number; inRange: number }): {
+  headline: string
+  next: string
+} {
+  if (u.inRange === 0) {
+    if (u.known === 1) {
+      return {
+        headline: 'Wi-Fi: its one network is not in range',
+        next: 'Check the network name in step 2 (2.4 GHz only), or move the board closer. It keeps trying on its own.',
+      }
+    }
+    return {
+      headline: `Wi-Fi: none of its ${u.known} known networks is in range`,
+      next: 'It keeps trying on its own. Move it within range of one of its networks, or re-flash it with the network it is near (2.4 GHz only).',
+    }
+  }
+  return {
+    headline: `Wi-Fi: ${u.inRange} of its ${u.known} known networks ${u.inRange === 1 ? 'is' : 'are'} in range, but none would take the board`,
+    next: 'Check the passphrases in step 2, then re-flash. It keeps trying on its own.',
+  }
+}
+
+function linkValue(
+  facts: ConsoleFacts,
+  flashed: ResultContext['flashed'],
+  row: DeviceSummary | undefined,
+): string {
   const link = facts.link
   if (link === null) return '—'
   const ip = link.ip === null ? 'address unavailable' : `ip ${link.ip}`
   if (link.type === 'ethernet') return `Ethernet · ${ip}`
   const ssid = facts.ssid ?? flashed?.ssid ?? null
-  return ssid === null ? `Wi-Fi · ${ip}` : `Wi-Fi ${ssid} · ${ip}`
+  // The count shows from 2 networks up: with one, the operator just typed it (the fleet
+  // row shows it from 1, where it answers "can this board move?").
+  const n = facts.knownNetworks ?? row?.known_networks ?? null
+  const knows = n !== null && n >= 2 ? knowsNetworks(n) : null
+  const parts = [ssid === null ? 'Wi-Fi' : `Wi-Fi ${ssid}`]
+  if (knows !== null) parts.push(knows)
+  parts.push(ip)
+  return parts.join(' · ')
 }
 
 export function describeOnboardingResult(input: {
@@ -257,7 +331,7 @@ export function describeOnboardingResult(input: {
     { label: 'Device id', value: deviceId ?? '—', tone: null },
     { label: 'Firmware', value: firmware ?? '—', tone: null },
     { label: 'Partition layout', value: row?.partition_layout ?? flashed?.layout ?? '—', tone: null },
-    { label: 'Link', value: linkValue(facts, flashed), tone: null },
+    { label: 'Link', value: linkValue(facts, flashed, row), tone: null },
     clockRow(facts),
     {
       label: 'Enrolled',
@@ -294,11 +368,12 @@ export function describeOnboardingResult(input: {
       : waitingFor !== null
         ? `Stopped before ${MILESTONE_LABELS[waitingFor]}`
         : 'Stopped short of the fleet'
+  const unjoined = cause === 'wifi' && facts.unjoined !== null ? unjoinedCopy(facts.unjoined) : null
   return {
     outcome: 'failure',
     cause,
-    headline,
-    next: cause !== null ? CAUSE_NEXT[cause] : NO_CAUSE_NEXT,
+    headline: unjoined?.headline ?? headline,
+    next: unjoined?.next ?? (cause !== null ? CAUSE_NEXT[cause] : NO_CAUSE_NEXT),
     // The same precedence the panel always had: the fault's action first, then the stall's.
     remedy: fault?.remedy ?? overdue?.remedy ?? null,
     rows,

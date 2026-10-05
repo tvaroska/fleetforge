@@ -67,6 +67,11 @@ export type DeviceSummary = {
   fw_version: string | null
   agent_version: string | null
   link_type: string
+  // Device-reported (R2b-be-5), the last value the board announced; agent >= 0.4.6 only.
+  // null = not reported (old agent, ethernet, malformed). For an offline board this is
+  // where it WAS, not where it is.
+  ssid: string | null
+  known_networks: number | null
   power_class: string
   expected_wake_interval_s: number | null
   parent_device_id: string | null

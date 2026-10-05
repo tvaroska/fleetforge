@@ -1911,6 +1911,24 @@ disabled, storage and IndexedDB empty, Enter does not navigate. **Not proven her
 actual save/fill bubble (needs headed Chrome at the bench) and a real join of network 2 (no
 radio in QEMU; R2b-test-4).
 
+### Known networks: shown on the fleet row and the result card (R2b-fe-13, 2026-10-05)
+
+As built (frontend only). `DeviceSummary` mirrors `ssid` / `known_networks` after `link_type`.
+`network.ts` holds the copy; `FleetView.tsx` renders it in the Status cell (no new column):
+`█ online, on: shed` / `░ offline, last on: shed` (title: the server cannot tell out of range
+from powered off), and a muted `knows N network(s)` line. Null ssid renders nothing; the SSID
+sits in `<bdi>`. The classifier gained the 0.4.6 cycle lines (`no known network in range (N
+known)`, `none of the V known networks in range could be joined (N known)`), and reason 201 on a
+multi-network direct try is demoted to generic so the fault cannot flicker. The result card reads
+the cycle line into `ConsoleFacts.unjoined` and says "none of its 2 known networks is in range";
+its Link row shows the count only from 2 networks up.
+
+T2 (dev stack, real Chromium, first `<td>`): running sim `█ online, on: shed` / `knows 2
+networks`; after a clean exit `░ offline, last on: shed` / `knows 2 networks`; NULL row `░
+offline`; U+202E+evil row `░ offline, last on: <rlo>evil` / `knows 1 network`, one `<bdi>`;
+ethernet row `░ offline`; re-announce without the keys -> `░ offline`.
+Not run: the onboarding-rehearsal `no-known-network` scenario was not added.
+
 ### Agent-written networks and keep identity: spike findings (R2b-spec-3, 2026-10-04) — FINDINGS, nothing built
 
 No agent, server, frontend, schema, migration, simulator or test change was made, and

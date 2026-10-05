@@ -6,6 +6,22 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-05 — The fleet row says where a board is or was ("on: shed" / "offline, last on: shed", "knows N networks"), never why it is offline; the card names "none of its N known networks is in range" from the console (R2b-fe-13)
+
+**Decided: frontend only. The note lives in the Status cell, copy in `network.ts`.**
+
+- **Placement.** After the presence word in the Status cell, with a muted `knows N network(s)` line. Seven columns stay, `StatusCell` untouched.
+- **Copy.** `on:` online, `last on:` offline (with a title: the server cannot tell out of range from powered off). Null ssid renders nothing. Count shows whenever reported. `link_type` is not consulted.
+- **Count asymmetry.** The result card's Link row shows the count only from 2 networks up; the fleet row from 1.
+- **Classifier.** The two 0.4.6 cycle lines are specific `wifi` hints, no remedy (the board keeps trying). Reason 201 on `; trying "x" next` / `; that was the last known network` is generic, otherwise the fault flips every cycle.
+- **Facts, not fault.** The card reads `ConsoleFacts.unjoined` (set by the cycle lines, cleared by link up / joined / boot), so its copy is stable.
+- **Gotcha.** SSID is device-controlled; U+202E passes the server filter, so it renders in `<bdi>`.
+- **Rejected:** a Network column; "unknown" for null; deriving from `link_type`; changing `summarizeConsole`; a remedy button; a server-side "out of range" state.
+
+Supersedes nothing.
+
+---
+
 ## 2026-10-05 — The flasher writes up to four networks, one `<form>` per network marked username/current-password; Ethernet writes no Wi-Fi fields; nothing is stored (R2b-fe-12)
 
 **Decided: `ffcfg.ts` writes `nets` (networks 2..N) and validates it exactly as `ff_cfg.py::_validate_networks` does; `FlashBoard.tsx` has up to 4 network rows. Frontend plus `tests/test_ff_cfg.py`; no agent, backend, spec or `session.tsx` change.**

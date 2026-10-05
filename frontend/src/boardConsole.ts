@@ -364,6 +364,14 @@ const WIFI_REASONS: Record<number, string> = {
   205: 'the association failed; the AP may be at its client limit',
 }
 
+/**
+ * `ff_net_wifi.c:259` and `:262` (agent >= 0.4.6), the last line of each scan cycle.
+ * Exported so `onboardingResult.ts` parses the same wording.
+ */
+export const NO_KNOWN_NETWORK_LINE = /^no known network in range \((\d+) known\)/
+export const NONE_JOINED_LINE =
+  /^none of the (\d+) known networks? in range could be joined \((\d+) known\)/
+
 /** IDF colours its log lines when CONFIG_LOG_COLORS is on: `ESC[0;32mI (12) …`. */
 const ANSI = /\u001b\[[0-9;]*[A-Za-z]/g
 /** `I (1234) ff-wifi: associated; waiting for DHCP` — the ESP-IDF log format. */
@@ -688,9 +696,42 @@ function hintFor(tag: string | null, text: string): Hint | null {
   }
 
   if (tag === 'ff-wifi') {
+    // The agent's once-per-cycle summary (R2b-fe-13). It is the cycle's last line, so it
+    // is the newest fault and stays so while the board keeps scanning.
+    const none = NO_KNOWN_NETWORK_LINE.exec(text)
+    if (none !== null) {
+      const n = Number(none[1])
+      return specific(
+        'wifi',
+        n === 1
+          ? 'Its one network is not in range: no access point with that SSID answered. ' +
+              'Check the spelling, and check the network has a 2.4 GHz band — the ESP32 ' +
+              'radio cannot see 5 GHz at all. The board keeps trying on its own.'
+          : `None of its ${n} known networks is in range. The board keeps scanning on its ` +
+              'own and joins the first one it sees. Move it closer to one of them, or ' +
+              're-flash it with the network it is near (2.4 GHz only).',
+      )
+    }
+    const unjoined = NONE_JOINED_LINE.exec(text)
+    if (unjoined !== null) {
+      const v = Number(unjoined[1])
+      const n = Number(unjoined[2])
+      return specific(
+        'wifi',
+        `${v} of its ${n} known networks ${v === 1 ? 'is' : 'are'} in range, but none gave ` +
+          'the board an address — usually a wrong passphrase, or an access point that ' +
+          'filters or isolates clients. The board keeps trying.',
+      )
+    }
     const reason = /^disconnected \(reason (-?\d+)\)/.exec(text)
     if (reason !== null) {
       const code = Number(reason[1])
+      // Reason 201 on a multi-network direct try only says THAT network was not seen; the
+      // cycle line says the rest. Specific, it would flip the fault back and forth every
+      // cycle (and overwrite a wrong-passphrase reason on a visible network).
+      if (code === 201 && /; (trying ".*" next|that was the last known network)$/.test(text)) {
+        return { text: WIFI_REASONS[201], kind: 'generic', remedy: null, cause: null }
+      }
       return specific(
         'wifi',
         WIFI_REASONS[code] ?? `the AP dropped this board (esp_wifi reason ${code})`,

@@ -348,7 +348,7 @@ are R3). Order inside each flow: the one-place status first, then the cards, the
 - [x] **R2b-be-5**: Ingest and expose the board's `ssid` and `known_networks` (P1, 0.5d) _(done 2026-10-05; reviewed; see docs/features/enrollment.md)_
       Additive fields on the device read model. Depends on `R2b-spec-1`.
       Spec applied in 8cb5335 (Patch A). Apply Patch B (announce example keys) in this task's commit. See docs/features/enrollment.md → *Known networks: wire proposal*.
-- [ ] **R2b-fe-13**: Fleet row shows the network: "on: shed", "knows 2 networks" (P1, 0.5d)
+- [x] **R2b-fe-13**: Fleet row shows the network: "on: shed", "knows 2 networks" (P1, 0.5d) _(done 2026-10-05; see docs/features/enrollment.md)_
       An offline board shows "offline, last on: shed": the server cannot tell out of range
       from powered off (R2b-spec-1). Only the result card, which reads the console, names
       "none of its 2 known networks is in range".
