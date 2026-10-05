@@ -39,8 +39,9 @@ build is caught before the fleet, and any device that gets one recovers itself.
   needs no new protocol; only the known-networks list touches the agent and `ff_cfg`.
 
 **Now: R2 — safe deploy (verify + auto-rollback), opened 2026-10-03.** The CUJ-1 T3 gate
-re-ran and passed on its graded segments (3: enroll, 5: OTA reports the new version); 6 and
-the wrong-layout refusal still have no harness. `jeep` found nothing assessable in what the
+re-ran and passed on its graded segments (3: enroll, 5: OTA reports the new version); the dashboard
+and server half of 6 and of the wrong-layout refusal is `just update-e2e` (R2b-test-3); the
+on-device half is still QEMU/bench. `jeep` found nothing assessable in what the
 run could show, so the pass rests on the deterministic judge. Task list below; background in
 [docs/features/ota-deploy.md](docs/features/ota-deploy.md) → *Phase 2*.
 
@@ -304,7 +305,7 @@ are R3). Order inside each flow: the one-place status first, then the cards, the
       PASS); esp32s3 bench images built at 1a00f7e. Bench run owed: waits on S0-bug-1 (board
       offline), the board on agent ≥ 0.4.5 (S0-infra-10 or a normal deploy), and an upload path
       on prod (R2b release or the curl fallback).)_
-- [ ] **R2b-test-3**: Update flow end to end (P1, 1d)
+- [x] **R2b-test-3**: Update flow end to end (P1, 1d) _(done 2026-10-05; see docs/features/ota-deploy.md)_
       Upload from the dashboard, pre-check refuses a wrong-layout build, upload refuses the merged
       binary, deploy a good build to `confirmed`, deploy a deliberately broken one to
       `rolled back`. Extends CUJ-1 steps 5 and 6.

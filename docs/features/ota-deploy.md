@@ -2273,3 +2273,45 @@ token id equal to the API log line and the `ffa_` cookie id, no other row had `s
 in `detail`; after `confirmed` the API gave the two-key `sent_by`; a second login session's
 repeat deploy returned `reused: true` with one row and the first session's id; boards with older
 transactions gave null; Chromium showed `admin · dashboard session (172.18.0.1)` in the card.
+
+## Update flow end to end (R2b-test-3, 2026-10-05)
+
+`just update-e2e` (`frontend/scripts/update-flow-e2e.mjs`) plays Flow 2 through the real
+dashboard in a real Chromium against the dev stack, with two simulated boards, and grades it:
+
+| Scenario | What it proves |
+|---|---|
+| `upload-good` | The form's header read fills in the version (no shell step); `Uploaded esp32s3 1.1.0-ue…`; the label is in the board's Deploy select. |
+| `upload-merged` | The merged full-flash image is refused at upload (`merged full-flash image`, `app .bin`); no label, no option. |
+| `precheck-wrong-layout` | `data-deployable=false`, refusal names `ab-4m-v1` and `ab-4m-arduino-v1`, no Send button; a direct `POST /deploy` is 409 and `deploy.cmd_id` is unchanged; the Arduino-layout board's pre-check of the same build is deployable. |
+| `deploy-good` | Send, then `data-outcome=good` within 60 s; API `fw_version` = good label, `confirmed`, terminal, `from_version` = baseline. |
+| `deploy-broken` | Send of a `-rbtest` build, then `data-outcome=rolled-back` within 120 s; API `fw_version` back on the good label, `rolled_back`, `confirming` before `rolled_back`, no `confirmed`; no Send again; no "good" card naming the broken build at any sample. |
+| `traps` | No `ffe_`/`ffa_` or password in any requested URL or simulator log. |
+
+**Simulator addition: `--broken-marker=TEXT`.** An image whose version contains TEXT never
+confirms (the real broken build is `FF_ROLLBACK_TEST`, which appends `-rbtest`); every other
+image follows `--confirm`. One board then confirms a good build and rolls back a broken one in
+one process, and rolls back to the good build's version, not its boot-time one. The `=` is
+required: argparse reads a bare `-rbtest` as an option. Empty TEXT is refused. Five tests in
+`tests/test_simulator.py`.
+
+**Not covered:** the real agent. The simulator reports the versions it is told, so the CUJ
+judge's "fw_version from the running image's own descriptor" and a real rollback stay with
+QEMU / bench (R2-test-1, R2b-test-2). `just bench-judge rbtest` cannot pass on simulator rows
+by design (wording, 60-240 s window).
+
+**Evidence (dev, run id `muvouybt`).** `just update-e2e` exit 0, `6/6 pass`; good cmd_id
+`560310b7287342bc9914633b3d89ed52` (Send to card 2.7 s), broken cmd_id
+`3c0f1a0e4f4e4b64bebcc7c8616f7b43` (25.2 s: the simulator's 20 s confirm timer). `just
+bench-judge confirmed <good> dev` JUDGE PASS. The broken transaction's `deploy_events`:
+requested, staging, downloading, verifying, staged, applying, rebooting, confirming,
+rolling_back, rolled_back (no `confirmed`). No `deploy_events` row for the wrong-layout label;
+no `artifact_versions` row for the merged label. Vacuity: `E2E_BREAK=deploy-broken` exit 1 with
+`FAIL deploy-broken: card data-outcome is rolled-back, wanted good`;
+`E2E_BREAK=precheck-wrong-layout` exit 1 with `FAIL precheck-wrong-layout: data-deployable is
+false, wanted true`. Screenshots are of the scenario's element, not the page: the dev fleet
+holds hundreds of rows and a full page is 30000 px tall.
+
+Observed, not changed: `artifacts` is keyed by sha256 with `ON CONFLICT DO NOTHING`, so the
+same bytes uploaded under a second label with another layout silently keep the first layout
+(the harness gives every build distinct bytes).

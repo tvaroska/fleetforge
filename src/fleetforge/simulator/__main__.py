@@ -225,6 +225,7 @@ async def _run_board(
             safe_window=args.safe_window,
             confirm=args.confirm,
             confirm_timeout_s=args.confirm_timeout,
+            broken_marker=args.broken_marker,
             step=step,
         )
         return
@@ -240,6 +241,7 @@ async def _run_board(
         safe_window=args.safe_window,
         confirm=args.confirm,
         confirm_timeout_s=args.confirm_timeout,
+        broken_marker=args.broken_marker,
         step=step,
     )
 
@@ -460,6 +462,17 @@ def _shared(parser: argparse.ArgumentParser) -> None:
             "ack and reports confirmed; `never` joins but never confirms (an FF_ROLLBACK_TEST "
             "image), so after --confirm-timeout it reports rolling_back, goes back to the "
             "version it came from and reports rolled_back"
+        ),
+    )
+    parser.add_argument(
+        "--broken-marker",
+        default=None,
+        metavar="TEXT",
+        help=(
+            "an image whose version contains TEXT never confirms (an FF_ROLLBACK_TEST build "
+            "is `<ver>-rbtest`); every other image follows --confirm. Write it with an `=` "
+            "when it starts with a dash: --broken-marker=-rbtest (argparse reads a bare "
+            "-rbtest as an option)"
         ),
     )
     parser.add_argument(

@@ -6,6 +6,23 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-05 — The update flow is played end to end in a real Chromium against simulated boards; a `-rbtest` version is the broken build (R2b-test-3)
+
+**Decided: `just update-e2e` (`frontend/scripts/update-flow-e2e.mjs`, Playwright resolved from `PLAYWRIGHT_MODULE`, not a dependency) drives Flow 2 through the dashboard against the dev stack with two simulator boards, and the simulator gets `--broken-marker=TEXT` (an image whose version contains TEXT never confirms, every other image follows `--confirm`).**
+
+- **Simulator, not QEMU.** QEMU's confirm timer is 300 s, needs ESP-IDF builds, and the on-device half is already proven by R2-test-1 and R2b-test-2. What this task lacked was the dashboard and server half (CUJ-1 steps 5 and 6, and the wrong-layout refusal). The cost: the CUJ judge's "fw_version from the running image's own descriptor" is only met on QEMU/bench. `bench-judge confirmed` grades the good deploy on simulator rows; `rbtest` cannot pass on them (wording, window) and is not used.
+- **`--broken-marker`, not two processes.** `--confirm never` is board-wide and per process, and the simulator does not persist `fw_version` across restarts, so good-then-broken on one board would need a second board or a restart that fakes "comes back on the version that worked". The marker is a substring (no pattern pitfalls); empty is refused (`"" in v` is always true). It must be written `--broken-marker=-rbtest`: argparse reads a bare `-rbtest` as an option.
+- **An Arduino-layout simulator board.** The upload form's layout select offers only `ab-4m-v1` plus layouts the fleet reports, so without one the operator cannot pick the wrong layout; it is also the positive control (the same build is deployable to the board it fits).
+- **Distinct bytes per label.** `artifacts` is keyed by sha256 with `ON CONFLICT DO NOTHING`, so the same bytes under a second label with another layout keep the FIRST layout silently. Each build is the real app-head fixture with its label written into the descriptor, which also makes the header read pre-fill the version. Labels carry a per-run id (labels are permanent). Not changed here.
+- **Wait on the transaction, not on "a card".** The harness waits for this `cmd_id` to be terminal on the API and for a card whose text names this transaction's version, because the previous good card is still on screen when the next deploy starts. Screenshots are of the scenario's element (the dev fleet is hundreds of rows).
+- **Vacuity switch** `E2E_BREAK=<scenario id>`; both runs of it fail as they must.
+- **Spec proposal (not applied; `spec/` is protected):** in `spec/cujs.md` CUJ-1 Driver table, name `just update-e2e` for row 5 (dashboard and server half), row 6 (server and dashboard half; the on-device half stays QEMU/bench) and the wrong-layout row.
+- **Rejected:** a second board for the broken build; restarting the simulator between deploys; QEMU for this task; adding Playwright as a dependency; full-page screenshots; changing the upload or pre-check code (nothing needed it).
+
+Supersedes nothing.
+
+---
+
 ## 2026-10-05 — The board measurements are stored as last reported, written as a triple on every announce; malformed is null, never a lost announce (R2b-be-6)
 
 **Decided: `devices.flash_chip_size BIGINT NULL`, `devices.partition_table_sha256 TEXT NULL`, `devices.rollback_capable BOOLEAN NULL` (migration `0006`), right after `ota_slot_size` in spec key order. Both edges normalise through `src/fleetforge/announce_fields.py`, the never-raising module from R2b-be-5. `DeviceSummary` exposes all three after `ota_slot_size`.**

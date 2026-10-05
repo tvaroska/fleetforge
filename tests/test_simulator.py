@@ -1060,15 +1060,17 @@ async def one_session(
     return lines
 
 
-async def applied_stage(**kwargs: Any) -> StageRunner:
-    """A board on 1.4.2 that has just applied 1.5.0 (`cmd-stage-1`) and is rebooting."""
+async def applied_stage(*, version: str = "1.5.0", **kwargs: Any) -> StageRunner:
+    """A board on 1.4.2 that has just applied `version` (`cmd-stage-1`) and is rebooting."""
     stage = StageRunner(
         identity=DeviceIdentity(device_id="a4cf12b3de90", fw_version="1.4.2"),
         link=LinkProfile(LINK_FAST),
         **kwargs,
     )
     first = FakeClient()
-    first.inbox.put_nowait(FakeMessage("ff/v1/d/a4cf12b3de90/dn/cmd", stage_command()))
+    first.inbox.put_nowait(
+        FakeMessage("ff/v1/d/a4cf12b3de90/dn/cmd", stage_command(version=version))
+    )
     await one_session(stage, first, awake_s=None)
     assert stage.reboot.is_set(), "the apply did not reboot"
     assert [report["state"] for report in statuses(first)] == list(STAGE_WALK)
@@ -1298,6 +1300,96 @@ def test_the_cli_offers_both_confirm_modes() -> None:
     defaults = cli.build_parser().parse_args(["fleet"])
     assert (defaults.confirm, defaults.confirm_timeout) == (CONFIRM_AUTO, DEFAULT_CONFIRM_TIMEOUT_S)
     assert DEFAULT_CONFIRM_TIMEOUT_S == 300.0  # spec/prd.md -> Timing
+
+
+# ---------------------------------------------------------------------------
+# R2b-test-3: `--broken-marker`. One board takes a good build (it confirms) and then a
+# `-rbtest` build (it never does) in one process, without a second board or a restart.
+# ---------------------------------------------------------------------------
+
+
+async def test_an_image_carrying_the_broken_marker_never_confirms_though_confirm_is_auto(
+    downloads: list[str],
+) -> None:
+    stage = await applied_stage(
+        version="1.5.0-rbtest", broken_marker="-rbtest", confirm_timeout_s=0.2
+    )
+    second = FakeClient()
+    await one_session(stage, second, awake_s=None)
+
+    assert [report["state"] for report in statuses(second)] == [
+        STATE_CONFIRMING,
+        STATE_ROLLING_BACK,
+    ]
+    assert stage.identity.fw_version == "1.4.2"
+    assert stage.reboot.is_set() and stage.rolled_back == "cmd-stage-1"
+    stage.reboot.clear()
+
+    back = FakeClient()
+    await one_session(stage, back)
+    assert channel_payloads(back, "a4cf12b3de90", ANNOUNCE)[0]["fw_version"] == "1.4.2"
+    rolled = statuses(back)
+    assert [report["state"] for report in rolled] == [STATE_ROLLED_BACK]
+    assert "returned to 1.4.2" in rolled[0]["detail"]
+
+
+async def test_an_image_without_the_broken_marker_still_confirms(downloads: list[str]) -> None:
+    stage = await applied_stage(version="1.5.0", broken_marker="-rbtest", confirm_timeout_s=0.2)
+    second = FakeClient()
+    await one_session(stage, second)
+
+    assert [report["state"] for report in statuses(second)] == list(CONFIRM_WALK)
+    assert stage.pending is None and not stage.reboot.is_set()
+    assert stage.rolled_back is None
+
+
+async def test_one_board_confirms_a_good_build_then_rolls_back_a_broken_one(
+    downloads: list[str],
+) -> None:
+    """Good then broken on ONE runner: the rollback lands on the good build's version,
+    not the version the board booted with."""
+    stage = await applied_stage(broken_marker="-rbtest", confirm_timeout_s=0.2)
+    await one_session(stage, FakeClient())
+    assert stage.identity.fw_version == "1.5.0" and stage.pending is None
+
+    broken = FakeClient()
+    broken.inbox.put_nowait(
+        FakeMessage(
+            "ff/v1/d/a4cf12b3de90/dn/cmd",
+            stage_command(cmd_id="cmd-stage-2", version="1.6.0-rbtest"),
+        )
+    )
+    await one_session(stage, broken, awake_s=None)
+    assert stage.reboot.is_set(), "the second apply did not reboot"
+    stage.reboot.clear()
+
+    on_broken = FakeClient()
+    await one_session(stage, on_broken, awake_s=None)
+    assert [r["state"] for r in statuses(on_broken)] == [STATE_CONFIRMING, STATE_ROLLING_BACK]
+    assert stage.identity.fw_version == "1.5.0"
+    stage.reboot.clear()
+
+    back = FakeClient()
+    await one_session(stage, back)
+    assert channel_payloads(back, "a4cf12b3de90", ANNOUNCE)[0]["fw_version"] == "1.5.0"
+    rolled = statuses(back)
+    assert [(r["cmd_id"], r["state"]) for r in rolled] == [("cmd-stage-2", STATE_ROLLED_BACK)]
+    assert "returned to 1.5.0" in rolled[0]["detail"]
+
+
+def test_an_empty_broken_marker_is_refused_before_any_io() -> None:
+    identity = DeviceIdentity(device_id="a4cf12b3de90")
+    with pytest.raises(SimulatorError):
+        StageRunner(identity=identity, link=LinkProfile(LINK_FAST), broken_marker="")
+
+
+def test_the_cli_takes_a_broken_marker_spelled_with_an_equals_sign() -> None:
+    # A bare `--broken-marker -rbtest` is read by argparse as an option: the `=` is required.
+    args = cli.build_parser().parse_args(["fleet", "--broken-marker=-rbtest"])
+    assert args.broken_marker == "-rbtest"
+    assert cli.build_parser().parse_args(["fleet"]).broken_marker is None
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["fleet", "--broken-marker", "-rbtest"])
 
 
 def test_redact_url_keeps_the_origin_and_drops_everything_else() -> None:

@@ -129,7 +129,9 @@ SAFE_WINDOW_MODES = (SAFE_WINDOW_AUTO, SAFE_WINDOW_HOLD)
 # `--confirm`: what the image this board reboots into does. `auto` confirms at the
 # announce PUBACK, like a healthy agent. `never` joins the fleet and never confirms — an
 # `FF_ROLLBACK_TEST` image (`docs/runbooks/rollback-test.md`) — so the confirm timer
-# fires and the board goes back to the version it came from.
+# fires and the board goes back to the version it came from. `--broken-marker TEXT` makes
+# that per image instead of per board: an image whose version contains TEXT never confirms
+# (an `FF_ROLLBACK_TEST` build is `<ver>-rbtest`), every other image follows `--confirm`.
 CONFIRM_AUTO = "auto"
 CONFIRM_NEVER = "never"
 CONFIRM_MODES = (CONFIRM_AUTO, CONFIRM_NEVER)
@@ -521,6 +523,7 @@ class StageRunner:
     safe_window: str = SAFE_WINDOW_AUTO
     confirm: str = CONFIRM_AUTO
     confirm_timeout_s: float = DEFAULT_CONFIRM_TIMEOUT_S
+    broken_marker: str | None = None
     seen: set[str] = field(default_factory=set)
     downloads: int = 0
     # Not arguments: a caller passing in a pre-set event would start a board that reboots
@@ -547,6 +550,13 @@ class StageRunner:
                 f"--confirm-timeout must be a positive number of seconds, "
                 f"not {self.confirm_timeout_s!r}"
             )
+        if self.broken_marker == "":
+            # `"" in version` is always true: every image would be the broken one.
+            raise SimulatorError("--broken-marker must not be empty")
+
+    def _is_broken(self, version: str) -> bool:
+        """An image whose version carries `broken_marker` never confirms (substring match)."""
+        return self.broken_marker is not None and self.broken_marker in version
 
     async def handle(self, client: aiomqtt.Client, message: aiomqtt.Message, step: Step) -> None:
         """Dispatch one `dn/` message: decode, dedup on `id`, execute or log."""
@@ -736,7 +746,8 @@ class StageRunner:
         if pending is None:
             return None
         await self._status(client, pending.cmd_id, STATE_CONFIRMING, step)
-        if self.confirm == CONFIRM_AUTO:
+        broken = self._is_broken(self.identity.fw_version)
+        if self.confirm == CONFIRM_AUTO and not broken:
             await self._status(client, pending.cmd_id, STATE_CONFIRMED, step, pct=100)
             step(f"confirm  {self.identity.fw_version} confirmed at the announce ack")
             self.pending = None
@@ -746,7 +757,12 @@ class StageRunner:
         if self._confirm_deadline is None:
             self._confirm_deadline = time.monotonic() + self.confirm_timeout_s
         remaining = max(0.0, self._confirm_deadline - time.monotonic())
-        step(f"confirm  --confirm never: rolling back in {remaining:.1f}s unless confirmed")
+        why = (
+            f"{self.identity.fw_version} carries the broken marker {self.broken_marker!r}"
+            if broken
+            else "--confirm never"
+        )
+        step(f"confirm  {why}: rolling back in {remaining:.1f}s unless confirmed")
         return asyncio.create_task(self._confirm_timeout(client, pending, remaining, step))
 
     async def _confirm_timeout(
@@ -983,6 +999,7 @@ async def run_always_on(
     safe_window: str = SAFE_WINDOW_AUTO,
     confirm: str = CONFIRM_AUTO,
     confirm_timeout_s: float = DEFAULT_CONFIRM_TIMEOUT_S,
+    broken_marker: str | None = None,
     step: Step = _silent,
 ) -> None:
     """One session, forever, reconnecting with capped exponential backoff.
@@ -1010,6 +1027,7 @@ async def run_always_on(
         safe_window=safe_window,
         confirm=confirm,
         confirm_timeout_s=confirm_timeout_s,
+        broken_marker=broken_marker,
     )
     delay = RECONNECT_INITIAL_DELAY_S
     while not stop.is_set():
@@ -1065,6 +1083,7 @@ async def run_sleepy(
     safe_window: str = SAFE_WINDOW_AUTO,
     confirm: str = CONFIRM_AUTO,
     confirm_timeout_s: float = DEFAULT_CONFIRM_TIMEOUT_S,
+    broken_marker: str | None = None,
     step: Step = _silent,
 ) -> None:
     """wake → connect → announce/presence/hb → drain `dn/` → disconnect → sleep → repeat.
@@ -1082,6 +1101,7 @@ async def run_sleepy(
         safe_window=safe_window,
         confirm=confirm,
         confirm_timeout_s=confirm_timeout_s,
+        broken_marker=broken_marker,
     )
     while not stop.is_set():
         step(f"wake     staying up {awake_s:.0f}s")
