@@ -334,7 +334,7 @@ are R3). Order inside each flow: the one-place status first, then the cards, the
 
 ### Flow 3 — Change the network (known networks)
 
-- [ ] **R2b-fw-1**: Agent reads a list of known networks and joins the first it can see (P1, 2d)
+- [x] **R2b-fw-1**: Agent reads a list of known networks and joins the first it can see (P1, 2d) _(done 2026-10-05; reviewed; see docs/features/enrollment.md)_
       CRITICAL (agent, `ff_cfg`, protocol). Old single-network `ff_cfg` stays readable. Reports
       `ssid` in `announce`. States "no known network in range" and keeps trying. New agent
       version; `just agent-verify` and the QEMU run unchanged. Depends on `R2b-spec-1`

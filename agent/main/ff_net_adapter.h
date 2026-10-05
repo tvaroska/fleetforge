@@ -26,6 +26,9 @@ esp_err_t ff_net_openeth_start(const ff_cfg_t *cfg);
 /* RSSI in dBm from the associated AP, or false when there is no radio / no association. */
 bool ff_net_wifi_rssi(int *out_dbm);
 
+/* The SSID of the known network that gave this board its address, or NULL while none has. */
+const char *ff_net_wifi_ssid(void);
+
 /* Called by an adapter's IP_EVENT handler. Unblocks ff_net_bring_up(). */
 void ff_net_report_got_ip(esp_netif_t *netif);
 

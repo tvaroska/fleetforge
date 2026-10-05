@@ -224,6 +224,122 @@ class TestDescribeHidesSecrets:
         assert "not shown" in rendered
 
 
+class TestKnownNetworks:
+    """R2b-fw-1: the `nets` list (spec/device-protocol.md -> Known networks), on the writer.
+
+    The writer refuses everything the firmware reader idles on, plus the cap the reader
+    would survive by truncating. No refusal and no rendering may carry a passphrase.
+    """
+
+    PSK = "hunter2-not-real"
+    BASE = {**MINIMAL, "link": "wifi", "ssid": "home", "psk": "top-secret-psk"}
+
+    def _refused(self, fields: dict[str, object], match: str) -> None:
+        with pytest.raises(ff_cfg.ConfigError, match=match) as info:
+            ff_cfg.validate(fields)
+        assert self.PSK not in str(info.value)
+        assert "top-secret-psk" not in str(info.value)
+
+    def test_round_trip(self) -> None:
+        fields = {**self.BASE, "nets": [{"ssid": "shed", "psk": self.PSK}, {"ssid": "bench"}]}
+        ff_cfg.validate(fields)
+        assert ff_cfg.decode(ff_cfg.encode(fields)) == fields
+
+    def test_accepts_four_networks_with_an_open_one(self) -> None:
+        nets = [{"ssid": "a", "psk": self.PSK}, {"ssid": "b"}, {"ssid": "c", "psk": ""}]
+        ff_cfg.validate({**self.BASE, "nets": nets})
+
+    def test_accepts_a_list_on_ethernet(self) -> None:
+        """The board parses it and ignores it: the QEMU proof that the parser ran."""
+        ff_cfg.validate({**self.BASE, "link": "ethernet", "nets": [{"ssid": "shed"}]})
+
+    def test_refuses_five_networks(self) -> None:
+        nets = [{"ssid": f"n{i}", "psk": self.PSK} for i in range(4)]
+        self._refused({**self.BASE, "nets": nets}, "at most 4")
+
+    def test_refuses_nets_without_a_top_level_ssid(self) -> None:
+        fields = {**MINIMAL, "link": "ethernet", "nets": [{"ssid": "shed", "psk": self.PSK}]}
+        self._refused(fields, "top-level")
+
+    def test_refuses_an_empty_entry_ssid(self) -> None:
+        self._refused({**self.BASE, "nets": [{"ssid": "", "psk": self.PSK}]}, r"nets\[0\]\.ssid")
+
+    def test_refuses_a_missing_entry_ssid(self) -> None:
+        self._refused({**self.BASE, "nets": [{"psk": self.PSK}]}, r"nets\[0\]\.ssid")
+
+    def test_refuses_a_33_byte_ssid(self) -> None:
+        nets = [{"ssid": "s"}, {"ssid": "x" * 33, "psk": self.PSK}]
+        self._refused({**self.BASE, "nets": nets}, r"nets\[1\]\.ssid")
+
+    def test_refuses_a_33_byte_ssid_counted_in_utf8_bytes(self) -> None:
+        self._refused({**self.BASE, "nets": [{"ssid": "é" * 17}]}, r"nets\[0\]\.ssid")
+
+    def test_refuses_a_65_byte_psk(self) -> None:
+        nets = [{"ssid": "shed", "psk": self.PSK * 5}]
+        with pytest.raises(ff_cfg.ConfigError, match=r"nets\[0\]\.psk") as info:
+            ff_cfg.validate({**self.BASE, "nets": nets})
+        assert self.PSK not in str(info.value)
+
+    def test_refuses_a_non_string_psk(self) -> None:
+        self._refused({**self.BASE, "nets": [{"ssid": "shed", "psk": 12345678}]}, r"\.psk")
+
+    def test_refuses_an_over_length_top_level_psk(self) -> None:
+        with pytest.raises(ff_cfg.ConfigError, match="psk") as info:
+            ff_cfg.validate({**self.BASE, "psk": "p" * 65})
+        assert "p" * 65 not in str(info.value)
+
+    def test_refuses_a_non_list(self) -> None:
+        self._refused({**self.BASE, "nets": "shed"}, "list")
+
+    def test_refuses_a_non_object_entry(self) -> None:
+        self._refused({**self.BASE, "nets": ["shed"]}, r"nets\[0\]")
+
+    def test_refuses_a_duplicate_ssid(self) -> None:
+        self._refused({**self.BASE, "nets": [{"ssid": "home", "psk": self.PSK}]}, "repeats")
+
+    def test_describe_hides_a_nested_psk(self) -> None:
+        rendered = ff_cfg.describe(
+            {**self.BASE, "nets": [{"ssid": "shed", "psk": self.PSK}, {"ssid": "bench"}]}
+        )
+        assert self.PSK not in rendered
+        assert "top-secret-psk" not in rendered
+        assert "'shed'" in rendered
+        assert f"<{len(self.PSK)} chars, not shown>" in rendered
+
+    def test_the_cli_writes_the_list_and_never_echoes_a_passphrase(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        out = tmp_path / "ff_cfg.bin"
+        argv = [
+            "--out", str(out), "--api-base", "http://a", "--mqtt-uri", "mqtt://b",
+            "--ssid", "home", "--psk", "toplevelpw",
+            "--net", "shed", "pw-shed-1", "--net", "bench",
+        ]  # fmt: skip
+        assert ff_cfg.main(argv) == 0
+        assert ff_cfg.decode(out.read_bytes())["nets"] == [
+            {"ssid": "shed", "psk": "pw-shed-1"},
+            {"ssid": "bench"},
+        ]
+        assert ff_cfg.main([*argv, "--print"]) == 0
+        captured = capsys.readouterr()
+        assert "pw-shed-1" not in captured.out + captured.err
+        assert "toplevelpw" not in captured.out + captured.err
+
+    def test_the_cli_refuses_three_values_for_one_net(self, tmp_path: Path) -> None:
+        argv = ["--out", str(tmp_path / "x.bin"), "--api-base", "http://a", "--mqtt-uri",
+                "mqtt://b", "--ssid", "a", "--net", "b", "p1", "p2"]  # fmt: skip
+        assert ff_cfg.main(argv) == 1
+        assert not (tmp_path / "x.bin").exists()
+
+    def test_the_cap_is_retyped_on_both_sides(self) -> None:
+        assert "#define FF_CFG_MAX_NETS 4" in FF_CFG_H.read_text()
+        assert ff_cfg.MAX_NETWORKS == 4
+        assert ff_cfg.MAX_SSID_BYTES == 32
+        assert ff_cfg.MAX_PSK_BYTES == 64
+        assert "#define FF_CFG_MAX_SSID 33" in FF_CFG_H.read_text()
+        assert "#define FF_CFG_MAX_PSK 65" in FF_CFG_H.read_text()
+
+
 class TestTypeScriptWriterAgrees:
     """The third implementation: `frontend/src/ffcfg.ts`, the browser flasher's encoder.
 
@@ -258,7 +374,20 @@ class TestTypeScriptWriterAgrees:
     def test_the_vector_is_a_config_both_sides_would_accept(self) -> None:
         ff_cfg.validate(self._vector()["fields"])  # type: ignore[arg-type]
 
-    @pytest.mark.parametrize("key", ff_cfg.KNOWN_KEYS)
+    @pytest.mark.parametrize(
+        "key",
+        [
+            pytest.param(
+                key,
+                marks=pytest.mark.xfail(
+                    strict=True, reason="R2b-fe-12 teaches ffcfg.ts to write nets"
+                ),
+            )
+            if key == "nets"
+            else key
+            for key in ff_cfg.KNOWN_KEYS
+        ],
+    )
     def test_every_field_name_is_written_by_the_browser(self, key: str) -> None:
         assert f"'{key}'" in FF_CFG_TS.read_text()
 
@@ -283,7 +412,19 @@ class TestCSourceAgrees:
 
     @pytest.mark.parametrize(
         "key",
-        ["api_base", "mqtt_uri", "token", "ssid", "psk", "link", "ntp", "hb_s", "power", "wake_s"],
+        [
+            "api_base",
+            "mqtt_uri",
+            "token",
+            "ssid",
+            "psk",
+            "link",
+            "ntp",
+            "hb_s",
+            "power",
+            "wake_s",
+            "nets",
+        ],
     )
     def test_every_field_name_is_read_by_the_firmware(self, key: str) -> None:
         """A rename on one side fails here rather than on a bench with a serial cable."""

@@ -135,6 +135,21 @@ static cJSON *announce_object(const ff_cfg_t *cfg)
     cJSON_AddStringToObject(root, "fw_version", ff_identity_fw_version());
     cJSON_AddStringToObject(root, "agent_version", app->version);
     cJSON_AddStringToObject(root, "link_type", ff_cfg_link_name(cfg->link));
+    /* spec/device-protocol.md -> up/announce: which network this broker session runs over,
+     * and how many the board will try. Both null on ethernet. Never a passphrase, never
+     * the other networks' SSIDs. The SSID comes through the seam (ff_net.h), never from
+     * the adapter: this file must not see a link-specific symbol. */
+    const char *ssid = cfg->link == FF_LINK_WIFI ? ff_net_ssid() : NULL;
+    if (ssid != NULL) {
+        cJSON_AddStringToObject(root, "ssid", ssid);
+    } else {
+        cJSON_AddNullToObject(root, "ssid");
+    }
+    if (cfg->link == FF_LINK_WIFI) {
+        cJSON_AddNumberToObject(root, "known_networks", cfg->net_count);
+    } else {
+        cJSON_AddNullToObject(root, "known_networks");
+    }
     cJSON_AddStringToObject(root, "power_class", cfg->power);
     if (cfg->wake_s > 0) {
         cJSON_AddNumberToObject(root, "expected_wake_interval_s", cfg->wake_s);

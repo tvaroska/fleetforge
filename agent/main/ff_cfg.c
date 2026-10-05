@@ -15,11 +15,21 @@
  *    additive: a newer flasher may write a key this agent has never heard of, and the
  *    board must still boot. It is the one property that cannot be added later, because
  *    the fielded agent is the one doing the ignoring.
+ *
+ * `nets` (R2b-fw-1) is the second additive key, after `wake_s`: the known-networks list,
+ * spec/device-protocol.md -> Known networks. The top-level `ssid`/`psk` stay network 1, so
+ * an old blob is a list of one and reads exactly as before. Its two failure modes are
+ * deliberately asymmetric. A MALFORMED `nets` (not an array, an entry that is not an
+ * object, a missing/empty/non-string `ssid`, a non-string `psk`, an over-length value) is
+ * a bad config and the board idles, like any other bad key. A TOO-LONG `nets` is not: the
+ * first FF_CFG_MAX_NETS are kept, the rest are counted and logged, and the board boots —
+ * a future flasher that raises the cap must not brick this agent.
  */
 
 #include "ff_cfg.h"
 
 #include <inttypes.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -91,6 +101,69 @@ static esp_err_t copy_int(const cJSON *root, const char *key, int *dest, int fal
     return ESP_OK;
 }
 
+/* `nets`: networks 2..N, in priority order (spec/device-protocol.md -> Known networks).
+ * Called after the top-level ssid/psk have filled nets[0]. Never logs a value: copy_string
+ * names only the key and a length, and the extra line names only the index. */
+static esp_err_t parse_nets(const cJSON *root, ff_cfg_t *out)
+{
+    const cJSON *nets = cJSON_GetObjectItemCaseSensitive(root, "nets");
+    if (nets == NULL || cJSON_IsNull(nets)) {
+        return ESP_OK;
+    }
+    if (!cJSON_IsArray(nets)) {
+        ESP_LOGE(TAG, "config key 'nets' is not an array");
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    int index = 0;
+    const cJSON *entry = NULL;
+    cJSON_ArrayForEach(entry, nets)
+    {
+        if (out->net_count >= FF_CFG_MAX_NETS) {
+            /* Counted, not validated: past capacity this agent will never use the entry,
+             * and a newer flasher's longer list must still boot. */
+            out->nets_dropped++;
+            index++;
+            continue;
+        }
+        ff_cfg_net_t *net = &out->nets[out->net_count];
+        esp_err_t err = ESP_OK;
+        if (!cJSON_IsObject(entry)) {
+            ESP_LOGE(TAG, "config nets[%d] is not an object", index);
+            err = ESP_ERR_INVALID_ARG;
+        } else if ((err = copy_string(entry, "ssid", net->ssid, sizeof(net->ssid), true)) !=
+                   ESP_OK) {
+            /* copy_string has said which way the ssid is wrong. */
+        } else if (net->ssid[0] == '\0') {
+            ESP_LOGE(TAG, "config nets[%d] has an empty 'ssid'", index);
+            err = ESP_ERR_INVALID_ARG;
+        } else {
+            /* Absent, null or "" all mean an open network. */
+            err = copy_string(entry, "psk", net->psk, sizeof(net->psk), false);
+        }
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "config nets[%d] is malformed — the board idles until it is re-flashed",
+                     index);
+            return err;
+        }
+        out->net_count++;
+        index++;
+    }
+
+    if (out->nets_dropped > 0) {
+        ESP_LOGW(TAG, "config lists %d networks; this agent keeps the first %d and ignores the "
+                      "rest",
+                 out->net_count + out->nets_dropped, FF_CFG_MAX_NETS);
+    }
+    if (out->nets[0].ssid[0] == '\0' && out->net_count > 0) {
+        /* Not malformed by the spec's list, so not an idle: the list is built from `nets`
+         * alone. Writers refuse this shape (agent/tools/ff_cfg.py::validate). */
+        ESP_LOGW(TAG, "config has 'nets' but no top-level 'ssid': agents older than 0.4.6 "
+                      "cannot join any network with this config");
+    }
+    return ESP_OK;
+}
+
 static esp_err_t parse_payload(const char *payload, size_t length, ff_cfg_t *out)
 {
     cJSON *root = cJSON_ParseWithLength(payload, length);
@@ -114,9 +187,16 @@ static esp_err_t parse_payload(const char *payload, size_t length, ff_cfg_t *out
         goto done;
     if ((err = copy_string(root, "token", out->token, sizeof(out->token), false)) != ESP_OK)
         goto done;
-    if ((err = copy_string(root, "ssid", out->ssid, sizeof(out->ssid), false)) != ESP_OK)
+    /* Network 1 is the top level. Its passphrase is parsed (and length-checked) even with
+     * no ssid, so an old blob is rejected or accepted exactly as before. */
+    if ((err = copy_string(root, "ssid", out->nets[0].ssid, sizeof(out->nets[0].ssid), false)) !=
+        ESP_OK)
         goto done;
-    if ((err = copy_string(root, "psk", out->psk, sizeof(out->psk), false)) != ESP_OK)
+    if ((err = copy_string(root, "psk", out->nets[0].psk, sizeof(out->nets[0].psk), false)) !=
+        ESP_OK)
+        goto done;
+    out->net_count = out->nets[0].ssid[0] != '\0' ? 1 : 0;
+    if ((err = parse_nets(root, out)) != ESP_OK)
         goto done;
     if ((err = copy_string(root, "power", out->power, sizeof(out->power), false)) != ESP_OK)
         goto done;
@@ -273,11 +353,30 @@ void ff_cfg_log(const ff_cfg_t *cfg)
     ESP_LOGI(TAG, "  mqtt_uri  %s", cfg->mqtt_uri);
     ESP_LOGI(TAG, "  link      %s%s%s", ff_cfg_link_name(cfg->link),
              cfg->link == FF_LINK_WIFI ? ", ssid " : "",
-             cfg->link == FF_LINK_WIFI ? cfg->ssid : "");
+             cfg->link == FF_LINK_WIFI ? cfg->nets[0].ssid : "");
+    /* Only when there is a list, so an old single-network blob logs exactly what it did.
+     * SSIDs only: a passphrase, nested or not, is never printed. */
+    if (cfg->net_count > 1 && cfg->link == FF_LINK_WIFI) {
+        char names[FF_CFG_MAX_NETS * (FF_CFG_MAX_SSID + 2)];
+        size_t used = 0;
+        names[0] = '\0';
+        for (int i = 0; i < cfg->net_count; i++) {
+            int n = snprintf(names + used, sizeof(names) - used, "%s%s", i > 0 ? ", " : "",
+                             cfg->nets[i].ssid);
+            if (n < 0 || (size_t)n >= sizeof(names) - used) {
+                break;
+            }
+            used += (size_t)n;
+        }
+        ESP_LOGI(TAG, "  networks  %d known: %s", cfg->net_count, names);
+    } else if (cfg->net_count > 1) {
+        /* The QEMU proof that the parser ran: openeth never uses the list. */
+        ESP_LOGI(TAG, "  networks  %d in ff_cfg, unused (link is ethernet)", cfg->net_count);
+    }
     ESP_LOGI(TAG, "  ntp       %s", cfg->ntp[0] ? cfg->ntp : "(disabled)");
     ESP_LOGI(TAG, "  hb_s      %d", cfg->hb_s);
     ESP_LOGI(TAG, "  power     %s (wake_s %d)", cfg->power, cfg->wake_s);
     /* Lengths only. A serial console is shoulder-surfable and often logged to a file. */
     ESP_LOGI(TAG, "  secrets   token %u chars, passphrase %u chars (never printed)",
-             (unsigned)strlen(cfg->token), (unsigned)strlen(cfg->psk));
+             (unsigned)strlen(cfg->token), (unsigned)strlen(cfg->nets[0].psk));
 }

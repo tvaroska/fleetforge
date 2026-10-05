@@ -35,6 +35,9 @@ extern "C" {
 
 /* Bring up the configured link and block until DHCP has assigned an address.
  *
+ * Safe to call again after a timeout: the adapter is started on the first successful call
+ * only, and later calls just wait for the address it is still trying to get.
+ *
  * Returns ESP_ERR_TIMEOUT if no IP arrives within `timeout`; the caller retries rather
  * than rebooting (a board that reboot-loops on a bad access point is indistinguishable
  * from a hardware fault, and reboots lose the serial log that says why).
@@ -46,6 +49,11 @@ const char *ff_net_link_type(void);
 
 /* The current RSSI in dBm, or false on a link that has none (Ethernet). */
 bool ff_net_rssi(int *out_dbm);
+
+/* The SSID of the known network the board joined, or NULL: on a link that has none
+ * (Ethernet), or while no network is joined. Reported as `ssid` in up/announce
+ * (spec/device-protocol.md). The string lives as long as the agent; never a passphrase. */
+const char *ff_net_ssid(void);
 
 #ifdef __cplusplus
 }

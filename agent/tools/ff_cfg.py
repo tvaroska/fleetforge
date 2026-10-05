@@ -32,8 +32,16 @@ Standard library only, and no import from `fleetforge.*`: this runs inside the p
 image, which has no uv and no project venv (same rule as `make_manifest.py` and
 `verify_bundle.py`).
 
-**No secret is printed.** `--token`, `--psk` and their values never reach stdout; `describe()`
-renders the *keys* a blob carries and the length of each secret, never its bytes.
+**Known networks** (`spec/device-protocol.md` → *Known networks*, R2b-fw-1). The top-level
+`ssid`/`psk` are network 1; the optional `nets` is a list of `{"ssid", "psk"}` objects for
+networks 2..N in priority order, at most `MAX_NETWORKS` in all. `--net SSID [PSK]` adds one
+(repeatable). The header version stays 1: an agent older than 0.4.6 ignores `nets` and joins
+the top-level network. `validate()` refuses everything the firmware reader would idle on.
+
+**No secret is printed.** `--token`, `--psk`, a `--net` passphrase and their values never
+reach stdout; `describe()` renders the *keys* a blob carries and the length of each secret,
+never its bytes — nested `nets[].psk` included. Error messages name a field by index
+(`nets[2].psk`), never by value.
 """
 
 from __future__ import annotations
@@ -69,7 +77,9 @@ FILL = 0xFF
 # validation whitelist. Wi-Fi credentials are `ssid`/`psk`, deliberately NOT
 # `wifi_ssid`/`wifi_password`: `tests/test_agent_partitions.py::test_agent_holds_no_credential`
 # greps every file under `agent/` for those spellings, and a C string literal naming one
-# would fail the build for the whole fleet's benefit. Do not rename them.
+# would fail the build for the whole fleet's benefit. Do not rename them. `nets` is the
+# known-networks list (networks 2..N; the top-level ssid/psk are network 1), and its entries
+# use the same two spellings.
 KNOWN_KEYS = (
     "api_base",
     "mqtt_uri",
@@ -81,7 +91,16 @@ KNOWN_KEYS = (
     "hb_s",
     "power",
     "wake_s",
+    "nets",
 )
+
+# Known-network limits, retyped from `agent/main/ff_cfg.h` (`FF_CFG_MAX_NETS`, and the field
+# capacities `FF_CFG_MAX_SSID` 33 / `FF_CFG_MAX_PSK` 65 minus the NUL). The reader idles on an
+# over-length value, so this writer refuses one; it truncates a list past MAX_NETWORKS (with
+# a warning) rather than idling, and this writer refuses that too.
+MAX_NETWORKS = 4
+MAX_SSID_BYTES = 32
+MAX_PSK_BYTES = 64
 
 # The two the firmware cannot invent a default for: it has nowhere to enroll and nowhere
 # to connect. `ff_cfg.c` refuses to boot without them rather than falling back.
@@ -179,12 +198,28 @@ def decode(blob: bytes) -> dict[str, Any]:
     return fields
 
 
+def _hidden(value: Any) -> str:
+    return f"<{len(str(value))} chars, not shown>"
+
+
 def describe(fields: dict[str, Any]) -> str:
-    """A one-line rendering of a decoded blob with every secret reduced to its length."""
+    """A one-line rendering of a decoded blob with every secret reduced to its length.
+
+    `nets` entries are rendered with their own `psk` reduced the same way: a nested
+    passphrase is still a passphrase.
+    """
     parts = []
     for key, value in fields.items():
         if key in SECRET_KEYS:
-            parts.append(f"{key}=<{len(str(value))} chars, not shown>")
+            parts.append(f"{key}={_hidden(value)}")
+        elif key == "nets" and isinstance(value, list):
+            shown = [
+                {k: (_hidden(v) if k in SECRET_KEYS else v) for k, v in entry.items()}
+                if isinstance(entry, dict)
+                else entry
+                for entry in value
+            ]
+            parts.append(f"{key}={shown!r}")
         else:
             parts.append(f"{key}={value!r}")
     return ", ".join(parts)
@@ -220,7 +255,71 @@ def fields_from_args(args: argparse.Namespace) -> dict[str, Any]:
         fields["power"] = args.power
     if args.wake is not None:
         fields["wake_s"] = args.wake
+    if args.net:
+        nets = []
+        for index, values in enumerate(args.net):
+            if len(values) > 2:
+                raise ConfigError(
+                    f"--net number {index + 1} takes SSID [PSK], not {len(values)} values"
+                )
+            entry = {"ssid": values[0]}
+            if len(values) == 2 and values[1]:
+                entry["psk"] = values[1]
+            nets.append(entry)
+        fields["nets"] = nets
     return fields
+
+
+def _utf8_len(value: str) -> int:
+    return len(value.encode("utf-8"))
+
+
+def _validate_networks(fields: dict[str, Any]) -> None:
+    """The known-networks rules, one per branch the firmware reader idles on (and the cap,
+    which the reader would survive by truncating but a writer must never rely on).
+
+    Messages name a field by index, never by value: the value may be a passphrase.
+    """
+    ssid = fields.get("ssid")
+    psk = fields.get("psk")
+    if ssid is not None and (not isinstance(ssid, str) or _utf8_len(ssid) > MAX_SSID_BYTES):
+        raise ConfigError(f"ssid must be a string of at most {MAX_SSID_BYTES} UTF-8 bytes")
+    if psk is not None and (not isinstance(psk, str) or _utf8_len(psk) > MAX_PSK_BYTES):
+        raise ConfigError(f"psk must be a string of at most {MAX_PSK_BYTES} UTF-8 bytes")
+    if "nets" not in fields or fields["nets"] is None:
+        return
+    nets = fields["nets"]
+    if not isinstance(nets, list):
+        raise ConfigError("nets must be a list of {ssid, psk} objects")
+    if not ssid:
+        raise ConfigError(
+            "nets needs a top-level --ssid: the top level is network 1, and an agent older "
+            "than 0.4.6 reads nothing else"
+        )
+    if 1 + len(nets) > MAX_NETWORKS:
+        raise ConfigError(
+            f"at most {MAX_NETWORKS} networks (the top-level ssid plus {MAX_NETWORKS - 1} in "
+            f"nets); this config lists {1 + len(nets)}"
+        )
+    seen = {ssid}
+    for index, entry in enumerate(nets):
+        where = f"nets[{index}]"
+        if not isinstance(entry, dict):
+            raise ConfigError(f"{where} must be an object with an ssid")
+        entry_ssid = entry.get("ssid")
+        if not isinstance(entry_ssid, str) or not entry_ssid:
+            raise ConfigError(f"{where}.ssid must be a non-empty string")
+        if _utf8_len(entry_ssid) > MAX_SSID_BYTES:
+            raise ConfigError(f"{where}.ssid is over {MAX_SSID_BYTES} UTF-8 bytes")
+        entry_psk = entry.get("psk")
+        if entry_psk is not None:
+            if not isinstance(entry_psk, str):
+                raise ConfigError(f"{where}.psk must be a string")
+            if _utf8_len(entry_psk) > MAX_PSK_BYTES:
+                raise ConfigError(f"{where}.psk is over {MAX_PSK_BYTES} UTF-8 bytes")
+        if entry_ssid in seen:
+            raise ConfigError(f"{where}.ssid repeats a network already listed")
+        seen.add(entry_ssid)
 
 
 def validate(fields: dict[str, Any]) -> None:
@@ -247,6 +346,9 @@ def validate(fields: dict[str, Any]) -> None:
         )
     if int(fields.get("hb_s") or 1) <= 0:
         raise ConfigError("--hb must be positive")
+    # Whatever the link: on ethernet the board parses the list and ignores it, which is
+    # exactly how the QEMU run proves the parser.
+    _validate_networks(fields)
     for scheme, key in (("http", "api_base"), ("mqtt", "mqtt_uri")):
         value = str(fields[key])
         if not value.startswith(f"{scheme}://") and not value.startswith(f"{scheme}s://"):
@@ -282,6 +384,14 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--power", choices=POWER_CLASSES, default="", help="default: always_on")
     parser.add_argument(
         "--wake", type=int, default=None, help="expected_wake_interval_s (power=sleepy)"
+    )
+    parser.add_argument(
+        "--net",
+        action="append",
+        nargs="+",
+        metavar=("SSID", "PSK"),
+        help="another known network, after --ssid, in priority order (repeatable; at most "
+        f"{MAX_NETWORKS} networks in all). Omit PSK for an open network.",
     )
     parser.add_argument(
         "--print", dest="show", action="store_true", help="decode a written blob back"

@@ -20,6 +20,11 @@ static const char *TAG = "ff-net";
 
 static EventGroupHandle_t s_events;
 static ff_link_t s_link = FF_LINK_WIFI;
+/* The adapter is started ONCE. agent_main.c calls ff_net_bring_up() in a retry loop, and
+ * an adapter's *_start() is not re-entrant: a second esp_netif_create_default_wifi_sta() /
+ * esp_wifi_init() / handler registration fails or asserts. Set only when start returned
+ * ESP_OK, so a board whose first start failed still gets another attempt. */
+static bool s_started;
 
 void ff_net_report_got_ip(esp_netif_t *netif)
 {
@@ -39,29 +44,35 @@ void ff_net_report_got_ip(esp_netif_t *netif)
 
 esp_err_t ff_net_bring_up(const ff_cfg_t *cfg, TickType_t timeout)
 {
-    if (s_events == NULL) {
-        s_events = xEventGroupCreate();
+    if (!s_started) {
         if (s_events == NULL) {
-            return ESP_ERR_NO_MEM;
+            s_events = xEventGroupCreate();
+            if (s_events == NULL) {
+                return ESP_ERR_NO_MEM;
+            }
         }
-    }
-    xEventGroupClearBits(s_events, FF_NET_GOT_IP_BIT);
-    s_link = cfg->link;
+        /* Cleared only before the first start. On a retry the adapter is still running
+         * (and still reconnecting on its own); clearing here would throw away a GOT_IP
+         * that landed between two calls, and the board would wait for one forever. */
+        xEventGroupClearBits(s_events, FF_NET_GOT_IP_BIT);
+        s_link = cfg->link;
 
-    esp_err_t err;
-    switch (cfg->link) {
-    case FF_LINK_ETHERNET:
-        err = ff_net_openeth_start(cfg);
-        break;
-    case FF_LINK_WIFI:
-    default:
-        err = ff_net_wifi_start(cfg);
-        break;
-    }
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "cannot start the %s link: %s", ff_cfg_link_name(cfg->link),
-                 esp_err_to_name(err));
-        return err;
+        esp_err_t err;
+        switch (cfg->link) {
+        case FF_LINK_ETHERNET:
+            err = ff_net_openeth_start(cfg);
+            break;
+        case FF_LINK_WIFI:
+        default:
+            err = ff_net_wifi_start(cfg);
+            break;
+        }
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "cannot start the %s link: %s", ff_cfg_link_name(cfg->link),
+                     esp_err_to_name(err));
+            return err;
+        }
+        s_started = true;
     }
 
     EventBits_t bits = xEventGroupWaitBits(s_events, FF_NET_GOT_IP_BIT, pdFALSE, pdTRUE, timeout);
@@ -86,4 +97,12 @@ bool ff_net_rssi(int *out_dbm)
         return false; /* Ethernet has no radio; up/hb reports null. */
     }
     return ff_net_wifi_rssi(out_dbm);
+}
+
+const char *ff_net_ssid(void)
+{
+    if (s_link != FF_LINK_WIFI) {
+        return NULL; /* Ethernet has no SSID; up/announce reports null. */
+    }
+    return ff_net_wifi_ssid();
 }

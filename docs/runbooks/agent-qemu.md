@@ -434,6 +434,11 @@ I ff-mqtt: announce acknowledged by the broker
 I ff-mqtt: publish ff/v1/d/000000000000/up/hb (qos 1, no retain, msg_id 21411, uptime 9 s)
 ```
 
+Since agent 0.4.6 (R2b-fw-1) the announce carries `"ssid":null,"known_networks":null`
+right after `"link_type":"ethernet"`, and a config written with `--net` adds one line after
+`link`: `networks  N in ff_cfg, unused (link is ethernet)`. That line is the only QEMU proof
+that the known-networks parser ran; there is no radio to select with.
+
 **No token and no password appear anywhere in that transcript, by design**. If one ever
 does, that is a bug in the firmware's logging, not a detail of the harness.
 

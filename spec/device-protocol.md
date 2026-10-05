@@ -103,6 +103,8 @@ own receipt time**, never the device's timestamp — see *Clock* below.
   "fw_version": "1.4.2",
   "agent_version": "0.3.2",
   "link_type": "wifi",
+  "ssid": "shed",
+  "known_networks": 2,
   "power_class": "always_on",
   "expected_wake_interval_s": null,
   "parent_device_id": null,

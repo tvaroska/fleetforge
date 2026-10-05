@@ -1453,7 +1453,7 @@ Implementation notes behind `spec/flows.md` Flow 1 and the 2026-10-04 entries in
 - **Diagnostic bundle.** Must be redacted: no token, Wi-Fi passphrase or broker credential
   (the CUJ-1 hard-fail trap).
 
-### Known networks: wire proposal (R2b-spec-1, 2026-10-04) — PROPOSED, not applied
+### Known networks: wire proposal (R2b-spec-1, 2026-10-04) — ACCEPTED; Patch A applied in 8cb5335, Patch B in the R2b-fw-1 commit
 
 `spec/` is protected during `/implement`, so this is the wire half of Flow 3 written as
 paste-ready patches for a later `spec:` commit (the route R2-spec-1 took). **Nothing here is
@@ -1710,6 +1710,81 @@ index f40e4ec..9f56aba 100644
    "expected_wake_interval_s": null,
    "parent_device_id": null,
 ```
+
+### Known networks: built in the agent (R2b-fw-1, 2026-10-05)
+
+Agent **0.4.6**. Decision: `DECISIONS.md` 2026-10-05 (R2b-fw-1). Patch B applied in the same
+commit; nothing else under `spec/` changed.
+
+As built:
+
+- **`ff_cfg`.** `ff_cfg_t.nets[FF_CFG_MAX_NETS = 4]`, `[0]` the top-level ssid/psk, so an old
+  blob is a list of one. `parse_nets()` idles on a malformed `nets` (`config key 'nets' is not
+  an array`, `config nets[N] is malformed — the board idles until it is re-flashed`), keeps the
+  first 4 of a longer list with `config lists N networks; this agent keeps the first 4 and
+  ignores the rest`, and never logs a value. `ff_cfg_log()` adds one line only when there is
+  a list: `networks  N known: home, shed, bench` (wifi, SSIDs only) or
+  `networks  N in ff_cfg, unused (link is ethernet)`.
+- **Selection.** One network: the old path, unchanged, plus
+  `no known network in range (1 known); trying again in N s` on reason 201. Several: scan
+  once, try the seen networks in list order (strongest AP of that SSID), then the unseen ones
+  directly, then one line per cycle (`no known network in range (N known); scanning again in
+  N s`), then the 1 s → 30 s backoff. A 20 s DHCP watchdog moves past a network that
+  associates but gives no address. No scan is ever started while associated; a working link
+  is never left. Console lines: `wifi sta starting, N known networks; scanning`,
+  `scan: A access points, V of N known networks in range`,
+  `trying "shed" (known network 2 of 3[, not seen in the scan])`,
+  `joined "shed" (known network 2 of 3)`,
+  `disconnected (reason N); trying "bench" next`,
+  `disconnected (reason N); link to "shed" lost; re-selecting in N ms`.
+  The classifier phrase for R2b-fe-12/13 is the prefix `no known network in range (`.
+- **The seam.** `ff_net_bring_up()` starts the adapter once and only waits on later calls
+  (a retry used to re-run `esp_wifi_init()` and drop a GOT_IP that arrived between calls).
+  `ff_net_ssid()` reports the joined SSID to the announce.
+- **Announce.** `"link_type":…,"ssid":…,"known_networks":…,"power_class":…`; both null on
+  ethernet; never a passphrase or the other SSIDs. The enroll body carries them too.
+- **Writer.** `agent/tools/ff_cfg.py --net SSID [PSK]` (repeatable); `validate()` refuses
+  what the reader idles on, more than 4, `nets` without a top-level `ssid`, and duplicates;
+  messages name an index, never a value; `describe()` hides nested `psk`. The browser writer
+  (`ffcfg.ts`) learns `nets` in R2b-fe-12 (a strict xfail in `tests/test_ff_cfg.py` forces
+  the cleanup).
+
+QEMU evidence (esp32, dev stack on 8088; trimmed; no secret appears in any log):
+
+```
+# A. old single-network ethernet blob, fresh board
+I ff-agent: fleetforge agent 0.4.6 (idf v5.5.5)
+I ff-cfg: ff_cfg v1 loaded (crc ok), 188 byte payload from 0x12000
+I ff-cfg:   link      ethernet
+I ff-cfg:   secrets   token 80 chars, passphrase 0 chars (never printed)
+I ff-enroll: enroll 200 http://10.0.2.2:8088/v1/enroll
+I ff-mqtt: announce acknowledged by the broker
+up/announce {…"agent_version":"0.4.6","link_type":"ethernet","ssid":null,"known_networks":null,"power_class":"always_on",…}
+
+# B. keep identity, --ssid home --psk … --net shed … --net bench (link ethernet)
+  …, psk=<16 chars, not shown>, link='ethernet', hb_s=10, nets=[{'ssid': 'shed', 'psk': '<13 chars, not shown>'}, {'ssid': 'bench'}]
+I ff-cfg:   networks  3 in ff_cfg, unused (link is ethernet)
+I ff-cfg:   secrets   token 0 chars, passphrase 16 chars (never printed)
+I ff-store: reusing the stored credential (no enrollment): 000000000000, …
+I ff-mqtt: announce acknowledged by the broker
+
+# C. "nets": "shed"  /  "nets": [{"ssid": "", "psk": "x"}]   (validator bypassed)
+E ff-cfg: config key 'nets' is not an array
+E ff-agent: halted: no usable ff_cfg partition — re-flash it (agent/tools/ff_cfg.py)
+E ff-cfg: config nets[0] has an empty 'ssid'
+E ff-cfg: config nets[0] is malformed — the board idles until it is re-flashed
+E ff-agent: halted: no usable ff_cfg partition — re-flash it (agent/tools/ff_cfg.py)
+
+# D. six networks in all
+W ff-cfg: config lists 6 networks; this agent keeps the first 4 and ignores the rest
+I ff-cfg:   networks  4 in ff_cfg, unused (link is ethernet)
+I ff-mqtt: announce acknowledged by the broker
+```
+
+**Wi-Fi selection is unproven until R2b-test-4.** QEMU has no radio, so the scan/selection
+loop, the DHCP watchdog, the "no known network in range" line on real radio and the
+strongest-AP choice are proven only by build (-Werror on four toolchains) and the text
+tripwires in `tests/test_agent_known_networks.py` until the bench run.
 
 ### Agent-written networks and keep identity: spike findings (R2b-spec-3, 2026-10-04) — FINDINGS, nothing built
 

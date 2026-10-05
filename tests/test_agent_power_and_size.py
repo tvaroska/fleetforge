@@ -127,16 +127,26 @@ FORBIDDEN_OPTIONS = [
 # exact measured byte: esp32 1,018,016 -> 1,018,304 (+288 B), esp32s3 998,352 -> 998,672
 # (+320 B). The added code is ff_ota_is_handling() (an otadata read and an ff_txn_load on a
 # re-delivered stage) and its log line.
+#
+# Raised 2026-10-05 (R2b-fw-1) for **all four targets**, all rebuilt, to the exact measured
+# byte: esp32 1,018,304 -> 1,026,592 (+8,288 B), esp32s3 998,672 -> 1,006,704 (+8,032 B),
+# esp32c3 1,028,336 -> 1,065,904, esp32c6 1,077,840 -> 1,115,424. The c3/c6 budgets had
+# never been raised since 0.2.0 (the gap the esp32s3 comment below admits), and the 0.4.5
+# bundles already measured 1,056,912 / 1,106,384, so against the real previous build this
+# task added +8,992 B (c3) and +9,040 B (c6). The added code is the known-networks parser
+# in ff_cfg.c, the scan/selection loop in ff_net_wifi.c (the driver's scan path it links
+# in, the DHCP watchdog esp_timer, the per-attempt config), the announce's two fields and
+# their log strings. 1,115,424 B (esp32c6) is 57% of the slot.
 APP_SIZE_BUDGET_BYTES = {
-    "esp32": 1_018_304,
+    "esp32": 1_026_592,
     # Raised from 973_136 for the OTA-capable agent (R1-fw-1/R1-fw-2), which cost every
     # target ~18 KB. Only esp32 was raised at the time: this gate reads whatever is in
     # `agent/dist/`, so a target nobody had built locally is not checked and does not
-    # fail. The other two are still carrying 0.2.0-era numbers and will need the same
-    # raise the first time they are built — that is a gap in the gate, not slack here.
-    "esp32s3": 998_672,
-    "esp32c3": 1_028_336,
-    "esp32c6": 1_077_840,
+    # fail. The other two were still carrying 0.2.0-era numbers until R2b-fw-1 raised
+    # them — that was a gap in the gate, not slack here.
+    "esp32s3": 1_006_704,
+    "esp32c3": 1_065_904,
+    "esp32c6": 1_115_424,
 }
 
 # An app may occupy at most this much of an OTA slot. Not a style rule: R2 downloads the

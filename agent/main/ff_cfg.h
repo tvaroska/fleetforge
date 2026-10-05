@@ -48,6 +48,12 @@ extern "C" {
 #define FF_CFG_MAX_NTP 64
 #define FF_CFG_MAX_POWER 16
 
+/* Known networks (spec/device-protocol.md -> Known networks): the top-level ssid/psk plus
+ * up to three more in `nets`. Retyped against agent/tools/ff_cfg.py::MAX_NETWORKS, which
+ * refuses to write more; this reader keeps the first FF_CFG_MAX_NETS it finds and ignores
+ * the rest with a warning, because "never refuses to boot over length" is the rule. */
+#define FF_CFG_MAX_NETS 4 /* top-level + 3 in `nets`; spec/device-protocol.md -> Known networks */
+
 /* spec/prd.md -> Requirements & targets -> Timing. Retyped, with the spec named, because
  * CRITICAL.md marks that table as the thing downstream code resolves against. */
 #define FF_CFG_DEFAULT_HB_S 60
@@ -62,12 +68,21 @@ typedef enum {
     FF_LINK_ETHERNET = 1,
 } ff_link_t;
 
+/* One known network. `psk` "" is an open network. NEVER spelled wifi_ssid — see ff_cfg.c. */
+typedef struct {
+    char ssid[FF_CFG_MAX_SSID];
+    char psk[FF_CFG_MAX_PSK];
+} ff_cfg_net_t;
+
 typedef struct {
     char api_base[FF_CFG_MAX_URI];  /* origin serving /v1; the scheme selects TLS */
     char mqtt_uri[FF_CFG_MAX_URI];  /* mqtt:// or mqtts://; the scheme selects TLS */
     char token[FF_CFG_MAX_TOKEN];   /* the single-use enrollment token; "" once used up */
-    char ssid[FF_CFG_MAX_SSID];     /* link=wifi. NEVER spelled wifi_ssid — see ff_cfg.c */
-    char psk[FF_CFG_MAX_PSK];       /* link=wifi */
+    /* link=wifi, in priority order. [0] is the top-level ssid/psk (so an old blob is a list
+     * of one); [1..] come from `nets`. NEVER spelled wifi_ssid — see ff_cfg.c. */
+    ff_cfg_net_t nets[FF_CFG_MAX_NETS];
+    int net_count;    /* how many the board will try; announced as `known_networks` */
+    int nets_dropped; /* entries past FF_CFG_MAX_NETS, ignored (and logged) */
     char ntp[FF_CFG_MAX_NTP];       /* "" means: do not sync, and TLS will fail */
     char power[FF_CFG_MAX_POWER];   /* always_on | sleepy — reported in up/announce */
     ff_link_t link;
@@ -93,8 +108,9 @@ esp_err_t ff_cfg_load(ff_cfg_t *out);
 /* "wifi" | "ethernet" — the string reported as `link_type` in up/announce. */
 const char *ff_cfg_link_name(ff_link_t link);
 
-/* Log the config the board is running with. Never prints the token or the passphrase:
- * the serial console is the one place a field engineer's credential leaks from. */
+/* Log the config the board is running with. Never prints the token or any passphrase —
+ * the top-level one or a nested `nets[].psk`: the serial console is the one place a field
+ * engineer's credential leaks from. Other known networks are listed by SSID only. */
 void ff_cfg_log(const ff_cfg_t *cfg);
 
 #ifdef __cplusplus
