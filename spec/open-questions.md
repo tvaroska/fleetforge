@@ -85,3 +85,19 @@ known networks moves between them with no re-flash ([device-protocol.md](device-
 and whether that holds once boards are sealed in boxes (CUJ-1) is open; see the *repeat
 path* question above. The writable store (NVS or `ff_cfg`), and `dn/cmd` `set_cfg` versus
 Improv as the way in, move to R2b-spec-3. Not decided.
+
+**An OTA image that does not contain the agent.** The confirm timer lives in the agent
+(`ff_mqtt.c::confirm_timeout_cb`), so an image without it arms no timer. The bootloader
+holds it in `PENDING_VERIFY`, and it is rolled back only if the board resets; otherwise it
+runs unconfirmed and offline, the deploy stays at `rebooting`, and no remote action
+reaches it. The pre-check refuses a merged binary and a wrong layout or slot size, but
+cannot tell whether the agent is linked in. Two candidates, not decided. (1) An agent
+signature check at upload (an app-descriptor project name or a marker string), reported
+in the pre-check; catches the plain-sketch mistake, not broken logic. It is the R3
+"library marker" gating warning, brought forward. (2) A watchdog the bootloader arms
+before it enters a `PENDING_VERIFY` image and only the agent's confirm path disarms, so
+a silent image resets and rolls back. It needs a custom bootloader (a one-time USB
+flash, so not OTA-able), applies only where we own the bootloader (not Arduino's), and
+it is unverified whether IDF's startup disables that watchdog before the app runs.
+Neither covers an image that has the agent and confirms but whose own logic is wrong;
+that is the R5 custom self-test.
