@@ -113,8 +113,7 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       S0 fw task (suspects: USB-Serial-JTAG console back-pressure, task WDT that does not
       reset) and tick S0-bug-1. If it never connects, re-flash from the flash page.
       _(2026-10-04: still offline at 15:33 UTC per devices.last_seen 14:24:08, presence_reported = f; operator power-cycle still owed)_
-- [!] **S0-infra-10**: Prod's flasher serves agent 0.3.2 (esp32s3) and 0.2.0 (esp32/c3/c6); the repo is at 0.4.5 (P1, 0.25d)
-      _(⚠ failed 2026-10-04; blocker: Blocked on the user's go-ahead, not failed. Publishing agent 0.4.5 to prod GCS needs an explicit message from the user such as "publish the agent to prod". '/implement-all fleetforge' is not that.)_
+- [x] **S0-infra-10**: Prod's flasher serves agent 0.3.2 (esp32s3) and 0.2.0 (esp32/c3/c6); the repo is at 0.4.5 (P1, 0.25d)
       Found by S0-bug-1 (2026-10-04): `gs://btvaroska/fleetforge/agent/index.json` was last
       published 2026-09-23. Every board flashed from bingo.tvaroska.sk gets a pre-R2 agent
       with none of R2-fw-1...6. Decide first whether the 0.3.x serial baseline is wanted
@@ -132,6 +131,7 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       just agent-publish-all ; then `just agent-check-prod` must print CHECK-VERSION OK and
       this task flips to [x].)_
       _(2026-10-04 re-check: bundles still fresh at 08de7b9, prod still 0.2.0/0.3.2; publish still owed, needs go-ahead)_
+      _(2026-10-06: done. Bundles rebuilt at 7a58f80 (all four 0.4.7, agent-check-fresh green), published to prod GCS on the user's go-ahead; `just agent-check-prod` printed CHECK-VERSION OK, all four CURRENT.)_
 - [x] **S0-test-3**: Someone who did not see the code onboards a board unaided — passed 2026-09-22 → [enrollment.md](docs/features/enrollment.md)
 - [x] **S0-fw-3**: A board that browns out during RF calibration cannot escape it — withdrawn 2026-09-23, not fixed → [enrollment.md](docs/features/enrollment.md)
 
