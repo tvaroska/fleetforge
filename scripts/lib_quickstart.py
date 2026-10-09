@@ -12,21 +12,30 @@ failure, so the README and this script cannot drift apart.
 
     just lib-quickstart --build-only     # the compile half: no stack, no QEMU
     just lib-quickstart                  # plus the board steps, in QEMU against `just up`
+    just lib-quickstart --build-only --fresh-pio-core
+                                         # README blocks on an EMPTY PlatformIO core (R3-fw-7)
 
 Phase 0 - a clean tree. `git ls-files --cached --others --exclude-standard`, copied into a
 fresh `ff-quickstart-*` temp dir: a clean checkout including uncommitted work, with no
 ignored build output (no `.pio/`, no `.qemu/`, no `lib-qemu/` state).
 
-Phase 1 - builds (`phase_builds`). Arduino: blocks `arduino-build`, then `arduino-edit` +
-`arduino-build-b` (build B must differ from A). ESP-IDF: blocks `idf-build` and
+Phase 1 - builds (`phase_builds`). Arduino: blocks `arduino-build` (a bare `pio run`: the
+summary table must list esp32 and esp32s3 as SUCCESS), then `pio-own-project` (the README's
+"Your own project": three files copied next to the tree, `lib_deps` rewritten to a symlink to
+the tree's library, both envs built), then `arduino-edit` +
+`arduino-build-b` (build B must differ from A). With `--fresh-pio-core` (only with
+`--build-only`) the README blocks run with `PLATFORMIO_CORE_DIR` on an empty directory, and
+the run checks the pinned pioarduino platform was installed into it from nothing. ESP-IDF: blocks `idf-build` and
 `idf-build-s3`, each inside the pinned `idf_image` from the justfile, on a container-local
 copy of the tree (nothing is written to the host). Every build: zero `warning:` lines from
 the library or the example, the app under the 1966080-byte slot. The IDF builds also
 decode the built partition table (== `agent/partitions.csv`, layout ab-4m-v1), read the
 resolved sdkconfig (rollback on, no eFuse burns) and the app descriptor (version 1.0.0).
 
-Phase 2 - the board steps, in QEMU (`phase_enroll`, `phase_ota`). Only two things in the
-README need a board, and both are substituted:
+Phase 2 - the board steps, in QEMU (`phase_enroll`, `phase_ota`). Only three things in the
+README need a board or a network clone, and all are substituted:
+
+* "git clone ... && cd fleetforge" -> the clean tree copy of Phase 0 (this run's `repo/`);
 
 * "flash it over USB" -> `just lib-qemu --fresh`, booting the QEMU build of the same sketch
   (lib-qemu/platformio.ini: the example's env:esp32 plus the OpenCores NIC). The OTA
@@ -79,7 +88,7 @@ SKETCH = f"{ARDUINO_DIR}/Basic.ino"
 MARKER = "# quickstart: "
 # Every block this script runs, by README. A README that lacks one fails the run.
 REQUIRED_BLOCKS: dict[str, tuple[str, ...]] = {
-    ARDUINO_README: ("arduino-build", "arduino-edit", "arduino-build-b"),
+    ARDUINO_README: ("arduino-build", "pio-own-project", "arduino-edit", "arduino-build-b"),
     IDF_README: ("idf-build", "idf-build-s3"),
 }
 
@@ -104,6 +113,11 @@ EFUSE_BURN_OPTIONS = (
     "CONFIG_FLASH_ENCRYPTION_ENABLED",
 )
 # A `warning:` line from these is ours (the library or the example), never the toolchain's.
+# The pioarduino release platformio.ini pins (55.03.312-1) reports this in platform.json.
+PINNED_PLATFORM_VERSION = "55.03.312"
+PIO_ENVS = ("esp32", "esp32s3")
+# One row of PlatformIO's `Environment  Status  Duration` summary table.
+PIO_ROW = re.compile(r"^(\S+)\s+(SUCCESS|FAILED|IGNORED)\s+\d\d:\d\d:\d\d", re.M)
 OUR_PATHS = re.compile(r"components/fleetforge|/examples/|Basic\.ino|basic_idf")
 
 Row = tuple[str, str, str, int, int]
@@ -183,6 +197,7 @@ class Run:
     qemu: subprocess.Popen[bytes] | None = None
     qemu_logs: list[Path] = field(default_factory=list)
     bearer: str | None = None
+    block_env: dict[str, str] | None = None  # env for README blocks only (--fresh-pio-core)
 
     def say(self, line: str = "") -> None:
         self.transcript.append(line)
@@ -288,7 +303,9 @@ def run_block(run: Run, name: str, body: str) -> str:
     run.say(f"  block `{name}`:")
     for line in body.rstrip("\n").splitlines():
         run.say(f"    $ {line}")
-    return run_logged(run, ["bash", "-euo", "pipefail", "-c", body], f"{name}.log")
+    return run_logged(
+        run, ["bash", "-euo", "pipefail", "-c", body], f"{name}.log", env=run.block_env
+    )
 
 
 def check_no_warnings(run: Run, label: str, output: str) -> None:
@@ -298,6 +315,20 @@ def check_no_warnings(run: Run, label: str, output: str) -> None:
             f"{label}: {len(found)} warning(s) from the library/example:\n" + "\n".join(found[:20])
         )
     run.passed(f"{label} warnings from components/fleetforge or the example", "0")
+
+
+def pio_summary(output: str) -> dict[str, str]:
+    """PlatformIO's `Environment  Status  Duration` table as {env: status}."""
+    return {m.group(1): m.group(2) for m in PIO_ROW.finditer(output)}
+
+
+def check_envs(run: Run, label: str, output: str, envs: Sequence[str]) -> None:
+    """Every env in `envs` is a SUCCESS row of the summary table."""
+    table = pio_summary(output)
+    bad = {env: table.get(env, "missing") for env in envs if table.get(env) != "SUCCESS"}
+    if bad:
+        raise QuickstartError(f"{label}: PlatformIO summary is not all SUCCESS: {bad} ({table})")
+    run.passed(f"{label} PlatformIO summary", f"{', '.join(envs)} SUCCESS")
 
 
 def check_app(run: Run, label: str, size: int) -> None:
@@ -346,13 +377,39 @@ def phase_builds(run: Run, skip_idf: bool) -> None:
 
     sketch = run.tree / SKETCH
     original = sketch.read_text()
+    core = Path(run.block_env["PLATFORMIO_CORE_DIR"]) if run.block_env else None
+    if core is not None and any(core.iterdir()):
+        raise QuickstartError(f"the fresh PlatformIO core {core} is not empty before the build")
     out = run_block(run, "arduino-build", arduino["arduino-build"])
+    check_envs(run, "Arduino build A", out, PIO_ENVS)
     check_no_warnings(run, "Arduino build A", out)
+    if core is not None:
+        platform_json = core / "platforms" / "espressif32" / "platform.json"
+        if not platform_json.is_file():
+            raise QuickstartError(f"{platform_json} missing after the build from an empty core")
+        version = json.loads(platform_json.read_text()).get("version")
+        if version != PINNED_PLATFORM_VERSION:
+            raise QuickstartError(f"{platform_json}: version {version}, pin is 55.03.312-1")
+        run.passed(
+            "fresh PlatformIO core",
+            f"empty before; {platform_json}: platform espressif32 {version} installed from the pin",
+        )
     pio = run.tree / ARDUINO_DIR / ".pio" / "build"
-    for env in ("esp32", "esp32s3"):
+    for env in PIO_ENVS:
         check_app(run, f"Arduino A {env}", _size(pio / env / "firmware.bin"))
     build_a = run.work / "arduino-A-esp32.bin"
     shutil.copy2(pio / "esp32" / "firmware.bin", build_a)
+
+    own = run_block(run, "pio-own-project", arduino["pio-own-project"])
+    check_no_warnings(run, "Own project", own)
+    check_envs(run, "Own project", own, PIO_ENVS)
+    own_build = run.tree.parent / "my-blinker" / ".pio" / "build"
+    for env in PIO_ENVS:
+        check_app(run, f"Own project {env}", _size(own_build / env / "firmware.bin"))
+    ini = (run.tree.parent / "my-blinker" / "platformio.ini").read_text()
+    if f"symlink://{run.tree}/agent/components/fleetforge" not in ini:
+        raise QuickstartError("my-blinker/platformio.ini lib_deps does not point at the tree")
+    run.passed("own project (lib_deps -> the clone)", "esp32, esp32s3 SUCCESS")
 
     run_block(run, "arduino-edit", arduino["arduino-edit"])
     edited = sketch.read_text()
@@ -878,7 +935,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument(
         "--skip-idf", action="store_true", help="skip the ESP-IDF builds (dev only)"
     )
+    parser.add_argument(
+        "--fresh-pio-core",
+        action="store_true",
+        help="run the README blocks on an empty PlatformIO core (needs --build-only; ~4.5 GB)",
+    )
     args = parser.parse_args(argv)
+    if args.fresh_pio_core and not args.build_only:
+        parser.error("--fresh-pio-core needs --build-only (the board phase gains nothing)")
 
     port = args.base.rsplit(":", 1)[-1].strip("/")
     root = Path(tempfile.mkdtemp(prefix="ff-quickstart-"))
@@ -893,6 +957,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     run.work.mkdir()
     run.logs.mkdir()
+    if args.fresh_pio_core:
+        core = root / "pio-core"
+        core.mkdir()
+        run.block_env = {**os.environ, "PLATFORMIO_CORE_DIR": str(core)}
+        run.say(f"  PlatformIO core for the README blocks: {core} (empty)")
     started = time.monotonic()
     code = 1
     try:

@@ -416,7 +416,7 @@ Order: spec-3 → fw-2 → fw-3/fw-4 → fw-5/fw-6/be-1 → test-1 → spec-2 �
       board announce none and are not refused for it (`null` never warns).
       Per R3-spec-3: the marker lives in the component, so the stock agent built from it carries and announces it too; "announce none" means agents ≤ 0.4.7. Applies Patch B (the lib_marker key in the up/announce example) in this task's commit.
       **Blocked:** waits for the owner to accept and apply the R3-spec-3 proposal (Patch A). See docs/features/ota-library.md → *Library marker proposal*.
-- [ ] **R3-fw-7**: PlatformIO recipe (P2, 0.5d)
+- [x] **R3-fw-7**: PlatformIO recipe (P2, 0.5d) _(done 2026-10-09; see docs/features/ota-library.md)_
       A working `platformio.ini` for the example, no registry publication (out of scope).
       Depends on `R3-fw-3`. Acceptance: `pio run` on a clean checkout builds both targets.
       Per R3-fw-3: the harness `examples/Basic/platformio.ini` exists (pioarduino 55.03.312-1 pinned,
@@ -471,6 +471,7 @@ Order: spec-3 → fw-2 → fw-3/fw-4 → fw-5/fw-6/be-1 → test-1 → spec-2 �
       `agent/version.txt` bump, `/release fleetforge minor`, then
       `just agent-publish-all` + `just agent-check-prod` **only with the owner's go-ahead**.
       Depends on everything above.
+      Per R3-fw-7: the README's `git clone` step needs the library on GitHub `main` (origin is behind); once the release tag exists, add the pinned git form `lib_deps = Fleetforge=https://github.com/tvaroska/fleetforge.git#vX.Y.Z` to *Your own project*. PlatformIO finds the nested `library.json`, probed with `git+file://` in R3-fw-7.
       Per R3-fw-4: link the two example READMEs (`examples/Basic/README.md`, `examples/basic_idf/README.md`) from the library README; keep their `# quickstart:` blocks intact (`just lib-quickstart` runs them).
 
 ### Order

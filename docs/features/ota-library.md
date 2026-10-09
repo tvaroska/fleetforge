@@ -16,6 +16,33 @@ becomes a board in the field that fixes itself" — this release *is* that journ
 
 ## Completed Work
 
+### R3-fw-7 (2026-10-09): the example's `platformio.ini` is the recipe; a bare `pio run` builds both targets; `just lib-quickstart --fresh-pio-core` proves it from an empty PlatformIO core
+
+**What.** `examples/Basic/platformio.ini` keeps its keys (only the header comment changed).
+The README's `arduino-build` block is a bare `pio run` (`default_envs = esp32, esp32s3`),
+gains a "Get the code" step 0 (`git clone`, substituted by the clean tree copy in the
+script), and a new *Your own project* section with the `pio-own-project` block: copy
+`Basic.ino`, `partitions.csv`, `platformio.ini` to `../my-blinker`, rewrite the one
+`lib_deps` line to a symlink to the clone's component. `scripts/lib_quickstart.py` runs it,
+parses PlatformIO's summary table (`pio_summary`/`check_envs`), and with `--fresh-pio-core`
+(only with `--build-only`) runs the README blocks on an empty `PLATFORMIO_CORE_DIR`, asserting
+it was empty before and holds `platforms/espressif32/platform.json` 55.03.312 after.
+
+**T2 (`just lib-quickstart --build-only --skip-idf --fresh-pio-core`, PASS in 360 s).**
+
+| Check | Observed |
+|---|---|
+| arduino-build from an empty core (bare `pio run`) | 284 s, esp32 + esp32s3 SUCCESS, 0 warnings |
+| platform in the fresh core | espressif32 55.03.312 |
+| app sizes A | esp32 1176096 B, esp32s3 1169504 B (slot 1966080 B) |
+| own project (`../my-blinker`, symlink `lib_deps`) | 59 s, esp32 1176096 B, esp32s3 1169504 B, SUCCESS, 0 warnings |
+| build B | esp32 1176112 B, differs from A |
+
+`just lib-quickstart --build-only` (with IDF builds) still PASSes in 504 s. The git form of
+`lib_deps` was probed (`pio pkg install -l "Fleetforge=git+file://...#main"` installed
+`Fleetforge@0.4.7+sha.3affea2`) but is not documented: GitHub `main` is behind and no tag
+carries the library. Left to R3-rel-1.
+
 ### R3-fw-5 (2026-10-09): a wrong flash layout is announced as `unknown` and refused at deploy time with the fix; `ff_ota.c` does not build without rollback
 
 **The problem.** `FF_PARTITION_LAYOUT` was compiled in (`ARDUINO` → `ab-4m-arduino-v1`,

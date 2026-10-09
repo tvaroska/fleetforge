@@ -36,6 +36,7 @@ from tests.agent_src import (
     COMPONENT_DIR,
     COMPONENT_INCLUDE,
     EXAMPLE_INO,
+    EXAMPLE_PLATFORMIO_INI,
     EXAMPLE_README,
     IDF_EXAMPLE_CMAKE,
     IDF_EXAMPLE_DIR,
@@ -356,7 +357,30 @@ class TestTheReadmes:
             blocks = quickstart.require_blocks(text, names, key)
             example_dir = readmes[key].parent.relative_to(REPO_ROOT).as_posix()
             for name, body in blocks.items():
-                assert body.splitlines()[0] == f"cd {example_dir}", (name, body)
+                if name == "pio-own-project":  # the one block run from the clone root
+                    assert body.splitlines()[0] == "mkdir ../my-blinker", body
+                else:
+                    assert body.splitlines()[0] == f"cd {example_dir}", (name, body)
+
+    def test_the_build_block_is_a_bare_pio_run(self) -> None:
+        blocks = quickstart.require_blocks(
+            EXAMPLE_README.read_text(), ("arduino-build",), "Basic/README.md"
+        )
+        assert blocks["arduino-build"].splitlines() == [
+            "cd agent/components/fleetforge/examples/Basic",
+            "pio run",
+        ]
+
+    def test_the_own_project_block_rewrites_the_one_lib_deps_line(self) -> None:
+        body = quickstart.require_blocks(
+            EXAMPLE_README.read_text(), ("pio-own-project",), "Basic/README.md"
+        )["pio-own-project"]
+        assert 'sed -i "s|symlink://../..|' in body
+        assert EXAMPLE_PLATFORMIO_INI.read_text().count("symlink://../..") == 1
+        copy = next(line for line in body.splitlines() if line.startswith("cp "))
+        assert "{Basic.ino,partitions.csv,platformio.ini}" in copy
+        for name in ("Basic.ino", "partitions.csv", "platformio.ini"):
+            assert (EXAMPLE_PLATFORMIO_INI.parent / name).is_file()
 
     def test_the_arduino_edit_block_is_the_tested_sed(self) -> None:
         blocks = quickstart.require_blocks(
@@ -365,7 +389,45 @@ class TestTheReadmes:
         assert 'sed -i \'s/"SOS"/"HELLO"/; s/"1.0.0"/"1.1.0"/\' Basic.ino' in blocks["arduino-edit"]
 
 
+PIO_TAIL = """\
+Environment    Status    Duration
+-------------  --------  ------------
+esp32          SUCCESS   00:00:05.440
+esp32s3        SUCCESS   00:00:04.893
+========================= 2 succeeded in 00:00:10.333 =========================
+"""
+
+
 class TestQuickstartScript:
+    def test_pio_summary_reads_the_table(self) -> None:
+        assert quickstart.pio_summary(PIO_TAIL) == {"esp32": "SUCCESS", "esp32s3": "SUCCESS"}
+        noisy = (
+            "[SUCCESS] Took 4.89 seconds\n" + PIO_TAIL + "esp32c3        FAILED    00:00:01.100\n"
+        )
+        assert quickstart.pio_summary(noisy) == {
+            "esp32": "SUCCESS",
+            "esp32s3": "SUCCESS",
+            "esp32c3": "FAILED",
+        }
+
+    def test_check_envs_fails_when_one_is_missing(self) -> None:
+        run = quickstart.Run(
+            tree=Path("t"), work=Path("w"), logs=Path("l"), base="", guest_base="", mqtt_uri=""
+        )
+        one = PIO_TAIL.replace("esp32s3        SUCCESS", "esp32s3        FAILED ")
+        with pytest.raises(quickstart.QuickstartError):
+            quickstart.check_envs(run, "x", one, ("esp32", "esp32s3"))
+        with pytest.raises(quickstart.QuickstartError):
+            quickstart.check_envs(run, "x", "no table", ("esp32",))
+        quickstart.check_envs(run, "x", PIO_TAIL, ("esp32", "esp32s3"))
+        assert run.results
+
+    def test_fresh_core_requires_build_only(self, capsys: pytest.CaptureFixture[str]) -> None:
+        with pytest.raises(SystemExit) as exit_info:
+            quickstart.main(["--fresh-pio-core"])
+        assert exit_info.value.code == 2
+        assert "--build-only" in capsys.readouterr().err
+
     def test_extraction_returns_the_body_without_the_marker(self) -> None:
         text = "intro\n\n```sh\n# quickstart: one\ncd a\necho 'x'\n```\n\n```sh\nnot named\n```\n"
         assert quickstart.extract_blocks(text) == {"one": "cd a\necho 'x'\n"}

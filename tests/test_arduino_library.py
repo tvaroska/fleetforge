@@ -228,6 +228,11 @@ class TestPlatformioIni:
             for name in [s.removeprefix("env:") for s in parser.sections() if s.startswith("env:")]:
                 assert _env(parser, name)["platform"] == PINNED_PLATFORM, (path, name)
 
+    def test_a_bare_pio_run_builds_both_targets(self) -> None:
+        parser = _ini(EXAMPLE_PLATFORMIO_INI)
+        default = [e.strip() for e in parser["platformio"]["default_envs"].split(",")]
+        assert default == ["esp32", "esp32s3"]
+
     def test_the_example_has_the_two_persona_targets(self) -> None:
         parser = _ini(EXAMPLE_PLATFORMIO_INI)
         envs = [s.removeprefix("env:") for s in parser.sections() if s.startswith("env:")]

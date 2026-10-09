@@ -6,6 +6,25 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-09 — The example's platformio.ini is the PlatformIO recipe; bare `pio run`; own project = copy three files + one `lib_deps` line; fresh core proved; git-URL form deferred to R3-rel-1 (R3-fw-7)
+
+**Decided.** No new recipe file: `examples/Basic/platformio.ini` (keys unchanged, pinned by
+`tests/test_arduino_library.py`) is the recipe, and `pio run` builds both targets via
+`default_envs`. A maker's own project copies `Basic.ino`, `partitions.csv` (unchanged, never
+edited) and `platformio.ini`, and changes one line, `lib_deps`, to a `symlink://` to the
+clone's `agent/components/fleetforge`. `scripts/lib_quickstart.py --fresh-pio-core`
+(`--build-only` only) runs the README blocks on an empty `PLATFORMIO_CORE_DIR` and proves the
+pinned pioarduino 55.03.312 installs from nothing. Phase 0 stays the `git ls-files` copy (a
+HEAD clone would test the old README). Details and the T2 table: `docs/features/ota-library.md`
+-> *R3-fw-7*.
+
+- **Deferred.** The GitHub git-URL `lib_deps` form: `git+file://` installed
+  `Fleetforge@0.4.7+sha.3affea2` (PlatformIO finds the nested `library.json`), but
+  `origin/main` is behind and no tag carries the library. Noted under R3-rel-1.
+- **Rejected.** A second script for fresh-core mode; a registry publication (out of scope).
+
+---
+
 ## 2026-10-09 — Layout detected by fingerprint; no match announces `unknown`; `unsupported_layout` refusal names the expected layout, slot size and the fix; rollback guard moved into the component's OTA path (R3-fw-5)
 
 **Decided.** A board says which map it carries, and a board on a map nobody supports is

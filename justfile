@@ -898,6 +898,7 @@ lib-qemu fresh="":
 # script is stdlib-only. docs/runbooks/agent-qemu.md -> *The worked example, end to end*.
 #
 #     just lib-quickstart --build-only    # the compile half: no stack, no QEMU
+#     just lib-quickstart --build-only --fresh-pio-core   # README blocks on an empty PlatformIO core
 #     just lib-quickstart                 # everything (--keep leaves the temp tree)
 lib-quickstart *args:
     python3 -u scripts/lib_quickstart.py {{ args }}

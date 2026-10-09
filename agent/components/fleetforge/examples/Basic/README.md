@@ -18,20 +18,28 @@ keeps blinking the whole time, network or not.
 `platformio.ini` pins the platform to pioarduino `55.03.312-1` (Arduino-ESP32 core 3.3.12 on
 ESP-IDF 5.5.5). PlatformIO's official `espressif32` platform cannot build this library.
 
-## 1. Build it
+## 0. Get the code
 
-From the repository root:
+```sh
+git clone https://github.com/tvaroska/fleetforge.git
+cd fleetforge
+```
+
+Every command below runs from this folder, the repository root, unless it says `cd`.
+
+## 1. Build it
 
 ```sh
 # quickstart: arduino-build
 cd agent/components/fleetforge/examples/Basic
-pio run -e esp32
-pio run -e esp32s3
+pio run
 ```
 
-The first build downloads the platform and takes a few minutes. Each build ends in
-`SUCCESS`; the firmware is `.pio/build/<env>/firmware.bin`. Build only the env of your
-board if you like (`esp32` is any ESP32 DevKit, `esp32s3` is the S3 DevKitC-1).
+A bare `pio run` builds both targets (`default_envs` in `platformio.ini`: `esp32` is any
+ESP32 DevKit, `esp32s3` is the S3 DevKitC-1). The first build downloads the platform and
+takes a few minutes (about 4-5 GB under `~/.platformio`). The summary table ends with
+`SUCCESS` for both; the firmware is `.pio/build/<env>/firmware.bin`. Build only the env of
+your board with `pio run -e esp32`.
 
 ## 2. Get an enrollment token
 
@@ -117,3 +125,28 @@ dashboard shows the deploy `confirmed` and the board at `1.1.0`; the serial port
 If build B could not reach the fleet (a wrong Wi-Fi password compiled into your own code,
 a crash at boot), the board would not confirm it, roll back to `1.0.0` on its own, and the
 dashboard would say `rolled back`. You would not need the USB cable for that either.
+
+## Your own project
+
+The example's `platformio.ini` is the recipe, and a project of your own changes exactly one
+line of it, `lib_deps`. From the repository root, next to the clone (never inside it):
+
+```sh
+# quickstart: pio-own-project
+mkdir ../my-blinker
+cp agent/components/fleetforge/examples/Basic/{Basic.ino,partitions.csv,platformio.ini} ../my-blinker/
+sed -i "s|symlink://../..|symlink://$PWD/agent/components/fleetforge|" ../my-blinker/platformio.ini
+cd ../my-blinker
+pio run
+```
+
+- Copy the three files: the sketch, `partitions.csv` and `platformio.ini`.
+- `partitions.csv` goes over unchanged. It is `ab-4m-arduino-v1`, every board carries it for
+  life, and it is never replaced or edited.
+- `lib_deps` now points at your clone through a symlink, not a copy. The clone must stay
+  where it is, and whatever it has checked out is the library you build.
+- No registry is involved. Rename the sketch and replace it with your code, as long as
+  `Fleetforge.begin(FW_VERSION)` stays the first line of `setup()` and the sketch keeps the
+  "do not" rules in `Basic.ino`'s header comment.
+
+Steps 2 to 7 are the same for your project: build there, upload the `firmware.bin`.

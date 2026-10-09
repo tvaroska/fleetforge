@@ -771,6 +771,9 @@ ignored build output is out). A README that loses a block fails the run by name.
 
 ```bash
 just lib-quickstart --build-only   # ~7 min: no stack, no QEMU
+# the same README blocks on an EMPTY PlatformIO core (R3-fw-7): one-time ~4.5 GB download,
+# ~6 min with --skip-idf (measured: arduino-build 284 s from nothing, own project 59 s)
+just lib-quickstart --build-only --skip-idf --fresh-pio-core
 # the api must hand the board 10.0.2.2 origins for the OTA half (see above). On this box:
 FF_PUBLIC_BASE_URL=http://10.0.2.2:8088 FF_S3_PUBLIC_ENDPOINT_URL=http://10.0.2.2:9000 \
   docker compose -f docker-compose.yml -f docker-compose.override.yml up -d --no-deps api
