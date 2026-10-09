@@ -22,8 +22,10 @@ Comments are stripped before any grep of C (`_code`), the idiom of the other age
 from __future__ import annotations
 
 import importlib.util
+import inspect
 import re
 import sys
+import time
 from pathlib import Path
 from types import ModuleType
 
@@ -520,3 +522,136 @@ class TestQuickstartScript:
                 for line in gitignore
             ), name
             assert f"components/fleetforge/examples/*/{name}" in dockerignore, name
+
+
+# R3-test-1: the broken build and its verdict.
+CMD_R = "c-rbtest"
+VERSION_B = "1.1.0-qs1760000000"
+VERSION_R = "1.2.0-qs1760000000-rbtest"
+DETAIL_R = "returned to ota_1; ota_0 did not confirm"
+
+
+def _rollback_row(**overrides: object) -> dict[str, object]:
+    """The final row of a good rollback run; `overrides` replace deploy keys or fw_version."""
+    steps = ["staging", "staged", "confirming", "rolling_back", "rolled_back"]
+    deploy: dict[str, object] = {
+        "cmd_id": CMD_R,
+        "state": "rolled_back",
+        "is_terminal": True,
+        "detail": DETAIL_R,
+        "steps": [{"state": state} for state in steps],
+    }
+    row: dict[str, object] = {"device_id": "000000000000", "fw_version": VERSION_B}
+    for key, value in overrides.items():
+        if key == "fw_version":
+            row[key] = value
+        else:
+            deploy[key] = value
+    row["deploy"] = deploy
+    return row
+
+
+def _steps(*states: str) -> list[dict[str, str]]:
+    return [{"state": state} for state in states]
+
+
+class TestRollbackRun:
+    def test_rollback_version_is_run_unique_and_marked(self) -> None:
+        version = quickstart.rollback_version(1760000000)
+        assert version == VERSION_R
+        assert version.startswith("1.2.0-qs") and version.endswith("-rbtest")
+        assert len(version) <= 31  # Fleetforge.begin's limit
+        assert re.fullmatch(r"[A-Za-z0-9._+-]{1,64}", version)
+        assert quickstart.rollback_version(1760000001) != version
+
+    def test_the_rollback_needle_is_the_hook_log_line(self) -> None:
+        """Retyped: the needle is ff_mqtt.c's hook line, inside `#if FF_ROLLBACK_TEST`."""
+        source = (COMPONENT_DIR / "src" / "ff_mqtt.c").read_text()
+        assert quickstart.ROLLBACK_HOOK_NEEDLE == b"FF_ROLLBACK_TEST: ignoring the announce ack"
+        assert quickstart.ROLLBACK_TEST_FLAGS == "-DFF_ROLLBACK_TEST=1"
+        blocks = re.findall(r"#if FF_ROLLBACK_TEST\n(.*?)#endif", source, re.S)
+        assert any("FF_ROLLBACK_TEST: ignoring the announce ack" in b for b in blocks)
+        assert any("#define CONFIRM_TIMEOUT_S 60" in b for b in blocks)
+
+    def test_has_rollback_hook(self) -> None:
+        hooked = b"\x00junk\x1b[0;31mE (%lu) %s: FF_ROLLBACK_TEST: ignoring the announce ack on"
+        assert quickstart.has_rollback_hook(hooked)
+        assert not quickstart.has_rollback_hook(b"\x00junk FF_ROLLBACK_TEST\x00 announce ack")
+
+    def test_confirmed_breach_on_the_deploy_state(self) -> None:
+        row = _rollback_row(state="confirmed", is_terminal=True)
+        message = quickstart.confirmed_breach(row, CMD_R, VERSION_R)
+        assert message is not None and "P0" in message and VERSION_R in message
+
+    def test_confirmed_breach_inside_the_steps(self) -> None:
+        row = _rollback_row(steps=_steps("staged", "confirming", "confirmed", "rolled_back"))
+        assert quickstart.confirmed_breach(row, CMD_R, VERSION_R) is not None
+
+    def test_confirmed_breach_ignores_another_deploy(self) -> None:
+        row = _rollback_row(cmd_id="c-b", state="confirmed", steps=_steps("confirmed"))
+        assert quickstart.confirmed_breach(row, CMD_R, VERSION_R) is None
+
+    def test_confirmed_breach_allows_r_on_its_own_version_while_confirming(self) -> None:
+        row = _rollback_row(
+            fw_version=VERSION_R,
+            state="confirming",
+            is_terminal=False,
+            steps=_steps("staged", "confirming"),
+        )
+        assert quickstart.confirmed_breach(row, CMD_R, VERSION_R) is None
+
+    def test_confirmed_breach_none_row(self) -> None:
+        assert quickstart.confirmed_breach(None, CMD_R, VERSION_R) is None
+
+    def test_check_rollback_row_passes_the_good_row(self) -> None:
+        summary = quickstart.check_rollback_row(
+            _rollback_row(), CMD_R, VERSION_B, VERSION_R, DETAIL_R
+        )
+        assert "rolled_back" in summary and VERSION_B in summary
+        assert "rolling_back seen: yes" in summary
+
+    @pytest.mark.parametrize(
+        ("overrides", "match"),
+        [
+            ({"fw_version": VERSION_R}, "broken build"),
+            ({"state": "confirmed"}, "confirm gate is broken"),
+            ({"steps": _steps("staged", "rolled_back")}, "confirming"),
+            ({"is_terminal": False}, "is_terminal"),
+            ({"detail": "returned to ota_0; ota_1 did not confirm"}, "detail"),
+            ({"cmd_id": "c-other"}, "cmd_id"),
+        ],
+    )
+    def test_check_rollback_row_refuses(self, overrides: dict[str, object], match: str) -> None:
+        with pytest.raises(quickstart.QuickstartError, match=match):
+            quickstart.check_rollback_row(
+                _rollback_row(**overrides), CMD_R, VERSION_B, VERSION_R, DETAIL_R
+            )
+
+    def test_check_rollback_row_without_rolling_back_still_passes(self) -> None:
+        row = _rollback_row(steps=_steps("staged", "confirming", "rolled_back"))
+        summary = quickstart.check_rollback_row(row, CMD_R, VERSION_B, VERSION_R, DETAIL_R)
+        assert "rolling_back seen: no" in summary
+
+    def test_wait_for_lines_fails_fast_on_a_forbidden_line(self, tmp_path: Path) -> None:
+        run = quickstart.Run(
+            tree=tmp_path, work=tmp_path, logs=tmp_path, base="", guest_base="", mqtt_uri=""
+        )
+        log = tmp_path / "qemu-R.log"
+        log.write_text("boot\nW (1) ff-mqtt: now marked valid and CONFIRMED\n")
+        started = time.monotonic()
+        with pytest.raises(quickstart.QuickstartError, match="CONFIRMED"):
+            quickstart.wait_for_lines(run, log, ["never-there"], timeout=5, forbidden=["CONFIRMED"])
+        assert time.monotonic() - started < 2
+
+        clean = tmp_path / "clean.log"
+        clean.write_text("one\ntwo\nthree\n")
+        end = quickstart.wait_for_lines(run, clean, ["one", "three"], 5, forbidden=["CONFIRMED"])
+        assert end == len("one\ntwo\nthree")
+        assert quickstart.wait_for_lines(run, clean, ["three"], 5, start=end - 5) == end
+
+    def test_phase_board_runs_the_rollback_after_the_ota(self) -> None:
+        source = inspect.getsource(quickstart.phase_board)
+        calls = ("phase_enroll(", "phase_ota(", "phase_rollback(", "check_no_credentials(")
+        positions = [source.index(call) for call in calls]
+        assert positions == sorted(positions)
+        assert "rollback_version(epoch)" in source and 'f"1.1.0-qs{epoch}"' in source

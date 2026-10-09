@@ -759,7 +759,7 @@ What differs from `agent-qemu esp32`:
   05528998…1fc4`, `fw_version: 1.0.0` (the sketch's, from `Fleetforge.begin`), and
   `agent_version` = the library version.
 
-## The worked example, end to end (R3-fw-4)
+## The worked example, end to end (R3-fw-4, R3-test-1)
 
 `just lib-quickstart` plays the worked example's README quickstart:
 `agent/components/fleetforge/examples/Basic/README.md` (Arduino) and
@@ -777,7 +777,7 @@ just lib-quickstart --build-only --skip-idf --fresh-pio-core
 # the api must hand the board 10.0.2.2 origins for the OTA half (see above). On this box:
 FF_PUBLIC_BASE_URL=http://10.0.2.2:8088 FF_S3_PUBLIC_ENDPOINT_URL=http://10.0.2.2:9000 \
   docker compose -f docker-compose.yml -f docker-compose.override.yml up -d --no-deps api
-just lib-quickstart                # ~30 min: builds, then enroll → heartbeat → OTA → confirm
+just lib-quickstart                # ~25-30 min: builds, enroll → heartbeat → OTA → confirm → broken build → rollback
 docker compose -f docker-compose.yml -f docker-compose.override.yml up -d --no-deps api  # restore
 ```
 
@@ -817,8 +817,27 @@ What it does:
    `is staged and bootable` and deploy state `staged`, then power-cycle (`agent-qemu-stop`,
    `lib-qemu`). Wait for `CONFIRMED` and `morse: HELLO (firmware 1.1.0-qs…)`, then the API:
    `fw_version` == B, deploy `confirmed`, `is_terminal: true`.
-5. **Credentials.** The token must occur 0 times, and no `"mqtt_password":"` value at all,
-   in both QEMU logs, every build log and the script's own output. Then unplug, and report
+5. **The broken build (R3-test-1).** Bundle R is the committed sketch with `"SOS"` →
+   `"BAD"` and `"1.0.0"` → `1.2.0-qs<epoch>-rbtest`, built with
+   `PLATFORMIO_BUILD_FLAGS=-DFF_ROLLBACK_TEST=1` (fault injection, never a README step; A
+   and B are built with that variable removed). It switches on `ff_mqtt.c`'s hook: the
+   announce is published but its PUBACK ignored, so the session never confirms, and the
+   confirm timer is 60 s. R's `app.bin` must contain the hook's log line before it is
+   uploaded (A's and B's must not). Upload, deploy `on_command`, wait for `update <cmd>:
+   ota_0 is staged and bootable` (R's slot must differ from B's), power-cycle. R's console
+   must show, in order, `OTA boot: 60 s from now …`, `ff-lib … firmware <R>`, `confirming on
+   ota_0`, `FF_ROLLBACK_TEST: ignoring the announce ack` and `no working session 60 s after
+   an OTA boot`, plus `morse: BAD (firmware <R>)`. The board then marks R invalid and
+   reboots by itself; QEMU panics on that `esp_restart()` (`rst:`), so a second power cycle
+   stands in for the reset a real board does. B's boot logs `transaction <cmd>: rolled_back
+   (returned to ota_1; ota_0 did not confirm)` and `morse: HELLO (firmware <B>)`, and the
+   API must show deploy `rolled_back`, terminal, `fw_version` == B, `confirming` and
+   `rolled_back` in the steps. **Any `confirmed` fails the run at once**: in an API poll
+   (state or steps), on R's console, or as R's version on the final row. `rolling_back` is
+   reported, not required (best effort). R's bundle takes ~30 s: the changed flags rebuild
+   the project and the library, not the framework.
+6. **Credentials.** The token must occur 0 times, and no `"mqtt_password":"` value at all,
+   in every QEMU log, every build log and the script's own output. Then unplug, and report
    the LWT.
 
 **The OTA artifact must be the QEMU build** (bundle B's `app.bin`), never the persona
@@ -845,6 +864,28 @@ W (13796) ff-mqtt: this image was written by OTA and is now CONFIRMED: the broke
 morse: HELLO (firmware 1.1.0-qs1791521470)
 GET /v1/devices                fw_version 1.1.0-qs1791521470, deploy confirmed (is_terminal True), 68 s after the deploy
 credentials                    token 0 occurrences, mqtt_password 0 (13 files)
+```
+
+The rollback half of the first passing three-run pass (2026-10-09, 1512 s in all; bundle R
+32 s), trimmed:
+
+```
+POST /v1/artifact              201, version 1.2.0-qs1791532201-rbtest (bundle R app.bin, 1177040 B, carries the hook)
+POST …/deploy on_command       202, cmd_id 5f87a826…
+I (69853) ff-ota: update 5f87a826…: ota_0 is staged and bootable      (staged 49 s after the deploy; B on ota_1)
+--- power cycle ---
+W (2120) ff-mqtt: OTA boot: 60 s from now to reach the fleet or roll back
+I (9380) ff-lib: fleetforge library 0.4.7, firmware 1.2.0-qs1791532201-rbtest
+W (12207) ff-mqtt: transaction 5f87a826…: confirming on ota_0
+E (12346) ff-mqtt: FF_ROLLBACK_TEST: ignoring the announce ack on purpose — this image must roll back in 60 s
+morse: BAD (firmware 1.2.0-qs1791532201-rbtest)
+E (69425) ff-mqtt: no working session 60 s after an OTA boot — marking this image invalid and rolling back to the previous slot
+rst: …                                                                (the esp_restart panic)
+--- power cycle ---
+W (14381) ff-mqtt: transaction 5f87a826…: rolled_back (returned to ota_1; ota_0 did not confirm)
+morse: HELLO (firmware 1.1.0-qs1791532201)
+GET /v1/devices                deploy rolled_back (is_terminal True), fw_version 1.1.0-qs1791532201, steps requested, staging, downloading, verifying, staged, confirming, rolling_back, rolled_back; 141 s after the deploy
+credentials                    token 0 occurrences, mqtt_password 0 (19 files)
 ```
 
 ## A wrong flash layout is refused (R3-fw-5)

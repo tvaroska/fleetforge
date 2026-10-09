@@ -16,6 +16,80 @@ becomes a board in the field that fixes itself" — this release *is* that journ
 
 ## Completed Work
 
+### R3-test-1 (2026-10-09): the library's rollback proof in QEMU; `just lib-quickstart` now enrolls, updates and rolls back a deliberately broken build
+
+**Run three, in the same script and the same QEMU session.** `scripts/lib_quickstart.py`
+gains `phase_rollback` after `phase_ota`, on the board left running build B. No firmware,
+server, justfile-recipe or `lib-qemu/platformio.ini` change.
+
+- **Build R** is the committed sketch with `"SOS"` → `"BAD"` and `"1.0.0"` →
+  `1.2.0-qs<epoch>-rbtest` (same epoch as B, each literal guarded `count == 1`), bundled
+  with `PLATFORMIO_BUILD_FLAGS=-DFF_ROLLBACK_TEST=1`. A and B get an env with that variable
+  removed, so a stray value in the operator's shell cannot leak in. That switches on
+  `ff_mqtt.c`'s existing hook: the announce is published and retained, its PUBACK is thrown
+  away, the session never confirms, and the confirm timer is 60 s.
+- **The flag is checked, not trusted.** R's `app.bin` must contain
+  `FF_ROLLBACK_TEST: ignoring the announce ack` (A's and B's must not), must differ from A
+  and B, and must fit the slot. Otherwise the run refuses to upload it.
+- **The run.** Upload R, deploy `on_command`, wait for `update <cmd>: (ota_\d) is staged and
+  bootable` (R's slot must differ from B's; both are captured from the log, never
+  hardcoded), power cycle. On R's console, in order: the 60 s timer line, `ff-lib … firmware
+  <R>`, `confirming on <R slot>`, the hook line, `no working session 60 s after an OTA boot`;
+  plus `morse: BAD (firmware <R>)`. Then the QEMU `esp_restart()` panic (`rst:`), a second
+  power cycle standing in for the reset a real board does itself, and on B's boot
+  `transaction <cmd>: rolled_back (returned to <B slot>; <R slot> did not confirm)` and
+  `morse: HELLO (firmware <B>)`.
+- **Never `confirmed`, enforced three ways, fail-fast.** Every `GET /v1/devices` poll after
+  R's deploy (`confirmed_breach`: neither `deploy.state` nor any `deploy.steps` entry is
+  `confirmed` for R's cmd_id); R's console must never contain `CONFIRMED` or
+  `transaction … confirmed` (`wait_for_lines(forbidden=…)`); and the final row
+  (`check_rollback_row`) must be `rolled_back`, terminal, on B's version, with `confirming`
+  and `rolled_back` in its steps and the slot-naming detail. `rolling_back` is reported, not
+  required (best effort, 2 s grace).
+
+**Plan corrections.** None of substance. The `morse: BAD` line repeats every loop, so it is
+checked on its own rather than placed in the ordered list. The hybrid Arduino bootloader
+does not log `Loaded app from partition at offset`, so the bootloader-offset check is
+conditional and did not run (named gap). The R build did **not** trigger a framework
+reinstall: 32 s.
+
+Tests: `tests/test_worked_example.py::TestRollbackRun` (18: `rollback_version`, the
+needle tripwire against `ff_mqtt.c`'s `#if FF_ROLLBACK_TEST` blocks, `has_rollback_hook`,
+`test_confirmed_breach_*` ×5, `test_check_rollback_row_*` (good row, six refusals, no
+`rolling_back`), `test_wait_for_lines_fails_fast_on_a_forbidden_line`,
+`test_phase_board_runs_the_rollback_after_the_ota`). Full suite: 1566 passed.
+
+**T2 evidence** (dev stack on 8088; api recreated with the 10.0.2.2 origins, then restored
+to `localhost`, both verified with `docker inspect`):
+
+| Check | Result |
+|---|---|
+| `just lib-quickstart` | exit 0, 1512 s (bundle A 727 s, B 20 s, **R 32 s**) |
+| Bundles | A and B 1176912 B (differ), R 1177040 B < 1966080; R carries the hook, A and B do not; R differs from both |
+| Run 1 | `enroll 200`, `announce acknowledged by the broker`, `morse: SOS (firmware 1.0.0)`; API online, `fw_version 1.0.0`, `ab-4m-arduino-v1`, `['ota']` |
+| Run 2 | B `1.1.0-qs1791532201` staged into `ota_1` (47 s), power cycle, `CONFIRMED`, `morse: HELLO (firmware 1.1.0-qs1791532201)`; API `confirmed`, `is_terminal True`, 67 s |
+| Run 3: upload / deploy | `POST /v1/artifact` 201 `1.2.0-qs1791532201-rbtest`; deploy `on_command` 202 |
+| Run 3: stage | `update 5f87a826…: ota_0 is staged and bootable`; API `staged` 49 s after the deploy (B on `ota_1`) |
+| Run 3: R's boot, in order | `OTA boot: 60 s from now …` (2120 ms), `ff-lib … firmware 1.2.0-qs1791532201-rbtest`, `confirming on ota_0`, `FF_ROLLBACK_TEST: ignoring the announce ack …`, `no working session 60 s after an OTA boot` (69425 ms); `morse: BAD (firmware 1.2.0-qs1791532201-rbtest)`; R appeared in the fleet on its own version; then `rst:` |
+| Run 3: after the second power cycle | `transaction 5f87a826…: rolled_back (returned to ota_1; ota_0 did not confirm)`, `morse: HELLO (firmware 1.1.0-qs1791532201)` |
+| Run 3: API | deploy `rolled_back`, `is_terminal True`, `fw_version 1.1.0-qs1791532201`, detail `returned to ota_1; ota_0 did not confirm`, steps `requested, staging, downloading, verifying, staged, confirming, rolling_back, rolled_back` (no `confirmed`), rolling_back seen: yes; 141 s after the deploy |
+| Credentials | token 0, `"mqtt_password":"` 0 in 19 transcripts |
+| Unplug | `online: false` (LWT) |
+| Negative ("fails on confirmed") | unit tests `test_confirmed_breach_on_the_deploy_state`, `…_inside_the_steps`, `test_check_rollback_row_refuses[…confirm gate…, …broken build…]`, `test_wait_for_lines_fails_fast_on_a_forbidden_line` |
+| `just lib-quickstart --build-only --skip-idf` | exit 0 |
+
+**Named gaps.**
+
+- **The reset after the timer is a power cycle in QEMU.** The board decides alone (timer →
+  invalid → reboot); QEMU panics on `esp_restart()`, so the script pulls the power. A real
+  board resets itself.
+- **No bootloader-offset check**: the hybrid Arduino bootloader does not log the loaded
+  partition. The `rolled_back` detail (read from otadata by the board) and `morse: HELLO`
+  name the slot instead.
+- **Only the confirm-timer path.** A sketch that crashes before the session (the
+  bootloader's ABORTED path) is not exercised; possible later addition.
+- The CUJ-1 Driver row 6 harness is now this run; `spec/cujs.md` is R3-spec-2's proposal.
+
 ### R3-fw-7 (2026-10-09): the example's `platformio.ini` is the recipe; a bare `pio run` builds both targets; `just lib-quickstart --fresh-pio-core` proves it from an empty PlatformIO core
 
 **What.** `examples/Basic/platformio.ini` keeps its keys (only the header comment changed).

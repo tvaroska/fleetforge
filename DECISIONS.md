@@ -6,6 +6,43 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-09 — The library's rollback proof is an FF_ROLLBACK_TEST build of the QEMU sketch, set with PLATFORMIO_BUILD_FLAGS; the run fails on any `confirmed` (R3-test-1)
+
+**Decided.** `just lib-quickstart` gains a third run, `phase_rollback`, after the OTA and on
+the same board: bundle R (`"BAD"`, `1.2.0-qs<epoch>-rbtest`) built with
+`PLATFORMIO_BUILD_FLAGS=-DFF_ROLLBACK_TEST=1`, deployed `on_command`, booted by a power
+cycle, and required to roll back to B and report `rolled_back`. Details and the T2 table:
+`docs/features/ota-library.md` → *R3-test-1*; procedure: `docs/runbooks/agent-qemu.md` →
+*The worked example, end to end*, step 5.
+
+- **The hook, not a sketch-level crash.** `ff_mqtt.c`'s existing `FF_ROLLBACK_TEST` image
+  runs our code, joins the fleet, reports `confirming`, and is rolled back by the
+  **library's confirm timer**, the CRITICAL path a maker depends on (and it proves
+  `Fleetforge.cpp`'s `verifyRollbackLater()` override: without it, `initArduino()` would
+  confirm R before `setup()`). A crash before the session would exercise only the
+  bootloader's ABORTED path; that is a possible later addition, not this proof.
+- **The env var is fine here; it was rejected for build B.** DECISIONS R3-fw-4 rejected
+  `PLATFORMIO_BUILD_FLAGS` for B because B is a README step and the script must do what the
+  reader does. No reader ever builds a rollback-test image: R is fault injection. A and B
+  are built with the variable removed from the env. The flag is not trusted: R's `app.bin`
+  must contain the hook's log string before upload.
+- **`rolling_back` is reported, not required.** `ff_mqtt.c` sends it best effort within a
+  2 s grace and never waits; requiring it would add flake unrelated to correctness. Required:
+  `confirming` and `rolled_back` in the steps, terminal `rolled_back`, `fw_version` == B,
+  the slot-naming detail, and no `confirmed` anywhere (API state/steps on every poll, R's
+  console, the final row's version).
+- **Slots are read, never hardcoded.** B's and R's slots come from their `is staged and
+  bootable` lines (cmd_id in the regex); they must differ, and the expected detail is
+  `returned to <B slot>; <R slot> did not confirm`. Observed: B `ota_1`, R `ota_0`.
+- **Measured.** The R bundle took 32 s: the changed flags rebuild the project and the
+  library, not the ~11 min framework step (pioarduino keys that on `sdkconfig.defaults`).
+  Whole run 1512 s.
+- **Rejected.** Editing `lib-qemu/platformio.ini` (pinned to the example's `env:esp32`), a
+  hook in `Basic.ino` (makers copy it), a `--skip-rollback` flag (the acceptance is all
+  three runs in one invocation).
+
+---
+
 ## 2026-10-09 — The example's platformio.ini is the PlatformIO recipe; bare `pio run`; own project = copy three files + one `lib_deps` line; fresh core proved; git-URL form deferred to R3-rel-1 (R3-fw-7)
 
 **Decided.** No new recipe file: `examples/Basic/platformio.ini` (keys unchanged, pinned by

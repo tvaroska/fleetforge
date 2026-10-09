@@ -365,6 +365,7 @@ Order: spec-3 → fw-2 → fw-3/fw-4 → fw-5/fw-6/be-1 → test-1 → spec-2 �
       half (DECISIONS 2026-10-05 proposal). Proposal only; `spec/cujs.md` is protected.
       Depends on `R3-test-1`.
       Per R3-fw-4: the row 1-2 harness is `just lib-quickstart --build-only` (the README blocks, verbatim, in a clean temp tree: Arduino esp32/esp32s3 + build B, ESP-IDF esp32/esp32s3).
+      Per R3-test-1: the row 6 harness is `just lib-quickstart` (full run, `phase_rollback`: an `FF_ROLLBACK_TEST` build of the sketch). Pass condition: deploy `rolled_back`, `fw_version` = the previous build, no `confirmed` in the steps (the run fails on any).
 
 ### Firmware
 
@@ -453,7 +454,7 @@ Order: spec-3 → fw-2 → fw-3/fw-4 → fw-5/fw-6/be-1 → test-1 → spec-2 �
 
 ### Test and release
 
-- [ ] **R3-test-1**: E2E in QEMU — example firmware enrolls, updates, rolls back (P1, 1d)
+- [x] **R3-test-1**: E2E in QEMU — example firmware enrolls, updates, rolls back (P1, 1d) _(done 2026-10-09; see docs/features/ota-library.md)_
       The library gets the same proof as the agent: `docs/runbooks/agent-qemu.md` boots the
       real bundle against the dev stack. Three runs: a clean enroll, an OTA to a second
       build whose visible behavior differs, and a deliberately broken build that rolls back
@@ -466,6 +467,7 @@ Order: spec-3 → fw-2 → fw-3/fw-4 → fw-5/fw-6/be-1 → test-1 → spec-2 �
       The T3 gate (`/verify`) with the segments from `R3-spec-2` applied by the owner.
       Depends on `R3-test-1`, `R3-spec-2`. Acceptance: deterministic judge passes on steps
       1-3, 5, 6; any segment still without a harness is listed, not scored.
+      Per R3-test-1: steps 1-2, 5 and 6 on the library path are all one `just lib-quickstart` run (~25 min; needs the api on 10.0.2.2 origins).
 - [ ] **R3-rel-1**: Quickstart, archive and release (P1, 0.5d)
       README quickstart for the library, `docs/features/ota-library.md` completed entries,
       `agent/version.txt` bump, `/release fleetforge minor`, then

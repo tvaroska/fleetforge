@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Play the worked example's README quickstart, end to end (R3-fw-4).
+"""Play the worked example's README quickstart, end to end (R3-fw-4, R3-test-1).
 
 The acceptance of the worked example is "the README quickstart is exactly the steps a
 reader follows, and a scripted run of those steps passes". This is that scripted run.
@@ -32,7 +32,7 @@ the library or the example, the app under the 1966080-byte slot. The IDF builds 
 decode the built partition table (== `agent/partitions.csv`, layout ab-4m-v1), read the
 resolved sdkconfig (rollback on, no eFuse burns) and the app descriptor (version 1.0.0).
 
-Phase 2 - the board steps, in QEMU (`phase_enroll`, `phase_ota`). Only three things in the
+Phase 2 - the board steps, in QEMU (`phase_enroll`, `phase_ota`, `phase_rollback`). Only three things in the
 README need a board or a network clone, and all are substituted:
 
 * "git clone ... && cd fleetforge" -> the clean tree copy of Phase 0 (this run's `repo/`);
@@ -56,7 +56,19 @@ lives in memory and in the temp tree's `.qemu/ff_cfg.bin` (0700, deleted at the 
 never printed, and the run fails if it appears in a QEMU log or in this script's output.
 An unused token is revoked on the way out.
 
-R3-test-1 adds the rollback run as one more phase (`phase_rollback`) after `phase_ota`.
+Phase 2c - the rollback (`phase_rollback`, R3-test-1), on the board `phase_ota` left
+running build B. Build R is the committed sketch with `"SOS"` -> `"BAD"` and `"1.0.0"` ->
+`1.2.0-qs<epoch>-rbtest` (same epoch as B), compiled with
+`PLATFORMIO_BUILD_FLAGS=-DFF_ROLLBACK_TEST=1`: fault injection, never a README step. That
+hook in ff_mqtt.c publishes the announce but throws its PUBACK away, so the session is
+never confirmed, and shortens the confirm timer to 60 s. Before R is uploaded, its app.bin
+must carry the hook's log string (and A's and B's must not): proof the flag reached the
+library. R is deployed `on_command` and booted by a power cycle, as B was. It must run our
+code (`confirming`), and 60 s later the timer marks it invalid and reboots. QEMU cannot
+survive that `esp_restart()`, so a second power cycle stands in for the reset a real board
+does by itself; the board returns to B's slot and reports `rolled_back`. The run fails at
+once if R is ever reported `confirmed` (any API poll, R's console, or the final row on R's
+version): that would mean the confirm gate is broken.
 """
 
 from __future__ import annotations
@@ -121,6 +133,13 @@ PIO_ROW = re.compile(r"^(\S+)\s+(SUCCESS|FAILED|IGNORED)\s+\d\d:\d\d:\d\d", re.M
 OUR_PATHS = re.compile(r"components/fleetforge|/examples/|Basic\.ino|basic_idf")
 
 Row = tuple[str, str, str, int, int]
+
+# R3-test-1: the broken build. The macro ff_mqtt.c tests (`#if FF_ROLLBACK_TEST`).
+ROLLBACK_TEST_FLAGS = "-DFF_ROLLBACK_TEST=1"
+# ff_mqtt.c's FF_ROLLBACK_TEST log line, ASCII prefix only (the line continues with an em dash).
+ROLLBACK_HOOK_NEEDLE = b"FF_ROLLBACK_TEST: ignoring the announce ack"
+ROLLBACK_MESSAGE = "BAD"
+STAGED_LINE = r"update {cmd}: (ota_\d) is staged and bootable"
 
 
 class QuickstartError(Exception):
@@ -633,14 +652,38 @@ def login_and_mint(run: Run, password: str) -> None:
     run.passed("enrollment token minted", f"id {run.token_id} (the token itself is never printed)")
 
 
-def just(run: Run, *args: str, log_name: str, timeout: float = 3600) -> str:
-    return run_logged(run, ["just", *args], log_name, timeout=timeout)
+def just(
+    run: Run,
+    *args: str,
+    log_name: str,
+    timeout: float = 3600,
+    env: dict[str, str] | None = None,
+) -> str:
+    return run_logged(run, ["just", *args], log_name, env=env, timeout=timeout)
 
 
-def build_bundles(run: Run, version_b: str) -> tuple[Path, Path]:
-    """Bundle A (the sketch as committed) and B (the README edit, run-unique version)."""
+def rollback_version(epoch: int) -> str:
+    """Build R's version: run-unique (409 on a rerun otherwise) and marked as a fault test."""
+    return f"1.2.0-qs{epoch}-rbtest"
+
+
+def has_rollback_hook(app: bytes) -> bool:
+    """Whether an app image was compiled with FF_ROLLBACK_TEST (its log string is in it)."""
+    return ROLLBACK_HOOK_NEEDLE in app
+
+
+def _replace_once(text: str, old: str, new: str) -> str:
+    if text.count(old) != 1:
+        raise QuickstartError(f"Basic.ino has no single {old} to replace with {new}")
+    return text.replace(old, new)
+
+
+def build_bundles(run: Run, version_b: str, version_r: str) -> tuple[Path, Path, Path]:
+    """Bundles A (as committed), B (the README edit) and R (FF_ROLLBACK_TEST, must roll back)."""
     bundle = run.tree / "lib-qemu" / ".pio" / "bundle" / "esp32-qemu"
-    just(run, "lib-bundle", "esp32-qemu", log_name="lib-bundle-A.log")
+    # A stray PLATFORMIO_BUILD_FLAGS in the operator's shell must not reach A or B.
+    plain_env = {k: v for k, v in os.environ.items() if k != "PLATFORMIO_BUILD_FLAGS"}
+    just(run, "lib-bundle", "esp32-qemu", log_name="lib-bundle-A.log", env=plain_env)
     bundle_a = run.work / "bundleA"
     shutil.copytree(bundle, bundle_a)
 
@@ -658,20 +701,48 @@ def build_bundles(run: Run, version_b: str) -> tuple[Path, Path]:
     if edited.count('"1.1.0"') != 1:
         raise QuickstartError('arduino-edit left no single "1.1.0" to make run-unique')
     sketch.write_text(edited.replace('"1.1.0"', f'"{version_b}"'))
-    just(run, "lib-bundle", "esp32-qemu", log_name="lib-bundle-B.log")
+    just(run, "lib-bundle", "esp32-qemu", log_name="lib-bundle-B.log", env=plain_env)
     bundle_b = run.work / "bundleB"
     shutil.copytree(bundle, bundle_b)
 
     sketch.write_text(original)
+    run.say(
+        f'  then  R: "SOS" -> "{ROLLBACK_MESSAGE}", "1.0.0" -> "{version_r}" in Basic.ino, '
+        f"built with PLATFORMIO_BUILD_FLAGS={ROLLBACK_TEST_FLAGS} (fault injection, not a "
+        "README step): an image that never confirms"
+    )
+    broken = _replace_once(original, '"SOS"', f'"{ROLLBACK_MESSAGE}"')
+    sketch.write_text(_replace_once(broken, f'"{VERSION_A}"', f'"{version_r}"'))
+    just(
+        run,
+        "lib-bundle",
+        "esp32-qemu",
+        log_name="lib-bundle-R.log",
+        env={**os.environ, "PLATFORMIO_BUILD_FLAGS": ROLLBACK_TEST_FLAGS},
+    )
+    bundle_r = run.work / "bundleR"
+    shutil.copytree(bundle, bundle_r)
+
+    sketch.write_text(original)
     shutil.rmtree(bundle)
     shutil.copytree(bundle_a, bundle)  # `lib-qemu --fresh` flashes from this directory
-    if (bundle_a / "app.bin").read_bytes() == (bundle_b / "app.bin").read_bytes():
+    app_a, app_b, app_r = ((b / "app.bin").read_bytes() for b in (bundle_a, bundle_b, bundle_r))
+    if app_a == app_b:
         raise QuickstartError("QEMU bundle B's app.bin is identical to A's")
-    run.passed(
-        "QEMU bundles",
-        f"A {_size(bundle_a / 'app.bin')} B, B {_size(bundle_b / 'app.bin')} B, B != A",
-    )
-    return bundle_a, bundle_b
+    run.passed("QEMU bundles", f"A {len(app_a)} B, B {len(app_b)} B, B != A")
+    if not has_rollback_hook(app_r):
+        raise QuickstartError(
+            f"the {ROLLBACK_TEST_FLAGS} flag did not reach ff_mqtt.c: bundle R has no rollback "
+            "hook; refusing to upload a build that would confirm"
+        )
+    if has_rollback_hook(app_a) or has_rollback_hook(app_b):
+        raise QuickstartError("bundle A or B carries the FF_ROLLBACK_TEST hook")
+    run.passed("QEMU bundle R rollback hook", "R carries FF_ROLLBACK_TEST; A and B do not")
+    if app_r in (app_a, app_b):
+        raise QuickstartError("QEMU bundle R's app.bin is identical to A's or B's")
+    run.passed("QEMU bundle R differs from A and B", "yes")
+    check_app(run, "QEMU bundle R", len(app_r))
+    return bundle_a, bundle_b, bundle_r
 
 
 def start_qemu(run: Run, fresh: bool, log_name: str) -> Path:
@@ -699,13 +770,32 @@ def stop_qemu(run: Run) -> None:
         run.qemu = None
 
 
-def wait_for_lines(run: Run, log: Path, patterns: Sequence[str], timeout: float) -> None:
-    """Each pattern (a regex), in order, in the growing log; the emulator must stay up."""
+def wait_for_lines(
+    run: Run,
+    log: Path,
+    patterns: Sequence[str],
+    timeout: float,
+    *,
+    forbidden: Sequence[str] = (),
+    start: int = 0,
+) -> int:
+    """Each pattern (a regex), in order, in the growing log; the emulator must stay up.
+
+    A `forbidden` regex matching anywhere in the log fails at once. Searching starts at
+    offset `start`; the offset just past the last match is returned.
+    """
     deadline = time.monotonic() + timeout
-    position = 0
+    position = start
     pending = list(patterns)
     while pending:
         text = log.read_text(errors="replace")
+        for pattern in forbidden:
+            bad = re.search(pattern, text)
+            if bad:
+                line_start = text.rfind("\n", 0, bad.start()) + 1
+                line_end = text.find("\n", bad.end())
+                line = text[line_start : line_end if line_end >= 0 else None].strip()
+                raise QuickstartError(f"{log.name}: forbidden `{pattern}` in: {line}")
         match = re.search(pending[0], text[position:])
         if match:
             line_start = text.rfind("\n", 0, position + match.start()) + 1
@@ -721,6 +811,7 @@ def wait_for_lines(run: Run, log: Path, patterns: Sequence[str], timeout: float)
         if time.monotonic() > deadline:
             raise QuickstartError(f"no `{pending[0]}` within {timeout:.0f} s:\n{tail(log)}")
         time.sleep(0.5)
+    return position
 
 
 def device(run: Run) -> dict[str, Any] | None:
@@ -734,12 +825,22 @@ def device(run: Run) -> dict[str, Any] | None:
 
 
 def wait_for_device(
-    run: Run, what: str, ok: Callable[[dict[str, Any]], bool], timeout: float, log: Path
+    run: Run,
+    what: str,
+    ok: Callable[[dict[str, Any]], bool],
+    timeout: float,
+    log: Path,
+    forbid: Callable[[dict[str, Any] | None], str | None] | None = None,
 ) -> dict[str, Any]:
+    """Poll the device row until `ok`; a message from `forbid` on any poll fails at once."""
     deadline = time.monotonic() + timeout
     row = None
     while time.monotonic() < deadline:
         row = device(run)
+        if forbid is not None:
+            message = forbid(row)
+            if message is not None:
+                raise QuickstartError(message)
         if row is not None and ok(row):
             return row
         time.sleep(1)
@@ -808,8 +909,11 @@ def phase_enroll(run: Run, port_guest: str) -> Path:
     return log
 
 
-def phase_ota(run: Run, bundle_b: Path, version_b: str, log_a: Path) -> None:
-    """README steps 6-7: upload build B, deploy it, watch it confirm and report its version."""
+def phase_ota(run: Run, bundle_b: Path, version_b: str, log_a: Path) -> tuple[str, Path]:
+    """README steps 6-7: upload build B, deploy it, watch it confirm and report its version.
+
+    Returns B's slot label (from the stage line) and B's console log.
+    """
     run.say("\n== Phase 2b: deploy build B (on_command + power cycle for the self-reboot) ==")
     status, body, _ = http(
         run,
@@ -833,7 +937,12 @@ def phase_ota(run: Run, bundle_b: Path, version_b: str, log_a: Path) -> None:
     run.passed("POST /v1/devices/…/deploy apply=on_command", f"202, cmd_id {cmd_id}")
 
     started = time.monotonic()
-    wait_for_lines(run, log_a, (r"is staged and bootable",), timeout=240)
+    staged_line = STAGED_LINE.format(cmd=re.escape(cmd_id))
+    wait_for_lines(run, log_a, (staged_line,), timeout=240)
+    slot = re.search(staged_line, log_a.read_text(errors="replace"))
+    if slot is None:
+        raise QuickstartError(f"no `{staged_line}` in {log_a.name}")
+    slot_b = slot.group(1)
     wait_for_device(
         run,
         "staged",
@@ -874,6 +983,238 @@ def phase_ota(run: Run, bundle_b: Path, version_b: str, log_a: Path) -> None:
         f"fw_version {row['fw_version']}, deploy {deploy['state']} (is_terminal "
         f"{deploy['is_terminal']}), {time.monotonic() - started:.0f} s after the deploy",
     )
+    return slot_b, log_b
+
+
+def _deploy_of(row: dict[str, Any] | None) -> dict[str, Any]:
+    deploy = (row or {}).get("deploy")
+    return deploy if isinstance(deploy, dict) else {}
+
+
+def _step_states(deploy: dict[str, Any]) -> list[str]:
+    return [str(s.get("state")) for s in deploy.get("steps") or [] if isinstance(s, dict)]
+
+
+def confirmed_breach(row: dict[str, Any] | None, cmd_id: str, version_r: str) -> str | None:
+    """The P0 sentence if the broken build's deploy was ever reported `confirmed`, else None.
+
+    R's own version on the row is NOT a breach: its announce is published and retained by
+    design, so the row shows it while R is `confirming`. Only the final row must not.
+    """
+    deploy = _deploy_of(row)
+    if deploy.get("cmd_id") != cmd_id:
+        return None
+    if deploy.get("state") == "confirmed" or "confirmed" in _step_states(deploy):
+        return (
+            f"the deliberately broken build {version_r} reported confirmed (deploy {cmd_id}) "
+            "— the confirm gate is broken (P0, CRITICAL path)"
+        )
+    return None
+
+
+def check_rollback_row(
+    row: dict[str, Any] | None,
+    cmd_id: str,
+    version_b: str,
+    version_r: str,
+    expected_detail: str,
+) -> str:
+    """The final row after the broken build: rolled back to B, never confirmed. A summary."""
+    breach = confirmed_breach(row, cmd_id, version_r)
+    if breach is not None:
+        raise QuickstartError(breach)
+    deploy = _deploy_of(row)
+    steps = _step_states(deploy)
+    fw_version = (row or {}).get("fw_version")
+    problems = []
+    if deploy.get("cmd_id") != cmd_id:
+        problems.append(f"deploy.cmd_id {deploy.get('cmd_id')!r} is not {cmd_id}")
+    if deploy.get("state") != "rolled_back":
+        problems.append(f"deploy.state {deploy.get('state')!r}, wanted rolled_back")
+    if deploy.get("is_terminal") is not True:
+        problems.append(f"is_terminal {deploy.get('is_terminal')!r}")
+    if fw_version == version_r:
+        problems.append(
+            f"fw_version is the broken build {version_r}: the board stayed on it (P0, CRITICAL)"
+        )
+    elif fw_version != version_b:
+        problems.append(f"fw_version {fw_version!r}, wanted the previous build {version_b}")
+    if "confirming" not in steps:
+        problems.append("no `confirming` step: R never ran our code under the confirm timer")
+    if "rolled_back" not in steps:
+        problems.append("no `rolled_back` step")
+    if expected_detail not in str(deploy.get("detail") or ""):
+        problems.append(f"detail {deploy.get('detail')!r} does not name {expected_detail!r}")
+    if problems:
+        raise QuickstartError("the broken build's final row: " + "; ".join(problems))
+    return (
+        f"deploy rolled_back (is_terminal True), fw_version {fw_version} (the previous build), "
+        f"detail {deploy.get('detail')!r}, steps {steps}, no confirmed; rolling_back seen: "
+        f"{'yes' if 'rolling_back' in steps else 'no (best effort, not required)'}"
+    )
+
+
+def phase_rollback(
+    run: Run, bundle_r: Path, version_b: str, version_r: str, slot_b: str, log_b: Path
+) -> None:
+    """R3-test-1: deploy a build that cannot confirm; it must roll back to B, unaided.
+
+    The board's decision is its own: the confirm timer marks R invalid and reboots. QEMU
+    cannot survive that `esp_restart()` (runbook: *The emulator cannot survive
+    esp_restart()*), so a power cycle stands in for the reset a real board does itself.
+    """
+    run.say(
+        "\n== Phase 2c: deploy a broken build (FF_ROLLBACK_TEST): it must roll back, "
+        "never confirm =="
+    )
+    status, body, _ = http(
+        run,
+        "POST",
+        f"/v1/artifact?target=esp32&version={version_r}&partition_layout={ARDUINO_LAYOUT}",
+        (bundle_r / "app.bin").read_bytes(),
+        content_type="application/octet-stream",
+    )
+    if status not in (200, 201):
+        raise QuickstartError(f"upload of {version_r} answered {status}: {body}")
+    run.passed("POST /v1/artifact (bundle R app.bin)", f"{status}, version {version_r}")
+    status, body, _ = http(
+        run,
+        "POST",
+        f"/v1/devices/{DEVICE_ID}/deploy",
+        {"version": version_r, "apply": "on_command"},
+    )
+    if status != 202 or not isinstance(body, dict):
+        raise QuickstartError(f"deploy of {version_r} answered {status}: {body}")
+    cmd_id = str(body["cmd_id"])
+    run.passed("POST /v1/devices/…/deploy R apply=on_command", f"202, cmd_id {cmd_id}")
+
+    def breach(row: dict[str, Any] | None) -> str | None:
+        return confirmed_breach(row, cmd_id, version_r)
+
+    started = time.monotonic()
+    staged_line = STAGED_LINE.format(cmd=re.escape(cmd_id))
+    wait_for_lines(run, log_b, (staged_line,), timeout=240)
+    slot = re.search(staged_line, log_b.read_text(errors="replace"))
+    if slot is None:
+        raise QuickstartError(f"no `{staged_line}` in {log_b.name}")
+    slot_r = slot.group(1)
+    if slot_r == slot_b:
+        raise QuickstartError(f"R was staged into {slot_r}, the slot B is running from")
+    wait_for_device(
+        run,
+        "staged (R)",
+        lambda r: _deploy_of(r).get("cmd_id") == cmd_id and _deploy_of(r).get("state") == "staged",
+        timeout=60,
+        log=log_b,
+        forbid=breach,
+    )
+    run.passed(
+        "deploy state (R)",
+        f"staged into {slot_r} (B runs from {slot_b}), {time.monotonic() - started:.0f} s "
+        "after the deploy",
+    )
+    time.sleep(1)
+    run.say("  power-cycle: just agent-qemu-stop esp32; just lib-qemu")
+    stop_qemu(run)
+
+    log_r = start_qemu(run, fresh=False, log_name="qemu-R.log")
+    never_confirmed = (r"CONFIRMED", r"transaction \S+: confirmed")
+    wait_for_lines(
+        run,
+        log_r,
+        (re.escape(f"morse: {ROLLBACK_MESSAGE} (firmware {version_r})"),),
+        timeout=180,
+        forbidden=never_confirmed,
+    )
+    position = wait_for_lines(
+        run,
+        log_r,
+        (
+            r"OTA boot: 60 s from now to reach the fleet or roll back",
+            rf"ff-lib: fleetforge library \S+, firmware {re.escape(version_r)}",
+            rf"transaction {re.escape(cmd_id)}: confirming on {slot_r}",
+            re.escape(ROLLBACK_HOOK_NEEDLE.decode()),
+            r"no working session 60 s after an OTA boot",
+        ),
+        timeout=180,
+        forbidden=never_confirmed,
+    )
+    row = device(run)
+    if row is not None and row.get("fw_version") == version_r:
+        run.say(f"  note  R appeared in the fleet on its own version ({version_r}), as designed")
+
+    # The timer has fired: R is marked invalid and reboots (in QEMU: the esp_restart panic).
+    rolled_line = (
+        rf"transaction {re.escape(cmd_id)}: rolled_back \(returned to {slot_b}; "
+        rf"{slot_r} did not confirm\)"
+    )
+    reset = r"rst:|Guru Meditation|abort\(\)|" + rolled_line
+    deadline = time.monotonic() + 15
+    seen = None
+    while time.monotonic() < deadline and seen is None:
+        seen = re.search(reset, log_r.read_text(errors="replace")[position:])
+        if seen is None:
+            time.sleep(0.5)
+    run.say(
+        "  note  after the timeout: "
+        + (repr(seen.group(0)) if seen else "no reset line within 15 s")
+        + " (QEMU cannot survive esp_restart; the power cycle stands in for the reset)"
+    )
+    text_r = log_r.read_text(errors="replace")
+    if re.search(r"CONFIRMED|transaction \S+: confirmed", text_r):
+        raise QuickstartError(
+            f"{log_r.name}: the broken build {version_r} logged confirmed — the confirm gate "
+            "is broken (P0, CRITICAL path)"
+        )
+    run.say("  power-cycle: just agent-qemu-stop esp32; just lib-qemu")
+    stop_qemu(run)
+
+    log_r2 = start_qemu(run, fresh=False, log_name="qemu-R2.log")
+    if re.search(rolled_line, text_r[position:]):
+        run.passed(f"log: {rolled_line}", "in qemu-R.log (the soft reset did not panic)")
+        wait_for_lines(
+            run, log_r2, (re.escape(f"morse: HELLO (firmware {version_b})"),), timeout=180
+        )
+    else:
+        wait_for_lines(
+            run,
+            log_r2,
+            (rolled_line, re.escape(f"morse: HELLO (firmware {version_b})")),
+            timeout=180,
+        )
+    text_r2 = log_r2.read_text(errors="replace")
+    loaded = re.findall(r"Loaded app from partition at offset (0x[0-9a-fA-F]+)", text_r2)
+    if loaded:
+        rows = parse_rows((run.tree / ARDUINO_DIR / "partitions.csv").read_text())
+        offset_b = next(offset for name, _, _, offset, _ in rows if name == slot_b)
+        if int(loaded[-1], 16) != offset_b:
+            raise QuickstartError(
+                f"after the rollback the bootloader loaded {loaded[-1]}, not {slot_b} "
+                f"({offset_b:#x})"
+            )
+        run.passed("bootloader after the rollback", f"loaded {loaded[-1]} = {slot_b}")
+    else:
+        run.say("  note  the bootloader does not log `Loaded app from partition` (not checked)")
+
+    row = wait_for_device(
+        run,
+        "rolled_back (R)",
+        lambda r: (
+            _deploy_of(r).get("cmd_id") == cmd_id
+            and _deploy_of(r).get("state") == "rolled_back"
+            and _deploy_of(r).get("is_terminal") is True
+        ),
+        timeout=120,
+        log=log_r2,
+        forbid=breach,
+    )
+    summary = check_rollback_row(
+        row, cmd_id, version_b, version_r, f"returned to {slot_b}; {slot_r} did not confirm"
+    )
+    run.passed(
+        f"GET /v1/devices {DEVICE_ID} after the broken build",
+        f"{summary}; {time.monotonic() - started:.0f} s after the deploy",
+    )
 
 
 def check_no_credentials(run: Run) -> None:
@@ -899,12 +1240,15 @@ def phase_board(run: Run) -> None:
     run.passed(
         "preflight", f"{run.base} healthy, api origins 10.0.2.2, no {QEMU_CONTAINER} running"
     )
-    version_b = f"1.1.0-qs{int(time.time())}"
-    _, bundle_b = build_bundles(run, version_b)
+    epoch = int(time.time())
+    version_b = f"1.1.0-qs{epoch}"
+    version_r = rollback_version(epoch)
+    _, bundle_b, bundle_r = build_bundles(run, version_b, version_r)
     login_and_mint(run, password)
     del password
     log_a = phase_enroll(run, run.guest_base)
-    phase_ota(run, bundle_b, version_b, log_a)
+    slot_b, log_b = phase_ota(run, bundle_b, version_b, log_a)
+    phase_rollback(run, bundle_r, version_b, version_r, slot_b, log_b)
     stop_qemu(run)
     check_no_credentials(run)
     try:

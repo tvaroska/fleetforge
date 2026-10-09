@@ -893,7 +893,8 @@ lib-qemu fresh="":
 # agent/components/fleetforge/examples/{Basic,basic_idf}/README.md, verbatim, in a clean temp
 # copy of the tree. Arduino esp32/esp32s3 + build B, ESP-IDF esp32/esp32s3 in the pinned
 # image; then (unless --build-only) the board steps in QEMU against `just up`: enroll,
-# heartbeat, deploy build B, confirm, report the version. The api must hand out 10.0.2.2
+# heartbeat, deploy build B, confirm, report the version, then a `-rbtest` build that must
+# roll back (R3-test-1). The api must hand out 10.0.2.2
 # origins for that half; the script says how if it does not. Plain python3, no venv: the
 # script is stdlib-only. docs/runbooks/agent-qemu.md -> *The worked example, end to end*.
 #
