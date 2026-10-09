@@ -89,3 +89,6 @@ ignore = ["E501"]
 # scripts/lib_quickstart.py drives git, docker, just and bash with fixed argv, and talks to the
 # dev API over urllib at an http(s) origin the operator passes (R3-fw-4).
 "scripts/lib_quickstart.py" = ["S603", "S607", "S310"]
+# scripts/arduino_ide_check.py runs the pinned arduino-cli, nm and df with fixed argv, in a
+# scratch toolchain whose default is the runbook's fixed /tmp/ff-arduino-ide (R3-fw-8).
+"scripts/arduino_ide_check.py" = ["S603", "S607", "S108"]

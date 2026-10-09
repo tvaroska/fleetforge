@@ -16,6 +16,61 @@ becomes a board in the field that fixes itself" — this release *is* that journ
 
 ## Completed Work
 
+### R3-fw-8 (2026-10-09): the Arduino IDE package — generated, zip-installable, compiles the example on core 3.3.12 for esp32 and esp32s3
+
+**What.** `scripts/arduino_package.py` (`just lib-arduino-package`) generates
+`dist/arduino/Fleetforge/` + `dist/arduino/Fleetforge-0.4.7.zip` from the component: a flat
+`src/` (the 8 `include/` headers + the 23 `src/` files, same basenames, a collision is an
+error), `library.properties` generated from library.json (`includes=Fleetforge.h`,
+`architectures=esp32`, never `dot_a_linkage`/`precompiled`), and `examples/Basic/` with
+`Basic.ino` and `partitions.csv` byte-identical. Every `.c`/`.cpp` gains a prelude carrying
+library.json's `-DLOG_LOCAL_LEVEL=ESP_LOG_INFO` (the IDE has no per-library flags) and a
+bare `#line 1`; every other byte is the source's. The zip has one root `Fleetforge/` and is
+byte-reproducible. `scripts/arduino_ide_check.py` (`just lib-arduino-check`) is the proof
+harness: pinned arduino-cli 1.5.1 (sha256-checked) and `esp32:esp32@3.3.12` in
+`/tmp/ff-arduino-ide`, `lib install --zip-path`, the INSTALLED example copied to a fresh
+sketch folder and compiled with the default board menu, toolchain deleted at the end.
+`tests/test_arduino_package.py` pins the package (27 tests, no toolchain). The example
+README gains an *Arduino IDE* section (no quickstart block). Decisions: DECISIONS.md
+2026-10-09 (R3-fw-8).
+
+**T2 (`just lib-arduino-check`, from an empty `/tmp/ff-arduino-ide`, PASS in 233 s; core
+install 148 s; `/` 16 GB free before, 14 GB with the toolchain, 16 GB after teardown).**
+
+| Check | esp32:esp32:esp32 | esp32:esp32:esp32s3 |
+|---|---|---|
+| zip install → `lib list` | Fleetforge 0.4.7 in `<tc>/user/libraries` | (same install) |
+| compile of the copied example | exit 0, 35 s | exit 0, 36 s |
+| warnings from Fleetforge / sketch (`--warnings all` = `-Wall -Wextra`) | 0 | 0 |
+| Used library | Fleetforge 0.4.7 at the installed path | same |
+| `Basic.ino.bin` (slot 1966080 B) | 1165520 B (59.3%) | 1156304 B (58.8%) |
+| built `partitions.bin` fingerprint | `05528998…1fc4` = ab-4m-arduino-v1 | same |
+| `flash_args` | app @ 0x10000, boot_app0 @ 0xe000 | same |
+| `nm` | `40186ac8 T verifyRollbackLater` | `420b6b08 T verifyRollbackLater` |
+| ff-lib INFO format string in the app | present | present |
+| IDE size line (observation) | `Maximum is 1310720 bytes` (88%) | `Maximum is 1310720 bytes` (88%) |
+
+Negative control (`just lib-arduino-check --keep-toolchain --negative-control`, prelude
+stripped from the temp package): every check passes up to (h), which FAILS ("the app has no
+'fleetforge library %s, firmware %s'"); the esp32 app shrinks to 1152576 B (12944 B of INFO
+strings compiled out). Positive control for the warning gate: an unused variable injected
+into a copied sketch is reported in `compile --format json`'s `compiler_err` with the
+sketch path. `git diff --stat` shows nothing under the component's `src/`, `include/` or
+any `partitions.csv`.
+
+**Plan deviations.** `prelude(manifest)` takes no filename and ends in a bare `#line 1`
+(not `#line 1 "<basename>"`): diagnostics keep the installed path, which the warning gate
+keys on. `compile --format json`, because arduino-cli 1.5.1 prints the *Used library* table
+only with `-v`. The scratch `arduino-cli.yaml` also pins `build_cache.path` under the
+toolchain dir (1.x defaults it to `~/.cache/arduino`).
+
+**Named gaps.** Private headers are includable by a sketch (all of `src/` is on the
+include path, as with PlatformIO). The IDE's size gate is the board menu's 1310720, not the
+slot: past it the IDE refuses a build that fits (workaround: PartitionScheme "Minimal
+SPIFFS"; the sketch-local table still wins). `library.properties` cannot pin the core
+(3.3.12 is stated in `paragraph` and the README). Not on the Library Manager; the release
+zip is R3-rel-1's.
+
 ### R3-spec-2 (2026-10-09): CUJ-1 Driver table proposed for R3; spec not applied
 
 Decided: CUJ-1's Driver names the library harnesses. Rows 1–2 = `just lib-quickstart
@@ -462,6 +517,8 @@ Tests: `tests/test_arduino_library.py` (41). Full suite 1479 passed.
 
 - **Arduino IDE packaging.** There is no `library.properties`: the IDE compiles `src/` only
   and cannot see `include/`, so it needs a flattened package (follow-up task `R3-fw-8`).
+  **Resolved by R3-fw-8** (see *R3-fw-8* above): `just lib-arduino-package` generates it,
+  `just lib-arduino-check` proves it on core 3.3.12.
 - **Upload form version pre-fill.** `frontend/src/appImage.ts` reads `esp_app_desc_t.version`,
   which is the lib-builder hash on Arduino builds. The operator types the version.
 - **`ff_cfg` provisioning for library users.** It goes at 0x3D0000, and the browser flasher

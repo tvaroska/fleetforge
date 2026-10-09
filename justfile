@@ -813,6 +813,8 @@ agent-qemu-clean:
 #     just lib-qemu --fresh            # new flash image = wipe NVS = forget the credential
 #     just agent-qemu-stop esp32       # stops it too: it is the same ff-qemu-esp32 board
 #     just lib-quickstart              # play the worked example's README quickstart (R3-fw-4)
+#     just lib-arduino-package         # the Arduino IDE package: dist/arduino/ (R3-fw-8)
+#     just lib-arduino-check           # prove it: zip install + compile on core 3.3.12
 #
 # Toolchain: pioarduino 55.03.312-1 (Arduino core 3.3.12 on ESP-IDF v5.5.5), pinned in
 # both platformio.ini files; it needs PlatformIO Core >= 6.2.0. docs/runbooks/agent-qemu.md
@@ -903,6 +905,18 @@ lib-qemu fresh="":
 #     just lib-quickstart                 # everything (--keep leaves the temp tree)
 lib-quickstart *args:
     python3 -u scripts/lib_quickstart.py {{ args }}
+
+# The Arduino IDE package (R3-fw-8): dist/arduino/Fleetforge/ + Fleetforge-<v>.zip, generated
+# from the component (flat src/, library.properties from library.json, examples/Basic with its
+# partitions.csv). A build artifact, never checked in.
+lib-arduino-package:
+    python3 scripts/arduino_package.py --out dist/arduino
+
+# Prove it: arduino-cli 1.5.1 + core esp32:esp32@3.3.12 in a scratch dir (/tmp/ff-arduino-ide),
+# zip install, compile Basic for esp32 and esp32s3. ~8 GB download; deleted afterwards unless
+# --keep-toolchain. --negative-control strips the LOG_LOCAL_LEVEL prelude and must FAIL.
+lib-arduino-check *args:
+    python3 -u scripts/arduino_ide_check.py {{ args }}
 
 # Bundles only. The ESP-IDF image is deliberately kept — re-pulling is 2.4 GB.
 agent-clean:

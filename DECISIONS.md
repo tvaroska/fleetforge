@@ -6,6 +6,66 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-09 — The Arduino IDE package is generated: flattened src/, library.properties from library.json, LOG_LOCAL_LEVEL as a source prelude, no dot_a_linkage; proved by `just lib-arduino-check` on core 3.3.12 (R3-fw-8)
+
+**Decided.** `scripts/arduino_package.py` (`just lib-arduino-package`) writes
+`dist/arduino/Fleetforge/` and `dist/arduino/Fleetforge-<version>.zip` from the component
+directory, which stays the one source. The output is a build artifact, gitignored like
+`.pio/`, at the repo root (never under `agent/`: `check_bundles_fresh.py` reads git status
+there, and `agent/dist/` holds agent bundles only). The R3-fw-3 "rejected: a generator" was
+about a second checked-in source tree; this is not one. Details and the T2 table:
+`docs/features/ota-library.md` → *R3-fw-8*.
+
+- **Flat `src/`** = every file of the component's `include/` + `src/`, same basenames. A
+  basename collision or a subdirectory is an error (none today).
+- **`library.properties` is generated from library.json** (name, version, description,
+  `headers` → `includes=Fleetforge.h`), `architectures=esp32`. No fourth version copy, and
+  still none at the component root (the IDE would then accept the unflattened directory and
+  fail on `include/`). **Never `dot_a_linkage` or `precompiled`:** the strong
+  `verifyRollbackLater()` must be linked as an object, not pulled from an archive by
+  resolution order. Test-pinned; T2 reads `T verifyRollbackLater` in both ELFs.
+- **No per-library flags in the IDE.** library.json's `-DNAME=VALUE` flags become a prelude
+  prepended to every packaged `.c`/`.cpp` (`#ifndef/#define/#endif`, value parsed from
+  library.json), ending in a bare `#line 1`, so diagnostics keep the source's line numbers
+  AND its installed path. `-Wall/-Wextra/-Werror` have no equivalent: the proof compiles
+  with `--warnings all` (core 3.3.12: `-Wall -Wextra`) and fails on any warning from the
+  library or the sketch. Any other flag stops the packager. The `#ifndef` form was enough:
+  the core's `esp32-hal-log.h` defines `LOG_LOCAL_LEVEL` only `#ifndef`, and the prelude
+  comes first; the `#undef` fallback was not needed. Every other byte is the source's.
+- **Example:** `examples/Basic/{Basic.ino,partitions.csv}`, byte-identical. Not
+  `platformio.ini` (its `symlink://../..` is wrong in a package), not the PlatformIO README,
+  not `basic_idf/`. The sketch-local table is how the IDE gets `ab-4m-arduino-v1` (R3-fw-1).
+- **Zip:** single root `Fleetforge/`, sorted entries, fixed 1980-01-01 timestamps and
+  modes: same inputs, same bytes (test-pinned).
+- **The proof is a harness**, `scripts/arduino_ide_check.py` (`just lib-arduino-check`):
+  arduino-cli 1.5.1 pinned by URL + sha256 (checked before extracting), `esp32:esp32@3.3.12`,
+  all in `/tmp/ff-arduino-ide` (build cache included), deleted at the end unless
+  `--keep-toolchain`; refuses to install with < 10 GB free. It packages into a temp dir,
+  `lib install --zip-path`, copies the INSTALLED example (*Save As*) and compiles it with the
+  default menu for `esp32:esp32:esp32` and `esp32:esp32:esp32s3`. `compile --format json`,
+  because arduino-cli 1.5.1 prints the *Used library* table only with `-v`.
+  `--negative-control` strips the prelude and must fail check (h).
+- **Measured.** Core install 148 s, 16 → 14 GB free during, back to 16 GB after teardown.
+  Apps: esp32 1165520 B, esp32s3 1156304 B (slot 1966080 B); `Maximum is 1310720 bytes` on
+  both. Negative control: esp32 app 1152576 B (12944 B of INFO strings gone), check (h)
+  FAILS, everything else passes. Injected unused variable in the sketch → reported in
+  `compiler_err` with the sketch path (the warning gate sees ours).
+- **Rejected.** A checked-in `library.properties` at the component root; restructuring the
+  component to `src/` only (would erase the IDF component's public/private split); shipping
+  `platformio.ini` in the package; `dot_a_linkage`; a `#line 1 "<basename>"` prelude (it
+  would hide the installed path the warning gate keys on).
+- **Named gaps.** (1) Arduino 1.5 format puts all of `src/` on the include path, so the
+  private headers (`ff_mqtt_internal.h`, ...) are includable by a sketch, as with PlatformIO;
+  the CMake `PRIV_INCLUDE_DIRS` protection is IDF-only. (2) The IDE's size gate is the board
+  menu's `upload.maximum_size` (1310720 on the default scheme), not the 1966080 slot: the
+  ~1.17 MB app passes today; past 1310720 the IDE refuses a build that fits the slot
+  (workaround: PartitionScheme "Minimal SPIFFS"; the sketch-local table still wins).
+  (3) `library.properties` cannot pin a core; 3.3.12 is stated in `paragraph` and the
+  README only, and a core bump re-opens the R3-fw-1 measurement. (4) Not on the Arduino
+  Library Manager (out of scope); release-zip publication belongs to R3-rel-1.
+
+---
+
 ## 2026-10-09 — CUJ-1's Driver names the library harnesses: `just lib-quickstart` for steps 1-2, 3, 5, 6 on the device, `just update-e2e` for the dashboard half and the wrong-layout row (R3-spec-2, proposed)
 
 **Decided: this entry covers the PROPOSAL only. Nothing is built: no code, test, recipe or

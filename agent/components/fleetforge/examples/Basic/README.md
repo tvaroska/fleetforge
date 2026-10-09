@@ -150,3 +150,32 @@ pio run
   "do not" rules in `Basic.ino`'s header comment.
 
 Steps 2 to 7 are the same for your project: build there, upload the `firmware.bin`.
+
+## Arduino IDE
+
+The repository layout is a PlatformIO library and an ESP-IDF component; the Arduino IDE
+needs it repackaged. Build the package from the repository root (a release zip will carry
+the same file, R3-rel-1):
+
+```sh
+just lib-arduino-package
+```
+
+That writes `dist/arduino/Fleetforge-0.4.7.zip`. Then, in the Arduino IDE (2.x):
+
+- **Boards Manager:** add `https://espressif.github.io/arduino-esp32/package_esp32_index.json`
+  under *File → Preferences → Additional boards manager URLs*, and install **esp32 by
+  Espressif, version 3.3.12 exactly**. Another core version is not measured and may lay out
+  flash differently.
+- *Sketch → Include Library → Add .ZIP Library…* and pick the zip.
+- *File → Examples → Fleetforge → Basic*, then *File → Save As* to a folder of your own.
+  The saved folder holds `Basic.ino` **and `partitions.csv`**. Keep `partitions.csv` next to
+  the sketch, unchanged: it is `ab-4m-arduino-v1`, the IDE uses it instead of the board
+  menu's partition scheme, and every board you flash carries it for life.
+- Pick your board (*ESP32 Dev Module* or *ESP32S3 Dev Module*, default options) and press
+  **Upload**. The IDE's `Maximum is 1310720 bytes` comes from the board menu, not from
+  `partitions.csv`; the real limit is the 1966080-byte OTA slot.
+
+Steps 2, 3, 5, 6 and 7 are the same. Write the config blob with step 4's `esptool` command
+at `0x3D0000` (the IDE ships esptool inside the core; `pip install esptool` works too), and
+for build B upload the `.bin` from *Sketch → Export Compiled Binary*.

@@ -422,7 +422,7 @@ Order: spec-3 → fw-2 → fw-3/fw-4 → fw-5/fw-6/be-1 → test-1 → spec-2 �
       Depends on `R3-fw-3`. Acceptance: `pio run` on a clean checkout builds both targets.
       Per R3-fw-3: the harness `examples/Basic/platformio.ini` exists (pioarduino 55.03.312-1 pinned,
       esp32 + esp32s3; needs PlatformIO Core >= 6.2.0). This task owns the clean-checkout recipe and README.
-- [ ] **R3-fw-8**: Arduino IDE package of the library (P2, 0.5d)
+- [x] **R3-fw-8**: Arduino IDE package of the library (P2, 0.5d) _(done 2026-10-09; reviewed; see docs/features/ota-library.md)_
       The component layout (`include/` + `src/`) is invisible to the Arduino IDE, which compiles
       and includes `src/` only, so R3-fw-3 ships no `library.properties` (DECISIONS 2026-10-08).
       Add a flattening package step (one `src/` with the public headers, `library.properties`,
