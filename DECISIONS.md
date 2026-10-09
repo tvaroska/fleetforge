@@ -6,6 +6,12 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-09 — Spec proposals R3-spec-3 and R3-spec-2 accepted and applied; S0-bug-1 and R2b-test-1 withdrawn
+
+**Decided (owner): apply Patch A of the library-marker proposal (`device-protocol.md` *Library marker* section and `lib_marker` prose, `flows.md` line 144, `open-questions.md`) and Patch A (a)-(d) of the CUJ-1 Driver proposal (`cujs.md`), plus `rolled-back` → `rolled_back` in `standards.md`. Patch B (`"lib_marker": 1` in the announce example) goes only in `R3-fw-6`'s commit. S0-bug-1 and R2b-test-1 are withdrawn: both need a person at a board, which the 2026-10-08 decision dropped.** Unblocks `R3-fw-6`, `R3-be-1`, `R3-test-2`. The release step stops before any prod deploy or `just agent-publish-all`.
+
+---
+
 ## 2026-10-09 — Partition profiles are a global table keyed by fingerprint; builtins are seeded by migration and immutable; an unknown table is recorded as a pending `detected` profile and adopted by naming it; the gate resolves an `unknown` board by fingerprint (R3-be-2)
 
 **Decided.** Migration `0007` adds `partition_profiles`; `fleetforge/partition_profiles.py`

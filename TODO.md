@@ -49,9 +49,7 @@ run could show, so the pass rests on the deterministic judge. Task list below; b
 
 **Blocked:**
 
-- `S0-bug-1` (board `94a990dd09a4` offline) and `R2b-test-1` (a human unaided run) still
-  need a person at a board. Kept, not on R3's path; withdraw them if the new approach
-  should cover them too.
+- `S0-bug-1` and `R2b-test-1` withdrawn 2026-10-09 (hardware-gated, no-bench approach).
 - **A dev box with pruned images cannot `just up`**: `minio/minio` and `minio/mc` no
   longer pull (`DECISIONS.md` 2026-10-01). No task filed yet.
 
@@ -87,31 +85,7 @@ the retired bingo app), single-tenant, **not a public product until V3**.
 
 Bricking risks, broker auth and security issues get filed here as they surface.
 
-- [!] **S0-bug-1**: Board `94a990dd09a4` did not reach "On the fleet" after the 2026-10-04 bench flash (P1, 0.5d)
-      _(⚠ failed 2026-10-04; blocker: Blocked on operator: replug USB with the dashboard and serial terminal closed, then watch the ingestor log for 10 min or more. (after 2 attempts))_
-      Found at the bench during Check F: after a native-USB flash the console re-opened by
-      itself and streamed the log, then sat at "waiting for **Clock set**" and the Fleet table
-      did not show the board online. Not diagnosed: the bench notes do not say whether it was
-      the Wi-Fi details, an unreachable time server (the agent gives up after 15 s and
-      continues), or the broker. First step: is the board online now, and what do its last
-      stage reports and the ingestor log say? Until answered, the one enrolled board's state
-      is unknown. Acceptance: the cause is named, and the board is on the fleet or re-flashed.
-      Diagnosed 2026-10-04: **Cause A** (fixed in the console): the board DID reach the fleet
-      at 14:20:08 and stayed online until 14:24:58. The SNTP wait timed out after 15 s, but
-      the S3's RTC kept a sane clock across the hard reset, so TLS enrolment worked
-      (`enroll 200`, MQTT connected). The console's strict first-unreached ordering kept
-      showing "waiting for Clock set" and never the on-fleet banner; a later milestone now
-      implies the earlier ones (`skipped`). **Cause B**: the board went silent at ~14:24:13
-      (broker keepalive timeout, no DISCONNECT, 10 s after the dashboard tab closed) and has
-      not returned: power removed vs firmware wedge cannot be told apart from the server.
-      Prod's agent bundles are stale: see S0-infra-10.
-      Operator owed: power-cycle the board (replug USB) with the dashboard **and** any serial
-      terminal closed. Watch `docker compose logs -f fleetforge-ingestor | grep 94a990` on prod
-      for 10 min or more. Heartbeats every 60 s for 10 min: cause B was the power being removed;
-      tick S0-bug-1. Silent again after 2-4 min with nothing touched: firmware wedge, file a new
-      S0 fw task (suspects: USB-Serial-JTAG console back-pressure, task WDT that does not
-      reset) and tick S0-bug-1. If it never connects, re-flash from the flash page.
-      _(2026-10-04: still offline at 15:33 UTC per devices.last_seen 14:24:08, presence_reported = f; operator power-cycle still owed)_
+- [x] **S0-bug-1**: Board `94a990dd09a4` did not reach "On the fleet" (cause A fixed in the console) — withdrawn 2026-10-09, not done (hardware-gated; DECISIONS 2026-10-09 withdrawal)
 - [x] **S0-infra-10**: Prod's flasher serves agent 0.3.2 (esp32s3) and 0.2.0 (esp32/c3/c6); the repo is at 0.4.5 (P1, 0.25d)
       Found by S0-bug-1 (2026-10-04): `gs://btvaroska/fleetforge/agent/index.json` was last
       published 2026-09-23. Every board flashed from bingo.tvaroska.sk gets a pre-R2 agent
@@ -248,15 +222,7 @@ are R3). Order inside each flow: the one-place status first, then the cards, the
       the table.
 - [x] **R2b-fe-6**: Name a board from the result card (P1, 0.5d) _(done 2026-10-04; see docs/features/dashboard.md)_
       Last line of Flow 1. Depends on `R2b-be-1`.
-- [!] **R2b-test-1**: Re-run the unaided onboarding test against the new flow (P1, 0.5d)
-      _(⚠ failed 2026-10-04; blocker: Human-gated. Three things must happen first: the R2b release to prod, the S0-infra-10 publish, and the S0-bug-1 diagnosis. (after 2 attempts))_
-      Extends `S0-test-3`, which passed 2026-09-22 on the old UI. Someone who has not seen
-      the code onboards a board from the result card alone. Run after `R2b-fe-1`..`fe-4`.
-      _(2026-10-04: run script docs/runbooks/unaided-onboarding.md; software rehearsal in real
-      Chromium on dev at 4b06281: 6/6 pass (frontend/scripts/onboarding-rehearsal.mjs). Prod is
-      0.4.2 / 9200e0f, "R2b NOT on prod"; `just agent-check-prod` STALE (esp32s3 0.3.2, others
-      0.2.0, repo 0.4.5). Human run owed; waits on the R2b release to prod, the S0-infra-10
-      publish and S0-bug-1.)_
+- [x] **R2b-test-1**: Re-run the unaided onboarding test against the new flow — withdrawn 2026-10-09, not done (hardware-gated; DECISIONS 2026-10-09 withdrawal)
 
 ### Flow 2 — Update a board
 
@@ -416,7 +382,6 @@ Order: spec-3 → fw-2 → fw-3/fw-4 → fw-5/fw-6/be-1 → test-1 → spec-2 �
       Acceptance: the QEMU example announces the marker; the stock agent and every pre-R3
       board announce none and are not refused for it (`null` never warns).
       Per R3-spec-3: the marker lives in the component, so the stock agent built from it carries and announces it too; "announce none" means agents ≤ 0.4.7. Applies Patch B (the lib_marker key in the up/announce example) in this task's commit.
-      **Blocked:** waits for the owner to accept and apply the R3-spec-3 proposal (Patch A). See docs/features/ota-library.md → *Library marker proposal*.
       Per R3-be-2: `ff_identity.c`'s comment "pinned equal to SUPPORTED_LAYOUTS" (and `agent/tools/lib_bundle.py`'s) should now say BUILTIN_LAYOUTS (renamed; not edited in R3-be-2 to keep bundles fresh).
 - [x] **R3-fw-7**: PlatformIO recipe (P2, 0.5d) _(done 2026-10-09; see docs/features/ota-library.md)_
       A working `platformio.ini` for the example, no registry publication (out of scope).
@@ -439,7 +404,6 @@ Order: spec-3 → fw-2 → fw-3/fw-4 → fw-5/fw-6/be-1 → test-1 → spec-2 �
       Acceptance: a plain sketch `.bin` warns and needs `override: [code]`; a library build
       and an agent bundle do not; unit tests pin all three.
       Per R3-spec-3: code no_library_marker (gating); scan rule and magic in docs/features/ota-library.md → *Library marker proposal*; artifacts uploaded before this have no verdict and never warn.
-      **Blocked:** waits for the owner to accept and apply the R3-spec-3 proposal (Patch A). See docs/features/ota-library.md → *Library marker proposal*.
 - [x] **R3-be-2**: Partition profile table with detected and user-defined entries (P2, 3d) _(done 2026-10-09; reviewed; see docs/features/board-profiles.md)_
       Board-profiles step 2 ([board-profiles.md](docs/features/board-profiles.md)): the
       `partition_profiles` table seeded from the catalog, `builtin` immutable vs `user`,
@@ -471,7 +435,6 @@ Order: spec-3 → fw-2 → fw-3/fw-4 → fw-5/fw-6/be-1 → test-1 → spec-2 �
       1-3, 5, 6; any segment still without a harness is listed, not scored.
       Per R3-test-1: steps 1-2, 5 and 6 on the library path are all one `just lib-quickstart` run (~25 min; needs the api on 10.0.2.2 origins).
       Per R3-spec-2: rows and graded halves in docs/features/ota-library.md → *CUJ-1 Driver proposal*; one full `just lib-quickstart` grades 1-2, 3, 5, 6 on the device, `just update-e2e` the dashboard half of 5 and 6 and the wrong-layout row; the duplicated-command assertion has no harness (list it, do not score it).
-      **Blocked:** waits for the owner to accept and apply the R3-spec-2 proposal (Patch A). See docs/features/ota-library.md → *CUJ-1 Driver proposal*.
 - [ ] **R3-rel-1**: Quickstart, archive and release (P1, 0.5d)
       README quickstart for the library, `docs/features/ota-library.md` completed entries,
       `agent/version.txt` bump, `/release fleetforge minor`, then
