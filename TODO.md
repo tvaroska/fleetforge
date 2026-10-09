@@ -359,7 +359,7 @@ Order: spec-3 → fw-2 → fw-3/fw-4 → fw-5/fw-6/be-1 → test-1 → spec-2 �
       the library links in, or a constant the pre-check can find in the image. It must be
       readable by the server at upload (`R3-be-1`) and survive both ESP-IDF and Arduino builds.
       Record in `DECISIONS.md` and file the `spec/` proposal. Blocks `R3-fw-6`, `R3-be-1`.
-- [ ] **R3-spec-2**: Propose the CUJ-1 Driver table for R3 (P1, 0.5d)
+- [x] **R3-spec-2**: Propose the CUJ-1 Driver table for R3 (P1, 0.5d) _(done 2026-10-09; reviewed; proposal filed, spec not applied; see DECISIONS.md and docs/features/ota-library.md)_
       Steps 1-2 (sketch compiles with the library) and 6 (bad build recovers) get harnesses
       (`R3-fw-4`, `R3-test-1`); step 5 names `just update-e2e` for the server and dashboard
       half (DECISIONS 2026-10-05 proposal). Proposal only; `spec/cujs.md` is protected.
@@ -468,6 +468,8 @@ Order: spec-3 → fw-2 → fw-3/fw-4 → fw-5/fw-6/be-1 → test-1 → spec-2 �
       Depends on `R3-test-1`, `R3-spec-2`. Acceptance: deterministic judge passes on steps
       1-3, 5, 6; any segment still without a harness is listed, not scored.
       Per R3-test-1: steps 1-2, 5 and 6 on the library path are all one `just lib-quickstart` run (~25 min; needs the api on 10.0.2.2 origins).
+      Per R3-spec-2: rows and graded halves in docs/features/ota-library.md → *CUJ-1 Driver proposal*; one full `just lib-quickstart` grades 1-2, 3, 5, 6 on the device, `just update-e2e` the dashboard half of 5 and 6 and the wrong-layout row; the duplicated-command assertion has no harness (list it, do not score it).
+      **Blocked:** waits for the owner to accept and apply the R3-spec-2 proposal (Patch A). See docs/features/ota-library.md → *CUJ-1 Driver proposal*.
 - [ ] **R3-rel-1**: Quickstart, archive and release (P1, 0.5d)
       README quickstart for the library, `docs/features/ota-library.md` completed entries,
       `agent/version.txt` bump, `/release fleetforge minor`, then

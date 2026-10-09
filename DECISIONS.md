@@ -6,6 +6,59 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-09 — CUJ-1's Driver names the library harnesses: `just lib-quickstart` for steps 1-2, 3, 5, 6 on the device, `just update-e2e` for the dashboard half and the wrong-layout row (R3-spec-2, proposed)
+
+**Decided: this entry covers the PROPOSAL only. Nothing is built: no code, test, recipe or
+script change, and `spec/` is untouched; the owner applies it in a separate `spec:`
+commit.** The reasoning, the sources and the paste-ready Patch A ((a)-(d), all
+`spec/cujs.md`) are in `docs/features/ota-library.md` → *CUJ-1 Driver proposal*.
+
+- **The rows.** 1–2: `just lib-quickstart --build-only` (the README blocks verbatim in a
+  clean temp tree: Arduino esp32/esp32s3 + the edited build, ESP-IDF esp32/esp32s3).
+  3: `just lib-quickstart` phase 2a (enroll), plus `pytest tests/test_enroll.py` for
+  `POST /v1/enroll`. 5: on the device phase 2b (OTA, `fw_version` read back from the
+  board); server and dashboard `just update-e2e` `upload-good` + `deploy-good`. 6: on the
+  device phase 2c (`phase_rollback`: requires `rolled_back` and the previous `fw_version`,
+  fails on any `confirmed`); server and dashboard `just update-e2e` `deploy-broken`.
+  Wrong layout: `just update-e2e` `precheck-wrong-layout`; its on-device half is the
+  `agent-qemu.md` procedure. One full `lib-quickstart` run plays 1–2, 3, 5, 6 on one
+  emulated board (needs the api on `10.0.2.2` origins).
+- **A `Graded` column.** The spec says a segmented CUJ "declares which segments are
+  gradeable"; the table did not. `yes` everywhere except the wrong-layout row: `server and
+  dashboard half`. Phases are named by the script's own headers (`phase 2a/2b/2c`) so
+  `/verify` can attribute one run's output to rows 3, 5 and 6.
+- **Dropped:** `just agent-qemu esp32` (interactive: boots and waits) and `just
+  agent-qemu-smoke esp32` (boot + config read, not enroll; the stock agent, not the sketch)
+  from row 3; `just sim-fleet 1 --capabilities ota` + `POST …/deploy` from row 5
+  (`update-e2e` does that through the real dashboard).
+- **Two Judge fixes, separable.** (b) `rolled-back` → `rolled_back`: the wire/API deploy
+  state (`device-protocol.md` `rolling_back → rolled_back`) and what `phase_rollback`
+  requires; a judge grepping the hyphen never matches. (c) Step 5's "read from the running
+  image's own descriptor" is false on the persona's path: in an Arduino library build
+  `esp_app_desc_t.version` is the core's IDF string and `fw_version` is the
+  `Fleetforge.begin(FW_VERSION)` literal compiled into the image
+  (`ff_identity_fw_version`, `#if defined(ARDUINO)`). Reworded to "the running image itself
+  (its app descriptor, or in a library build the version compiled into it and handed to the
+  library at start)". `R3-test-2` needs (a), and (b)+(c) for steps 5-6 to be judgeable.
+- **The bench sentence** ("proved at the bench") is stale since the 2026-10-08 no-bench
+  decision; replaced by "done by a person; no harness plays them and T3 does not grade them".
+  (d), optional: Supported By drops the deleted `docs/runbooks/upload-artifact.sh` for the
+  dashboard upload form.
+- **Named gaps.** "A duplicated deploy command produces one download, not two" has no
+  scripted harness (shown once by hand in R1-fw-1); T3 lists it, does not score it.
+  Suggested follow-up, **not filed**: re-publish the same `dn/cmd` in `phase_ota` and
+  require one `downloading` step and the `duplicate command` console line. The wrong-layout
+  row's on-device half is a procedure. The IDF flavour is compile-only; QEMU boots the
+  hybrid build. Side finding, not patched: `spec/standards.md:148` also says `rolled-back`.
+- **Rejected.** Extra rows per half (splits one journey step in two). Keeping `agent-qemu`
+  as a driver (interactive). `sim-fleet` + curl for row 5 (`update-e2e` covers it through
+  the dashboard). Writing the duplicate-command gap into the spec (the spec is status-free).
+- **Supersedes** the Driver-table parts of the R3-fw-4 proposal (b) and of the R2b-test-3
+  spec proposal; both are folded in here.
+- **Dependents blocked on the owner:** `R3-test-2`.
+
+---
+
 ## 2026-10-09 — The library's rollback proof is an FF_ROLLBACK_TEST build of the QEMU sketch, set with PLATFORMIO_BUILD_FLAGS; the run fails on any `confirmed` (R3-test-1)
 
 **Decided.** `just lib-quickstart` gains a third run, `phase_rollback`, after the OTA and on
