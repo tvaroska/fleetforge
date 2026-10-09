@@ -6,6 +6,16 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-09 — CUJ-1's T3 gate passes on the library path: one full lib-quickstart grades steps 1-2, 3, 5, 6 on the device, update-e2e the dashboard half and the wrong-layout refusal; the duplicated-command assertion and the 2 s criterion are listed, not scored (R3-test-2)
+
+- **Run order.** lib-quickstart needs the api on 10.0.2.2 origins and update-e2e needs localhost origins, so they ran sequentially with the api restored in between. Both passed (1833 s; 7/7).
+- **Grading rules.** `fw_version` is graded only from lib-quickstart (simulated boards report what they are told). "Read from the running image" is the `morse: HELLO (firmware X)` line plus the API row, with identical X. Trap mapping as in the plan; device halves of wrong layout are a procedure.
+- **jeep.** No hard-fail trap; PASS on every assessable item; the duplicated deploy command was NOT ASSESSABLE.
+- **Named gaps.** Duplicated deploy command (no harness); dashboard within 2 s (no harness).
+- **Suggested follow-ups, not filed.** A dedupe re-publish in `phase_ota`; a 2 s measurement. Details: `docs/features/ota-library.md` -> R3-test-2.
+
+---
+
 ## 2026-10-09 — The dashboard lists partition profiles and adopts a detected one by naming it; the upload form offers only adopted profile names; profiles are re-read on device.announce via a counter on useFleet (R3-fe-1)
 
 **Decided.** A "Partition profiles" section (`PartitionProfiles.tsx`) sits between the fleet

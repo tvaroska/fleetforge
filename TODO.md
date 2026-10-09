@@ -2,7 +2,7 @@
 
 **Goal:** Self-hosted OTA firmware management for embedded fleets (ESP32 first) — a bad
 build is caught before the fleet, and any device that gets one recovers itself.
-**Updated:** 2026-10-08
+**Updated:** 2026-10-09
 
 ## Where this stands
 
@@ -430,7 +430,7 @@ Order: spec-3 → fw-2 → fw-3/fw-4 → fw-5/fw-6/be-1 → test-1 → spec-2 �
       device reports `confirmed`.
       Per R3-fw-4: runs one and two exist as `just lib-quickstart` (`phase_enroll`, `phase_ota` in `scripts/lib_quickstart.py`); add the broken build as `phase_rollback` after `phase_ota` (a QEMU bundle that cannot confirm, `apply: "on_command"`, power cycle; expect `rolled_back`, fail on `confirmed`). Each run pays one ~11 min hybrid compile in the fresh `lib-qemu/`.
       Per R3-fw-5: the rollback run uses the example's own `partitions.csv` (a wrong table announces `unknown` and is refused before any stage; `tests/fixtures/wrong-layout-partitions.csv` is for that refusal only). `ff_ota.c` now fails the build without `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`.
-- [ ] **R3-test-2**: Play CUJ-1 end to end with every segment gradeable (P1, 0.5d)
+- [x] **R3-test-2**: Play CUJ-1 end to end with every segment gradeable (P1, 0.5d) _(done 2026-10-09; deterministic judge PASS on 1-2, 3, 5, 6; jeep PASS, no hard-fail trap; see docs/features/ota-library.md)_
       The T3 gate (`/verify`) with the segments from `R3-spec-2` applied by the owner.
       Depends on `R3-test-1`, `R3-spec-2`. Acceptance: deterministic judge passes on steps
       1-3, 5, 6; any segment still without a harness is listed, not scored.

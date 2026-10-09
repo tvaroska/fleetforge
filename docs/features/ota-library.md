@@ -16,6 +16,43 @@ becomes a board in the field that fixes itself" — this release *is* that journ
 
 ## Completed Work
 
+### R3-test-2 (2026-10-09): CUJ-1 played end to end on the library path; deterministic judge PASS on steps 1-2, 3, 5, 6
+
+No code changed. Evidence kept outside the repo in `/tmp/ff-r3-test-2` (logs, scorecard, jeep output).
+
+**What was run.**
+- `uv run pytest tests/test_enroll.py -q`: 42 passed.
+- api origins swapped to 10.0.2.2 (QEMU slirp), then `just lib-quickstart`: exit 0, `== PASS (1833 s) ==`, Phases 1, 2a, 2b, 2c, no `SKIP  ESP-IDF`. The api was restored to localhost origins afterwards.
+- `just update-e2e http://localhost:8088 /tmp/ff-r3-test-2/update-e2e`: exit 0, 7/7 pass (upload-good, upload-merged, precheck-wrong-layout, deploy-good, deploy-broken, adopt-detected-profile, traps). `elapsed_s` good 3.4, broken 26.3, adopted 3.3. The two harnesses ran sequentially because their origins conflict.
+- Credential sweep over the evidence dir (`ff[ea]_...`, `"mqtt_password":"`): no file matched.
+
+**Run values.** VB `1.1.0-qs1791559092` (cmd_id `07abea33fe3244bebb5dfdef63ac3ccd`, staged ota_1); VR `1.2.0-qs1791559092-rbtest` (cmd_id `f3ebec807da24af1b947db9e07feab69`, staged ota_0, rolled_back to ota_1).
+
+**Scorecard.**
+
+| Assertion | Verdict | Evidence |
+|---|---|---|
+| Steps 1-2: sketch compiles with the library | PASS | `own project (lib_deps -> the clone) esp32, esp32s3 SUCCESS`; `Arduino B differs from A yes`; both IDF builds `app version 1.0.0` |
+| Step 3: row online | PASS | `online True, fw_version 1.0.0, partition_layout ab-4m-arduino-v1, capabilities ['ota'], agent_version 0.4.7` |
+| Step 5: fw_version == uploaded build | PASS | `morse: HELLO (firmware 1.1.0-qs1791559092)`; `after the update: fw_version 1.1.0-qs1791559092, deploy confirmed (is_terminal True), 98 s after the deploy`; update-e2e upload-good, deploy-good |
+| Step 6: rolled_back, previous fw_version | PASS | `deploy rolled_back (is_terminal True), fw_version 1.1.0-qs1791559092 (the previous build) ... no confirmed`; update-e2e deploy-broken |
+| Traps: credentials, physical retrieval, wrong layout (server+dashboard half), stale milestone | PASS | `token 0 occurrences, mqtt_password 0 (19 files)`; step 6; PASS precheck-wrong-layout; PASS deploy-broken |
+| Deploy within 5 min | PASS | 98 s (device), 3.4 s (simulated) |
+
+**Listed, not scored.**
+- The duplicated deploy command assertion: no harness (R3-spec-2 named gap 1).
+- Dashboard reflects a change within 2 s: no harness measures it.
+- Trap "raw UART log / ESP-IDF / this repo required": LLM rubric only.
+- Wrong-layout device half: a procedure.
+- Step 4 (physical install) and the unaided half of step 3: a person.
+- The ESP-IDF flavour is compile-only; QEMU boots the hybrid `lib-qemu/` build; the reset after the confirm timer is a power cycle.
+
+**jeep (recorded, not gating).** exit 0. PASS on step 3 row, step 5 fw_version, step 6 rolled_back, error text with next action, docs-equals-steps, readable sketch (63 lines), no source knowledge needed. NOT ASSESSABLE on the duplicated deploy command. No hard-fail trap named.
+
+**Follow-ups proposed, not filed.** Add a dedupe re-publish of the same `dn/cmd` to `phase_ota` in lib-quickstart so the duplicated deploy command assertion can be scored; a harness measurement for the 2 s criterion.
+
+**Judge commands (for /replan).** `just lib-quickstart` (with api on 10.0.2.2 origins), `just update-e2e`, `uv run pytest tests/test_enroll.py`, then the acceptance greps against the tee'd logs and `jeep` over `spec/cujs.md` CUJ-1.
+
 ### R3-be-1 (2026-10-09): an upload stores whether the library marker is in the image; a deploy of an unmarked build is gated as no_library_marker
 
 **The problem.** From R3-fw-6 every library build carries the marker, but the server never
@@ -1273,7 +1310,7 @@ app runs. Neither covers an image that has the agent and confirms but whose own 
 wrong; that is the R5 custom self-test.
 ```
 
-#### CUJ-1 Driver proposal (R3-spec-2, 2026-10-09) — PROPOSED, not applied
+#### CUJ-1 Driver proposal (R3-spec-2, 2026-10-09) — ACCEPTED: Patch A (a)-(d) applied in 8f1f458
 
 `spec/` is protected during `/implement`, so this is the decision written as paste-ready
 text for a later `spec:` commit (the route R2-spec-1, R2b-spec-2 and R3-spec-3 took).
