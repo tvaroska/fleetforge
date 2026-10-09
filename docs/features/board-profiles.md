@@ -13,6 +13,81 @@ finishes a task, it appends a completed entry below.
 
 ## Completed Work
 
+### R3-fe-1 (2026-10-09): the dashboard names a detected profile
+
+Frontend, e2e harness, docs and a `justfile` comment only: `src/`, `alembic/`, `spec/`,
+`agent/`, `mosquitto/` and `.env*` untouched, no CRITICAL.md path. Decision: `DECISIONS.md`
+2026-10-09 (R3-fe-1). Board-profiles step 2, the dashboard half.
+
+As built:
+
+- **A "Partition profiles" section** between the fleet table and the upload form
+  (`PartitionProfiles.tsx`). The named table (Name, Kind, OTA slot, Boards, Fingerprint) lists
+  every deployable profile. Under "Detected, not named yet", each pending map shows the board
+  it was first seen on (its name when the fleet has one), the boards on it now, its measured
+  slot and flash chip, the full fingerprint, and a form: `Name for this map` and `Name and
+  adopt`. A `Name for this map` input is the only way to adopt; the form asks for an OTA slot
+  in bytes only when the row has none measured. A name is final once adopted, and the form says
+  so. Naming is `PATCH /v1/partition-profiles/{sha}` with `{layout_id}`; 409/422 sentences render
+  verbatim, a bad name is refused client-side first (`profileName.ts`, mirrors
+  `PROFILE_LAYOUT_ID_PATTERN` and the reserved `unknown` sentence).
+- **The announce hint (D1).** `useFleet` returns `announceSeq`, bumped once per coalesced burst
+  that held a `device.announce` frame and on every stream re-open after the first. `useProfiles`
+  (`profiles.ts`, the `deploy.ts` idiom) reads on mount, on a hint change, and after an adopt,
+  dropping out-of-order responses. No second EventSource, no new event type, no poll.
+- **Upload options are adopted names only (D3).** `UploadBuild` takes `profiles` and offers
+  `adoptedNames(profiles)`, defaulting to the one effective layout every board of the chosen
+  chip shares (`effectiveLayout`: announced adopted id, else the adopted profile with the
+  board's fingerprint), else `ab-4m-v1`. `d.partition_layout` is no longer read, so `unknown`
+  is never an option. Before the list loads the option is `ab-4m-v1`.
+- **The pre-check card** says `board <profile> (announces unknown)` when
+  `device_partition_profile` differs from the announced id (`deployPrecheck.ts::fitLine`).
+- **`api.ts`** mirrors `PartitionProfileSummary`/`Adopt`/`List`, `listPartitionProfiles`,
+  `adoptPartitionProfile`, and the optional `DeviceSummary.flash_chip_size /
+  partition_table_sha256 / rollback_capable` and `DeployPrecheck.device_partition_profile`.
+- **E2E scenario 7, `adopt-detected-profile`** (`frontend/scripts/update-flow-e2e.mjs`), between
+  `deploy-broken` and `traps`. A third simulated board (`--partition-layout unknown`, a per-run
+  `--partition-sha`, `--flash-chip-size 4194304`) is started only once the page is loaded. The
+  scenario checks: (1) fewer than 32 pending rows; (2) the board is online announcing `unknown`
+  and the fingerprint; (3) the pending row appears with no reload and carries the device id,
+  `1,966,080`, `4,194,304`, and the API agrees (`detected`, no name, detecting board); (4) the
+  pre-check of the good build is refused, no Send, with "adopt it by naming it" and the
+  fingerprint; (5) the upload form's layout options never include `unknown`; (6) naming it
+  turns the row deployable, with the notice and the API (`layout_id`, `deployable`, `adopted_at`);
+  (7) a build uploaded under that name is offered, the pre-check is deployable and names the
+  profile (API: profile = the name, layout = `unknown`), Send is 202, and the card reaches `good`
+  with `confirming` before `confirmed`. A failure before naming deletes its own pending row.
+  `E2E_BREAK=adopt-detected-profile` flips (6)'s expectation.
+
+T1: `npm test` 688 passed in 34 files (was 651 in 31): new `profiles.test.ts`,
+`profileName.test.ts`, `PartitionProfiles.test.tsx`, and new cases in `fleet.test.tsx` (announce
+bump per burst, heartbeat does not, first open skipped), `UploadBuild.test.tsx`,
+`deployPrecheck.test.ts`, `api.test.ts`, `Dashboard.test.tsx` (announce frame causes a second
+profile read). `npm run typecheck` and `npm run build` clean; `node --check` on the harness;
+`uv run pytest` 1745 passed, `ruff check`, `mypy src/ scripts/` clean.
+
+T2 (dev stack, `just update-e2e`, run `mv135kum`): 7/7 pass; adopted `cmd_id
+b0a9d8ab107e4b01b3a41a1b11dc0e05`. `/tmp/ff-r2b-test-3/adopt-detected-profile.txt` shows, in
+order, the pending row (per-run fingerprint, 1,966,080 slot, 4,194,304 flash, the detect board),
+the refusal, the named row `uemv135kum-map`, and the deploy card `good`. The database row is
+`detected|uemv135kum-map|t|8278288aa341`. Vacuity: `E2E_BREAK=adopt-detected-profile` exited 1,
+`FAIL adopt-detected-profile: the row's data-deployable is true, wanted false`, 6/7 pass.
+(An earlier draft of the break check waited for the pending row, which is present at the moment
+of the click, so the run still passed; the check now waits for the settled row.)
+
+Named gaps:
+
+- No UI for `POST` (defining a profile up front from a fingerprint) and none for `DELETE`
+  (forgetting a pending map). The API has both; the `curl`/runbook route stays.
+- The pre-check card's refusal says "adopt it by naming it" but does not link to the section.
+- The fleet table's columns are unchanged: a board on an adopted map still reads `unknown`
+  in the data it announces; the profile name shows in the pre-check card and the Boards count.
+- Every `just update-e2e` run leaves one adopted profile behind (permanent once an artifact
+  names it, like the labels). `ruff format --check .` flags `docs/features/ota-library.md`
+  (a markdown code block), which this task did not touch.
+- The board-profiles spec paragraph proposed by R3-be-2 is still unapplied; no new `spec/`
+  change is proposed here.
+
 ### R3-be-2 (2026-10-09): partition profiles table, detected and user-defined
 
 CRITICAL (new Alembic migration `0007`). Decision: `DECISIONS.md` 2026-10-09 (R3-be-2).
@@ -714,8 +789,8 @@ the second and third real layouts (`ab-4m-arduino-v1` already exists,
 and a maker with a stock `min_spiffs` table is the first user who cannot be served by a
 code-resident dict. Building the table before that evidence is speculative schema.
 
-Status (R3-be-2, 2026-10-09): **built** (API; the dashboard half is R3-fe-1). See
-*Completed Work → R3-be-2*.
+Status (R3-fe-1, 2026-10-09): **built** (API in R3-be-2, dashboard in R3-fe-1). See
+*Completed Work → R3-be-2* and *R3-fe-1*.
 
 **Why the bootloader field matters, and why it cannot wait for a redesign**. Rollback exists in code jointly by the second-stage bootloader and the app, and **Fleetforge OTA
 replaces the app, never the bootloader**. Per the ESP-IDF 6.2 migration notes, a device

@@ -4,7 +4,7 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { ApiError, type DeviceSummary } from './api'
+import { ApiError, type DeviceSummary, type PartitionProfileSummary } from './api'
 import { UploadBuild, uploadErrorMessage } from './UploadBuild'
 
 function appBin(chip: number, version: string): File {
@@ -42,11 +42,40 @@ const uploaded = (over: object = {}) => ({
   ...over,
 })
 
-function setup(devices: DeviceSummary[] | null = [board()]) {
+function prof(over: Partial<PartitionProfileSummary> = {}): PartitionProfileSummary {
+  return {
+    partition_table_sha256: '1'.repeat(64),
+    layout_id: 'ab-4m-v1',
+    origin: 'builtin',
+    deployable: true,
+    ota_slot_size: 1_966_080,
+    flash_chip_size: 4_194_304,
+    detected_device_id: null,
+    device_ids: [],
+    created_at: '2026-10-09T10:00:00Z',
+    adopted_at: '2026-10-09T10:00:00Z',
+    ...over,
+  }
+}
+
+const BUILTINS = [
+  prof(),
+  prof({ partition_table_sha256: '2'.repeat(64), layout_id: 'ab-4m-arduino-v1' }),
+]
+
+function setup(
+  devices: DeviceSummary[] | null = [board()],
+  profiles: PartitionProfileSummary[] | null | undefined = undefined,
+) {
   const onUploaded = vi.fn()
   const onSessionExpired = vi.fn()
   render(
-    <UploadBuild devices={devices} onUploaded={onUploaded} onSessionExpired={onSessionExpired} />,
+    <UploadBuild
+      devices={devices}
+      profiles={profiles}
+      onUploaded={onUploaded}
+      onSessionExpired={onSessionExpired}
+    />,
   )
   return { onUploaded, onSessionExpired }
 }
@@ -180,11 +209,46 @@ describe('UploadBuild', () => {
   })
 
   it("defaults the layout to the one the chip's boards report", async () => {
-    setup([board({ platform_type: 'esp32s3', partition_layout: 'ab-4m-arduino-v1' })])
+    setup([board({ platform_type: 'esp32s3', partition_layout: 'ab-4m-arduino-v1' })], BUILTINS)
     await pickFile(appBin(S3, '1.0.0'))
 
     await waitFor(() => expect(screen.getByLabelText('Chip target')).toHaveValue('esp32s3'))
     expect(screen.getByLabelText('Partition layout')).toHaveValue('ab-4m-arduino-v1')
+  })
+
+  const optionValues = () =>
+    Array.from(screen.getByLabelText('Partition layout').querySelectorAll('option')).map(
+      (o) => o.value,
+    )
+
+  it('offers adopted profile names only, and defaults to the one an unknown board resolves to (R3-fe-1)', () => {
+    const sha = 'c'.repeat(64)
+    const profiles = [
+      prof(),
+      prof({ partition_table_sha256: sha, layout_id: 'be2-map', origin: 'detected' }),
+      prof({
+        partition_table_sha256: 'd'.repeat(64),
+        layout_id: null,
+        origin: 'detected',
+        deployable: false,
+        adopted_at: null,
+      }),
+    ]
+    setup(
+      [board({ partition_layout: 'unknown', partition_table_sha256: sha })],
+      profiles,
+    )
+
+    expect(optionValues()).toEqual(['ab-4m-v1', 'be2-map'])
+    expect(screen.getByLabelText('Partition layout')).toHaveValue('be2-map')
+    expect(optionValues()).not.toContain('unknown')
+    expect(optionValues()).not.toContain('d'.repeat(64))
+  })
+
+  it('offers only the prebuilt layout before the profiles are known', () => {
+    setup([board({ partition_layout: 'unknown' })])
+    expect(optionValues()).toEqual(['ab-4m-v1'])
+    expect(screen.getByLabelText('Partition layout')).toHaveValue('ab-4m-v1')
   })
 
   it('offers fleet targets and the agent targets, as a select not free text', () => {

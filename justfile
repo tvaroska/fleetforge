@@ -162,18 +162,19 @@ capacity-check-prod *args:
 # ── Update flow end to end (R2b-test-3) ──────────────────────────────────────
 #
 # Flow 2 (upload, pre-check, deploy to confirmed, deploy to rolled back) played through
-# the real dashboard in a real Chromium against the dev stack (`just up`), with two
-# simulated boards. Prints PASS/FAIL per scenario, `N/6 pass`, and the good and broken
-# cmd_ids. Evidence:
+# the real dashboard in a real Chromium against the dev stack (`just up`), with simulated
+# boards, plus the adoption of a detected partition profile (R3-fe-1). Prints PASS/FAIL per
+# scenario, `N/7 pass`, and the good, broken and adopted cmd_ids. Evidence:
 # /tmp/ff-r2b-test-3/ (a .txt and a .png per scenario (element shots), the simulator logs, run.json).
-# Leaves two simulated boards and four labels per run in the dev DB; deletes nothing.
+# Leaves three simulated boards, five labels and one adopted partition profile per run in the
+# dev DB; deletes nothing (except its own pending profile when the adopt scenario fails).
 # `E2E_BREAK=<scenario id> just update-e2e` flips one expectation: the run must then FAIL.
 # The admin password comes from $FF_ADMIN_PASSWORD or the repo-root .env, never argv.
 #
 #     just update-e2e
 #     just update-e2e http://localhost:8088 /tmp/somewhere-else
 #
-# Play Flow 2 against the dev stack with simulated boards (exit 0 = all six scenarios pass).
+# Play Flow 2 against the dev stack with simulated boards (exit 0 = all seven scenarios pass).
 update-e2e *args:
     cd frontend && PLAYWRIGHT_MODULE="${PLAYWRIGHT_MODULE:-$(npm root -g)/playwright/index.mjs}" node scripts/update-flow-e2e.mjs {{args}}
 

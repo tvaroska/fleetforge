@@ -6,6 +6,40 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-09 — The dashboard lists partition profiles and adopts a detected one by naming it; the upload form offers only adopted profile names; profiles are re-read on device.announce via a counter on useFleet (R3-fe-1)
+
+**Decided.** A "Partition profiles" section (`PartitionProfiles.tsx`) sits between the fleet
+table and the upload form. Naming a detected map is what adopts it (R3-be-2 D3). Details, the
+e2e scenario and the T2 table: `docs/features/board-profiles.md` → *R3-fe-1*.
+
+- **D1. The hint.** `useFleet` already parses each frame's `type`; it gains `announceSeq`,
+  bumped once per coalesced burst that held a `device.announce` frame and on every stream
+  re-open after the first (a re-open is the resync path: frames in the gap are lost; the first
+  open is skipped because the profile hook reads on mount). No second `EventSource`, no new
+  event type, no poll. Nothing is rendered from the frame body (rule 1 of `fleet.ts`).
+- **D2. `useProfiles` is in `profiles.ts`, the `deploy.ts` idiom**: a non-rendering hook that
+  reads on mount, when `announceSeq` changes and after an adopt, drops out-of-order responses,
+  sends a 401 to the login gate, and turns any other failure into a string under the heading.
+  Dashboard owns the one instance and passes it down; `UploadBuild` still never fetches on mount.
+- **D3. Upload options are adopted names only** (every deployable `layout_id`, sorted).
+  `d.partition_layout` is no longer an option source, so `unknown` can never be offered. The
+  default is the one effective layout every board of the chosen chip shares (the server's D7
+  order: announced adopted id, else the adopted profile with the board's fingerprint), else
+  `ab-4m-v1`. Before the list loads, or if it fails, the only option is `ab-4m-v1`; the
+  server's 400 stays the authority.
+- **D4. Naming is a client check that mirrors the server, then a PATCH** (`profileName.ts`, the
+  `boardName.ts` posture; the server is authoritative). The body is `{layout_id}`;
+  `ota_slot_size` is sent only when the row has no measured slot. Duplicates are the server's 409.
+- **D5. The proof is a 7th `update-e2e` scenario, `adopt-detected-profile`**, not a new script
+  (CUJ-1's Driver names scenarios by id, so this is additive and no `spec/` text changes). Each
+  run uses a per-run fingerprint and name, so a run leaves one adopted profile behind; a failure
+  before naming deletes its own pending row so failed runs cannot fill the cap of 32.
+- **Named gaps.** No create-by-fingerprint UI and no forget-pending UI (the API has both). The
+  pre-check card's refusal says "adopt it by naming it" but does not link to the section. The
+  board-profiles spec paragraph proposed by R3-be-2 is still unapplied; this task does not need it.
+
+---
+
 ## 2026-10-09 — An upload stores has_lib_marker (BOOLEAN NULL, migration 0008); no_library_marker is the second gating code, raised only when the verdict is false; the device's announced lib_marker stays unstored (R3-be-1)
 
 **Decided.** `POST /v1/artifact` reads every accepted upload with `fleetforge/lib_marker.py`

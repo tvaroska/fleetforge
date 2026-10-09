@@ -14,14 +14,22 @@
 //   deploy-good            Send -> confirmed -> the result card says "good"
 //   deploy-broken          Send of a `-rbtest` build -> never confirms -> rolled back to the
 //                          good build; the card says "rolled back", with no "Send again"
+//   adopt-detected-profile (R3-fe-1) a third board on a flash map the server has never seen
+//                          (layout `unknown`, a per-run fingerprint) appears live under
+//                          "Detected, not named yet" with no reload; its deploy is refused
+//                          before naming; the operator names it in the page; the upload form
+//                          then offers that name (and never `unknown`), and the same board
+//                          takes a build uploaded under it, to confirmed
 //   traps                  no token or password in any URL the browser requested or in a
 //                          simulator log
 //
-// The boards are two simulator processes (`fleetforge.simulator fleet`): one `ab-4m-v1`
+// The boards are simulator processes (`fleetforge.simulator fleet`): one `ab-4m-v1`
 // board that takes BOTH builds (`--broken-marker=-rbtest`: an image whose version carries
 // `-rbtest` never confirms, like an FF_ROLLBACK_TEST build; any other image confirms), and
 // one `ab-4m-arduino-v1` board. The Arduino board is what lets the operator pick that
-// layout in the form at all, and the positive control for the pre-check.
+// layout in the form at all, and the positive control for the pre-check. The third, the
+// `unknown`-layout board with a per-run `--partition-sha`, is started by its scenario once
+// the page is loaded, which is what proves the section re-reads without a reload.
 //
 // What it does NOT cover: the real agent. The simulator reports versions it was told; the
 // CUJ judge's "fw_version from the running image's own descriptor" and a real rollback are
@@ -41,8 +49,10 @@
 //
 // Every label and board name carries a per-run id: labels are permanent (a re-used label
 // with other bytes is a 409), and a fresh board has no leftover deploy state. A run leaves
-// two simulated boards (they go offline when the simulators exit) and four labels in the dev
-// database; it deletes nothing.
+// three simulated boards (they go offline when the simulators exit), five labels and one
+// adopted partition profile in the dev database (a profile an artifact names is permanent,
+// like the labels). The only thing it deletes is its own still-pending detected profile, when
+// the adopt scenario fails before naming it, so failed runs cannot fill the 32-row pending cap.
 //
 // Exit: 0 all pass, 1 any scenario failed, 2 setup failed (stack down, login refused, the
 // simulated boards never came online). `E2E_BREAK=<scenario id>` flips that scenario's
@@ -75,7 +85,14 @@ const LABELS = {
   wrong: `1.1.1-ue${RUN}-arduino`,
   broken: `1.2.0-ue${RUN}-rbtest`,
   merged: `1.3.0-ue${RUN}-merged`,
+  adopted: `1.4.0-ue${RUN}-map`,
 }
+
+// R3-fe-1: the per-run profile name and flash-map fingerprint. RUN is base36, so the name
+// matches the server's `^[a-z0-9][a-z0-9-]{0,31}$`.
+const PROFILE_NAME = `ue${RUN}-map`
+const DETECTED_SHA = createHash('sha256').update(`fleetforge-e2e-detected-${RUN}`).digest('hex')
+const PENDING_CAP = 32
 
 function readPassword() {
   if (process.env.FF_ADMIN_PASSWORD) return process.env.FF_ADMIN_PASSWORD
@@ -142,11 +159,13 @@ const FILES = {
   wrong: `${OUT}/bins/wrong-layout.bin`,
   broken: `${OUT}/bins/broken.bin`,
   merged: `${OUT}/bins/merged.bin`,
+  adopted: `${OUT}/bins/adopted.bin`,
 }
 await writeFile(FILES.good, buildWith(LABELS.good))
 await writeFile(FILES.wrong, buildWith(LABELS.wrong))
 await writeFile(FILES.broken, buildWith(LABELS.broken))
 await writeFile(FILES.merged, mergedHead)
+await writeFile(FILES.adopted, buildWith(LABELS.adopted))
 
 // ── Simulated boards ──────────────────────────────────────────────────────────────────
 
@@ -159,11 +178,14 @@ function deviceIdOf(name) {
 const BOARDS = {
   main: { prefix: `ue${RUN}`, layout: LAYOUT, marker: true },
   arduino: { prefix: `ue${RUN}a`, layout: ARDUINO_LAYOUT, marker: false },
+  // Started by its scenario, not at setup. `unknown` is what a board announces on a map its
+  // firmware cannot name; the fingerprint is what the server keys a detected profile on.
+  detect: { prefix: `ue${RUN}d`, layout: 'unknown', marker: false, sha: DETECTED_SHA, flash: 4194304 },
 }
-for (const board of Object.values(BOARDS)) {
+for (const [key, board] of Object.entries(BOARDS)) {
   board.name = `${board.prefix}-01`
   board.id = deviceIdOf(board.name)
-  board.log = `${OUT}/sim-${board === BOARDS.main ? 'main' : 'arduino'}.log`
+  board.log = `${OUT}/sim-${key}.log`
 }
 
 const children = []
@@ -195,6 +217,9 @@ function startBoard(board) {
   ]
   // `=` is required: argparse reads a bare `-rbtest` as an option.
   if (board.marker) args.push('--broken-marker=-rbtest')
+  // Not secrets, so argv is fine.
+  if (board.sha !== undefined) args.push('--partition-sha', board.sha)
+  if (board.flash !== undefined) args.push('--flash-chip-size', String(board.flash))
   const log = createWriteStream(board.log)
   // The password goes through the environment, never argv.
   const child = spawn('uv', args, {
@@ -373,7 +398,11 @@ async function rowText(page, id) {
 // ── Scenarios ─────────────────────────────────────────────────────────────────────────
 // Each returns `{ problems: string[], text: string }`; empty problems = pass.
 
-const state = { uploaded: {}, cmdIds: { good: null, broken: null }, elapsedS: { good: null, broken: null } }
+const state = {
+  uploaded: {},
+  cmdIds: { good: null, broken: null, adopted: null },
+  elapsedS: { good: null, broken: null, adopted: null },
+}
 const skipped = (...needs) => {
   const missing = needs.filter((n) => state.uploaded[n] !== true)
   return missing.length > 0 ? `skipped: depends on upload of the ${missing.join(' and ')} build` : null
@@ -576,6 +605,154 @@ const SCENARIOS = [
     },
   },
   {
+    id: 'adopt-detected-profile',
+    shotOf: (page) => page.locator('section[aria-labelledby=profiles-heading]'),
+    async run(page, notes) {
+      const problems = []
+      const text = []
+      const detect = BOARDS.detect
+      const rowSel = (deployable) =>
+        `[data-testid=profile-row][data-sha="${DETECTED_SHA}"][data-deployable="${deployable}"]`
+      // The failure-only cleanup: a pending row this run created must not outlive a failed
+      // run (the server caps pending rows at ${PENDING_CAP}). Best effort; 409 = already named.
+      const cleanup = async () => {
+        const gone = await api(page, 'DELETE', `/v1/partition-profiles/${DETECTED_SHA}`)
+        notes.push(`cleanup: DELETE the pending profile -> ${gone.status}`)
+      }
+      let adopted = false
+      try {
+        // 1. Precondition: room under the pending cap.
+        const list = await api(page, 'GET', '/v1/partition-profiles')
+        const pendingNow = (list.json?.profiles ?? []).filter((p) => p.deployable === false).length
+        if (pendingNow >= PENDING_CAP)
+          return {
+            problems: [`dev DB holds ${pendingNow} pending detected profiles (the cap); DELETE some`],
+            text: '',
+          }
+
+        // 2. Start the board only now, with the page already loaded and no reload after.
+        startBoard(detect)
+        const online = await until(async () => {
+          const d = await device(page, detect.id)
+          return d !== null && d.online === true && d.partition_layout === 'unknown' &&
+            d.partition_table_sha256 === DETECTED_SHA
+            ? d
+            : null
+        }, 60_000, 1000)
+        if (online === null)
+          return { problems: [`the detect board never came online announcing unknown + ${DETECTED_SHA} (see ${detect.log})`], text: '' }
+
+        // 3. It shows, live.
+        const pendingRow = page.locator(rowSel('false'))
+        const seen = await pendingRow.waitFor({ timeout: 20_000 }).then(() => true, () => false)
+        if (!seen) return { problems: ['no pending profile row appeared without a reload within 20s'], text: '' }
+        const pendingText = (await pendingRow.innerText()).replace(/\n+/g, ' ')
+        text.push(`--- pending row (no reload) ---\n${pendingText}`)
+        for (const needle of [detect.id, '1,966,080', '4,194,304', DETECTED_SHA])
+          if (!pendingText.includes(needle)) problems.push(`the pending row lacks "${needle}": ${pendingText}`)
+        const view = await api(page, 'GET', '/v1/partition-profiles')
+        const row = view.json?.profiles?.find((p) => p.partition_table_sha256 === DETECTED_SHA)
+        if (row?.origin !== 'detected' || row.layout_id !== null || row.detected_device_id !== detect.id)
+          problems.push(`API row is ${JSON.stringify(row)}, wanted origin detected, layout_id null, detected_device_id ${detect.id}`)
+
+        // 4. Refused before naming (needs the good build to be in the Deploy select).
+        if (state.uploaded.good === true) {
+          if (!(await waitForOption(page, detect.id, LABELS.good)))
+            problems.push(`${LABELS.good} is not in the detect board's Deploy select`)
+          else {
+            const refused = await openPrecheck(page, detect.id, LABELS.good)
+            const refusedText = (await refused.innerText()).replace(/\s+/g, ' ')
+            text.push(`--- precheck before naming ---\n${refusedText}`)
+            if ((await refused.getAttribute('data-deployable')) !== 'false')
+              problems.push('the pre-check before naming is deployable')
+            if ((await refused.getByRole('button', { name: /^Send/ }).count()) !== 0)
+              problems.push('the pre-check before naming has a Send button')
+            for (const needle of ['adopt it by naming it', DETECTED_SHA])
+              if (!refusedText.includes(needle)) problems.push(`the refusal lacks "${needle}": ${refusedText}`)
+            await refused.getByRole('button', { name: 'Cancel' }).click()
+          }
+        } else notes.push('refusal step skipped: the good build was not uploaded')
+
+        // 5. The upload form never offers `unknown`.
+        const options = await uploadForm(page)
+          .getByLabel('Partition layout', { exact: true })
+          .locator('option')
+          .evaluateAll((os) => os.map((o) => o.value))
+        text.push(`--- upload layout options before naming ---\n${options.join(', ')}`)
+        if (options.includes('unknown')) problems.push(`the upload form offers unknown: ${options.join(', ')}`)
+        if (options.includes(PROFILE_NAME)) problems.push(`the upload form offers ${PROFILE_NAME} before it is named`)
+
+        // 6. Name it.
+        const pendingBox = page.locator(rowSel('false'))
+        await pendingBox.getByLabel('Name for this map').fill(PROFILE_NAME)
+        await pendingBox.getByRole('button', { name: 'Name and adopt' }).click()
+        const named = await page
+          .locator(rowSel('true'))
+          .waitFor({ timeout: 15_000 })
+          .then(() => true, () => false)
+        if (!named) return { problems: [...problems, 'no deployable row for the fingerprint within 15s of naming it'], text: text.join('\n\n') }
+        // The primary expectation: the row for this fingerprint is now deployable.
+        const wantDeployable = BREAK === 'adopt-detected-profile' ? 'false' : 'true'
+        const gotDeployable = await page
+          .locator(`[data-testid=profile-row][data-sha="${DETECTED_SHA}"]`)
+          .getAttribute('data-deployable')
+        if (gotDeployable !== wantDeployable)
+          problems.push(`the row's data-deployable is ${gotDeployable}, wanted ${wantDeployable}`)
+        adopted = true
+        const namedText = (await page.locator(rowSel('true')).innerText()).replace(/\n+/g, ' ')
+        const banner = await page.locator('[data-testid=profile-adopted]').innerText().catch(() => '')
+        text.push(`--- named row ---\n${namedText}\n${banner}`)
+        if (!namedText.includes(PROFILE_NAME)) problems.push(`the named row lacks ${PROFILE_NAME}: ${namedText}`)
+        if (!banner.includes(PROFILE_NAME)) problems.push(`the adopted notice lacks ${PROFILE_NAME}: ${banner}`)
+        const after = await api(page, 'GET', '/v1/partition-profiles')
+        const adoptedRow = after.json?.profiles?.find((p) => p.partition_table_sha256 === DETECTED_SHA)
+        if (adoptedRow?.layout_id !== PROFILE_NAME || adoptedRow.deployable !== true ||
+            adoptedRow.origin !== 'detected' || adoptedRow.adopted_at === null)
+          problems.push(`API row after naming is ${JSON.stringify(adoptedRow)}`)
+
+        // 7. It accepts a deploy.
+        const up = await uploadBuild(page, { file: FILES.adopted, layout: PROFILE_NAME }).catch((err) => ({
+          kind: 'error',
+          text: `the upload form could not select ${PROFILE_NAME}: ${err instanceof Error ? err.message.split('\n')[0] : err}`,
+        }))
+        if (up.kind !== 'result') return { problems: [...problems, `the ${PROFILE_NAME} build was not uploaded: ${up.text}`], text: text.join('\n\n') }
+        if (!(await waitForOption(page, detect.id, LABELS.adopted)))
+          return { problems: [...problems, `${LABELS.adopted} never appeared in the detect board's select`], text: text.join('\n\n') }
+        const card = await openPrecheck(page, detect.id, LABELS.adopted)
+        const cardText = (await card.innerText()).replace(/\s+/g, ' ')
+        text.push(`--- precheck after naming ---\n${cardText}`)
+        if ((await card.getAttribute('data-deployable')) !== 'true') problems.push(`the pre-check after naming is not deployable: ${cardText}`)
+        if ((await card.locator('[data-testid=precheck-refusals]').count()) !== 0) problems.push('the pre-check after naming lists refusals')
+        if (!cardText.includes(PROFILE_NAME)) problems.push(`the pre-check card does not name ${PROFILE_NAME}: ${cardText}`)
+        const pre = await api(page, 'POST', `/v1/devices/${detect.id}/deploy/precheck`, { version: LABELS.adopted, apply: 'auto' })
+        if (pre.json?.device_partition_profile !== PROFILE_NAME || pre.json?.device_partition_layout !== 'unknown')
+          problems.push(`API precheck says profile ${pre.json?.device_partition_profile}, layout ${pre.json?.device_partition_layout}; wanted ${PROFILE_NAME} and unknown`)
+        const sent = await send(page, detect.id, card)
+        if (sent.status !== 202 || sent.cmdId === null) return { problems: [...problems, `Send answered ${sent.status} with cmd_id ${sent.cmdId}`], text: text.join('\n\n') }
+        state.cmdIds.adopted = sent.cmdId
+        const r = await awaitDeploy(page, detect.id, { cmdId: sent.cmdId, label: LABELS.adopted, deadlineS: GOOD_DEADLINE_S })
+        if (r.timedOut) return { problems: [...problems, `not terminal after ${GOOD_DEADLINE_S}s: ${JSON.stringify(r.dev?.deploy?.state)}`], text: text.join('\n\n') }
+        state.elapsedS.adopted = Math.round(((Date.now() - sent.at) / 1000) * 10) / 10
+        notes.push(`Send to card ${state.elapsedS.adopted}s`)
+        if (r.card === null) problems.push('no result card naming the adopted-profile build')
+        else {
+          if (r.card.outcome !== 'good') problems.push(`card data-outcome is ${r.card.outcome}, wanted good`)
+          text.push(`--- deploy result card ---\n${r.card.text.replace(/\n+/g, ' ')}`)
+        }
+        const d = r.dev
+        if (d.fw_version !== LABELS.adopted) problems.push(`API fw_version is ${d.fw_version}, wanted ${LABELS.adopted}`)
+        if (d.deploy.state !== 'confirmed') problems.push(`API state is ${d.deploy.state}, wanted confirmed`)
+        const steps = stepStates(d)
+        if (!(steps.includes('confirming') && steps.indexOf('confirming') < steps.indexOf('confirmed')))
+          problems.push(`steps lack confirming before confirmed: ${steps.join(', ')}`)
+        text.push(`steps: ${steps.join(' > ')}`)
+        return { problems, text: text.join('\n\n') }
+      } finally {
+        if (!adopted) await cleanup()
+      }
+    },
+  },
+  {
     id: 'traps',
     async run(page) {
       const problems = []
@@ -633,7 +810,7 @@ try {
     await stopBoards()
     setupFailed(`the simulated boards never came online (see ${BOARDS.main.log})`)
   }
-  for (const board of Object.values(BOARDS)) {
+  for (const board of [BOARDS.main, BOARDS.arduino]) {
     const log = await readFile(board.log, 'utf8').catch(() => '')
     if (!log.includes(`board    ${board.name} -> ${board.id}`))
       console.error(`note: ${board.log} does not name ${board.name} -> ${board.id}; the id derivation may have drifted`)
@@ -668,7 +845,8 @@ try {
       {
         run: RUN,
         base: BASE,
-        devices: { main: BOARDS.main.id, arduino: BOARDS.arduino.id },
+        devices: { main: BOARDS.main.id, arduino: BOARDS.arduino.id, detect: BOARDS.detect.id },
+        profile: { name: PROFILE_NAME, sha256: DETECTED_SHA },
         labels: LABELS,
         cmd_ids: state.cmdIds,
         elapsed_s: state.elapsedS,
@@ -681,6 +859,7 @@ try {
   console.log(`\n${SCENARIOS.length - failed}/${SCENARIOS.length} pass; wrote to ${OUT}`)
   console.log(`good cmd_id ${state.cmdIds.good ?? '-'}`)
   console.log(`broken cmd_id ${state.cmdIds.broken ?? '-'}`)
+  console.log(`adopted cmd_id ${state.cmdIds.adopted ?? '-'}`)
   process.exitCode = failed === 0 ? 0 : 1
 } finally {
   await browser.close().catch(() => {})

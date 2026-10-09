@@ -19,6 +19,15 @@ When `/implement` finishes a task, it appends a completed entry below.
 <!-- Newest first. One entry per completed task. Capture what a future reader
      needs WITHOUT the local plan file. -->
 
+### 2026-10-09 — R3-fe-1 Partition profiles section: name a detected flash map
+
+A "Partition profiles" section between the fleet table and the upload form lists the flash
+maps the server deploys to and lets the operator name a detected one, which adopts it. The
+upload form's layout options are now the adopted profile names, and the pre-check card names the
+profile a board resolved to. Profiles re-read on `device.announce` through `useFleet`'s
+`announceSeq`. Full entry, the e2e scenario, and the named gaps (no create or forget UI):
+[board-profiles.md](board-profiles.md) → *Completed Work → R3-fe-1*.
+
 ### 2026-10-04 — R2b-be-1 Set a device's name and group (API)
 
 `PATCH /v1/devices/{device_id}` (admin-only) sets the two operator-set facts, `name` and `group_id`. Before this, `name` was in the schema and in `GET /v1/devices` but nothing wrote it, so every board showed as its id. The UI is a separate, later piece (naming from the result card).

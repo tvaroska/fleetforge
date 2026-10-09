@@ -9,6 +9,9 @@
 // (result card, R2b-fe-3), and the table's update result cards (R2b-fe-10) read the same
 // versions — all from the props this page already has, with no new hooks.
 // The upload form (R2b-fe-7) shares the one artifact list: it calls `artifacts.reload`.
+// The profiles section (R3-fe-1) owns one profile read, re-read on the fleet's announce
+// hint (`fleet.announceSeq`), and shares that list with the upload form, whose layout
+// options are the adopted profile names.
 
 import { useState } from 'react'
 import { type Me } from './api'
@@ -20,6 +23,8 @@ import { FlashBoard } from './FlashBoard'
 import { FleetTable } from './FleetView'
 import { useFleet, type EventSourceFactory } from './fleet'
 import { type HealthState } from './health'
+import { PartitionProfiles } from './PartitionProfiles'
+import { useProfiles } from './profiles'
 import { StatusStrip } from './StatusStrip'
 import { describeBoard, describeVersions } from './statusStrip'
 import { UploadBuild } from './UploadBuild'
@@ -45,6 +50,7 @@ export function Dashboard({
 }) {
   const fleet = useFleet({ onSessionExpired: expire, createEventSource })
   const artifacts = useArtifacts({ onSessionExpired: expire })
+  const profiles = useProfiles({ onSessionExpired: expire, hint: fleet.announceSeq })
   const [selected, setSelected] = useState<string | null>(null)
   const board = describeBoard(selected, fleet.devices, fleet.arrivals)
   const effective = board.kind === 'board' ? board.deviceId : null
@@ -73,10 +79,18 @@ export function Dashboard({
         onSelect={setSelected}
         versions={versions}
       />
+      {/* Naming a detected flash map comes before uploading a build for it. */}
+      <PartitionProfiles
+        profiles={profiles}
+        devices={fleet.devices}
+        now={fleet.now}
+        onSessionExpired={expire}
+      />
       {/* Flow 2 step 1 sits next to the table whose Deploy column it feeds; a finished
           upload re-reads the one artifact list, so the new version shows with no reload. */}
       <UploadBuild
         devices={fleet.devices}
+        profiles={profiles.profiles}
         onUploaded={artifacts.reload}
         onSessionExpired={expire}
       />

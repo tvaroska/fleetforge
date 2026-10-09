@@ -14,10 +14,20 @@
 // 3. **Nothing here fetches on mount** and nothing is stored: no localStorage, no URL
 //    beyond target/version/layout, never a log of the File.
 // 4. **No progress bar.** `fetch` has no upload progress and this app has no bars.
+//
+// Layouts come from the adopted partition profiles (R3-fe-1), never from what boards
+// announce: a board on an unnamed map announces `unknown`, which is not a name.
 
 import { useRef, useState, type FormEvent } from 'react'
-import { ApiError, api, type ArtifactUploaded, type DeviceSummary } from './api'
+import {
+  ApiError,
+  api,
+  type ArtifactUploaded,
+  type DeviceSummary,
+  type PartitionProfileSummary,
+} from './api'
 import { APP_IMAGE_HEAD_BYTES, readAppImage, type AppImageInfo } from './appImage'
+import { adoptedNames, effectiveLayout } from './profiles'
 
 /** The agent's build targets (`justfile` `agent_targets`), offered even on an empty fleet. */
 const KNOWN_TARGETS = ['esp32', 'esp32c3', 'esp32c6', 'esp32s3']
@@ -58,10 +68,14 @@ export function uploadErrorMessage(err: unknown, fileSize: number): string {
 
 export function UploadBuild({
   devices,
+  profiles,
   onUploaded,
   onSessionExpired,
 }: {
   devices: DeviceSummary[] | null
+  // The page's one profile list (`null` or absent until it loads): the options are its
+  // adopted names, falling back to the prebuilt agent's layout.
+  profiles?: PartitionProfileSummary[] | null
   onUploaded: () => void
   onSessionExpired: () => void
 }) {
@@ -84,19 +98,22 @@ export function UploadBuild({
   ].sort()
   const target = chosenTarget ?? info?.target ?? (fleetTargets.length === 1 ? fleetTargets[0] : '')
 
-  const layouts = [
-    ...new Set([
-      DEFAULT_LAYOUT,
-      ...fleet.flatMap((d) => (d.partition_layout === null ? [] : [d.partition_layout])),
-    ]),
-  ].sort()
-  // The one layout every board of this chip reports, else the prebuilt agent's.
+  const names = profiles ? adoptedNames(profiles) : []
+  const layouts = names.length > 0 ? names : [DEFAULT_LAYOUT]
+  // The one adopted layout every board of this chip is on (the server's resolution order),
+  // else the prebuilt agent's.
   const reported = new Set(
     fleet
-      .filter((d) => d.platform_type === target && d.partition_layout !== null)
-      .map((d) => d.partition_layout),
+      .filter((d) => d.platform_type === target)
+      .map((d) => effectiveLayout(d, profiles ?? []))
+      .filter((l): l is string => l !== null && layouts.includes(l)),
   )
-  const defaultLayout = reported.size === 1 ? [...reported][0]! : DEFAULT_LAYOUT
+  const defaultLayout =
+    reported.size === 1
+      ? [...reported][0]!
+      : layouts.includes(DEFAULT_LAYOUT)
+        ? DEFAULT_LAYOUT
+        : layouts[0]!
   const layout = chosenLayout ?? defaultLayout
 
   const mismatch = info?.target != null && target !== '' && target !== info.target

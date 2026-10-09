@@ -134,6 +134,23 @@ describe('summaryLine and fitLine', () => {
     expect(fitLine(precheck({ size_bytes: null }))).toBe('layout: board ab-4m-v1, build ab-4m-v1')
   })
 
+  it('names the adopted profile when the board announces something else (R3-fe-1)', () => {
+    const p = precheck({
+      device_partition_layout: 'unknown',
+      device_partition_profile: 'be2-map',
+      artifact_partition_layout: 'be2-map',
+    })
+    expect(fitLine(p)).toBe(
+      'layout: board be2-map (announces unknown), build be2-map · 230,000 of 1,966,080 bytes',
+    )
+    expect(fitLine(precheck({ device_partition_layout: 'unknown' }))).toBe(
+      'layout: board unknown, build ab-4m-v1 · 230,000 of 1,966,080 bytes',
+    )
+    expect(
+      fitLine(precheck({ device_partition_profile: 'ab-4m-v1', device_partition_layout: 'ab-4m-v1' })),
+    ).toBe('layout: board ab-4m-v1, build ab-4m-v1 · 230,000 of 1,966,080 bytes')
+  })
+
   it('has no fit line without a build', () => {
     expect(fitLine(precheck({ sha256: null }))).toBeNull()
   })

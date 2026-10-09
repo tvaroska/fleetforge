@@ -48,6 +48,19 @@ const artifact = {
   created_at: '2026-09-10T11:00:00Z',
 }
 
+const builtinProfile = {
+  partition_table_sha256: '1'.repeat(64),
+  layout_id: 'ab-4m-v1',
+  origin: 'builtin',
+  deployable: true,
+  ota_slot_size: 1966080,
+  flash_chip_size: 4194304,
+  detected_device_id: null,
+  device_ids: [],
+  created_at: '2026-10-09T10:00:00Z',
+  adopted_at: '2026-10-09T10:00:00Z',
+}
+
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
@@ -94,6 +107,7 @@ function mockApi(devices: DeviceSummary[]) {
     if (url.startsWith('/v1/devices/') && init?.method === 'POST') {
       return json({ cmd_id: 'c', device_id: 'x', version: '1.5.0', apply: 'auto', reused: false })
     }
+    if (url === '/v1/partition-profiles') return json({ profiles: [builtinProfile] })
     if (url === '/v1/devices') return json({ devices, arrivals: [] })
     if (url === '/v1/agent/manifest') {
       return json({
@@ -220,6 +234,24 @@ describe('Dashboard', () => {
     const { sources } = renderDashboard()
     await screen.findByTestId('strip-board')
     expect(sources).toHaveBeenCalledTimes(1)
+  })
+
+  it('renders the partition profiles and re-reads them on a device.announce frame (R3-fe-1)', async () => {
+    const fetchSpy = mockApi([device()])
+    const { sources } = renderDashboard()
+    const section = await screen.findByTestId('profiles')
+    await waitFor(() => expect(within(section).getAllByTestId('profile-row')).toHaveLength(1))
+    const reads = () =>
+      fetchSpy.mock.calls.filter(([input]) => String(input) === '/v1/partition-profiles').length
+    expect(reads()).toBe(1)
+
+    const source = sources.mock.results[0]!.value as EventSourceLike
+    source.onmessage?.(
+      new MessageEvent('message', {
+        data: JSON.stringify({ v: 1, type: 'device.announce', device_id: 'a4cf12b3de90' }),
+      }),
+    )
+    await waitFor(() => expect(reads()).toBe(2), { timeout: 2000 })
   })
 
   describe('pre-flight card', () => {

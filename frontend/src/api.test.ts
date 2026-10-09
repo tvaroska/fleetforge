@@ -79,3 +79,33 @@ describe('api.updateDevice', () => {
     expect(err.message).toBe('the API is unreachable')
   })
 })
+
+describe('api.listPartitionProfiles and api.adoptPartitionProfile (R3-fe-1)', () => {
+  it('reads the list from the relative path', async () => {
+    const spy = respond(200, '{"profiles":[]}')
+    await expect(api.listPartitionProfiles()).resolves.toEqual({ profiles: [] })
+    expect(spy.mock.calls[0][0]).toBe('/v1/partition-profiles')
+  })
+
+  it('adopts with an upper-case PATCH carrying exactly the body given', async () => {
+    const row = { partition_table_sha256: 'f'.repeat(64), layout_id: 'be2-map' }
+    const spy = respond(200, JSON.stringify(row))
+
+    await expect(
+      api.adoptPartitionProfile('f'.repeat(64), { layout_id: 'be2-map' }),
+    ).resolves.toEqual(row)
+
+    const [url, init] = spy.mock.calls[0]
+    expect(url).toBe(`/v1/partition-profiles/${'f'.repeat(64)}`)
+    expect(init?.method).toBe('PATCH')
+    expect(init?.body).toBe('{"layout_id":"be2-map"}')
+    expect(init?.credentials).toBe('same-origin')
+  })
+
+  it('passes a 409 sentence through verbatim', async () => {
+    respond(409, '{"detail":"a name is final once adopted"}')
+    const err = await rejection(api.adoptPartitionProfile('f'.repeat(64), { layout_id: 'x' }))
+    expect(err.status).toBe(409)
+    expect(err.message).toBe('a name is final once adopted')
+  })
+})

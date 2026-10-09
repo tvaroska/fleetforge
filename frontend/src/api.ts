@@ -77,6 +77,12 @@ export type DeviceSummary = {
   parent_device_id: string | null
   partition_layout: string | null
   ota_slot_size: number | null
+  // R2b-be-6 measurements, OPTIONAL: a dashboard served against an older API, and every
+  // fixture written before R3-fe-1, must keep working (the `steps?` precedent). Absent and
+  // null both mean "not reported".
+  flash_chip_size?: number | null
+  partition_table_sha256?: string | null
+  rollback_capable?: boolean | null
   capabilities: string[]
   last_seen: string | null
   enrolled_at: string
@@ -254,6 +260,10 @@ export type DeployPrecheck = {
   size_bytes: number | null
   artifact_partition_layout: string | null
   device_partition_layout: string | null
+  // R3-be-2, OPTIONAL: the effective ADOPTED profile the gate resolved for this board. A
+  // board on an adopted map still announces `unknown` in `device_partition_layout`, so this
+  // is the name to show. Absent/null = the board's own announced id stands.
+  device_partition_profile?: string | null
   ota_slot_size: number | null
   power_class: string
   expected_wake_interval_s: number | null
@@ -263,6 +273,33 @@ export type DeployPrecheck = {
   refusals: PrecheckFinding[]
   warnings: PrecheckFinding[]
 }
+
+// Mirrors `PartitionProfileSummary.origin` in api/schemas.py: provenance, never changed after
+// insert. Rendered through a lookup with a fallback (`profiles.ts::ORIGIN_LABELS`) and never
+// switched on exhaustively, so a value this file has not heard of shows as itself.
+export type PartitionProfileOrigin = 'builtin' | 'user' | 'detected'
+
+// Mirrors `PartitionProfileSummary` in api/schemas.py, field for field and in its order.
+// `layout_id` is null while a detected map is pending; `deployable` is the SERVER's
+// "adopted = named" (R3-be-2 D3), never re-derived from `adopted_at` here.
+export type PartitionProfileSummary = {
+  partition_table_sha256: string
+  layout_id: string | null
+  origin: PartitionProfileOrigin
+  deployable: boolean
+  ota_slot_size: number | null
+  flash_chip_size: number | null
+  detected_device_id: string | null
+  device_ids: string[]
+  created_at: string
+  adopted_at: string | null
+}
+
+export type PartitionProfileList = { profiles: PartitionProfileSummary[] }
+
+// Mirrors `PartitionProfileAdopt` in api/schemas.py. `ota_slot_size` is needed only when the
+// detected row has none measured (the server answers 422 without it, 409 to a differing one).
+export type PartitionProfileAdopt = { layout_id: string; ota_slot_size?: number }
 
 export class ApiError extends Error {
   readonly status: number
@@ -458,6 +495,18 @@ export const api = {
     request<DeployPrecheck>(`/v1/devices/${encodeURIComponent(deviceId)}/deploy/precheck`, {
       method: 'POST',
       body: JSON.stringify({ version, apply }),
+    }),
+
+  // R3-fe-1. Every flash map this server knows: builtin, user and detected (pending ones
+  // have `deployable: false` and no name). Admin-only.
+  listPartitionProfiles: () => request<PartitionProfileList>('/v1/partition-profiles'),
+
+  // R3-fe-1. Adopt a detected map by naming it. `PATCH` must be upper-case, for the same
+  // reason as `updateDevice`. 409/422 `detail`s are plain sentences the banner shows as-is.
+  adoptPartitionProfile: (sha256: string, body: PartitionProfileAdopt) =>
+    request<PartitionProfileSummary>(`/v1/partition-profiles/${encodeURIComponent(sha256)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
     }),
 
   // The prebuilt agent images the Web Serial flasher writes (R0-fe-3). Every offset the

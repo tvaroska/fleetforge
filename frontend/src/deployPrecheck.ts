@@ -57,8 +57,16 @@ export function summaryLine(precheck: DeployPrecheck): string {
 /** Layout and size against the board's slot, or null when there is no build to describe. */
 export function fitLine(precheck: DeployPrecheck): string | null {
   if (precheck.sha256 === null) return null
+  // An adopted map: a board on it still announces `unknown`, so name the profile the gate
+  // resolved and say what the board announced (R3-fe-1).
+  const announced = precheck.device_partition_layout ?? NOT_REPORTED
+  const profile = precheck.device_partition_profile
+  const board =
+    profile != null && profile !== precheck.device_partition_layout
+      ? `${profile} (announces ${announced})`
+      : announced
   const layout =
-    `layout: board ${precheck.device_partition_layout ?? NOT_REPORTED}, ` +
+    `layout: board ${board}, ` +
     `build ${precheck.artifact_partition_layout ?? NOT_REPORTED}`
   if (precheck.size_bytes === null) return layout
   const size =

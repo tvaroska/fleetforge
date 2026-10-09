@@ -18,7 +18,7 @@ import { render, screen } from '@testing-library/react'
 import { act } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest'
 import { FleetView } from './FleetView'
-import { COALESCE_MS, POLL_MS, type EventSourceLike } from './fleet'
+import { COALESCE_MS, POLL_MS, useFleet, type EventSourceLike } from './fleet'
 
 function device(overrides: Partial<Record<string, unknown>> = {}) {
   return {
@@ -392,5 +392,67 @@ describe('useFleet', () => {
     })
     await advance(COALESCE_MS + 10)
     expect(deviceCalls().length).toBe(before + 1)
+  })
+})
+
+// R3-fe-1: `announceSeq` is a HINT for readers of state an announce can change (partition
+// profiles). It is bumped from the frame's `type` alone; nothing is rendered from the body.
+describe('useFleet announceSeq', () => {
+  const ANNOUNCE = { v: 1, type: 'device.announce', device_id: 'a4cf12b3de90', at: '2026-09-10T12:00:00Z', online: true }
+
+  function Probe() {
+    const fleet = useFleet({ onSessionExpired: vi.fn(), createEventSource: factory })
+    return <p data-testid="seq">{fleet.announceSeq}</p>
+  }
+
+  const seq = () => screen.getByTestId('seq').textContent
+
+  it('bumps once per coalesced burst, however many announce frames it held', async () => {
+    fetchMock.mockImplementation(responds({ devices: [] }))
+    render(<Probe />)
+    await settle()
+    expect(seq()).toBe('0')
+
+    await act(async () => {
+      for (let i = 0; i < 3; i += 1) latest().message(ANNOUNCE)
+    })
+    await advance(COALESCE_MS + 10)
+    expect(seq()).toBe('1')
+
+    await act(async () => {
+      latest().message(ANNOUNCE)
+    })
+    await advance(COALESCE_MS + 10)
+    expect(seq()).toBe('2')
+  })
+
+  it('is not bumped by a heartbeat, even beside no announce', async () => {
+    fetchMock.mockImplementation(responds({ devices: [] }))
+    render(<Probe />)
+    await settle()
+
+    await act(async () => {
+      latest().message(HEARTBEAT)
+    })
+    await advance(COALESCE_MS + 10)
+    expect(seq()).toBe('0')
+  })
+
+  it('skips the first open and bumps on every re-open (the resync path)', async () => {
+    fetchMock.mockImplementation(responds({ devices: [] }))
+    render(<Probe />)
+    await settle()
+
+    await act(async () => {
+      latest().open()
+    })
+    await settle()
+    expect(seq()).toBe('0')
+
+    await act(async () => {
+      latest().open()
+    })
+    await settle()
+    expect(seq()).toBe('1')
   })
 })

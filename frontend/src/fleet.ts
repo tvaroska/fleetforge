@@ -120,6 +120,13 @@ export type Fleet = {
    * click that lands mid-poll into one request.
    */
   refresh: () => void
+  /**
+   * Bumped once per coalesced burst that contained at least one `device.announce` frame,
+   * and on each stream re-open after the first (a re-open is the resync path: frames sent
+   * during the gap are lost). A HINT for readers of state an announce can change
+   * (partition profiles, R3-fe-1); never a payload, and 0 until the first bump.
+   */
+  announceSeq: number
 }
 
 export type UseFleetOptions = {
@@ -136,6 +143,7 @@ export function useFleet({ onSessionExpired, createEventSource }: UseFleetOption
   const [stream, setStream] = useState<StreamState>('connecting')
   const [lastSyncedAt, setLastSyncedAt] = useState<number | null>(null)
   const [now, setNow] = useState(() => Date.now())
+  const [announceSeq, setAnnounceSeq] = useState(0)
 
   // The factory and the expiry callback are read through refs so the stream effect can
   // depend on nothing and therefore run exactly once per mount: re-running it would
@@ -241,6 +249,10 @@ export function useFleet({ onSessionExpired, createEventSource }: UseFleetOption
     let coalesce: ReturnType<typeof setTimeout> | null = null
     let reconnect: ReturnType<typeof setTimeout> | null = null
     let backoff = RECONNECT_INITIAL_MS
+    // A `device.announce` frame arrived since the last coalesced re-read (R3-fe-1).
+    let announced = false
+    // The first open is skipped for `announceSeq`: readers of it load on mount anyway.
+    let opened = false
 
     /** Detach and close the current source, so a late callback from it is a no-op. */
     function discard() {
@@ -256,6 +268,10 @@ export function useFleet({ onSessionExpired, createEventSource }: UseFleetOption
       if (coalesce !== null) return
       coalesce = setTimeout(() => {
         coalesce = null
+        if (announced) {
+          announced = false
+          setAnnounceSeq((n) => n + 1)
+        }
         void refresh()
       }, COALESCE_MS)
     }
@@ -269,6 +285,8 @@ export function useFleet({ onSessionExpired, createEventSource }: UseFleetOption
         if (!state.live) return
         setStream('live')
         backoff = RECONNECT_INITIAL_MS
+        if (opened) setAnnounceSeq((n) => n + 1)
+        opened = true
         // Every stream ends eventually — `sse_max_stream_s` caps it at 15 min, and a
         // Postgres listener reconnect calls `EventHub.close_all()` on purpose. Both are
         // normal, and both leave a gap; re-reading on open is the resync path, which is
@@ -285,7 +303,9 @@ export function useFleet({ onSessionExpired, createEventSource }: UseFleetOption
         try {
           const parsed: unknown = JSON.parse(event.data)
           if (parsed === null || typeof parsed !== 'object') return
-          if (typeof (parsed as { type?: unknown }).type !== 'string') return
+          const type = (parsed as { type?: unknown }).type
+          if (typeof type !== 'string') return
+          if (type === 'device.announce') announced = true
         } catch {
           return
         }
@@ -360,5 +380,5 @@ export function useFleet({ onSessionExpired, createEventSource }: UseFleetOption
 
   // `refresh` itself is `async`; the returned callback swallows the promise so a caller
   // cannot accidentally `await` the fleet's internal read.
-  return { devices, arrivals, error, stream, lastSyncedAt, now, refresh: () => void refresh() }
+  return { devices, arrivals, error, stream, lastSyncedAt, now, refresh: () => void refresh(), announceSeq }
 }

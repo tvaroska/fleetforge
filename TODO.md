@@ -414,7 +414,7 @@ Order: spec-3 → fw-2 → fw-3/fw-4 → fw-5/fw-6/be-1 → test-1 → spec-2 �
       Acceptance: `SUPPORTED_LAYOUTS` is read from the table; both layouts seeded; an
       unknown announced layout lands as `detected` and is not deployable until adopted.
       Per R3-fw-5: a board on a map its firmware does not know announces the reserved id `unknown` (never a profile name), so a detected profile keys on `partition_table_sha256`; until adopted it is refused as `unsupported_layout` (`deploy_precheck.py`).
-- [ ] **R3-fe-1**: Dashboard adopts or names a detected profile (P2, 1d)
+- [x] **R3-fe-1**: Dashboard adopts or names a detected profile (P2, 1d) _(done 2026-10-09; see docs/features/board-profiles.md)_
       Depends on `R3-be-2`. Acceptance: in `just update-e2e` style Chromium run, a detected
       profile shows, can be named, and then accepts a deploy.
       Per R3-be-2: the API is `GET/POST/PATCH/DELETE /v1/partition-profiles` (PATCH = adopt by naming, `{layout_id, ota_slot_size?}`; 409/422 details are plain text for the banner); the precheck has `device_partition_profile` (an adopted board still announces `unknown` in `device_partition_layout`); the upload form must offer catalog ids (adopted profiles), not `d.partition_layout`; there is no new SSE type, so re-read profiles on `device.announce`; `api.ts` needs the mirror types.
