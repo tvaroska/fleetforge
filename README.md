@@ -5,17 +5,12 @@ grow to Raspberry Pi and eventually FPGAs.
 
 **Safe remote firmware updates**, where "safe" means the gate catches a bad build before the fleet. Any device that does get a bad update recovers itself.
 
-> **Where this stands:** enrollment and OTA both work on real hardware, against the hosted
-> instance. You flash and enroll a board from the browser (no toolchain, no CLI) and it
-> appears live in the dashboard — fleet list, live event stream, a diagnosing serial
-> console — (R0, closed 2026-09-22, including an unaided run by someone who had never
-> seen the code). The dashboard's per-device Deploy pushes a new agent build to that
-> board and watches its version change (R1, 2026-09-23), and a board that boots a bad
-> image but never confirms it rolls itself back unattended (proven on an ESP32-S3 the same
-> day). **Next is R2, safe deploy:** confirm/rollback reporting and a checksum gate. Thus, the
-> remaining gamble (an image that boots, confirms, and is broken anyway) is narrowed.
-> Until then, deploy to one board at a time. What is open, next and blocked lives in
-> [`TODO.md`](TODO.md) and nowhere else.
+> **Where this stands:** R0-R2b are released (v0.4.3 and earlier): enroll a board from the
+> browser, deploy from the dashboard, device-side rollback of a build that never confirms,
+> and the operator flows around them. R3 adds the thin OTA library, so a maker's own
+> Arduino, PlatformIO or ESP-IDF firmware updates and rolls back the same way; it is proved
+> in QEMU and the simulator, not on a hardware bench (DECISIONS 2026-10-08). What is open,
+> next and blocked lives in [`TODO.md`](TODO.md) and nowhere else.
 
 ## Why
 
@@ -45,6 +40,7 @@ MQTT is the control plane. HTTPS carries artifact bytes.
 | [`Dockerfile`](Dockerfile) | One image, two commands — `api` and `ingestor` differ only in `command:` |
 | [`docker-compose.yml`](docker-compose.yml) | The standalone stack: the dev loop *and* the V2 self-host artifact |
 | [`frontend/`](frontend/) | Vite + React + TS dashboard. Its nginx serves the SPA and `/v1` on one origin |
+| [`agent/components/fleetforge/`](agent/components/fleetforge/) | The OTA library: ESP-IDF component + Arduino library and their worked examples; its README is the quickstart |
 | [`mosquitto/`](mosquitto/) | Broker config. Fleet authz is the two pattern rules in `acl`. Dynsec (authentication only) is provisioned by `bootstrap.sh` then `configure.sh`. A protected path |
 | [`docs/runbooks/`](docs/runbooks/) | Operational procedures, starting with the dev stack |
 | [`spec/prd.md`](spec/prd.md) | Requirements, targets, scope, risks |
@@ -57,6 +53,13 @@ MQTT is the control plane. HTTPS carries artifact bytes.
 | [`docs/features/`](docs/features/) | Per-capability detail and task history |
 | [`DECISIONS.md`](DECISIONS.md) | Append-only decision log |
 | [`CRITICAL.md`](CRITICAL.md) | Protected paths — including the ones no OTA can fix |
+
+## Put Fleetforge in your own firmware
+
+The OTA library in [`agent/components/fleetforge/`](agent/components/fleetforge/README.md)
+gives your own Arduino, PlatformIO or ESP-IDF firmware the same enroll, update and rollback
+as the stock agent. Its README routes to a worked example per toolchain, and
+`just lib-quickstart` plays the PlatformIO one in QEMU.
 
 ## Development
 

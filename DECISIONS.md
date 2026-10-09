@@ -6,6 +6,18 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-09 — R3 is prepared as v0.5.0: agent and library 0.5.0, a library README that routes to the two example READMEs, the pinned git lib_deps form proved with git+file; nothing published or deployed (R3-rel-1)
+
+- **D1. Versions.** App `0.4.3 -> 0.5.0` (minor), agent and library `0.4.7 -> 0.5.0`: the component's public surface ships for the first time (additive-only from now on) and the announce gained `lib_marker`. The app tag equals the library version this once, so `#v0.5.0` installs `Fleetforge@0.5.0`. A coincidence, not a policy; the two numbers stay independent.
+- **D2. The library README** is `agent/components/fleetforge/README.md`. It routes to the example READMEs for every command and holds no `# quickstart:` block, so the scripted blocks and their names stay unique.
+- **D3. The pinned git form** `lib_deps = Fleetforge=https://github.com/tvaroska/fleetforge.git#v0.5.0` is documented in the library README and Basic's *Your own project*. It is true only after the owner pushes `main` and the tag; proved locally with `git+file://`.
+- **D4. Two commits and a local tag.** `R3-rel-1: ...` (agent bump, READMEs, docs, test), then `chore: release v0.5.0` (the five app version files), tagged `v0.5.0`, annotated, not pushed.
+- **D5. The Arduino release zip** is built locally (`just lib-arduino-package`, gitignored); attaching it to a GitHub release is the owner's step.
+- **Release notes and owner checklist:** `docs/features/ota-library.md` -> *R3-rel-1*.
+- **Supersedes.** The R3-fw-7 "Deferred" git-URL form (now documented), and the R3-fw-6 named gap "Dev-built 0.4.7 agents announce lib_marker" (now unambiguous: 0.5.0 and later).
+
+---
+
 ## 2026-10-09 — CUJ-1's T3 gate passes on the library path: one full lib-quickstart grades steps 1-2, 3, 5, 6 on the device, update-e2e the dashboard half and the wrong-layout refusal; the duplicated-command assertion and the 2 s criterion are listed, not scored (R3-test-2)
 
 - **Run order.** lib-quickstart needs the api on 10.0.2.2 origins and update-e2e needs localhost origins, so they ran sequentially with the api restored in between. Both passed (1833 s; 7/7).

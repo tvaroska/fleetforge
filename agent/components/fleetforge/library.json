@@ -1,6 +1,6 @@
 {
   "name": "Fleetforge",
-  "version": "0.4.7",
+  "version": "0.5.0",
   "description": "Fleetforge OTA for Arduino-ESP32: enroll, announce/heartbeat and the four-verb update (stage, apply, confirm, rollback) with automatic rollback. The same C as the fleetforge ESP-IDF component, plus Fleetforge.h.",
   "keywords": ["ota", "esp32", "firmware-update", "rollback", "fleet"],
   "frameworks": ["arduino"],

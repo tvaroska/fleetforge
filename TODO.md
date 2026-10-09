@@ -437,7 +437,7 @@ Order: spec-3 → fw-2 → fw-3/fw-4 → fw-5/fw-6/be-1 → test-1 → spec-2 �
       Per R3-test-1: steps 1-2, 5 and 6 on the library path are all one `just lib-quickstart` run (~25 min; needs the api on 10.0.2.2 origins).
       Per R3-spec-2: rows and graded halves in docs/features/ota-library.md → *CUJ-1 Driver proposal*; one full `just lib-quickstart` grades 1-2, 3, 5, 6 on the device, `just update-e2e` the dashboard half of 5 and 6 and the wrong-layout row; the duplicated-command assertion has no harness (list it, do not score it).
       Per R3-be-1: `just update-e2e`'s synthetic builds now carry a marker (`LIB_MARKER` in update-flow-e2e.mjs); a plain build gates as `no_library_marker`.
-- [ ] **R3-rel-1**: Quickstart, archive and release (P1, 0.5d)
+- [x] **R3-rel-1**: Quickstart, archive and release (P1, 0.5d) _(done 2026-10-09; local only: v0.5.0 tagged, not pushed; publish and deploy are the owner's; see docs/features/ota-library.md)_
       README quickstart for the library, `docs/features/ota-library.md` completed entries,
       `agent/version.txt` bump, `/release fleetforge minor`, then
       `just agent-publish-all` + `just agent-check-prod` **only with the owner's go-ahead**.

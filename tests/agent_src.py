@@ -23,6 +23,7 @@ AGENT_MAIN_C = AGENT_MAIN_DIR / "agent_main.c"
 # R3-fw-3: the same component directory is the Arduino library (library.json), and the
 # wrapper is its second consumer. The example and its partitions.csv travel together.
 LIBRARY_JSON = COMPONENT_DIR / "library.json"
+COMPONENT_README = COMPONENT_DIR / "README.md"
 ARDUINO_WRAPPER_CPP = COMPONENT_SRC / "Fleetforge.cpp"
 ARDUINO_WRAPPER_H = COMPONENT_SRC / "Fleetforge.h"
 LIB_VERSION_H = COMPONENT_SRC / "ff_lib_version.h"

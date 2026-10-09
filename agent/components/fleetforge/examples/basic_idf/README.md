@@ -6,6 +6,8 @@ the message and the version, upload the new build to your fleet, and the board u
 itself over the air. If the new build cannot reach the fleet, the board rolls back to the
 old one on its own. Your firmware keeps blinking the whole time, network or not.
 
+The library itself: [`../../README.md`](../../README.md).
+
 | File | What it is |
 |---|---|
 | `main/main.c` | your firmware: `fleetforge_start()` first, then the blinker |

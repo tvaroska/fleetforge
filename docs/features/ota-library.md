@@ -16,6 +16,32 @@ becomes a board in the field that fixes itself" — this release *is* that journ
 
 ## Completed Work
 
+### R3-rel-1 (2026-10-09): library README quickstart, R3 archived, v0.5.0 prepared locally (agent/library 0.5.0); not deployed
+
+Nothing was published or deployed: no push, no tag push, no `just deploy`, no `agent-publish*`.
+
+**What shipped.**
+- `agent/components/fleetforge/README.md` (new): what the firmware does, a toolchain table that links `examples/Basic/README.md`, its *Arduino IDE* section and `examples/basic_idf/README.md`, the pinned git form, requirements, flash layouts, the marker, public headers, what is not yet. It holds no `# quickstart:` block; the scripted blocks stay only in the two example READMEs.
+- `examples/Basic/README.md`: link to the library README, a "Without a clone" pinned `lib_deps` block under *Your own project*, and the zip name `Fleetforge-0.5.0.zip`. `examples/basic_idf/README.md`: a link to the library README. No quickstart block changed.
+- Repo `README.md`: a factual "Where this stands", a section pointing at the library README, and a *Where things live* row.
+- `tests/test_worked_example.py::TestTheLibraryReadme`: links resolve, both example READMEs linked both ways, no quickstart block, the zip name equals `agent/version.txt`.
+- Versions: agent and library `0.4.7 -> 0.5.0` (`version.txt`, `library.json`, `ff_lib_version.h`); app `0.4.3 -> 0.5.0` in the release commit.
+
+**Pinned form.** `lib_deps = Fleetforge=https://github.com/tvaroska/fleetforge.git#v0.5.0` is true only once the owner pushes `main` and the tag. The local proof is the same line with `git+file://<repo>#v0.5.0`.
+
+**Release notes v0.5.0.**
+- Agent and library 0.5.0: every 0.5.0 agent and library build announces `lib_marker: 1` and carries the marker; the released 0.4.7 (`v0.4.3`) announces none (never warned).
+- Migration `0007` (`partition_profiles`): restart `fleetforge-ingestor` after the api rollout; its retained replay records boards on unknown maps. The downgrade drops operator profiles and adoptions.
+- Migration `0008` (`artifacts.has_lib_marker`): artifacts uploaded before it have no verdict and never warn until re-uploaded (the re-upload fills it). The downgrade drops the verdicts.
+- New gating code `no_library_marker` (override by name).
+- Named gaps carried from R3: the duplicated deploy command and the 2 s criterion have no harness; the IDF flavour is compile-only; QEMU boots the hybrid build; no registries.
+
+**Owner checklist, in order (NOT done by this task).**
+1. `git push origin main --tags` (makes Basic step 0's `git clone` and the `#v0.5.0` pin true).
+2. Publish agent bundles BEFORE deploying (S0-infra-10): `just agent-check-fresh`, the typed GCS `just agent-publish-all` from the justfile comment, then `just agent-check-prod`.
+3. `/release` steps 7-12 (`just build`, digests into `services/prod/docker-compose.yml`, `just deploy --yes --service fleetforge`, ops-log promotions).
+4. Attach `dist/arduino/Fleetforge-0.5.0.zip` to the GitHub release.
+
 ### R3-test-2 (2026-10-09): CUJ-1 played end to end on the library path; deterministic judge PASS on steps 1-2, 3, 5, 6
 
 No code changed. Evidence kept outside the repo in `/tmp/ff-r3-test-2` (logs, scorecard, jeep output).
@@ -933,7 +959,7 @@ _Tracked in `TODO.md` (live status lives there, not here)._
 
 ## Planned Work
 
-### Thin OTA library — Arduino, ESP-IDF component, PlatformIO (Priority: P1)
+### Thin OTA library — Arduino, ESP-IDF component, PlatformIO (Priority: P1) — **LANDED 2026-10-09 (R3, v0.5.0 prepared; deploy pending the owner)**
 
 - **Problem:** A hobbyist's unit of work is a sketch, not a Fleetforge agent. Today the
   only firmware that speaks the protocol is the prebuilt agent, which connects,
@@ -1499,6 +1525,8 @@ judge reads it, so it is left for the owner.
    dashboard half is graded.
 
 ### R3 task list — moves into `TODO.md` when R3 opens
+
+_Historical. R3 opened 2026-10-08; every task is done, each with its entry under Completed Work._
 
 Written 2026-09-22 alongside `R3-spec-1`, and moved here from `TODO.md` on 2026-10-01
 (`S0-ops-1`). `TODO.md` carries Sprint 0 plus the *active* release only, and R3 sits behind

@@ -9,6 +9,8 @@ keeps blinking the whole time, network or not.
 > No board? `just lib-quickstart` (from the repository root) plays every step below in the
 > QEMU emulator against a local Fleetforge server.
 
+The library itself: [`../../README.md`](../../README.md).
+
 ## What you need
 
 - [PlatformIO Core](https://platformio.org/install/cli) 6.2.0 or newer (`pio --version`).
@@ -149,19 +151,27 @@ pio run
   `Fleetforge.begin(FW_VERSION)` stays the first line of `setup()` and the sketch keeps the
   "do not" rules in `Basic.ino`'s header comment.
 
+Without a clone, replace the `lib_deps` line with a pinned git dependency:
+
+```ini
+lib_deps = Fleetforge=https://github.com/tvaroska/fleetforge.git#v0.5.0
+```
+
+PlatformIO fetches it from GitHub and the line names a release tag, so it works only once
+that tag is published. Pin a tag, never a branch.
+
 Steps 2 to 7 are the same for your project: build there, upload the `firmware.bin`.
 
 ## Arduino IDE
 
 The repository layout is a PlatformIO library and an ESP-IDF component; the Arduino IDE
-needs it repackaged. Build the package from the repository root (a release zip will carry
-the same file, R3-rel-1):
+needs it repackaged. Build the package from the repository root:
 
 ```sh
 just lib-arduino-package
 ```
 
-That writes `dist/arduino/Fleetforge-0.4.7.zip`. Then, in the Arduino IDE (2.x):
+That writes `dist/arduino/Fleetforge-0.5.0.zip`. Then, in the Arduino IDE (2.x):
 
 - **Boards Manager:** add `https://espressif.github.io/arduino-esp32/package_esp32_index.json`
   under *File → Preferences → Additional boards manager URLs*, and install **esp32 by

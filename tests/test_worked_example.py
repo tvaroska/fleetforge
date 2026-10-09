@@ -37,6 +37,7 @@ from tests.agent_src import (
     AGENT_MAIN_C,
     COMPONENT_DIR,
     COMPONENT_INCLUDE,
+    COMPONENT_README,
     EXAMPLE_INO,
     EXAMPLE_PLATFORMIO_INI,
     EXAMPLE_README,
@@ -398,6 +399,40 @@ esp32          SUCCESS   00:00:05.440
 esp32s3        SUCCESS   00:00:04.893
 ========================= 2 succeeded in 00:00:10.333 =========================
 """
+
+
+class TestTheLibraryReadme:
+    """R3-rel-1: the library README routes to the example READMEs; it runs nothing itself."""
+
+    def test_it_links_both_example_readmes(self) -> None:
+        text = COMPONENT_README.read_text()
+        assert "](examples/Basic/README.md" in text
+        assert "](examples/basic_idf/README.md" in text
+
+    def test_every_relative_link_resolves(self) -> None:
+        text = COMPONENT_README.read_text()
+        targets = re.findall(r"\]\(([^)\s]+)\)", text)
+        assert targets
+        for target in targets:
+            if target.startswith(("http://", "https://", "#")):
+                continue
+            path = target.split("#", 1)[0]
+            assert (COMPONENT_README.parent / path).exists(), target
+
+    def test_it_holds_no_quickstart_block(self) -> None:
+        text = COMPONENT_README.read_text()
+        assert "# quickstart:" not in text
+        assert quickstart.extract_blocks(text) == {}
+
+    def test_the_zip_name_follows_the_library_version(self) -> None:
+        version = (AGENT_DIR / "version.txt").read_text().strip()
+        for readme in (EXAMPLE_README, COMPONENT_README):
+            for name in re.findall(r"Fleetforge-(\d+\.\d+\.\d+)\.zip", readme.read_text()):
+                assert name == version, (readme, name)
+
+    def test_both_example_readmes_link_back(self) -> None:
+        for readme in (EXAMPLE_README, IDF_EXAMPLE_README):
+            assert "](../../README.md)" in readme.read_text(), readme
 
 
 class TestQuickstartScript:
