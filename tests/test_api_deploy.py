@@ -63,6 +63,8 @@ LAYOUT = "ab-4m-v1"
 # spec/device-protocol.md → Partition layouts, retyped (R2b-be-7).
 AB_SHA = "1fa67e6bbd034e434d04e9d6f4f52bbe899361602cd498573eb3bde97d1559ed"
 ARDUINO_SHA = "05528998ae17fb6a7a5741443f9a7a4720c766f370fefc30814cbc3e391c1fc4"
+# tests/fixtures/wrong-layout-partitions.csv: matches no builtin layout (R3-fw-5, R3-be-2).
+WRONG_SHA = "47db53920359cfb4581532a293d8e563401f3abe37f9b282cc713039ac937c4c"
 # Read from the defaults rather than retyped: the URL's lifetime is also the reuse
 # window, and a literal here would keep passing while the setting drifted.
 TTL_S = settings_for_tests().signed_url_ttl_s
@@ -105,6 +107,8 @@ async def db(engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
             await session.execute(delete(Device))
             await session.execute(text("DELETE FROM artifact_versions"))
             await session.execute(text("DELETE FROM artifacts"))
+            # R3-be-2: operator and detected profiles; never the builtins.
+            await session.execute(text("DELETE FROM partition_profiles WHERE origin <> 'builtin'"))
             await session.commit()
 
 
@@ -880,6 +884,7 @@ class TestPrecheck:
         assert body["size_bytes"] == len(IMAGE)
         assert body["artifact_partition_layout"] == LAYOUT
         assert body["device_partition_layout"] == LAYOUT
+        assert body["device_partition_profile"] == LAYOUT
         assert body["confirm_timeout_s"] == CONFIRM_TIMEOUT_S
         assert body["device_online"] is True
 
@@ -938,6 +943,69 @@ class TestPrecheck:
             "slot_too_small",
             "no_ota_capability",
         ]
+
+    async def test_an_unknown_board_is_deployable_only_once_its_map_is_adopted(
+        self,
+        admin_app: FastAPI,
+        db: AsyncSession,
+        store: MemoryObjectStore,
+        publisher: FakeCommandPublisher,
+    ) -> None:
+        """R3-be-2 end to end: a board on a map nobody knew announces `unknown`; its map is
+        recorded pending; it is refused (and nothing is written) until an operator names
+        the map; then an image uploaded for that name is deployable to it."""
+        await add_device(
+            db,
+            partition_layout="unknown",
+            ota_slot_size=1835008,
+            partition_table_sha256=WRONG_SHA,
+        )
+        await db.execute(
+            text(
+                "INSERT INTO partition_profiles (partition_table_sha256, origin, ota_slot_size) "
+                "VALUES (:sha, 'detected', 1835008)"
+            ),
+            {"sha": WRONG_SHA},
+        )
+        await db.commit()
+        await add_artifact(db, version="be2-a")
+        token = await login_admin(admin_app)
+
+        refused = (await precheck(admin_app, token, version="be2-a")).json()
+        assert refused["deployable"] is False
+        assert [r["code"] for r in refused["refusals"]] == ["unsupported_layout"]
+        message = refused["refusals"][0]["message"]
+        assert message.startswith("this device's flash map is not a layout this server supports")
+        assert "recorded as a detected profile" in message
+        assert refused["device_partition_profile"] is None
+        sent = await deploy(admin_app, token, version="be2-a")
+        assert sent.status_code == 409
+        assert sent.json()["detail"] == message
+        assert await events(db) == []
+        assert publisher.published == []
+
+        async with client_for(admin_app, base_url="https://testserver") as client:
+            adopted = await client.patch(
+                f"/v1/partition-profiles/{WRONG_SHA}",
+                json={"layout_id": "be2-map"},
+                headers={"authorization": f"Bearer {token}"},
+            )
+        assert adopted.status_code == 200, adopted.text
+        await add_artifact(db, sha256=OTHER_SHA256, version="be2-b", layout="be2-map")
+
+        ok = (await precheck(admin_app, token, version="be2-b")).json()
+        assert ok["deployable"] is True, ok["refusals"]
+        assert ok["refusals"] == []
+        assert ok["device_partition_profile"] == "be2-map"
+        assert ok["device_partition_layout"] == "unknown"
+        wrong = (await precheck(admin_app, token, version="be2-a")).json()
+        assert [r["code"] for r in wrong["refusals"]] == ["layout_mismatch"]
+        assert "runs partition layout be2-map" in wrong["refusals"][0]["message"]
+
+        accepted = await deploy(admin_app, token, version="be2-b")
+        assert accepted.status_code == 202, accepted.text
+        assert [e["state"] for e in await events(db)] == ["requested"]
+        assert publisher.last["artifact"]["sha256"] == OTHER_SHA256
 
     @pytest.mark.parametrize(
         ("overrides", "codes"),

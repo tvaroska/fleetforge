@@ -6,6 +6,80 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-09 — Partition profiles are a global table keyed by fingerprint; builtins are seeded by migration and immutable; an unknown table is recorded as a pending `detected` profile and adopted by naming it; the gate resolves an `unknown` board by fingerprint (R3-be-2)
+
+**Decided.** Migration `0007` adds `partition_profiles`; `fleetforge/partition_profiles.py`
+owns it; `/v1/partition-profiles` (admin) lists, creates, adopts and deletes. Details, the
+API table and the T2 table: `docs/features/board-profiles.md` → *R3-be-2*.
+
+- **D1. Global, not per fleet or per group** (settles the board-profiles.md open item).
+  One install is one fleet in v1 and in V2 self-hosting; `device_groups` scope enrollment
+  tokens, not fleets. A flash map is a physical property of a board, so moving a board
+  between groups must not change what it can take. Artifacts are global (`artifact_versions`
+  is keyed by `(target, version)`) and a profile id is what an artifact's `partition_layout`
+  names, so the two scopes must match. V3 multi-tenant adds a tenant column to both, additively.
+- **D2. PK `partition_table_sha256`; `layout_id` a nullable UNIQUE name.** Every board on an
+  unsupported map announces the same `unknown` (the R3-fw-5 named gap), so the id cannot be
+  the key. Every row has a fingerprint (NOT NULL): a profile without one cannot be checked.
+- **D3. Origins `builtin | user | detected`**, provenance, never changed after insert.
+  Adopted (`adopted_at IS NOT NULL`) = named = deployable. Builtin and user rows are adopted
+  at insert; only `detected` may be pending. All of it is DB CHECKs.
+- **D4. Builtins are seeded by the migration (retyped literals, no `fleetforge` import) and
+  immutable**: PATCH/DELETE answer 409. A new builtin is a new migration INSERT (check first
+  that no user row holds that name or fingerprint). Tests pin DB builtins = `BUILTIN_LAYOUTS`
+  = the spec table. An adopted name never changes either (artifacts carry it as text); such
+  a profile is deletable only while no artifact names it. A pending row is always deletable.
+- **D5. `SUPPORTED_LAYOUTS` → `BUILTIN_LAYOUTS`.** It is the seed, the firmware's
+  `FF_KNOWN_LAYOUTS`, the spec table and what agent bundles validate against (bundles are
+  built only from `agent/partitions.csv` and load with no DB session), not "what this server
+  supports". The runtime set is a `LayoutCatalog` loaded from the table per request
+  (`load_layout_catalog`, not `load_catalog`, which is the agent catalog). Old DECISIONS
+  mentions and `agent/` comments are left as they are (append-only; firmware is CRITICAL and
+  an edit marks bundles stale): R3-fw-6 fixes the `ff_identity.c` comment.
+- **D6. Detection is in the ingestor**, after the device UPDATE returned a live row, as one
+  `INSERT … SELECT … WHERE NOT EXISTS (that id is a profile) AND pending < 32 ON CONFLICT
+  DO NOTHING`, in a SAVEPOINT. Idempotent under QoS-1 redelivery and the retained replay,
+  capped (`DETECTED_PENDING_CAP`, WARNING when it blocks), never for an unregistered or
+  decommissioned device, never in `store.py` (its "never INSERT" is about `devices`). A
+  failure (`except SQLAlchemyError`, never bare) is logged and the announce stands. Enroll
+  does not detect: the first announce follows within seconds. A slot ≤ 0 is stored NULL.
+- **D7. The gate resolves the effective layout**: the announced id if it is adopted (with the
+  existing fingerprint check, so a builtin id on another table is still
+  `partition_table_mismatch` and creates no row); else the adopted profile the fingerprint
+  matches (the only way an `unknown` board is ever deployable); else `unsupported_layout`,
+  whose old sentence is a byte-for-byte prefix plus one adoption sentence when the
+  fingerprint is pending. `catalog` is a required keyword of `refusals`, so
+  `deploy_precheck.py` stays pure and no path falls back to builtins silently. The
+  pre-check reports `device_partition_profile` (additive).
+- **D8. `MAX_PROFILE_SLOT_SIZE = 4 MiB`** for operator-entered or adopted slots: nginx's
+  `client_max_body_size 4m` on `location = /v1/artifact`; a larger slot would let the API
+  accept what nginx answers with its own HTML 413. `tests/test_frontend_nginx.py` pins it.
+- **Deviation from the plan, named.** D7 as written also resolves (a) an id-less board with a
+  known fingerprint and (b) an unrecognised non-`unknown` id with a known fingerprint. Both
+  were previously "not layout-checked" / "refused as unsupported". Two R3-fw-5/R2b-be-7 unit
+  tests encoded the old outcome; they now use an unknown table for their original intent,
+  and new tests pin the resolution. Real firmware announces the id it detected by
+  fingerprint, so neither case arises from a current build.
+- **Release note.** Migration `0007`. The ingestor never fails a message on a `0006` schema
+  (savepoint), but detects nothing until the api has migrated: restart
+  `fleetforge-ingestor` after the api rollout, as for be-5/be-6. Its retained replay then
+  records every board already on an unknown map (seen on dev: three old boards on the
+  R3-fw-5 wrong-layout fixture). **The downgrade drops operator profiles and adoptions**,
+  unlike 0005/0006.
+- **Rejected.** Per-group profiles (D1). Deriving "detected" at read time from `devices` with
+  no row (the acceptance wants a pending row, and the row keeps the first device, slot and
+  flash size). Inserting from `store.py`. A DB trigger for builtin immutability (the API is
+  the only writer besides migrations and the ingestor's `DO NOTHING`). Syncing builtins
+  from code at startup (migrations own data). Server-side fingerprinting of an uploaded
+  `partitions.csv` (useful follow-up, out of scope). A new SSE event type (`device.announce`
+  already fires in the detecting transaction).
+- **Proposed for the owner (`spec/` untouched).** `spec/device-protocol.md` → *Partition
+  layouts*: a paragraph saying the table is the builtin set and a server may hold
+  operator-defined profiles keyed by fingerprint, resolved for boards announcing `unknown`.
+  Text in `docs/features/board-profiles.md` → *R3-be-2*.
+
+---
+
 ## 2026-10-09 — The Arduino IDE package is generated: flattened src/, library.properties from library.json, LOG_LOCAL_LEVEL as a source prelude, no dot_a_linkage; proved by `just lib-arduino-check` on core 3.3.12 (R3-fw-8)
 
 **Decided.** `scripts/arduino_package.py` (`just lib-arduino-package`) writes

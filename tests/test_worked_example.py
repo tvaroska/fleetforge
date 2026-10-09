@@ -31,7 +31,7 @@ from types import ModuleType
 
 import pytest
 
-from fleetforge.firmware.manifest import EXPECTED_PARTITION_LAYOUT, SUPPORTED_LAYOUTS
+from fleetforge.firmware.manifest import BUILTIN_LAYOUTS, EXPECTED_PARTITION_LAYOUT
 from tests.agent_src import (
     AGENT_DIR,
     AGENT_MAIN_C,
@@ -175,7 +175,7 @@ class TestTheIdfExampleLayout:
         assert ("ff_cfg", "data", "0x40", 0x12000, 0x1000) in rows
 
     def test_fingerprint_is_the_spec_and_the_catalog(self) -> None:
-        profile = SUPPORTED_LAYOUTS[EXPECTED_PARTITION_LAYOUT]
+        profile = BUILTIN_LAYOUTS[EXPECTED_PARTITION_LAYOUT]
         assert EXPECTED_PARTITION_LAYOUT == "ab-4m-v1"
         fingerprint = _fingerprint(_rows(IDF_EXAMPLE_PARTITIONS))
         assert fingerprint == profile.partition_table_sha256 == EXPECTED_PARTITION_TABLE_SHA256

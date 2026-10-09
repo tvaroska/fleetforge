@@ -66,11 +66,11 @@ from fleetforge.firmware.index import (
     compare_published_versions,
 )
 from fleetforge.firmware.manifest import (
+    BUILTIN_LAYOUTS,
     EXPECTED_OTA_SLOT_SIZE,
     EXPECTED_PARTITION_LAYOUT,
     MANIFEST_SCHEMA,
     PART_NAMES,
-    SUPPORTED_LAYOUTS,
     UNKNOWN_PARTITION_LAYOUT,
     AgentBuildInfo,
     AgentManifest,
@@ -107,7 +107,7 @@ __all__ = [
     "PART_NAMES",
     "PartManifest",
     "PublishedVersion",
-    "SUPPORTED_LAYOUTS",
+    "BUILTIN_LAYOUTS",
     "SupersededEntry",
     "UNKNOWN_PARTITION_LAYOUT",
     "VersionStatus",

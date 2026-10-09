@@ -26,6 +26,13 @@ about *not* believing something is alive:
 Together: **`last_seen` advances only on a live (`retain=False`) message that is not
 `presence{online:false}`.**
 
+**The ingestor's one INSERT is a detected partition profile (R3-be-2)**, and only for a
+live, registered device: after an announce has updated the device row, a partition table
+nobody knows becomes one pending `partition_profiles` row
+(`partition_profiles.note_detected`, idempotent and capped). It runs in a SAVEPOINT and a
+failure there is logged and never costs the announce. `store.py` still never INSERTs: its
+rule is about `devices`, the enrollment boundary.
+
 This module does not commit — the caller owns the transaction, which is what lets the
 test suite drive it through the rolled-back `session` fixture.
 """
@@ -33,8 +40,11 @@ test suite drive it through the rolled-back `session` fixture.
 import datetime as dt
 import logging
 
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from fleetforge import partition_profiles
+from fleetforge.db.models import Device
 from fleetforge.deploys import record_observed_status
 from fleetforge.events import DeviceEvent, EventType, emit
 from fleetforge.ingestor import store
@@ -101,6 +111,9 @@ async def handle_up_message(
             session, device_id, announce, received_at, advance_last_seen=not retained
         )
         event_type = EventType.DEVICE_ANNOUNCE
+        if row is not None:
+            # Retained replays too: a detected map is state, not liveness.
+            await _note_detected_profile(session, row)
 
     elif parsed.channel == UpChannel.PRESENCE:
         presence = decode(PresencePayload, topic, payload)
@@ -187,3 +200,23 @@ async def handle_up_message(
     )
     await emit(session, event)
     return event
+
+
+async def _note_detected_profile(session: AsyncSession, row: Device) -> None:
+    """Record an unknown partition table as a pending profile; never lose the announce.
+
+    The SAVEPOINT is what makes "never" true: a failure (including a new-image ingestor on
+    a schema the api has not migrated yet, `UndefinedTableError`) rolls back only this
+    statement, and the announce already applied in the outer transaction stands. No event:
+    the same transaction emits `device.announce`, the hint to re-read the profiles.
+    """
+    device_id = row.device_id
+    try:
+        async with session.begin_nested():
+            await partition_profiles.note_detected(session, row)
+    except SQLAlchemyError:
+        logger.warning(
+            "device %s: detected-profile bookkeeping failed; announce kept",
+            device_id,
+            exc_info=True,
+        )

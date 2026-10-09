@@ -38,8 +38,8 @@ from pydantic import ValidationError
 
 from fleetforge.firmware.index import DEFAULT_INDEX_KEY, AgentIndex, AgentIndexEntry
 from fleetforge.firmware.manifest import (
+    BUILTIN_LAYOUTS,
     PART_NAMES,
-    SUPPORTED_LAYOUTS,
     BundleManifest,
     ConfigPartition,
 )
@@ -196,11 +196,13 @@ def _bundle_from_manifest(entry: AgentIndexEntry, manifest: BundleManifest) -> A
             f"manifest says layout {manifest.partition_layout!r} but the index filed it as "
             f"{entry.partition_layout!r}"
         )
-    profile = SUPPORTED_LAYOUTS.get(manifest.partition_layout)
+    # BUILTIN_LAYOUTS, not the partition_profiles table (R3-be-2 D5): an agent bundle is
+    # only ever built from agent/partitions.csv, and the catalog loads with no DB session.
+    profile = BUILTIN_LAYOUTS.get(manifest.partition_layout)
     if profile is None:
         raise ValueError(
             f"partition_layout {manifest.partition_layout!r} is not one of "
-            f"{list(SUPPORTED_LAYOUTS)} (spec/device-protocol.md)"
+            f"{list(BUILTIN_LAYOUTS)} (spec/device-protocol.md)"
         )
     expected_slot = profile.ota_slot_size
     if manifest.ota_slot_size != expected_slot:

@@ -13,6 +13,102 @@ finishes a task, it appends a completed entry below.
 
 ## Completed Work
 
+### R3-be-2 (2026-10-09): partition profiles table, detected and user-defined
+
+CRITICAL (new Alembic migration `0007`). Decision: `DECISIONS.md` 2026-10-09 (R3-be-2).
+`spec/`, `agent/`, `frontend/` and `mosquitto/` untouched. Board-profiles step 2.
+
+As built:
+
+- **Table `partition_profiles`** (migration `0007`, model `PartitionProfile`), **global**
+  (D1), keyed by `partition_table_sha256` (PK, lowercase hex CHECK); `layout_id` is a
+  nullable UNIQUE name (`SafeSegment` shape, never `unknown`); `origin` is
+  `builtin | user | detected` (CHECK, never changes); `ota_slot_size`, `flash_chip_size`,
+  `detected_device_id` (no FK), `created_at`, `adopted_at`. Adopted = named = deployable;
+  only `detected` may be pending. CHECKs `adopted_is_named`, `only_detected_pending`,
+  `adopted_has_slot`, `slot_positive`. The migration seeds the two builtins from retyped
+  literals; `tests/test_partition_profiles.py` pins them equal to `BUILTIN_LAYOUTS`.
+  **`downgrade()` drops operator profiles and adoptions.**
+- **`SUPPORTED_LAYOUTS` → `BUILTIN_LAYOUTS`** (D5): the seed, the firmware's
+  `FF_KNOWN_LAYOUTS`, the spec table, and what agent bundles validate against
+  (`bundledir.py`, `catalog.py` stay on it: no DB session at bundle load). What the server
+  supports at runtime is the table, read per request as a `LayoutCatalog`
+  (`fleetforge/partition_profiles.py::load_layout_catalog`).
+- **Gate (D7).** `deploy_precheck.refusals(..., catalog=)` (required keyword; the module
+  stays pure). Effective layout = the announced id if adopted, else the adopted profile
+  the fingerprint matches, else `unsupported_layout`. A pending fingerprint appends one
+  sentence ("recorded as a detected profile … adopt it by naming it …") to the unchanged
+  old sentence. The fingerprint check runs only when the announced id itself is adopted, so
+  a builtin id on a foreign table is still `partition_table_mismatch`. The multi-layout
+  fix names an operator profile with "the partitions.csv it was defined from" instead of
+  echoing its id. `DeployPrecheck.device_partition_profile` (additive) is the effective id.
+- **Detection (D6)** in the ingestor, after the announce UPDATE returned a live row:
+  `note_detected` is one `INSERT … SELECT … WHERE NOT EXISTS (layout named) AND pending <
+  32 ON CONFLICT DO NOTHING RETURNING`, in a SAVEPOINT (`except SQLAlchemyError`: warn,
+  keep the announce). INFO on a new row; WARNING when the cap blocked one. `store.py`
+  unchanged. Retained replays detect too.
+- **Upload.** `POST /v1/artifact` loads the catalog before reading the body; the
+  `partition_layout` must be an adopted profile and its slot is the ceiling. The 400 lists
+  `sorted(catalog.layouts)`.
+- **API** (admin-only, `api/routers/partition_profiles.py`):
+
+  | Route | Answer |
+  |---|---|
+  | `GET /v1/partition-profiles` | 200 `{profiles: [...]}`: builtins, adopted by name, pending oldest first; each with `deployable` and live `device_ids` |
+  | `POST /v1/partition-profiles` `{layout_id, partition_table_sha256, ota_slot_size}` | 201 user profile, deployable; 409 duplicate sha (pending: "adopt it by naming it") or name; 422 `unknown`, uppercase sha, slot ≤ 0 or > 4 MiB, extra keys |
+  | `PATCH /v1/partition-profiles/{sha}` `{layout_id, ota_slot_size?}` | 200 adopts a pending row (measured slot wins); 409 builtin, already named, slot differs, name taken; 422 slot missing, measured slot > 4 MiB; 404 unknown/malformed sha |
+  | `DELETE /v1/partition-profiles/{sha}` | 204 pending or image-less user/adopted row; 409 builtin or "N artifacts are labelled for <id>"; 404 |
+
+- **No new SSE type**: the announce that creates a detected row already emits
+  `device.announce`; the dashboard re-reads profiles on it (R3-fe-1).
+- **Behaviour change, named:** an announce whose id the server does not know but whose
+  fingerprint is an adopted profile now resolves to that profile (before, any unknown id
+  was refused). An id-less board with a known fingerprint is layout-checked under that
+  profile's id. Two `tests/test_deploy_precheck.py` cases were updated for this.
+
+**Spec proposal (not applied; `spec/` is protected).** `spec/device-protocol.md` →
+*Partition layouts*, a paragraph after the table:
+
+> The table is the builtin set: every agent and library build knows these ids and their
+> fingerprints. A server may also hold operator-defined profiles, keyed by
+> `partition_table_sha256`. A board on such a map announces `unknown`, because its firmware
+> knows only the builtin ids. The server resolves it by fingerprint, and refuses it until an
+> operator has named the profile. An operator-defined profile never changes a builtin row,
+> and a builtin id is never reused.
+
+If R3-fw-5's Patch A (the reserved `unknown`) is not yet applied, this goes in with it.
+
+**Release note.** Migration `0007`. The ingestor never fails a message on a `0006` schema
+(detection is in a savepoint, `UndefinedTableError` is caught), but nothing is detected
+until the api has migrated. As with be-5 and be-6, restart `fleetforge-ingestor` after the
+api rollout; its retained replay then records every board already on an unknown map. A
+downgrade drops operator profiles; artifacts labelled with a user layout then neither
+upload nor deploy until the profile is re-created.
+
+**T1.** `just test`: lint, mypy and 1680 tests green, including the new
+`test_partition_profiles.py` and `test_api_partition_profiles.py`, and `test_schema.py`'s
+upgrade → downgrade → upgrade plus `alembic check`.
+
+**T2** (dev stack, api restarted first, then ingestor; run id `1791539097`):
+
+| # | Observed |
+|---|---|
+| 0 | `alembic_version` `0007`; two builtin adopted rows (`ab-4m-arduino-v1`, `ab-4m-v1`, 1966080, spec shas). The ingestor's retained replay at once recorded X from an older dev board (`0a6341b1728c`); cleared with `DELETE` (204) so be2a would be the detector |
+| A | GET: both builtins `deployable: true`, `device_ids` 6 and 7 dev boards |
+| B | `just sim … --name be2a --partition-layout unknown --partition-sha X --flash-chip-size 4194304`: ingestor INFO "… recorded as a detected profile, pending adoption"; row `detected`, `layout_id` null, `deployable` false, slot 1966080, flash 4194304, `detected_device_id` `d212564bc71d` (be2a) |
+| C | sim again + `docker compose restart ingestor`: still 1 row for X, no bookkeeping warnings |
+| D | upload `be2-a-1791539097` (esp32c6, `ab-4m-v1`) 201; precheck `deployable: false`, `unsupported_layout`, old sentence + "This flash map is recorded as a detected profile …", `device_partition_profile: null` |
+| E | POST /deploy 409 with the same sentence; 0 `deploy_events` rows |
+| F | upload under `be2-map`: 400 "unknown partition_layout; this server understands: ab-4m-arduino-v1, ab-4m-v1" |
+| G | PATCH X `{"layout_id":"be2-map"}`: 200, `deployable: true`, `origin: detected`, slot 1966080 kept |
+| H | F again: 201 |
+| I | precheck `be2-b-1791539097`: deployable, no refusals, `device_partition_profile: be2-map`, `device_partition_layout: unknown`; `be2-a-1791539097`: `layout_mismatch` "runs partition layout be2-map … built for ab-4m-v1" |
+| J | sim online (`--capabilities ota`), POST /deploy 202; `requested → … → confirmed` |
+| K | PATCH/DELETE builtin 409/409; PATCH X again 409 (name final); DELETE X 409 (1 artifact labelled for be2-map); builtin row unchanged |
+| L | POST `be2-user` 201 deployable; repeat 409; `unknown` / uppercase sha / slot 5242880 → 422 ×3 |
+| M | be2m announcing `ab-4m-v1` with a foreign sha: no profile row; precheck `partition_table_mismatch` |
+| N | `just update-e2e`: 6/6 pass |
+
 ### R2b-fw-2 (2026-10-05): agent 0.4.7 announces the three measurements
 
 CRITICAL (agent wire format, the confirm path). Decision: `DECISIONS.md` 2026-10-05
@@ -488,6 +584,7 @@ rule when claim and measurement disagree".
   code (step 1 item 4). The `ab-4m-v1` hash is pinned against `agent/partitions.csv` by
   `tests/test_agent_partitions.py` with a retyped literal (that file's own convention).
 - Whether a `detected` profile is per-fleet or global stays **open for step 2 (R3)**.
+  Status (R3-be-2): settled, **global** (DECISIONS 2026-10-09 R3-be-2 D1).
 
 **Considered and deferred.**
 
@@ -617,6 +714,9 @@ the second and third real layouts (`ab-4m-arduino-v1` already exists,
 and a maker with a stock `min_spiffs` table is the first user who cannot be served by a
 code-resident dict. Building the table before that evidence is speculative schema.
 
+Status (R3-be-2, 2026-10-09): **built** (API; the dashboard half is R3-fe-1). See
+*Completed Work → R3-be-2*.
+
 **Why the bootloader field matters, and why it cannot wait for a redesign**. Rollback exists in code jointly by the second-stage bootloader and the app, and **Fleetforge OTA
 replaces the app, never the bootloader**. Per the ESP-IDF 6.2 migration notes, a device
 whose bootloader predates rollback support never transitions
@@ -652,7 +752,8 @@ which is why step 1 is small. The predicates exist and are tested, they need a s
 caller and a wire field to read.
 
 **Open, to settle when step 1 is written:** whether a `detected` profile is per-fleet or
-global (for step 2, R3). The precedence rule when claim and measurement disagree is now
+global (for step 2, R3). Status (R3-be-2): **global** (DECISIONS 2026-10-09 R3-be-2
+D1). The precedence rule when claim and measurement disagree is now
 proposed as refuse-and-flag; see *Step 1 wire proposal (R2-spec-1)* above. The choice of
 this design over the two alternatives gets a `DECISIONS.md` entry when step 1 lands, not
 before — it is a plan until something is built. The R2-spec-1 entry covers the wire

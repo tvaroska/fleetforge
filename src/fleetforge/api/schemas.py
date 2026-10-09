@@ -30,6 +30,7 @@ from fleetforge.auth.enrollment import EnrollmentTokenStatus
 from fleetforge.auth.tokens import MAX_TOKEN_LENGTH
 from fleetforge.db.models import PowerClass
 from fleetforge.identity import is_valid_device_id
+from fleetforge.partition_profiles import MAX_PROFILE_SLOT_SIZE
 
 
 class LoginRequest(BaseModel):
@@ -691,6 +692,10 @@ class DeployPrecheck(BaseModel):
     size_bytes: int | None
     artifact_partition_layout: str | None
     device_partition_layout: str | None
+    # R3-be-2: the board's effective layout, the adopted profile the gate resolved it to
+    # (`LayoutCatalog.resolve`), or `None`. A board on an adopted map still announces
+    # `unknown` in `device_partition_layout`. Defaulted so no other constructor breaks.
+    device_partition_profile: str | None = None
     ota_slot_size: int | None
     power_class: str
     expected_wake_interval_s: int | None
@@ -699,3 +704,91 @@ class DeployPrecheck(BaseModel):
     deployable: bool
     refusals: list[PrecheckFinding]
     warnings: list[PrecheckFinding]
+
+
+# ---------------------------------------------------------------------------
+# Partition profiles (R3-be-2)
+# ---------------------------------------------------------------------------
+
+# A profile's name must be uploadable: the upload's `partition_layout` is `SafeSegment`
+# (the same shape), and the DB CHECK `layout_id_format` agrees. pydantic's regex engine
+# reads `$` as the end of the input, so a trailing newline is refused, never stripped.
+PROFILE_LAYOUT_ID_PATTERN = r"^[a-z0-9][a-z0-9-]{0,31}$"
+# Rejected, never lowercased: uppercase is a second spelling of a fingerprint.
+PROFILE_SHA256_PATTERN = r"^[0-9a-f]{64}$"
+RESERVED_LAYOUT_ID = "unknown"  # firmware.manifest.UNKNOWN_PARTITION_LAYOUT (R3-fw-5)
+ProfileOrigin = Literal["builtin", "user", "detected"]
+
+
+def _not_reserved(value: str) -> str:
+    if value == RESERVED_LAYOUT_ID:
+        raise ValueError(
+            "unknown is reserved: it is what a board announces when its map has no name"
+        )
+    return value
+
+
+class PartitionProfileSummary(BaseModel):
+    """One flash map the server knows, as `GET /v1/partition-profiles` lists it.
+
+    `deployable` is "adopted": builtin and user rows always are, a `detected` row only once
+    an operator has named it. `device_ids` are the live boards announcing this fingerprint
+    now (sorted, capped at 500), which is what an operator needs to decide whether to name
+    a detected map. Built field by field with `from_attributes` off (the `DeviceSummary`
+    convention).
+    """
+
+    partition_table_sha256: str
+    layout_id: str | None
+    origin: ProfileOrigin
+    deployable: bool
+    ota_slot_size: int | None
+    flash_chip_size: int | None
+    detected_device_id: str | None
+    device_ids: list[str]
+    created_at: dt.datetime
+    adopted_at: dt.datetime | None
+
+
+class PartitionProfileList(BaseModel):
+    """An envelope, not a bare array — the `DeviceList` rule."""
+
+    profiles: list[PartitionProfileSummary]
+
+
+class PartitionProfileCreate(BaseModel):
+    """`POST /v1/partition-profiles`: an operator profile, named and deployable at once.
+
+    The fingerprint is the geometry-only SHA-256 of the table (`spec/device-protocol.md` →
+    *Partition layouts*); a board on that map announces it. The slot is the ceiling for
+    uploads under this name, at most `MAX_PROFILE_SLOT_SIZE` (nginx's body limit).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    layout_id: str = Field(pattern=PROFILE_LAYOUT_ID_PATTERN)
+    partition_table_sha256: str = Field(pattern=PROFILE_SHA256_PATTERN)
+    ota_slot_size: int = Field(gt=0, le=MAX_PROFILE_SLOT_SIZE)
+
+    @field_validator("layout_id")
+    @classmethod
+    def _layout_id_not_reserved(cls, value: str) -> str:
+        return _not_reserved(value)
+
+
+class PartitionProfileAdopt(BaseModel):
+    """`PATCH /v1/partition-profiles/{sha}`: name a detected profile, which adopts it.
+
+    `ota_slot_size` is needed only when the detecting board did not report its slot; a
+    reported slot is a measurement and wins (a different value is a 409).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    layout_id: str = Field(pattern=PROFILE_LAYOUT_ID_PATTERN)
+    ota_slot_size: int | None = Field(default=None, gt=0, le=MAX_PROFILE_SLOT_SIZE)
+
+    @field_validator("layout_id")
+    @classmethod
+    def _layout_id_not_reserved(cls, value: str) -> str:
+        return _not_reserved(value)

@@ -417,6 +417,7 @@ Order: spec-3 → fw-2 → fw-3/fw-4 → fw-5/fw-6/be-1 → test-1 → spec-2 �
       board announce none and are not refused for it (`null` never warns).
       Per R3-spec-3: the marker lives in the component, so the stock agent built from it carries and announces it too; "announce none" means agents ≤ 0.4.7. Applies Patch B (the lib_marker key in the up/announce example) in this task's commit.
       **Blocked:** waits for the owner to accept and apply the R3-spec-3 proposal (Patch A). See docs/features/ota-library.md → *Library marker proposal*.
+      Per R3-be-2: `ff_identity.c`'s comment "pinned equal to SUPPORTED_LAYOUTS" (and `agent/tools/lib_bundle.py`'s) should now say BUILTIN_LAYOUTS (renamed; not edited in R3-be-2 to keep bundles fresh).
 - [x] **R3-fw-7**: PlatformIO recipe (P2, 0.5d) _(done 2026-10-09; see docs/features/ota-library.md)_
       A working `platformio.ini` for the example, no registry publication (out of scope).
       Depends on `R3-fw-3`. Acceptance: `pio run` on a clean checkout builds both targets.
@@ -439,7 +440,7 @@ Order: spec-3 → fw-2 → fw-3/fw-4 → fw-5/fw-6/be-1 → test-1 → spec-2 �
       and an agent bundle do not; unit tests pin all three.
       Per R3-spec-3: code no_library_marker (gating); scan rule and magic in docs/features/ota-library.md → *Library marker proposal*; artifacts uploaded before this have no verdict and never warn.
       **Blocked:** waits for the owner to accept and apply the R3-spec-3 proposal (Patch A). See docs/features/ota-library.md → *Library marker proposal*.
-- [ ] **R3-be-2**: Partition profile table with detected and user-defined entries (P2, 3d)
+- [x] **R3-be-2**: Partition profile table with detected and user-defined entries (P2, 3d) _(done 2026-10-09; reviewed; see docs/features/board-profiles.md)_
       Board-profiles step 2 ([board-profiles.md](docs/features/board-profiles.md)): the
       `partition_profiles` table seeded from the catalog, `builtin` immutable vs `user`,
       a `detected` profile created in pending state from an unknown id with a valid
@@ -451,6 +452,7 @@ Order: spec-3 → fw-2 → fw-3/fw-4 → fw-5/fw-6/be-1 → test-1 → spec-2 �
 - [ ] **R3-fe-1**: Dashboard adopts or names a detected profile (P2, 1d)
       Depends on `R3-be-2`. Acceptance: in `just update-e2e` style Chromium run, a detected
       profile shows, can be named, and then accepts a deploy.
+      Per R3-be-2: the API is `GET/POST/PATCH/DELETE /v1/partition-profiles` (PATCH = adopt by naming, `{layout_id, ota_slot_size?}`; 409/422 details are plain text for the banner); the precheck has `device_partition_profile` (an adopted board still announces `unknown` in `device_partition_layout`); the upload form must offer catalog ids (adopted profiles), not `d.partition_layout`; there is no new SSE type, so re-read profiles on `device.announce`; `api.ts` needs the mirror types.
 
 ### Test and release
 

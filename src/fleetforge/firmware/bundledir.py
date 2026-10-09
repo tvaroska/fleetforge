@@ -40,9 +40,9 @@ from pathlib import Path
 from pydantic import ValidationError
 
 from fleetforge.firmware.manifest import (
+    BUILTIN_LAYOUTS,
     PART_NAMES,
     SAFE_SEGMENT,
-    SUPPORTED_LAYOUTS,
     BundleManifest,
 )
 
@@ -176,8 +176,10 @@ def load_bundle_dir(bundle_dir: Path | str) -> LocalBundle:
 
     # The protocol contract. A bundle that disagrees would be flashed onto a board that
     # then announces a layout the server does not support — spec/device-protocol.md.
-    known_layouts = list(SUPPORTED_LAYOUTS.keys())
-    profile = SUPPORTED_LAYOUTS.get(manifest.partition_layout)
+    # BUILTIN_LAYOUTS, not the partition_profiles table (R3-be-2 D5): an agent bundle is
+    # only ever built from agent/partitions.csv, and bundles load with no DB session.
+    known_layouts = list(BUILTIN_LAYOUTS.keys())
+    profile = BUILTIN_LAYOUTS.get(manifest.partition_layout)
     if profile is None:
         raise AgentBundleError(
             f"partition_layout {manifest.partition_layout!r} is not one of {known_layouts} "

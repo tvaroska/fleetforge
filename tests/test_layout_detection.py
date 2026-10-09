@@ -5,7 +5,7 @@ can run `agent/components/fleetforge/src/*.c`, so what is held here, on every `j
 the shape that makes the QEMU run in `docs/runbooks/agent-qemu.md` (*A wrong flash layout is
 refused*) come out right:
 
-* the board's table of known layouts IS `SUPPORTED_LAYOUTS`, id for id and fingerprint for
+* the board's table of known layouts IS `BUILTIN_LAYOUTS`, id for id and fingerprint for
   fingerprint, so a board says what map it carries and the server agrees on what that means;
 * the reserved `unknown` is spelled the same on both ends and is never a supported layout;
 * the announce sends the detected id, never this build's compiled one;
@@ -22,7 +22,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from fleetforge.firmware.manifest import SUPPORTED_LAYOUTS, UNKNOWN_PARTITION_LAYOUT
+from fleetforge.firmware.manifest import BUILTIN_LAYOUTS, UNKNOWN_PARTITION_LAYOUT
 from tests.agent_src import COMPONENT_SRC
 from tests.test_agent_board_measurements import _csv_fingerprint
 from tests.test_agent_txn import _function_body
@@ -59,7 +59,7 @@ def _unknown_error_format() -> str:
 
 def test_the_board_knows_exactly_the_supported_layouts() -> None:
     assert _known_layouts() == {
-        layout: profile.partition_table_sha256 for layout, profile in SUPPORTED_LAYOUTS.items()
+        layout: profile.partition_table_sha256 for layout, profile in BUILTIN_LAYOUTS.items()
     }
 
 
@@ -69,7 +69,7 @@ def test_unknown_is_spelled_alike_on_both_ends_and_never_supported() -> None:
     )
     assert define is not None
     assert define.group(1) == UNKNOWN_PARTITION_LAYOUT == "unknown"
-    assert UNKNOWN_PARTITION_LAYOUT not in SUPPORTED_LAYOUTS
+    assert UNKNOWN_PARTITION_LAYOUT not in BUILTIN_LAYOUTS
     assert UNKNOWN_PARTITION_LAYOUT not in _known_layouts()
 
 
@@ -142,7 +142,7 @@ def test_ff_ota_does_not_compile_without_rollback() -> None:
 
 def test_the_wrong_layout_fixture_boots_but_is_not_supported() -> None:
     fingerprint = _csv_fingerprint(WRONG_LAYOUT_CSV)
-    assert fingerprint not in {p.partition_table_sha256 for p in SUPPORTED_LAYOUTS.values()}
+    assert fingerprint not in {p.partition_table_sha256 for p in BUILTIN_LAYOUTS.values()}
 
     rows = {}
     for line in WRONG_LAYOUT_CSV.read_text().splitlines():

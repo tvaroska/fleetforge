@@ -40,12 +40,19 @@ class LayoutProfile:
     partition_table_sha256: str | None
 
 
-# Every layout this server understands: the slot size a bundle claiming it MUST declare,
-# and the partition-table fingerprint a board announcing it must match (R2b-be-7). Both
-# rows are frozen: a new layout is a new id plus an entry here plus a
-# `spec/device-protocol.md` → *Partition layouts* row — never an edit to an existing one.
-# The mapping is what keeps `partition_layout` and `ota_slot_size` from drifting apart:
-# a bundle cannot claim `ab-4m-v1` with a 4 MB slot.
+# The builtin layouts (R3-be-2 renamed this from SUPPORTED_LAYOUTS): the slot size a bundle
+# claiming one MUST declare, and the partition-table fingerprint a board announcing it must
+# match (R2b-be-7). This dict is the seed migration 0007 retyped into `partition_profiles`,
+# the firmware's FF_KNOWN_LAYOUTS (`tests/test_layout_detection.py`), the spec's *Partition
+# layouts* table (`tests/test_deploy_precheck.py`), and what agent bundles validate against
+# (`firmware/bundledir.py`, `firmware/catalog.py`: an agent bundle is only ever built from
+# `agent/partitions.csv`, and bundles load at startup with no DB session). It is NOT "what
+# this server supports at runtime": that is the `partition_profiles` table, read per request
+# through `fleetforge.partition_profiles.load_layout_catalog`, which also holds operator
+# profiles. Both rows are frozen: a new builtin is a new id plus an entry here plus a spec
+# row plus a migration INSERT — never an edit to an existing one. The mapping is what keeps
+# `partition_layout` and `ota_slot_size` from drifting apart: a bundle cannot claim
+# `ab-4m-v1` with a 4 MB slot.
 #
 # The fingerprint is the geometry-only SHA-256 `spec/device-protocol.md` defines (one
 # `type:subtype:offset:size` line per partition, sorted by offset; no labels, no flags).
@@ -55,12 +62,12 @@ class LayoutProfile:
 # `ab-4m-arduino-v1` is the OTA library's map (design/decisions/arduino-gets-its-own-
 # layout-id.md): same slot size, different offsets, because the Arduino upload recipe
 # cannot reach `ab-4m-v1`'s. The prebuilt agent never ships it, so EXPECTED_* stay put.
-# Its fingerprint was computed from the ADR's table, because R3 has not checked in a CSV
-# yet. No Arduino board announces a fingerprint today, so it refuses nobody.
+# Its fingerprint was computed from the ADR's table and is pinned against the library's
+# examples/Basic/partitions.csv by `tests/test_arduino_library.py`.
 #
-# A plain, mutable dict on purpose: tests `monkeypatch.setitem` it.
+# A plain, mutable dict on purpose (R2b-be-7).
 ARDUINO_PARTITION_LAYOUT = "ab-4m-arduino-v1"
-SUPPORTED_LAYOUTS: dict[str, LayoutProfile] = {
+BUILTIN_LAYOUTS: dict[str, LayoutProfile] = {
     EXPECTED_PARTITION_LAYOUT: LayoutProfile(
         EXPECTED_OTA_SLOT_SIZE,
         "1fa67e6bbd034e434d04e9d6f4f52bbe899361602cd498573eb3bde97d1559ed",
@@ -72,8 +79,10 @@ SUPPORTED_LAYOUTS: dict[str, LayoutProfile] = {
 }
 
 # Reserved (R3-fw-5): what a board announces as `partition_layout` when its measured
-# partition table matches no layout id its firmware knows. Never a key of
-# SUPPORTED_LAYOUTS; `deploy_precheck.refusals` refuses it as `unsupported_layout`. The
+# partition table matches no layout id its firmware knows. Never a key of BUILTIN_LAYOUTS
+# and never a `partition_profiles.layout_id` (a DB CHECK). A board announcing it is resolved
+# by its fingerprint (`LayoutCatalog.resolve`, R3-be-2): deployable once an operator has
+# named that fingerprint's profile, otherwise refused as `unsupported_layout`. The
 # firmware's twin is FF_PARTITION_LAYOUT_UNKNOWN in agent/components/fleetforge/src/
 # ff_identity_internal.h, and tests/test_layout_detection.py keeps the two equal.
 UNKNOWN_PARTITION_LAYOUT = "unknown"

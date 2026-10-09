@@ -1,11 +1,11 @@
 """The fleetforge registry schema — R0-db-1, plus `device_progress` (S0-fw-1), the
-content-addressed artifact tables (S0-infra-4) and the version labels over them
-(R1-be-1).
+content-addressed artifact tables (S0-infra-4), the version labels over them
+(R1-be-1) and the partition profiles (R3-be-2).
 
-Nine tables: `device_groups`, `devices`, `enrollment_tokens`, `admin_tokens`,
-`deploy_events`, `device_progress`, `artifacts`, `artifact_versions`, `builds`. Two of them
-(`enrollment_tokens`, `admin_tokens`) are CRITICAL.md paths; read their docstrings
-before changing anything.
+Ten tables: `device_groups`, `devices`, `enrollment_tokens`, `admin_tokens`,
+`deploy_events`, `device_progress`, `artifacts`, `artifact_versions`, `builds`,
+`partition_profiles`. Two of them (`enrollment_tokens`, `admin_tokens`) are CRITICAL.md
+paths; read their docstrings before changing anything.
 
 Three conventions that hold across the whole file, each with a reason that is not
 obvious from the code:
@@ -683,3 +683,79 @@ class Build(Base):
     created_at: Mapped[dt.datetime] = mapped_column(
         TimestampTZ, nullable=False, server_default=text("now()")
     )
+
+
+class PartitionProfile(Base):
+    """A flash map the server knows: its fingerprint, its name, its OTA slot. R3-be-2.
+
+    **Global, not per fleet or per group** (DECISIONS R3-be-2 D1). One install is one
+    fleet in v1 and in V2 self-hosting; `device_groups` scope enrollment tokens, not
+    fleets. A flash map is a physical property of a board, so moving a board between groups
+    must not change what it can take; and a profile's name is what `artifacts.partition_layout`
+    carries, and artifacts are global too.
+
+    **Keyed by `partition_table_sha256`; `layout_id` is a nullable UNIQUE name** (D2).
+    Every board on a map its firmware does not know announces the same reserved id
+    `unknown` (R3-fw-5), so the id cannot be the key. Every row has a fingerprint: a
+    profile with none could never be checked against a board.
+
+    **Three origins, `builtin | user | detected`** (D3). `origin` is provenance and never
+    changes after insert. "Adopted" means `adopted_at IS NOT NULL` and is the same as
+    "named"; builtin and user rows are adopted at insert, and only a `detected` row may be
+    pending. Only adopted rows are deployable. Builtins are seeded by migration `0007`
+    (retyped from `firmware.manifest.BUILTIN_LAYOUTS`, test-pinned equal) and are
+    immutable: the API answers 409 to a change (D4). An adopted name is never changed
+    either, because artifacts carry it as text.
+
+    The CHECKs, each with its reason:
+
+    * `sha256_format`: the fingerprint is compared byte for byte with what boards announce,
+      and the edges reject (never lowercase) anything else; one spelling.
+    * `origin`: an exception to convention 1, like `devices.power_class`. The vocabulary is
+      server-authored only (no device or wire input ever reaches it), and immutability of
+      builtins depends on it being exactly these three.
+    * `layout_id_format`: a name must be uploadable, and the upload's `partition_layout`
+      query parameter is `SafeSegment` (the same pattern). `unknown` is reserved (R3-fw-5).
+    * `adopted_is_named`, `only_detected_pending`, `adopted_has_slot`: the adoption state
+      machine, so no writer can leave a named-but-pending, a pending builtin, or a
+      deployable profile with no slot ceiling.
+    * `slot_positive`: a zero slot is a ceiling nothing fits under.
+
+    `detected_device_id` has **no FK**: it is informational (the first board that announced
+    the map), and devices are soft-deleted; the precedent is `device_progress`. There is no
+    `updated_at`: the only mutation is the one-way adoption, which `adopted_at` records.
+    """
+
+    __tablename__ = "partition_profiles"
+    __table_args__ = (
+        CheckConstraint("partition_table_sha256 ~ '^[0-9a-f]{64}$'", name="sha256_format"),
+        CheckConstraint("origin IN ('builtin', 'user', 'detected')", name="origin"),
+        CheckConstraint(
+            "layout_id IS NULL OR "
+            "(layout_id ~ '^[a-z0-9][a-z0-9-]{0,31}$' AND layout_id <> 'unknown')",
+            name="layout_id_format",
+        ),
+        CheckConstraint("(layout_id IS NULL) = (adopted_at IS NULL)", name="adopted_is_named"),
+        CheckConstraint(
+            "origin = 'detected' OR adopted_at IS NOT NULL", name="only_detected_pending"
+        ),
+        CheckConstraint("adopted_at IS NULL OR ota_slot_size IS NOT NULL", name="adopted_has_slot"),
+        CheckConstraint("ota_slot_size IS NULL OR ota_slot_size > 0", name="slot_positive"),
+        UniqueConstraint("layout_id"),
+    )
+
+    partition_table_sha256: Mapped[str] = mapped_column(Text, primary_key=True)
+    # NULL = pending (a detected map nobody has named yet).
+    layout_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    origin: Mapped[str] = mapped_column(Text, nullable=False)
+    # NULL only while pending, when the detecting board did not report its slot.
+    ota_slot_size: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # Informational, from the detecting board.
+    flash_chip_size: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # The first board that announced it. No FK: see the class docstring.
+    detected_device_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        TimestampTZ, nullable=False, server_default=text("now()")
+    )
+    # NULL = pending.
+    adopted_at: Mapped[dt.datetime | None] = mapped_column(TimestampTZ, nullable=True)

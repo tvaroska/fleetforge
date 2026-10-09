@@ -230,8 +230,11 @@ more than one exists for a target:
 * No layout specified and exactly one exists → resolves, for backward compatibility with
   the R0 case
 
-**Adding a layout** means a `SUPPORTED_LAYOUTS` entry in `src/fleetforge/firmware/manifest.py`,
-a `spec/device-protocol.md` change documenting it, and a new `agent/partitions.csv` id.
+**Adding a layout** means a `BUILTIN_LAYOUTS` entry in `src/fleetforge/firmware/manifest.py`
+(renamed from `SUPPORTED_LAYOUTS` in R3-be-2), a new Alembic migration that INSERTs the same
+row into `partition_profiles` (the runtime authority; `tests/test_partition_profiles.py`
+keeps the two equal), a `spec/device-protocol.md` change documenting it, and a new
+`agent/partitions.csv` id.
 The entry is a `LayoutProfile(ota_slot_size, partition_table_sha256)`: the slot size AND
 the table fingerprint, computed by the spec's rule (one decimal `type:subtype:offset:size`
 line per partition, sorted by offset, SHA-256 hex; no labels, no flags), and the same two

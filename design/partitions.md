@@ -182,8 +182,10 @@ for what that rules in and out.
 ## 6. Changing any of this
 
 **A new layout is a new id** (`ab-4m-v2`, `ab-8m-v1`, …) plus an entry in
-`SUPPORTED_LAYOUTS` plus a `device-protocol.md` change — **never an edit to an existing
-row**. Boards already flashed keep `ab-4m-v1` until someone physically gets them. Thus,
+`BUILTIN_LAYOUTS` plus a migration INSERT into `partition_profiles` plus a
+`device-protocol.md` change — **never an edit to an existing row**. (An operator's own map
+needs none of this: it is a `user` or adopted `detected` row in `partition_profiles`,
+R3-be-2.) Boards already flashed keep `ab-4m-v1` until someone physically gets them. Thus,
 both layouts must be supported simultaneously. The layout version is what lets the
 server detect and quarantine a board carrying a superseded one.
 
@@ -213,7 +215,9 @@ To announce `"partition_layout": "ab-4m-v1"` truthfully, a build must have:
 4. None of the three eFuse options enabled.
 
 Anything short of that is a different layout and must announce a different id. The server
-accepts only the ids in `SUPPORTED_LAYOUTS`. A deploy only matches equal ids. Thus, a
+accepts only the adopted profiles in `partition_profiles` (the builtins, plus operator
+profiles; a board on an operator map announces `unknown` and is resolved by its fingerprint,
+R3-be-2). A deploy only matches equal ids. Thus, a
 mismatch is a rejected deploy, not a silent brick. This is the intended failure.
 
 **Arduino gets its own layout id: `ab-4m-arduino-v1`**. An Arduino IDE build uses a board

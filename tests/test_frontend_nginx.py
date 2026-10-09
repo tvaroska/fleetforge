@@ -11,7 +11,8 @@ notices a tidy-up that drops the override. Read as text: there is no nginx in th
 import re
 from pathlib import Path
 
-from fleetforge.firmware.manifest import SUPPORTED_LAYOUTS
+from fleetforge.firmware.manifest import BUILTIN_LAYOUTS
+from fleetforge.partition_profiles import MAX_PROFILE_SLOT_SIZE
 
 CONF = (Path(__file__).resolve().parent.parent / "frontend" / "nginx.conf").read_text()
 
@@ -43,7 +44,10 @@ def test_the_upload_route_takes_at_least_one_ota_slot() -> None:
     block = _block("location = /v1/artifact")
     limit = _body_limit(block)
     assert limit is not None, "no client_max_body_size: nginx falls back to 1m"
-    assert limit >= max(p.ota_slot_size for p in SUPPORTED_LAYOUTS.values())
+    assert limit >= max(p.ota_slot_size for p in BUILTIN_LAYOUTS.values())
+    # R3-be-2 D8: an operator profile's slot may be up to MAX_PROFILE_SLOT_SIZE, and an upload
+    # that size must reach the API rather than nginx's own HTML 413.
+    assert limit >= MAX_PROFILE_SLOT_SIZE
     assert "proxy_pass http://api:8000" in block
 
 

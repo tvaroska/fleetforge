@@ -36,7 +36,7 @@ from typing import Any
 
 import pytest
 
-from fleetforge.firmware.manifest import ARDUINO_PARTITION_LAYOUT, SUPPORTED_LAYOUTS
+from fleetforge.firmware.manifest import ARDUINO_PARTITION_LAYOUT, BUILTIN_LAYOUTS
 from tests.agent_src import (
     AGENT_DIR,
     AGENT_MAIN_C,
@@ -183,7 +183,7 @@ class TestTheExampleLayout:
     def test_fingerprint_is_the_spec_and_the_catalog(self) -> None:
         fingerprint = _fingerprint(_rows(EXAMPLE_PARTITIONS))
         assert fingerprint == ARDUINO_LAYOUT_SHA256
-        assert SUPPORTED_LAYOUTS[ARDUINO_PARTITION_LAYOUT].partition_table_sha256 == fingerprint
+        assert BUILTIN_LAYOUTS[ARDUINO_PARTITION_LAYOUT].partition_table_sha256 == fingerprint
         row = next(
             line
             for line in DEVICE_PROTOCOL.read_text().splitlines()
@@ -202,7 +202,7 @@ class TestTheExampleLayout:
         assert rows["ota_1"][3] == rows["ota_0"][3] + rows["ota_0"][4]
         assert rows["ff_cfg"][1:3] == ("data", "0x40")
         assert not any(row[2] == "factory" for row in rows.values())
-        assert SUPPORTED_LAYOUTS[ARDUINO_PARTITION_LAYOUT].ota_slot_size == OTA_SLOT_SIZE
+        assert BUILTIN_LAYOUTS[ARDUINO_PARTITION_LAYOUT].ota_slot_size == OTA_SLOT_SIZE
 
     def test_the_csv_names_its_layout(self) -> None:
         assert 'layout id "ab-4m-arduino-v1"' in EXAMPLE_PARTITIONS.read_text()
@@ -217,7 +217,7 @@ class TestTheExampleLayout:
         )
         assert match is not None
         assert match.group(1) == ARDUINO_PARTITION_LAYOUT
-        assert match.group(1) in SUPPORTED_LAYOUTS
+        assert match.group(1) in BUILTIN_LAYOUTS
         assert "#define FF_OTA_SLOT_SIZE 1966080" in header
 
 

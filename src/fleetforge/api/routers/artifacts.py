@@ -33,9 +33,14 @@ parameters. R1-fe-1 posts the `File` object straight as the body.
 **One size limit, not two.** `spec/prd.md` → *Capacity* says "Artifact size ≤ 1.9 MB"
 and `spec/device-protocol.md` says `ota_slot_size` is 1966080 — those are one number
 written twice (1966080 B = 1.875 MiB, which rounds to 1.9 MB), not two independent
-caps. The authority is `SUPPORTED_LAYOUTS`, because it is the one tied to the partition
-table a board actually carries; a second, slightly different constant would be a
-rejection nobody could explain. Proposed as a spec clarification in
+caps. The authority is the `partition_profiles` table (R3-be-2): the adopted profile the
+upload names, because it is the one tied to the partition table a board actually carries;
+a second, slightly different constant would be a rejection nobody could explain. The
+builtins there are seeded from the same literals agent bundles validate against
+(`firmware.manifest.BUILTIN_LAYOUTS`), so an upload and a bundle cannot disagree about how
+big an OTA slot is. An operator-defined profile brings its own slot, at most
+`partition_profiles.MAX_PROFILE_SLOT_SIZE` (nginx's body limit). A pending detected profile
+has no name yet, so it can never be an upload's layout. Proposed as a spec clarification in
 `spec/open-questions.md` rather than resolved by inventing a number here.
 
 **Nothing reaches the store until it is known to be acceptable.** The limit is checked
@@ -65,8 +70,9 @@ from fleetforge.api.deps import (
 from fleetforge.api.schemas import ArtifactList, ArtifactSummary, ArtifactUploaded
 from fleetforge.db.models import ArtifactKind
 from fleetforge.deploy_precheck import merged_binary
-from fleetforge.firmware.manifest import EXPECTED_PARTITION_LAYOUT, SUPPORTED_LAYOUTS, SafeSegment
+from fleetforge.firmware.manifest import EXPECTED_PARTITION_LAYOUT, SafeSegment
 from fleetforge.merged_image import detect_merged
+from fleetforge.partition_profiles import LayoutCatalog, load_layout_catalog
 from fleetforge.storage.blobs import digest_bytes, put_blob
 from fleetforge.storage.objectstore import ObjectStoreError
 
@@ -136,18 +142,18 @@ _LABEL_SELECT_SQL = text(
 )
 
 
-def _slot_size(partition_layout: str) -> int:
+def _slot_size(partition_layout: str, catalog: LayoutCatalog) -> int:
     """The byte ceiling for this layout, or a 400 naming the layouts that exist.
 
-    `SUPPORTED_LAYOUTS` is the same mapping `firmware/manifest.py` validates agent
-    bundles against, so an upload and a bundle cannot disagree about how big an OTA
-    slot is. A new layout is a new entry there plus a `spec/device-protocol.md` change
-    — never a number typed in here.
+    `catalog` is the `partition_profiles` table's adopted profiles (R3-be-2): the builtins,
+    seeded from the literals agent bundles validate against, plus operator profiles. A
+    new builtin is a migration plus a `spec/device-protocol.md` change — never a number
+    typed in here.
     """
     try:
-        return SUPPORTED_LAYOUTS[partition_layout].ota_slot_size
+        return catalog.layouts[partition_layout].ota_slot_size
     except KeyError:
-        known = ", ".join(sorted(SUPPORTED_LAYOUTS))
+        known = ", ".join(sorted(catalog.layouts))
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"unknown partition_layout; this server understands: {known}",
@@ -245,7 +251,10 @@ async def upload_artifact(
             ),
         )
 
-    limit = _slot_size(partition_layout)
+    # Before the body: the limit is what the Content-Length check needs.
+    async with sessionmaker() as session:
+        catalog = await load_layout_catalog(session)
+    limit = _slot_size(partition_layout, catalog)
     _declared_length(request, limit)
     data = await _read_capped(request, limit)
 

@@ -68,6 +68,7 @@ from fleetforge.api.routers import (
     enroll,
     enrollment,
     events,
+    partition_profiles,
     progress,
 )
 from fleetforge.auth.cache import VerifiedSecretCache
@@ -260,6 +261,8 @@ def create_app() -> FastAPI:
     app.include_router(agent.router)
     app.include_router(progress.router)
     app.include_router(artifacts.router)
+    # Admin-only, like `artifacts.router`: the profiles an upload's partition_layout names.
+    app.include_router(partition_profiles.router)
     # Public, unauthenticated, signature-as-authorization. Registered after
     # `artifacts.router` (which owns `POST ""` under the same prefix, admin-only) — two
     # modules on purpose: a shared router would make the auth dependency a per-route

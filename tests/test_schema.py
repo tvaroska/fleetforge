@@ -25,6 +25,7 @@ EXPECTED_TABLES = {
     "device_progress",
     "devices",
     "enrollment_tokens",
+    "partition_profiles",
 }
 
 MIGRATION_TEST_DB = "fleetforge_migration_test"
@@ -138,3 +139,109 @@ async def test_builds_accepts_a_well_formed_row(session: AsyncSession) -> None:
     )
     row = await session.execute(text("SELECT outputs -> 'app' ->> 'offset' FROM builds"))
     assert row.scalar_one() == "65536"
+
+
+# ---------------------------------------------------------------------------
+# partition_profiles (R3-be-2): the adoption state machine lives in CHECKs, so no writer
+# can leave a named-but-pending row, a pending builtin, or a deployable row with no slot.
+# ---------------------------------------------------------------------------
+
+_PROFILE_INSERT = text(
+    "INSERT INTO partition_profiles "
+    "(partition_table_sha256, layout_id, origin, ota_slot_size, adopted_at) "
+    "VALUES (:sha, :layout_id, :origin, :slot, "
+    "CASE WHEN :adopted THEN now() ELSE NULL END)"
+)
+
+
+async def _profile(
+    session: AsyncSession,
+    *,
+    sha: str = "e" * 64,
+    layout_id: str | None = "my-map",
+    origin: str = "user",
+    slot: int | None = 1966080,
+    adopted: bool = True,
+) -> None:
+    await session.execute(
+        _PROFILE_INSERT,
+        {"sha": sha, "layout_id": layout_id, "origin": origin, "slot": slot, "adopted": adopted},
+    )
+
+
+async def test_the_builtins_are_seeded(session: AsyncSession) -> None:
+    rows = await session.execute(
+        text(
+            "SELECT layout_id, origin, ota_slot_size, partition_table_sha256, "
+            "adopted_at IS NOT NULL FROM partition_profiles WHERE origin = 'builtin' "
+            "ORDER BY layout_id"
+        )
+    )
+    assert [tuple(row) for row in rows] == [
+        (
+            "ab-4m-arduino-v1",
+            "builtin",
+            1966080,
+            "05528998ae17fb6a7a5741443f9a7a4720c766f370fefc30814cbc3e391c1fc4",
+            True,
+        ),
+        (
+            "ab-4m-v1",
+            "builtin",
+            1966080,
+            "1fa67e6bbd034e434d04e9d6f4f52bbe899361602cd498573eb3bde97d1559ed",
+            True,
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("overrides", "constraint"),
+    [
+        ({"sha": "E" * 64}, "ck_partition_profiles_sha256_format"),
+        ({"sha": "e" * 63}, "ck_partition_profiles_sha256_format"),
+        ({"origin": "detected", "adopted": False}, "ck_partition_profiles_adopted_is_named"),
+        ({"adopted": False}, "ck_partition_profiles_adopted_is_named"),
+        ({"layout_id": None}, "ck_partition_profiles_adopted_is_named"),
+        (
+            {"origin": "builtin", "layout_id": None, "adopted": False},
+            "ck_partition_profiles_only_detected_pending",
+        ),
+        (
+            {"origin": "user", "layout_id": None, "adopted": False},
+            "ck_partition_profiles_only_detected_pending",
+        ),
+        ({"layout_id": "unknown"}, "ck_partition_profiles_layout_id_format"),
+        ({"layout_id": "my/map"}, "ck_partition_profiles_layout_id_format"),
+        ({"layout_id": "My-Map"}, "ck_partition_profiles_layout_id_format"),
+        ({"layout_id": "-map"}, "ck_partition_profiles_layout_id_format"),
+        ({"layout_id": "m" * 33}, "ck_partition_profiles_layout_id_format"),
+        ({"slot": 0}, "ck_partition_profiles_slot_positive"),
+        ({"slot": None}, "ck_partition_profiles_adopted_has_slot"),
+        ({"origin": "vendor"}, "ck_partition_profiles_origin"),
+    ],
+)
+async def test_partition_profiles_refuses_an_impossible_row(
+    session: AsyncSession, overrides: dict[str, object], constraint: str
+) -> None:
+    with pytest.raises(IntegrityError, match=constraint):
+        await _profile(session, **overrides)  # type: ignore[arg-type]
+
+
+async def test_a_layout_id_names_one_profile(session: AsyncSession) -> None:
+    await _profile(session)
+    with pytest.raises(IntegrityError, match="uq_partition_profiles_layout_id"):
+        await _profile(session, sha="f" * 64)
+
+
+async def test_many_pending_detected_profiles_coexist(session: AsyncSession) -> None:
+    """NULL is never equal to NULL, so UNIQUE(layout_id) allows any number of pending rows."""
+    for digit in "abc":
+        await _profile(
+            session, sha=digit * 64, layout_id=None, origin="detected", slot=None, adopted=False
+        )
+    await _profile(session, sha="d" * 64, layout_id="adopted-map", origin="detected")
+    pending = await session.scalar(
+        text("SELECT count(*) FROM partition_profiles WHERE adopted_at IS NULL")
+    )
+    assert pending == 3

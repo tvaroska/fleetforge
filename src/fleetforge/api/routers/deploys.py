@@ -56,6 +56,12 @@ lookup, the mint and the INSERT, so a gated deploy writes no row and publishes n
 The pre-check ignores `override` and always reports the warning, so the card can render
 the tick.
 
+**The supported layouts are the `partition_profiles` table (R3-be-2).** Both routes load a
+`LayoutCatalog` in their own session, right after resolving the device and the artifact,
+and hand it to `deploy_precheck.refusals`, which stays pure. The pre-check also reports
+`device_partition_profile`, the board's effective layout (`catalog.resolve`), beside the
+layout it announces: a board on an adopted map still announces `unknown`.
+
 **Who sent it (R2b-be-4)** is recorded on the `requested` row (`detail.sent_by`): the
 subject, the token id and a snapshot of the token's label. The sender is whoever opened
 the transaction; a reuse writes no row, so the original sender stands.
@@ -104,6 +110,7 @@ from fleetforge.deploys import (
     record_publish_failure,
     record_requested,
 )
+from fleetforge.partition_profiles import LayoutCatalog, load_layout_catalog
 from fleetforge.presence import is_online
 
 logger = logging.getLogger(__name__)
@@ -219,7 +226,10 @@ async def deploy_device(
 
     async with sessionmaker() as session:
         device, found_artifact = await _resolve(session, device_id, body.version)
-        artifact = _accept(device, found_artifact, version=body.version, override=body.override)
+        catalog = await load_layout_catalog(session)
+        artifact = _accept(
+            device, found_artifact, version=body.version, override=body.override, catalog=catalog
+        )
 
         # The reuse window is the minted URL's lifetime: past it the first URL has
         # expired, so a board that never acted on the first command cannot act on it
@@ -341,13 +351,14 @@ def _accept(
     *,
     version: str,
     override: Collection[str],
+    catalog: LayoutCatalog,
 ) -> ResolvedArtifact:
     """Return the artifact, or raise the first refusal: 404 for no artifact, else 409.
 
     Then the gate: the first gating warning `override` does not name is a 409 with its
     own sentence. Refusals come first, so `override` can never clear one.
     """
-    found: list[Finding] = refusals(device, artifact, version=version)
+    found: list[Finding] = refusals(device, artifact, version=version, catalog=catalog)
     if found:
         raise HTTPException(
             status_code=(
@@ -387,8 +398,9 @@ async def precheck_deploy(
 
     async with sessionmaker() as session:
         device, artifact = await _resolve(session, device_id, body.version)
+        catalog = await load_layout_catalog(session)
         online = is_online(device, now=now_utc(), tolerance=settings.presence_tolerance)
-        found = refusals(device, artifact, version=body.version)
+        found = refusals(device, artifact, version=body.version, catalog=catalog)
         warned = warnings(device, online=online)
         response = DeployPrecheck(
             device_id=device_id,
@@ -399,6 +411,9 @@ async def precheck_deploy(
             size_bytes=artifact.size_bytes if artifact else None,
             artifact_partition_layout=artifact.partition_layout if artifact else None,
             device_partition_layout=device.partition_layout,
+            device_partition_profile=catalog.resolve(
+                device.partition_layout, device.partition_table_sha256
+            ),
             ota_slot_size=device.ota_slot_size,
             power_class=str(device.power_class),
             expected_wake_interval_s=device.expected_wake_interval_s,

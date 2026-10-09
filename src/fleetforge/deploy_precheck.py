@@ -27,6 +27,16 @@ whose table matches no layout its firmware knows announces `unknown`
 size and the fix. A partition table never changes over the air, so the fix is always a USB
 flash, and the sentence says so.
 
+**The supported layouts are a `LayoutCatalog` (R3-be-2), loaded from the
+`partition_profiles` table by the caller and passed in**, so this module stays pure: it
+never reads the DB. `catalog` is a required keyword, so no production path can silently
+fall back to the builtins. A board's effective layout is `catalog.resolve(...)` (DECISIONS
+R3-be-2 D7): the id it announces when that id is an adopted profile, otherwise the adopted
+profile whose fingerprint it announces. That is how a board announcing `unknown` becomes
+deployable once an operator has named its map. A board whose map is recorded as a pending
+detected profile is still refused as `unsupported_layout`, and the sentence gains one
+sentence naming the adoption route.
+
 The `detail` text of a refused deploy is lifted verbatim into the dashboard banner, so do
 not reword a sentence without reading `tests/test_api_deploy.py`.
 """
@@ -36,8 +46,8 @@ from collections.abc import Collection
 from dataclasses import dataclass
 
 from fleetforge.db.models import Device, PowerClass
-from fleetforge.firmware.manifest import SUPPORTED_LAYOUTS
 from fleetforge.merged_image import MergedImage
+from fleetforge.partition_profiles import LayoutCatalog
 
 logger = logging.getLogger(__name__)
 
@@ -60,9 +70,10 @@ ROLLBACK_INCAPABLE = "rollback_incapable"
 # `OverrideCode` literal is kept equal to this by `tests/test_deploy_precheck.py`.
 GATING_CODES: tuple[str, ...] = (ROLLBACK_INCAPABLE,)
 
-# Where a library user finds the partitions.csv for each supported layout: the fix named by
+# Where a library user finds the partitions.csv for each builtin layout: the fix named by
 # `unsupported_layout` and `partition_table_mismatch`. `tests/test_deploy_precheck.py` keeps
-# its keys equal to SUPPORTED_LAYOUTS', so a new layout cannot ship without a hint.
+# its keys equal to BUILTIN_LAYOUTS', so a new builtin cannot ship without a hint. An
+# operator-defined profile has no entry: the operator knows where its table came from.
 LAYOUT_SOURCES: dict[str, str] = {
     "ab-4m-v1": (
         "the library's examples/basic_idf/partitions.csv, or the prebuilt agent from the "
@@ -113,22 +124,27 @@ def _fix_for(layouts: list[str]) -> str:
         hint = LAYOUT_SOURCES.get(layouts[0])
         csv = f"the partitions.csv for {layouts[0]}" + (f" ({hint})" if hint else "")
     else:
-        hints = "; ".join(f"{layout}: {LAYOUT_SOURCES.get(layout, layout)}" for layout in layouts)
+        hints = "; ".join(
+            f"{layout}: {LAYOUT_SOURCES.get(layout, 'the partitions.csv it was defined from')}"
+            for layout in layouts
+        )
         csv = f"the partitions.csv for one of them ({hints})"
     return f"build it with {csv}, flash it once over USB, then deploy again."
 
 
-def _supported_summary() -> str:
+def _supported_summary(catalog: LayoutCatalog) -> str:
     """Every supported layout with its slot size, for a sentence with no known target."""
     return _and(
         [
             f"{layout} (two OTA slots of {profile.ota_slot_size} bytes each)"
-            for layout, profile in SUPPORTED_LAYOUTS.items()
+            for layout, profile in catalog.layouts.items()
         ]
     )
 
 
-def _unsupported_layout(device: Device, artifact: ResolvedArtifact | None, version: str) -> Finding:
+def _unsupported_layout(
+    device: Device, artifact: ResolvedArtifact | None, version: str, catalog: LayoutCatalog
+) -> Finding:
     """The board announces a layout this server does not support (R3-fw-5). One cause, one
     sentence: what it announces, what the build expects, and the fix. No backticks."""
     announced = [f"partition layout {device.partition_layout}"]
@@ -137,24 +153,40 @@ def _unsupported_layout(device: Device, artifact: ResolvedArtifact | None, versi
     if device.partition_table_sha256 is not None:
         announced.append(f"partition table fingerprint {device.partition_table_sha256}")
     target = artifact.partition_layout if artifact is not None else None
-    if target is not None and target in SUPPORTED_LAYOUTS:
+    if target is not None and target in catalog.layouts:
         expected = (
             f"{version} was built for {target}, whose two OTA slots are "
-            f"{SUPPORTED_LAYOUTS[target].ota_slot_size} bytes each."
+            f"{catalog.layouts[target].ota_slot_size} bytes each."
         )
         layouts = [target]
     else:
-        expected = f"This server supports {_supported_summary()}."
-        layouts = list(SUPPORTED_LAYOUTS)
+        expected = f"This server supports {_supported_summary(catalog)}."
+        layouts = list(catalog.layouts)
+    # R3-be-2: the old sentence stays a byte-for-byte prefix; a pending map only appends.
+    adoptable = ""
+    if device.partition_table_sha256 is not None and device.partition_table_sha256 in (
+        catalog.pending
+    ):
+        adoptable = (
+            " This flash map is recorded as a detected profile (fingerprint "
+            f"{device.partition_table_sha256}): an operator can adopt it by naming it, and "
+            "images uploaded for that name can then be deployed to this board."
+        )
     return Finding(
         UNSUPPORTED_LAYOUT,
         "this device's flash map is not a layout this server supports: it announces "
         f"{_and(announced)}. {expected} A partition table never changes over the air, so no "
-        f"deploy can fix this board: {_fix_for(layouts)}",
+        f"deploy can fix this board: {_fix_for(layouts)}{adoptable}",
     )
 
 
-def refusals(device: Device, artifact: ResolvedArtifact | None, *, version: str) -> list[Finding]:
+def refusals(
+    device: Device,
+    artifact: ResolvedArtifact | None,
+    *,
+    version: str,
+    catalog: LayoutCatalog,
+) -> list[Finding]:
     """Every reason this board cannot take this label, in the order a deploy checks them.
 
     `artifact` is `None` when the label names nothing for the device's chip. The
@@ -162,19 +194,23 @@ def refusals(device: Device, artifact: ResolvedArtifact | None, *, version: str)
     skipped. Layout and slot size are only checked when both sides are known: an R0 board
     that announced neither is not refused for being old.
 
-    A layout this server does not support (not in `SUPPORTED_LAYOUTS`, `unknown` included)
-    is refused, `unsupported_layout`, with or without an artifact and whatever layout the
-    artifact claims (R3-fw-5). It replaces `layout_mismatch` for that board, and its
-    fingerprint is not checked: there is no profile to check it against.
+    The board's layout is its *effective* one, `catalog.resolve(...)` (R3-be-2 D7): the
+    announced id when it is an adopted profile, otherwise the adopted profile its
+    fingerprint matches. A board that announces a layout and resolves to none (`unknown`
+    included) is refused, `unsupported_layout`, with or without an artifact and whatever
+    layout the artifact claims (R3-fw-5). It replaces `layout_mismatch` for that board, and
+    its fingerprint is not checked: there is no profile to check it against.
 
     The partition-table fingerprint is a property of the device against its own profile,
-    not of the artifact, so it runs without one too. It is checked only when the device
-    sent a fingerprint AND its layout has a known one: a board that has not reported one
-    yet is not refused for being old.
+    not of the artifact, so it runs without one too. It is checked only when the announced
+    id itself is an adopted profile, the device sent a fingerprint AND that profile has a
+    known one: a board that has not reported one yet is not refused for being old. A board
+    resolved *by* its fingerprint matches by construction, so it is not checked again.
     """
     found: list[Finding] = []
     layout = device.partition_layout
-    unsupported = layout is not None and layout not in SUPPORTED_LAYOUTS
+    effective = catalog.resolve(layout, device.partition_table_sha256)
+    unsupported = layout is not None and effective is None
 
     if artifact is None:
         found.append(
@@ -186,18 +222,18 @@ def refusals(device: Device, artifact: ResolvedArtifact | None, *, version: str)
             )
         )
     if unsupported:
-        found.append(_unsupported_layout(device, artifact, version))
+        found.append(_unsupported_layout(device, artifact, version, catalog))
     if artifact is not None:
         if (
             not unsupported
-            and layout is not None
+            and effective is not None
             and artifact.partition_layout is not None
-            and layout != artifact.partition_layout
+            and effective != artifact.partition_layout
         ):
             found.append(
                 Finding(
                     LAYOUT_MISMATCH,
-                    f"this device runs partition layout {layout} and "
+                    f"this device runs partition layout {effective} and "
                     f"{version} was built for {artifact.partition_layout}. "
                     "An image written into the wrong partition table does not boot.",
                 )
@@ -213,7 +249,7 @@ def refusals(device: Device, artifact: ResolvedArtifact | None, *, version: str)
             )
 
     announced = device.partition_table_sha256
-    profile = SUPPORTED_LAYOUTS.get(layout) if layout is not None else None
+    profile = catalog.layouts.get(layout) if layout is not None else None
     if announced is not None and layout is not None and profile is not None:
         expected = profile.partition_table_sha256
         if expected is None:

@@ -65,6 +65,8 @@ async def truncate(engine: AsyncEngine) -> None:
     async with engine.begin() as conn:
         await conn.execute(text("DELETE FROM artifact_versions"))
         await conn.execute(text("DELETE FROM artifacts"))
+        # R3-be-2: operator and detected profiles; never the builtins.
+        await conn.execute(text("DELETE FROM partition_profiles WHERE origin <> 'builtin'"))
 
 
 async def upload(
@@ -271,6 +273,66 @@ class TestRefusedBeforeItCosts:
         assert fits.json()["partition_layout"] == layout
         too_big = b"\x00" * (EXPECTED_OTA_SLOT_SIZE + 1)
         assert (await upload(admin_app, token, too_big, layout=layout)).status_code == 413
+
+
+USER_SHA = hashlib.sha256(b"upload-user-map").hexdigest()
+PENDING_SHA = hashlib.sha256(b"upload-pending-map").hexdigest()
+USER_SLOT = 4096
+
+
+async def add_profile(engine: AsyncEngine, sha: str, layout_id: str | None, slot: int) -> None:
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO partition_profiles "
+                "(partition_table_sha256, layout_id, origin, ota_slot_size, adopted_at) "
+                "VALUES (:sha, :layout_id, :origin, :slot, "
+                "CASE WHEN :adopted THEN now() ELSE NULL END)"
+            ),
+            {
+                "sha": sha,
+                "layout_id": layout_id,
+                "origin": "detected" if layout_id is None else "user",
+                "slot": slot,
+                "adopted": layout_id is not None,
+            },
+        )
+
+
+class TestOperatorProfiles:
+    """R3-be-2: the upload's layouts and ceilings are the `partition_profiles` table."""
+
+    async def test_an_adopted_user_layout_is_accepted_under_its_own_slot(
+        self, admin_app: FastAPI, store: MemoryObjectStore, engine: AsyncEngine
+    ) -> None:
+        await add_profile(engine, USER_SHA, "my-map", USER_SLOT)
+        token = await login_admin(admin_app)
+        fits = await upload(admin_app, token, b"\x01" * USER_SLOT, layout="my-map")
+        assert fits.status_code == 201, fits.text
+        assert fits.json()["partition_layout"] == "my-map"
+        too_big = await upload(
+            admin_app, token, b"\x02" * (USER_SLOT + 1), layout="my-map", version="1.5.1"
+        )
+        assert too_big.status_code == 413
+        assert str(USER_SLOT) in too_big.json()["detail"]
+
+    async def test_a_pending_or_missing_layout_is_400_and_the_list_grows_on_adoption(
+        self, admin_app: FastAPI, store: MemoryObjectStore, engine: AsyncEngine
+    ) -> None:
+        await add_profile(engine, PENDING_SHA, None, USER_SLOT)
+        token = await login_admin(admin_app)
+        missing = await upload(admin_app, token, IMAGE, layout="my-map")
+        assert missing.status_code == 400
+        assert missing.json()["detail"] == (
+            "unknown partition_layout; this server understands: ab-4m-arduino-v1, ab-4m-v1"
+        )
+        await add_profile(engine, USER_SHA, "my-map", USER_SLOT)
+        listed = await upload(admin_app, token, IMAGE, layout="other-map")
+        assert listed.status_code == 400
+        assert listed.json()["detail"] == (
+            "unknown partition_layout; this server understands: ab-4m-arduino-v1, ab-4m-v1, my-map"
+        )
+        assert store.puts == []
 
 
 class TestLabelsAreRejectedNeverNormalised:
