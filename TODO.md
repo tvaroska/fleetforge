@@ -354,7 +354,7 @@ Order: spec-3 → fw-2 → fw-3/fw-4 → fw-5/fw-6/be-1 → test-1 → spec-2 �
 
 ### Spec (proposals)
 
-- [ ] **R3-spec-3**: Decide how the library marker is encoded in the app binary (P1, 0.5d)
+- [x] **R3-spec-3**: Decide how the library marker is encoded in the app binary (P1, 0.5d) _(done 2026-10-08; reviewed; decided: scanned 64-byte marker constant, announced as lib_marker; proposal filed, spec not applied; see DECISIONS.md and docs/features/ota-library.md)_
       Open since `spec/flows.md` (R2b). Candidates: a string in `esp_app_desc_t`, a section
       the library links in, or a constant the pre-check can find in the image. It must be
       readable by the server at upload (`R3-be-1`) and survive both ESP-IDF and Arduino builds.
@@ -390,6 +390,7 @@ Order: spec-3 → fw-2 → fw-3/fw-4 → fw-5/fw-6/be-1 → test-1 → spec-2 �
       Acceptance: Arduino-framework builds (PlatformIO on the dev box, `pio` is installed)
       of the example for esp32 and esp32s3 compile; the esp32 build enrolls and heartbeats
       in QEMU against the dev stack.
+      Per R3-spec-3 (side finding, not fixed): an Arduino build's `esp_app_desc_t.version` is the core's IDF string (`esp-idf: v4.4.7 38eeba213a` on core 2.0.17), so `fw_version` and the upload form's version pre-fill are wrong unless the library supplies the maker's version.
 - [ ] **R3-fw-4**: The worked example — enroll → heartbeat → stage → report version (P1, 1d)
       Small enough to read in one screen: the PRD's Morse-code blinker, which changes its
       message between two builds so "the OTA worked" is visible in the log and the
@@ -410,6 +411,8 @@ Order: spec-3 → fw-2 → fw-3/fw-4 → fw-5/fw-6/be-1 → test-1 → spec-2 �
       on `R3-spec-3`, `R3-fw-2`.
       Acceptance: the QEMU example announces the marker; the stock agent and every pre-R3
       board announce none and are not refused for it (`null` never warns).
+      Per R3-spec-3: the marker lives in the component, so the stock agent built from it carries and announces it too; "announce none" means agents ≤ 0.4.7. Applies Patch B (the lib_marker key in the up/announce example) in this task's commit.
+      **Blocked:** waits for the owner to accept and apply the R3-spec-3 proposal (Patch A). See docs/features/ota-library.md → *Library marker proposal*.
 - [ ] **R3-fw-7**: PlatformIO recipe (P2, 0.5d)
       A working `platformio.ini` for the example, no registry publication (out of scope).
       Depends on `R3-fw-3`. Acceptance: `pio run` on a clean checkout builds both targets.
@@ -422,6 +425,8 @@ Order: spec-3 → fw-2 → fw-3/fw-4 → fw-5/fw-6/be-1 → test-1 → spec-2 �
       image at upload. Not for the stock agent's own bundles. Depends on `R3-spec-3`.
       Acceptance: a plain sketch `.bin` warns and needs `override: [code]`; a library build
       and an agent bundle do not; unit tests pin all three.
+      Per R3-spec-3: code no_library_marker (gating); scan rule and magic in docs/features/ota-library.md → *Library marker proposal*; artifacts uploaded before this have no verdict and never warn.
+      **Blocked:** waits for the owner to accept and apply the R3-spec-3 proposal (Patch A). See docs/features/ota-library.md → *Library marker proposal*.
 - [ ] **R3-be-2**: Partition profile table with detected and user-defined entries (P2, 3d)
       Board-profiles step 2 ([board-profiles.md](docs/features/board-profiles.md)): the
       `partition_profiles` table seeded from the catalog, `builtin` immutable vs `user`,

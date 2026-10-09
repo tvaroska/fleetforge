@@ -16,6 +16,51 @@ becomes a board in the field that fixes itself" — this release *is* that journ
 
 ## Completed Work
 
+### R3-spec-3 (2026-10-08): library marker encoding decided; spec not applied
+
+Decided: the library marker is a 64-byte `const` struct in the library's shared C core
+(magic `14a948d18f12cfdd46464f54414c4942`, then `format`, then `lib_version`), found by
+scanning the whole uploaded image, not a field of `esp_app_desc_t`, not
+`.rodata_custom_desc`, not a linker section and not an ELF note. It is kept only by an
+`extern` read from library code, so `--gc-sections` drops it from a sketch that has the
+library installed but never calls it; it is never force-kept. Boards announce the running
+image's marker as `lib_marker` (additive, `proto` 1, `null` never warns); the pre-check
+gates on the image being sent, as the gating warning `no_library_marker` (`R3-be-1`). The
+paste-ready text is in *Planned Work → Library marker proposal*. Application order: Patch A
+((b) new `## Library marker` section, (c) the `lib_marker` prose, (d) the `flows.md` line
+144 deletion, (e) the `open-questions.md` candidate (1) rewrite) any time after the owner
+accepts; Patch B ((a), `"lib_marker": 1` in the announce example) only in `R3-fw-6`'s
+commit. Blocked on the owner: `R3-fw-6`, `R3-be-1`. Side finding for `R3-fw-3`: an Arduino
+build's `esp_app_desc_t.version` is the core's IDF string, so its `fw_version` is wrong.
+Nothing is built and `spec/` is untouched.
+
+**T2 evidence.** Reference reader (the code in the proposal) as a scratch script,
+`python3 -I scan.py --selftest`: exit 0 (a struct at an odd offset inside a copy of
+`agent/dist/esp32/app.bin` is found with the right `lib_version`; truncated, `format = 0`,
+empty, non-printable and unterminated `lib_version` are all "no marker"; an invalid first
+occurrence before a valid one finds the second). Then the scan:
+
+| Binary | Result |
+|---|---|
+| `agent/dist/{esp32,esp32c3,esp32c6,esp32s3}/app.bin` (0.4.7, `project_name='fleetforge-agent'`) | `no marker` ×4 |
+| `tests/fixtures/firmware/esp32{,s3}.app.head.bin` (0.4.5) | `no marker` ×2 |
+| `tests/fixtures/firmware/esp32{,s3}.merged.head.bin` | `no marker` ×2 |
+| Arduino core 2.0.17, `call` (`.pio/build/call/firmware.bin`) | `marker format=1 lib_version=0.0.0-spike @0x148` |
+| Arduino core 2.0.17, `nocall` | `no marker` |
+| ESP-IDF 6.0.1 component, `call` | `marker format=1 lib_version=0.0.0-spike @0x5a74` |
+| ESP-IDF 6.0.1 component, `nocall` | `no marker` |
+
+PlatformIO 6.1.19, `espressif32` 7.0.1, `esp32dev`. The Arduino builds' descriptor:
+`version='esp-idf: v4.4.7 38eeba213a'`, `project_name='arduino-lib-builder'`. The first
+Arduino build installed `framework-arduinoespressif32` (769 MB) and `toolchain-xtensa-esp32`
+(396 MB) under `~/.platformio/packages`; both are kept for `R3-fw-3`/`R3-fw-7`. The scratch
+projects were deleted. The patches were dry-run on a copy of the repo: Patch A applies at
+its anchors and `test_ff_cfg.py`, `test_agent_partitions.py`,
+`test_agent_board_measurements.py`, `test_agent_known_networks.py` and
+`test_deploy_precheck.py` stay green; Patch A + B turns exactly
+`TestAnnounceMatchesTheSpec::test_the_firmware_builds_exactly_the_spec_keys` red, which is
+why B waits for `R3-fw-6`.
+
 ### Where a library user's config lives (R3-fw-1) — **LANDED 2026-09-22**
 
 **What shipped**. A measurement and a decision, no firmware. The open question filed with
@@ -228,6 +273,307 @@ code-resident `SUPPORTED_LAYOUTS` cannot serve that, so step 2 of
 **Out of scope for R3:** Improv reprovisioning (HOBBYIST §4.3, unslotted), PlatformIO
 registry publication beyond a working `platformio.ini` recipe, and any application-config
 channel — `dn/cfg` stays agent-only by design.
+
+#### Library marker proposal (R3-spec-3, 2026-10-08) — PROPOSED, not applied
+
+`spec/` is protected during `/implement`, so this is the decision written as paste-ready
+text for a later `spec:` commit (the route R2-spec-1 and R2b-spec-2 took). **Nothing here is
+built.** No agent, server, schema, migration, simulator or test change has been made. The
+follow-ups (`R3-fw-6`, `R3-be-1`) are blocked in `TODO.md` until the owner accepts and
+applies Patch A. The decision is logged in `DECISIONS.md` (2026-10-08, R3-spec-3), as
+proposed only.
+
+**The question.** `spec/flows.md` Flow 2 step 2 warns, with an explicit override, on "a
+binary without the Fleetforge OTA library marker" from R3, and `spec/open-questions.md` →
+*An OTA image that does not contain the agent* explains why: an image without the library
+arms no confirm timer, runs unconfirmed and offline, and no remote action reaches it. The
+marker must be readable by the server from the uploaded `.bin` at upload, and must survive
+both ESP-IDF and Arduino builds.
+
+**Decided: a 64-byte constant, found by scanning the whole image** (candidate 3 of the
+task). It is one `const` struct in the library's shared C core, the part `R3-fw-2` extracts
+into the ESP-IDF component and `R3-fw-3` wraps for Arduino, defined in its own translation
+unit (planned name `ff_marker.c`). It is not in `esp_app_desc_t` and not at a fixed offset.
+
+Byte layout. Every field is bytes or chars, so byte order never matters. The struct is
+4-byte aligned.
+
+| Offset | Size | Field | Value |
+|---|---|---|---|
+| 0 | 16 | `magic` | `14 a9 48 d1 8f 12 cf dd 46 46 4f 54 41 4c 49 42`: 8 random bytes, then ASCII `FFOTALIB`. As one hex string: `14a948d18f12cfdd46464f54414c4942` |
+| 16 | 1 | `format` | `1` |
+| 17 | 3 | reserved | `0` |
+| 20 | 32 | `lib_version` | the library's version: printable ASCII (`0x20`..`0x7e`), NUL-terminated, non-empty |
+| 52 | 12 | reserved | `0` |
+
+The magic was generated once (`secrets.token_hex(8)`, then `FFOTALIB`) and is frozen: it
+is never regenerated. The random half means a sketch that prints "FFOTALIB" cannot match by
+accident; the ASCII half lets a person find the marker with `grep -a FFOTALIB` or `strings`.
+
+**Reader rule (the server, `R3-be-1`).** Scan the whole image for `magic`. Take each
+occurrence in order and accept the first that has at least 64 bytes from the start of the
+magic to the end of the image, `format >= 1`, and a valid `lib_version` C string. Read
+fields beyond `lib_version` only when `format` says they exist. No occurrence, or no valid
+one, is "no marker". A malformed marker is "no marker", never an error (the "malformed is
+null, never a lost announce" rule, applied to an image). Cost: one `bytes.find` loop over at
+most 1966080 bytes, once per upload. The reference reader the spike used, in full:
+
+```python
+MAGIC = bytes.fromhex("14a948d18f12cfdd46464f54414c4942")
+
+def find_marker(data: bytes) -> dict | None:
+    pos = data.find(MAGIC)
+    while pos != -1:
+        if len(data) - pos >= 64 and data[pos + 16] >= 1:
+            raw = data[pos + 20 : pos + 52]
+            end = raw.find(b"\0")
+            if end > 0 and all(0x20 <= b <= 0x7E for b in raw[:end]):
+                return {"offset": pos, "format": data[pos + 16],
+                        "lib_version": raw[:end].decode("ascii")}
+        pos = data.find(MAGIC, pos + 1)
+    return None
+```
+
+**Writer rules (the library, `R3-fw-6`). Mechanism, so it lives here and not in the spec.**
+
+- Defined once, in `ff_marker.c`, as
+  `const ff_lib_marker_t ff_lib_marker __attribute__((aligned(4))) = {...};` with a
+  `_Static_assert(sizeof(ff_lib_marker_t) == 64)`.
+- **It is kept alive only because library code reads it**, through an `extern` from another
+  translation unit: the announce builder (`ff_identity.c::announce_object`) and/or the confirm
+  path. Both toolchains compile with `-fdata-sections` and link with `--gc-sections`, so the
+  marker's own `.rodata.ff_lib_marker` section survives exactly when that code is linked.
+  The spike's `nocall` builds below are the proof: library installed and compiled, never
+  called, no marker.
+- **Never** force-keep it with `-u`, `KEEP()` or `__attribute__((used))`/`retain`. A
+  force-kept marker would mark a sketch that merely has the library installed, which is the
+  case the warning exists for.
+- **Let the address escape**, do not only read a scalar. A read of `ff_lib_marker.format`
+  alone can be constant-folded under LTO and the object dropped. Passing
+  `ff_lib_marker.lib_version` as a string (it is the announce's `agent_version` in a library
+  build, see the version note) keeps the object, and the linker keeps or drops its section
+  as a unit. Unmeasured under LTO: neither spike build uses it, and `R3-fw-6` may check it.
+- Growth is additive: a new field takes reserved bytes and a higher `format`. Existing
+  fields never move or change type.
+
+**Why the scan survives every toolchain.** An ESP app `.bin` holds the DROM (`.rodata`)
+segment bytes verbatim, uncompressed and unencrypted: flash encryption happens on the device,
+and a Secure Boot signature is appended, not interleaved. A `const` object is contiguous
+inside one segment, so segment headers never split it. The approach depends only on "the
+object is linked", which holds the same way on ESP-IDF 4.4 through 6.0, Arduino core 2.x and
+3.x, and PlatformIO. In the spike it landed at `0x5a74` (ESP-IDF) and `0x148` (Arduino):
+not a fixed offset, and the reader must not assume one.
+
+**What it proves, and what it does not.** It proves the library's code, including its
+confirm timer, is linked into the image. It does **not** prove (1) that the firmware starts
+the library (a sketch that calls it only on a path that never runs still carries it), (2) that its flash layout is right (`partition_layout` and the
+partition-table fingerprint check that), or (3) that its own logic works (R5's custom
+self-test). Three named gaps.
+
+**On the wire (`R3-fw-6`).** One additive, flat `up/announce` field, `"lib_marker": 1`: the
+`format` of the marker in the **running** image. Absent on any image without one, which
+includes every agent up to 0.4.7, so every board in the field today. The server never
+refuses or warns on a device for this field (`null`/absent never warns). The pre-check
+gates on the marker of the **image being sent** (the upload verdict), not on the board's
+announce: the board's field says what it runs now, the warning is about what it will run
+next. Additive under *Evolution rules* rule 2; `proto` stays `1`; flat, so CBOR stays a
+drop-in. Malformed (not an integer, a boolean, or outside `1..255`) is stored as null and
+logged, never refused, on both the ingestor and `/v1/enroll`. Size: `,"lib_marker":1` adds
+15 B to an announce of about 590 B; esp-mqtt's buffer is 1024 B.
+
+**The stock agent carries the marker too**, from the first agent built on the `R3-fw-2`
+component: it links the same code, and the rule is simply "has the confirm path, has the
+marker". So `R3-fw-6`'s acceptance "the stock agent and every pre-R3 board announce none"
+reads as "agents ≤ 0.4.7 (pre-R3) announce none" (clarified in `TODO.md`). `R3-be-1`'s "not
+for the stock agent's own bundles" stands: agent bundles are published through
+`firmware/publish.py`, never through `POST /v1/artifact`, so they are never checked, and the
+0.4.x bundles carry no marker.
+
+**Pre-check (`R3-be-1`), named here so it is not re-decided.** Code `no_library_marker`, a
+gating warning (`needs_override: true`), the second gating code after `rollback_incapable`:
+`/deploy` answers 409 unless the body has `override: ["no_library_marker"]`. Its sentence
+lives in `deploy_precheck.py`. The verdict must be computed at upload and stored, because a
+deploy never reads bytes (R1-be-3; the R2b-be-3 entry notes that "a verdict per artifact
+would need a migration"). Storage is `R3-be-1`'s to decide, with two constraints:
+`artifacts.provenance` is producer-copied identity ("copied, never recomputed",
+`db/models.py`), a poor home for a server-computed verdict; and a new column is an alembic
+migration, which is CRITICAL. **Artifacts uploaded before `R3-be-1` have no verdict and
+count as unknown: they never warn** (the "null never warns" rule; a named gap).
+
+**Consumers each dependent touches.**
+
+- `R3-fw-6`: `ff_marker.c` (+ its header) in the `R3-fw-2` component, and
+  `ff_identity.c::announce_object` (adds `lib_marker` and is the extern reader); Patch B in
+  the same commit.
+- `R3-be-1`: `api/routers/artifacts.py` (the scan next to the `detect_merged(data)` call,
+  about line 261), the stored verdict, `deploy_precheck.py` (`NO_LIBRARY_MARKER`,
+  `GATING_CODES`), `api/schemas.py::OverrideCode` (the `Literal` behind
+  `DeployRequest.override`, kept equal to `GATING_CODES` by `tests/test_deploy_precheck.py`),
+  and, for the board's field, `ingestor/protocol.py::AnnouncePayload`, `ingestor/store.py`,
+  `api/schemas.py::EnrollRequest` (storing it is optional; nothing gates on it).
+
+**Rejected.**
+
+1. **A string in `esp_app_desc_t` (`project_name` or `version`).** The maker owns both:
+   `project_name` is their CMake project, and `version` is already the build label that
+   becomes `fw_version` and pre-fills the upload form (`frontend/src/appImage.ts`). Hijacking
+   either breaks something the user sees. And in an Arduino build the descriptor is compiled
+   into the core's precompiled libraries, so a library cannot write it at all: the spike's
+   Arduino builds (core 2.0.17) carry `version='esp-idf: v4.4.7 38eeba213a'`,
+   `project_name='arduino-lib-builder'`. There is no free field.
+2. **`.rodata_custom_desc` (`esp_custom_app_desc_t`, fixed at `0x120`, right after
+   `esp_app_desc_t`).** Attractive because the 256-byte head would hold it. But it is one
+   slot per application, which the maker may use; it depends on every core's linker script
+   placing that section (the PlatformIO ESP-IDF copy does, `sections.ld.in`; every Arduino
+   core and platform version would have to be re-verified forever); and the ESP-IDF docs keep
+   it alive with `-u custom_app_desc`, which an Arduino library cannot add.
+3. **A dedicated output section the library links in.** Needs a linker-script change:
+   impossible from an Arduino library and fragile across cores.
+4. **An ELF symbol or note.** The server receives the `.bin`, which has no symbols.
+
+The scan needs no linker cooperation at all.
+
+**Version note for `R3-fw-2` / `R3-fw-6` (not spec text).** `lib_version` is the
+component's version string; `R3-fw-2` picks its single source. `ff_identity.c` already says
+that from R1 "the agent is a component inside a user firmware and only `fw_version` moves",
+so in a library build `agent_version` is the same constant as the marker's `lib_version`,
+and `fw_version` stays `esp_app_desc_t.version`. **Side finding for `R3-fw-3`/`R3-fw-4`**:
+in an Arduino build `esp_app_desc_t.version` is the core's IDF string (above), so
+`fw_version` and the upload form's version pre-fill are wrong for every Arduino build until
+the library supplies the maker's version another way. Not fixed here.
+
+**Spike results (2026-10-08).** PlatformIO 6.1.19, platform `espressif32` 7.0.1, board
+`esp32dev`. A three-file mini library (`fflib.h`, `ff_marker.c` with the exact bytes above
+and `lib_version "0.0.0-spike"`, `fflib.c` whose `fflib_begin()` prints `format` and
+`lib_version` through an `extern`) and an app that calls `fflib_begin()` only when
+`FF_CALL=1`. Two envs per toolchain, `call` and `nocall`. Scanned with the reference reader.
+
+| Build | Scan result | `ff_lib_marker` in the ELF | `esp_app_desc_t` |
+|---|---|---|---|
+| Arduino core 2.0.17 (IDF 4.4.7), `call` | `marker format=1 lib_version=0.0.0-spike @0x148` | `3f400148 D` | `version='esp-idf: v4.4.7 38eeba213a'`, `project_name='arduino-lib-builder'` |
+| Arduino core 2.0.17 (IDF 4.4.7), `nocall` | `no marker` | absent | same |
+| ESP-IDF 6.0.1 (component), `call` | `marker format=1 lib_version=0.0.0-spike @0x5a74` | `3f405a74 D` | `version='1'`, `project_name='spike'` |
+| ESP-IDF 6.0.1 (component), `nocall` | `no marker` | absent | same |
+
+False positives: none. The reader on every real binary in the repo: `agent/dist/{esp32,
+esp32c3,esp32c6,esp32s3}/app.bin` (agent 0.4.7) and `tests/fixtures/firmware/*.bin` (two
+0.4.5 app heads, two merged heads): all `no marker`, and none contains `FFOTALIB`. Arduino
+core 3.x was not built (2.0.17 is the platform's default); the scan does not depend on the
+core, and `R3-fw-3`'s builds re-prove it.
+
+**Paste-ready spec text.** Everything below is for `spec/device-protocol.md`,
+`spec/flows.md` and `spec/open-questions.md`, in two patches. **Patch A** is (b), (c), (d)
+and (e): apply any time after the owner accepts. **Patch B** is (a): apply **only in
+`R3-fw-6`'s commit**, never before, because
+`tests/test_ff_cfg.py::TestAnnounceMatchesTheSpec::test_the_firmware_builds_exactly_the_spec_keys`
+requires `ff_identity.c` to emit every key in the `up/announce` example, so Patch B alone
+turns `just test` red (R2b-spec-2's A4, same reason). Patch A on its own leaves `just test`
+green: no test reads the text it adds.
+
+*(a) Patch B. `spec/device-protocol.md` → `up/announce` JSON example.* Anchor: the line
+`  "capabilities": ["ota", "selftest", "identify"]` inside the ```` ```json ```` block under
+`### \`up/announce\` — identity`. Replace that one line with these two; every other line stays
+byte-for-byte (`tests/test_agent_partitions.py` matches `"ota_slot_size": 1966080` and
+`"partition_layout": "ab-4m-v1"` as text). The edit is to the last line only, so it composes
+with R2b-spec-2's still-owed Patch B (three keys after `ota_slot_size`) in either order.
+
+```json
+  "capabilities": ["ota", "selftest", "identify"],
+  "lib_marker": 1
+```
+
+*(b) Patch A. `spec/device-protocol.md`, a new section.* Anchor: insert immediately before
+the line `## Evolution rules`, after the paragraph of `## Hierarchy (V3)` that ends "keeping
+the namespace flat and reserving the field.", with one blank line on each side:
+
+```markdown
+## Library marker
+
+An image built with the Fleetforge OTA library (the ESP-IDF component or the Arduino
+library, and so the prebuilt agent built from it) contains one 64-byte constant, the
+library marker. The server looks for it in an uploaded image. It is not in `esp_app_desc_t`
+and not at a fixed offset. Every field is bytes or chars, so byte order does not matter.
+
+| Offset | Size | Field | Value |
+|---|---|---|---|
+| 0 | 16 | `magic` | `14 a9 48 d1 8f 12 cf dd 46 46 4f 54 41 4c 49 42` (hex `14a948d18f12cfdd46464f54414c4942`; the last 8 bytes are ASCII `FFOTALIB`) |
+| 16 | 1 | `format` | `1` |
+| 17 | 3 | reserved | `0` |
+| 20 | 32 | `lib_version` | the library's version: printable ASCII, NUL-terminated, non-empty |
+| 52 | 12 | reserved | `0` |
+
+**Reading it.** Scan the whole image for `magic`. Take each occurrence in order and accept
+the first that has at least 64 bytes from the start of the magic to the end of the image,
+`format` of at least `1`, and a `lib_version` that is a non-empty string of printable ASCII
+(`0x20`-`0x7e`) ended by a NUL within its 32 bytes. Read fields beyond `lib_version` only
+when `format` says they exist. No occurrence, or no valid one, means the image has no
+marker; a malformed marker is no marker, never an error.
+
+**Writing it.** The marker is defined once, in the library, and is present in an image
+exactly when the library's code is linked into it; installing the library without using it
+does not mark an image. It grows only additively: a new field takes reserved bytes and a
+higher `format`, and existing fields never move or change type.
+
+**What it proves.** That the library's code, including its confirm timer, is linked into
+the image. Not that the firmware starts the library, not that its flash layout is right
+(`partition_layout` and `partition_table_sha256` check that), and not that its own logic
+works.
+
+An image without the marker gets a warning with an explicit override at pre-check
+([flows.md](flows.md) Flow 2, step 2), never a refusal.
+```
+
+*(c) Patch A. `spec/device-protocol.md` → `up/announce` prose.* Anchor: insert as a new
+paragraph after the paragraph that begins "`ssid` and `known_networks` say which network the
+board is on" and ends "The passphrase and the other networks' SSIDs are never sent.", and
+before `#### Partition layouts`, with one blank line on each side:
+
+```markdown
+`lib_marker` is the `format` of the library marker (*Library marker* below) in the image
+the board is running, an integer. It is absent when that image has no marker, which
+includes every agent built before the library. It is additive under *Evolution rules*,
+rule 2, and `proto` stays `1`. The server never refuses or warns on a device for it: the
+pre-check reads the marker from the image being sent, not from the board. The enroll body
+carries it like every other announce field, and the server stores a malformed value as
+null rather than refusing the request.
+```
+
+*(d) Patch A. `spec/flows.md` line 144* (Flow 2, *Decisions (operator view)*). Anchor: the
+line that begins `- **Open, recorded not decided:**`. Delete ", and how the Fleetforge
+library marker is encoded in the app binary header (R3)", so the line reads:
+
+```markdown
+- **Open, recorded not decided:** how a sleepy battery node avoids a false rollback from the confirm timer (beyond surfacing its sleepy wake window at pre-check).
+```
+
+"Header" was wrong as well as open: the marker is not in the image header. Line 107 ("from
+R3, a binary without the Fleetforge OTA library marker …") and line 140 stay as they are.
+
+*(e) Patch A. `spec/open-questions.md` → *An OTA image that does not contain the agent*.*
+Anchor: the paragraph that begins `**An OTA image that does not contain the agent.**`
+(lines 89-103 today). Replace the whole paragraph with the one below. The first two
+sentences, candidate (2) and the closing R5 sentence are unchanged. The third sentence drops
+", but cannot tell whether the agent is linked in" (the marker is how it tells), "Two
+candidates, not decided." loses "not decided", candidate (1) is rewritten as decided, and
+candidate (2) is marked open:
+
+```markdown
+**An OTA image that does not contain the agent.** The confirm timer lives in the agent
+(`ff_mqtt.c::confirm_timeout_cb`), so an image without it arms no timer. The bootloader
+holds it in `PENDING_VERIFY`, and it is rolled back only if the board resets; otherwise it
+runs unconfirmed and offline, the deploy stays at `rebooting`, and no remote action
+reaches it. The pre-check refuses a merged binary and a wrong layout or slot size. Two
+candidates. (1) Decided for detection (R3-spec-3): the library marker read from the image
+at upload ([device-protocol.md](device-protocol.md) → *Library marker*), shown at
+pre-check as the gating warning `no_library_marker`. It catches the plain-sketch mistake,
+not a library that is linked but never started, and not broken logic. (2) Open: a watchdog
+the bootloader arms before it enters a `PENDING_VERIFY` image and only the agent's confirm
+path disarms, so a silent image resets and rolls back. It needs a custom bootloader (a
+one-time USB flash, so not OTA-able), applies only where we own the bootloader (not
+Arduino's), and it is unverified whether IDF's startup disables that watchdog before the
+app runs. Neither covers an image that has the agent and confirms but whose own logic is
+wrong; that is the R5 custom self-test.
+```
 
 ### R3 task list — moves into `TODO.md` when R3 opens
 

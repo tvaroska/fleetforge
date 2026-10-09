@@ -2225,8 +2225,12 @@ Implementation notes behind `spec/flows.md` Flow 2 and the 2026-10-04 entries in
   list[Literal["rollback_incapable"]] = []`, per code, never a blanket `force`; an unknown
   code is a 422; refusals are never overridable). `null` or absent never warns.
   Details: `board-profiles.md` → *Server semantics*.
-- **Library marker.** R3 only. How it is encoded in the app binary is open; until it is,
-  no refusal can be implemented.
+- **Library marker.** R3 only. Encoding decided (R3-spec-3, proposed): a 64-byte constant
+  the library links in, found by scanning the whole uploaded image (not `esp_app_desc_t`,
+  not a fixed offset). `R3-be-1` turns it into the gating warning `no_library_marker`
+  (`override: ["no_library_marker"]`, a verdict computed at upload), after the owner applies
+  Patch A; until then nothing checks it. Details: `ota-library.md` → *Library marker
+  proposal*.
 - **Crash reason after a rollback.** Open question, not a design. After the bootloader
   rolls back, the surviving slot boots a fresh `esp_reset_reason()`, which may describe the
   rollback reset rather than the failed boot's panic or watchdog. A reason and last milestone
