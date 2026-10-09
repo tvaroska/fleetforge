@@ -17,3 +17,11 @@ dist/
 # PlatformIO build output of the Arduino library example (R3-fw-3): hundreds of MB, and
 # not an input to the IDF build.
 **/.pio
+
+# A host `idf.py build` of the ESP-IDF example (R3-fw-4): output, never an input, and its
+# `sdkconfig` would be read as the example's own if it ever reached a build.
+components/fleetforge/examples/*/build
+components/fleetforge/examples/*/sdkconfig
+components/fleetforge/examples/*/sdkconfig.old
+components/fleetforge/examples/*/dependencies.lock
+components/fleetforge/examples/*/managed_components

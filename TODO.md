@@ -364,6 +364,7 @@ Order: spec-3 → fw-2 → fw-3/fw-4 → fw-5/fw-6/be-1 → test-1 → spec-2 �
       (`R3-fw-4`, `R3-test-1`); step 5 names `just update-e2e` for the server and dashboard
       half (DECISIONS 2026-10-05 proposal). Proposal only; `spec/cujs.md` is protected.
       Depends on `R3-test-1`.
+      Per R3-fw-4: the row 1-2 harness is `just lib-quickstart --build-only` (the README blocks, verbatim, in a clean temp tree: Arduino esp32/esp32s3 + build B, ESP-IDF esp32/esp32s3).
 
 ### Firmware
 
@@ -391,7 +392,7 @@ Order: spec-3 → fw-2 → fw-3/fw-4 → fw-5/fw-6/be-1 → test-1 → spec-2 �
       of the example for esp32 and esp32s3 compile; the esp32 build enrolls and heartbeats
       in QEMU against the dev stack.
       Per R3-spec-3 (side finding, not fixed): an Arduino build's `esp_app_desc_t.version` is the core's IDF string (`esp-idf: v4.4.7 38eeba213a` on core 2.0.17), so `fw_version` and the upload form's version pre-fill are wrong unless the library supplies the maker's version.
-- [ ] **R3-fw-4**: The worked example — enroll → heartbeat → stage → report version (P1, 1d)
+- [x] **R3-fw-4**: The worked example — enroll → heartbeat → stage → report version (P1, 1d) _(done 2026-10-09; reviewed; see docs/features/ota-library.md)_
       Small enough to read in one screen: the PRD's Morse-code blinker, which changes its
       message between two builds so "the OTA worked" is visible in the log and the
       dashboard version. Depends on `R3-fw-2`, `R3-fw-3`.
@@ -458,6 +459,7 @@ Order: spec-3 → fw-2 → fw-3/fw-4 → fw-5/fw-6/be-1 → test-1 → spec-2 �
       unaided and reports `rolled-back`. Depends on `R3-fw-4`.
       Acceptance: all three pass with no board; the rollback run fails the test if the
       device reports `confirmed`.
+      Per R3-fw-4: runs one and two exist as `just lib-quickstart` (`phase_enroll`, `phase_ota` in `scripts/lib_quickstart.py`); add the broken build as `phase_rollback` after `phase_ota` (a QEMU bundle that cannot confirm, `apply: "on_command"`, power cycle; expect `rolled_back`, fail on `confirmed`). Each run pays one ~11 min hybrid compile in the fresh `lib-qemu/`.
 - [ ] **R3-test-2**: Play CUJ-1 end to end with every segment gradeable (P1, 0.5d)
       The T3 gate (`/verify`) with the segments from `R3-spec-2` applied by the owner.
       Depends on `R3-test-1`, `R3-spec-2`. Acceptance: deterministic judge passes on steps
@@ -467,6 +469,7 @@ Order: spec-3 → fw-2 → fw-3/fw-4 → fw-5/fw-6/be-1 → test-1 → spec-2 �
       `agent/version.txt` bump, `/release fleetforge minor`, then
       `just agent-publish-all` + `just agent-check-prod` **only with the owner's go-ahead**.
       Depends on everything above.
+      Per R3-fw-4: link the two example READMEs (`examples/Basic/README.md`, `examples/basic_idf/README.md`) from the library README; keep their `# quickstart:` blocks intact (`just lib-quickstart` runs them).
 
 ### Order
 

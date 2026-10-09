@@ -812,6 +812,7 @@ agent-qemu-clean:
 #     just lib-qemu                    # boot that bundle; same .qemu/ff_cfg.bin as agent-qemu
 #     just lib-qemu --fresh            # new flash image = wipe NVS = forget the credential
 #     just agent-qemu-stop esp32       # stops it too: it is the same ff-qemu-esp32 board
+#     just lib-quickstart              # play the worked example's README quickstart (R3-fw-4)
 #
 # Toolchain: pioarduino 55.03.312-1 (Arduino core 3.3.12 on ESP-IDF v5.5.5), pinned in
 # both platformio.ini files; it needs PlatformIO Core >= 6.2.0. docs/runbooks/agent-qemu.md
@@ -834,6 +835,13 @@ lib-bundle env="esp32-qemu":
     [ "{{ env }}" = "esp32-qemu" ] || {
         echo "lib-qemu/ has one env, esp32-qemu (QEMU emulates only the esp32)"; exit 2; }
     export PLATFORMIO_CORE_DIR="${FF_LIB_QEMU_PIO_CORE:-$HOME/.platformio-fleetforge-qemu}"
+    pio run -d lib-qemu -e {{ env }}
+    # Twice, on purpose (R3-fw-4, found by `just lib-quickstart` on a clean tree). In a fresh
+    # lib-qemu/ (no sdkconfig.defaults yet) the first run reinstalls the framework and does
+    # the hybrid compile, and that changes the build's checksum under it: the NEXT pio
+    # invocation wipes .pio/build/<env> and keeps only what it builds itself. If that next
+    # one were `-t idedata`, the build dir would hold idedata.json and no bootloader.bin.
+    # The second run is that rebuild (~30 s); on every later run it is an up-to-date no-op.
     pio run -d lib-qemu -e {{ env }}
     pio run -d lib-qemu -e {{ env }} -t idedata > /dev/null
     python3 agent/tools/lib_bundle.py --build-dir lib-qemu/.pio/build/{{ env }} \
@@ -880,6 +888,19 @@ lib-qemu fresh="":
         -e QEMU_SHA256={{ qemu_sha256 }} -e IDF_IMAGE_REF={{ idf_image }} \
         -v "$PWD/.qemu:/q" -v "$PWD/$bundle:/d:ro" -v "$PWD/agent/tools:/t:ro" \
         --entrypoint bash {{ idf_image }} -c '{{ qemu_program }}'
+
+# Play the worked example's README quickstart (R3-fw-4): the `# quickstart:` blocks of
+# agent/components/fleetforge/examples/{Basic,basic_idf}/README.md, verbatim, in a clean temp
+# copy of the tree. Arduino esp32/esp32s3 + build B, ESP-IDF esp32/esp32s3 in the pinned
+# image; then (unless --build-only) the board steps in QEMU against `just up`: enroll,
+# heartbeat, deploy build B, confirm, report the version. The api must hand out 10.0.2.2
+# origins for that half; the script says how if it does not. Plain python3, no venv: the
+# script is stdlib-only. docs/runbooks/agent-qemu.md -> *The worked example, end to end*.
+#
+#     just lib-quickstart --build-only    # the compile half: no stack, no QEMU
+#     just lib-quickstart                 # everything (--keep leaves the temp tree)
+lib-quickstart *args:
+    python3 -u scripts/lib_quickstart.py {{ args }}
 
 # Bundles only. The ESP-IDF image is deliberately kept — re-pulling is 2.4 GB.
 agent-clean:

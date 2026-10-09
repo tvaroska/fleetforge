@@ -759,6 +759,91 @@ What differs from `agent-qemu esp32`:
   05528998…1fc4`, `fw_version: 1.0.0` (the sketch's, from `Fleetforge.begin`), and
   `agent_version` = the library version.
 
+## The worked example, end to end (R3-fw-4)
+
+`just lib-quickstart` plays the worked example's README quickstart:
+`agent/components/fleetforge/examples/Basic/README.md` (Arduino) and
+`examples/basic_idf/README.md` (ESP-IDF). Every command a reader types for a build sits in a
+fenced block whose first line is `# quickstart: <name>`. `scripts/lib_quickstart.py` runs
+those blocks **verbatim** (`bash -euo pipefail`, from the tree root) in a clean temp copy of
+the tree (`git ls-files --cached --others --exclude-standard`, so uncommitted work is in,
+ignored build output is out). A README that loses a block fails the run by name.
+
+```bash
+just lib-quickstart --build-only   # ~7 min: no stack, no QEMU
+# the api must hand the board 10.0.2.2 origins for the OTA half (see above). On this box:
+FF_PUBLIC_BASE_URL=http://10.0.2.2:8088 FF_S3_PUBLIC_ENDPOINT_URL=http://10.0.2.2:9000 \
+  docker compose -f docker-compose.yml -f docker-compose.override.yml up -d --no-deps api
+just lib-quickstart                # ~30 min: builds, then enroll → heartbeat → OTA → confirm
+docker compose -f docker-compose.yml -f docker-compose.override.yml up -d --no-deps api  # restore
+```
+
+`--no-deps` is this box's quirk: its MinIO runs from a local override, and without the
+flag compose tries to pull `minio/minio` and fails. The script refuses (exit 2, printing
+the fix) when the api's `PUBLIC_BASE_URL`/`S3_PUBLIC_ENDPOINT_URL` are not `10.0.2.2`, when
+the API does not answer, or when an `ff-qemu-esp32` is already running. It checks all of
+that before it mints a token.
+
+What it does:
+
+1. **Builds** (`--build-only` stops here). Arduino: `arduino-build` (esp32, esp32s3),
+   `arduino-edit` (the README's `sed`: `"SOS"` → `"HELLO"`, `"1.0.0"` → `"1.1.0"`), and
+   `arduino-build-b`. B must differ from A. ESP-IDF: `idf-build` and `idf-build-s3`
+   inside the pinned `idf_image`, on a container-local copy, so nothing is written to the
+   host. Every build must have zero `warning:` lines from the library or the example and an
+   app < 1966080 B. Each IDF build's `partition-table.bin` is decoded and must equal
+   `agent/partitions.csv`. Its resolved `sdkconfig` must have rollback on and no eFuse burn
+   (exact option names, like `verify_bundle.py`). Its app descriptor must say `1.0.0`.
+2. **QEMU bundles.** `just lib-bundle esp32-qemu` in the temp tree for A. Then
+   `arduino-edit` again, plus one run-unique substitution, `"1.1.0"` →
+   `"1.1.0-qs<epoch>"`: a `(target, version)` label is a promise about bytes, and a rerun
+   uploading rebuilt `1.1.0` bytes would get 409. Then the B bundle. A is copied back,
+   because `--fresh` flashes from the bundle dir (*Two builds* above). A fresh `lib-qemu/`
+   has no `sdkconfig.defaults`, so pioarduino reinstalls the framework and does the hybrid
+   compile (~11 min) on every run. `just lib-bundle` runs `pio run` twice, because that
+   first build otherwise makes the `-t idedata` call wipe the build dir.
+3. **The board steps.** Log in (password from `$FF_ADMIN_PASSWORD` or `.env`, never
+   printed or put in argv). Mint a token. `just agent-cfg` (ethernet, `--hb 10`). Then
+   `just lib-qemu --fresh` stands in for the USB flash. Wait for `ff-enroll: enroll 200`,
+   `announce acknowledged by the broker` and `morse: SOS (firmware 1.0.0)`, then
+   `GET /v1/devices`: online, `fw_version 1.0.0`, `ab-4m-arduino-v1`, `capabilities
+   ["ota"]`.
+4. **The OTA.** Upload bundle B's `app.bin` (`partition_layout=ab-4m-arduino-v1`). Deploy
+   with **`apply: "on_command"`**: QEMU cannot survive the self-reboot (*The emulator cannot
+   survive `esp_restart()`*), and a real board takes the dashboard default `auto`. Wait for
+   `is staged and bootable` and deploy state `staged`, then power-cycle (`agent-qemu-stop`,
+   `lib-qemu`). Wait for `CONFIRMED` and `morse: HELLO (firmware 1.1.0-qs…)`, then the API:
+   `fw_version` == B, deploy `confirmed`, `is_terminal: true`.
+5. **Credentials.** The token must occur 0 times, and no `"mqtt_password":"` value at all,
+   in both QEMU logs, every build log and the script's own output. Then unplug, and report
+   the LWT.
+
+**The OTA artifact must be the QEMU build** (bundle B's `app.bin`), never the persona
+`firmware.bin` from step 1. The persona build has no driver for QEMU's only NIC: OTA'd into
+the emulator, it would never reach the fleet and would, correctly, roll back.
+
+`--keep` leaves the temp tree for inspection. It then holds a live credential in `.qemu/`,
+so delete it. `--skip-idf` is a dev shortcut; acceptance runs without it.
+
+The board half of the first passing run (2026-10-09, 1301 s in all, 742 s of which went to
+bundle A's hybrid compile), trimmed:
+
+```
+I (7046) ff-lib: fleetforge library 0.4.7, firmware 1.0.0
+I (10267) ff-enroll: enroll 200 http://10.0.2.2:8088/v1/enroll
+I (11069) ff-mqtt: announce acknowledged by the broker
+morse: SOS (firmware 1.0.0)
+GET /v1/devices 000000000000   online True, fw_version 1.0.0, ab-4m-arduino-v1, ['ota'], agent_version 0.4.7
+POST /v1/artifact              201, version 1.1.0-qs1791521470 (bundle B app.bin, 1176160 B)
+POST …/deploy on_command       202
+I (63266) ff-ota: update 7416d299…: ota_1 is staged and bootable      (staged 48 s after the deploy)
+--- power cycle ---
+W (13796) ff-mqtt: this image was written by OTA and is now CONFIRMED: the broker accepted us …
+morse: HELLO (firmware 1.1.0-qs1791521470)
+GET /v1/devices                fw_version 1.1.0-qs1791521470, deploy confirmed (is_terminal True), 68 s after the deploy
+credentials                    token 0 occurrences, mqtt_password 0 (13 files)
+```
+
 ## What we know about the boot-loop panic
 
 **S0-infra-1 filed this harness as dead** (2026-09-10): `just agent-qemu esp32`

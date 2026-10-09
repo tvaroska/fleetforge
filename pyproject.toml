@@ -86,3 +86,6 @@ ignore = ["E501"]
 "alembic/versions/*" = ["E402"]
 # agent/tools/ runs in the ESP-IDF builder image (no venv); subprocess calls git with fixed args.
 "agent/tools/*" = ["S603", "S607"]
+# scripts/lib_quickstart.py drives git, docker, just and bash with fixed argv, and talks to the
+# dev API over urllib at an http(s) origin the operator passes (R3-fw-4).
+"scripts/lib_quickstart.py" = ["S603", "S607", "S310"]

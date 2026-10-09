@@ -95,6 +95,25 @@ PINNED_PLATFORM = (
 _SUBTYPES = {**_FINGERPRINT_DATA_SUBTYPES, "coredump": 3}
 
 
+# agent_main.c's boot sequence, as the tokens a consumer's task must contain in this order.
+# Shared with tests/test_worked_example.py (the ESP-IDF example's fleetforge_start.c).
+BOOT_SEQUENCE_ORDER = (
+    "nvs_ready(",
+    "ff_cfg_load(",
+    "ff_store_sync_token(",
+    "ff_progress_init(",
+    "ff_identity_init(",
+    "esp_netif_init(",
+    "esp_event_loop_create_default(",
+    "ff_net_bring_up(",
+    "FF_PROGRESS_LINK_UP",
+    "ff_time_sync(",
+    "FF_PROGRESS_TIME_SYNCED",
+    "ff_store_load(",
+    "ff_mqtt_run(",
+)
+
+
 def _subtype(ptype: str, subtype: str) -> int:
     if subtype.startswith("0x") or subtype.isdigit():
         return int(subtype, 0)
@@ -386,22 +405,7 @@ class TestParityWithAgentMain:
 
     def test_the_boot_sequence_order(self) -> None:
         task = _function_body(_wrapper(), "fleetforge_task")
-        order = [
-            "nvs_ready(",
-            "ff_cfg_load(",
-            "ff_store_sync_token(",
-            "ff_progress_init(",
-            "ff_identity_init(",
-            "esp_netif_init(",
-            "esp_event_loop_create_default(",
-            "ff_net_bring_up(",
-            "FF_PROGRESS_LINK_UP",
-            "ff_time_sync(",
-            "FF_PROGRESS_TIME_SYNCED",
-            "ff_store_load(",
-            "ff_mqtt_run(",
-        ]
-        positions = [task.index(token) for token in order]
+        positions = [task.index(token) for token in BOOT_SEQUENCE_ORDER]
         assert positions == sorted(positions)
         assert _ff_calls(task)[-1] == "ff_mqtt_run"
 

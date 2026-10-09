@@ -6,6 +6,81 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-09 — The worked example is the Basic sketch as a Morse blinker plus an ESP-IDF twin under examples/basic_idf; the README's named blocks are what `just lib-quickstart` runs (R3-fw-4)
+
+**Decided.** One worked example, two flavours, and a script that plays their READMEs.
+Details and the T2 table: `docs/features/ota-library.md` → *R3-fw-4*; procedure:
+`docs/runbooks/agent-qemu.md` → *The worked example, end to end*.
+
+- **Arduino (the persona): `examples/Basic/Basic.ino` became the Morse blinker in place.**
+  The folder keeps its name. `tests/agent_src.py`, `lib-qemu/platformio.ini`, `just
+  lib-build`, the CRITICAL.md row and the docs all pin that path, so renaming buys nothing.
+  `Basic/partitions.csv` and `Basic/platformio.ini` are not edited. Two `#ifndef` lines say
+  what it blinks (`MORSE_MESSAGE "SOS"`) and its version (`FW_VERSION "1.0.0"`). Each
+  literal occurs once, so the README's `sed` hits exactly those two lines. The LED is
+  `LED_BUILTIN` when the variant has one (the S3 DevKitC-1's RGB LED), else GPIO 2. It is a
+  `static const`, not two `#define`s: PlatformIO's `.ino` converter preprocesses with
+  `-fpreprocessed -dD`, sees both branches, and warns `"LED_PIN" redefined`.
+- **ESP-IDF: a new project `examples/basic_idf/`** (snake_case; `library.json`'s
+  `examples/*/*.ino` glob never sees it). `main/main.c` is the reader's part (one screen,
+  `fleetforge_start()` first). `main/fleetforge_start.c`/`.h` is the boot ladder, copied
+  unchanged: the C twin of `Fleetforge.cpp`'s `begin()` + task. The confirm timer comes
+  first, the `#error` fires without rollback, and it reaches the public `include/` only.
+  It uses `agent_main.c`'s order, minus `ESP_ERROR_CHECK`. `EXTRA_COMPONENT_DIRS` = `../..`
+  registers the component as one component (the build log's `Component paths` lists
+  `agent/components/fleetforge` and `basic_idf/main`, nothing under `examples/`). No
+  `idf_component.yml` override was needed. `fw_version` = `PROJECT_VER` in the top
+  `CMakeLists.txt`.
+- **The IDF example ships `ab-4m-v1`**, row for row `agent/partitions.csv` (ff_cfg at
+  0x12000). An IDF build of the component announces that id. It is a new flash-time
+  immutable, already covered by the `examples/*/partitions.csv` glob and now named in
+  CRITICAL.md, with its `sdkconfig.defaults` and `fleetforge_start.c`.
+- **No public-surface change.** `include/` stays exactly what `agent_main.c` calls.
+- **READMEs: one per flavour.** Every command a reader types for a build is in a fenced
+  block whose first line is `# quickstart: <name>`. `scripts/lib_quickstart.py` (stdlib
+  only) extracts the blocks by name and runs them verbatim in a clean temp copy of the tree
+  (`git ls-files --cached --others --exclude-standard`). A missing block is a hard failure.
+  `--build-only` runs the Arduino builds (A, the README edit, B) and the IDF builds (in the
+  pinned image, nothing written to the host). It checks: zero warnings from the
+  library/example, app < 1966080, decoded table == ab-4m-v1, resolved rollback on, no eFuse
+  burn (exact names, `verify_bundle.py`'s rule: `CONFIG_SECURE_BOOT_V1_SUPPORTED=y` is a
+  SoC capability), app version 1.0.0. The full run adds the board steps in QEMU.
+- **The full run is the first library OTA.** The two board-only steps are substituted.
+  USB flash → `just lib-qemu --fresh`. The self-reboot → `apply: "on_command"` plus a power
+  cycle, because QEMU panics on `esp_restart()`. The OTA artifact is the QEMU (hybrid)
+  build of the edited sketch, not the persona binary, which has no driver for QEMU's NIC
+  and would correctly roll back. Build B's version is `1.1.0-qs<epoch>`, because a label is
+  a promise about bytes and a rerun would get 409.
+- **Plan correction: `just lib-bundle` runs `pio run` twice.** In a fresh `lib-qemu/` the
+  first run reinstalls the framework and does the hybrid compile (pioarduino keys that on
+  a hash in the project's `sdkconfig.defaults`, which a clean tree does not have). That
+  changes the build checksum, so the next pio invocation wiped `.pio/build/esp32-qemu`.
+  When that was `-t idedata`, `lib_bundle.py` found no `bootloader.bin`. The second run is
+  the rebuild (~30 s), and a no-op afterwards. So every quickstart run pays the ~11 min
+  hybrid compile once. The repo's own `lib-qemu/` keeps its matching hash and is not
+  disturbed.
+- **Dev-box note:** `docker compose … up -d api` also tried to pull `minio/minio`, because
+  this box's MinIO runs from a local override. `--no-deps` recreates the api alone.
+- **Rejected.** Renaming `Basic`. A public `ff_start()` now (additive later, see below).
+  The Arduino core as an IDF component as "the ESP-IDF build". `PLATFORMIO_BUILD_FLAGS`
+  for build B instead of the README's edit (the script must run what the reader does). A
+  library-level README (R3-rel-1). Copying ignored build state into the clean tree to save
+  the hybrid compile.
+- **Named gaps.** The IDF flavour is compile-only; QEMU runs the Arduino one. In an IDF
+  consumer the announce's `agent_version` is `PROJECT_VER` (`ff_identity.c`'s non-ARDUINO
+  branch), and R3-fw-6's `lib_version` is the planned answer. The QEMU run uses the hybrid
+  build. The IDF example cannot light the S3 DevKitC-1's RGB LED.
+- **Side finding, not fixed (CRITICAL file):** `Fleetforge.cpp`'s header point 2 still says
+  PlatformIO links the library as a static archive. The R3-fw-3 entry above says it does
+  not.
+- **Proposed for the owner (`spec/`/`design/` untouched).** (a) An additive public
+  `ff_start()`-style entry in the component, so IDF users stop copying
+  `fleetforge_start.c`. (b) `spec/cujs.md` CUJ-1 Driver row 1–2 harness → `just
+  lib-quickstart --build-only` (R3-spec-2 files it). (c) The IDF `agent_version` gap →
+  R3-fw-6.
+
+---
+
 ## 2026-10-08 — The Arduino library is the component plus library.json and a Fleetforge.cpp consumer; Arduino's verifyRollbackLater is overridden; pioarduino 3.3.12 / IDF 5.5.5 (R3-fw-3)
 
 **Decided.** `agent/components/fleetforge/` is also the Arduino library: `library.json`

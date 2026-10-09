@@ -30,6 +30,18 @@ EXAMPLE_DIR = COMPONENT_DIR / "examples" / "Basic"
 EXAMPLE_PARTITIONS = EXAMPLE_DIR / "partitions.csv"
 EXAMPLE_INO = EXAMPLE_DIR / "Basic.ino"
 EXAMPLE_PLATFORMIO_INI = EXAMPLE_DIR / "platformio.ini"
+EXAMPLE_README = EXAMPLE_DIR / "README.md"
+# R3-fw-4: the ESP-IDF flavour of the worked example. Its partitions.csv is ab-4m-v1 (an IDF
+# build of the component announces that id) and, like the sketch's, a flash-time immutable.
+IDF_EXAMPLE_DIR = COMPONENT_DIR / "examples" / "basic_idf"
+IDF_EXAMPLE_MAIN_C = IDF_EXAMPLE_DIR / "main" / "main.c"
+IDF_EXAMPLE_START_C = IDF_EXAMPLE_DIR / "main" / "fleetforge_start.c"
+IDF_EXAMPLE_START_H = IDF_EXAMPLE_DIR / "main" / "fleetforge_start.h"
+IDF_EXAMPLE_MAIN_CMAKE = IDF_EXAMPLE_DIR / "main" / "CMakeLists.txt"
+IDF_EXAMPLE_PARTITIONS = IDF_EXAMPLE_DIR / "partitions.csv"
+IDF_EXAMPLE_SDKCONFIG = IDF_EXAMPLE_DIR / "sdkconfig.defaults"
+IDF_EXAMPLE_CMAKE = IDF_EXAMPLE_DIR / "CMakeLists.txt"
+IDF_EXAMPLE_README = IDF_EXAMPLE_DIR / "README.md"
 # The QEMU harness lives OUTSIDE agent/: its hybrid compile writes managed_components/
 # next to it, and agent/ is the IDF build context and a tree tests scan file by file.
 LIB_QEMU_PLATFORMIO_INI = AGENT_DIR.parent / "lib-qemu" / "platformio.ini"

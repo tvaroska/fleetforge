@@ -1,0 +1,25 @@
+# Fleetforge basic (ESP-IDF) — FLASH-TIME IMMUTABLES. CRITICAL.md.
+#
+# Every line here ends up in the bootloader or the partition table, and no OTA can change
+# either: a board flashed without one of them keeps that mistake for life. This is the
+# safety-relevant subset of agent/sdkconfig.defaults; tests/test_worked_example.py pins it.
+# Power, speed and size tuning are yours to add.
+#
+# NEVER add anti-rollback, secure boot or flash encryption here: each one burns eFuses on
+# every board it is flashed to, irreversibly (agent/tools/verify_bundle.py refuses them
+# for the agent for the same reason).
+
+# The A/B table in partitions.csv (layout ab-4m-v1). The default single-app table cannot OTA.
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+# ab-4m-v1 is a 4 MB map.
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+# Automatic rollback: an OTA'd image that never reaches the fleet goes back to the old one.
+# fleetforge_start.c refuses to compile without it.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+# TLS to the fleet server validates its certificate, including its dates (the clock is set
+# over SNTP before the first handshake). Without these every HTTPS/mqtts connection fails,
+# or accepts an expired certificate.
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+CONFIG_MBEDTLS_HAVE_TIME_DATE=y

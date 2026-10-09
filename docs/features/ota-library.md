@@ -16,6 +16,107 @@ becomes a board in the field that fixes itself" — this release *is* that journ
 
 ## Completed Work
 
+### R3-fw-4 (2026-10-09): the worked example is a Morse blinker in Arduino and ESP-IDF, and `just lib-quickstart` plays its README; the first library OTA confirmed
+
+**Two flavours, one example.**
+
+- **Arduino / PlatformIO (the persona).** `examples/Basic/Basic.ino` became the blinker in
+  place (61 lines). The folder keeps its name because tests, `lib-qemu/`, `just lib-build`,
+  CRITICAL.md and the docs pin it. Its `partitions.csv` and `platformio.ini` are untouched.
+  - `Fleetforge.begin(FW_VERSION)` is still the first statement of `setup()`.
+  - `MORSE_MESSAGE "SOS"` and `FW_VERSION "1.0.0"` are `#ifndef`-overridable, and each
+    literal occurs once, so the README's `sed` edits exactly those two lines.
+  - `loop()` prints `morse: <msg> (firmware <ver>)` and blinks it (200 ms unit, standard
+    gaps).
+  - The LED is `LED_BUILTIN` where the variant defines it (S3 DevKitC-1: the RGB LED, which
+    core 3.x drives through `digitalWrite`), else GPIO 2.
+- **ESP-IDF.** A new project, `examples/basic_idf/`:
+  - `main/main.c` is the reader's part (67 lines): `fleetforge_start()` first, then the
+    same blinker, printing `ff_identity_fw_version()`.
+  - `main/fleetforge_start.c`/`.h` is the boot ladder, copied unchanged. It is the C twin
+    of `Fleetforge.cpp`: the confirm timer is armed first, an `#error` fires without
+    `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`, and it uses only the public `include/`.
+    It follows `agent_main.c`'s order with no `ESP_ERROR_CHECK`.
+  - `CMakeLists.txt` sets `PROJECT_VER "1.0.0"` (= `fw_version`) and
+    `EXTRA_COMPONENT_DIRS ../..`. The build's `Component paths` holds the one `fleetforge`
+    component plus `basic_idf/main`.
+  - `partitions.csv` is `ab-4m-v1`, `agent/partitions.csv` row for row, because an IDF
+    build of the component announces that id. `sdkconfig.defaults` is the safety subset of
+    the agent's: custom table, 4 MB, rollback, cert bundle, time/date check.
+- **No public-surface change.** The component's `include/` is untouched. The copied ladder
+  stands in for a public `ff_start()`, which is proposed for the owner in DECISIONS.
+
+**The README is the script.** Each example has a README a person follows. Every command a
+reader types for a build is in a fenced block that starts `# quickstart: <name>`: Basic has
+`arduino-build`, `arduino-edit` and `arduino-build-b`; basic_idf has `idf-build` and
+`idf-build-s3`. `scripts/lib_quickstart.py` (stdlib only, `just lib-quickstart`) copies a
+clean tree (`git ls-files --cached --others --exclude-standard`) to a 0700 temp dir. It runs
+the blocks verbatim and fails by name on a missing one.
+
+- `--build-only` is the compile half.
+- The full run adds the board steps in QEMU against the dev stack. USB flash →
+  `just lib-qemu --fresh`. The self-reboot → `apply: "on_command"` plus a power cycle.
+- Build B's version is run-unique (`1.1.0-qs<epoch>`).
+- The admin password comes from env or `.env`, and is never printed or put in argv.
+- The token is checked to occur 0 times in every transcript, and is revoked if a run dies
+  before enrolling.
+- The phases are functions (`phase_builds`, `phase_enroll`, `phase_ota`), so R3-test-1 adds
+  `phase_rollback`.
+
+**Plan correction found by the clean-tree run.** `just lib-bundle` failed on a fresh tree:
+`lib_bundle: …/bootloader.bin, named by idedata.json, does not exist`. pioarduino decides to
+reinstall the framework and hybrid-compile from a hash in the *project's*
+`sdkconfig.defaults`. A clean `lib-qemu/` has none, so the first `pio run` does the ~11 min
+compile and changes the build checksum. The next pio invocation (`-t idedata`) then wiped
+`.pio/build/esp32-qemu` down to `idedata.json`. This was reproduced in a scratch tree: a
+second `pio run` rebuilt in 28 s, and idedata then kept everything. The recipe now runs
+`pio run` twice. The second run is a no-op when nothing changed (in-repo `just lib-bundle`:
+20 s, no reinstall). The repo's own `lib-qemu/` keeps its matching hash, so a quickstart run
+does not make it rebuild.
+
+Tests: `tests/test_worked_example.py` (42). `BOOT_SEQUENCE_ORDER` was factored out of
+`test_arduino_library.py` and is shared. Full suite: 1521 passed.
+
+**T2 evidence** (dev stack on 8088; api recreated with `FF_PUBLIC_BASE_URL=http://10.0.2.2:8088
+FF_S3_PUBLIC_ENDPOINT_URL=http://10.0.2.2:9000 … up -d --no-deps api`, both verified, then
+restored to `localhost`):
+
+| Check | Result |
+|---|---|
+| `just lib-quickstart --build-only` | exit 0, 416 s |
+| Arduino A (`arduino-build`, esp32 + esp32s3), clean temp tree | 0 warnings from the library/sketch; `firmware.bin` 1175264 B / 1168656 B < 1966080 |
+| `arduino-edit` + `arduino-build-b` | 0 warnings; esp32 1175264 B; bytes differ from A |
+| ESP-IDF `idf-build` / `idf-build-s3` in `espressif/idf:v5.5.5@sha256:a9231d06…` | 0 warnings; app 1102832 B (esp32) / 1108112 B (esp32s3); decoded `partition-table.bin` == `agent/partitions.csv` (6 rows, ff_cfg 0x12000); resolved `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`, none of the 7 eFuse-burn options `=y`; `esp_app_desc_t.version` 1.0.0 |
+| `just lib-quickstart` | exit 0, 1301 s (bundle A 742 s: fresh-tree hybrid compile; bundle B 20 s) |
+| QEMU bundles | A app 1176144 B, B 1176160 B, differ |
+| Boot A (`lib-qemu --fresh`, fresh token, `--hb 10`) | `ff-lib: fleetforge library 0.4.7, firmware 1.0.0`, `ff-enroll: enroll 200`, `announce acknowledged by the broker`, `morse: SOS (firmware 1.0.0)` |
+| `GET /v1/devices` | `online: true`, `fw_version 1.0.0`, `partition_layout ab-4m-arduino-v1`, `capabilities ["ota"]`, `agent_version 0.4.7` |
+| Upload B / deploy | `POST /v1/artifact` 201 (`1.1.0-qs1791521470`, `ab-4m-arduino-v1`); `POST …/deploy` `apply: on_command` 202 |
+| Stage | `ff-ota: update 7416d299…: ota_1 is staged and bootable`; API `staged` 48 s after the deploy |
+| Power cycle → B | `ff-mqtt: this image was written by OTA and is now CONFIRMED`; `morse: HELLO (firmware 1.1.0-qs1791521470)` |
+| API after | `fw_version 1.1.0-qs1791521470`, deploy `confirmed`, `is_terminal: true`, 68 s after the deploy; steps `requested, staging, downloading, verifying, staged, confirming, confirmed`; `from_version 1.0.0`; `rollback_capable: true` (measured on the PENDING_VERIFY boot); token `used` by `000000000000` |
+| Credentials | token 0 occurrences and no `"mqtt_password":"` in 13 transcripts (both QEMU logs, every build log, the script's output) |
+| Unplug | `online: false` (LWT) |
+| Negative: marker renamed to `arduino-compile` in a scratch copy | `--build-only` exit 1 at once: `…/Basic/README.md has no '# quickstart: arduino-build' block`; pytest cases `test_a_missing_block_fails_by_name`, `test_the_real_readme_with_a_renamed_marker_fails` |
+| In-repo `just lib-build esp32`, `esp32s3` (clean `.pio`) | 0 `warning:` lines; 1175264 B / 1168640 B. `just lib-bundle esp32-qemu` exit 0 (20 s) |
+
+**Named gaps.**
+
+- **The IDF flavour is compile-only.** QEMU runs the Arduino flavour.
+- **IDF `agent_version` is `PROJECT_VER`** (`ff_identity.c`'s non-ARDUINO branch). This is
+  R3-fw-6's `lib_version`.
+- **The QEMU run boots the hybrid build**, not the persona binary (inherited from R3-fw-3).
+  The OTA artifact must be that build too.
+- **`on_command` + a power cycle in QEMU** vs the dashboard default `auto` on a board.
+- **The IDF example cannot light the S3 DevKitC-1's RGB LED**; there, the console line is the
+  indicator.
+- **Each quickstart run pays one ~11 min hybrid compile** in its fresh `lib-qemu/`.
+- **The enrollment token rides in argv** to `just agent-cfg` → `ff_cfg.py`. This is the
+  existing tooling's interface, and the recipe is `@`-quiet. The token burns at the
+  board's enroll seconds later.
+- **`ff_cfg` for library users is still a CLI step** (`ff_cfg.py` + `esptool write-flash`);
+  the browser flasher writes agent bundles only.
+
 ### R3-fw-3 (2026-10-08): the Arduino library is the component plus `library.json` and `Fleetforge.cpp`; the example ships `ab-4m-arduino-v1`
 
 **Layout.** The component directory IS the library. `agent/components/fleetforge/library.json`

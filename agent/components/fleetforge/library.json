@@ -16,6 +16,6 @@
   },
   "examples": ["examples/*/*.ino"],
   "export": {
-    "exclude": ["examples/*/.pio"]
+    "exclude": ["examples/*/.pio", "examples/*/build"]
   }
 }

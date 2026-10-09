@@ -66,3 +66,11 @@ agent/dist/*
 !/lib-qemu/platformio.ini
 # PlatformIO's temporary .ino -> .cpp conversion, next to the sketch during a build.
 *.ino.cpp
+# A host `idf.py build` of the ESP-IDF example (R3-fw-4: examples/basic_idf). Same reason as
+# .pio/ above: untracked under agent/, they would read as dirty agent sources to
+# check_bundles_fresh.py. `sdkconfig` is also the file that WINS over sdkconfig.defaults.
+agent/components/fleetforge/examples/*/build/
+agent/components/fleetforge/examples/*/sdkconfig
+agent/components/fleetforge/examples/*/sdkconfig.old
+agent/components/fleetforge/examples/*/dependencies.lock
+agent/components/fleetforge/examples/*/managed_components/
