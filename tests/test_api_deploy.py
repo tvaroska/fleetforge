@@ -140,15 +140,26 @@ async def add_artifact(
     target: str = TARGET,
     version: str = VERSION,
     layout: str | None = LAYOUT,
+    has_lib_marker: bool | None = None,
 ) -> None:
-    """Insert the artifact and its label directly — `test_api_artifact_upload.py` owns POST."""
+    """Insert the artifact and its label directly — `test_api_artifact_upload.py` owns POST.
+
+    `has_lib_marker` defaults to NULL, an artifact uploaded before R3-be-1: never warns.
+    """
     await session.execute(
         text(
-            "INSERT INTO artifacts (sha256, size_bytes, kind, target, partition_layout) "
-            "VALUES (:sha256, :size_bytes, 'user_firmware', :target, :layout) "
+            "INSERT INTO artifacts (sha256, size_bytes, kind, target, partition_layout, "
+            "has_lib_marker) "
+            "VALUES (:sha256, :size_bytes, 'user_firmware', :target, :layout, :marker) "
             "ON CONFLICT (sha256) DO NOTHING"
         ),
-        {"sha256": sha256, "size_bytes": size_bytes, "target": target, "layout": layout},
+        {
+            "sha256": sha256,
+            "size_bytes": size_bytes,
+            "target": target,
+            "layout": layout,
+            "marker": has_lib_marker,
+        },
     )
     await session.execute(
         text(
@@ -1253,6 +1264,144 @@ class TestTheGate:
             ("offline", False),
             ("rollback_incapable", True),
         ]
+
+
+FIXTURES = Path(__file__).parent / "fixtures" / "firmware"
+PLAIN_SKETCH = "esp32.nocall.app.bin"  # Basic with Fleetforge.begin deleted: no marker
+LIBRARY_BUILD = "esp32.basic.app.head.bin"  # Arduino Basic, built from R3-fw-6 on
+AGENT_BUNDLE = "esp32.agent.app.head.bin"  # the stock agent's app.bin, from R3-fw-6 on
+
+
+async def upload_fixture(app: FastAPI, token: str, name: str) -> httpx.Response:
+    """The real `POST /v1/artifact`, so the verdict under test is the one the upload stored."""
+    async with client_for(app, base_url="https://testserver") as client:
+        return await client.post(
+            "/v1/artifact",
+            params={"target": TARGET, "version": VERSION, "partition_layout": LAYOUT},
+            content=(FIXTURES / name).read_bytes(),
+            headers={"authorization": f"Bearer {token}"},
+        )
+
+
+class TestTheLibraryMarkerGate:
+    """R3-be-1 acceptance, end to end: upload, pre-check, deploy.
+
+    A plain sketch warns and needs `override: ["no_library_marker"]`; a library build and
+    an agent bundle do not; an artifact with no verdict (uploaded before R3-be-1) never warns.
+    """
+
+    async def test_a_plain_sketch_is_gated_until_the_code_is_named(
+        self,
+        admin_app: FastAPI,
+        db: AsyncSession,
+        store: MemoryObjectStore,
+        publisher: FakeCommandPublisher,
+    ) -> None:
+        await add_device(db)
+        token = await login_admin(admin_app)
+        uploaded = await upload_fixture(admin_app, token, PLAIN_SKETCH)
+        assert uploaded.status_code == 201, uploaded.text
+        assert uploaded.json()["has_lib_marker"] is False
+
+        checked = await precheck(admin_app, token)
+        assert checked.status_code == 200
+        body = checked.json()
+        assert body["deployable"] is True
+        assert body["refusals"] == []
+        assert [(w["code"], w["needs_override"]) for w in body["warnings"]] == [
+            ("no_library_marker", True)
+        ]
+
+        sent = await deploy(admin_app, token)
+        assert sent.status_code == 409
+        assert sent.json()["detail"] == body["warnings"][0]["message"]
+        assert publisher.published == []
+        assert await events(db) == []
+
+        sent = await deploy(admin_app, token, override=["no_library_marker"])
+        assert sent.status_code == 202, sent.text
+        assert len(publisher.published) == 1
+        assert [e["state"] for e in await events(db)] == ["requested"]
+
+    @pytest.mark.parametrize("fixture", [LIBRARY_BUILD, AGENT_BUNDLE])
+    async def test_a_library_build_and_an_agent_bundle_are_not_gated(
+        self,
+        admin_app: FastAPI,
+        db: AsyncSession,
+        store: MemoryObjectStore,
+        publisher: FakeCommandPublisher,
+        fixture: str,
+    ) -> None:
+        await add_device(db)
+        token = await login_admin(admin_app)
+        uploaded = await upload_fixture(admin_app, token, fixture)
+        assert uploaded.status_code == 201, uploaded.text
+        assert uploaded.json()["has_lib_marker"] is True
+
+        checked = (await precheck(admin_app, token)).json()
+        sent = await deploy(admin_app, token)
+
+        assert checked["refusals"] == [] and checked["warnings"] == []
+        assert sent.status_code == 202, sent.text
+        assert len(publisher.published) == 1
+
+    async def test_no_verdict_never_warns(
+        self,
+        admin_app: FastAPI,
+        db: AsyncSession,
+        store: MemoryObjectStore,
+        publisher: FakeCommandPublisher,
+    ) -> None:
+        await add_device(db)
+        await add_artifact(db, has_lib_marker=None)
+        token = await login_admin(admin_app)
+
+        checked = (await precheck(admin_app, token)).json()
+        sent = await deploy(admin_app, token)
+
+        assert checked["warnings"] == []
+        assert sent.status_code == 202
+
+    async def test_a_refusal_beats_the_override(
+        self,
+        admin_app: FastAPI,
+        db: AsyncSession,
+        store: MemoryObjectStore,
+        publisher: FakeCommandPublisher,
+    ) -> None:
+        await add_device(db, ota_slot_size=100)
+        await add_artifact(db, has_lib_marker=False)
+        token = await login_admin(admin_app)
+
+        checked = (await precheck(admin_app, token)).json()
+        sent = await deploy(admin_app, token, override=["no_library_marker"])
+
+        assert [r["code"] for r in checked["refusals"]] == ["slot_too_small"]
+        assert [w["code"] for w in checked["warnings"]] == ["no_library_marker"]
+        assert sent.status_code == 409
+        assert sent.json()["detail"] == checked["refusals"][0]["message"]
+        assert publisher.published == []
+        assert await events(db) == []
+
+    async def test_both_gates_need_both_codes(
+        self,
+        admin_app: FastAPI,
+        db: AsyncSession,
+        store: MemoryObjectStore,
+        publisher: FakeCommandPublisher,
+    ) -> None:
+        await add_device(db, rollback_capable=False)
+        await add_artifact(db, has_lib_marker=False)
+        token = await login_admin(admin_app)
+
+        warned = (await precheck(admin_app, token)).json()["warnings"]
+        half = await deploy(admin_app, token, override=["rollback_incapable"])
+        both = await deploy(admin_app, token, override=["rollback_incapable", "no_library_marker"])
+
+        assert [w["code"] for w in warned] == ["rollback_incapable", "no_library_marker"]
+        assert half.status_code == 409
+        assert half.json()["detail"] == warned[1]["message"]
+        assert both.status_code == 202
 
 
 class TestPrecheckSendsNothing:

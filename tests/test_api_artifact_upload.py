@@ -13,6 +13,8 @@ The properties worth holding, each one a class below:
   is 409, and the old label survives it.
 * **Labels are many-to-one over blobs.** Two versions of byte-identical firmware are
   two rows and one object.
+* **The library marker is scanned, stored and never refuses** (R3-be-1). A re-upload fills
+  a NULL verdict and never rewrites a known one.
 """
 
 import hashlib
@@ -126,6 +128,7 @@ class TestStoresTheBytes:
             "version": "1.5.0",
             "partition_layout": "ab-4m-v1",
             "created": True,
+            "has_lib_marker": False,
         }
         # The key is a function of the bytes, not of anything the client sent.
         assert store.objects[blob_key(digest)] == IMAGE
@@ -403,3 +406,88 @@ class TestMergedImageIsRefused:
         assert (await upload(admin_app, token, IMAGE)).status_code == 201
         merged = (FIXTURES / "esp32.merged.head.bin").read_bytes()
         assert (await upload(admin_app, token, merged)).status_code == 422
+
+
+async def seed_artifact(engine: AsyncEngine, data: bytes, has_lib_marker: bool | None) -> str:
+    """An `artifacts` row + `esp32/1.5.0` label for `data`, as an earlier server wrote it."""
+    digest = hashlib.sha256(data).hexdigest()
+    async with engine.begin() as conn:
+        await conn.execute(
+            text(
+                "INSERT INTO artifacts (sha256, size_bytes, kind, target, partition_layout, "
+                "has_lib_marker) VALUES (:sha, :size, 'user_firmware', 'esp32', 'ab-4m-v1', "
+                ":marker)"
+            ),
+            {"sha": digest, "size": len(data), "marker": has_lib_marker},
+        )
+        await conn.execute(
+            text(
+                "INSERT INTO artifact_versions (target, version, sha256) "
+                "VALUES ('esp32', '1.5.0', :sha)"
+            ),
+            {"sha": digest},
+        )
+    return digest
+
+
+class TestTheLibraryMarkerVerdict:
+    """R3-be-1: every accepted upload is scanned (`fleetforge.lib_marker`) and the verdict
+    stored as `artifacts.has_lib_marker`. A missing marker is never a refusal."""
+
+    @pytest.mark.parametrize(
+        ("fixture", "expected"),
+        [
+            ("esp32.nocall.app.bin", False),  # a plain sketch: library installed, never called
+            ("esp32.basic.app.head.bin", True),  # a library build (Arduino Basic)
+            ("esp32.agent.app.head.bin", True),  # the stock agent, built from R3-fw-6 on
+        ],
+    )
+    async def test_the_verdict_is_returned_and_stored(
+        self,
+        admin_app: FastAPI,
+        store: MemoryObjectStore,
+        engine: AsyncEngine,
+        fixture: str,
+        expected: bool,
+    ) -> None:
+        token = await login_admin(admin_app)
+        data = (FIXTURES / fixture).read_bytes()
+        response = await upload(admin_app, token, data)
+
+        assert response.status_code == 201, response.text
+        assert response.json()["has_lib_marker"] is expected
+        assert await rows(engine, "SELECT sha256, has_lib_marker FROM artifacts") == [
+            (hashlib.sha256(data).hexdigest(), expected)
+        ]
+
+    async def test_a_re_upload_fills_a_null_verdict(
+        self, admin_app: FastAPI, store: MemoryObjectStore, engine: AsyncEngine
+    ) -> None:
+        data = (FIXTURES / "esp32.nocall.app.bin").read_bytes()
+        digest = await seed_artifact(engine, data, None)
+        token = await login_admin(admin_app)
+        response = await upload(admin_app, token, data)
+
+        assert response.status_code == 200, response.text
+        assert response.json()["has_lib_marker"] is False
+        assert await rows(engine, "SELECT sha256, has_lib_marker FROM artifacts") == [
+            (digest, False)
+        ]
+
+    async def test_a_known_verdict_is_never_rewritten(
+        self, admin_app: FastAPI, store: MemoryObjectStore, engine: AsyncEngine
+    ) -> None:
+        # In reality the bytes and the verdict always agree; a disagreeing seed proves the
+        # upsert's `WHERE artifacts.has_lib_marker IS NULL`, and the other columns keep
+        # their first writer's values.
+        data = (FIXTURES / "esp32.nocall.app.bin").read_bytes()
+        digest = await seed_artifact(engine, data, True)
+        token = await login_admin(admin_app)
+        assert (await upload(admin_app, token, data)).status_code == 200
+        assert await rows(engine, "SELECT has_lib_marker FROM artifacts") == [(True,)]
+        response = await upload(admin_app, token, data, layout="ab-4m-arduino-v1", version="2")
+
+        assert response.status_code == 201, response.text
+        assert await rows(
+            engine, "SELECT sha256, partition_layout, has_lib_marker FROM artifacts"
+        ) == [(digest, "ab-4m-v1", True)]

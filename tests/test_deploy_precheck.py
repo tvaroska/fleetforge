@@ -67,8 +67,12 @@ def device(**overrides: object) -> Device:
     return Device(**values)
 
 
-def artifact(size: int = 500, layout: str | None = LAYOUT) -> ResolvedArtifact:
-    return ResolvedArtifact(sha256="ab" * 32, size_bytes=size, partition_layout=layout)
+def artifact(
+    size: int = 500, layout: str | None = LAYOUT, has_lib_marker: bool | None = None
+) -> ResolvedArtifact:
+    return ResolvedArtifact(
+        sha256="ab" * 32, size_bytes=size, partition_layout=layout, has_lib_marker=has_lib_marker
+    )
 
 
 def codes(found: list) -> list[str]:  # type: ignore[type-arg]
@@ -113,23 +117,25 @@ class TestRefusals:
 
 class TestWarnings:
     def test_online_always_on_is_quiet(self) -> None:
-        assert warnings(device(), online=True) == []
+        assert warnings(device(), online=True, artifact=None) == []
 
     def test_offline(self) -> None:
-        assert codes(warnings(device(), online=False)) == ["offline"]
+        assert codes(warnings(device(), online=False, artifact=None)) == ["offline"]
 
     def test_never_connected_replaces_offline(self) -> None:
         d = device(last_seen=None, presence_reported=None)
-        assert codes(warnings(d, online=False)) == ["never_connected"]
+        assert codes(warnings(d, online=False, artifact=None)) == ["never_connected"]
 
     def test_sleepy_online(self) -> None:
-        found = warnings(device(power_class="sleepy", expected_wake_interval_s=60), online=True)
+        found = warnings(
+            device(power_class="sleepy", expected_wake_interval_s=60), online=True, artifact=None
+        )
         assert codes(found) == ["sleepy"]
         assert "60" in found[0].message
 
     def test_sleepy_offline_has_both(self) -> None:
         d = device(power_class="sleepy", expected_wake_interval_s=60)
-        assert codes(warnings(d, online=False)) == ["offline", "sleepy"]
+        assert codes(warnings(d, online=False, artifact=None)) == ["offline", "sleepy"]
 
 
 class TestMergedBinary:
@@ -445,7 +451,7 @@ class TestRollbackIncapable:
     """R2b-be-7: the gating warning. Only `False` warns; `None` stays silent."""
 
     def test_false_is_a_gating_warning(self) -> None:
-        found = warnings(device(rollback_capable=False), online=True)
+        found = warnings(device(rollback_capable=False), online=True, artifact=None)
         assert codes(found) == ["rollback_incapable"]
         assert found[0].needs_override is True
         assert "cannot roll back" in found[0].message
@@ -453,25 +459,69 @@ class TestRollbackIncapable:
 
     @pytest.mark.parametrize("value", [True, None])
     def test_true_and_unknown_are_silent(self, value: bool | None) -> None:
-        assert warnings(device(rollback_capable=value), online=True) == []
-        assert unmet_gates(device(rollback_capable=value), []) == []
+        assert warnings(device(rollback_capable=value), online=True, artifact=None) == []
+        assert unmet_gates(device(rollback_capable=value), [], artifact=None) == []
 
     def test_gating_goes_last(self) -> None:
         d = device(power_class="sleepy", expected_wake_interval_s=60, rollback_capable=False)
-        found = warnings(d, online=False)
+        found = warnings(d, online=False, artifact=None)
         assert codes(found) == ["offline", "sleepy", "rollback_incapable"]
         assert [f.needs_override for f in found] == [False, False, True]
 
     def test_plain_warnings_do_not_need_an_override(self) -> None:
         d = device(last_seen=None, presence_reported=None)
-        assert all(f.needs_override is False for f in warnings(d, online=False))
+        assert all(f.needs_override is False for f in warnings(d, online=False, artifact=None))
 
     def test_unmet_gates_is_cleared_only_by_naming_the_code(self) -> None:
         d = device(rollback_capable=False)
-        assert codes(unmet_gates(d, [])) == ["rollback_incapable"]
-        assert codes(unmet_gates(d, ["something_else"])) == ["rollback_incapable"]
-        assert unmet_gates(d, ["rollback_incapable"]) == []
-        assert unmet_gates(d, []) == [warnings(d, online=True)[0]]
+        assert codes(unmet_gates(d, [], artifact=None)) == ["rollback_incapable"]
+        assert codes(unmet_gates(d, ["something_else"], artifact=None)) == ["rollback_incapable"]
+        assert unmet_gates(d, ["rollback_incapable"], artifact=None) == []
+        assert unmet_gates(d, [], artifact=None) == [warnings(d, online=True, artifact=None)[0]]
+
+
+class TestNoLibraryMarker:
+    """R3-be-1: the image's gating warning. Only a stored `False` warns; `None` (an artifact
+    uploaded before the scan existed) and no artifact stay silent."""
+
+    def test_false_is_a_gating_warning(self) -> None:
+        found = warnings(device(), online=True, artifact=artifact(has_lib_marker=False))
+        assert codes(found) == ["no_library_marker"]
+        assert found[0].needs_override is True
+        assert "library" in found[0].message
+        assert "`" not in found[0].message
+
+    @pytest.mark.parametrize("value", [True, None])
+    def test_marked_and_unknown_are_silent(self, value: bool | None) -> None:
+        a = artifact(has_lib_marker=value)
+        assert warnings(device(), online=True, artifact=a) == []
+        assert unmet_gates(device(), [], artifact=a) == []
+
+    def test_no_artifact_is_silent(self) -> None:
+        assert warnings(device(), online=True, artifact=None) == []
+
+    def test_both_gates_in_order_and_last(self) -> None:
+        d = device(power_class="sleepy", expected_wake_interval_s=60, rollback_capable=False)
+        found = warnings(d, online=False, artifact=artifact(has_lib_marker=False))
+        assert codes(found) == ["offline", "sleepy", "rollback_incapable", "no_library_marker"]
+        assert [f.needs_override for f in found] == [False, False, True, True]
+        assert tuple(codes(found[2:])) == GATING_CODES
+
+    def test_unmet_gates_is_cleared_only_by_naming_the_code(self) -> None:
+        a = artifact(has_lib_marker=False)
+        assert codes(unmet_gates(device(), [], artifact=a)) == ["no_library_marker"]
+        assert codes(unmet_gates(device(), ["rollback_incapable"], artifact=a)) == [
+            "no_library_marker"
+        ]
+        assert unmet_gates(device(), ["no_library_marker"], artifact=a) == []
+
+    def test_both_raised_need_both_named(self) -> None:
+        d = device(rollback_capable=False)
+        a = artifact(has_lib_marker=False)
+        assert codes(unmet_gates(d, [], artifact=a)) == ["rollback_incapable", "no_library_marker"]
+        assert codes(unmet_gates(d, ["no_library_marker"], artifact=a)) == ["rollback_incapable"]
+        assert codes(unmet_gates(d, ["rollback_incapable"], artifact=a)) == ["no_library_marker"]
+        assert unmet_gates(d, ["rollback_incapable", "no_library_marker"], artifact=a) == []
 
 
 class TestLayoutProfiles:

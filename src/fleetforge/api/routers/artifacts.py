@@ -21,10 +21,12 @@ same kind of object stored the same way.
 them. There is no ELF check, no image-header validation and no "is this really an ESP32
 app?" — `docs/features/ota-deploy.md` is explicit that users build with their own
 toolchain, and a server that understood the format would be a server that has opinions
-about which toolchains are allowed. The one exception is a negative check: the server reads two
-signatures to refuse one known trap, a merged full-flash image (R2b-be-3,
-`fleetforge/merged_image.py`). That is never format validation; an unrecognised file is
-still accepted.
+about which toolchains are allowed. There are two narrow reads, and neither is format
+validation. One is a negative check: the server reads two signatures to refuse one known
+trap, a merged full-flash image (R2b-be-3, `fleetforge/merged_image.py`). The other is the
+library-marker scan (R3-be-1, `fleetforge/lib_marker.py`): the verdict is stored as
+`artifacts.has_lib_marker` for the deploy pre-check, and a missing or malformed marker
+never refuses an upload. An unrecognised file is still accepted.
 
 **Raw body, not `multipart/form-data`.** `python-multipart` is not a dependency and an
 opaque blob does not need a form parser; the metadata is small enough to be query
@@ -71,6 +73,7 @@ from fleetforge.api.schemas import ArtifactList, ArtifactSummary, ArtifactUpload
 from fleetforge.db.models import ArtifactKind
 from fleetforge.deploy_precheck import merged_binary
 from fleetforge.firmware.manifest import EXPECTED_PARTITION_LAYOUT, SafeSegment
+from fleetforge.lib_marker import find_marker
 from fleetforge.merged_image import detect_merged
 from fleetforge.partition_profiles import LayoutCatalog, load_layout_catalog
 from fleetforge.storage.blobs import digest_bytes, put_blob
@@ -120,11 +123,16 @@ _LIST_SQL = text(
 # a new label is 201, re-uploading bytes already stored under this exact (target,
 # version) is 200. Neither is an error — re-`put` of the same key is a no-op by
 # construction (`storage/blobs.py`).
+#
+# R3-be-1: a re-upload fills a NULL `has_lib_marker` (a row from before the scan existed)
+# and never changes a known one. The verdict is a pure function of the bytes the digest
+# names, so filling it is idempotent; every other column keeps its first writer's value.
 _ARTIFACT_UPSERT_SQL = text(
     """
-    INSERT INTO artifacts (sha256, size_bytes, kind, target, partition_layout)
-    VALUES (:sha256, :size_bytes, :kind, :target, :partition_layout)
-    ON CONFLICT (sha256) DO NOTHING
+    INSERT INTO artifacts (sha256, size_bytes, kind, target, partition_layout, has_lib_marker)
+    VALUES (:sha256, :size_bytes, :kind, :target, :partition_layout, :has_lib_marker)
+    ON CONFLICT (sha256) DO UPDATE SET has_lib_marker = EXCLUDED.has_lib_marker
+     WHERE artifacts.has_lib_marker IS NULL
     """
 )
 
@@ -283,6 +291,9 @@ async def upload_artifact(
         )
 
     digest = digest_bytes(data)
+    # R3-be-1: never a refusal. The pre-check gates a deploy of an unmarked build.
+    marker = find_marker(data)
+    has_lib_marker = marker is not None
 
     async with sessionmaker() as session:
         # Cheap pre-check so the common conflict costs no upload. It is not the
@@ -311,6 +322,7 @@ async def upload_artifact(
                 "kind": ArtifactKind.USER_FIRMWARE.value,
                 "target": target,
                 "partition_layout": partition_layout,
+                "has_lib_marker": has_lib_marker,
             },
         )
         labelled = await session.scalar(
@@ -332,12 +344,18 @@ async def upload_artifact(
         response.status_code = status.HTTP_200_OK
 
     logger.info(
-        "artifact %s (%d bytes, %s/%s, layout %s) %s by %s",
+        "artifact %s (%d bytes, %s/%s, layout %s, %s) %s by %s",
         digest,
         len(data),
         target,
         version,
         partition_layout,
+        (
+            f"lib_marker format={marker.format} lib_version={marker.lib_version} "
+            f"at 0x{marker.offset:x}"
+            if marker is not None
+            else "no library marker"
+        ),
         "stored" if created else "re-uploaded unchanged",
         admin.token_id,
     )
@@ -348,6 +366,7 @@ async def upload_artifact(
         version=version,
         partition_layout=partition_layout,
         created=created,
+        has_lib_marker=has_lib_marker,
     )
 
 

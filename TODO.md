@@ -397,7 +397,7 @@ Order: spec-3 → fw-2 → fw-3/fw-4 → fw-5/fw-6/be-1 → test-1 → spec-2 �
 
 ### Backend and dashboard
 
-- [ ] **R3-be-1**: Pre-check: a binary without the library marker is a gating warning (P1, 1d)
+- [x] **R3-be-1**: Pre-check: a binary without the library marker is a gating warning (P1, 1d) _(done 2026-10-09; reviewed; see docs/features/ota-library.md)_
       The second gating code after `rollback_incapable` (`deploy_precheck.py`,
       `GATING_CODES`, `tests/test_deploy_precheck.py::TestOverrideCodes`). Detect from the
       image at upload. Not for the stock agent's own bundles. Depends on `R3-spec-3`.
@@ -436,6 +436,7 @@ Order: spec-3 → fw-2 → fw-3/fw-4 → fw-5/fw-6/be-1 → test-1 → spec-2 �
       1-3, 5, 6; any segment still without a harness is listed, not scored.
       Per R3-test-1: steps 1-2, 5 and 6 on the library path are all one `just lib-quickstart` run (~25 min; needs the api on 10.0.2.2 origins).
       Per R3-spec-2: rows and graded halves in docs/features/ota-library.md → *CUJ-1 Driver proposal*; one full `just lib-quickstart` grades 1-2, 3, 5, 6 on the device, `just update-e2e` the dashboard half of 5 and 6 and the wrong-layout row; the duplicated-command assertion has no harness (list it, do not score it).
+      Per R3-be-1: `just update-e2e`'s synthetic builds now carry a marker (`LIB_MARKER` in update-flow-e2e.mjs); a plain build gates as `no_library_marker`.
 - [ ] **R3-rel-1**: Quickstart, archive and release (P1, 0.5d)
       README quickstart for the library, `docs/features/ota-library.md` completed entries,
       `agent/version.txt` bump, `/release fleetforge minor`, then
@@ -444,6 +445,7 @@ Order: spec-3 → fw-2 → fw-3/fw-4 → fw-5/fw-6/be-1 → test-1 → spec-2 �
       Per R3-fw-7: the README's `git clone` step needs the library on GitHub `main` (origin is behind); once the release tag exists, add the pinned git form `lib_deps = Fleetforge=https://github.com/tvaroska/fleetforge.git#vX.Y.Z` to *Your own project*. PlatformIO finds the nested `library.json`, probed with `git+file://` in R3-fw-7.
       Per R3-fw-4: link the two example READMEs (`examples/Basic/README.md`, `examples/basic_idf/README.md`) from the library README; keep their `# quickstart:` blocks intact (`just lib-quickstart` runs them).
       Per R3-fw-6: after the `agent/version.txt` bump (and `library.json` + `ff_lib_version.h` with it), agents > 0.4.7 announce `lib_marker: 1` and carry the marker; until then dev-built 0.4.7 agents do too, while the released 0.4.7 (`v0.4.3`) announces none.
+      Per R3-be-1: migration 0008 (`artifacts.has_lib_marker`); release note: artifacts uploaded before it have no verdict and never warn until re-uploaded (the re-upload fills it); the downgrade drops the verdicts.
 
 ### Order
 

@@ -544,6 +544,10 @@ class ArtifactUploaded(BaseModel):
     `True` is a new label, `False` is an idempotent re-upload of bytes already stored
     under this exact `(target, version)`. The status code says the same thing (201 vs
     200); the field is here so a client does not have to parse it out of one.
+
+    `has_lib_marker` (R3-be-1) is whether the server found the Fleetforge OTA library
+    marker in the bytes (`fleetforge.lib_marker`). Always a bool here: every upload is
+    scanned. `False` is never a refusal; a deploy of it is gated as `no_library_marker`.
     """
 
     sha256: str
@@ -552,6 +556,7 @@ class ArtifactUploaded(BaseModel):
     version: str
     partition_layout: str
     created: bool
+    has_lib_marker: bool
 
 
 class ArtifactSummary(BaseModel):
@@ -596,7 +601,7 @@ class ArtifactList(BaseModel):
 # The gating warnings an operator may override, one by one (R2b-be-7). A literal, so it
 # cannot reference `deploy_precheck.GATING_CODES`; `tests/test_deploy_precheck.py` keeps
 # the two equal. An unknown code is a 422.
-OverrideCode = Literal["rollback_incapable"]
+OverrideCode = Literal["rollback_incapable", "no_library_marker"]
 
 
 class DeployRequest(BaseModel):

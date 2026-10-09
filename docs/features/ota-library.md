@@ -16,6 +16,68 @@ becomes a board in the field that fixes itself" — this release *is* that journ
 
 ## Completed Work
 
+### R3-be-1 (2026-10-09): an upload stores whether the library marker is in the image; a deploy of an unmarked build is gated as no_library_marker
+
+**The problem.** From R3-fw-6 every library build carries the marker, but the server never
+looked for it, so a plain sketch (no library, or the library installed and never started)
+deployed like any other build and orphaned the board: nothing in it confirms the update or
+listens for the next one. The decisions it implements were named in advance in the
+*Library marker proposal* below ("Pre-check (`R3-be-1`), named here so it is not
+re-decided"); this entry records how they shipped.
+
+**What shipped.**
+
+- **`src/fleetforge/lib_marker.py` (new).** `find_marker(data) -> LibMarker | None`, the
+  spec's reading rule verbatim (pure, stdlib, never raises); `MAGIC`, `MARKER_SIZE`.
+- **Migration `0008` + `Artifact.has_lib_marker` (`BOOLEAN NULL`, no default, no CHECK).**
+  NULL = never scanned (every row from before R3-be-1; never warns), `false` gates, `true`
+  is marked. The one server-computed column on `artifacts`; not `provenance`.
+- **`POST /v1/artifact`** scans every accepted upload after the merged-image refusal and
+  stores the verdict; the response gains `has_lib_marker`; the log line names the
+  marker's format, version and offset or "no library marker". Never a refusal. The upsert
+  is `ON CONFLICT (sha256) DO UPDATE SET has_lib_marker = EXCLUDED.has_lib_marker WHERE
+  artifacts.has_lib_marker IS NULL`: a re-upload fills a NULL verdict and never changes a
+  known one, and every other column keeps its first writer's value.
+- **`deploy_precheck.py`.** `NO_LIBRARY_MARKER`; `GATING_CODES = (ROLLBACK_INCAPABLE,
+  NO_LIBRARY_MARKER)`; `ResolvedArtifact.has_lib_marker` (no default);
+  `warnings`/`gating_warnings`/`unmet_gates` take a required `artifact=` keyword. The
+  finding is raised only when `artifact.has_lib_marker is False`, after
+  `rollback_incapable`, with a backtick-free sentence naming the consequence and the fix
+  (`Fleetforge.begin()` / `fleetforge_start()`).
+- **`deploys.py`** selects `a.has_lib_marker` and passes the artifact to the gate and the
+  warnings. **`schemas.py`**: `OverrideCode` is `"rollback_incapable" | "no_library_marker"`.
+  No frontend code change: `deployPrecheck.ts` renders any `needs_override` code generically.
+- **`frontend/scripts/update-flow-e2e.mjs`**: the synthetic builds end with one valid marker
+  (`LIB_MARKER`, `lib_version` `0.0.0-e2e`), since they stand for library builds.
+- **Fixtures** (real bytes, R3-fw-6 builds): `esp32.basic.app.head.bin` (Arduino Basic, first
+  128 KiB), `esp32.agent.app.head.bin` (agent `app.bin`, first 128 KiB),
+  `esp32.nocall.app.bin` (Basic with `Fleetforge.begin` deleted, whole file, no marker).
+- **Tests.** `test_lib_marker_reader.py` (new: magic == spec == firmware, the real fixtures,
+  every malformed case); `test_deploy_precheck.py::TestNoLibraryMarker`;
+  `test_api_artifact_upload.py::TestTheLibraryMarkerVerdict` (verdict stored, NULL backfill,
+  a known verdict never rewritten); `test_api_deploy.py::TestTheLibraryMarkerGate` (the
+  acceptance end to end through upload, pre-check and deploy); `test_schema.py` (the column).
+
+**T2 (2026-10-09, dev stack at `localhost:8088`, no board).**
+
+| Step | Result |
+|---|---|
+| Migration | `just migrate`: `0007 -> 0008`; `\d artifacts` shows `has_lib_marker | boolean`, nullable; the 90 existing rows stay NULL |
+| T2-A reader on whole binaries | agent `app.bin` ×4 and Basic esp32/esp32s3: `LibMarker(format=1, lib_version='0.4.7')`; `esp32.nocall.app.bin` and the stock Arduino `StartCounter.ino.bin`: `None` |
+| T2-B live (simulated esp32 board online) | upload StartCounter / Basic / agent: 201, `has_lib_marker` false / true / true. Pre-check: plain `[("no_library_marker", true)]`, lib and agent `[]`. Deploy plain: 409 with the pre-check sentence; `override: ["force"]` 422; `override: ["no_library_marker"]` 202. Deploy lib without override: 202. SQL: f / t / t |
+| T2-C `just update-e2e` | exit 0, 6/6 PASS; its three uploads stored `has_lib_marker = true` |
+| T1 | `just test` 1745 passed (ruff, mypy, full suite on Postgres, incl. `test_models_match_migration` and `test_migration_downgrades_cleanly`); `node --check update-flow-e2e.mjs` 0 |
+
+**Named gaps.**
+
+- **Artifacts uploaded before R3-be-1 have no verdict and never warn** until the same bytes
+  are uploaded again (which fills it). The migration cannot backfill: it has no object store.
+- **The marker proves the library is linked, not started** (spec). A sketch whose code
+  references the library on a path that never runs is marked and not warned.
+- **The downgrade drops every stored verdict**; they come back only by re-upload, and NULL
+  is fail-open.
+- **The device's announced `lib_marker` is still not stored** (DECISIONS R3-be-1 D6).
+
 ### R3-fw-6 (2026-10-09): the library marker is in the component, linked by the announce; `up/announce` ends with `lib_marker`; spec Patch B
 
 **The problem.** R3-spec-3 decided the marker (one 64-byte constant, magic

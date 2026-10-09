@@ -544,6 +544,11 @@ class Artifact(Base):
     `devices.device_id_format` is: the digest *is* the object key, so a row whose digest
     is not `^[0-9a-f]{64}$` names a key that `blobs.blob_key` will refuse to build — and
     the disagreement would surface at download time, not at write time.
+
+    **`has_lib_marker` is the one server-computed column** (R3-be-1). It is not in
+    `provenance`, which is the producer's identity copied and never recomputed; the
+    verdict is the server's own reading of the bytes, so it lives beside them as a
+    nullable column, the same tri-state as `devices.rollback_capable`.
     """
 
     __tablename__ = "artifacts"
@@ -564,6 +569,11 @@ class Artifact(Base):
     target: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Mirrors `devices.partition_layout` (`ab-4m-v1`).
     partition_layout: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # R3-be-1: whether the server found the Fleetforge OTA library marker in the bytes
+    # (`fleetforge.lib_marker`, spec/device-protocol.md -> *Library marker*). Server-computed
+    # at upload, a pure function of the digest. NULL = never scanned (uploaded before
+    # R3-be-1): fail-open, never warns. False gates a deploy as `no_library_marker`.
+    has_lib_marker: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     # `source_commit`, `idf_version`, `idf_image`, `agent_version`, `config_sha256`,
     # `build_digest` — i.e. the S0-infra-3 manifest identity, **copied, never
     # recomputed**. JSONB rather than columns because the shape belongs to the producer

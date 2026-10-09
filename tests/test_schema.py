@@ -117,6 +117,22 @@ async def test_artifacts_refuses_a_zero_byte_artifact(session: AsyncSession) -> 
         )
 
 
+async def test_artifacts_has_a_nullable_boolean_library_marker_verdict(
+    session: AsyncSession,
+) -> None:
+    """R3-be-1, migration 0008: NULL = never scanned (every older row), never warns."""
+    row = (
+        await session.execute(
+            text(
+                "SELECT data_type, is_nullable, column_default FROM information_schema.columns "
+                "WHERE table_schema = 'public' AND table_name = 'artifacts' "
+                "AND column_name = 'has_lib_marker'"
+            )
+        )
+    ).one()
+    assert tuple(row) == ("boolean", "YES", None)
+
+
 async def test_builds_refuses_outputs_that_are_not_an_object(session: AsyncSession) -> None:
     """JSONB would happily store `[]`; a reader doing `outputs['app']` on it gets a 500."""
     with pytest.raises(IntegrityError, match="ck_builds_outputs_object"):

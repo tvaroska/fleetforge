@@ -105,9 +105,14 @@ if (!PASSWORD) setupFailed('no FF_ADMIN_PASSWORD in the environment or in the re
 // ── Build files ───────────────────────────────────────────────────────────────────────
 // A real app-image head (magic 0xE9, chip id 9 = esp32s3, app descriptor with a version at
 // 0x30). Each build's version field is overwritten with its label, so its bytes are DISTINCT
-// (artifacts are keyed by sha256 and the upsert is `ON CONFLICT DO NOTHING`: the same bytes
-// under a second label with another layout would silently keep the FIRST layout) and the
-// form's header read fills the label in.
+// (artifacts are keyed by sha256 and a re-upload fills only a NULL library-marker verdict:
+// the same bytes under a second label with another layout would silently keep the FIRST
+// layout) and the form's header read fills the label in.
+//
+// Each build also ends with one valid Fleetforge OTA library marker (spec/device-protocol.md
+// -> *Library marker*): these builds stand for library builds, since the simulated board runs
+// the library, so they must not gate as `no_library_marker` (R3-be-1). Not to be confused
+// with the simulator's `--broken-marker` below, which is a version suffix.
 
 const FIXTURES = new URL('../../tests/fixtures/firmware/', import.meta.url)
 const appHead = await readFile(new URL('esp32s3.app.head.bin', FIXTURES))
@@ -116,12 +121,19 @@ const mergedHead = await readFile(new URL('esp32s3.merged.head.bin', FIXTURES))
 const VERSION_AT = 0x30
 const VERSION_LEN = 32
 
+// 64 bytes: magic (16), format 1, 3 reserved zeros, lib_version NUL-padded to 32, 12 reserved
+// zeros. Appended at offset 36864, which is 4-aligned like the library's own.
+const LIB_MARKER = Buffer.alloc(64)
+Buffer.from('14a948d18f12cfdd46464f54414c4942', 'hex').copy(LIB_MARKER, 0)
+LIB_MARKER[16] = 1
+LIB_MARKER.write('0.0.0-e2e', 20, 'ascii')
+
 function buildWith(label) {
   if (Buffer.byteLength(label) >= VERSION_LEN) throw new Error(`label ${label} does not fit the descriptor`)
   const bytes = Buffer.from(appHead)
   bytes.fill(0, VERSION_AT, VERSION_AT + VERSION_LEN)
   bytes.write(label, VERSION_AT, 'utf8')
-  return bytes
+  return Buffer.concat([bytes, LIB_MARKER])
 }
 
 await mkdir(`${OUT}/bins`, { recursive: true })

@@ -6,6 +6,47 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-09 — An upload stores has_lib_marker (BOOLEAN NULL, migration 0008); no_library_marker is the second gating code, raised only when the verdict is false; the device's announced lib_marker stays unstored (R3-be-1)
+
+**Decided.** `POST /v1/artifact` reads every accepted upload with `fleetforge/lib_marker.py`
+and stores the verdict; the deploy pre-check gates a deploy of an unmarked build as
+`no_library_marker` (`needs_override: true`) and never reads bytes. Details and the T2
+table: `docs/features/ota-library.md` → *R3-be-1*.
+
+- **D1. Storage: `artifacts.has_lib_marker BOOLEAN NULL`**, migration `0008`, no default, no
+  CHECK. Tri-state, the `devices.rollback_capable` idiom: NULL = never scanned (every row
+  from before R3-be-1; never warns), `false` = scanned, no valid marker (gates), `true` =
+  marker found. Not `provenance` (producer-copied, "never recomputed"). Not the format
+  integer with a 0 sentinel: the gate needs only presence; `format` and `lib_version` go to
+  the upload log line. **Rejected:** storing `lib_version` (no consumer yet; additive later).
+- **D2. The reader is `src/fleetforge/lib_marker.py`** (pure, stdlib, never raises), the
+  spec's reading rule verbatim. `MAGIC` is pinned equal to the spec table and to
+  `ff_marker.c` by `tests/test_lib_marker_reader.py`.
+- **D3. Scan every accepted upload**, after the merged-image refusal and before the blob
+  write. The verdict is always a bool from R3-be-1 on; a missing or malformed marker never
+  refuses an upload.
+- **D4. A re-upload backfills a NULL verdict**: `ON CONFLICT (sha256) DO UPDATE SET
+  has_lib_marker = EXCLUDED.has_lib_marker WHERE artifacts.has_lib_marker IS NULL`. The
+  verdict is a pure function of the bytes the digest names, so filling it is idempotent and
+  never changes a known verdict; every other column keeps its first writer's value. This is
+  the operator's route to a verdict for a pre-R3-be-1 artifact; the migration cannot
+  backfill (no object store).
+- **D5. The gate** is `gating_warnings(device, artifact=…)`: `rollback_incapable` (the
+  board's) first, then `no_library_marker` (the image's) when `artifact is not None and
+  artifact.has_lib_marker is False`. `GATING_CODES = (ROLLBACK_INCAPABLE,
+  NO_LIBRARY_MARKER)`. `artifact` is a required keyword and `ResolvedArtifact.has_lib_marker`
+  has no default (the R3-be-2 `catalog` idiom), so no path silently drops the gate.
+- **D6. The device's announced `lib_marker` is not stored.** Nothing reads it and the spec
+  forbids warning on it; the ingestor and `/v1/enroll` keep ignoring the key. It becomes a
+  column when a dashboard reads it. Supersedes the parenthetical "storing it … are R3-be-1"
+  in the R3-fw-6 entry below.
+- **Named gaps.** Artifacts uploaded before R3-be-1 have no verdict and never warn until
+  re-uploaded (D4); the marker proves the library is linked, not started (spec); the
+  downgrade drops every stored verdict (a re-upload recomputes it, and NULL is fail-open).
+  No `spec/` change is proposed: the spec already says all of this.
+
+---
+
 ## 2026-10-09 — The library marker is ff_marker.c's ff_lib_marker, its lib_version is FF_LIB_VERSION in every build, read by the announce (lib_marker, last key) and the ff-id image line; Patch B applied (R3-fw-6)
 
 **Decided.** The marker R3-spec-3 specified is one `const ff_lib_marker_t ff_lib_marker`

@@ -17,9 +17,18 @@ its persistent session. **Except gating warnings** (`needs_override`, R2b-be-7):
 names their code in `override`. Per code, never a blanket `force`; the pre-check reports
 them regardless of `override`, so the dashboard can render the tick.
 
+Two gating codes (`GATING_CODES`): `rollback_incapable`, a property of the board, and
+`no_library_marker` (R3-be-1), a property of the image. The image's verdict is the one
+`POST /v1/artifact` computed with `fleetforge.lib_marker` and stored as
+`artifacts.has_lib_marker`; a deploy never reads bytes. The board's own announced
+`lib_marker` is never warned on (spec/device-protocol.md): the image being sent is what
+matters.
+
 The board measurements are fail-open (R2b-be-6): a NULL `partition_table_sha256` never
 refuses and a NULL `rollback_capable` never warns. Every board before its first OTA, and
 every agent at or below 0.4.6, reports NULL, and an old board is not refused for being old.
+So is the artifact's verdict: an artifact uploaded before R3-be-1 has a NULL
+`has_lib_marker` and never warns.
 
 A layout this server does not support is refused, `unsupported_layout` (R3-fw-5): a board
 whose table matches no layout its firmware knows announces `unknown`
@@ -65,10 +74,12 @@ OFFLINE = "offline"
 SLEEPY = "sleepy"
 MERGED_BINARY = "merged_binary"  # refused at upload, not by refusals()
 ROLLBACK_INCAPABLE = "rollback_incapable"
+NO_LIBRARY_MARKER = "no_library_marker"
 
-# The warnings `/deploy` enforces unless `override` names them. `api/schemas.py`'s
-# `OverrideCode` literal is kept equal to this by `tests/test_deploy_precheck.py`.
-GATING_CODES: tuple[str, ...] = (ROLLBACK_INCAPABLE,)
+# The warnings `/deploy` enforces unless `override` names them, in the order they are
+# raised. `api/schemas.py`'s `OverrideCode` literal is kept equal to this by
+# `tests/test_deploy_precheck.py`.
+GATING_CODES: tuple[str, ...] = (ROLLBACK_INCAPABLE, NO_LIBRARY_MARKER)
 
 # Where a library user finds the partitions.csv for each builtin layout: the fix named by
 # `unsupported_layout` and `partition_table_mismatch`. `tests/test_deploy_precheck.py` keeps
@@ -90,6 +101,9 @@ class ResolvedArtifact:
     sha256: str
     size_bytes: int
     partition_layout: str | None
+    # The upload's library-marker verdict (R3-be-1); NULL = never scanned, never warns.
+    # No default: every constructor says it, so no path silently drops the gate.
+    has_lib_marker: bool | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -284,7 +298,7 @@ def refusals(
     return found
 
 
-def warnings(device: Device, *, online: bool) -> list[Finding]:
+def warnings(device: Device, *, online: bool, artifact: ResolvedArtifact | None) -> list[Finding]:
     """What the operator should know before sending.
 
     Never blocks a send, except the gating warnings (`needs_override`), which come last
@@ -321,18 +335,23 @@ def warnings(device: Device, *, online: bool) -> list[Finding]:
             )
         )
 
-    found.extend(gating_warnings(device))
+    found.extend(gating_warnings(device, artifact=artifact))
     return found
 
 
-def gating_warnings(device: Device) -> list[Finding]:
-    """The warnings `/deploy` refuses unless overridden. Pure, NULL-silent.
+def gating_warnings(device: Device, *, artifact: ResolvedArtifact | None) -> list[Finding]:
+    """The warnings `/deploy` refuses unless overridden, in `GATING_CODES` order. Pure,
+    NULL-silent.
 
-    `rollback_capable is False`, never `not rollback_capable`: `None` (no OTA observed yet,
-    or an agent too old to report) must stay silent.
+    `rollback_incapable` is the board's: `rollback_capable is False`, never
+    `not rollback_capable`, because `None` (no OTA observed yet, or an agent too old to
+    report) must stay silent. `no_library_marker` is the image's (R3-be-1): the verdict
+    stored at upload, `has_lib_marker is False`, for the same reason: `None` is an artifact
+    uploaded before the scan existed. No artifact is a refusal already, so it is silent.
     """
+    found: list[Finding] = []
     if device.rollback_capable is False:
-        return [
+        found.append(
             Finding(
                 ROLLBACK_INCAPABLE,
                 "this board's bootloader cannot roll back: it booted an earlier update "
@@ -341,10 +360,28 @@ def gating_warnings(device: Device) -> list[Finding]:
                 "Send it only if losing this board to a bad build is acceptable.",
                 needs_override=True,
             )
-        ]
-    return []
+        )
+    if artifact is not None and artifact.has_lib_marker is False:
+        found.append(
+            Finding(
+                NO_LIBRARY_MARKER,
+                "this build does not contain the Fleetforge OTA library: no library marker "
+                "was found in the image. Nothing in it confirms the update or listens for "
+                "the next one, so the board would run it unconfirmed and offline, out of "
+                "reach of every remote action, until a reset rolls it back or someone "
+                "reflashes it over USB. A sketch that has the library installed but never "
+                "starts it is not marked either. Rebuild with the library linked and "
+                "started (Fleetforge.begin() in setup(), or fleetforge_start() in ESP-IDF), "
+                "or send it only if losing this board until someone reaches it is "
+                "acceptable.",
+                needs_override=True,
+            )
+        )
+    return found
 
 
-def unmet_gates(device: Device, override: Collection[str]) -> list[Finding]:
+def unmet_gates(
+    device: Device, override: Collection[str], *, artifact: ResolvedArtifact | None
+) -> list[Finding]:
     """The gating warnings `override` does not name, in order. Empty means the gate opens."""
-    return [f for f in gating_warnings(device) if f.code not in override]
+    return [f for f in gating_warnings(device, artifact=artifact) if f.code not in override]

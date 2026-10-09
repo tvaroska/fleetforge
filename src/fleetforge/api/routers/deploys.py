@@ -48,13 +48,15 @@ in `fleetforge/deploy_precheck.py`, which this endpoint turns into its first HTT
 The pre-check has no side effects, and its plain warnings (offline, sleepy) are never
 enforced.
 
-**The gate (R2b-be-7).** A gating warning (`needs_override`, today only
-`rollback_incapable`) is the one warning `/deploy` enforces: after the refusals (a refusal
+**The gate (R2b-be-7).** A gating warning (`needs_override`: `rollback_incapable`, and from
+R3-be-1 `no_library_marker`) is the one warning `/deploy` enforces: after the refusals (a refusal
 always wins, and `override` never clears one), `_accept` answers 409 with the warning's
 own sentence unless the body names its code in `override`. It runs before the reuse
 lookup, the mint and the INSERT, so a gated deploy writes no row and publishes nothing.
 The pre-check ignores `override` and always reports the warning, so the card can render
-the tick.
+the tick. `no_library_marker` reads the verdict `POST /v1/artifact` stored at upload
+(`artifacts.has_lib_marker`), never the bytes; a NULL verdict (uploaded before R3-be-1)
+never warns.
 
 **The supported layouts are the `partition_profiles` table (R3-be-2).** Both routes load a
 `LayoutCatalog` in their own session, right after resolving the device and the artifact,
@@ -126,7 +128,7 @@ router = APIRouter(
 # request field" structural instead of a comment.
 _ARTIFACT_FOR_TARGET_SQL = text(
     """
-    SELECT a.sha256, a.size_bytes, a.partition_layout
+    SELECT a.sha256, a.size_bytes, a.partition_layout, a.has_lib_marker
       FROM artifact_versions AS v
       JOIN artifacts AS a ON a.sha256 = v.sha256
      WHERE v.target = :target AND v.version = :version
@@ -341,7 +343,10 @@ async def _resolve(
     if row is None:
         return device, None
     return device, ResolvedArtifact(
-        sha256=row.sha256, size_bytes=row.size_bytes, partition_layout=row.partition_layout
+        sha256=row.sha256,
+        size_bytes=row.size_bytes,
+        partition_layout=row.partition_layout,
+        has_lib_marker=row.has_lib_marker,
     )
 
 
@@ -368,7 +373,7 @@ def _accept(
             ),
             detail=found[0].message,
         )
-    gated = unmet_gates(device, override)
+    gated = unmet_gates(device, override, artifact=artifact)
     if gated:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=gated[0].message)
     if artifact is None:  # unreachable: a missing artifact is always a refusal
@@ -401,7 +406,7 @@ async def precheck_deploy(
         catalog = await load_layout_catalog(session)
         online = is_online(device, now=now_utc(), tolerance=settings.presence_tolerance)
         found = refusals(device, artifact, version=body.version, catalog=catalog)
-        warned = warnings(device, online=online)
+        warned = warnings(device, online=online, artifact=artifact)
         response = DeployPrecheck(
             device_id=device_id,
             target=device.platform_type,
