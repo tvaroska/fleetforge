@@ -16,6 +16,74 @@ becomes a board in the field that fixes itself" — this release *is* that journ
 
 ## Completed Work
 
+### R3-fw-6 (2026-10-09): the library marker is in the component, linked by the announce; `up/announce` ends with `lib_marker`; spec Patch B
+
+**The problem.** R3-spec-3 decided the marker (one 64-byte constant, magic
+`14a948d18f12cfdd46464f54414c4942`) and Patch A put it in `spec/device-protocol.md`, but no
+image carried it, so R3-be-1's pre-check had nothing to find. The spec also requires that
+installing the library without calling it does not mark an image, which rules out every
+way of force-keeping the object.
+
+**What shipped.**
+
+- **`src/ff_marker.c` + `src/ff_marker.h` (new, private).** `const ff_lib_marker_t
+  ff_lib_marker __attribute__((aligned(4)))`, alone in its TU: the 16 magic bytes (spelled as
+  literals so a test compares them to the spec), `format = FF_LIB_MARKER_FORMAT` (1),
+  `lib_version = FF_LIB_VERSION`, reserved bytes zero by designated initializers.
+  `_Static_assert`s pin size 64 and offsets 16/20/52, and that the version string is
+  non-empty and fits with its NUL. No `used`, `retain`, `KEEP()` or `-u`.
+- **What keeps it.** `ff_identity.c` reads it twice: `announce_object` adds
+  `cJSON_AddNumberToObject(root, "lib_marker", ff_lib_marker.format)` as the last key (after
+  `capabilities`), and `ff_identity_init` logs `image: fleetforge library %s, lib_marker %u`
+  with `ff_lib_marker.lib_version` (the address escape). The line sits **before**
+  `device_id %s`: `frontend/src/diagnostics.ts` reads the device id from the last `ff-id`
+  line's first 12-hex run, and this line has none.
+- **`lib_version` is `FF_LIB_VERSION` in every build** (IDF agent, a maker's IDF project,
+  Arduino). `ff_lib_version.h`'s comment now says so; it is still pinned to
+  `agent/version.txt` and `library.json`. Not `PROJECT_VER` (in `basic_idf` it is the
+  maker's `1.0.0`), not CMake's `version.txt` (a copied component has none).
+- **CMake `SRCS`** gains `src/ff_marker.c`. `library.json` and `scripts/arduino_package.py`
+  are unchanged (no srcFilter; the package globs `src/`).
+- **Spec Patch B.** The `up/announce` example's `capabilities` line gains a comma and is
+  followed by `"lib_marker": 1`. The only `spec/` edit.
+- **Comments.** `ff_identity.c` and `agent/tools/lib_bundle.py` say `BUILTIN_LAYOUTS`
+  (R3-be-2 rename).
+- **Tests.** `tests/test_library_marker.py` (new): magic == spec table and ends `FFOTALIB`;
+  layout asserts, field order and sizes, `aligned(4)`; format 1 and `FF_LIB_VERSION`, no
+  `PROJECT_VER`; no force-keep spelling in the component, `library.json` or the package
+  script; one definition, declared only in `src/ff_marker.h`, absent from `include/`,
+  `agent_main.c` and `Fleetforge.cpp`; `lib_marker` is the last `cJSON_Add` before `return
+  root;`; the spec example parses with `lib_marker` last; the `image:` line precedes
+  `device_id` with no hex run; the ingestor decodes an announce with `lib_marker` 1, `"x"`
+  and absent and keeps `fw_version`. `ff_marker.h` joins `PRIVATE_WHOLE_HEADERS`. Size
+  budgets raised for all four targets.
+
+**T2 (2026-10-09, no board; the reference reader of the proposal at `/tmp/ff-scan/scan.py`).**
+
+| Step | Result |
+|---|---|
+| T2-A pre-R3 announce none | `git grep -n -e lib_marker -e FFOTALIB -e ff_lib_marker v0.4.3 -- agent` rc=1. The pre-rebuild 0.4.7 bundles (×4) and `tests/fixtures/firmware/*.bin` (×4): `no marker (magic x0)` |
+| T2-B stock agent | `agent/dist/{esp32,esp32s3,esp32c3,esp32c6}/app.bin`: `marker format=1 lib_version=0.4.7 (magic x1)` ×4 |
+| T2-C Arduino | `examples/Basic/.pio/build/{esp32,esp32s3}/firmware.bin`, `lib-qemu/.pio/bundle/esp32-qemu/app.bin`: `marker format=1 lib_version=0.4.7 (magic x1)` ×3 |
+| T2-D ESP-IDF consumer | `basic_idf` built for esp32 in the pinned image: `marker format=1 lib_version=0.4.7 (magic x1)`; its `PROJECT_VER` is `1.0.0` |
+| T2-E installed, not called | Basic with `Fleetforge.begin` deleted (grep 0): `pio run` SUCCESS, `ff_marker.c.o` compiled, image `no marker (magic x0)` |
+| T2-F QEMU example | `I (7464) ff-id: image: fleetforge library 0.4.7, lib_marker 1` before `ff-id: device_id`; `enroll 200`; `announce acknowledged`. Last `up/announce`: `lib_marker` 1, last key, `ab-4m-arduino-v1`, `fw_version` 1.0.0. API: `000000000000` online, 1.0.0 |
+| T2-G stock agent in QEMU | Same lines; announce `lib_marker` 1 (last key), `ab-4m-v1`, `agent_version` 0.4.7; `just agent-qemu-smoke esp32` HARNESS OK |
+| T2-H server tolerance | `test_library_marker.py`, `TestAnnounceMatchesTheSpec`, `test_unknown_body_fields_are_ignored`: 22 passed |
+| Builds | `just agent-build-all` BUNDLE OK ×4, 0 `warning:`; esp32 1,030,512 B (+192), s3 +224, c3 +224, c6 +224. `just lib-build esp32`/`esp32s3` SUCCESS; `just lib-bundle esp32-qemu` exit 0; `just lib-quickstart --build-only` PASS (481 s); `just test` green |
+
+**Named gaps.**
+
+- **LTO is unmeasured.** No build here uses `-flto`; the `image:` line's `%s` is the
+  address escape that should survive it.
+- **The marker proves the library is linked, not started.** T2-E covers only "installed,
+  not referenced".
+- **Dev-built 0.4.7 agents announce `lib_marker`.** "Agents ≤ 0.4.7 announce none" holds
+  for the released 0.4.7 (`v0.4.3`) and becomes unambiguous at the R3-rel-1 bump.
+- **The server ignores the key.** Storing it and the `no_library_marker` gate are R3-be-1.
+- **The Arduino IDE package** (`just lib-arduino-check`, ~8 GB) was not re-run; the new `.c`
+  goes through the generic glob that `tests/test_arduino_package.py` covers.
+
 ### R3-fw-8 (2026-10-09): the Arduino IDE package — generated, zip-installable, compiles the example on core 3.3.12 for esp32 and esp32s3
 
 **What.** `scripts/arduino_package.py` (`just lib-arduino-package`) generates
@@ -842,7 +910,7 @@ code-resident `SUPPORTED_LAYOUTS` cannot serve that, so step 2 of
 registry publication beyond a working `platformio.ini` recipe, and any application-config
 channel — `dn/cfg` stays agent-only by design.
 
-#### Library marker proposal (R3-spec-3, 2026-10-08) — PROPOSED, not applied
+#### Library marker proposal (R3-spec-3, 2026-10-08) — ACCEPTED: Patch A applied in 8f1f458, Patch B applied in R3-fw-6
 
 `spec/` is protected during `/implement`, so this is the decision written as paste-ready
 text for a later `spec:` commit (the route R2-spec-1 and R2b-spec-2 took). **Nothing here is

@@ -61,7 +61,7 @@ from make_manifest import (
 )
 
 # spec/device-protocol.md -> Partition layouts. Retyped with the spec named, as
-# firmware/manifest.py::SUPPORTED_LAYOUTS does; tests/test_arduino_library.py holds the
+# firmware/manifest.py::BUILTIN_LAYOUTS does; tests/test_arduino_library.py holds the
 # three equal.
 ARDUINO_LAYOUT_ID = "ab-4m-arduino-v1"
 ARDUINO_LAYOUT_SHA256 = "05528998ae17fb6a7a5741443f9a7a4720c766f370fefc30814cbc3e391c1fc4"

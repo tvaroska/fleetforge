@@ -33,6 +33,7 @@
 #include "esp_partition.h"
 #include "esp_system.h"
 #include "esp_timer.h"
+#include "ff_marker.h"
 #include "ff_net_internal.h"
 #include "ff_store_internal.h"
 #include "mbedtls/sha256.h"
@@ -56,7 +57,7 @@ static bool s_rollback_capable;
 
 /* R3-fw-5: every partition layout this firmware knows, by its geometry fingerprint. All of
  * them, not just this build's own: a board says what map it carries. spec/device-protocol.md
- * -> Partition layouts, retyped; pinned equal to SUPPORTED_LAYOUTS by
+ * -> Partition layouts, retyped; pinned equal to BUILTIN_LAYOUTS by
  * tests/test_layout_detection.py. A new layout is a new row here AND a spec row. */
 typedef struct {
     const char *id;
@@ -275,6 +276,12 @@ esp_err_t ff_identity_init(void)
                  s_device_id);
     }
 
+    /* R3-fw-6: which library this image was built with, from the library marker. It passes
+     * lib_version as a string, so the marker's address escapes (see ff_marker.c), and it
+     * goes BEFORE the device_id line: frontend/src/diagnostics.ts reads the device id out
+     * of the last ff-id line, and this one has no 12-character hex run. */
+    ESP_LOGI(TAG, "image: fleetforge library %s, lib_marker %u", ff_lib_marker.lib_version,
+             (unsigned)ff_lib_marker.format);
     ESP_LOGI(TAG, "device_id %s", s_device_id);
 
     /* R2b-fw-2. After the MAC, and never fatal: an unknown measurement is announced as
@@ -480,6 +487,10 @@ static cJSON *announce_object(const ff_cfg_t *cfg)
     cJSON *capabilities = cJSON_CreateArray();
     cJSON_AddItemToArray(capabilities, cJSON_CreateString("ota"));
     cJSON_AddItemToObject(root, "capabilities", capabilities);
+    /* R3-fw-6, spec/device-protocol.md -> up/announce `lib_marker`: the `format` of the
+     * library marker in the RUNNING image, the last key. This read from another TU is what
+     * keeps the marker linked (ff_marker.c): nothing force-keeps it. */
+    cJSON_AddNumberToObject(root, "lib_marker", ff_lib_marker.format);
     return root;
 }
 

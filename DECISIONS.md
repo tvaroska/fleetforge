@@ -6,6 +6,48 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-09 — The library marker is ff_marker.c's ff_lib_marker, its lib_version is FF_LIB_VERSION in every build, read by the announce (lib_marker, last key) and the ff-id image line; Patch B applied (R3-fw-6)
+
+**Decided.** The marker R3-spec-3 specified is one `const ff_lib_marker_t ff_lib_marker`
+(64 B, `aligned(4)`) alone in the component's `src/ff_marker.c`, declared in the private
+`src/ff_marker.h`. Nothing force-keeps it. `ff_identity.c` keeps it linked by reading it:
+the announce adds `"lib_marker": ff_lib_marker.format` as its **last** key, and
+`ff_identity_init` logs `ff-id: image: fleetforge library <lib_version>, lib_marker <format>`.
+Spec Patch B (the key in the `up/announce` example) is in the same commit, as approved.
+Details and the T2 table: `docs/features/ota-library.md` → *R3-fw-6*.
+
+- **The version mechanism (settles R3-fw-2's "how the number reaches ff_marker.c").**
+  `lib_version` is `FF_LIB_VERSION` from `src/ff_lib_version.h` in EVERY build: the IDF
+  agent, a maker's own ESP-IDF project and Arduino. That header is already pinned equal to
+  `agent/version.txt` and `library.json` (`tests/test_arduino_library.py`), so there is still
+  one number in three files. **Rejected:** `PROJECT_VER` (in a maker's IDF project it is the
+  maker's version; `basic_idf` sets `1.0.0`, and T2-D shows the marker says `0.4.7`), and
+  CMake reading `../../version.txt` (a copied component has no such file, and the Arduino
+  builds have no CMake).
+- **Why the boot line sits before `device_id`.** `frontend/src/diagnostics.ts` takes the
+  device id from the last `ff-id` line's first 12-hex run. The `image:` line has no such
+  run and goes before `device_id %s`, so nothing new lands after the `device_id` line.
+  It is also the address escape: `lib_version` passed as a `%s` argument.
+- **Why nothing force-keeps it.** A `used`/`retain` attribute, a linker `KEEP()` or `-u`
+  would put the marker in a sketch that has the library installed but never calls it, which
+  the spec forbids. T2-E proves gc-sections drops it there (`ff_marker.c.o` compiled, image
+  unmarked). A test bans those spellings in the component and the package script.
+- **Size.** +192 B (esp32), +224 B (esp32s3, esp32c3, esp32c6), budgets raised to the exact
+  measured bytes.
+- **T2.** The released 0.4.7 source (`v0.4.3`) never mentions the key or the magic; the
+  pre-rebuild bundles and `tests/fixtures/firmware/*.bin` have no marker. Every library
+  build from this commit has exactly one valid marker, `format=1 lib_version=0.4.7`: agent
+  ×4, Arduino Basic esp32/esp32s3, the QEMU bundle, `basic_idf`. The QEMU example and the
+  stock agent in QEMU announce `lib_marker: 1` as the last key, enroll 200, and are online
+  (not refused).
+- **Named gaps.** LTO is unmeasured (no build uses `-flto`). The marker proves the library
+  is linked, not started. Dev-built 0.4.7 agents from this commit announce `lib_marker`;
+  "agents ≤ 0.4.7 announce none" means the released 0.4.7 until the R3-rel-1 bump. The
+  ingestor and enroll ignore the key (storing it and `no_library_marker` are R3-be-1). The
+  Arduino IDE package check (`just lib-arduino-check`) was not re-run.
+
+---
+
 ## 2026-10-09 — Spec proposals R3-spec-3 and R3-spec-2 accepted and applied; S0-bug-1 and R2b-test-1 withdrawn
 
 **Decided (owner): apply Patch A of the library-marker proposal (`device-protocol.md` *Library marker* section and `lib_marker` prose, `flows.md` line 144, `open-questions.md`) and Patch A (a)-(d) of the CUJ-1 Driver proposal (`cujs.md`), plus `rolled-back` → `rolled_back` in `standards.md`. Patch B (`"lib_marker": 1` in the announce example) goes only in `R3-fw-6`'s commit. S0-bug-1 and R2b-test-1 are withdrawn: both need a person at a board, which the 2026-10-08 decision dropped.** Unblocks `R3-fw-6`, `R3-be-1`, `R3-test-2`. The release step stops before any prod deploy or `just agent-publish-all`.

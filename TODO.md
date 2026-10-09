@@ -376,7 +376,7 @@ Order: spec-3 → fw-2 → fw-3/fw-4 → fw-5/fw-6/be-1 → test-1 → spec-2 �
       Acceptance: a deliberately mismatched layout (simulator or QEMU, no board) triggers a
       refusal at deploy time naming the expected layout and slot size; the library does not
       start its OTA path on a bootloader without rollback.
-- [ ] **R3-fw-6**: Library build carries the marker and announces it (P1, 1d)
+- [x] **R3-fw-6**: Library build carries the marker and announces it (P1, 1d) _(done 2026-10-09; reviewed; Patch B applied; see docs/features/ota-library.md)_
       CRITICAL (announce is protocol). Implements `R3-spec-3`; additive field only. Depends
       on `R3-spec-3`, `R3-fw-2`.
       Acceptance: the QEMU example announces the marker; the stock agent and every pre-R3
@@ -404,6 +404,7 @@ Order: spec-3 → fw-2 → fw-3/fw-4 → fw-5/fw-6/be-1 → test-1 → spec-2 �
       Acceptance: a plain sketch `.bin` warns and needs `override: [code]`; a library build
       and an agent bundle do not; unit tests pin all three.
       Per R3-spec-3: code no_library_marker (gating); scan rule and magic in docs/features/ota-library.md → *Library marker proposal*; artifacts uploaded before this have no verdict and never warn.
+      Per R3-fw-6: agent bundles built from R3-fw-6 on carry the marker (`ff_marker.c`, `lib_version` = `FF_LIB_VERSION`), as do the Arduino and ESP-IDF library builds; a sketch with the library installed but never called carries none (gc-sections). The simulator never sends `lib_marker`. The reference reader in the proposal matched every library build (agent ×4, Basic esp32/esp32s3, the QEMU bundle, basic_idf) and found no marker in the 0.4.7 bundles or `tests/fixtures/firmware/*.bin`; the ingestor and enroll still ignore the key.
 - [x] **R3-be-2**: Partition profile table with detected and user-defined entries (P2, 3d) _(done 2026-10-09; reviewed; see docs/features/board-profiles.md)_
       Board-profiles step 2 ([board-profiles.md](docs/features/board-profiles.md)): the
       `partition_profiles` table seeded from the catalog, `builtin` immutable vs `user`,
@@ -442,6 +443,7 @@ Order: spec-3 → fw-2 → fw-3/fw-4 → fw-5/fw-6/be-1 → test-1 → spec-2 �
       Depends on everything above.
       Per R3-fw-7: the README's `git clone` step needs the library on GitHub `main` (origin is behind); once the release tag exists, add the pinned git form `lib_deps = Fleetforge=https://github.com/tvaroska/fleetforge.git#vX.Y.Z` to *Your own project*. PlatformIO finds the nested `library.json`, probed with `git+file://` in R3-fw-7.
       Per R3-fw-4: link the two example READMEs (`examples/Basic/README.md`, `examples/basic_idf/README.md`) from the library README; keep their `# quickstart:` blocks intact (`just lib-quickstart` runs them).
+      Per R3-fw-6: after the `agent/version.txt` bump (and `library.json` + `ff_lib_version.h` with it), agents > 0.4.7 announce `lib_marker: 1` and carry the marker; until then dev-built 0.4.7 agents do too, while the released 0.4.7 (`v0.4.3`) announces none.
 
 ### Order
 

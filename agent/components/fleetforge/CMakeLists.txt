@@ -28,6 +28,7 @@
 idf_component_register(SRCS "src/ff_cfg.c"
                             "src/ff_enroll.c"
                             "src/ff_identity.c"
+                            "src/ff_marker.c"
                             "src/ff_mqtt.c"
                             "src/ff_net.c"
                             "src/ff_net_openeth.c"

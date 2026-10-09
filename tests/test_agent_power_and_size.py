@@ -162,16 +162,23 @@ FORBIDDEN_OPTIONS = [
 # added code is the layout detection in ff_identity.c: the two-row known-layouts table (two
 # 64-character fingerprints), the strcmp loop, the boot-time `unknown` error line and the
 # `layout %s` in the `board:` line. ff_ota.c's rollback #error emits no code.
+#
+# Raised 2026-10-09 (R3-fw-6) for **all four targets**, all rebuilt, to the exact measured
+# byte: esp32 1,030,320 -> 1,030,512 (+192 B), esp32s3 1,010,336 -> 1,010,560 (+224 B),
+# esp32c3 1,069,872 -> 1,070,096 (+224 B), esp32c6 1,119,408 -> 1,119,632 (+224 B). The
+# added bytes are the 64-byte library marker (ff_marker.c, kept only because ff_identity.c
+# reads it), the announce's `lib_marker` key and the `image: fleetforge library %s,
+# lib_marker %u` boot line.
 APP_SIZE_BUDGET_BYTES = {
-    "esp32": 1_030_320,
+    "esp32": 1_030_512,
     # Raised from 973_136 for the OTA-capable agent (R1-fw-1/R1-fw-2), which cost every
     # target ~18 KB. Only esp32 was raised at the time: this gate reads whatever is in
     # `agent/dist/`, so a target nobody had built locally is not checked and does not
     # fail. The other two were still carrying 0.2.0-era numbers until R2b-fw-1 raised
     # them — that was a gap in the gate, not slack here.
-    "esp32s3": 1_010_336,
-    "esp32c3": 1_069_872,
-    "esp32c6": 1_119_408,
+    "esp32s3": 1_010_560,
+    "esp32c3": 1_070_096,
+    "esp32c6": 1_119_632,
 }
 
 # An app may occupy at most this much of an OTA slot. Not a style rule: R2 downloads the

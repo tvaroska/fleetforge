@@ -110,7 +110,8 @@ own receipt time**, never the device's timestamp — see *Clock* below.
   "parent_device_id": null,
   "partition_layout": "ab-4m-v1",
   "ota_slot_size": 1966080,
-  "capabilities": ["ota", "selftest", "identify"]
+  "capabilities": ["ota", "selftest", "identify"],
+  "lib_marker": 1
 }
 ```
 

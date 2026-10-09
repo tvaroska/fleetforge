@@ -729,11 +729,12 @@ just agent-cfg --api-base http://10.0.2.2:8088 --mqtt-uri mqtt://10.0.2.2:8883 \
       --link ethernet --hb 10 --token "$FFE"     # the same blob as the agent's
 just lib-bundle esp32-qemu      # lib-qemu/.pio/bundle/esp32-qemu (first run ~10 min)
 just lib-qemu --fresh           # same Ctrl-A x / tty rules as agent-qemu
-#   I (7656) ff-lib: fleetforge library 0.4.7, firmware 1.0.0
-#   I (9110) ff-net: eth link up, ip 10.0.2.15 gw 10.0.2.2 mask 255.255.255.0
-#   I (10732) ff-enroll: enroll 200 http://10.0.2.2:8088/v1/enroll
-#   I (11459) ff-mqtt: mqtt connected as 000000000000 (mqtt://10.0.2.2:8883)
-#   I (11567) ff-mqtt: announce acknowledged by the broker
+#   I (7189) ff-lib: fleetforge library 0.4.7, firmware 1.0.0
+#   I (7464) ff-id: image: fleetforge library 0.4.7, lib_marker 1   # R3-fw-6: the marker is linked
+#   I (8709) ff-net: eth link up, ip 10.0.2.15 gw 10.0.2.2 mask 255.255.255.0
+#   I (11492) ff-enroll: enroll 200 http://10.0.2.2:8088/v1/enroll
+#   I (12230) ff-mqtt: mqtt connected as 000000000000 (mqtt://10.0.2.2:8883)
+#   I (12340) ff-mqtt: announce acknowledged by the broker
 just agent-qemu-stop esp32      # stops it: it is the same ff-qemu-esp32 board
 ```
 
@@ -758,6 +759,12 @@ What differs from `agent-qemu esp32`:
 - `GET /v1/devices` shows `partition_layout: ab-4m-arduino-v1`, `partition_table_sha256:
   05528998…1fc4`, `fw_version: 1.0.0` (the sketch's, from `Fleetforge.begin`), and
   `agent_version` = the library version.
+- **The library marker (R3-fw-6).** The `ff-id: image:` line prints the marker's
+  `lib_version` and `format`, before `device_id`. The last `up/announce` (`just mqtt-sub
+  'ff/v1/d/000000000000/up/announce'`) ends with `"lib_marker":1`. The stock agent
+  (`agent-qemu esp32`) prints and announces the same since R3-fw-6: the marker is in the
+  component. To check a built image without booting it, scan it for the magic
+  (`docs/features/ota-library.md` → *R3-fw-6*).
 
 ## The worked example, end to end (R3-fw-4, R3-test-1)
 

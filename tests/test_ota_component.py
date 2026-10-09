@@ -39,7 +39,7 @@ from tests.test_ff_cfg import _code
 
 JUSTFILE = AGENT_DIR.parent / "justfile"
 
-PRIVATE_WHOLE_HEADERS = ("ff_ota.h", "ff_txn.h", "ff_net_adapter.h")
+PRIVATE_WHOLE_HEADERS = ("ff_ota.h", "ff_txn.h", "ff_net_adapter.h", "ff_marker.h")
 INTERNAL_HEADERS = tuple(
     f"ff_{name}_internal.h" for name in ("identity", "mqtt", "net", "store", "time")
 )
