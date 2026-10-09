@@ -71,6 +71,13 @@ SUPPORTED_LAYOUTS: dict[str, LayoutProfile] = {
     ),
 }
 
+# Reserved (R3-fw-5): what a board announces as `partition_layout` when its measured
+# partition table matches no layout id its firmware knows. Never a key of
+# SUPPORTED_LAYOUTS; `deploy_precheck.refusals` refuses it as `unsupported_layout`. The
+# firmware's twin is FF_PARTITION_LAYOUT_UNKNOWN in agent/components/fleetforge/src/
+# ff_identity_internal.h, and tests/test_layout_detection.py keeps the two equal.
+UNKNOWN_PARTITION_LAYOUT = "unknown"
+
 # Logical part ids, and the only values `GET /v1/agent/{target}/{part}` will resolve.
 # `bootloader` first, `app` last: the flasher writes them in ascending offset order.
 PART_NAMES = ("bootloader", "partition-table", "ota-data", "app")

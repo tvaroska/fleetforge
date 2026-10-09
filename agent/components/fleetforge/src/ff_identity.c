@@ -54,6 +54,38 @@ static bool s_have_partition_sha256;
  * every read and no lock is needed. */
 static bool s_rollback_capable;
 
+/* R3-fw-5: every partition layout this firmware knows, by its geometry fingerprint. All of
+ * them, not just this build's own: a board says what map it carries. spec/device-protocol.md
+ * -> Partition layouts, retyped; pinned equal to SUPPORTED_LAYOUTS by
+ * tests/test_layout_detection.py. A new layout is a new row here AND a spec row. */
+typedef struct {
+    const char *id;
+    const char *sha256;
+} ff_known_layout_t;
+
+static const ff_known_layout_t FF_KNOWN_LAYOUTS[] = {
+    {"ab-4m-v1", "1fa67e6bbd034e434d04e9d6f4f52bbe899361602cd498573eb3bde97d1559ed"},
+    {"ab-4m-arduino-v1", "05528998ae17fb6a7a5741443f9a7a4720c766f370fefc30814cbc3e391c1fc4"},
+};
+
+/* The `partition_layout` this board announces (R3-fw-5): the known id whose fingerprint was
+ * measured, FF_PARTITION_LAYOUT_UNKNOWN when none matches, and this build's own
+ * FF_PARTITION_LAYOUT when the table could not be measured (fail-open, D3). Same threading
+ * argument as s_rollback_capable: written once in ff_identity_init() on the main task before
+ * esp_mqtt_client_start(), read by the announce in the mqtt task after it. */
+static const char *s_partition_layout = FF_PARTITION_LAYOUT;
+/* Set when the table has more than FF_PT_MAX_ENTRIES entries. No fingerprint is announced,
+ * but that alone is proof the table is not a supported one (they have six rows), so it is
+ * announced as unknown rather than as this build's id. */
+static bool s_pt_too_many;
+
+/* Where the partitions.csv for this build's layout lives, for the D4 error. */
+#if defined(ARDUINO)
+#define FF_LAYOUT_SOURCE "the library's examples/Basic/partitions.csv, beside the sketch"
+#else
+#define FF_LAYOUT_SOURCE "the library's examples/basic_idf/partitions.csv, in the ESP-IDF project"
+#endif
+
 /* 32 entries is twice what any table we know of carries (ab-4m-v1 has six). Static, so a
  * 384-byte array never lands on the main task's stack. */
 #define FF_PT_MAX_ENTRIES 32
@@ -85,6 +117,7 @@ static bool partition_fingerprint(char out[65])
         if (p != NULL && p->flash_chip == esp_flash_default_chip) {
             if (count == FF_PT_MAX_ENTRIES) {
                 esp_partition_iterator_release(it);
+                s_pt_too_many = true;
                 ESP_LOGW(TAG, "the partition table has more than %d entries; "
                               "partition_table_sha256 is announced as null",
                          FF_PT_MAX_ENTRIES);
@@ -152,6 +185,49 @@ static bool partition_fingerprint(char out[65])
     return true;
 }
 
+/* R3-fw-5. The announced `partition_layout`, from the measured fingerprint (D1-D3). A table
+ * that matches no known layout is `unknown`, never this build's id: that id with a wrong
+ * fingerprint is exactly the silent case (library 0.4.7) this replaces. A table that could
+ * not be measured keeps this build's id, and its fingerprint goes out as null so the server
+ * fails open, unless it was too big to be any supported layout. */
+static const char *detect_layout(void)
+{
+    if (s_pt_too_many) {
+        return FF_PARTITION_LAYOUT_UNKNOWN;
+    }
+    if (!s_have_partition_sha256) {
+        return FF_PARTITION_LAYOUT;
+    }
+    for (size_t i = 0; i < sizeof FF_KNOWN_LAYOUTS / sizeof FF_KNOWN_LAYOUTS[0]; i++) {
+        if (strcmp(s_partition_sha256, FF_KNOWN_LAYOUTS[i].sha256) == 0) {
+            return FF_KNOWN_LAYOUTS[i].id;
+        }
+    }
+    return FF_PARTITION_LAYOUT_UNKNOWN;
+}
+
+/* One loud line, said once at boot, for the person at the serial console: what the board
+ * carries, what this build expects, what the server will do, and the fix. No 12-character
+ * hex run in it: frontend/src/diagnostics.ts reads the device id out of the last ff-id line
+ * that way, and the full fingerprint is already in the `board:` line. */
+static void log_unknown_layout(void)
+{
+    char slot[16];
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    if (running != NULL) {
+        snprintf(slot, sizeof(slot), "%" PRIu32, running->size);
+    } else {
+        strlcpy(slot, "unknown", sizeof(slot));
+    }
+    ESP_LOGE(TAG,
+             "this board's partition table is not a layout this firmware knows: its OTA slot "
+             "is %s bytes, and this build expects %s, whose two OTA slots are %d bytes each. "
+             "It announces partition_layout \"unknown\" and the server refuses every update. "
+             "Fix: build with the partitions.csv for %s (%s) and flash it once over USB; a "
+             "partition table never changes over the air.",
+             slot, FF_PARTITION_LAYOUT, FF_OTA_SLOT_SIZE, FF_PARTITION_LAYOUT, FF_LAYOUT_SOURCE);
+}
+
 /* The two flash-time measurements. Neither may come from the image header or the build
  * config: those are claims made by whoever built THIS image, and the point of the fields
  * is what the board itself is. So no fallback to esp_flash_get_size() (the header's
@@ -170,6 +246,10 @@ static void measure_board(void)
     }
 
     s_have_partition_sha256 = partition_fingerprint(s_partition_sha256);
+    s_partition_layout = detect_layout();
+    if (strcmp(s_partition_layout, FF_PARTITION_LAYOUT_UNKNOWN) == 0) {
+        log_unknown_layout();
+    }
 }
 
 esp_err_t ff_identity_init(void)
@@ -209,8 +289,8 @@ esp_err_t ff_identity_init(void)
         strlcpy(chip, "unknown", sizeof(chip));
     }
     ESP_LOGI(TAG, "board: flash chip %s bytes (physical), partition table sha256 %s, "
-                  "rollback_capable %s",
-             chip, s_have_partition_sha256 ? s_partition_sha256 : "unknown",
+                  "layout %s, rollback_capable %s",
+             chip, s_have_partition_sha256 ? s_partition_sha256 : "unknown", s_partition_layout,
              s_rollback_capable ? "true" : "unknown");
     return ESP_OK;
 }
@@ -250,8 +330,8 @@ static uint32_t running_slot_size(void)
         return FF_OTA_SLOT_SIZE;
     }
     if (running->size != FF_OTA_SLOT_SIZE) {
-        ESP_LOGW(TAG, "the running slot is %" PRIu32 " bytes but %s promises %d — this board "
-                      "carries a partition layout the server does not know",
+        ESP_LOGW(TAG, "the running slot is %" PRIu32 " bytes but this build's layout %s has "
+                      "%d-byte slots",
                  running->size, FF_PARTITION_LAYOUT, FF_OTA_SLOT_SIZE);
     }
     return running->size;
@@ -367,7 +447,8 @@ static cJSON *announce_object(const ff_cfg_t *cfg)
     }
     /* Reserved for V3's gateway hierarchy; a v1 board is always its own root. */
     cJSON_AddNullToObject(root, "parent_device_id");
-    cJSON_AddStringToObject(root, "partition_layout", FF_PARTITION_LAYOUT);
+    /* R3-fw-5: detected by fingerprint in ff_identity_init(), not this build's own id. */
+    cJSON_AddStringToObject(root, "partition_layout", s_partition_layout);
     cJSON_AddNumberToObject(root, "ota_slot_size", running_slot_size());
     /* R2b-fw-2: the three board measurements, in spec order, measured on this board and
      * never taken from the build. `flash_chip_size` is OMITTED when unreadable ("a device

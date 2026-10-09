@@ -401,7 +401,7 @@ Order: spec-3 → fw-2 → fw-3/fw-4 → fw-5/fw-6/be-1 → test-1 → spec-2 �
       Acceptance: builds unmodified from a clean checkout on both ESP-IDF and Arduino
       (PlatformIO); the README quickstart is exactly the steps a reader follows, and a
       scripted run of those steps passes.
-- [ ] **R3-fw-5**: Reject a wrong flash layout loudly (P1, 1d)
+- [x] **R3-fw-5**: Reject a wrong flash layout loudly (P1, 1d) _(done 2026-10-09; reviewed; see docs/features/ota-library.md)_
       A build that does not reproduce a supported layout exactly must announce a different
       `partition_layout`, and the deploy refusal must tell a library user what to fix.
       **Do not use the IDE's `Maximum is N bytes` line as the check** (R3-fw-1 measured it
@@ -446,6 +446,7 @@ Order: spec-3 → fw-2 → fw-3/fw-4 → fw-5/fw-6/be-1 → test-1 → spec-2 �
       is CRITICAL. Depends on `R3-fw-3` (the second real layout).
       Acceptance: `SUPPORTED_LAYOUTS` is read from the table; both layouts seeded; an
       unknown announced layout lands as `detected` and is not deployable until adopted.
+      Per R3-fw-5: a board on a map its firmware does not know announces the reserved id `unknown` (never a profile name), so a detected profile keys on `partition_table_sha256`; until adopted it is refused as `unsupported_layout` (`deploy_precheck.py`).
 - [ ] **R3-fe-1**: Dashboard adopts or names a detected profile (P2, 1d)
       Depends on `R3-be-2`. Acceptance: in `just update-e2e` style Chromium run, a detected
       profile shows, can be named, and then accepts a deploy.
@@ -460,6 +461,7 @@ Order: spec-3 → fw-2 → fw-3/fw-4 → fw-5/fw-6/be-1 → test-1 → spec-2 �
       Acceptance: all three pass with no board; the rollback run fails the test if the
       device reports `confirmed`.
       Per R3-fw-4: runs one and two exist as `just lib-quickstart` (`phase_enroll`, `phase_ota` in `scripts/lib_quickstart.py`); add the broken build as `phase_rollback` after `phase_ota` (a QEMU bundle that cannot confirm, `apply: "on_command"`, power cycle; expect `rolled_back`, fail on `confirmed`). Each run pays one ~11 min hybrid compile in the fresh `lib-qemu/`.
+      Per R3-fw-5: the rollback run uses the example's own `partitions.csv` (a wrong table announces `unknown` and is refused before any stage; `tests/fixtures/wrong-layout-partitions.csv` is for that refusal only). `ff_ota.c` now fails the build without `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`.
 - [ ] **R3-test-2**: Play CUJ-1 end to end with every segment gradeable (P1, 0.5d)
       The T3 gate (`/verify`) with the segments from `R3-spec-2` applied by the owner.
       Depends on `R3-test-1`, `R3-spec-2`. Acceptance: deterministic judge passes on steps

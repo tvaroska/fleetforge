@@ -11,13 +11,18 @@ from fleetforge.clock import now_utc
 from fleetforge.db.models import Device
 from fleetforge.deploy_precheck import (
     GATING_CODES,
+    LAYOUT_SOURCES,
     ResolvedArtifact,
     merged_binary,
     refusals,
     unmet_gates,
     warnings,
 )
-from fleetforge.firmware.manifest import SUPPORTED_LAYOUTS, LayoutProfile
+from fleetforge.firmware.manifest import (
+    SUPPORTED_LAYOUTS,
+    UNKNOWN_PARTITION_LAYOUT,
+    LayoutProfile,
+)
 from fleetforge.merged_image import MergedImage
 from tests.conftest import capture_logs
 
@@ -25,6 +30,9 @@ LAYOUT = "ab-4m-v1"
 # spec/device-protocol.md → Partition layouts, retyped.
 AB_SHA = "1fa67e6bbd034e434d04e9d6f4f52bbe899361602cd498573eb3bde97d1559ed"
 ARDUINO_SHA = "05528998ae17fb6a7a5741443f9a7a4720c766f370fefc30814cbc3e391c1fc4"
+ARDUINO = "ab-4m-arduino-v1"
+# tests/fixtures/wrong-layout-partitions.csv: slots of 1835008, matches no supported layout.
+WRONG_SHA = "47db53920359cfb4581532a293d8e563401f3abe37f9b282cc713039ac937c4c"
 DEVICE_PROTOCOL = Path(__file__).resolve().parent.parent / "spec" / "device-protocol.md"
 
 
@@ -66,12 +74,12 @@ class TestRefusals:
 
     def test_all_three_in_order_and_naming_their_values(self) -> None:
         found = refusals(
-            device(partition_layout="single-2m-v1", ota_slot_size=100, capabilities=["x"]),
+            device(partition_layout=ARDUINO, ota_slot_size=100, capabilities=["x"]),
             artifact(size=500),
             version="1.5.0",
         )
         assert codes(found) == ["layout_mismatch", "slot_too_small", "no_ota_capability"]
-        assert "single-2m-v1" in found[0].message and LAYOUT in found[0].message
+        assert ARDUINO in found[0].message and LAYOUT in found[0].message
         assert "500" in found[1].message and "100" in found[1].message
         assert "x" in found[2].message
         assert "nothing" in refusals(device(capabilities=[]), artifact(), version="1")[0].message
@@ -132,6 +140,20 @@ class TestPartitionTableFingerprint:
         assert "partition table fingerprint" in message
         assert "`" not in message
 
+    def test_the_mismatch_sentence_keeps_its_text_and_names_the_fix(self) -> None:
+        """R3-fw-5: the library 0.4.7 case (compiled id, wrong table) now says what to do."""
+        found = refusals(device(partition_table_sha256=WRONG_SHA), artifact(), version="1.5.0")
+        message = found[0].message
+        assert message.startswith(
+            f"this device announces partition layout {LAYOUT} but its partition table "
+            f"fingerprint is {WRONG_SHA}, not the {AB_SHA} that {LAYOUT} has. The device "
+            f"disagrees with its profile, so an image built for {LAYOUT} could be written "
+            "over the wrong partitions. "
+        )
+        assert "1966080" in message and LAYOUT_SOURCES[LAYOUT] in message
+        assert "USB" in message and "never changes over the air" in message
+        assert "`" not in message
+
     def test_no_fingerprint_is_fail_open(self) -> None:
         d = device(partition_table_sha256=None)
         assert refusals(d, artifact(), version="1.5.0") == []
@@ -140,13 +162,15 @@ class TestPartitionTableFingerprint:
         d = device(partition_layout=None, partition_table_sha256=ARDUINO_SHA)
         assert refusals(d, artifact(), version="1.5.0") == []
 
-    def test_an_unknown_layout_is_logged_not_checked(self) -> None:
+    def test_an_unsupported_layout_is_refused_not_fingerprint_checked(self) -> None:
+        """R3-fw-5: it used to be logged and let through. There is no profile to check the
+        fingerprint against, so it is refused once, and nothing is logged as 'not checked'."""
         d = device(partition_layout="single-2m-v1", partition_table_sha256=ARDUINO_SHA)
         with capture_logs("fleetforge.deploy_precheck") as records:
             found = refusals(d, artifact(layout=None), version="1.5.0")
-        assert found == []
+        assert codes(found) == ["unsupported_layout"]
         lines = [r.getMessage() for r in records]
-        assert any("not checked" in line and "single-2m-v1" in line for line in lines), lines
+        assert not any("not checked" in line for line in lines), lines
 
     def test_a_profile_with_no_known_fingerprint_is_not_checked(
         self, monkeypatch: pytest.MonkeyPatch
@@ -176,6 +200,86 @@ class TestPartitionTableFingerprint:
 
     def test_a_rollback_incapable_board_is_not_refused(self) -> None:
         assert refusals(device(rollback_capable=False), artifact(), version="1.5.0") == []
+
+
+class TestUnsupportedLayout:
+    """R3-fw-5: a board whose table matches no layout its firmware knows announces
+    `unknown`. It is refused, naming what it announced, what the build expects and the fix."""
+
+    def unknown(self, **overrides: object) -> Device:
+        values: dict[str, object] = {
+            "partition_layout": UNKNOWN_PARTITION_LAYOUT,
+            "ota_slot_size": 1835008,
+            "partition_table_sha256": WRONG_SHA,
+        }
+        values.update(overrides)
+        return device(**values)
+
+    def test_the_reserved_id_is_never_supported(self) -> None:
+        assert UNKNOWN_PARTITION_LAYOUT == "unknown"
+        assert UNKNOWN_PARTITION_LAYOUT not in SUPPORTED_LAYOUTS
+
+    def test_it_names_the_announcement_the_expected_layout_and_the_fix(self) -> None:
+        found = refusals(self.unknown(), artifact(size=500, layout=ARDUINO), version="1.5.0")
+        assert codes(found) == ["unsupported_layout"]
+        message = found[0].message
+        for needle in (
+            "partition layout unknown",
+            "1835008",
+            WRONG_SHA,
+            "1.5.0 was built for ab-4m-arduino-v1",
+            "1966080",
+            "examples/Basic/partitions.csv",
+            "USB",
+        ):
+            assert needle in message, needle
+        assert "`" not in message
+        assert found[0].needs_override is False
+
+    def test_unannounced_measurements_are_left_out_of_the_sentence(self) -> None:
+        d = self.unknown(ota_slot_size=None, partition_table_sha256=None)
+        message = refusals(d, artifact(layout=ARDUINO), version="1.5.0")[0].message
+        assert "it announces partition layout unknown. " in message
+        assert "fingerprint" not in message and "an OTA slot of" not in message
+
+    def test_without_an_artifact_it_names_every_supported_layout(self) -> None:
+        found = refusals(self.unknown(), None, version="1.5.0")
+        assert codes(found) == ["no_artifact_for_target", "unsupported_layout"]
+        message = found[1].message
+        for layout, profile in SUPPORTED_LAYOUTS.items():
+            assert layout in message and LAYOUT_SOURCES[layout] in message
+            assert str(profile.ota_slot_size) in message
+        assert "`" not in message
+
+    def test_an_artifact_with_no_layout_is_still_refused(self) -> None:
+        """Before R3-fw-5 an unknown-layout board plus a layout-less artifact passed every
+        check."""
+        found = refusals(self.unknown(), artifact(layout=None), version="1.5.0")
+        assert codes(found) == ["unsupported_layout"]
+        assert all(layout in found[0].message for layout in SUPPORTED_LAYOUTS)
+
+    def test_an_artifact_for_an_unsupported_layout_names_the_supported_ones(self) -> None:
+        found = refusals(self.unknown(), artifact(layout="single-2m-v1"), version="1.5.0")
+        assert codes(found) == ["unsupported_layout"]
+        assert all(layout in found[0].message for layout in SUPPORTED_LAYOUTS)
+
+    def test_it_replaces_layout_mismatch_and_keeps_the_rest(self) -> None:
+        found = refusals(
+            self.unknown(ota_slot_size=100, capabilities=["x"]),
+            artifact(size=500, layout=LAYOUT),
+            version="1.5.0",
+        )
+        assert codes(found) == ["unsupported_layout", "slot_too_small", "no_ota_capability"]
+        assert all(f.needs_override is False for f in found)
+
+    def test_any_unsupported_id_is_refused_not_just_unknown(self) -> None:
+        found = refusals(device(partition_layout="single-2m-v1"), artifact(), version="1.5.0")
+        assert codes(found) == ["unsupported_layout"]
+
+    def test_every_supported_layout_has_a_source_hint(self) -> None:
+        assert LAYOUT_SOURCES.keys() == SUPPORTED_LAYOUTS.keys()
+        assert all("partitions.csv" in hint for hint in LAYOUT_SOURCES.values())
+        assert not any("`" in hint for hint in LAYOUT_SOURCES.values())
 
 
 class TestRollbackIncapable:

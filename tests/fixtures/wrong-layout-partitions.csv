@@ -1,0 +1,13 @@
+# R3-fw-5 T2 fixture: NOT a Fleetforge layout. Slots 0x1C0000 (1835008), not 1966080.
+# A plausible maker mistake that still boots: otadata and ota_0 sit where the Arduino upload
+# recipe writes them (0xe000 / 0x10000), and ff_cfg is at 0x3D0000, where the library
+# bundle's manifest (and so the QEMU harness) places the config blob.
+# Never under examples/: this is not a layout anyone ships (docs/runbooks/agent-qemu.md ->
+# A wrong flash layout is refused).
+# Name,    Type, SubType,  Offset,   Size
+nvs,       data, nvs,      0x9000,   0x5000
+otadata,   data, ota,      0xe000,   0x2000
+ota_0,     app,  ota_0,    0x10000,  0x1C0000
+ota_1,     app,  ota_1,    0x1D0000, 0x1C0000
+ff_cfg,    data, 0x40,     0x3D0000, 0x1000
+coredump,  data, coredump, 0x3F0000, 0x10000

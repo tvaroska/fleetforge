@@ -844,6 +844,66 @@ GET /v1/devices                fw_version 1.1.0-qs1791521470, deploy confirmed (
 credentials                    token 0 occurrences, mqtt_password 0 (13 files)
 ```
 
+## A wrong flash layout is refused (R3-fw-5)
+
+The library example's real firmware, booted on a deliberately wrong partition table
+(`tests/fixtures/wrong-layout-partitions.csv`: the Arduino offsets, but 0x1C0000 = 1835008-B
+slots instead of 1966080). The board must announce `partition_layout: "unknown"`, say so
+loudly on the console, and the server must refuse every deploy to it, naming the fix. No
+board, no USB: the swapped table is a file in a temp copy of the bundle.
+
+```bash
+cd /home/boris/products/fleetforge && just up
+BASE=http://localhost:8088
+# TOKEN = an admin session (POST /v1/auth/login with the dev FF_ADMIN_PASSWORD from .env;
+# the ff_session cookie value is the bearer). newtok mints a single-use enrollment token.
+newtok() { curl -sS -X POST "$BASE/v1/enrollment-tokens" -H "Authorization: Bearer $TOKEN" \
+           -H 'content-type: application/json' -d '{}' | jq -r .token; }
+
+just lib-bundle esp32-qemu        # the bundle with this tree's component
+S=$(mktemp -d); cp -r lib-qemu/.pio/bundle/esp32-qemu "$S/bundle"
+cp tests/fixtures/wrong-layout-partitions.csv "$S/"
+docker run --rm -u $(id -u):$(id -g) -v "$S:/s" --entrypoint bash <idf_image> -c \
+  '. $IDF_PATH/export.sh >/dev/null 2>&1; python $IDF_PATH/components/partition_table/gen_esp32part.py /s/wrong-layout-partitions.csv /s/bundle/partition-table.bin'
+just agent-cfg --api-base http://10.0.2.2:8088 --mqtt-uri mqtt://10.0.2.2:8883 \
+      --link ethernet --hb 10 --token "$(newtok)"
+rm -f .qemu/flash-lib-wrong-esp32.bin   # its own flash file: never mix it with flash-lib-esp32.bin
+# the lib-qemu recipe's docker run line, with only FLASH and the /d mount changed:
+docker run --rm --name ff-qemu-esp32 --network host -u $(id -u):$(id -g) \
+  -e TARGET=esp32 -e FLASH=/q/flash-lib-wrong-esp32.bin -e FFCFG=/q/ff_cfg.bin \
+  -e QEMU_SHA256=<qemu_sha256> -e IDF_IMAGE_REF=<idf_image> \
+  -v "$PWD/.qemu:/q" -v "$S/bundle:/d:ro" -v "$PWD/agent/tools:/t:ro" \
+  --entrypoint bash <idf_image> -c "$(just --evaluate qemu_program)" > /tmp/wrong.log 2>&1 &
+```
+
+`qemu_image.py` places every part by the manifest's offset and does not re-hash it, so the
+swapped table lands at 0x8000. What the first run (2026-10-09) printed:
+
+```
+E (7708) ff-id: this board's partition table is not a layout this firmware knows: its OTA slot is 1835008 bytes, and this build expects ab-4m-arduino-v1, whose two OTA slots are 1966080 bytes each. It announces partition_layout "unknown" and the server refuses every update. Fix: build with the partitions.csv for ab-4m-arduino-v1 (the library's examples/Basic/partitions.csv, beside the sketch) and flash it once over USB; a partition table never changes over the air.
+I (7720) ff-id: board: flash chip 4194304 bytes (physical), partition table sha256 47db53920359cfb4581532a293d8e563401f3abe37f9b282cc713039ac937c4c, layout unknown, rollback_capable unknown
+I (12651) ff-enroll: enroll 200 http://10.0.2.2:8088/v1/enroll
+I (13484) ff-mqtt: announce acknowledged by the broker
+```
+
+Then:
+
+- `GET /v1/devices` shows `000000000000` with `partition_layout: "unknown"`,
+  `ota_slot_size: 1835008` and `partition_table_sha256: 47db5392…7c4c`.
+- Upload any esp32 app with `partition_layout=ab-4m-arduino-v1`. `POST
+  /v1/devices/000000000000/deploy/precheck` gives `deployable: false`, `unsupported_layout`,
+  and `POST …/deploy` gives 409 with the same sentence word for word. The sentence names
+  `unknown`, `1835008`, the fingerprint, `ab-4m-arduino-v1`, `1966080`,
+  `examples/Basic/partitions.csv` and USB.
+- `grep -c ff-ota /tmp/wrong.log` is 0: nothing was staged.
+- Stop it with `just agent-qemu-stop esp32`. Positive control: `just agent-cfg … --token
+  "$(newtok)"`, then `just lib-qemu --fresh`. The row goes back to `ab-4m-arduino-v1` /
+  `05528998…1fc4`, with no `E … ff-id` line, and the precheck is deployable.
+
+The server half alone, with no QEMU: `just sim --platform-type esp32 --partition-layout
+unknown --ota-slot-size 1835008 --partition-sha 47db…7c4c --capabilities ota …` gives the
+same refusal.
+
 ## What we know about the boot-loop panic
 
 **S0-infra-1 filed this harness as dead** (2026-09-10): `just agent-qemu esp32`

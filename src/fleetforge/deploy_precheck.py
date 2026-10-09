@@ -21,6 +21,12 @@ The board measurements are fail-open (R2b-be-6): a NULL `partition_table_sha256`
 refuses and a NULL `rollback_capable` never warns. Every board before its first OTA, and
 every agent at or below 0.4.6, reports NULL, and an old board is not refused for being old.
 
+A layout this server does not support is refused, `unsupported_layout` (R3-fw-5): a board
+whose table matches no layout its firmware knows announces `unknown`
+(`UNKNOWN_PARTITION_LAYOUT`), and the sentence names the layout the build expects, its slot
+size and the fix. A partition table never changes over the air, so the fix is always a USB
+flash, and the sentence says so.
+
 The `detail` text of a refused deploy is lifted verbatim into the dashboard banner, so do
 not reword a sentence without reading `tests/test_api_deploy.py`.
 """
@@ -40,6 +46,7 @@ OTA_CAPABILITY = "ota"
 # Stable codes: clients branch on these, never on the message.
 NO_ARTIFACT_FOR_TARGET = "no_artifact_for_target"
 LAYOUT_MISMATCH = "layout_mismatch"
+UNSUPPORTED_LAYOUT = "unsupported_layout"
 SLOT_TOO_SMALL = "slot_too_small"
 PARTITION_TABLE_MISMATCH = "partition_table_mismatch"
 NO_OTA_CAPABILITY = "no_ota_capability"
@@ -52,6 +59,17 @@ ROLLBACK_INCAPABLE = "rollback_incapable"
 # The warnings `/deploy` enforces unless `override` names them. `api/schemas.py`'s
 # `OverrideCode` literal is kept equal to this by `tests/test_deploy_precheck.py`.
 GATING_CODES: tuple[str, ...] = (ROLLBACK_INCAPABLE,)
+
+# Where a library user finds the partitions.csv for each supported layout: the fix named by
+# `unsupported_layout` and `partition_table_mismatch`. `tests/test_deploy_precheck.py` keeps
+# its keys equal to SUPPORTED_LAYOUTS', so a new layout cannot ship without a hint.
+LAYOUT_SOURCES: dict[str, str] = {
+    "ab-4m-v1": (
+        "the library's examples/basic_idf/partitions.csv, or the prebuilt agent from the "
+        "browser flasher"
+    ),
+    "ab-4m-arduino-v1": "the library's examples/Basic/partitions.csv, beside the sketch",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +102,58 @@ def merged_binary(merged: MergedImage) -> Finding:
     )
 
 
+def _and(items: list[str]) -> str:
+    """`a`, `a and b`, `a, b and c`."""
+    return items[0] if len(items) == 1 else f"{', '.join(items[:-1])} and {items[-1]}"
+
+
+def _fix_for(layouts: list[str]) -> str:
+    """The one fix there is: a table never changes over the air, so it is a USB flash."""
+    if len(layouts) == 1:
+        hint = LAYOUT_SOURCES.get(layouts[0])
+        csv = f"the partitions.csv for {layouts[0]}" + (f" ({hint})" if hint else "")
+    else:
+        hints = "; ".join(f"{layout}: {LAYOUT_SOURCES.get(layout, layout)}" for layout in layouts)
+        csv = f"the partitions.csv for one of them ({hints})"
+    return f"build it with {csv}, flash it once over USB, then deploy again."
+
+
+def _supported_summary() -> str:
+    """Every supported layout with its slot size, for a sentence with no known target."""
+    return _and(
+        [
+            f"{layout} (two OTA slots of {profile.ota_slot_size} bytes each)"
+            for layout, profile in SUPPORTED_LAYOUTS.items()
+        ]
+    )
+
+
+def _unsupported_layout(device: Device, artifact: ResolvedArtifact | None, version: str) -> Finding:
+    """The board announces a layout this server does not support (R3-fw-5). One cause, one
+    sentence: what it announces, what the build expects, and the fix. No backticks."""
+    announced = [f"partition layout {device.partition_layout}"]
+    if device.ota_slot_size is not None:
+        announced.append(f"an OTA slot of {device.ota_slot_size} bytes")
+    if device.partition_table_sha256 is not None:
+        announced.append(f"partition table fingerprint {device.partition_table_sha256}")
+    target = artifact.partition_layout if artifact is not None else None
+    if target is not None and target in SUPPORTED_LAYOUTS:
+        expected = (
+            f"{version} was built for {target}, whose two OTA slots are "
+            f"{SUPPORTED_LAYOUTS[target].ota_slot_size} bytes each."
+        )
+        layouts = [target]
+    else:
+        expected = f"This server supports {_supported_summary()}."
+        layouts = list(SUPPORTED_LAYOUTS)
+    return Finding(
+        UNSUPPORTED_LAYOUT,
+        "this device's flash map is not a layout this server supports: it announces "
+        f"{_and(announced)}. {expected} A partition table never changes over the air, so no "
+        f"deploy can fix this board: {_fix_for(layouts)}",
+    )
+
+
 def refusals(device: Device, artifact: ResolvedArtifact | None, *, version: str) -> list[Finding]:
     """Every reason this board cannot take this label, in the order a deploy checks them.
 
@@ -92,13 +162,19 @@ def refusals(device: Device, artifact: ResolvedArtifact | None, *, version: str)
     skipped. Layout and slot size are only checked when both sides are known: an R0 board
     that announced neither is not refused for being old.
 
+    A layout this server does not support (not in `SUPPORTED_LAYOUTS`, `unknown` included)
+    is refused, `unsupported_layout`, with or without an artifact and whatever layout the
+    artifact claims (R3-fw-5). It replaces `layout_mismatch` for that board, and its
+    fingerprint is not checked: there is no profile to check it against.
+
     The partition-table fingerprint is a property of the device against its own profile,
     not of the artifact, so it runs without one too. It is checked only when the device
-    sent a fingerprint AND its layout has a known one (`SUPPORTED_LAYOUTS`): a board that
-    has not reported one yet is not refused for being old, and an unknown layout is
-    logged, not guessed at.
+    sent a fingerprint AND its layout has a known one: a board that has not reported one
+    yet is not refused for being old.
     """
     found: list[Finding] = []
+    layout = device.partition_layout
+    unsupported = layout is not None and layout not in SUPPORTED_LAYOUTS
 
     if artifact is None:
         found.append(
@@ -109,16 +185,19 @@ def refusals(device: Device, artifact: ResolvedArtifact | None, *, version: str)
                 f"built for {device.platform_type} under that version.",
             )
         )
-    else:
+    if unsupported:
+        found.append(_unsupported_layout(device, artifact, version))
+    if artifact is not None:
         if (
-            device.partition_layout is not None
+            not unsupported
+            and layout is not None
             and artifact.partition_layout is not None
-            and device.partition_layout != artifact.partition_layout
+            and layout != artifact.partition_layout
         ):
             found.append(
                 Finding(
                     LAYOUT_MISMATCH,
-                    f"this device runs partition layout {device.partition_layout} and "
+                    f"this device runs partition layout {layout} and "
                     f"{version} was built for {artifact.partition_layout}. "
                     "An image written into the wrong partition table does not boot.",
                 )
@@ -134,10 +213,9 @@ def refusals(device: Device, artifact: ResolvedArtifact | None, *, version: str)
             )
 
     announced = device.partition_table_sha256
-    layout = device.partition_layout
-    if announced is not None and layout is not None:
-        profile = SUPPORTED_LAYOUTS.get(layout)
-        expected = profile.partition_table_sha256 if profile is not None else None
+    profile = SUPPORTED_LAYOUTS.get(layout) if layout is not None else None
+    if announced is not None and layout is not None and profile is not None:
+        expected = profile.partition_table_sha256
         if expected is None:
             logger.info(
                 "device %s announces a partition table fingerprint for layout %s, which has "
@@ -152,7 +230,9 @@ def refusals(device: Device, artifact: ResolvedArtifact | None, *, version: str)
                     f"this device announces partition layout {layout} but its partition "
                     f"table fingerprint is {announced}, not the {expected} that {layout} "
                     "has. The device disagrees with its profile, so an image built for "
-                    f"{layout} could be written over the wrong partitions.",
+                    f"{layout} could be written over the wrong partitions. {layout} has two "
+                    f"OTA slots of {profile.ota_slot_size} bytes each. A partition table "
+                    f"never changes over the air: {_fix_for([layout])}",
                 )
             )
 

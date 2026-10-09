@@ -25,6 +25,8 @@
  *    it unbuffered. R1-fw-1 believed `esp_ota_write` withheld the first 16 bytes of the
  *    header until the end; that is not what v5.5.5 does (DECISIONS 2026-10-03, R2-fw-1).
  *    The #error below makes flash encryption a build failure, so the premise cannot rot.
+ *    A second #error makes a build without CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE fail too
+ *    (R3-fw-5): this OTA path is never built with a config whose bootloader cannot roll back.
  * 3. **A mismatch never moves the boot pointer.** It is caught before finish(), so the
  *    image is abandoned with esp_https_ota_abort() and otadata is never written. Before
  *    R2-fw-1 the switch came first and was undone afterwards, and in between — the whole
@@ -84,6 +86,15 @@
 
 #if CONFIG_SECURE_FLASH_ENC_ENABLED
 #error "ff_ota verifies the slot BEFORE esp_https_ota_finish(); with flash encryption esp_ota_write() holds back a trailing partial block until esp_ota_end(), so that read-back would hash an incomplete image. See R2-fw-1."
+#endif
+
+/* R3-fw-5: the OTA path does not build without rollback. Every consumer's bootloader is
+ * built from the same sdkconfig as its app (Arduino's core or hybrid rebuild, one IDF
+ * sdkconfig), and this file is always compiled, so this is the one guard that covers every
+ * consumer, including an IDF main that skips the example's fleetforge_start.c. It emits no
+ * code; the runtime posture after an OTA is unchanged (ff_mqtt.c::classify_txn). */
+#if !CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE
+#error "fleetforge's OTA path needs CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y: without it an image written by OTA that cannot reach the fleet never rolls back. Turn it back on in sdkconfig.defaults (ESP-IDF) or remove the custom_sdkconfig line that turns it off (Arduino/PlatformIO)."
 #endif
 
 static const char *TAG = "ff-ota";

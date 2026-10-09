@@ -6,6 +6,80 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-09 — Layout detected by fingerprint; no match announces `unknown`; `unsupported_layout` refusal names the expected layout, slot size and the fix; rollback guard moved into the component's OTA path (R3-fw-5)
+
+**Decided.** A board says which map it carries, and a board on a map nobody supports is
+refused at deploy time with a sentence that tells a library user what to do. Details and
+the T2 table: `docs/features/ota-library.md` → *R3-fw-5*; procedure:
+`docs/runbooks/agent-qemu.md` → *A wrong flash layout is refused*. Supersedes the R3-fw-3
+named gap "the layout id is chosen by `ARDUINO` at compile time".
+
+- **D1. The firmware detects the layout by fingerprint.** `ff_identity.c` holds every known
+  id with its fingerprint (`FF_KNOWN_LAYOUTS`, both rows, not just the build's own), and the
+  announced `partition_layout` is the id whose fingerprint equals the measured
+  `partition_table_sha256`. `tests/test_layout_detection.py` keeps the C table equal to
+  `SUPPORTED_LAYOUTS`. `FF_PARTITION_LAYOUT` stays byte-for-byte (pinned by
+  `tests/test_arduino_library.py`) and now means "the layout this build ships": it is the
+  expected layout in the log line and the fail-open fallback.
+- **D2. No match announces the reserved id `"unknown"`.** `FF_PARTITION_LAYOUT_UNKNOWN` in C,
+  `manifest.UNKNOWN_PARTITION_LAYOUT` in Python, test-pinned equal and never a
+  `SUPPORTED_LAYOUTS` key.
+- **D3. A table that cannot be measured keeps the build's id**, with the fingerprint null, so
+  the server's fail-open (R2b-be-6/7) holds. Exception: more than 32 entries
+  (`FF_PT_MAX_ENTRIES`) is proof the table is not a supported one (they have six rows), so
+  `s_pt_too_many` announces `unknown`.
+- **D4. One loud `ESP_LOGE` (tag `ff-id`) at boot when the board announces `unknown`.** It
+  names the running OTA slot size, the build's expected layout and its slot size, that the
+  server refuses every update, and the fix (the example's `partitions.csv`, flashed once
+  over USB; a table never changes over the air). No 12-character hex run in it, because
+  `frontend/src/diagnostics.ts` reads the device id from the last `ff-id` line that way.
+  The `board:` INFO line gains `layout %s`.
+- **D5. No device-side stage refusal based on the layout.** A server refusal can be fixed by
+  shipping server code; a refusal baked into firmware cannot be fixed on that board at all,
+  because OTA is what it refuses. `choose_target_slot` already refuses a missing spare slot
+  and esp_https_ota refuses an image larger than the slot.
+- **D6. Server: a new stable refusal code `unsupported_layout`.** Emitted when
+  `device.partition_layout` is set and not in `SUPPORTED_LAYOUTS`, with or without an
+  artifact, and also when the artifact's layout is null (before, an unknown-layout board
+  plus a layout-less artifact passed every check). It replaces `layout_mismatch` for that
+  board, the fingerprint check is skipped (no profile), it is never overridable, and
+  `/deploy` answers 409 through the existing generic mapping. Order: `no_artifact_for_target`
+  → `unsupported_layout` | `layout_mismatch` → `slot_too_small` → `partition_table_mismatch`
+  → `no_ota_capability`. `layout_mismatch` between two supported layouts is unchanged.
+- **D7. The sentence.** Plain text, no backticks. It names what the board announced (layout,
+  slot, fingerprint when present), the expected layout and its slot size (the artifact's
+  when it is a supported id, otherwise every supported id), and the fix with a source hint
+  from `deploy_precheck.LAYOUT_SOURCES` (keys pinned equal to `SUPPORTED_LAYOUTS`'). The
+  `partition_table_mismatch` sentence keeps its text as a prefix and gains the same fix
+  (the library 0.4.7 case: compiled id, wrong table).
+- **D8. "Does not start its OTA path on a bootloader without rollback" is a component build
+  guard.** `ff_ota.c` has `#if !CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE #error` next to the
+  flash-encryption guard. Every consumer's bootloader comes from the same sdkconfig as its
+  app, and `ff_ota.c` is always compiled, so this covers an IDF `main` that skips
+  `fleetforge_start.c` and the agent itself (`agent_main.c` had no guard). The two consumer
+  guards stay. The runtime posture is unchanged (`TXN_BOOTED_NEW` → `confirmed` with a
+  detail, R2b-fw-2), and `rollback_capable` is still `true` or null (A3).
+- **Rejected.** `null` for no match (the server reads null as "not reported" and fails
+  open: the silent path this task closes). A fingerprint-derived id like `custom-47db…`
+  (the fingerprint is already its own field). Keeping the compiled id (the old behaviour).
+  A device-side stage refusal (D5). A persisted "bootloader cannot roll back" NVS flag that
+  refuses later stages (irreversible, on an observation no bench can make: QEMU always arms
+  rollback; it contradicts A3 and would defeat the server's per-code `rollback_incapable`
+  override). The IDE's `Maximum is N bytes` line as the check (R3-fw-1 measured it wrong).
+- **Named gaps.** A board whose bootloader came from an earlier, different flash
+  (`idf.py app-flash`) is only discovered after its first OTA and is not reported as
+  `false` (A3). Every board on an unsupported map announces the same `unknown`, so R3-be-2's
+  "detected profile" must key on the fingerprint, not the id.
+- **Side findings, not fixed.** `diagnostics.ts`'s "reported id" regex already matches the
+  `board:` line's fingerprint (pre-existing since R2b-fw-2). `frontend/src/UploadBuild.tsx`
+  offers every fleet-reported layout, so a fleet of only `unknown` boards pre-selects
+  `unknown` and the upload answers 400 "unknown partition_layout; this server understands: …".
+- **Proposed for the owner (`spec/` untouched).** `spec/device-protocol.md` → *Partition
+  layouts*: `unknown` is reserved (text in `docs/features/ota-library.md` → *R3-fw-5*,
+  Patch A).
+
+---
+
 ## 2026-10-09 — The worked example is the Basic sketch as a Morse blinker plus an ESP-IDF twin under examples/basic_idf; the README's named blocks are what `just lib-quickstart` runs (R3-fw-4)
 
 **Decided.** One worked example, two flavours, and a script that plays their READMEs.

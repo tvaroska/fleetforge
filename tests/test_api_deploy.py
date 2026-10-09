@@ -695,7 +695,7 @@ class TestRefusals:
         store: MemoryObjectStore,
         publisher: FakeCommandPublisher,
     ) -> None:
-        await add_device(db, partition_layout="single-2m-v1")
+        await add_device(db, partition_layout="ab-4m-arduino-v1")
         await add_artifact(db)
         token = await login_admin(admin_app)
 
@@ -703,7 +703,7 @@ class TestRefusals:
 
         assert response.status_code == 409
         detail = response.json()["detail"]
-        assert "single-2m-v1" in detail and LAYOUT in detail
+        assert "ab-4m-arduino-v1" in detail and LAYOUT in detail
         assert publisher.published == []
 
     async def test_an_image_larger_than_the_ota_slot_is_409(
@@ -886,7 +886,8 @@ class TestPrecheck:
     @pytest.mark.parametrize(
         ("overrides", "code", "deploy_status"),
         [
-            ({"partition_layout": "single-2m-v1"}, "layout_mismatch", 409),
+            ({"partition_layout": "ab-4m-arduino-v1"}, "layout_mismatch", 409),
+            ({"partition_layout": "unknown"}, "unsupported_layout", 409),
             ({"ota_slot_size": 100}, "slot_too_small", 409),
             ({"capabilities": ["telemetry"]}, "no_ota_capability", 409),
             ({"platform_type": "esp32c6"}, "no_artifact_for_target", 404),
@@ -925,7 +926,7 @@ class TestPrecheck:
         publisher: FakeCommandPublisher,
     ) -> None:
         await add_device(
-            db, partition_layout="single-2m-v1", ota_slot_size=100, capabilities=["telemetry"]
+            db, partition_layout="ab-4m-arduino-v1", ota_slot_size=100, capabilities=["telemetry"]
         )
         await add_artifact(db)
         token = await login_admin(admin_app)
@@ -1334,6 +1335,7 @@ class TestNoSchedulerLivesHere:
             "did not announce the `ota` capability",
             "The target is this device's chip",
             "partition table fingerprint",
+            "not a layout this server supports",
             "cannot roll back",
         ],
     )

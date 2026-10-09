@@ -2172,6 +2172,7 @@ home of every sentence; `/deploy` raises the first refusal from it, unchanged.
 |---|---|---|
 | refusal | `no_artifact_for_target` | no label for the device's chip (404 on deploy) |
 | refusal | `layout_mismatch` | both layouts known and differ (409) |
+| refusal | `unsupported_layout` | device announces a layout this server does not support, `unknown` included; replaces `layout_mismatch` for it, names the expected layout, its slot size and the USB fix (409; never overridable; R3-fw-5) |
 | refusal | `slot_too_small` | image larger than a known slot (409) |
 | refusal | `partition_table_mismatch` | device fingerprint present, layout has a known one, they differ (409; never overridable; R2b-be-7) |
 | refusal | `no_ota_capability` | `ota` not announced (409) |

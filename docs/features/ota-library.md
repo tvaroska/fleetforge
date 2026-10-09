@@ -16,6 +16,91 @@ becomes a board in the field that fixes itself" — this release *is* that journ
 
 ## Completed Work
 
+### R3-fw-5 (2026-10-09): a wrong flash layout is announced as `unknown` and refused at deploy time with the fix; `ff_ota.c` does not build without rollback
+
+**The problem.** `FF_PARTITION_LAYOUT` was compiled in (`ARDUINO` → `ab-4m-arduino-v1`,
+else `ab-4m-v1`) and announced whatever table was on flash. A sketch built with the wrong
+`partitions.csv` announced the right name with a wrong fingerprint. The server refused it
+as `partition_table_mismatch`, but that sentence was about profile disagreement and did not
+say what to fix. A board announcing an id the server did not know, plus an artifact with no
+layout, passed every check.
+
+**What shipped.**
+
+- **Firmware (`ff_identity.c`, every consumer).** A `FF_KNOWN_LAYOUTS` table holds both
+  known ids with their fingerprints. At `ff_identity_init()` the announced
+  `partition_layout` becomes the id whose fingerprint matches the measured one (D1). No
+  match gives the reserved `"unknown"` (`FF_PARTITION_LAYOUT_UNKNOWN`, D2). A table that
+  cannot be measured keeps the build's id, with a null fingerprint (fail-open). The
+  exception is more than 32 entries, which gives `unknown` (D3). On `unknown`, one
+  `ESP_LOGE` names the running slot size, the expected layout and its slot size, the
+  consequence and the fix, with no 12-hex run (D4). The `board:` line gains `layout %s`.
+  `FF_PARTITION_LAYOUT` is unchanged byte for byte, and now means "the layout this build
+  ships".
+- **No device-side refusal (D5).** The server can be corrected by shipping code; a
+  refusal baked into firmware cannot be corrected on the board it refuses.
+- **Server (`deploy_precheck.py`).** A new stable code, `unsupported_layout` (D6). It fires
+  when the device's layout is set and not in `SUPPORTED_LAYOUTS`, with or without an
+  artifact, whatever the artifact claims. It replaces `layout_mismatch` for that board,
+  skips the fingerprint check, is never overridable, and gives 409 on `/deploy`. Order:
+  `no_artifact_for_target` → `unsupported_layout` | `layout_mismatch` → `slot_too_small` →
+  `partition_table_mismatch` → `no_ota_capability`. The sentence (D7) names what the board
+  announced, the expected layout and its slot size, and the fix, with the source hint from
+  `LAYOUT_SOURCES`. The expected layout is the artifact's if it is supported; otherwise
+  every supported one is listed. `partition_table_mismatch` keeps its text and gains the
+  same fix. `manifest.UNKNOWN_PARTITION_LAYOUT = "unknown"`.
+- **Rollback guard (D8).** `ff_ota.c` has `#if !CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE
+  #error` next to the flash-encryption guard. `ff_ota.c` is always compiled and every
+  consumer's bootloader comes from the same sdkconfig, so no consumer builds the OTA path
+  without rollback. Before this, an IDF `main` that skipped `fleetforge_start.c`, or the
+  agent itself, compiled it unguarded. It emits no code: +816 B on esp32 is the detection.
+- **Tests.** `tests/test_layout_detection.py` (new): the C table equals
+  `SUPPORTED_LAYOUTS`; `unknown` is spelled alike in C and Python and is never supported;
+  the announce uses the detected id; the too-many and unmeasured branches; the error line's
+  needles and no hex run; the `ff_ota.c` guard; the fixture. `tests/test_deploy_precheck.py`
+  gains `TestUnsupportedLayout` and the appended fix. `tests/test_api_deploy.py`: the
+  "other layout" cases use `ab-4m-arduino-v1`, and an `unknown` case proves precheck ==
+  deploy and the 409. Size budgets were raised for all four targets.
+- **Fixture.** `tests/fixtures/wrong-layout-partitions.csv` is the Arduino offsets with
+  0x1C0000 slots (fingerprint `47db5392…7c4c`). It is not under `examples/`.
+
+**T2 (2026-10-09, dev stack on :8088, no board).**
+
+| Step | Result |
+|---|---|
+| T2-A sim `--platform-type esp32 --partition-layout unknown --ota-slot-size 1835008 --partition-sha 47db…7c4c` | row `unknown` / 1835008 / `47db…7c4c`; upload `r3fw5-1791526565` (`ab-4m-arduino-v1`) 201 |
+| T2-A precheck / deploy | `deployable: false`, `["unsupported_layout"]`; deploy **409**, detail == precheck message; contains `unknown`, `1835008`, `ab-4m-arduino-v1`, `1966080`, `examples/Basic/partitions.csv`, `USB`; no backtick; sim log has no `dn/cmd`/stage, `deploy: null` |
+| T2-A control: sim `ab-4m-arduino-v1` + `05528998…1fc4` | precheck `deployable: true`, no refusals |
+| T2-B QEMU, lib bundle with the fixture's table at 0x8000 | `E (7708) ff-id: this board's partition table is not a layout this firmware knows: its OTA slot is 1835008 bytes, and this build expects ab-4m-arduino-v1, whose two OTA slots are 1966080 bytes each. …partitions.csv… flash it once over USB…`; `board: … sha256 47db…7c4c, layout unknown`; `enroll 200`; `announce acknowledged` |
+| T2-B API | `000000000000`: `unknown`, 1835008, `47db…7c4c`; precheck `unsupported_layout`, deploy 409 with the same sentence; `ff-ota` lines in the log: 0 |
+| T2-B positive control (`just lib-qemu --fresh`, correct table) | `layout ab-4m-arduino-v1`, `05528998…1fc4`, no `E … ff-id` line, precheck `deployable: true` |
+| Agent no-regression (`just agent-qemu esp32 --fresh`) | `layout ab-4m-v1`, `1fa67e6b…59ed`, enroll 200; `just agent-qemu-smoke esp32` HARNESS OK |
+| T2-C agent copy with `# CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE is not set` | docker build exit 1: `components/fleetforge/src/ff_ota.c:97:2: error: #error "fleetforge's OTA path needs CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y…"`; repo `agent/sdkconfig.defaults` untouched |
+| Builds | `just agent-build-all` BUNDLE OK ×4, 0 `warning:`; esp32 1,030,320 B (+816). `just lib-build esp32`/`esp32s3` 0 warnings; `just lib-bundle esp32-qemu` exit 0; `just lib-quickstart --build-only` PASS (396 s); `just test` 1542 passed (ruff, format, mypy green) |
+
+**Named gaps.**
+
+- **A bootloader from an earlier, different flash** (`idf.py app-flash`) is only discovered
+  after its first OTA, and is not reported as `false` (A3). The build guard covers a
+  bootloader built with the app, not one left over from before.
+- **Every unsupported map announces the same `unknown`.** R3-be-2's detected profiles must
+  key on the fingerprint.
+- **`UploadBuild.tsx` offers every fleet-reported layout**, so a fleet of only `unknown`
+  boards pre-selects `unknown`, and the upload answers 400 "unknown partition_layout; this
+  server understands: …". Not fixed.
+- **`diagnostics.ts`'s "reported id" regex** already matches the `board:` line's
+  fingerprint (pre-existing since R2b-fw-2). Not fixed. The new error line adds no hex run.
+
+**Spec proposal (Patch A, NOT applied).** `spec/device-protocol.md` → *Partition layouts*,
+add after the table:
+
+> `unknown` is reserved. A board whose decoded partition table matches no layout id its
+> firmware knows announces `partition_layout: "unknown"` (with its real `ota_slot_size` and
+> `partition_table_sha256`). It is never a row in this table. The server refuses every
+> deploy to it (`unsupported_layout`), naming the layout the build expects and its slot
+> size. A board that cannot measure its table announces its build's id with
+> `partition_table_sha256: null`.
+
 ### R3-fw-4 (2026-10-09): the worked example is a Morse blinker in Arduino and ESP-IDF, and `just lib-quickstart` plays its README; the first library OTA confirmed
 
 **Two flavours, one example.**
@@ -249,7 +334,8 @@ Tests: `tests/test_arduino_library.py` (41). Full suite 1479 passed.
 - **The QEMU proof runs the `lib-qemu` hybrid build**, not the byte-identical persona binary.
   Its resolved config differs from stock beyond the NIC (SPIRAM, Matter/camera, clocks).
 - **The layout id is chosen by `ARDUINO` at compile time.** Detection by fingerprint is
-  R3-fw-5.
+  R3-fw-5. **Resolved by R3-fw-5** (see *R3-fw-5* above): the announced id is now detected
+  by fingerprint, and the compiled id is only the expected layout and the fail-open fallback.
 - **Every library object is linked when the library is in the build** (no archive). See
   above. This matters for R3-fw-6's marker writer rule: "kept alive only by a reference"
   still holds under `--gc-sections`, but "a sketch that merely installs the library" is now

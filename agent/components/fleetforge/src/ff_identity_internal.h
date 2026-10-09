@@ -28,7 +28,13 @@ extern "C" {
 
 /* spec/device-protocol.md -> up/announce. Retyped with the spec named, per CRITICAL.md:
  * `partition_layout` + `ota_slot_size` are what let the server run spec/flows.md's
- * capability check, and agent/partitions.csv is the other half of the same contract. */
+ * capability check, and agent/partitions.csv is the other half of the same contract.
+ *
+ * R3-fw-5: FF_PARTITION_LAYOUT is the layout THIS BUILD SHIPS, not what the board announces.
+ * The announced id is detected by fingerprint in ff_identity.c (the known id whose
+ * partition_table_sha256 equals the one measured on this board). FF_PARTITION_LAYOUT is the
+ * expected layout named in the logs, and the fallback announced when the table cannot be
+ * measured (the fingerprint then goes out as null, and the server fails open). */
 #if defined(ARDUINO)
 /* R3-fw-3. The Arduino library ships its own map, `ab-4m-arduino-v1`
  * (design/decisions/arduino-gets-its-own-layout-id.md): the Arduino upload recipe writes
@@ -41,6 +47,13 @@ extern "C" {
 #define FF_PARTITION_LAYOUT "ab-4m-v1"
 #endif
 #define FF_OTA_SLOT_SIZE 1966080
+
+/* R3-fw-5. Reserved: what a board announces as `partition_layout` when its measured
+ * partition table matches no layout id its firmware knows. Never a row in spec/
+ * device-protocol.md -> Partition layouts; src/fleetforge/firmware/manifest.py::
+ * UNKNOWN_PARTITION_LAYOUT is the other end, and the server refuses every deploy to such a
+ * board (`unsupported_layout`), naming the layout the build expects and how to fix it. */
+#define FF_PARTITION_LAYOUT_UNKNOWN "unknown"
 
 /* spec/device-protocol.md -> Evolution rules: `proto` in announce is what lets the server
  * adapt per device, forever, to an agent it can never update. */
