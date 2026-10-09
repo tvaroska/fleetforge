@@ -39,3 +39,7 @@ design
 # re-adding a narrower rule cannot quietly let the 1.2 MB-per-target bundles back in.
 agent/
 agent/dist
+
+# The Arduino library's QEMU harness (R3-fw-3): a PlatformIO project whose hybrid compile
+# leaves hundreds of MB next to it. Firmware tooling, never part of the app image.
+lib-qemu/

@@ -6,6 +6,81 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-08 — The Arduino library is the component plus library.json and a Fleetforge.cpp consumer; Arduino's verifyRollbackLater is overridden; pioarduino 3.3.12 / IDF 5.5.5 (R3-fw-3)
+
+**Decided.** `agent/components/fleetforge/` is also the Arduino library: `library.json`
+(PlatformIO defaults `src`/`include`, so every `src/*.c` compiles) plus the wrapper
+`src/Fleetforge.h` / `src/Fleetforge.cpp`, the component's second consumer. The example
+`examples/Basic/` ships `partitions.csv` = `ab-4m-arduino-v1`. Details and the T2 table:
+`docs/features/ota-library.md` → *R3-fw-3*.
+
+- **Toolchain:** pioarduino `55.03.312-1` (Arduino-ESP32 3.3.12 on ESP-IDF v5.5.5), pinned
+  by exact URL in both `platformio.ini` files. It needs **PlatformIO Core ≥ 6.2.0**; this box
+  was upgraded from 6.1.19 (`uv tool upgrade platformio`).
+- **Rollback posture, all three in `Fleetforge.cpp`:**
+  1. a strong `extern "C" bool verifyRollbackLater(void) { return true; }`. Core 3.3.12's
+     `initArduino()` otherwise confirms every PENDING_VERIFY image before `setup()`.
+  2. `ff_mqtt_arm_confirm_timer()` before anything in `begin()` that can fail or return.
+  3. `#if !CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE` → `#error`. This is the "fails at build"
+     clause. `rollback_capable` stays measured-only (2026-10-05), and the runtime
+     "don't start OTA on a rollback-less bootloader" is R3-fw-5.
+- **Plan correction: no archive linking.** pioarduino forces `lib_archive = False`, and the
+  Arduino IDE links library objects directly. So the override is in every build that
+  includes the library, not only builds that call `begin()`. Without `begin()` an OTA'd
+  image is never confirmed and rolls back at its next reset. That is the conservative
+  direction, and it is accepted. R3-fw-6 should read "a sketch that merely has the library
+  installed" as "a sketch whose build includes it". `--gc-sections` still drops what nothing
+  references.
+- **Arduino differences only under `#if defined(ARDUINO)` in `ff_identity`.**
+  - `FF_PARTITION_LAYOUT` is `ab-4m-arduino-v1`.
+  - A private `ff_identity_set_app_versions()`, called only by `begin()`, supplies
+    `fw_version` (the maker's literal) and `agent_version` (`FF_LIB_VERSION`).
+  - The IDF agent's app is byte-for-byte the same size (1029504 B).
+  - The R3-spec-3 side finding, re-measured on 3.3.12: `esp_app_desc_t.version` is
+    `6671d0b` (the lib-builder's hash).
+- **Version:** `src/ff_lib_version.h` is a test-pinned copy of `agent/version.txt`, and so is
+  `library.json`'s `version`. Bump all three together (R3-rel-1's bump trips the test by
+  design).
+- **Logging:** the stock core compiles `ESP_LOGI` out (`CONFIG_LOG_MAXIMUM_LEVEL=1`) and sets
+  `"*"` to ERROR before `setup()`. So `library.json` adds `-DLOG_LOCAL_LEVEL=ESP_LOG_INFO`
+  (library sources only), and `begin()` raises exactly the 13 `ff-*` tags to INFO, pinned to
+  the `TAG`s in `src/`. `CORE_DEBUG_LEVEL` is not used.
+- **`-Werror`:** the core's global `-Wno-error=unused-*` / `-Wno-unused-parameter` /
+  `-Wno-sign-compare` survive a library `-Werror`. IDF's defaults carry the same set, so
+  this is parity with the CMake component, not a regression. The T1 gate rejects any
+  `warning:` from the component.
+- **QEMU is a separate project, `lib-qemu/platformio.ini` at the repo root** (example
+  `env:esp32` + `custom_sdkconfig = CONFIG_ETH_USE_OPENETH=y`, pinned). It is run with its
+  own `PLATFORMIO_CORE_DIR`, because the hybrid compile rewrites the shared Arduino libs in
+  place: the next persona build printed `Reinstall Arduino framework` and re-downloaded it.
+  The project dir is not inside the example, because the hybrid compile writes
+  `.dummy/`, `managed_components/` and `sdkconfig.*` beside its `platformio.ini`. It is not
+  inside `agent/` either, because `test_agent_holds_no_credential` scans `agent/` and found
+  a `WIFI_SSID=` in a managed component. The hybrid config also differs from stock beyond
+  the NIC (no SPIRAM/Matter/camera, 240 MHz, DIO). That is a named gap: QEMU proves the
+  library's C on the core's IDF, while `just lib-build` proves the persona binary compiles.
+- **`agent/tools/lib_bundle.py`:** offsets come from `idedata.json` plus the app's position
+  in `firmware.factory.bin`. The table is decoded by `make_manifest.py`'s code. It refuses on
+  otadata/ota_0/ff_cfg/slots/fingerprint. The id is written only when the geometry is
+  `ab-4m-arduino-v1`. Output never goes to `agent/dist/`.
+- **Rejected.**
+  - The official `espressif32` 7.0.1 platform: IDF 4.4, so the component does not compile.
+  - A top-level `arduino/` copy or a generator: a second source.
+  - `library.properties` now: the IDE cannot see `include/`. Follow-up `R3-fw-8`.
+  - Global constructors or `used`/`retain`: linking must do no work.
+  - A runtime layout probe: that is R3-fw-5.
+  - Vendoring IDF's openeth driver into the library.
+  - An unguarded setter: it would move the agent's size.
+  - A third env inside the example's `platformio.ini`: it pollutes the folder a maker copies,
+    and the shared libs ping-pong.
+- **Proposed for the owner (`spec/`/`design/` untouched).** Optional, in `design/architecture.md`:
+  "The Arduino library is the same `fleetforge` component, with `library.json` and
+  `src/Fleetforge.cpp`; its example carries `ab-4m-arduino-v1`."
+- **CRITICAL.md:** two rows added. One covers `agent/components/fleetforge/examples/*/partitions.csv`
+  as a flash-time immutable. The other covers `Fleetforge.cpp`'s rollback posture.
+
+---
+
 ## 2026-10-08 — The protocol is the `fleetforge` ESP-IDF component under agent/components/; its public surface is exactly what agent_main.c calls (R3-fw-2)
 
 **Decided.** The 12 `ff_*` modules moved out of `agent/main/` into

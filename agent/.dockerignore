@@ -13,3 +13,7 @@ dist/
 
 # PROJECT_VER comes from version.txt precisely because .git is not here.
 .git
+
+# PlatformIO build output of the Arduino library example (R3-fw-3): hundreds of MB, and
+# not an input to the IDF build.
+**/.pio

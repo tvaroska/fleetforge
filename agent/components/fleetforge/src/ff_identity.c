@@ -270,12 +270,50 @@ static bool boot_ok(void)
     return state != ESP_OTA_IMG_PENDING_VERIFY;
 }
 
+#if defined(ARDUINO)
+/* R3-fw-3: see ff_identity_set_app_versions() in ff_identity_internal.h. Written once in
+ * begin() before the fleetforge task exists, read only from that task and the tasks it
+ * starts, so task creation orders the write before every read and no lock is needed. */
+#define FF_APP_VERSION_SIZE 32
+static char s_fw_version[FF_APP_VERSION_SIZE];
+static char s_agent_version[FF_APP_VERSION_SIZE];
+
+static bool app_version_valid(const char *version)
+{
+    if (version == NULL) {
+        return false;
+    }
+    size_t len = 0;
+    for (; version[len] != '\0'; len++) {
+        if (len == FF_APP_VERSION_SIZE - 1 || version[len] < 0x20 || version[len] > 0x7e) {
+            return false;
+        }
+    }
+    return len > 0;
+}
+
+esp_err_t ff_identity_set_app_versions(const char *fw_version, const char *agent_version)
+{
+    if (!app_version_valid(fw_version) || !app_version_valid(agent_version)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    strlcpy(s_fw_version, fw_version, sizeof(s_fw_version));
+    strlcpy(s_agent_version, agent_version, sizeof(s_agent_version));
+    return ESP_OK;
+}
+#endif
+
 /* R1-fw-2. The one place a version becomes a thing this board says about itself. The
  * descriptor belongs to the image that is EXECUTING: after an OTA it is the new slot's,
  * after a bootloader rollback it is the old slot's again. See ff_identity.h for why no
  * other source is allowed. */
 const char *ff_identity_fw_version(void)
 {
+#if defined(ARDUINO)
+    if (s_fw_version[0] != '\0') {
+        return s_fw_version;
+    }
+#endif
     return esp_app_get_description()->version;
 }
 
@@ -297,7 +335,14 @@ static cJSON *announce_object(const ff_cfg_t *cfg)
      * are separate fields because from R1 the agent is a component inside a user firmware
      * and only `fw_version` moves. */
     cJSON_AddStringToObject(root, "fw_version", ff_identity_fw_version());
+#if defined(ARDUINO)
+    /* R3-fw-3: in a library build `agent_version` is the library's version, handed in by
+     * begin() (DECISIONS R3-spec-3's version note); the descriptor's is the core's. */
+    cJSON_AddStringToObject(root, "agent_version",
+                            s_agent_version[0] != '\0' ? s_agent_version : app->version);
+#else
     cJSON_AddStringToObject(root, "agent_version", app->version);
+#endif
     cJSON_AddStringToObject(root, "link_type", ff_cfg_link_name(cfg->link));
     /* spec/device-protocol.md -> up/announce: which network this broker session runs over,
      * and how many the board will try. Both null on ethernet. Never a passphrase, never

@@ -717,6 +717,48 @@ It deliberately proves **nothing** about enrollment or MQTT: those need a live t
 throwaway config aimed at a closed port and its own `flash-<target>-smoke.bin`. Thus, it
 spends no token and never disturbs the NVS your real emulated board is accumulating.
 
+## The library example in QEMU (R3-fw-3)
+
+The Arduino library (`agent/components/fleetforge/library.json` + `src/Fleetforge.cpp`)
+gets the same proof as the agent: its Basic example boots in QEMU against the dev stack.
+This box's traefik is on **8088** (searxng holds 8080), so the board's API base is
+`http://10.0.2.2:8088`.
+
+```bash
+just agent-cfg --api-base http://10.0.2.2:8088 --mqtt-uri mqtt://10.0.2.2:8883 \
+      --link ethernet --hb 10 --token "$FFE"     # the same blob as the agent's
+just lib-bundle esp32-qemu      # lib-qemu/.pio/bundle/esp32-qemu (first run ~10 min)
+just lib-qemu --fresh           # same Ctrl-A x / tty rules as agent-qemu
+#   I (7656) ff-lib: fleetforge library 0.4.7, firmware 1.0.0
+#   I (9110) ff-net: eth link up, ip 10.0.2.15 gw 10.0.2.2 mask 255.255.255.0
+#   I (10732) ff-enroll: enroll 200 http://10.0.2.2:8088/v1/enroll
+#   I (11459) ff-mqtt: mqtt connected as 000000000000 (mqtt://10.0.2.2:8883)
+#   I (11567) ff-mqtt: announce acknowledged by the broker
+just agent-qemu-stop esp32      # stops it: it is the same ff-qemu-esp32 board
+```
+
+What differs from `agent-qemu esp32`:
+
+- **The flash image is `.qemu/flash-lib-esp32.bin`.** An agent image's NVS and offsets
+  belong to `ab-4m-v1` and must never be mixed with `ab-4m-arduino-v1`. Here `ff_cfg` sits at
+  `0x3D0000`, read from the bundle's manifest like every other offset. `--fresh` wipes it.
+- **The container name is the same `ff-qemu-esp32`, and so is the refusal.** An agent
+  board and a library board at once are one `000000000000` twice.
+- **The NIC delta.** QEMU's esp32 has only the OpenCores NIC, and the stock Arduino
+  libraries are built without its driver. `lib-qemu/platformio.ini` is the example's
+  `env:esp32` plus `custom_sdkconfig = CONFIG_ETH_USE_OPENETH=y`. pioarduino then rebuilds
+  the Arduino libraries from ESP-IDF ("hybrid compile"). It does that inside the package
+  directory, so the recipe gives it its own `PLATFORMIO_CORE_DIR`
+  (`~/.platformio-fleetforge-qemu`, override with `FF_LIB_QEMU_PIO_CORE`). Without that,
+  every `just lib-build` after it deletes and re-downloads the Arduino framework.
+- **The resolved config of that rebuild is not the stock one.** It differs beyond the NIC:
+  no SPIRAM, no Matter or camera components, 240 MHz, DIO flash. A green QEMU run proves the
+  library's C on the core's IDF, not the persona's exact binary. `just lib-build esp32` is
+  that binary's compile proof.
+- `GET /v1/devices` shows `partition_layout: ab-4m-arduino-v1`, `partition_table_sha256:
+  05528998…1fc4`, `fw_version: 1.0.0` (the sketch's, from `Fleetforge.begin`), and
+  `agent_version` = the library version.
+
 ## What we know about the boot-loop panic
 
 **S0-infra-1 filed this harness as dead** (2026-09-10): `just agent-qemu esp32`

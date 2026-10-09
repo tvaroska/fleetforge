@@ -1,0 +1,24 @@
+# Fleetforge partition table — layout id "ab-4m-arduino-v1"
+#
+# FLASH-TIME IMMUTABLE. A board carries this table for life: no OTA can change it.
+# Never edit this file. A different map is a NEW layout id, never an edit to this one
+# (CRITICAL.md; design/partitions.md section 6).
+#
+# The Arduino library's layout (design/decisions/arduino-gets-its-own-layout-id.md): the
+# stock min_spiffs map plus a 4 KB ff_cfg. The Arduino upload recipe writes boot_app0 at
+# 0xe000 and the app at 0x10000 whatever the table says, so these offsets are the only ones
+# it can reach. Two 1966080-byte OTA slots, as ab-4m-v1; a different map.
+# spec/device-protocol.md -> Partition layouts: partition_table_sha256
+# 05528998ae17fb6a7a5741443f9a7a4720c766f370fefc30814cbc3e391c1fc4.
+#
+# Keep it next to the sketch: the Arduino IDE's prebuild hook and PlatformIO's
+# board_build.partitions both read the sketch folder, never a library. ff_cfg (the
+# per-board config blob from agent/tools/ff_cfg.py) is flashed at 0x3D0000.
+#
+# Name,    Type, SubType,  Offset,   Size
+nvs,       data, nvs,      0x9000,   0x5000
+otadata,   data, ota,      0xe000,   0x2000
+ota_0,     app,  ota_0,    0x10000,  0x1E0000
+ota_1,     app,  ota_1,    0x1F0000, 0x1E0000
+ff_cfg,    data, 0x40,     0x3D0000, 0x1000
+coredump,  data, coredump, 0x3F0000, 0x10000

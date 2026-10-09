@@ -803,6 +803,84 @@ agent-qemu-smoke target="esp32" deadline="120":
 agent-qemu-clean:
     rm -rf .qemu
 
+# ─────────────────────────────────────────────────────────────────────────────
+# The Arduino library (R3-fw-3) — the same component, built by PlatformIO
+# ─────────────────────────────────────────────────────────────────────────────
+#
+#     just lib-build esp32             # compile the Basic example (also: esp32s3)
+#     just lib-bundle esp32-qemu       # the QEMU build of it, as a bundle qemu_image.py takes
+#     just lib-qemu                    # boot that bundle; same .qemu/ff_cfg.bin as agent-qemu
+#     just lib-qemu --fresh            # new flash image = wipe NVS = forget the credential
+#     just agent-qemu-stop esp32       # stops it too: it is the same ff-qemu-esp32 board
+#
+# Toolchain: pioarduino 55.03.312-1 (Arduino core 3.3.12 on ESP-IDF v5.5.5), pinned in
+# both platformio.ini files; it needs PlatformIO Core >= 6.2.0. docs/runbooks/agent-qemu.md
+# -> *The library example in QEMU*.
+
+# Compile agent/components/fleetforge/examples/Basic — exactly the folder a maker copies.
+lib-build env="esp32":
+    pio run -d agent/components/fleetforge/examples/Basic -e {{ env }}
+
+# The QEMU build (lib-qemu/: env:esp32 plus the OpenCores NIC driver), bundled into
+# lib-qemu/.pio/bundle/<env>/ — never agent/dist/, which holds agent bundles only.
+#
+# Its own PLATFORMIO_CORE_DIR, on purpose: the NIC delta makes pioarduino rebuild the
+# Arduino libraries INTO the package directory, and a shared one would then be deleted and
+# re-downloaded every time `lib-build` and this recipe take turns. The first run here
+# downloads the platform and rebuilds the libraries (~10 min); later runs take seconds.
+lib-bundle env="esp32-qemu":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    [ "{{ env }}" = "esp32-qemu" ] || {
+        echo "lib-qemu/ has one env, esp32-qemu (QEMU emulates only the esp32)"; exit 2; }
+    export PLATFORMIO_CORE_DIR="${FF_LIB_QEMU_PIO_CORE:-$HOME/.platformio-fleetforge-qemu}"
+    pio run -d lib-qemu -e {{ env }}
+    pio run -d lib-qemu -e {{ env }} -t idedata > /dev/null
+    python3 agent/tools/lib_bundle.py --build-dir lib-qemu/.pio/build/{{ env }} \
+        --out lib-qemu/.pio/bundle/{{ env }}
+
+# Boot the library bundle in QEMU: `agent-qemu esp32` with three differences — `/d` is the
+# library bundle, the flash image is `.qemu/flash-lib-esp32.bin` (an agent image's NVS and
+# offsets belong to ab-4m-v1 and must never be mixed with ab-4m-arduino-v1), and nothing
+# else. Same `qemu_program`, same `.qemu/ff_cfg.bin` (the blob is layout-independent; the
+# offset comes from this bundle's manifest), same `-it`-only-on-a-tty rule. And the SAME
+# container name, `ff-qemu-esp32`, with the same refusal: every emulated board is
+# 000000000000, so an agent board and a library board at once are one device twice.
+lib-qemu fresh="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    bundle=lib-qemu/.pio/bundle/esp32-qemu
+    test -f "$bundle/manifest.json" || {
+        echo "no library bundle — run: just lib-bundle esp32-qemu"; exit 1; }
+    test -f .qemu/ff_cfg.bin || {
+        echo "no .qemu/ff_cfg.bin — run: just agent-cfg --api-base … --mqtt-uri … --token …"
+        exit 1; }
+    if [ -n "$(docker ps -q --filter name='^ff-qemu-esp32$')" ]; then
+        echo "an esp32 board is ALREADY RUNNING as container ff-qemu-esp32 (agent or library)."
+        echo "Every emulated board claims device_id 000000000000, so a second one would"
+        echo "report stages and heartbeats as the same device and make both runs unreadable."
+        echo "Stop it first:  just agent-qemu-stop esp32"
+        exit 1
+    fi
+    case "{{ fresh }}" in
+        "") ;;
+        --fresh) rm -f .qemu/flash-lib-esp32.bin ;;
+        *) echo "unknown argument '{{ fresh }}' (the only one is --fresh)"; exit 2 ;;
+    esac
+    tty_flag=()
+    if [ -t 0 ]; then
+        tty_flag=(-it)
+        echo "QEMU: Ctrl-A x quits. NVS persists in .qemu/flash-lib-esp32.bin (--fresh wipes it)."
+    else
+        echo "QEMU: no terminal, so no Ctrl-A x — stop it with 'just agent-qemu-stop esp32'."
+    fi
+    docker run --rm "${tty_flag[@]}" --name ff-qemu-esp32 \
+        --network host -u $(id -u):$(id -g) \
+        -e TARGET=esp32 -e FLASH=/q/flash-lib-esp32.bin -e FFCFG=/q/ff_cfg.bin \
+        -e QEMU_SHA256={{ qemu_sha256 }} -e IDF_IMAGE_REF={{ idf_image }} \
+        -v "$PWD/.qemu:/q" -v "$PWD/$bundle:/d:ro" -v "$PWD/agent/tools:/t:ro" \
+        --entrypoint bash {{ idf_image }} -c '{{ qemu_program }}'
+
 # Bundles only. The ESP-IDF image is deliberately kept — re-pulling is 2.4 GB.
 agent-clean:
     find agent/dist -mindepth 1 -not -name .gitkeep -delete

@@ -29,7 +29,17 @@ extern "C" {
 /* spec/device-protocol.md -> up/announce. Retyped with the spec named, per CRITICAL.md:
  * `partition_layout` + `ota_slot_size` are what let the server run spec/flows.md's
  * capability check, and agent/partitions.csv is the other half of the same contract. */
+#if defined(ARDUINO)
+/* R3-fw-3. The Arduino library ships its own map, `ab-4m-arduino-v1`
+ * (design/decisions/arduino-gets-its-own-layout-id.md): the Arduino upload recipe writes
+ * boot_app0 at 0xe000 and the app at 0x10000 whatever the table says, so ab-4m-v1's
+ * offsets are unreachable from it. Its partitions.csv travels with the example
+ * (examples/Basic/partitions.csv). `ARDUINO` is predefined by every Arduino builder, so
+ * the IDF agent build compiles the #else line only and is unchanged. Same slot size. */
+#define FF_PARTITION_LAYOUT "ab-4m-arduino-v1"
+#else
 #define FF_PARTITION_LAYOUT "ab-4m-v1"
+#endif
 #define FF_OTA_SLOT_SIZE 1966080
 
 /* spec/device-protocol.md -> Evolution rules: `proto` in announce is what lets the server
@@ -62,6 +72,25 @@ bool ff_identity_mac_is_blank(void);
 char *ff_identity_announce_json(const ff_cfg_t *cfg);
 char *ff_identity_enroll_body(const ff_cfg_t *cfg);
 char *ff_identity_heartbeat_json(uint32_t uptime_s);
+
+#if defined(ARDUINO)
+/* R3-fw-3, Arduino builds only. An Arduino build's esp_app_desc_t.version is the core's
+ * own string (`esp-idf: v4.4.7 …` on core 2.0.17, the R3-spec-3 side finding; the
+ * lib-builder hash `6671d0b` on core 3.3.12, re-measured by R3-fw-3), because
+ * the descriptor comes from the core's precompiled libraries and a sketch cannot write it.
+ * So the maker's firmware version, and the library's own version, are handed in here
+ * instead: `fw_version` becomes `fw_version` in up/announce and up/hb, `agent_version`
+ * becomes `agent_version` in up/announce (DECISIONS R3-spec-3: in a library build that is
+ * the library's version).
+ *
+ * Called ONCE, by Fleetforge.cpp's begin(), before the task that reads either version is
+ * created; nothing else may call it (tests/test_arduino_library.py). Both strings must be
+ * constants compiled into the running image — that is what keeps R1-fw-2's "what booted,
+ * never what a command asked for" true: neither is ever persisted, and ff_ota.c never
+ * reaches them. Each must be 1-31 bytes of printable ASCII (0x20-0x7e); otherwise
+ * ESP_ERR_INVALID_ARG and nothing is kept. */
+esp_err_t ff_identity_set_app_versions(const char *fw_version, const char *agent_version);
+#endif
 
 #ifdef __cplusplus
 }

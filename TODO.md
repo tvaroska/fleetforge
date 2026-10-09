@@ -59,7 +59,7 @@ run could show, so the pass rests on the deterministic judge. Task list below; b
 <!-- Sprint 0 counters: fe=8 fw=4 infra=10 test=4 ops=1 bug=1 -->
 <!-- R1 counters: be=3 fe=1 fw=2 test=1 -->
 <!-- R2 counters: fw=6 be=1 fe=1 test=2 spec=1 (fw-3 is the R1-landed confirm timer) -->
-<!-- R3 counters: spec=3 fw=7 be=2 fe=1 test=2 rel=1 -->
+<!-- R3 counters: spec=3 fw=8 be=2 fe=1 test=2 rel=1 -->
 <!-- R2b counters: spec=3 fe=13 be=5 fw=1 test=4 -->
 
 Live status lives ONLY here. States: `- [ ]` open · `- [x]` done · `- [!]`
@@ -378,7 +378,7 @@ Order: spec-3 → fw-2 → fw-3/fw-4 → fw-5/fw-6/be-1 → test-1 → spec-2 �
       Acceptance: the agent builds from the component with no behavior change, the QEMU
       run in `docs/runbooks/agent-qemu.md` still passes. The component's public
       headers are a strict subset of what `agent_main.c` uses.
-- [ ] **R3-fw-3**: Arduino library wrapping the same C (P1, 2d)
+- [x] **R3-fw-3**: Arduino library wrapping the same C (P1, 2d) _(done 2026-10-08; reviewed; see docs/features/ota-library.md)_
       Depends on `R3-fw-2`. The persona writes Arduino or PlatformIO and does not use
       ESP-IDF (`docs/personas/PERSONAS.md` §1). Ships layout **`ab-4m-arduino-v1`** as a
       sketch-local `partitions.csv` that travels with the **example** (the prebuild hook
@@ -395,6 +395,8 @@ Order: spec-3 → fw-2 → fw-3/fw-4 → fw-5/fw-6/be-1 → test-1 → spec-2 �
       Small enough to read in one screen: the PRD's Morse-code blinker, which changes its
       message between two builds so "the OTA worked" is visible in the log and the
       dashboard version. Depends on `R3-fw-2`, `R3-fw-3`.
+      Per R3-fw-3: build on `agent/components/fleetforge/examples/Basic/` (the sketch, its
+      `partitions.csv` and `platformio.ini`); QEMU runs through `lib-qemu/` + `just lib-bundle` / `just lib-qemu`.
       Acceptance: builds unmodified from a clean checkout on both ESP-IDF and Arduino
       (PlatformIO); the README quickstart is exactly the steps a reader follows, and a
       scripted run of those steps passes.
@@ -416,6 +418,14 @@ Order: spec-3 → fw-2 → fw-3/fw-4 → fw-5/fw-6/be-1 → test-1 → spec-2 �
 - [ ] **R3-fw-7**: PlatformIO recipe (P2, 0.5d)
       A working `platformio.ini` for the example, no registry publication (out of scope).
       Depends on `R3-fw-3`. Acceptance: `pio run` on a clean checkout builds both targets.
+      Per R3-fw-3: the harness `examples/Basic/platformio.ini` exists (pioarduino 55.03.312-1 pinned,
+      esp32 + esp32s3; needs PlatformIO Core >= 6.2.0). This task owns the clean-checkout recipe and README.
+- [ ] **R3-fw-8**: Arduino IDE package of the library (P2, 0.5d)
+      The component layout (`include/` + `src/`) is invisible to the Arduino IDE, which compiles
+      and includes `src/` only, so R3-fw-3 ships no `library.properties` (DECISIONS 2026-10-08).
+      Add a flattening package step (one `src/` with the public headers, `library.properties`,
+      the example with its `partitions.csv`) and prove it with `arduino-cli compile` of the
+      example for esp32 and esp32s3 on core 3.3.12. Depends on `R3-fw-3`.
 
 ### Backend and dashboard
 

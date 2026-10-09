@@ -55,3 +55,14 @@ agent/sdkconfig.old
 !agent/dist/
 agent/dist/*
 !agent/dist/.gitkeep
+# PlatformIO build output (R3-fw-3: agent/components/fleetforge/examples/*/.pio). Required,
+# not tidy: check_bundles_fresh.py reads `git status` over the `agent` pathspec, so an
+# untracked .pio/ under agent/ would read as dirty agent sources and mark every bundle STALE.
+.pio/
+# The Arduino library's QEMU harness project (R3-fw-3): only its platformio.ini is source.
+# pioarduino's hybrid compile writes .dummy/, managed_components/, sdkconfig.defaults and
+# sdkconfig.esp32-qemu next to it; untracked, they would read as dirty agent sources too.
+/lib-qemu/*
+!/lib-qemu/platformio.ini
+# PlatformIO's temporary .ino -> .cpp conversion, next to the sketch during a build.
+*.ino.cpp

@@ -20,6 +20,20 @@ COMPONENT_MANIFEST = COMPONENT_DIR / "idf_component.yml"
 MAIN_CMAKE = AGENT_MAIN_DIR / "CMakeLists.txt"
 AGENT_MAIN_C = AGENT_MAIN_DIR / "agent_main.c"
 
+# R3-fw-3: the same component directory is the Arduino library (library.json), and the
+# wrapper is its second consumer. The example and its partitions.csv travel together.
+LIBRARY_JSON = COMPONENT_DIR / "library.json"
+ARDUINO_WRAPPER_CPP = COMPONENT_SRC / "Fleetforge.cpp"
+ARDUINO_WRAPPER_H = COMPONENT_SRC / "Fleetforge.h"
+LIB_VERSION_H = COMPONENT_SRC / "ff_lib_version.h"
+EXAMPLE_DIR = COMPONENT_DIR / "examples" / "Basic"
+EXAMPLE_PARTITIONS = EXAMPLE_DIR / "partitions.csv"
+EXAMPLE_INO = EXAMPLE_DIR / "Basic.ino"
+EXAMPLE_PLATFORMIO_INI = EXAMPLE_DIR / "platformio.ini"
+# The QEMU harness lives OUTSIDE agent/: its hybrid compile writes managed_components/
+# next to it, and agent/ is the IDF build context and a tree tests scan file by file.
+LIB_QEMU_PLATFORMIO_INI = AGENT_DIR.parent / "lib-qemu" / "platformio.ini"
+
 
 def agent_sources() -> list[Path]:
     """Every `.c` / `.h` the agent firmware is built from: main plus the component."""
