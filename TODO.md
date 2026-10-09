@@ -2,7 +2,7 @@
 
 **Goal:** Self-hosted OTA firmware management for embedded fleets (ESP32 first) — a bad
 build is caught before the fleet, and any device that gets one recovers itself.
-**Updated:** 2026-10-04
+**Updated:** 2026-10-08
 
 ## Where this stands
 
@@ -20,39 +20,38 @@ build is caught before the fleet, and any device that gets one recovers itself.
 
 **Not yet, and why it matters:**
 
-- Confirm/rollback is reported only from agent 0.4.0 on (R2-be-1). Prod's board is on
-  0.3.1, so the deploy that first carries 0.4.x to it still parks at `rebooting`. From then
-  on every deploy ends `confirmed` or `rolled_back`.
+- Confirm/rollback is reported only from agent 0.4.0 on (R2-be-1). From then on every deploy
+  ends `confirmed` or `rolled_back`.
 - An image that boots, gets its announce acked and is broken anyway confirms itself and
   **nothing recovers it**. Roll to **one board at a time**. (The flaky radio is no longer a
-  reason: R2-test-2 showed in QEMU that the download and the confirm timer never overlap.
-  Bench replay owed.)
+  reason: R2-test-2 showed in QEMU that the download and the confirm timer never overlap.)
 - A store connection that goes silent mid-download no longer holds the board's update
   slot: since agent 0.4.4 (R2-fw-5) the download fails as `download stalled` 60-80 s after
-  the last byte and the next deploy starts (proven in QEMU, bench replay owed). A peer that
+  the last byte and the next deploy starts (proven in QEMU). A peer that
   goes silent before the first 1 KB of body is still not caught.
 - An OTA'd image that hangs before its broker session rolls back by itself since agent
-  0.4.3 (R2-fw-4): proven in QEMU, bench replay owed.
+  0.4.3 (R2-fw-4): proven in QEMU.
 - Every device has `name: null`. Now `R2b-be-1` / `R2b-fe-6`.
 - The operator experience (onboard, update, change Wi-Fi) is specified as three flows in
   `spec/flows.md` (2026-10-04) and is **R2b** below. Almost all of it is dashboard work that
   needs no new protocol; only the known-networks list touches the agent and `ff_cfg`.
 
-**Now: R2 — safe deploy (verify + auto-rollback), opened 2026-10-03.** The CUJ-1 T3 gate
+**Approach change (2026-10-08): no hardware bench tests.** Every proof is QEMU, the simulator
+or a unit test; a task whose acceptance needs a person at a board is not filed. The bench
+tasks, scripts and runbooks are gone (`DECISIONS.md` 2026-10-08). **R3 is now open.**
+
+**Was: R2 — safe deploy (verify + auto-rollback), opened 2026-10-03.** The CUJ-1 T3 gate
 re-ran and passed on its graded segments (3: enroll, 5: OTA reports the new version); the dashboard
 and server half of 6 and of the wrong-layout refusal is `just update-e2e` (R2b-test-3); the
-on-device half is still QEMU/bench. `jeep` found nothing assessable in what the
+on-device half is still QEMU. `jeep` found nothing assessable in what the
 run could show, so the pass rests on the deterministic judge. Task list below; background in
 [docs/features/ota-deploy.md](docs/features/ota-deploy.md) → *Phase 2*.
 
 **Blocked:**
 
-- `S0-test-1` and `S0-test-2` are deferred to after R2b (2026-10-04) and need hardware:
-  a CP2102/CH340 board for Checks A-E (the bench S3 has only native USB), the S3 for
-  Check F. Both on the Windows + Chrome bench (settled 2026-10-02).
-- **R3 (thin OTA library)** waits on R2 by decision
-  (`design/decisions/ota-library-ships-after-safe-deploy.md`). Its task list lives in
-  [docs/features/ota-library.md](docs/features/ota-library.md) until it opens.
+- `S0-bug-1` (board `94a990dd09a4` offline) and `R2b-test-1` (a human unaided run) still
+  need a person at a board. Kept, not on R3's path; withdraw them if the new approach
+  should cover them too.
 - **A dev box with pruned images cannot `just up`**: `minio/minio` and `minio/mc` no
   longer pull (`DECISIONS.md` 2026-10-01). No task filed yet.
 
@@ -60,7 +59,7 @@ run could show, so the pass rests on the deterministic judge. Task list below; b
 <!-- Sprint 0 counters: fe=8 fw=4 infra=10 test=4 ops=1 bug=1 -->
 <!-- R1 counters: be=3 fe=1 fw=2 test=1 -->
 <!-- R2 counters: fw=6 be=1 fe=1 test=2 spec=1 (fw-3 is the R1-landed confirm timer) -->
-<!-- R3 counters: spec=1 fw=4 test=1 -->
+<!-- R3 counters: spec=3 fw=7 be=2 fe=1 test=2 rel=1 -->
 <!-- R2b counters: spec=3 fe=13 be=5 fw=1 test=4 -->
 
 Live status lives ONLY here. States: `- [ ]` open · `- [x]` done · `- [!]`
@@ -242,8 +241,7 @@ are R3). Order inside each flow: the one-place status first, then the cards, the
 - [x] **R2b-fe-5**: Watch the console and the server together (P1, 1d) _(done 2026-10-04; see docs/features/enrollment.md)_
       A native-USB reset must not read as "no board": mark Enrolled / On the fleet from the
       device list or `GET /v1/events` even when the console lost the port. Built without waiting
-      for the bench: the server's view is the truth either way. `S0-test-2` (Check F) tests it
-      afterwards.
+      for the bench: the server's view is the truth either way. It has no bench test.
 - [x] **R2b-be-1**: Set a device's name and tag (P1, 0.5d) _(done 2026-10-04; see docs/features/dashboard.md)_
       `name` is in the schema and in `GET /v1/devices`, but nothing sets it, so every device
       is `null`. A `PATCH /v1/devices/{id}`, admin-only. Acceptance: round-trips and shows in
@@ -296,15 +294,6 @@ are R3). Order inside each flow: the one-place status first, then the cards, the
 - [x] **R2b-fe-11**: "Send again" after a failure before reboot (P2, 0.5d) _(done 2026-10-04; see docs/features/dashboard.md)_
       Safe because a repeated stage is deduplicated on the board (R2-fw-6). Not offered after
       a rollback.
-- [ ] **R2b-test-2**: Bench replay of the R2 recovery paths proven only in QEMU (P1, 1d)
-      Boot loop, power cut mid-download, hang before the session, silent store, marginal
-      radio: `docs/runbooks/rollback-test.md`. Flow 2's "rolls back on its own" rests on it.
-      Hardware-gated; needs the special fault-injection build.
-      _(2026-10-04: bench script docs/runbooks/bench-replay.md and judge `just bench-judge`;
-      rehearsed on dev (simulator + QEMU esp32: power-cut, confirmed, bootloop, hang all JUDGE
-      PASS); esp32s3 bench images built at 1a00f7e. Bench run owed: waits on S0-bug-1 (board
-      offline), the board on agent ≥ 0.4.5 (S0-infra-10 or a normal deploy), and an upload path
-      on prod (R2b release or the curl fallback).)_
 - [x] **R2b-test-3**: Update flow end to end (P1, 1d) _(done 2026-10-05; see docs/features/ota-deploy.md)_
       Upload from the dashboard, pre-check refuses a wrong-layout build, upload refuses the merged
       binary, deploy a good build to `confirmed`, deploy a deliberately broken one to
@@ -330,10 +319,6 @@ are R3). Order inside each flow: the one-place status first, then the cards, the
       `SUPPORTED_LAYOUTS` → `{layout: {ota_slot_size, partition_table_sha256}}` with a pin in
       `tests/test_agent_partitions.py`. Depends on `R2b-be-6`.
       Spec applied in 8cb5335 (Patch A). Apply Patch B (announce example keys) in this task's commit. See docs/features/board-profiles.md → *Step 1 wire proposal*.
-- [ ] **R2b-test-5**: Bench a rollback-less bootloader to settle `rollback_capable: false` (P2, 0.5d)
-      What an OTA'd image observes (`NEW` or `VALID`) when the bootloader has no rollback.
-      Gates `R2b-fw-2` emitting `false`. Hardware-gated.
-
 ### Flow 3 — Change the network (known networks)
 
 - [x] **R2b-fw-1**: Agent reads a list of known networks and joins the first it can see (P1, 2d) _(done 2026-10-05; reviewed; see docs/features/enrollment.md)_
@@ -355,92 +340,122 @@ are R3). Order inside each flow: the one-place status first, then the cards, the
       from powered off (R2b-spec-1). Only the result card, which reads the console, names
       "none of its 2 known networks is in range".
       Depends on `R2b-be-5`.
-- [ ] **R2b-test-4**: Move a board between two networks on the bench (P1, 0.5d)
-      Flash with two networks, power it where only the second is in range, see it join and
-      the row change. Hardware-gated. Depends on `R2b-fw-1`.
-      _(2026-10-05: bench script docs/runbooks/known-networks-bench.md and checker `just bench-net`;
-      rehearsed on dev with the simulator (a to b move incl. a half-open old session: NET PASS);
-      esp32s3 0.4.7 bundle at 8cf4475 for the esptool route. Bench run owed: waits on the R2b
-      release to prod (be-5/fe-12/fe-13, migration 0005), an agent ≥ 0.4.6 on the flash path
-      (S0-infra-10 or the esptool route), S0-bug-1, and a second 2.4 GHz network at the bench.)_
+---
 
-### Bench verification — after the flows land
+## R3: Thin OTA library + first CUJ
 
-Moved from Sprint 0 on 2026-10-04: the bench runs wait until the new flows exist, so the
-console and the merged watch are tested once, in their final form. Order: `S0-bug-1` first
-(Sprint 0), then Check A–D when a bridge board is on hand, then E and F back to back (both
-re-flash `94a990dd09a4`).
+Opened 2026-10-08. The four-verb contract as something a maker embeds in **their own**
+firmware: ESP-IDF component, Arduino library, a worked example, the first CUJ end to end.
+Plan substance, the spike result (`R3-fw-1`, layout `ab-4m-arduino-v1`) and the CUJ
+(`R3-spec-1`) are in [docs/features/ota-library.md](docs/features/ota-library.md).
+**No hardware: every acceptance below is QEMU, the simulator, a compile or a unit test.**
+Order: spec-3 → fw-2 → fw-3/fw-4 → fw-5/fw-6/be-1 → test-1 → spec-2 → test-2 → rel-1.
+`spec/` and `design/` are protected: spec tasks file proposals, the owner applies them.
 
-- [ ] **S0-test-1**: Bench-verify the serial console on real hardware (P1, 0.5d) _(deferred 2026-10-04: moved here from Sprint 0, to be run after the R2b flows land. Hardware-gated: needs a CP2102/CH340 board, which is not on hand. Id kept so the runbook and notes still resolve.)_
-      Filed 2026-09-10, when S0-fe-1 shipped. Its software half is proven in jsdom against
-      replays of real `agent/main/*.c` output. These four cannot be, because they are
-      properties of a USB bridge chip and an OS, not of the classifier. The bench is
-      Windows + Chrome (settled 2026-10-02). The Linux dev box does not enumerate boards
-      over WebSerial.
-      * **Re-acquire after `hard_reset`, bridge-chip path**. `serialConsole.ts` re-reads
-        `navigator.serial.getPorts()` every 250 ms for 8 s. On a classic esp32 the port
-        *survives* the reset, so this must reconnect without ever showing "No board is
-        available to watch". The native-USB half of this check is **S0-test-2**. No
-        C3/C6/S3 board is on hand (2026-09-11).
-      * **115200 decodes cleanly**. `sdkconfig.defaults` sets no
-        `CONFIG_ESP_CONSOLE_UART_BAUDRATE` so this must be right, but a wrong baud
-        yields plausible-looking mojibake rather than an error. The classifier would
-        then silently match nothing.
-      * **The EN pulse boots the app, not the ROM loader**. `SerialConsole.reboot()`
-        drives RTS high with DTR low. If the wiring inverts, the board lands in download
-        mode and prints `waiting for download` forever.
-      * **Release really releases**. After the button, the COM port must open in another
-        terminal (for example,PuTTY, 115200). If it reports "Access denied" / port in use,
-        `port.close()` is not being reached.
-      Acceptance: all four confirmed against **any** bridge-chip board (CP2102 or CH340) —
-      retargeted 2026-09-23, since the DevKit v1 is out of consideration and this task
-      tests the bridge-chip *path*, not that board. Anything that fails comes back as a
-      new S0 task with the observed behavior.
-      The bench host is Windows + Chrome (settled 2026-10-02, earlier entries said the Mac).
-      Re-acquire is an OS-and-driver property — record the driver and COM port used.
-      * **Folded in from S0-fe-8 (accepted 2026-10-01 without a bench run)**. On Windows,
-        with the board's VCP driver *not* installed, an operator who has never installed one
-        reaches a working COM port using only "My board does not appear" on the flash page:
-        no Device Manager, no asking. Also confirm that picking COM1 gets refused by name
-        and that the Silicon Labs driver link resolves (the dev box gets a 403 from Akamai).
-      Bench script: docs/runbooks/serial-console-bench.md (2026-10-03). Board: **not the
-      bench S3** (2026-10-04: it has one native-USB socket and no bridge chip, so the UART-socket
-      proposal is withdrawn). Needs any CP2102/CH340 ESP32 board, not yet on hand. Check E
-      re-flashes the board it runs on; if that is 94a990dd09a4, it ends its 0.3.1 baseline.
+### Spec (proposals)
 
-- [ ] **S0-test-2**: The native-USB re-acquire path, on a C3/C6/S3 (P2, 0.25d) _(deferred 2026-10-04: moved here from Sprint 0, to be run after the R2b flows land, so it also tests the merged watch (`R2b-fe-5`). Hardware-gated: Check F on the Windows + Chrome bench with the ESP32-S3 (94a990dd09a4) on native USB (COM3). Id kept.)_
-      Split from S0-test-1 on 2026-09-11: the only board on hand is an ESP32-DevKit v1,
-      whose bridge chip keeps the port alive across `hard_reset`. That exercises the
-      *easy* half. The 8 s `getPorts()` poll in `serialConsole.ts` exists for the parts
-      that come back as a **different** `SerialPort`. Nothing has ever tested it on
-      metal. A too-short window shows "No board is available to watch" on a board that
-      is merely rebooting. This is the exact false negative the console exists to
-      delete. ~~**Blocked on acquiring a C3, C6 or S3.**~~
-      **Unblocked 2026-09-22**. An **ESP32-S3** is on hand and enrolled against
-      prod — device `94a990dd09a4`, the board that passed `R0-test-2` on 2026-09-19. This
-      task's premise ("the only board on hand is an ESP32-DevKit v1") is simply out of
-      date. Cheap to run now, since the board is already flashed and known-good.
-      Acceptance: on the bench, `hard_reset` from the console on a native-USB board
-      reconnects inside the window and streams the boot log without operator action.
-      The bench is **Windows + Chrome** (settled 2026-10-02): the S3 enrolled from it with
-      native USB on COM3. Earlier entries said the Mac; that is superseded. Record the
-      driver and COM port used — the re-acquire window is an OS-and-driver property.
-      Bench script: docs/runbooks/serial-console-bench.md → Check F (2026-10-03). Run it right
-      after S0-test-1's Check E: both re-flash `94a990dd09a4`, so the 0.3.1 baseline is given up
-      once. The panel's `watching …: opened on try N, T ms`
-      notice needs the frontend release after this commit on prod.
-      **2026-10-04 bench, partial.** Frontend 0.4.2 on prod. The S3 was flashed from COM3
-      (`303a:1001`, driver `usbser.sys`, serial `94:A9:90:DD:09:A4`, Windows 10, Chrome
-      154.0.8037.58). The console opened by itself and streamed the log with no click, which
-      is the core of this check. **Not recorded:** the `opened on try N, T ms` notice and
-      whether "No board is available to watch" appeared. The board then stalled at "Clock
-      set" (`S0-bug-1`). Needs one clean re-run once the board is on the fleet; that re-run
-      now waits for R2b.
+- [ ] **R3-spec-3**: Decide how the library marker is encoded in the app binary (P1, 0.5d)
+      Open since `spec/flows.md` (R2b). Candidates: a string in `esp_app_desc_t`, a section
+      the library links in, or a constant the pre-check can find in the image. It must be
+      readable by the server at upload (`R3-be-1`) and survive both ESP-IDF and Arduino builds.
+      Record in `DECISIONS.md` and file the `spec/` proposal. Blocks `R3-fw-6`, `R3-be-1`.
+- [ ] **R3-spec-2**: Propose the CUJ-1 Driver table for R3 (P1, 0.5d)
+      Steps 1-2 (sketch compiles with the library) and 6 (bad build recovers) get harnesses
+      (`R3-fw-4`, `R3-test-1`); step 5 names `just update-e2e` for the server and dashboard
+      half (DECISIONS 2026-10-05 proposal). Proposal only; `spec/cujs.md` is protected.
+      Depends on `R3-test-1`.
+
+### Firmware
+
+- [ ] **R3-fw-2**: Extract the protocol into an ESP-IDF component (P1, 2d)
+      `agent/main/` already separates protocol from demo app: `ff_ota`, `ff_mqtt`,
+      `ff_enroll`, `ff_cfg`, `ff_store`, `ff_identity`, `ff_net`, `ff_time`. Move them to
+      a component with an `idf_component.yml`. The agent becomes its first consumer and
+      must keep passing `just agent-verify` and the QEMU E2E unchanged.
+      The real work is deciding the **public** surface — whatever ships is additive-only
+      from then on, exactly like the wire protocol. Keep it to the four verbs, enroll,
+      announce/heartbeat, and a version accessor. CRITICAL (confirm timer, A/B apply move).
+      Acceptance: the agent builds from the component with no behavior change, the QEMU
+      run in `docs/runbooks/agent-qemu.md` still passes. The component's public
+      headers are a strict subset of what `agent_main.c` uses.
+- [ ] **R3-fw-3**: Arduino library wrapping the same C (P1, 2d)
+      Depends on `R3-fw-2`. The persona writes Arduino or PlatformIO and does not use
+      ESP-IDF (`docs/personas/PERSONAS.md` §1). Ships layout **`ab-4m-arduino-v1`** as a
+      sketch-local `partitions.csv` that travels with the **example** (the prebuild hook
+      reads only the sketch folder), config still in a flashable `ff_cfg`
+      (`design/decisions/arduino-gets-its-own-layout-id.md`). The library must read the same
+      known-networks list as the agent (`R2b-fw-1`), or an OTA to the maker's firmware
+      strands the board. The stock core is already `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`;
+      a configuration that cannot roll back must fail at build or enroll, not warn.
+      Acceptance: Arduino-framework builds (PlatformIO on the dev box, `pio` is installed)
+      of the example for esp32 and esp32s3 compile; the esp32 build enrolls and heartbeats
+      in QEMU against the dev stack.
+- [ ] **R3-fw-4**: The worked example — enroll → heartbeat → stage → report version (P1, 1d)
+      Small enough to read in one screen: the PRD's Morse-code blinker, which changes its
+      message between two builds so "the OTA worked" is visible in the log and the
+      dashboard version. Depends on `R3-fw-2`, `R3-fw-3`.
+      Acceptance: builds unmodified from a clean checkout on both ESP-IDF and Arduino
+      (PlatformIO); the README quickstart is exactly the steps a reader follows, and a
+      scripted run of those steps passes.
+- [ ] **R3-fw-5**: Reject a wrong flash layout loudly (P1, 1d)
+      A build that does not reproduce a supported layout exactly must announce a different
+      `partition_layout`, and the deploy refusal must tell a library user what to fix.
+      **Do not use the IDE's `Maximum is N bytes` line as the check** (R3-fw-1 measured it
+      wrong). Depends on `R3-fw-3`.
+      Acceptance: a deliberately mismatched layout (simulator or QEMU, no board) triggers a
+      refusal at deploy time naming the expected layout and slot size; the library does not
+      start its OTA path on a bootloader without rollback.
+- [ ] **R3-fw-6**: Library build carries the marker and announces it (P1, 1d)
+      CRITICAL (announce is protocol). Implements `R3-spec-3`; additive field only. Depends
+      on `R3-spec-3`, `R3-fw-2`.
+      Acceptance: the QEMU example announces the marker; the stock agent and every pre-R3
+      board announce none and are not refused for it (`null` never warns).
+- [ ] **R3-fw-7**: PlatformIO recipe (P2, 0.5d)
+      A working `platformio.ini` for the example, no registry publication (out of scope).
+      Depends on `R3-fw-3`. Acceptance: `pio run` on a clean checkout builds both targets.
+
+### Backend and dashboard
+
+- [ ] **R3-be-1**: Pre-check: a binary without the library marker is a gating warning (P1, 1d)
+      The second gating code after `rollback_incapable` (`deploy_precheck.py`,
+      `GATING_CODES`, `tests/test_deploy_precheck.py::TestOverrideCodes`). Detect from the
+      image at upload. Not for the stock agent's own bundles. Depends on `R3-spec-3`.
+      Acceptance: a plain sketch `.bin` warns and needs `override: [code]`; a library build
+      and an agent bundle do not; unit tests pin all three.
+- [ ] **R3-be-2**: Partition profile table with detected and user-defined entries (P2, 3d)
+      Board-profiles step 2 ([board-profiles.md](docs/features/board-profiles.md)): the
+      `partition_profiles` table seeded from the catalog, `builtin` immutable vs `user`,
+      a `detected` profile created in pending state from an unknown id with a valid
+      fingerprint. Decide per-fleet vs global first (open in that doc). Alembic migration
+      is CRITICAL. Depends on `R3-fw-3` (the second real layout).
+      Acceptance: `SUPPORTED_LAYOUTS` is read from the table; both layouts seeded; an
+      unknown announced layout lands as `detected` and is not deployable until adopted.
+- [ ] **R3-fe-1**: Dashboard adopts or names a detected profile (P2, 1d)
+      Depends on `R3-be-2`. Acceptance: in `just update-e2e` style Chromium run, a detected
+      profile shows, can be named, and then accepts a deploy.
+
+### Test and release
+
+- [ ] **R3-test-1**: E2E in QEMU — example firmware enrolls, updates, rolls back (P1, 1d)
+      The library gets the same proof as the agent: `docs/runbooks/agent-qemu.md` boots the
+      real bundle against the dev stack. Three runs: a clean enroll, an OTA to a second
+      build whose visible behavior differs, and a deliberately broken build that rolls back
+      unaided and reports `rolled-back`. Depends on `R3-fw-4`.
+      Acceptance: all three pass with no board; the rollback run fails the test if the
+      device reports `confirmed`.
+- [ ] **R3-test-2**: Play CUJ-1 end to end with every segment gradeable (P1, 0.5d)
+      The T3 gate (`/verify`) with the segments from `R3-spec-2` applied by the owner.
+      Depends on `R3-test-1`, `R3-spec-2`. Acceptance: deterministic judge passes on steps
+      1-3, 5, 6; any segment still without a harness is listed, not scored.
+- [ ] **R3-rel-1**: Quickstart, archive and release (P1, 0.5d)
+      README quickstart for the library, `docs/features/ota-library.md` completed entries,
+      `agent/version.txt` bump, `/release fleetforge minor`, then
+      `just agent-publish-all` + `just agent-check-prod` **only with the owner's go-ahead**.
+      Depends on everything above.
 
 ### Order
 
 1. `S0-bug-1` (Sprint 0). 2. `R2b-fe-1`, `-2`, `-3`, `-7` and `R2b-be-2`, `-3` (no dependencies).
 3. `R2b-fe-8`..`fe-10`, `R2b-fe-4`, `R2b-fe-5`, `R2b-be-1`/`fe-6`. 4. `R2b-spec-1`, then `R2b-fw-1`,
 `fe-12`, `be-5`, `fe-13`; `R2b-spec-2`'s follow-ups (`be-6`, `be-7`, `fw-2`) once the owner
-applies Patch A; `R2b-test-5` with the bench runs. 5. The `R2b-test-*` tasks and the bench verification (`S0-test-1`,
-`S0-test-2`) last, on the final flows. `R2b-spec-3` can run any time and gates future Improv work.
+applies Patch A; 5. `R2b-test-1` last. `R2b-spec-3` can run any time and gates future Improv work.

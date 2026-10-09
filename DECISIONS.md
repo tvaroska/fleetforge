@@ -6,6 +6,17 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-08 — No hardware bench tests; R3 opens with QEMU/simulator-only acceptance
+
+**Decided: fleetforge stops filing and keeping tasks whose acceptance needs a person at a board. Removed: `S0-test-1`, `S0-test-2`, `R2b-test-2`, `R2b-test-4`, `R2b-test-5` (TODO), `scripts/bench_judge.py`, `scripts/bench_net.py`, their tests, the `bench-judge` and `bench-net` recipes, and the `bench-replay`, `known-networks-bench` and `serial-console-bench` runbooks. R3 (thin OTA library) is open, task list in `TODO.md` → *R3*.**
+
+- **Why.** The bench was one Windows + Chrome machine with one native-USB S3, which is offline (`S0-bug-1`) and cannot run the bridge-chip checks. The hardware-gated tasks sat open for weeks and blocked nothing they proved. QEMU and the simulator already carry every recovery path (R2-test-1/2, R2-fw-4/5).
+- **Supersedes** the 2026-10-04/05 bench entries below (`bench-replay`, `bench-net`) and every "bench replay owed" line in `docs/features/` and `docs/runbooks/rollback-test.md`: retired, not pending.
+- **Consequences, accepted.** `R2b-fw-2` keeps never emitting `rollback_capable: false` (`R2b-test-5` withdrawn); real-radio network selection and the native-USB re-acquire window stay unproven on metal. `frontend/src/fixtures/bench-*.ts` stay: they are recorded real logs used by jsdom tests, not bench tooling.
+- **Kept:** `S0-bug-1` and `R2b-test-1` (a person at a board); not on R3's path. Withdraw if the new approach should cover them.
+
+---
+
 ## 2026-10-05 — Moving a board between networks is graded from the device row by `just bench-net`; the bench session also checks stay-put, priority on boot and nothing-in-range; the run is held for the R2b release (R2b-test-4)
 
 **Decided: `scripts/bench_net.py` (stdlib only, `just bench-net <device> <ssid> <known> [prod|dev] [timeout]`) polls one `devices` row and grades it; `docs/runbooks/known-networks-bench.md` is the bench session. The task stays `- [ ]`: the acceptance needs the Windows + Chrome bench with the ESP32-S3 and two real 2.4 GHz networks, and this pass has a rehearsal only (R2b-test-1 and R2b-test-2 precedent).**

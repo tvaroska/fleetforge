@@ -25,8 +25,7 @@
 //
 // What it does NOT cover: the real agent. The simulator reports versions it was told; the
 // CUJ judge's "fw_version from the running image's own descriptor" and a real rollback are
-// QEMU / bench territory (R2-test-1, R2b-test-2). Independent grading of the good deploy:
-// `just bench-judge confirmed <good cmd_id> dev`.
+// QEMU territory (R2-test-1).
 //
 // Not a test and not wired into `npm test`. It needs the dev stack (`just up`), `uv`, and
 // the admin password. Playwright is resolved at runtime and is deliberately NOT a dependency

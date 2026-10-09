@@ -159,55 +159,12 @@ capacity-check *args:
 capacity-check-prod *args:
     ssh prod 'python3 - --watch 900 --interval 30 {{args}}' < scripts/capacity_snapshot.py
 
-# ── Bench replay judge (R2b-test-2) ──────────────────────────────────────────
-#
-# Grades one deploy transaction's deploy_events rows against a bench scenario
-# (docs/runbooks/bench-replay.md). ref = cmd_id (32 hex) or device id (12 hex:
-# its newest transaction); anything else is refused before any SQL exists. The
-# SELECT goes to psql on stdin (read-only on prod, over ssh). Exit: 0 PASS,
-# 1 FAIL, 2 usage/refused/no rows, 3 INCOMPLETE (run again later).
-#
-#     just bench-judge bootloop 94a990dd09a4          # prod
-#     just bench-judge confirmed <cmd_id> dev          # the dev stack
-#     python3 scripts/bench_judge.py --list            # the scenarios
-#
-# Grade one bench-replay transaction (prod: a read-only SELECT over ssh).
-bench-judge $scenario $ref $where="prod":
-    #!/usr/bin/env bash
-    set -euo pipefail
-    # The arguments arrive as env vars ($scenario, $ref, $where), never spliced into this script.
-    case "$where" in prod|dev) ;; *) echo "where must be prod or dev, not '$where'" >&2; exit 2;; esac
-    python3 scripts/bench_judge.py --list | cut -d' ' -f1 | grep -qxF -- "$scenario" \
-        || { echo "unknown scenario '$scenario'; see: python3 scripts/bench_judge.py --list" >&2; exit 2; }
-    sql=$(python3 scripts/bench_judge.py --sql "$ref") || exit 2
-    if [ "$where" = prod ]; then
-        printf '%s\n' "$sql" | ssh prod 'cd /opt/boris/prod && docker compose exec -T postgres psql -U fleetforge fleetforge -v ON_ERROR_STOP=1 -At -F "|"'
-    else
-        printf '%s\n' "$sql" | docker compose exec -T postgres psql -U fleetforge fleetforge -v ON_ERROR_STOP=1 -At -F '|'
-    fi | python3 scripts/bench_judge.py "$scenario"
-
-# ── Known networks bench (R2b-test-4) ────────────────────────────────────────
-#
-# Is the board online on the expected network? Polls one device row (psql: over ssh
-# for prod, in the dev stack for dev) until it is, prints each change of the row, and
-# grades it (docs/runbooks/known-networks-bench.md). The SSID is compared exactly and
-# never enters SQL; a device that is not 12 hex is refused before anything runs.
-# Exit: 0 NET PASS, 1 NET FAIL (wrong flash), 2 usage/refused/no device/fetch error,
-# 3 NET WAIT / NET TIMEOUT. timeout 0 reads once.
-#
-#     just bench-net 94a990dd09a4 "bench-ap" 2            # prod, waits up to 300 s
-#     just bench-net 94a990dd09a4 "bench-ap" 2 prod 0     # one read, for the record sheet
-#
-# Wait until a board is online on SSID with `known` networks configured (prod: a read-only SELECT over ssh).
-bench-net $device $ssid $known="2" $where="prod" $timeout="300":
-    python3 scripts/bench_net.py watch "$device" --ssid="$ssid" --known="$known" --where="$where" --timeout="$timeout"
-
 # ── Update flow end to end (R2b-test-3) ──────────────────────────────────────
 #
 # Flow 2 (upload, pre-check, deploy to confirmed, deploy to rolled back) played through
 # the real dashboard in a real Chromium against the dev stack (`just up`), with two
 # simulated boards. Prints PASS/FAIL per scenario, `N/6 pass`, and the good and broken
-# cmd_ids (grade the good one with `just bench-judge confirmed <cmd_id> dev`). Evidence:
+# cmd_ids. Evidence:
 # /tmp/ff-r2b-test-3/ (a .txt and a .png per scenario (element shots), the simulator logs, run.json).
 # Leaves two simulated boards and four labels per run in the dev DB; deletes nothing.
 # `E2E_BREAK=<scenario id> just update-e2e` flips one expectation: the run must then FAIL.
@@ -752,7 +709,7 @@ agent-qemu-otadata target="esp32" *args="decode":
 # FF_S3_PUBLIC_ENDPOINT_URL must point at the 1xxxx ports (docs/runbooks/agent-qemu.md ->
 # "Driving a flaky link"). Modes: pass, throttle:N, blackhole, reset (agent/tools/flaky_link.py).
 # Slirp is the guest's TCP peer and ACKs whatever happens here, so an outage always looks
-# like "the far end is alive but silent" to the board. Proven in QEMU; bench replay owed.
+# like "the far end is alive but silent" to the board. Proven in QEMU.
 # Flaky link proxy for QEMU runs (R2-test-2)
 agent-qemu-flaky schedule="0=pass" *args="":
     #!/usr/bin/env bash

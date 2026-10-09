@@ -82,8 +82,8 @@ item as it happens, without helping. Each is tied to the task that built it.
       re-enrol this board" (`R2b-fe-2`).
 - [ ] After the write the tester touches nothing. The console re-acquires the native-USB
       port by itself and never shows "No board is available to watch" (`R2b-fe-5`). Record the
-      `watching ...: opened on try N, T ms into the 8 s window` notice; it also serves
-      `S0-test-2` Check F (`serial-console-bench.md`).
+      `watching ...: opened on try N, T ms into the 8 s window` notice; it was once meant
+      to serve the retired bench Check F.
 - [ ] The milestone timeline reaches **On the fleet**, and the success card shows device id,
       firmware, layout, link, clock source, enrolled, on the fleet, UI and API (`R2b-fe-3`).
 - [ ] The tester names the board from the card and finds it by that name in the fleet table
