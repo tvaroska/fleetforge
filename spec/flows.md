@@ -141,7 +141,7 @@ What the operator sees is **one flow with one result**, under the same status st
 - **Crash reason after a rollback is best effort.** An installed board has no USB cable. After the bootloader rolls back, the surviving slot reports `rolled_back` and, where it can, the failed boot's reset reason and last milestone. Whether the reset reason and a breadcrumb survive a rollback, and a brownout or power loss, is not established: [ota-deploy.md](../docs/features/ota-deploy.md) → *Operator-flow additions*.
 - **The deployment is an API resource.** The result card, an audit record (who, what, when) and a CI client read the same thing. This is the audit trail Marcus needs; rings and provenance build on it later.
 - **The timeline reports only what the agent reports.** No progress bar: `downloading` is published once, so a bar would sit still and read as a hang.
-- **Open, recorded not decided:** how a sleepy battery node avoids a false rollback from the confirm timer (beyond surfacing its sleepy wake window at pre-check), and how the Fleetforge library marker is encoded in the app binary header (R3).
+- **Open, recorded not decided:** how a sleepy battery node avoids a false rollback from the confirm timer (beyond surfacing its sleepy wake window at pre-check).
 
 **Decisions (transaction):**
 - **Artifact source = user's own toolchain (v1).** They build the `.bin` (idf.py / PlatformIO / Arduino); the server never builds in v1. *V2 adds a server-side compiler as one more producer — see [build-pipeline.md](../docs/features/build-pipeline.md).* Artifacts are opaque + versioned.

@@ -79,34 +79,44 @@ of it: the prebuilt agent is the demo of this, not the substitute for it.
 - `standards.md` → *enrollment* → **Unaided onboarding** — step 3: flash to green in the
   fleet list, with no UART log in any path.
 - `standards.md` → *dashboard* → **Getting firmware in is a dashboard operation** —
-  step 5's first half. Alex uploads the `.bin` their IDE just built; today that step is
-  `docs/runbooks/upload-artifact.sh`, which is outside the journey as written.
+  step 5's first half. Alex uploads the `.bin` their IDE just built from the dashboard's
+  upload form (`flows.md` Flow 2).
 - `spec/device-protocol.md` — the wire contract both the library and the agent speak.
 - Releases: R0 (enroll) · R1 (OTA transport) · R2 (auto-rollback) · R3 (the library
   itself). See `docs/releases.md`.
 
 **Driver:** segmented — this journey crosses four releases. Each segment names the harness
-that plays it; a segment whose harness does not exist yet is **not graded**.
+that plays it and whether it is graded; a segment whose harness does not exist yet is
+**not graded**, and neither is a half that names a procedure rather than a command.
 
-| Steps | Segment | Harness |
-|---|---|---|
-| 1–2 | Sketch compiles with the library added | The worked example's build on both ESP-IDF and Arduino, from a clean checkout |
-| 3 | One flash → board on the fleet | `just agent-qemu esp32` (boots the real bundle against the dev stack and enrols); `just agent-qemu-smoke esp32` for the unattended form; `pytest tests/test_enroll.py` for the `POST /v1/enroll` surface |
-| 5 | OTA a changed build → new version reported | `just sim-fleet 1 --capabilities ota` then `POST /v1/devices/{id}/deploy` for the server half; the on-device path per `docs/runbooks/agent-qemu.md` |
-| 6 | A bad build recovers itself | A QEMU run that deploys a deliberately broken build and requires `rolled-back` |
-| — | A wrong flash layout is refused, not flashed | A deploy against a build whose partition table disagrees with its announced `partition_layout` |
+| Steps | Segment | Harness | Graded |
+|---|---|---|---|
+| 1–2 | Sketch compiles with the library added | `just lib-quickstart --build-only`: the worked example's README build steps, run verbatim in a clean copy of the tree — Arduino (PlatformIO) for esp32 and esp32s3 plus the edited second build, and ESP-IDF for esp32 and esp32s3 | yes |
+| 3 | One flash → board on the fleet | `just lib-quickstart`, phase 2a (enroll): the example, flashed once in QEMU in place of the USB flash, enrolls and heartbeats against the dev stack and is online in the fleet list on the version it was built with; `pytest tests/test_enroll.py` for the `POST /v1/enroll` surface | yes |
+| 5 | OTA a changed build → new version reported | On the device: `just lib-quickstart`, phase 2b (OTA): the edited build is uploaded, deployed and confirmed, and the board reports its version. Server and dashboard: `just update-e2e`, scenarios `upload-good` and `deploy-good` — the build is uploaded from the dashboard form, sent, and the result card says good | yes |
+| 6 | A bad build recovers itself | On the device: `just lib-quickstart`, phase 2c (rollback): a build that never confirms is deployed, and the run requires `rolled_back` and the previous `fw_version` and fails on any `confirmed`. Server and dashboard: `just update-e2e`, scenario `deploy-broken` | yes |
+| — | A wrong flash layout is refused, not flashed | Server and dashboard: `just update-e2e`, scenario `precheck-wrong-layout` — a refusal card with no Send, and a direct deploy is a 409 that sends nothing. On the device: `docs/runbooks/agent-qemu.md` → *A wrong flash layout is refused* (a procedure) | server and dashboard half |
 
-Steps 4 (physical install) and the unaided half of step 3 are human, and are proved at the
-bench rather than by a harness.
+One full `just lib-quickstart` run plays segments 1–2, 3, 5 and 6 on the device, in that
+order, on one emulated board; the API must give that board `10.0.2.2` origins
+(`docs/runbooks/agent-qemu.md` → *The worked example, end to end*). QEMU stands in for two
+things a board does by itself: the one USB flash, and the reboot after an update (an
+`on_command` apply and a power cycle). `just update-e2e` plays the dashboard against
+simulated boards that report the versions they were told, so the `fw_version` assertions
+of steps 5 and 6 are graded on the `lib-quickstart` run, never on it.
+
+Step 4 (physical install) and the unaided half of step 3 are done by a person; no harness
+plays them and T3 does not grade them.
 
 **Judge:**
 
 - *Deterministic (must-pass):*
   - After step 3, the device has a row in the fleet list and is online.
   - After step 5, the `fw_version` the device reports equals the version of the build that
-    was uploaded — read from the running image's own descriptor, not from what it was told
-    to install.
-  - After step 6, the device reports `rolled-back` and its `fw_version` is the pre-deploy
+    was uploaded — read from the running image itself (its app descriptor, or in a library
+    build the version compiled into it and handed to the library at start), not from what
+    it was told to install.
+  - After step 6, the device reports `rolled_back` and its `fw_version` is the pre-deploy
     value.
   - A duplicated deploy command produces one download, not two.
 - *Hard-fail traps (cap the score at 0):*

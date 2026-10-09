@@ -145,6 +145,14 @@ announce is republished on every broker connect, so a board that moved to anothe
 reports it in its next session. The passphrase and the other networks' SSIDs are never
 sent.
 
+`lib_marker` is the `format` of the library marker (*Library marker* below) in the image
+the board is running, an integer. It is absent when that image has no marker, which
+includes every agent built before the library. It is additive under *Evolution rules*,
+rule 2, and `proto` stays `1`. The server never refuses or warns on a device for it: the
+pre-check reads the marker from the image being sent, not from the board. The enroll body
+carries it like every other announce field, and the server stores a malformed value as
+null rather than refusing the request.
+
 #### Partition layouts
 
 A layout id names a **whole flash map**, and it is a flash-time immutable: no OTA can
@@ -320,6 +328,41 @@ gateway access only to *its own* subtree. A gateway therefore receives explicit
 additional ACL entries for each child, granted when that child enrols with a
 `parent_device_id`. That is a V3 concern; nothing in v1 needs to anticipate it beyond
 keeping the namespace flat and reserving the field.
+
+## Library marker
+
+An image built with the Fleetforge OTA library (the ESP-IDF component or the Arduino
+library, and so the prebuilt agent built from it) contains one 64-byte constant, the
+library marker. The server looks for it in an uploaded image. It is not in `esp_app_desc_t`
+and not at a fixed offset. Every field is bytes or chars, so byte order does not matter.
+
+| Offset | Size | Field | Value |
+|---|---|---|---|
+| 0 | 16 | `magic` | `14 a9 48 d1 8f 12 cf dd 46 46 4f 54 41 4c 49 42` (hex `14a948d18f12cfdd46464f54414c4942`; the last 8 bytes are ASCII `FFOTALIB`) |
+| 16 | 1 | `format` | `1` |
+| 17 | 3 | reserved | `0` |
+| 20 | 32 | `lib_version` | the library's version: printable ASCII, NUL-terminated, non-empty |
+| 52 | 12 | reserved | `0` |
+
+**Reading it.** Scan the whole image for `magic`. Take each occurrence in order and accept
+the first that has at least 64 bytes from the start of the magic to the end of the image,
+`format` of at least `1`, and a `lib_version` that is a non-empty string of printable ASCII
+(`0x20`-`0x7e`) ended by a NUL within its 32 bytes. Read fields beyond `lib_version` only
+when `format` says they exist. No occurrence, or no valid one, means the image has no
+marker; a malformed marker is no marker, never an error.
+
+**Writing it.** The marker is defined once, in the library, and is present in an image
+exactly when the library's code is linked into it; installing the library without using it
+does not mark an image. It grows only additively: a new field takes reserved bytes and a
+higher `format`, and existing fields never move or change type.
+
+**What it proves.** That the library's code, including its confirm timer, is linked into
+the image. Not that the firmware starts the library, not that its flash layout is right
+(`partition_layout` and `partition_table_sha256` check that), and not that its own logic
+works.
+
+An image without the marker gets a warning with an explicit override at pre-check
+([flows.md](flows.md) Flow 2, step 2), never a refusal.
 
 ## Evolution rules
 

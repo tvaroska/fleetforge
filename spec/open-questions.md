@@ -90,14 +90,14 @@ Improv as the way in, move to R2b-spec-3. Not decided.
 (`ff_mqtt.c::confirm_timeout_cb`), so an image without it arms no timer. The bootloader
 holds it in `PENDING_VERIFY`, and it is rolled back only if the board resets; otherwise it
 runs unconfirmed and offline, the deploy stays at `rebooting`, and no remote action
-reaches it. The pre-check refuses a merged binary and a wrong layout or slot size, but
-cannot tell whether the agent is linked in. Two candidates, not decided. (1) An agent
-signature check at upload (an app-descriptor project name or a marker string), reported
-in the pre-check; catches the plain-sketch mistake, not broken logic. It is the R3
-"library marker" gating warning, brought forward. (2) A watchdog the bootloader arms
-before it enters a `PENDING_VERIFY` image and only the agent's confirm path disarms, so
-a silent image resets and rolls back. It needs a custom bootloader (a one-time USB
-flash, so not OTA-able), applies only where we own the bootloader (not Arduino's), and
-it is unverified whether IDF's startup disables that watchdog before the app runs.
-Neither covers an image that has the agent and confirms but whose own logic is wrong;
-that is the R5 custom self-test.
+reaches it. The pre-check refuses a merged binary and a wrong layout or slot size. Two
+candidates. (1) Decided for detection (R3-spec-3): the library marker read from the image
+at upload ([device-protocol.md](device-protocol.md) → *Library marker*), shown at
+pre-check as the gating warning `no_library_marker`. It catches the plain-sketch mistake,
+not a library that is linked but never started, and not broken logic. (2) Open: a watchdog
+the bootloader arms before it enters a `PENDING_VERIFY` image and only the agent's confirm
+path disarms, so a silent image resets and rolls back. It needs a custom bootloader (a
+one-time USB flash, so not OTA-able), applies only where we own the bootloader (not
+Arduino's), and it is unverified whether IDF's startup disables that watchdog before the
+app runs. Neither covers an image that has the agent and confirms but whose own logic is
+wrong; that is the R5 custom self-test.

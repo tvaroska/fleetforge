@@ -145,7 +145,7 @@ itself (step 5), and recovers from a bad build unaided (step 6).
       behaviour and reports the new version.
 - [ ] **A bad build of their own firmware recovers itself.** A deliberately broken build
       is deployed to a library-based board; it rolls back unaided and reports
-      `rolled-back`.
+      `rolled_back`.
 - [ ] **The example is the documentation.** A worked example — enroll → heartbeat →
       handle `stage` → report version — builds unmodified from a clean checkout on both
       ESP-IDF and Arduino, and is short enough to read in one screen.
