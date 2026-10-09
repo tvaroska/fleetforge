@@ -95,6 +95,23 @@ def test_bundle_predates_agent_main_is_stale(git_repo: Path) -> None:
     assert result == 1
 
 
+def test_bundle_predates_component_change_is_stale(git_repo: Path) -> None:
+    """A bundle built before a change to the `fleetforge` component is STALE (R3-fw-2: the
+    protocol moved to agent/components/fleetforge/, and the pathspec must still cover it)."""
+    old_head = _git(git_repo, "rev-parse", "HEAD").stdout.strip()
+    bundle_dir = git_repo / "agent" / "dist" / "esp32"
+    _write_manifest(bundle_dir, old_head, "2026-09-11T12:00:00Z", "esp32")
+
+    component_src = git_repo / "agent" / "components" / "fleetforge" / "src"
+    component_src.mkdir(parents=True)
+    (component_src / "x.c").write_text("// component change\n")
+    _git(git_repo, "add", "agent/components/fleetforge/src/x.c")
+    _git(git_repo, "commit", "-m", "change the component")
+
+    result = cbf.main(["--repo", str(git_repo), str(bundle_dir)])
+    assert result == 1
+
+
 def test_bundle_after_non_agent_change_is_fresh(git_repo: Path) -> None:
     """A bundle is fresh even after a commit outside agent/ (proves the pathspec)."""
     # Build a bundle at HEAD

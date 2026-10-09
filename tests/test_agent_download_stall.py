@@ -1,6 +1,6 @@
 """A download that stops making progress fails (R2-fw-5) — firmware tripwires, as text.
 
-No host test can execute `agent/main/*.c`; the QEMU run (store proxy blackholed mid-download:
+No host test can execute `agent/components/fleetforge/src/*.c`; the QEMU run (store proxy blackholed mid-download:
 `failed` / `download stalled` 60-80 s after the last byte, otadata unchanged, the next
 deploy runs) is the proof. What CAN be held here, on every `just test`, are the orderings
 that make that true. Each one fails silently: the board stays safe on its old image, and

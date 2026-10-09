@@ -13,8 +13,10 @@ cmake_minimum_required(VERSION 3.16)
 
 file(STRINGS "${CMAKE_CURRENT_LIST_DIR}/version.txt" PROJECT_VER LIMIT_COUNT 1)
 
-# FF_ROLLBACK_TEST — the live test of the confirm/rollback pair (agent/main/ff_mqtt.c,
-# CRITICAL.md "Device-side confirm timer / rollback path"). OFF unless asked for, and a
+# FF_ROLLBACK_TEST — the live test of the confirm/rollback pair
+# (agent/components/fleetforge/src/ff_mqtt.c, CRITICAL.md "Device-side confirm timer /
+# rollback path"; the define itself is set in components/fleetforge/CMakeLists.txt, on the
+# component that compiles ff_mqtt.c). OFF unless asked for, and a
 # build with it ON is DELIBERATELY BROKEN: it never confirms, so it is guaranteed to roll
 # back. One switch rather than two so there is no half-configured state.
 #

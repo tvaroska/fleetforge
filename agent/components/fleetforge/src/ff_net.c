@@ -8,7 +8,7 @@
  * for before believing anything the agent says afterwards.
  */
 
-#include "ff_net.h"
+#include "ff_net_internal.h"
 
 #include "esp_log.h"
 #include "ff_net_adapter.h"

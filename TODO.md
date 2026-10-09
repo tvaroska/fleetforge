@@ -367,7 +367,7 @@ Order: spec-3 → fw-2 → fw-3/fw-4 → fw-5/fw-6/be-1 → test-1 → spec-2 �
 
 ### Firmware
 
-- [ ] **R3-fw-2**: Extract the protocol into an ESP-IDF component (P1, 2d)
+- [x] **R3-fw-2**: Extract the protocol into an ESP-IDF component (P1, 2d) _(done 2026-10-08; reviewed; see docs/features/ota-library.md)_
       `agent/main/` already separates protocol from demo app: `ff_ota`, `ff_mqtt`,
       `ff_enroll`, `ff_cfg`, `ff_store`, `ff_identity`, `ff_net`, `ff_time`. Move them to
       a component with an `idf_component.yml`. The agent becomes its first consumer and

@@ -16,6 +16,54 @@ becomes a board in the field that fixes itself" — this release *is* that journ
 
 ## Completed Work
 
+### R3-fw-2 (2026-10-08): the protocol is the `fleetforge` ESP-IDF component; the agent is its first consumer
+
+The 12 `ff_*` modules moved with `git mv` from `agent/main/` to
+`agent/components/fleetforge/`. Public headers are in `include/`. Everything else is in a
+private `src/` (`PRIV_INCLUDE_DIRS`): every `.c`, `ff_ota.h`, `ff_txn.h`, `ff_net_adapter.h`,
+and the five `ff_{identity,mqtt,net,store,time}_internal.h` halves split out of the old headers.
+`agent/main/` holds only `agent_main.c` (unchanged), with `REQUIRES fleetforge`. IDF finds
+the component from `<project>/components/` on its own.
+
+**The public surface** is the 8 headers `agent_main.c` includes and the 16 functions it
+calls, no more and no less. It is additive-only from here on, like the wire protocol. Kept
+private on purpose: `ff_mqtt_publish_status` + `FF_STATUS_*` (a firmware could publish
+`confirmed`), the rollback_capable writers (a firmware could *claim* it),
+`ff_identity_announce_json`, `FF_PARTITION_LAYOUT`/`FF_OTA_SLOT_SIZE`, the NVS keys, and
+the link/clock helpers. The version's single source is `agent/version.txt`, and
+`idf_component.yml` has no `version:` (DECISIONS 2026-10-08 R3-fw-2). `FF_ROLLBACK_TEST`
+moved to the component's CMakeLists with `ff_mqtt.c`, and `FF_FAULT_TEST` stays with
+`agent_main.c`. IDF deps are `PRIV_REQUIRES`, and `-Werror` is on both components.
+
+Tests: `tests/agent_src.py` is one definition of where the sources live, and
+`agent_sources()` refuses to come back empty. Every test that read `agent/main/*` was
+repointed. The private-symbol pins now read the `*_internal.h` they moved to. The new
+`tests/test_ota_component.py` (14 tests) pins the surface rule, the hazards, the boundary,
+the CMake posture and the manifest. A freshness case proves a commit under
+`agent/components/fleetforge/` makes a bundle STALE. Agent test files: 231 → 246 passed,
+0 skipped. Size budgets were raised to the exact measured byte (+64 B esp32, +48 B others).
+The cause is the longer `__FILE__` paths, with no code change.
+
+**T2 evidence** (baseline = the 0.4.7 bundles from `7a58f80`, copied aside before any rebuild):
+
+| Check | Result |
+|---|---|
+| B1: `git diff --cached -M` on `ff_mqtt.c`, `ff_ota.c`, `ff_txn.c` | only `#include` lines (2, 1, 0); `ff_txn.c` 100% rename; `agent_main.c` unchanged |
+| B2: prototypes + `FF_*` defines of each old split header vs public ∪ internal | equal for all 5 (identity 8+5, mqtt 3+12, net 4+0, store 6+13, time 3+0); no overlap; the other 6 headers are 100% renames |
+| B3: `sdkconfig.resolved`, `config_sha256`, partition-table / otadata sha256, `partition_layout`, `ota_slot_size` | identical on esp32, esp32s3, esp32c3, esp32c6; bootloader differs only in its date string; no diff under `agent/partitions.csv`, `agent/sdkconfig.defaults*`, `spec/`, `design/` |
+| B4: `strings` diff of `app.bin` | text changes only `./main/ff_{mqtt,net_wifi,net_openeth}.c` → `./components/fleetforge/src/…` and the build date/time (the rest is literal-pool address bytes shifted by relinking) |
+| Build: `just agent-build` ×4 | `BUNDLE OK` ×4, 0 warnings; component manager: `Processing 1 dependencies: [1/1] idf (5.5.5)`, no error |
+| Q0: `just agent-qemu-smoke esp32` | `HARNESS OK` |
+| Q1/Q2: baseline vs component build, `--fresh`, fresh tokens | both `enroll 200`, credential stored, announce acked. `jq -S` announce diff empty, key order identical, device rows identical (`0.4.7`, `["ota"]`, `ab-4m-v1`, 1966080, table sha `1fa67e6b…`). Boot-log diff: build date, clock, uptime, one async eth line order |
+| Q3: OTA to B `0.4.8-r3fw2-1791508042` (`on_command`, power cycle) | cmd `510453683aba…`: `pending_verify` → `confirming on ota_1` → `CONFIRMED` → record cleared. Rows `…, staged, confirming, confirmed`. `fw_version` = B |
+| Q4: R `0.4.9-r3fw2-1791508042-rbtest` (`FF_ROLLBACK_TEST=1`) | cmd `7af7beb3d8fb…`: `FF_ROLLBACK_TEST: ignoring the announce ack on purpose`, then 60 s later `no working session … rolling back`. Rows `…, staged, confirming, rolling_back, rolled_back` (`returned to ota_1; ota_0 did not confirm`), **no `confirmed`**, board back on B |
+
+B and R were built from scratch copies of `agent/` with their own `version.txt`, so the
+checked-in `agent/version.txt` was never edited. Neither was built into `agent/dist`. The api
+was recreated with the `10.0.2.2` origins for the run and restored afterwards. Proposed
+(not applied): path-only fixes in `spec/open-questions.md`, `design/partitions.md` and
+`design/decisions/enrollment-console-is-the-diagnostic-surface.md` (DECISIONS entry).
+
 ### R3-spec-3 (2026-10-08): library marker encoding decided; spec not applied
 
 Decided: the library marker is a 64-byte `const` struct in the library's shared C core

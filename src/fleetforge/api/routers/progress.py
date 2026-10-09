@@ -29,7 +29,7 @@ parsing, `dummy_verify()` on an unknown id so it costs what a wrong secret costs
 401 body that never says *why*, and the reason in the log with the token *id* only.
 
 202, not 200: the report is recorded, and the board is told nothing it could act on —
-it must never wait on this endpoint or retry it (`agent/main/ff_progress.c`).
+it must never wait on this endpoint or retry it (`agent/components/fleetforge/src/ff_progress.c`).
 """
 
 import logging

@@ -26,8 +26,8 @@
 #include "esp_crt_bundle.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
-#include "ff_identity.h"
-#include "ff_time.h"
+#include "ff_identity_internal.h"
+#include "ff_time_internal.h"
 
 static const char *TAG = "ff-enroll";
 

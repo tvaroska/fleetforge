@@ -1,6 +1,6 @@
 """Verify before the boot switch (R2-fw-1) — firmware tripwires, as text.
 
-No host test can execute `agent/main/*.c`; the QEMU run (otadata byte-identical across a
+No host test can execute `agent/components/fleetforge/src/*.c`; the QEMU run (otadata byte-identical across a
 corrupt stage) is the proof that the boot pointer never moves for a bad image. What CAN be
 held here, on every `just test`, are the orderings that make that true. Each one is silent
 on the bench — a board on a desk never loses power in the half-second window — and fatal

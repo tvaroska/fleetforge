@@ -1,6 +1,6 @@
 # Prove the confirm/rollback pair on real hardware
 
-The live test of `agent/main/ff_mqtt.c`'s confirm/rollback pair — CRITICAL.md's
+The live test of `agent/components/fleetforge/src/ff_mqtt.c`'s confirm/rollback pair — CRITICAL.md's
 *"Device-side confirm timer / rollback path"*, described there as **"the whole bricking
 gamble. A bug here means a board that cannot recover itself — the one failure the product
 must never have."**
@@ -30,8 +30,9 @@ a state the bootloader never produces.
 ## The injected fault
 
 `FF_ROLLBACK_TEST=1` is a build flag, OFF by default and absent from normal builds
-(`agent/CMakeLists.txt`, `agent/main/CMakeLists.txt`, `agent/Dockerfile`). It changes two
-things and nothing else:
+(`agent/CMakeLists.txt`, `agent/components/fleetforge/CMakeLists.txt` — the define sits on
+the component that compiles `ff_mqtt.c`, since R3-fw-2 — and `agent/Dockerfile`). It changes
+two things and nothing else:
 
 1. **The announce ack drops**. `ctx->announce_msg_id = -1` after the publish. Thus,
    the PUBACK can never match and `session_confirmed` stays false. The announce itself still publishes with the retain flag — the board genuinely joins the fleet on the bad

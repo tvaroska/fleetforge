@@ -85,7 +85,7 @@ PARTITION_SUBTYPE_FACTORY = 0x00
 PARTITION_SUBTYPE_OTA_0 = 0x10
 PARTITION_SUBTYPE_OTA_1 = 0x11
 
-# The flash-time config partition (`agent/main/ff_cfg.h`, `agent/tools/ff_cfg.py`): a
+# The flash-time config partition (`agent/components/fleetforge/include/ff_cfg.h`, `agent/tools/ff_cfg.py`): a
 # custom data subtype, so IDF gives it no name of its own. Its offset is decoded here and
 # carried through the manifest so the flasher (R0-fe-3) and the QEMU harness never type
 # `0x12000` — the same rule the bootloader offset already follows.

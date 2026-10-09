@@ -1030,7 +1030,7 @@ async def test_a_session_that_applies_nothing_is_not_cut_short(downloads: list[s
 # The session on the image the board rebooted into reports `confirming` → `confirmed`;
 # a `--confirm never` image reports `confirming` → `rolling_back`, goes back, and the
 # session on the image it RETURNED to reports `rolled_back`. Same split as the firmware
-# (`agent/main/ff_mqtt.c`): the outcome is reported by whoever observed it.
+# (`agent/components/fleetforge/src/ff_mqtt.c`): the outcome is reported by whoever observed it.
 # ---------------------------------------------------------------------------
 
 

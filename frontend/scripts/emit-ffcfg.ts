@@ -2,7 +2,7 @@
 // not bundled, not served, and not part of the app.
 //
 // It exists for one reason: the only hardware-free way to prove `src/ffcfg.ts` against
-// the real firmware reader is to boot `agent/main/ff_cfg.c` on a blob this encoder made.
+// the real firmware reader is to boot `agent/components/fleetforge/src/ff_cfg.c` on a blob this encoder made.
 // `just agent-qemu` does exactly that with `.qemu/ff_cfg.bin`, so this script is the
 // bridge between the two (R0-fe-3, T2-A).
 //

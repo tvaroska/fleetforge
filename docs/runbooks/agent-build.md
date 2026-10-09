@@ -17,6 +17,15 @@ image and a build there would starve the broker. This is a developer-box pipelin
 *output* is **published** from this box to the object store prod reads (S0-infra-6). The
 app image carries no firmware at all.
 
+**Where the sources live (R3-fw-2).** `agent/main/` is the agent's own app, `agent_main.c`
+and nothing else. The protocol (enroll, the MQTT session, announce/heartbeat, the four-verb
+update, the confirm timer) is the `fleetforge` ESP-IDF component in
+`agent/components/fleetforge/`, which IDF picks up from the project's `components/` on its
+own. Its `include/` is the **public surface, and it is additive-only**, like the wire
+protocol: it holds exactly what `agent_main.c` uses (`tests/test_ota_component.py` pins
+it). Everything else, every `.c` included, is in its private `src/`. Both directories are
+inside `agent/`, so a change to either makes a bundle STALE (below).
+
 ## Build
 
 ```bash

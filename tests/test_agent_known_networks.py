@@ -1,7 +1,7 @@
 """The agent reads a list of known networks and joins the first one it can see (R2b-fw-1).
 
 spec/device-protocol.md -> *Known networks* and *up/announce*. No host test can execute
-`agent/main/*.c`, and QEMU has no Wi-Fi radio, so the scan/selection loop itself is proven
+`agent/components/fleetforge/src/*.c`, and QEMU has no Wi-Fi radio, so the scan/selection loop itself is proven
 only on the bench (R2b-test-4). The QEMU run proves the parser (an ethernet board with a
 list logs `networks  N in ff_cfg, unused`) and the announce (`"ssid":null,
 "known_networks":null` on ethernet). What CAN be held here, on every `just test`, is the
@@ -27,14 +27,14 @@ very spellings these tests forbid.
 import re
 from pathlib import Path
 
+from tests.agent_src import AGENT_MAIN_C, COMPONENT_SRC
 from tests.test_agent_txn import _function_body
-from tests.test_ff_cfg import AGENT_DIR, FF_CFG_C, FF_IDENTITY_C, _code
+from tests.test_ff_cfg import FF_CFG_C, FF_IDENTITY_C, _code
 
-MAIN = AGENT_DIR / "main"
-FF_NET_C = MAIN / "ff_net.c"
-FF_NET_H = MAIN / "ff_net.h"
-FF_NET_WIFI_C = MAIN / "ff_net_wifi.c"
-AGENT_MAIN_C = MAIN / "agent_main.c"
+FF_NET_C = COMPONENT_SRC / "ff_net.c"
+# ff_net_ssid() is component-private since R3-fw-2: only ff_identity.c reports it.
+FF_NET_INTERNAL_H = COMPONENT_SRC / "ff_net_internal.h"
+FF_NET_WIFI_C = COMPONENT_SRC / "ff_net_wifi.c"
 
 LOG_CALL = re.compile(r"ESP_LOG[EWIDV]\((.*?)\);", re.DOTALL)
 
@@ -175,7 +175,7 @@ class TestTheAnnounce:
         assert '"known_networks"' in source
         assert "ff_net_ssid(" in source
         assert "ff_net_adapter.h" not in FF_IDENTITY_C.read_text()
-        assert "const char *ff_net_ssid(void);" in _code(FF_NET_H)
+        assert "const char *ff_net_ssid(void);" in _code(FF_NET_INTERNAL_H)
 
     def test_they_sit_right_after_link_type(self) -> None:
         body = _function_body(_code(FF_IDENTITY_C), "announce_object")

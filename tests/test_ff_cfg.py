@@ -1,7 +1,7 @@
 """The `ff_cfg` blob — a cross-language contract, checked with no toolchain installed.
 
 Three implementations have to agree about sixteen bytes: `agent/tools/ff_cfg.py` (the
-writer used by the QEMU harness), `agent/main/ff_cfg.c` (the firmware reader, which no
+writer used by the QEMU harness), `agent/components/fleetforge/src/ff_cfg.c` (the firmware reader, which no
 host test can execute) and — since R0-fe-3 — `frontend/src/ffcfg.ts`, the browser
 flasher's `encodeFfCfg()`, which no Python test can execute either. A disagreement is not
 a test failure on this box: it is a board that boots, finds a header it does not
@@ -35,15 +35,17 @@ from types import ModuleType
 
 import pytest
 
+from tests.agent_src import AGENT_DIR, COMPONENT_INCLUDE, COMPONENT_SRC
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
-AGENT_DIR = REPO_ROOT / "agent"
 FF_CFG_PY = AGENT_DIR / "tools" / "ff_cfg.py"
-FF_CFG_C = AGENT_DIR / "main" / "ff_cfg.c"
-FF_CFG_H = AGENT_DIR / "main" / "ff_cfg.h"
-FF_IDENTITY_C = AGENT_DIR / "main" / "ff_identity.c"
-FF_IDENTITY_H = AGENT_DIR / "main" / "ff_identity.h"
-FF_MQTT_H = AGENT_DIR / "main" / "ff_mqtt.h"
-FF_OTA_C = AGENT_DIR / "main" / "ff_ota.c"
+FF_CFG_C = COMPONENT_SRC / "ff_cfg.c"
+FF_CFG_H = COMPONENT_INCLUDE / "ff_cfg.h"
+FF_IDENTITY_C = COMPONENT_SRC / "ff_identity.c"
+FF_IDENTITY_H = COMPONENT_INCLUDE / "ff_identity.h"
+# The `up/status` vocabulary is component-private since R3-fw-2 (src/, not include/).
+FF_MQTT_INTERNAL_H = COMPONENT_SRC / "ff_mqtt_internal.h"
+FF_OTA_C = COMPONENT_SRC / "ff_ota.c"
 # The third implementation and the vector both writers are pinned to (R0-fe-3).
 FF_CFG_TS = REPO_ROOT / "frontend" / "src" / "ffcfg.ts"
 FF_CFG_VECTOR = REPO_ROOT / "frontend" / "src" / "ffcfg.vector.json"
@@ -553,8 +555,10 @@ class TestStatusStatesMatchTheSpec:
         return set(re.findall(r"[a-z_]{4,}", block))
 
     def test_every_state_the_firmware_can_publish_is_in_the_machine(self) -> None:
-        declared = set(re.findall(r'#define FF_STATUS_[A-Z_]+ "([a-z_]+)"', FF_MQTT_H.read_text()))
-        assert declared, "ff_mqtt.h declares no FF_STATUS_* states"
+        declared = set(
+            re.findall(r'#define FF_STATUS_[A-Z_]+ "([a-z_]+)"', FF_MQTT_INTERNAL_H.read_text())
+        )
+        assert declared, "ff_mqtt_internal.h declares no FF_STATUS_* states"
         spec_states = self._spec_states()
         assert spec_states, "the spec's up/status machine could not be parsed"
         assert declared <= spec_states, f"not in spec/device-protocol.md: {declared - spec_states}"
@@ -564,7 +568,9 @@ class TestStatusStatesMatchTheSpec:
         the reboot — `confirming`/`confirmed`, or `rolling_back`/`rolled_back` from the
         image the board returned to. `awaiting_safe_window` stays absent: it belongs to a
         board with a window to wait for, and this agent is always-on."""
-        declared = set(re.findall(r'#define FF_STATUS_[A-Z_]+ "([a-z_]+)"', FF_MQTT_H.read_text()))
+        declared = set(
+            re.findall(r'#define FF_STATUS_[A-Z_]+ "([a-z_]+)"', FF_MQTT_INTERNAL_H.read_text())
+        )
         assert declared == {
             "staging",
             "downloading",

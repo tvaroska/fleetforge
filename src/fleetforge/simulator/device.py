@@ -73,7 +73,7 @@ STATUS = "status"
 # `broker/commands.py` for the reason `POWER_CLASSES` is retyped — see below.
 COMMAND = "cmd"
 
-# `artifact.sha256` as the firmware accepts it (`agent/main/ff_mqtt.c::on_stage`,
+# `artifact.sha256` as the firmware accepts it (`agent/components/fleetforge/src/ff_mqtt.c::on_stage`,
 # `is_lowercase_sha256`): exactly 64 lowercase hex characters, never normalised. Local on
 # purpose, not `fleetforge.storage.blobs.SHA256_HEX`: the simulator imports nothing from
 # the server (`tests/test_invariants.py`).
@@ -480,7 +480,7 @@ def _fetch(url: str) -> bytes:
 
 @dataclass(frozen=True, slots=True)
 class PendingConfirm:
-    """The NVS analogue: the transaction that crossed the apply reboot (`agent/main/ff_txn.h`).
+    """The NVS analogue: the transaction that crossed the apply reboot (`agent/components/fleetforge/src/ff_txn.h`).
 
     `previous_identity` is the board as it was before the apply — what a rollback returns
     it to, captured **before** `fw_version` was rebound.

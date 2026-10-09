@@ -16,14 +16,12 @@
  *  - the next link (cellular, Thread, a second Wi-Fi band) plugs in here and changes
  *    nothing above.
  *
- * `ff_net_rssi()` returns false rather than a number on a link that has no radio. An
- * invented RSSI is a lie in a health field, and the dashboard cannot tell it from a
- * reading.
+ * This is the PUBLIC half (the `fleetforge` component's include/, additive-only from
+ * R3-fw-2): bring the link up. What the link reports into up/announce (type, RSSI, SSID)
+ * is component-private, in src/ff_net_internal.h.
  */
 
 #pragma once
-
-#include <stdbool.h>
 
 #include "esp_err.h"
 #include "ff_cfg.h"
@@ -43,17 +41,6 @@ extern "C" {
  * from a hardware fault, and reboots lose the serial log that says why).
  * ESP_ERR_NOT_SUPPORTED means this build has no adapter for the configured link. */
 esp_err_t ff_net_bring_up(const ff_cfg_t *cfg, TickType_t timeout);
-
-/* "wifi" | "ethernet" — what actually came up, and what up/announce reports. */
-const char *ff_net_link_type(void);
-
-/* The current RSSI in dBm, or false on a link that has none (Ethernet). */
-bool ff_net_rssi(int *out_dbm);
-
-/* The SSID of the known network the board joined, or NULL: on a link that has none
- * (Ethernet), or while no network is joined. Reported as `ssid` in up/announce
- * (spec/device-protocol.md). The string lives as long as the agent; never a passphrase. */
-const char *ff_net_ssid(void);
 
 #ifdef __cplusplus
 }

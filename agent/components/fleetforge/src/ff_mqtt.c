@@ -21,7 +21,7 @@
  *    publish is logged with its message id and the operator checks GET /v1/devices.
  */
 
-#include "ff_mqtt.h"
+#include "ff_mqtt_internal.h"
 
 #include <inttypes.h>
 #include <stdlib.h>
@@ -32,7 +32,7 @@
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_timer.h"
-#include "ff_identity.h"
+#include "ff_identity_internal.h"
 #include "ff_ota.h"
 #include "ff_progress.h"
 #include "ff_txn.h"

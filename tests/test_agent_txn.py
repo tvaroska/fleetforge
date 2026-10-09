@@ -1,6 +1,6 @@
 """The transaction that crosses the apply reboot (R2-be-1) — firmware tripwires, as text.
 
-No host test can execute `agent/main/*.c`, and the QEMU run is the only proof that the
+No host test can execute `agent/components/fleetforge/src/*.c`, and the QEMU run is the only proof that the
 record survives a reset. What CAN be held here, on every `just test`, are the rules whose
 violation is silent on the bench and expensive in the field:
 
@@ -21,17 +21,21 @@ files quote the very spellings they forbid, so the greps look at code only.
 """
 
 import re
-from pathlib import Path
 
+from tests.agent_src import (
+    AGENT_MAIN_C,
+    COMPONENT_CMAKE,
+    COMPONENT_INCLUDE,
+    COMPONENT_SRC,
+    agent_sources,
+)
 from tests.test_ff_cfg import _code
 
-AGENT_MAIN = Path(__file__).resolve().parent.parent / "agent" / "main"
-FF_TXN_C = AGENT_MAIN / "ff_txn.c"
-FF_TXN_H = AGENT_MAIN / "ff_txn.h"
-FF_MQTT_C = AGENT_MAIN / "ff_mqtt.c"
-AGENT_MAIN_C = AGENT_MAIN / "agent_main.c"
-FF_OTA_C = AGENT_MAIN / "ff_ota.c"
-CMAKELISTS = AGENT_MAIN / "CMakeLists.txt"
+FF_TXN_C = COMPONENT_SRC / "ff_txn.c"
+FF_TXN_H = COMPONENT_SRC / "ff_txn.h"
+FF_MQTT_C = COMPONENT_SRC / "ff_mqtt.c"
+FF_OTA_C = COMPONENT_SRC / "ff_ota.c"
+CMAKELISTS = COMPONENT_CMAKE
 
 
 def _function_body(source: str, name: str) -> str:
@@ -54,7 +58,7 @@ def _function_body(source: str, name: str) -> str:
 
 
 def test_the_record_is_compiled_in() -> None:
-    assert '"ff_txn.c"' in CMAKELISTS.read_text()
+    assert '"src/ff_txn.c"' in CMAKELISTS.read_text()
 
 
 def test_the_record_has_its_own_namespace_and_never_erases_the_partition() -> None:
@@ -159,12 +163,13 @@ def test_ff_mqtt_run_no_longer_arms_it() -> None:
 
 
 def test_only_app_main_calls_the_arm() -> None:
-    callers = sorted(path.name for path in AGENT_MAIN.glob("*.c") if f"{ARM}(" in _code(path))
+    sources = [path for path in agent_sources() if path.suffix == ".c"]
+    callers = sorted(path.name for path in sources if f"{ARM}(" in _code(path))
     assert callers == ["agent_main.c", "ff_mqtt.c"]
     mqtt = _code(FF_MQTT_C)
     assert mqtt.count(f"{ARM}(") == 1, "ff_mqtt.c defines it and never calls it"
     assert f"void {ARM}(void)" in mqtt
-    assert f"void {ARM}(void);" in _code(AGENT_MAIN / "ff_mqtt.h")
+    assert f"void {ARM}(void);" in _code(COMPONENT_INCLUDE / "ff_mqtt.h")
 
 
 def test_the_arm_needs_nothing_app_main_has_not_got_yet() -> None:

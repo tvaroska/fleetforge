@@ -1,6 +1,6 @@
 """A re-delivered stage for the update in progress is ignored, not failed (R2-fw-6).
 
-No host test can execute `agent/main/*.c`; the QEMU run (a re-POST of the deploy that is
+No host test can execute `agent/components/fleetforge/src/*.c`; the QEMU run (a re-POST of the deploy that is
 downloading, or of the image staged and waiting, answers `reused: true` with the same
 cmd_id, and the board logs "already carrying out — ignored" instead of publishing `failed`
 against it) is the proof. What CAN be held here, on every `just test`, is what makes that

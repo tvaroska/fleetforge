@@ -1,40 +1,20 @@
-# The agent is ONE component, on purpose: at R1 this whole directory becomes an
-# `ff_agent` component a customer's own project pulls in, and a flat file list with no
-# internal component boundaries is what makes that a move rather than a rewrite.
+# The agent's own app: app_main and nothing else. It is the first consumer of the
+# `fleetforge` component (../components/fleetforge, R3-fw-2), and it reaches the
+# protocol ONLY through that component's public include/ — exactly what a maker's
+# firmware gets. If this file ever needs a path into the component's src/, the boundary
+# is wrong, not this file.
 #
-# The two `ff_net_*` adapters are BOTH compiled on every target. `ff_net_openeth.c`
-# collapses to a stub that returns ESP_ERR_NOT_SUPPORTED when CONFIG_ETH_USE_OPENETH is
-# off (see the bottom of that file), which is how a chip with no Ethernet still links —
-# and still explains itself if someone flashes it a `link=ethernet` config.
+# The REQUIRES list after `fleetforge` is what agent_main.c includes directly.
 idf_component_register(SRCS "agent_main.c"
-                            "ff_cfg.c"
-                            "ff_enroll.c"
-                            "ff_identity.c"
-                            "ff_mqtt.c"
-                            "ff_net.c"
-                            "ff_net_openeth.c"
-                            "ff_net_wifi.c"
-                            "ff_ota.c"
-                            "ff_progress.c"
-                            "ff_store.c"
-                            "ff_time.c"
-                            "ff_txn.c"
                        INCLUDE_DIRS "."
-                       REQUIRES esp_eth
+                       REQUIRES fleetforge
+                                app_update
+                                esp_app_format
+                                esp_event
                                 esp_hw_support
                                 esp_netif
-                                esp_wifi
-                                esp-tls
-                                esp_http_client
-                                esp_https_ota
                                 esp_partition
-                                spi_flash
-                                app_update
-                                mqtt
-                                json
-                                nvs_flash
-                                mbedtls
-                                esptool_py)
+                                nvs_flash)
 
 # -Werror on THIS component only. IDF's own components are built with the upstream's
 # warning posture and adding -Werror globally would fail the build on third-party code
@@ -42,13 +22,6 @@ idf_component_register(SRCS "agent_main.c"
 # mismatch in the agent stops the build instead of shipping to a fleet. Firmware has no
 # `try:` — a truncated snprintf is a corrupted MQTT topic on a thousand boards.
 target_compile_options(${COMPONENT_LIB} PRIVATE -Wall -Wextra -Werror)
-
-# See the FF_ROLLBACK_TEST block in ../CMakeLists.txt. Compiled in only when asked for,
-# so the guarded code in ff_mqtt.c is absent from every normal build rather than merely
-# unreached.
-if(FF_ROLLBACK_TEST)
-    target_compile_definitions(${COMPONENT_LIB} PRIVATE FF_ROLLBACK_TEST=1)
-endif()
 
 # See the FF_FAULT_TEST block in ../CMakeLists.txt (which has already refused any other
 # value). The hook in agent_main.c is preprocessor-excluded from every normal build.

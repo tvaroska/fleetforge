@@ -1,6 +1,6 @@
 """A/B slot apply and the atomic switch (R2-fw-2) — firmware tripwires, as text.
 
-No host test can execute `agent/main/*.c`; the QEMU run (an otadata decode per sector) is
+No host test can execute `agent/components/fleetforge/src/*.c`; the QEMU run (an otadata decode per sector) is
 the proof. What CAN be held here, on every `just test`, are the rules that make it true.
 Each one is silent on the bench and fatal in the field. A bench board is staged once and
 rebooted by hand. A fleet board receives a second deploy while the first one waits for its

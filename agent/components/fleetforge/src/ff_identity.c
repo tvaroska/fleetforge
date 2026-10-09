@@ -18,7 +18,7 @@
  *    same sentence. A nested `{"token":…, "identity":{…}}` would be a fleet recall.
  */
 
-#include "ff_identity.h"
+#include "ff_identity_internal.h"
 
 #include <inttypes.h>
 #include <stdio.h>
@@ -33,8 +33,8 @@
 #include "esp_partition.h"
 #include "esp_system.h"
 #include "esp_timer.h"
-#include "ff_net.h"
-#include "ff_store.h"
+#include "ff_net_internal.h"
+#include "ff_store_internal.h"
 #include "mbedtls/sha256.h"
 
 static const char *TAG = "ff-id";

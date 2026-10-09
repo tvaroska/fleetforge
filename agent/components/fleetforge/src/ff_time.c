@@ -6,7 +6,7 @@
  * underlying lwIP options, and it provides the blocking wait this file needs.
  */
 
-#include "ff_time.h"
+#include "ff_time_internal.h"
 
 #include <string.h>
 #include <sys/time.h>

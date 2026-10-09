@@ -1,10 +1,7 @@
 /*
- * ff_identity — who this board says it is, and the three JSON bodies that say it.
- *
- * `device_id` is the eFuse MAC as 12 lowercase hex digits with no separators
- * (spec/device-protocol.md -> Topic namespace). It is also the MQTT username, and the two
- * `%u` pattern ACLs in mosquitto/acl are the entire fleet authz — so this string is a
- * security boundary, not a label.
+ * ff_identity, the component-private half — the device id, the layout contract, and the
+ * three JSON bodies that say who this board is. PRIVATE (src/, never reachable from a
+ * consumer's main): see include/ff_identity.h for the public half.
  *
  * The announce payload, the enroll body and the heartbeat are built HERE, in one place, so
  * that the identity presented at enrolment and the identity announced on the broker cannot
@@ -19,6 +16,7 @@
 
 #include "esp_err.h"
 #include "ff_cfg.h"
+#include "ff_identity.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -38,16 +36,6 @@ extern "C" {
  * adapt per device, forever, to an agent it can never update. */
 #define FF_PROTO_VERSION 1
 
-/* Read the eFuse MAC and format the device id once. Call before anything publishes, and
- * after ff_store_sync_token() (it reads the stored rollback_capable observation, which a
- * token change erases).
- *
- * R2b-fw-2: it also takes the board's two flash-time measurements once — the physical
- * flash chip size and the partition table fingerprint — and loads `rollback_capable`. A
- * measurement that fails is logged and left unknown; it never fails this function, which
- * parks the board on failure. */
-esp_err_t ff_identity_init(void);
-
 /* R2b-fw-2. `rollback_capable` is MEASURED, never claimed (DECISIONS 2026-10-03 R2-spec-1):
  * it is never derived from CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE or any build setting,
  * because the bootloader is a flash-time immutable this image did not bring with it. The
@@ -65,17 +53,6 @@ const char *ff_device_id(void);
 /* True when the eFuse MAC read back as all zeros — an emulator, never a board (see
  * ff_identity.c). Reported honestly rather than papered over. */
 bool ff_identity_mac_is_blank(void);
-
-/* The version this board is RUNNING, taken from the running image's own `esp_app_desc_t`
- * (R1-fw-2). This is the ONLY source for `fw_version` in up/announce and up/hb: after an
- * OTA the descriptor is the new slot's, and after a bootloader rollback it is the old
- * slot's again — with no state of ours to get wrong. It must never come from a `stage`
- * command (`ff_ota_cmd_t::version` is the version we were TOLD to install), from NVS, or
- * from a compile-time macro: those disagree with reality exactly when something went
- * wrong, which is the moment the field has to be right.
- *
- * Never NULL, and valid before ff_identity_init() — it reads no eFuse. */
-const char *ff_identity_fw_version(void);
 
 /*
  * The three payloads. Each returns a heap string the caller must free() — cJSON's own

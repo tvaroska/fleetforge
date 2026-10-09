@@ -5,7 +5,7 @@ pre-check reads to refuse a build whose table does not match the board, and to w
 before deploying to a board that cannot roll back (`spec/device-protocol.md` ->
 `up/announce`, DECISIONS 2026-10-03 R2-spec-1 and 2026-10-04 R2b-spec-2). Every one of them
 must be MEASURED on the board, never taken from the build: the build is exactly the thing
-that may disagree with the board. No host test can run `agent/main/*.c`; the QEMU run in
+that may disagree with the board. No host test can run `agent/components/fleetforge/src/*.c`; the QEMU run in
 `docs/runbooks/agent-qemu.md` is the live proof. What is held here, on every `just test`:
 
 * the keys go out in the spec's order, right after `ota_slot_size`;
@@ -26,20 +26,21 @@ import hashlib
 import re
 from pathlib import Path
 
+from tests.agent_src import AGENT_DIR, COMPONENT_CMAKE, COMPONENT_SRC
 from tests.test_agent_txn import _function_body
 from tests.test_ff_cfg import _code
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-AGENT_DIR = REPO_ROOT / "agent"
-AGENT_MAIN = AGENT_DIR / "main"
-FF_IDENTITY_C = AGENT_MAIN / "ff_identity.c"
-FF_IDENTITY_H = AGENT_MAIN / "ff_identity.h"
-FF_MQTT_C = AGENT_MAIN / "ff_mqtt.c"
-FF_STORE_C = AGENT_MAIN / "ff_store.c"
-FF_STORE_H = AGENT_MAIN / "ff_store.h"
-FF_TXN_C = AGENT_MAIN / "ff_txn.c"
-FF_TXN_H = AGENT_MAIN / "ff_txn.h"
-CMAKELISTS = AGENT_MAIN / "CMakeLists.txt"
+FF_IDENTITY_C = COMPONENT_SRC / "ff_identity.c"
+# The rollback_capable writers and the NVS keys are component-private since R3-fw-2: a
+# firmware that could call them could CLAIM rollback_capable, which is measured.
+FF_IDENTITY_INTERNAL_H = COMPONENT_SRC / "ff_identity_internal.h"
+FF_MQTT_C = COMPONENT_SRC / "ff_mqtt.c"
+FF_STORE_C = COMPONENT_SRC / "ff_store.c"
+FF_STORE_INTERNAL_H = COMPONENT_SRC / "ff_store_internal.h"
+FF_TXN_C = COMPONENT_SRC / "ff_txn.c"
+FF_TXN_H = COMPONENT_SRC / "ff_txn.h"
+CMAKELISTS = COMPONENT_CMAKE
 PARTITIONS_CSV = AGENT_DIR / "partitions.csv"
 VERSION_TXT = AGENT_DIR / "version.txt"
 DEVICE_PROTOCOL = REPO_ROOT / "spec" / "device-protocol.md"
@@ -156,8 +157,8 @@ def test_rollback_capable_is_true_or_null_never_false() -> None:
     assert 'cJSON_AddFalseToObject(root, "rollback_capable"' not in source
     assert 'cJSON_AddBoolToObject(root, "rollback_capable"' not in source
     assert "esp_err_t ff_store_save_rollback_capable(void)" in _code(FF_STORE_C)
-    assert "esp_err_t ff_store_save_rollback_capable(void);" in _code(FF_STORE_H)
-    assert "void ff_identity_note_rollback_capable(void);" in _code(FF_IDENTITY_H)
+    assert "esp_err_t ff_store_save_rollback_capable(void);" in _code(FF_STORE_INTERNAL_H)
+    assert "void ff_identity_note_rollback_capable(void);" in _code(FF_IDENTITY_INTERNAL_H)
 
 
 def test_it_is_observed_at_classification_from_pending_verify_before_the_record() -> None:
@@ -194,7 +195,7 @@ def test_the_confirm_and_rollback_path_stays_free_of_the_observation() -> None:
 def test_the_observation_is_stored_in_the_credential_namespace() -> None:
     """ "ff", so a re-flash with a new token clears it and an OTA keeps it; never "ff_txn",
     which ff_txn_save() erases at every stage."""
-    header = _code(FF_STORE_H)
+    header = _code(FF_STORE_INTERNAL_H)
     source = _code(FF_STORE_C)
     match = re.search(r'#define FF_STORE_KEY_ROLLBACK_CAPABLE "([^"]+)"', header)
     assert match is not None

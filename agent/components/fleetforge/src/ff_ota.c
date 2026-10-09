@@ -75,7 +75,7 @@
 #include "esp_partition.h"
 #include "esp_system.h"
 #include "esp_timer.h"
-#include "ff_mqtt.h"
+#include "ff_mqtt_internal.h"
 #include "ff_txn.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"

@@ -1,0 +1,11 @@
+# No `version:` on purpose: the component's version has ONE source, agent/version.txt
+# (DECISIONS 2026-10-08, R3-fw-2). A second copy here would drift. Adding the key is
+# additive, when registry publication is in scope.
+description: "Fleetforge OTA: enroll, announce/heartbeat and the four-verb update (stage, apply, confirm, rollback) for ESP-IDF firmware"
+targets:
+  - esp32
+  - esp32s3
+  - esp32c3
+  - esp32c6
+dependencies:
+  idf: ">=5.5"

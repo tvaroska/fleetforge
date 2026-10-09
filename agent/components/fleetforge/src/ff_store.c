@@ -5,7 +5,7 @@
  * burns a single-use token.
  */
 
-#include "ff_store.h"
+#include "ff_store_internal.h"
 
 #include <stdint.h>
 #include <string.h>

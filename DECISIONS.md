@@ -6,6 +6,89 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-08 — The protocol is the `fleetforge` ESP-IDF component under agent/components/; its public surface is exactly what agent_main.c calls (R3-fw-2)
+
+**Decided.** The 12 `ff_*` modules moved out of `agent/main/` into
+`agent/components/fleetforge/` (`git mv`, history follows). `agent/main/` now holds only
+`agent_main.c`, unchanged byte for byte, and it is the component's first consumer
+(`REQUIRES fleetforge`). Details and the T2 table: `docs/features/ota-library.md` →
+*R3-fw-2*.
+
+- **Layout.** `include/` is public: the 8 headers `agent_main.c` includes. `src/`
+  is private (`PRIV_INCLUDE_DIRS`): every `.c`, `ff_ota.h`, `ff_txn.h`, `ff_net_adapter.h`,
+  and five `*_internal.h` halves. The directory name is the component name, so it is never
+  renamed. It sits **inside `agent/`** because `agent/` is the Docker build context, and
+  because `check_bundles_fresh.py`'s pathspec `agent` (minus `agent/dist`) then covers it
+  with no edit (a test now proves it). A top-level `components/` would be outside the image,
+  and a change to it would not make a bundle STALE.
+- **The rule, and how "strict subset" is read.** Every function declared in a public header
+  is one `agent_main.c` calls (16), and every `ff_*` call in `agent_main.c` is declared
+  publicly. The old headers exposed ~40 functions to `agent_main.c`. The public set is now
+  exactly the 16 it uses, so no public function goes unused by the first consumer.
+  Macros and types are public only when a public declaration needs them (`ff_cfg_t`,
+  `ff_cred_t` and their `*_MAX_*`) or when they are a public function's closed vocabulary
+  (`FF_PROGRESS_*`, the `ff_cfg` binary-format constants the flasher pins).
+  `tests/test_ota_component.py` pins all of it. The public surface is **additive-only**
+  from this commit, like the wire protocol. TODO's "four verbs, enroll,
+  announce/heartbeat, version accessor" maps onto it as follows. The verbs are
+  `ff_mqtt_arm_confirm_timer` + `ff_mqtt_run`: stage, apply, confirm and rollback all happen
+  inside the session. Enroll is `ff_enroll` plus the cfg/store/time/net/identity calls
+  around it. Announce and heartbeat happen inside `ff_mqtt_run`. The version accessor is
+  `ff_identity_fw_version`. `ff_progress_*` is an accepted extra, because the agent calls it.
+- **Kept private on purpose** (none of these could be withdrawn once shipped):
+  `ff_mqtt_publish_status` + `FF_STATUS_*` would let a firmware publish `confirmed` for an
+  image that never confirmed. `ff_identity_note_rollback_capable` /
+  `ff_store_save_rollback_capable` would let it *claim* `rollback_capable` (measured, never
+  claimed: 2026-10-05 R2b-fw-2). `ff_identity_announce_json`, `FF_PARTITION_LAYOUT` and
+  `FF_OTA_SLOT_SIZE` would turn the announce and the three-way layout contract into user
+  API. The NVS namespace/keys, `ff_net_link_type/rssi/ssid` and `ff_time_is_sane/iso8601` are
+  private too.
+- **Version single source: `agent/version.txt`.** It is already the release-bumped number,
+  and it feeds `PROJECT_VER`. In the agent build `agent_version`, `fw_version` and the future
+  `lib_version` are that one number. `idf_component.yml` has **no `version:`** (optional for
+  a local component, and leaving it out means no second copy to drift). Adding it is
+  additive, when registry publication is in scope. How the number reaches `ff_marker.c` is
+  `R3-fw-6`'s mechanism. Arduino (`R3-fw-3`) has no CMake, so it may need a generated or
+  test-pinned header. `agent_version` in the announce stays `esp_app_get_description()->version`.
+- **`idf: ">=5.5"`**: v5.5.5 is the only IDF ever built, and loosening it later is
+  additive. The component manager runs and resolves only `idf`, with no registry access and
+  no error. Its `dependencies.lock` is written inside the build container and never reaches
+  the host.
+- **IDF deps are `PRIV_REQUIRES`.** The public headers need only `esp_err.h` and
+  `freertos/FreeRTOS.h`, so nothing leaks into a consumer's include path. `main` lists what
+  `agent_main.c` includes directly.
+- **FF_ROLLBACK_TEST moved with `ff_mqtt.c`** into the component CMakeLists. A define on
+  main's target never reaches the component's objects, and an `FF_ROLLBACK_TEST=1` build
+  would then silently confirm, so the rollback test would prove nothing. FF_FAULT_TEST stays
+  in `main/CMakeLists.txt` with its hooks in `agent_main.c`.
+- **CRITICAL files are include-only.** `ff_mqtt.c` (2 lines) and `ff_ota.c` (1 line)
+  changed only `#include "ff_X.h"` → `"ff_X_internal.h"`. `ff_txn.c` is a 100% rename.
+- **Size budgets** were raised to the exact measured byte: esp32 +64 B, esp32s3/c3/c6 +48 B.
+  No code changed. The `__FILE__` strings that ESP_ERROR_CHECK/assert embed grow from
+  `./main/ff_*.c` to `./components/fleetforge/src/ff_*.c` (+21 B each), rounded up by
+  alignment.
+- **T2, in short.** All four `just agent-build` runs ended `BUNDLE OK`, with zero warnings.
+  `sdkconfig.resolved`, `config_sha256`, the partition-table and otadata sha256 are identical
+  to the 0.4.7 baseline on all four targets. In the app `strings` diff, the only text that
+  changed is those source paths and the build date/time. In QEMU, the component build's
+  announce matches the baseline's key for key and in key order. OTA to B confirmed
+  (`staged, confirming, confirmed`). A `FF_ROLLBACK_TEST=1` R rolled back by the confirm
+  timer (`… confirming, rolling_back, rolled_back`, no `confirmed`), and the board was back on B.
+- **Rejected.** Keeping the old headers whole (makes the hazards above public forever). A
+  top-level component dir (outside the build context and the freshness pathspec). An
+  umbrella `fleetforge.h` (`agent_main.c` would not include it, so it breaks the subset
+  rule). `ff_lib_version()` now (unused by the agent, and a boot line would be a behaviour
+  change). Editing `agent_main.c`.
+- **Proposed, path-only, for the owner (`spec/`/`design/` untouched):**
+  `spec/open-questions.md:50` and `design/partitions.md:122`: `agent/main/ff_cfg.c` →
+  `agent/components/fleetforge/src/ff_cfg.c`.
+  `design/decisions/enrollment-console-is-the-diagnostic-surface.md:43`: `agent/main/*.c` →
+  `agent/main/*.c and agent/components/fleetforge/src/*.c`. Optional, `design/architecture.md`:
+  one sentence saying the device code is the `fleetforge` component plus the agent app, and
+  that the component's `include/` is additive-only like the wire protocol.
+
+---
+
 ## 2026-10-08 — The library marker is a 64-byte constant found by scanning the image, not a field of esp_app_desc_t; boards announce it as lib_marker (R3-spec-3, proposed)
 
 **Decided: this entry covers the PROPOSAL only. Nothing is built: no agent, server,

@@ -25,10 +25,11 @@ from pathlib import Path
 
 import pytest
 
+from tests.agent_src import AGENT_DIR, COMPONENT_SRC
+
 REPO_ROOT = Path(__file__).resolve().parent.parent
-AGENT_DIR = REPO_ROOT / "agent"
 SDKCONFIG_DEFAULTS = AGENT_DIR / "sdkconfig.defaults"
-WIFI_ADAPTER = AGENT_DIR / "main" / "ff_net_wifi.c"
+WIFI_ADAPTER = COMPONENT_SRC / "ff_net_wifi.c"
 DIST_DIR = AGENT_DIR / "dist"
 
 # Retyped literally rather than imported, for the same reason test_agent_partitions.py
@@ -145,16 +146,25 @@ FORBIDDEN_OPTIONS = [
 # partition-table walk, sort and incremental SHA-256), the rb_cap load/save in ff_store.c,
 # the NEW-at-target branch and accept_unverified_image() in ff_mqtt.c, the three announce
 # keys and their log strings. 1,118,544 B (esp32c6) is 57% of the slot.
+#
+# Raised 2026-10-08 (R3-fw-2) for **all four targets**, all rebuilt, to the exact measured
+# byte: esp32 1,029,440 -> 1,029,504 (+64 B), esp32s3 1,009,488 -> 1,009,536 (+48 B),
+# esp32c3 1,069,008 -> 1,069,056 (+48 B), esp32c6 1,118,544 -> 1,118,592 (+48 B). No code
+# changed: the move into the `fleetforge` component lengthens the `__FILE__` strings that
+# ESP_ERROR_CHECK/assert embed, `./main/ff_*.c` -> `./components/fleetforge/src/ff_*.c`
+# (+21 B each; three survive in the esp32 image, two elsewhere), rounded up by alignment.
+# A `strings` diff against the 0.4.7 bundles shows those paths and the build date/time
+# and nothing else.
 APP_SIZE_BUDGET_BYTES = {
-    "esp32": 1_029_440,
+    "esp32": 1_029_504,
     # Raised from 973_136 for the OTA-capable agent (R1-fw-1/R1-fw-2), which cost every
     # target ~18 KB. Only esp32 was raised at the time: this gate reads whatever is in
     # `agent/dist/`, so a target nobody had built locally is not checked and does not
     # fail. The other two were still carrying 0.2.0-era numbers until R2b-fw-1 raised
     # them — that was a gap in the gate, not slack here.
-    "esp32s3": 1_009_488,
-    "esp32c3": 1_069_008,
-    "esp32c6": 1_118_544,
+    "esp32s3": 1_009_536,
+    "esp32c3": 1_069_056,
+    "esp32c6": 1_118_592,
 }
 
 # An app may occupy at most this much of an OTA slot. Not a style rule: R2 downloads the

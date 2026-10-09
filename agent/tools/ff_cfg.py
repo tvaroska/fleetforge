@@ -3,7 +3,7 @@
 One 4 KB `data`/`0x40` partition at `0x12000` (`agent/partitions.csv`, frozen at R0) holds
 everything that differs between two boards flashed from the same bundle: which server they
 talk to, how they get on the network, and the single-use enrollment token they exchange for
-a broker credential. `agent/main/ff_cfg.c` is the reader; this is one of two writers. The
+a broker credential. `agent/components/fleetforge/src/ff_cfg.c` is the reader; this is one of two writers. The
 other is the browser flasher (`R0-fe-3`), which will re-implement `encode()` in TypeScript —
 so the format has to be describable in a paragraph and implementable with `TextEncoder` and
 a CRC32 table.
@@ -63,7 +63,7 @@ HEADER_STRUCT = struct.Struct("<4sHHII")
 HEADER_SIZE = HEADER_STRUCT.size
 
 # agent/partitions.csv → `ff_cfg, data, 0x40, 0x12000, 0x1000`. Retyped, not imported:
-# `agent/main/ff_cfg.h` retypes it too and `tests/test_ff_cfg.py` is what keeps the three
+# `agent/components/fleetforge/include/ff_cfg.h` retypes it too and `tests/test_ff_cfg.py` is what keeps the three
 # equal. A blob that is not exactly one partition long cannot be flashed at an offset.
 PARTITION_SIZE = 4096
 MAX_PAYLOAD = PARTITION_SIZE - HEADER_SIZE
@@ -72,7 +72,7 @@ MAX_PAYLOAD = PARTITION_SIZE - HEADER_SIZE
 # looks like erased flash after its payload, instead of like a payload of NUL bytes.
 FILL = 0xFF
 
-# Every key `agent/main/ff_cfg.c` reads. Unknown keys are *ignored* by both sides (that is
+# Every key `agent/components/fleetforge/src/ff_cfg.c` reads. Unknown keys are *ignored* by both sides (that is
 # the whole point of JSON here), so this list is documentation and CLI surface — never a
 # validation whitelist. Wi-Fi credentials are `ssid`/`psk`, deliberately NOT
 # `wifi_ssid`/`wifi_password`: `tests/test_agent_partitions.py::test_agent_holds_no_credential`
@@ -94,7 +94,7 @@ KNOWN_KEYS = (
     "nets",
 )
 
-# Known-network limits, retyped from `agent/main/ff_cfg.h` (`FF_CFG_MAX_NETS`, and the field
+# Known-network limits, retyped from `agent/components/fleetforge/include/ff_cfg.h` (`FF_CFG_MAX_NETS`, and the field
 # capacities `FF_CFG_MAX_SSID` 33 / `FF_CFG_MAX_PSK` 65 minus the NUL). The reader idles on an
 # over-length value, so this writer refuses one; it truncates a list past MAX_NETWORKS (with
 # a warning) rather than idling, and this writer refuses that too.
@@ -152,7 +152,7 @@ def encode(fields: dict[str, Any]) -> bytes:
 def decode(blob: bytes) -> dict[str, Any]:
     """Parse a blob back into its fields, or raise `ConfigError` naming what was wrong.
 
-    Every rejection here has a matching branch in `agent/main/ff_cfg.c`, and both say the
+    Every rejection here has a matching branch in `agent/components/fleetforge/src/ff_cfg.c`, and both say the
     same thing for the same reason: a board with an unreadable config must idle loudly, not
     connect approximately.
     """

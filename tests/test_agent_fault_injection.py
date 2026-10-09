@@ -23,16 +23,14 @@ greps look at code only (`_code`), and CMake comments are stripped here.
 import re
 from pathlib import Path
 
+from tests.agent_src import AGENT_DIR, AGENT_MAIN_C, COMPONENT_CMAKE, MAIN_CMAKE, agent_sources
 from tests.test_agent_txn import _function_body
 from tests.test_ff_cfg import _code
 
 ROOT = Path(__file__).resolve().parent.parent
-AGENT = ROOT / "agent"
-AGENT_MAIN_DIR = AGENT / "main"
+AGENT = AGENT_DIR
 TOP_CMAKE = AGENT / "CMakeLists.txt"
-MAIN_CMAKE = AGENT_MAIN_DIR / "CMakeLists.txt"
 DOCKERFILE = AGENT / "Dockerfile"
-AGENT_MAIN_C = AGENT_MAIN_DIR / "agent_main.c"
 JUSTFILE = ROOT / "justfile"
 
 FAULT_DEFINES = ("FF_FAULT_TEST_BOOTLOOP", "FF_FAULT_TEST_HANG")
@@ -162,13 +160,16 @@ class TestTheHook:
         assert body.index("ff_mqtt_arm_confirm_timer();") < body.index("#if FF_FAULT_TEST_BOOTLOOP")
 
     def test_no_other_agent_source_knows_the_switch(self) -> None:
-        sources = sorted(AGENT_MAIN_DIR.glob("*.[ch]"))
+        """Main and the `fleetforge` component (R3-fw-2): the hooks are agent_main.c's
+        alone, so the component neither reads the switch nor defines it."""
+        sources = agent_sources()
         assert any(path.name == "ff_mqtt.c" for path in sources)
         assert any(path.name == "ff_ota.c" for path in sources)
         for path in sources:
             if path == AGENT_MAIN_C:
                 continue
             assert "FF_FAULT_TEST" not in path.read_text(), path.name
+        assert "FF_FAULT_TEST" not in COMPONENT_CMAKE.read_text()
 
 
 def test_no_recipe_builds_a_fault_image() -> None:
