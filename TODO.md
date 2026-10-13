@@ -50,8 +50,6 @@ run could show, so the pass rests on the deterministic judge. Task list below; b
 **Blocked:**
 
 - `S0-bug-1` and `R2b-test-1` withdrawn 2026-10-09 (hardware-gated, no-bench approach).
-- **A dev box with pruned images cannot `just up`**: `minio/minio` and `minio/mc` no
-  longer pull (`DECISIONS.md` 2026-10-01). No task filed yet.
 
 <!-- Counters: spec=1 infra=7 db=1 be=6 fe=7 sec=1 fw=4 test=3 -->
 <!-- Sprint 0 counters: fe=8 fw=4 infra=10 test=4 ops=1 bug=1 -->

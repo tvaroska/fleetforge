@@ -216,7 +216,11 @@ services:
   # Object storage. The self-hosted sibling of GCS behind the R0-be-6 adapter.
   # ---------------------------------------------------------------------------
   minio:
-    image: minio/minio:RELEASE.2025-04-22T22-12-26Z    # pinned: MinIO tags churn, and newer releases dropped the console
+    # Chainguard: minio/minio left Docker Hub and quay.io. Pinned by digest because the tag
+    # floats; -dev because only it has a shell and wget (healthcheck). Runs as root so the
+    # existing fleetforge_minio volume (written by the old image) stays writable.
+    image: cgr.dev/chainguard/minio:latest-dev@sha256:8d5a0265f0e18fb3b29f95598147f1cc2a86b782181668bad176b0e90cce9569
+    user: "0"
     container_name: fleetforge-minio
     restart: unless-stopped
     command: server /data --console-address ":9001"
@@ -231,14 +235,14 @@ services:
     networks:
       - backend
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:9000/minio/health/live || exit 1"]
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:9000/minio/health/live || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5
 
   # One-shot, idempotent bucket creation: `just up` twice must be safe.
   minio-init:
-    image: minio/mc:RELEASE.2025-08-13T08-35-41Z
+    image: cgr.dev/chainguard/minio-client:latest-dev@sha256:a552f9a01603b3db647712ae056e8bb4c04800365707f5bd4abffa05c9e4198e    # minio/mc is gone from Docker Hub
     container_name: fleetforge-minio-init
     restart: "no"
     depends_on:
