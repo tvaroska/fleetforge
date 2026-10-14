@@ -105,7 +105,7 @@ Bricking risks, broker auth and security issues get filed here as they surface.
       _(2026-10-06: done. Bundles rebuilt at 7a58f80 (all four 0.4.7, agent-check-fresh green), published to prod GCS on the user's go-ahead; `just agent-check-prod` printed CHECK-VERSION OK, all four CURRENT.)_
 - [x] **S0-test-3**: Someone who did not see the code onboards a board unaided — passed 2026-09-22 → [enrollment.md](docs/features/enrollment.md)
 - [x] **S0-fw-3**: A board that browns out during RF calibration cannot escape it — withdrawn 2026-09-23, not fixed → [enrollment.md](docs/features/enrollment.md)
-- [ ] **S0-bug-2**: An `always_on` device's `announce` event reads `online=False` until its `presence` arrives (P2, 2h)
+- [x] **S0-bug-2**: An `always_on` device's `announce` event reads `online=False` until its `presence` arrives (P2, 2h) _(done 2026-10-14; see DECISIONS.md)_
       Found 2026-10-14 on `84c7bbe0e8c0` (ingestor log: announce `online=False`, then presence `online=True` in the same second). `presence.is_online` reads `presence_reported`, which only the later `up/presence` sets, and `ingestor/handlers.py` emits the `DeviceEvent` on announce, so the SSE snapshot can flash offline on every connect. `GET /v1/devices` recomputes on read and is right. Fix: on announce, carry the previously reported presence or skip the `online` value until presence is known. Acceptance: a test that an announce for a connected always_on board emits no `online=False`; dashboard shows no offline flicker on connect.
       Added: 2026-10-14
 - [ ] **S0-bug-3**: Find out why `84c7bbe0e8c0` announced twice with no deploy attached (P2, 2h)

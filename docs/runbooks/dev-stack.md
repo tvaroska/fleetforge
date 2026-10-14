@@ -159,6 +159,7 @@ PW=$(curl -sS -X POST "$BASE/v1/enroll" -H 'content-type: application/json' \
      | jq -r .mqtt_password)      # the only copy — keep it in the shell, not in a file
 
 just mqtt-pub "ff/v1/d/$DEV/up/announce" '{"proto":1,"platform_type":"esp32c6","fw_version":"1.4.2","link_type":"wifi","power_class":"always_on"}' 0 "$DEV" "$PW"
+# The SSE frame for this announce carries "online":null until the presence publish (S0-bug-2).
 psql -c "SELECT fw_version, last_seen, presence_reported FROM devices WHERE device_id='$DEV';"
 #  => 1.4.2 | a timestamp | (empty — announce says nothing about presence)
 

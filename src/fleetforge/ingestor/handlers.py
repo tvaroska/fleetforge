@@ -26,6 +26,11 @@ about *not* believing something is alive:
 Together: **`last_seen` advances only on a live (`retain=False`) message that is not
 `presence{online:false}`.**
 
+**A live announce never reports `online: false`.** It opens a new broker session, and the
+stored `presence_reported` still describes the previous one, so the event says `null`
+("this session's `up/presence` follows") unless presence already derives online
+(S0-bug-2). A retained announce replay keeps the derived value.
+
 **The ingestor's one INSERT is a detected partition profile (R3-be-2)**, and only for a
 live, registered device: after an announce has updated the device row, a partition table
 nobody knows becomes one pending `partition_profiles` row
@@ -195,11 +200,32 @@ async def handle_up_message(
         type=event_type,
         device_id=device_id,
         at=received_at,
-        online=is_online(row, now=received_at, tolerance=tolerance),
+        online=_online_snapshot(
+            row,
+            live_announce=parsed.channel == UpChannel.ANNOUNCE and not retained,
+            now=received_at,
+            tolerance=tolerance,
+        ),
         fw_version=row.fw_version,
     )
     await emit(session, event)
     return event
+
+
+def _online_snapshot(
+    row: Device, *, live_announce: bool, now: dt.datetime, tolerance: float
+) -> bool | None:
+    """`is_online`, except that a live announce withholds a `False`.
+
+    A live announce is a new session whose `up/presence` has not arrived, while
+    `presence_reported` still holds the previous session's value (NULL after enroll,
+    false after an LWT). Reporting `False` would be a stale answer, so it reports
+    `None`. `presence.is_online` stays the one derivation; this only withholds it.
+    """
+    online = is_online(row, now=now, tolerance=tolerance)
+    if live_announce and not online:
+        return None
+    return online
 
 
 async def _note_detected_profile(session: AsyncSession, row: Device) -> None:

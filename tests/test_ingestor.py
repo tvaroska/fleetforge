@@ -128,6 +128,35 @@ async def test_announce_says_nothing_about_presence(session: AsyncSession) -> No
     assert device.presence_reported is None
 
 
+@pytest.mark.parametrize("reported", [None, False], ids=["after-enroll", "after-lwt"])
+async def test_a_live_announce_never_reports_a_connecting_board_offline(
+    session: AsyncSession, reported: bool | None
+) -> None:
+    """S0-bug-2: `presence_reported` is the previous session's, so the snapshot is `null`."""
+    await seed_device(session, presence_reported=reported)
+
+    event = await publish(session, "announce", ANNOUNCE)
+
+    assert event is not None
+    assert event.online is None, "a live announce must say 'not known yet', never False"
+    assert (await reload(session)).presence_reported is reported
+
+    event = await publish(session, "presence", {"online": True})
+
+    assert event is not None
+    assert event.online is True
+
+
+async def test_a_retained_announce_replay_still_reads_offline(session: AsyncSession) -> None:
+    """An ingestor restart must not make a dead fleet look 'unknown'."""
+    await seed_device(session, presence_reported=False)
+
+    event = await publish(session, "announce", ANNOUNCE, retained=True)
+
+    assert event is not None
+    assert event.online is False
+
+
 async def test_announce_from_unknown_device_creates_nothing(session: AsyncSession) -> None:
     """The enrollment boundary: publishing to the broker must never join the fleet."""
     before = await session.scalar(select(func.count()).select_from(Device))

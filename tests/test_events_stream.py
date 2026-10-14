@@ -246,6 +246,23 @@ async def test_an_unknown_extra_field_is_forwarded_verbatim() -> None:
         assert subscription.queue.get_nowait() == payload
 
 
+async def test_a_null_online_is_forwarded() -> None:
+    """S0-bug-2: a connecting board's announce carries `online: null`; the model must accept it."""
+    payload = json.dumps(
+        {
+            "v": 1,
+            "type": "device.announce",
+            "device_id": DEVICE_ID,
+            "at": "2026-09-08T10:00:00+00:00",
+            "online": None,
+        }
+    )
+    hub = EventHub(queue_size=4, max_subscribers=4)
+    with hub.subscribe() as subscription:
+        a_listener(hub)._on_notify(None, 1, "ff_events", payload)
+        assert subscription.queue.get_nowait() == payload
+
+
 # ---------------------------------------------------------------------------
 # GET /v1/events
 # ---------------------------------------------------------------------------

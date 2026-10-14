@@ -21,6 +21,8 @@ Three properties of `NOTIFY` that shape this module:
 **The event is a hint, not a record.** It carries a *computed* `online` snapshot for
 the SSE consumer; the client re-reads `GET /v1/devices`, because presence is derived
 and a sleepy device goes offline with no event at all (`fleetforge.presence`).
+`online` is `null` on exactly one event: a live `device.announce` whose session has not
+reported presence yet (S0-bug-2), so a connecting board is never snapshotted offline.
 """
 
 import datetime as dt
@@ -46,6 +48,9 @@ class EventType(StrEnum):
     # Emitted by `POST /v1/enroll` (R0-be-4) before the board has ever connected, so
     # its `online` is always false. R0-be-5 forwards it like any other.
     DEVICE_ENROLLED = "device.enrolled"
+    # A live announce opens a new broker session, so its `online` is `true` or `null`
+    # ("this session's `up/presence` follows"), never `false` (S0-bug-2). A retained
+    # replay still reads the derived value.
     DEVICE_ANNOUNCE = "device.announce"
     DEVICE_PRESENCE = "device.presence"
     DEVICE_HEARTBEAT = "device.heartbeat"
@@ -86,7 +91,9 @@ class DeviceEvent(BaseModel):
     # Server receipt time, never a device `ts` (`spec/device-protocol.md` → *Clock*).
     at: dt.datetime
     # Derived by `fleetforge.presence.is_online` at write time. A snapshot, not a cache.
-    online: bool
+    # `None` only on a live `device.announce` whose session has not reported presence
+    # yet (S0-bug-2). Required: every emitter must still decide.
+    online: bool | None
     fw_version: str | None = None
 
 

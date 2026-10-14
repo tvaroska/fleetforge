@@ -6,6 +6,16 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-14 — A live announce reports online:null, never false, until its presence lands (S0-bug-2)
+
+- **Root cause.** The agent publishes retained `up/announce` and then retained `up/presence {"online":true}` on every connect. At announce time `presence_reported` still holds the previous session's value, so `is_online` was False for an `always_on` board and the event said `online=False`. Prod `84c7bbe0e8c0`: 21:47:37 (after re-enroll reset presence to NULL) and 22:14:50 (after an LWT at 22:09:59).
+- **No dashboard flicker was possible.** The browser never reads the event's `online` (`fleet.ts` rule 1; 2026-09-10): a frame only means "re-read `GET /v1/devices`". Only the SSE snapshot (`curl` watchers) and the ingestor log carried the wrong value.
+- **Rule.** A live (`retained=False`) announce reports `true` if `is_online(row)` is true, else `null`. A retained announce replay reports `is_online(row)` (a dead board's replay still reads `false`). Every other message type is unchanged and always a bool. `presence.py` is unchanged; `handlers._online_snapshot` only withholds its answer.
+- **Envelope.** `DeviceEvent.online` becomes `bool | None`, still required. `v` stays 1: the consumers are the browser (reads `type` only), `api/eventstream._on_notify` (same model, same image) and human `curl` watchers; no `spec/` section defines the envelope. Deploy skew: an old api validating a new ingestor's `null` drops that frame ("dropping an unparseable ff_events payload"); api and ingestor ship and restart together and the presence frame that follows is a bool, so this is harmless.
+- **Rejected.** (1) Report `true` on a live announce: asserts presence beyond `is_online`, and lies if the presence publish is denied. (2) Write `presence_reported = true` on announce: takes presence authority from `up/presence`/LWT (`spec/device-protocol.md`) and breaks `test_announce_says_nothing_about_presence`. (3) Reorder the agent: a firmware change across a deployed fleet, and the order is load-bearing on the board.
+
+---
+
 ## 2026-10-09 — R3 is prepared as v0.5.0: agent and library 0.5.0, a library README that routes to the two example READMEs, the pinned git lib_deps form proved with git+file; nothing published or deployed (R3-rel-1)
 
 - **D1. Versions.** App `0.4.3 -> 0.5.0` (minor), agent and library `0.4.7 -> 0.5.0`: the component's public surface ships for the first time (additive-only from now on) and the announce gained `lib_marker`. The app tag equals the library version this once, so `#v0.5.0` installs `Fleetforge@0.5.0`. A coincidence, not a policy; the two numbers stay independent.
