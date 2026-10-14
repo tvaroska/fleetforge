@@ -52,7 +52,7 @@ run could show, so the pass rests on the deterministic judge. Task list below; b
 - `S0-bug-1` and `R2b-test-1` withdrawn 2026-10-09 (hardware-gated, no-bench approach).
 
 <!-- Counters: spec=1 infra=7 db=1 be=6 fe=7 sec=1 fw=4 test=3 -->
-<!-- Sprint 0 counters: fe=8 fw=5 infra=10 test=4 ops=1 bug=3 -->
+<!-- Sprint 0 counters: fe=8 fw=6 infra=10 test=4 ops=1 bug=3 -->
 <!-- R1 counters: be=3 fe=1 fw=2 test=1 -->
 <!-- R2 counters: fw=6 be=1 fe=1 test=2 spec=1 (fw-3 is the R1-landed confirm timer) -->
 <!-- R3 counters: spec=3 fw=8 be=2 fe=1 test=2 rel=1 -->
@@ -108,11 +108,14 @@ Bricking risks, broker auth and security issues get filed here as they surface.
 - [x] **S0-bug-2**: An `always_on` device's `announce` event reads `online=False` until its `presence` arrives (P2, 2h) _(done 2026-10-14; see DECISIONS.md)_
       Found 2026-10-14 on `84c7bbe0e8c0` (ingestor log: announce `online=False`, then presence `online=True` in the same second). `presence.is_online` reads `presence_reported`, which only the later `up/presence` sets, and `ingestor/handlers.py` emits the `DeviceEvent` on announce, so the SSE snapshot can flash offline on every connect. `GET /v1/devices` recomputes on read and is right. Fix: on announce, carry the previously reported presence or skip the `online` value until presence is known. Acceptance: a test that an announce for a connected always_on board emits no `online=False`; dashboard shows no offline flicker on connect.
       Added: 2026-10-14
-- [ ] **S0-bug-3**: Find out why `84c7bbe0e8c0` announced twice with no deploy attached (P2, 2h)
+- [x] **S0-bug-3**: Find out why `84c7bbe0e8c0` announced twice with no deploy attached (P2, 2h) _(done 2026-10-14; 22:23:22 was a reboot (cause unknown, probably the operator: console EN pulse or reset), 22:49:26 an MQTT reconnect inside the boot; reset_reason proposed → S0-fw-6; operator question owed; see DECISIONS.md and docs/features/health-telemetry.md)_
       Found 2026-10-14: extra `announce` + `presence` at 22:23:22 and 22:49:26 UTC, between deploys. The operator may have reset or re-plugged the board, or it rebooted on its own, and nothing the board sends tells the two apart (no reset reason in the announce). Ask the operator first; if unexplained, add `reset_reason` (`esp_reset_reason()`) to `up/announce` as an additive field and watch for a repeat. Acceptance: the two events are explained, or a spontaneous reboot is reproducible and filed with its reason.
       Added: 2026-10-14
 - [ ] **S0-fw-5**: Firmware logs reach the server, not only the serial port (P2, 1d; may belong in R4)
       Found 2026-10-14 while bench-testing a custom blink build: `up/log` is listed as "optional diagnostics" and `spec/device-protocol.md` still leaves open whether it ships in R0 or waits for R4, so a maker's firmware log (the `morse:` line) is visible only over USB. Decide whether this stays here or moves to R4, then propose the `up/log` payload and retention as a `spec/` change (spec is protected: file a proposal, do not edit). Related: `docs/SWARM.md` section 5.1 (`age_ms` batched samples).
+      Added: 2026-10-14
+- [ ] **S0-fw-6**: Announce `reset_reason` so a spontaneous reboot names itself (P3, 0.5d) — **blocked on the owner accepting the S0-bug-3 proposal (Patch A)**
+      From S0-bug-3: a reboot with no deploy cannot say whether it was the operator or a crash. Proposal and paste-ready Patch A/B: `docs/features/health-telemetry.md` → *Reset reason proposal*. Build: `ff_identity.c` emits it (before `lib_marker`), apply Patch B in the same commit, simulator sends `poweron`/`sw`, ingestor logs it on a live announce (no storage). Acceptance (QEMU, no bench): `just agent-qemu esp32 --fresh` announces `poweron`; after a QEMU OTA reboot it announces `sw`; a build with an injected `abort()` after connect announces `panic` on the next boot; spec-reading tests green. Withdraw it if the operator confirms S0-bug-3's event 1 and nobody needs crash attribution before R4.
       Added: 2026-10-14
 
 ---
