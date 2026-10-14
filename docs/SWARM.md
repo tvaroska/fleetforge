@@ -482,6 +482,55 @@ gateway instead of a bullet list.
 
 ---
 
+## 5. Addendum (2026-10-14) — Carrier-Deck & Contested-RF (Data-Mule) Recommendations
+
+*Added after R0, R1, R2, R2b, and R3 closed in the repo, while designing a planetary/contested-RF ground-carrier (UGV) + multi-drone (UAV) exploration fleet. Like the rest of this document, these are **recommendations only** — not active spec changes.*
+
+When the ground vehicle is a **mobile carrier with a contact-charging/data deck** and the drones fly **beyond line-of-sight or into RF-jammed / high-radiation zones** ("Data-Mule" sorties), six specific extensions to R4 (Health & Telemetry) and V3 (Swarm Gateway) become high-leverage. All six are **strictly additive to `proto: 1`**:
+
+### 5.1 Store-and-forward telemetry with relative sample age (`age_ms`)
+- **Problem:** [`spec/device-protocol.md`](../spec/device-protocol.md) → *Clock* timestamps all incoming messages by **server receipt time** because ESP32s have no RTC across power loss. If a drone flies a 20-minute radio-silent sortie, buffering battery sag, VIO drift, and RF noise floor in RAM/flash, and flushes those samples when it docks on the UGV, receipt-time stamping collapses a 20-minute flight curve into a single instant.
+- **Recommendation (for R4 / V3):** Allow `up/telemetry` and `up/log` payloads to carry batched sample arrays where each sample includes an optional **`age_ms`** (milliseconds elapsed on the device's monotonic `esp_timer` between capture and publish). The ingestor records `sample_ts = receipt_ts - age_ms`. This needs **no wall clock or SNTP on the drone** and preserves exact time-series curves across disconnected data-mule sorties.
+- **Library helper (`libfleetforge`):** Add a lightweight ring-buffer helper in `agent/components/fleetforge/` that records telemetry/log entries in RAM/PSRAM while MQTT is disconnected and flushes them with `age_ms` upon reconnect.
+
+### 5.2 Planned-offline / sortie presence leases (`expected_back_s`)
+- **Problem:** Fleetforge currently defines two `power_class` modes: `always_on` (instant offline via MQTT Last Will) and `sleepy` (periodic wake interval). A carrier-launched drone is `always_on` while sitting on the charging pad, then intentionally goes radio-silent or flies out of range for a 15–25 minute sortie. Under `always_on`, departing the deck looks like a crash/disconnect; under `sleepy`, you lose instant LWT while docked.
+- **Recommendation (for R4 / V3):** Allow a device (or its parent gateway on its behalf) to publish an additive lease on `up/presence` before launch:
+  ```json
+  {"online": false, "reason": "sortie", "expected_back_s": 1200}
+  ```
+  The server and dashboard can then distinguish **"Out on Sortie (ETA 14m)"** from **"Overdue / Lost"** (when `now > last_seen + tolerance × expected_back_s`), while keeping instant LWT presence whenever the drone is docked.
+
+### 5.3 Physical dock bus as a first-class V3 link (`link_type: "dock"`)
+- **Problem:** Section 1 assumes the UGV-to-drone hop is a Wi-Fi AP or ESP-NOW. Under active RF jamming, radiation storms, or EMCON (radio silence), wireless links fail even at 2 meters. Meanwhile, a drone that lands on a carrier deck for contact charging already mates with physical pins (or narrow-beam optical transceivers).
+- **Recommendation (for V3):** Treat a **wired dock bus** (Ethernet-over-pogo-pins, UART/SLIP, or CAN-FD alongside the DC charging rails) as a standard IP-bearing `esp_netif` / Linux interface (`link_type: "dock"`). When the drone touches down in the capture funnel:
+  1. It joins the UGV gateway over the physical pins with **zero RF signature** and 10–100 Mbps throughput.
+  2. Buffered `up/telemetry` and `up/log` flush immediately.
+  3. Pending OTA `stage → apply → confirm` transactions run over the wire while the battery charges, when `awaiting_safe_window` is guaranteed safe (`DOCKED_AND_DISARMED`).
+
+### 5.4 Multi-component / attached-processor artifacts (`artifact.type` + `sub_versions`)
+- **Problem:** Already noted in [`spec/open-questions.md`](../spec/open-questions.md) (`artifact.type` on `dn/cmd` `stage`) and [`docs/PLATFORMS.md`](PLATFORMS.md). A field drone or rover is rarely one processor: a companion board (Pi / Radxa / ESP32-S3) sits on a UART/SPI bus next to an STM32 flight controller (ArduPilot/PX4) and carries local vision model weights.
+- **Recommendation (for V2/V3):**
+  1. Document the default in `device-protocol.md` now: absent `artifact.type` on `dn/cmd` `stage` means `"app"`.
+  2. Reserve additive `artifact.type` values (e.g., `"mcu_fw"`, `"model_weights"`, `"fpga_bitstream"`) and an optional `sub_versions: {"fc_fw": "4.5.1", "vision_model": "0.2.0"}` map in `up/announce`.
+  3. The companion's Fleetforge agent delegates non-`"app"` artifacts to a registered local sub-handler (e.g., flashing the flight controller bootloader over UART while docked, verifying heartbeat, and rolling back to the cached prior `.apj`/`.bin` if confirm fails).
+
+### 5.5 Parent-gated safe windows (carrier-deck & leapfrog interlocks)
+- **Problem:** `awaiting_safe_window` is currently decided by each device in isolation. On a carrier rover with 2–3 drones running a leapfrog scout rotation:
+  - The **Carrier Deck Controller** must not reboot for an OTA update while an airborne drone is on final optical approach to land on it—even if the deck controller itself appears idle.
+  - A group deploy to 3 drones must not put all 3 into `applying → rebooting → self-test` simultaneously when the mission requires at least one charged standby drone ready to launch.
+- **Recommendation (for V3):** Add two lightweight controls to the V3 gateway/group orchestrator:
+  1. **Group concurrency cap (`max_parallel_apply: 1`):** Stagger `apply` grants across a group so at most $K$ children leave `staged` at a time, advancing only after the previous child reaches `confirmed`.
+  2. **Parent safe-window inhibit:** Allow the parent gateway (UGV) to hold/defer `apply` authorization for its child devices while a mission-critical window (such as `RECOVERY_WINDOW` / terminal landing) is active.
+
+### 5.6 Gateway-local NTP & local ECDSA CA in `ff_cfg`
+- **Problem:** Also noted in [`spec/open-questions.md`](../spec/open-questions.md). A drone or peripheral waking at epoch zero in a GPS/internet-denied crater cannot reach public SNTP (`pool.ntp.org`) or validate a public Let's Encrypt hostname on an isolated rover LAN/dock bus.
+- **Recommendation (for V3):**
+  - The UGV gateway image runs a **local NTP server** (backed by the UGV's battery-backed RTC) advertised via DHCP option 42 on the Wi-Fi AP and dock bus, satisfying SNTP-before-TLS offline.
+  - Use the spare room in the 4 KB `ff_cfg` partition to allow an optional `< 1 KB` **ECDSA root CA certificate (`ca`)** so field devices can authenticate the UGV gateway's local TLS endpoint without internet DNS.
+
+---
+
 ## Related
 
 - [`docs/personas/PERSONAS.md`](personas/PERSONAS.md) — canonical persona descriptions and priority matrix
