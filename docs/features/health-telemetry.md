@@ -29,3 +29,20 @@ policy, not just the ingest.
 ## Post-v1
 
 Grafana/Prometheus telemetry export (the "observe" pillar), richer alerting.
+
+### Live announce never reports a connecting board offline
+- **What was built:** `DeviceEvent.online` is now `bool | None` (still required, `v` stays 1).
+  `ingestor/handlers.py::_online_snapshot` returns `presence.is_online(...)`, except that a live
+  (`retained=False`) `up/announce` whose derived presence is not true reports `None`
+  ("not known yet; this session's `up/presence` follows"). It is keyed on the channel, not
+  `event_type`. Retained announce replays and all other message types are unchanged.
+  `presence.py` is untouched, so `is_online` stays the single derivation.
+- **Why:** the agent publishes announce then presence on every connect. At announce time
+  `presence_reported` still holds the previous session's value (NULL after re-enroll, false
+  after an LWT), so an `always_on` board's announce snapshot said `online=False`. The browser
+  never reads the event's `online` (a frame only triggers a re-read of `GET /v1/devices`), so
+  the dashboard could not flicker; only SSE watchers and the ingestor log saw the wrong value.
+- **Seams and gotchas:** the agent publish order is load-bearing and was not changed. The
+  ingestor does not hot-reload in dev, so restart it when testing. `api/eventstream._on_notify`
+  validates with the same model, so an old api would drop a new ingestor's `null` frame; they
+  ship together. `test_a_null_online_is_forwarded` guards against reverting the model to `bool`.
