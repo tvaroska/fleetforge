@@ -20,9 +20,13 @@ policy, not just the ingest.
 |----|------|----------|--------|
 | R4-FW-1 | Agent reports boot-success + uptime | P0 | 1d |
 | R4-FW-2 | User-defined telemetry metrics channel | P1 | 1d |
+| R4-FW-3 | Agent + library forward firmware log lines on `up/log` (explicit call; ring buffer; simulator; Basic/basic_idf forward `morse:`). Touches CRITICAL `Fleetforge.cpp`. Needs Patches A+B (*up/log proposal*) | P1 | 1d |
 | R4-BE-1 | Ingest + persist health/telemetry with SPEC retention (30d telemetry, 7d logs). Expose via API + SSE | P0 | 1.5d |
 | R4-FE-1 | Live fleet status dashboard: online/offline, last-seen, boot-success, metrics | P0 | 2d |
+| R4-FE-2 | Per-device log tail (newest first, level, text, dropped gaps) | P1 | 1d |
 | R4-TEST-1 | E2E: metric emitted on device → visible live in dashboard | P0 | 0.5d |
+
+R4-BE-1's `up/log` half follows *up/log proposal* (its own table + migration, bounded on write like `progress.py`, `_sanitise_detail` on `text`, `logged_at = received_at − age_ms`, plus an age sweep or predicate so a silent board's lines still expire).
 
 **Done when:** you can watch fleet health live.
 
@@ -77,3 +81,71 @@ Proposal only; nothing is built. `spec/` is protected, so the patches are paste-
   > announce field.
 
 - **Patch B** (S0-fw-6's commit only): in the announce JSON example insert `"reset_reason": "poweron",` on its own line **between** the `"capabilities": [...]` line and `"lib_marker": 1`. `lib_marker` must stay the last key (`test_the_spec_example_ends_with_lib_marker`, `test_lib_marker_is_the_last_key`). In `ff_identity.c::announce_object` the new `cJSON_AddStringToObject(root, "reset_reason", ...)` likewise goes after `capabilities` and before the `lib_marker` line.
+
+### up/log proposal (S0-fw-5, proposed)
+
+Proposal only; nothing is built. `spec/` is protected, so the patches are paste-ready here (the `reset_reason` and `lib_marker` precedent).
+
+- **Decision:** the build is R4 (R4-FW-3, R4-BE-1, R4-FE-2); Sprint 0 is bricking, auth and security, and a missing remote log is none of these. The server already tolerates `up/log` (`ingestor/handlers.py` only moves `last_seen`), so R0 shipped without it harmlessly.
+- **On the wire:** `up/log`, QoS 0, not retained (unchanged from the table). One payload is a batch: `{"dropped": n, "lines": [{"age_ms", "level", "text"}, ...]}`, oldest first. `proto` stays 1 (additive: the channel was declared, its payload never specified, no agent <= 0.6.0 publishes it).
+- **What gets sent is the firmware's choice:** an explicit library call. Nothing is forwarded by default. `esp_log_set_vprintf` would miss `printf`/`Serial.printf` (where the `morse:` line comes from) and recurses, because esp-mqtt and mbedTLS log while publishing.
+- **Limits:** `text` <= 200 bytes, a payload < 2048 bytes, at most one publish per 5 s while lines flow. This bounds a chatty board at about 400 B/s. esp-mqtt's default buffer is 1024 B: R4-FW-3 must check whether it raises `buffer_size` or caps at 1 KB (measure in QEMU). The server drops payloads > 8192 B whole.
+- **Time:** `logged_at = received_at - age_ms` (a negative `age_ms` is treated as 0). The device needs no wall clock. `age_ms` is the name `docs/SWARM.md` 5.1 proposes for `up/telemetry`, so R4-FW-2 can adopt it unchanged.
+- **Retention:** 7 days (unchanged) and the newest 5 000 lines per device (new bound, Patch B). Worst case at 5 boards is about 25 000 rows, 7-8 MB, so a looping board cannot fill the shared prod VM. Mechanism (R4-BE-1): trim count on write (the `progress.py` idiom). A silent board never writes again, so the 7-day rule also needs a sweep or an age predicate in the same trim.
+- **Security:** the broker ACL already limits a device to its own `up/#`, so a line cannot be forged for another board. `text` is untrusted (sanitise like `deploys.py::_sanitise_detail`); the server never echoes it into its own logs; the read API is admin-only. Lines never carry passphrases, credentials, enrolment tokens or signed URLs.
+- **Named gaps:** a reboot loses unsent lines (RAM ring), so a panic's last words are lost (a later RTC-noinit ring or core dump could fix it); QoS-0 loss in flight is invisible; plain `printf`/`Serial.printf` lines are not forwarded unless the maker calls the library; "Watch a board" pulses EN and reboots the board (S0-bug-3), so a running board's log cannot be read without a restart. That friction is real but not Sprint 0 class; the owner can pull R4-FW-3 forward.
+- **Rejected:** build in S0 now (edits the near-frozen protocol before acceptance, and needs a migration R4-BE-1 owns); forward all ESP_LOG output; tee the UART/USB-CDC stream; a server-side log level; a per-batch `seq`; device wall-clock timestamps (against *Clock*); keeping a dead board's lines beyond 7 days (a retention change the prd does not promise).
+- **Tests later:** R4-FW-3 and R4-BE-1 pin the spec example against the simulator/ingestor with a spec-reading test (the `test_library_marker.py` idiom). Patches A and B have no test that turns red, so the owner can apply both together at any time.
+- **Dry-run result (throwaway worktree, 2026-10-14):** Patches A1-A3 + B applied to a detached worktree copy (text pasted from this section): the six spec-reading test files give 253 passed, 0 failed, the same count as the unpatched tree; the structural check (section order, example keys, 2048 B bound, topic row, open item gone, prd row) printed `UP-LOG PATCH OK`.
+- **Patch A** (owner, `spec:` commit), `spec/device-protocol.md`, three hunks.
+
+  **A1, Topics table.** Replace the row `| `up/log` | 0 | no | optional diagnostics |` with:
+
+  ```
+  | `up/log` | 0 | no | firmware log lines, batched (R4) |
+  ```
+
+  **A2, new section.** Insert directly after the `### `up/hb` — heartbeat` section (after "A sleepy device sends one per wake." and its blank line), before `### `dn/cmd` — commands`:
+
+````markdown
+### `up/log` — firmware log lines
+
+```json
+{"dropped":0,"lines":[{"age_ms":5120,"level":"I","text":"morse: HELLO (firmware 1.0.1)"},{"age_ms":0,"level":"W","text":"sensor: no reply"}]}
+```
+
+Log lines the firmware chose to send, batched, oldest first. A device sends nothing here
+unless its firmware asks the agent to: which lines go out is the device's choice, never
+the server's.
+
+- `lines`: one entry per line, oldest first, at least one.
+  - `text`: one line of UTF-8, no line break, at most 200 bytes (the device truncates).
+  - `level`: the ESP-IDF letter, `E`, `W`, `I`, `D` or `V`. An open vocabulary; absent
+    means `I`.
+  - `age_ms`: milliseconds on the device's monotonic clock from the line being logged to
+    this payload being built. The server stamps the line `receipt time − age_ms` (see
+    *Clock*); it is never a wall-clock time. Absent means `0`.
+- `dropped`: lines the device discarded since its last `up/log` publish, because its
+  buffer filled while offline or it hit its own rate limit. Absent means `0`. A QoS 0
+  publish lost in flight is not counted, because the device cannot know about it.
+
+A device keeps one payload under **2048 bytes** and publishes at most one every **5 s**
+while lines are flowing. It buffers in RAM while disconnected and flushes on reconnect,
+so a reboot loses lines not yet sent. QoS 0, because a log line is not worth a retransmit
+or a persistent-session slot. A log line never carries a passphrase, credential, enrolment
+token or signed URL.
+
+The server treats `text` as untrusted: it strips control characters, redacts URLs and
+bounds the length. It drops a payload over 8192 bytes, or one it cannot decode, whole and
+without refusing the device. It keeps lines as [prd.md](prd.md) → *Retention* says. Like
+every live `up/` message, an `up/log` moves `last_seen`. The fields are additive under
+*Evolution rules*, rule 2, and `proto` stays `1`.
+````
+
+  **A3, Open items for R0.** Delete the bullet `- Whether `up/log` ships in R0 or waits for R4.` (answered: R4, by S0-fw-5). Leave the dynsec bullet and the italic note.
+
+- **Patch B** (owner, same `spec:` commit), `spec/prd.md` -> *Retention*. Replace the row `| Device logs (`up/log`) | **7 days** |` with:
+
+  ```
+  | Device logs (`up/log`) | **7 days**, and at most the newest **5 000 lines** per device |
+  ```
