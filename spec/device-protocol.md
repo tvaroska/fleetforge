@@ -154,6 +154,16 @@ pre-check reads the marker from the image being sent, not from the board. The en
 carries it like every other announce field, and the server stores a malformed value as
 null rather than refusing the request.
 
+`reset_reason` is why the chip last reset, as `esp_reset_reason()` reports it at
+boot, lowercased without the `ESP_RST_` prefix: `poweron`, `ext`, `sw`, `panic`,
+`int_wdt`, `task_wdt`, `wdt`, `deepsleep`, `brownout`, `sdio`, `usb`, `jtag`, `efuse`,
+`pwr_glitch`, `cpu_lockup`, or `unknown`. It describes the current boot, so a
+reconnect inside one boot repeats it. It is additive under *Evolution rules*, rule 2,
+and `proto` stays `1`. It is absent from agents that predate it, and the server treats
+absent and `null` alike. The server never refuses or warns on a device for it and
+logs a value it does not know as-is. The enroll body carries it like every other
+announce field.
+
 #### Partition layouts
 
 A layout id names a **whole flash map**, and it is a flash-time immutable: no OTA can
