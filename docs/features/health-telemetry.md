@@ -18,6 +18,7 @@ policy, not just the ingest.
 
 | ID | Task | Priority | Effort |
 |----|------|----------|--------|
+| R4-SPEC-1 | Propose the `proto: 1` additive reservations: absent `artifact.type` means `app`, `sub_versions`, a presence lease, `link_type` `dock`, `min_free_heap` (proposal only; *proto: 1 reservations proposal*) | P1 | 0.5d |
 | R4-FW-1 | Agent reports boot-success + uptime | P0 | 1d |
 | R4-FW-2 | User-defined telemetry metrics channel | P1 | 1d |
 | R4-FW-3 | Agent + library forward firmware log lines on `up/log` (explicit call; ring buffer; simulator; Basic/basic_idf forward `morse:`). Touches CRITICAL `Fleetforge.cpp`. Needs Patches A+B (*up/log proposal*) | P1 | 1d |
@@ -165,3 +166,100 @@ every live `up/` message, an `up/log` moves `last_seen`. The fields are additive
   ```
   | Device logs (`up/log`) | **7 days**, and at most the newest **5 000 lines** per device |
   ```
+
+### proto: 1 reservations proposal (R4-spec-1, proposed)
+
+Proposal only; nothing is built. `spec/` is protected, so the patches are paste-ready here (the `reset_reason`, `up/log` and `lib_marker` precedent).
+
+- **Source:** focus-group item 9 (synthetic personas, DECISIONS 2026-10-15) and `docs/SWARM.md` 5.2-5.4. `spec/open-questions.md` -> *`artifact.type` on `dn/cmd` `stage`* already asked for exactly the "absent means `app`" sentence.
+- **What each reservation buys, and why it is safe.** All are additive under *Evolution rules*, rule 2, and `proto` stays `1`. No agent <= 0.5.x sends any of the new fields, and the server already ignores unknown fields, so nothing changes on the wire today.
+  - `artifact.type` absent means `app`; `mcu_fw`, `model_weights`, `fpga_bitstream` reserved. Fixes the meaning of absence before anyone assigns another.
+  - `up/announce.sub_versions`: component name -> version string, for a device that updates other processors.
+  - `up/presence` `reason` and `expected_back_s`: a retained "planned absence" lease (a drone leaving its dock).
+  - `link_type` `dock`: a wired bus to a carrier or gateway (V3). `link_type` is already an open vocabulary: the column is TEXT, `LinkType` is advisory, and `test_ingestor.py::test_unknown_link_type_is_written_through` stores `satellite`. `ff_cfg.LINKS` is the flash-config `link` (wifi/ethernet), a different thing, not touched. Adding `DOCK` to `LinkType` is a later build.
+  - `up/hb.min_free_heap`: `esp_get_minimum_free_heap_size()`, bytes, the low-water mark since boot, beside `free_heap`. Documents what R4-FW-1 will send.
+- **Test shape (why each hunk is shaped as it is).** `TestAnnounceMatchesTheSpec` parses every `"key":` in the announce JSON example and requires `ff_identity.c` to emit it, so `sub_versions` is **prose only**; `test_the_spec_example_ends_with_lib_marker` and `test_the_spec_example_puts_it_last_but_one` pin the example's tail, so Patch A does not touch the example at all. `test_stage_payload_is_exactly_the_spec_keys` pins the server's stage payload (the server keeps omitting `artifact.type`), so the `dn/cmd` example is untouched too. `test_heartbeat_carries_the_spec_fields` uses a hard-coded key list, so adding `min_free_heap` to the hb example turns nothing red; it is still **Patch B, applied in R4-FW-1's commit** (the `reset_reason` rule: the example shows what the firmware sends, and R4-FW-1 adds the spec-parsing hb test).
+- **Old-agent hazard (written into A4).** `agent/components/fleetforge/src/ff_mqtt.c` reads only `url`, `sha256`, `version` and `size` from `artifact`. A deployed agent sent `"type":"mcu_fw"` would write the blob into its OTA slot as an app. So a server sends a type other than `app` only to a device whose `capabilities` names a handler. `artifact.type` is nested and unrelated to the command's own top-level `type` (`stage`).
+- **Presence lease and the LWT (written into A3).** The lease is a retained publish on `up/presence`. If the device then drops uncleanly, the LWT fires and its bare `{"online":false}` replaces the retained lease. A clean MQTT `DISCONNECT` suppresses the will (MQTT 3.1.1), so the device must disconnect cleanly after publishing. `PresencePayload` is `extra="ignore"` with only `online`, so a v1 server reads the lease as plain offline. A parent publishing for its child needs the V3 hierarchy ACLs.
+- **Order-independent with the `up/log` Patch A.** Its A2 inserts after "A sleepy device sends one per wake." and its blank line. Our `min_free_heap` paragraph (A2 below) goes directly after the hb JSON fence, before "Interval from `dn/cfg`", so the two never share an anchor; the dry-run applies both orders and the results are byte-identical. up/log A3 deletes an *Open items* bullet; this proposal does not touch *Open items*.
+- **Not proposed: the `device_id` widening** (`^[a-z0-9_-]{1,32}$`). It is a server schema change, noted and **not built**. The format is enforced in `identity.py::DEVICE_ID_RE`; the DB CHECK `devices.device_id_format` (`db/models.py`, `alembic/versions/0001_initial_schema.py`: a migration, CRITICAL); the `mosquitto/acl` comment (CRITICAL); topic parsing (`ingestor/protocol.py`); the frontend (`flash.ts`, `diagnostics.ts`, `boardName.ts`); and the agent's `FF_DEVICE_ID_LEN`. **Service-username collision:** `device_id` is the MQTT username, and that shape admits the broker's service usernames (`MOSQUITTO_*_USERNAME` in `mosquitto/configure.sh`); an enroll claiming one would make dynsec provisioning act on a service client. A 12-hex id can never collide today. Any widening needs a reserved-name rule (or a disjoint shape) before it ships. `spec/open-questions.md` -> *`device_id` format* already argues against widening in V1; the focus-group regex is a candidate for when a non-ESP32 platform exists (Patch C2 records this).
+- **Rejected:** `sub_versions` in the announce example (reddens the parity test, and no agent sends it); a `type` in today's stage payload (the server has one kind); reserving capability names for the handlers now (no handler exists to name); a new `power_class` value for "sortie" (SWARM 5.2's own point: it is presence, not power).
+- **Dry-run result (throwaway worktrees, 2026-10-15):** Patches A+C: the ten spec-reading test files (`test_agent_board_measurements`, `test_agent_known_networks`, `test_agent_partitions`, `test_arduino_library`, `test_deploy_precheck`, `test_ff_cfg`, `test_library_marker`, `test_reset_reason`, `test_broker_commands`, `test_presence`) give 318 passed, 0 failed, the same count as the unpatched tree; A+B+C: 318 passed, 0 failed. Order check: the `up/log` Patch A1-A3 then these A+B+C, and the reverse, every anchor found exactly once in both orders, and the two patched `spec/device-protocol.md` and `spec/open-questions.md` are byte-identical (`cmp`). The throwaway script took the patch text from this section and asserted: announce example keys unchanged (`reset_reason` last but one, `lib_marker` last), `sub_versions` in prose only, `dn/cmd` example unchanged and the `artifact.type` bullet after the `artifact.sig` bullet, the presence paragraph before `## Messages`, the `min_free_heap` paragraph between the hb fence and "Interval from `dn/cfg`", the hb example parsing as JSON with `min_free_heap` and `boot_ok` (Patch B), and *Open items for R0* byte-identical; it printed `R4-RESERVATIONS PATCH OK`.
+- **Patch A** (owner, `spec:` commit), `spec/device-protocol.md`, four hunks, each hunk in its own block.
+
+**A1, `### up/announce — identity`.** Insert these two paragraphs directly after the `reset_reason` paragraph (ending "...The enroll body carries it like every other announce field."), before `#### Partition layouts`:
+
+```markdown
+`link_type` names the link this broker session runs over. The agent sends `wifi` or
+`ethernet`. It is an open vocabulary: the server stores a value it does not know as-is.
+`dock` is reserved for a wired bus between a device and the carrier or gateway it docks on
+(V3). A link that is not Wi-Fi reports `ssid` and `known_networks` as `null`, as
+`ethernet` does.
+
+`sub_versions` is reserved for a device that updates processors besides its own: an object
+mapping a component name to the version string that component runs, one level deep, for
+example `{"fc_fw": "4.5.1", "vision_model": "0.2.0"}`. It never repeats `fw_version`. No v1
+agent sends it. Absent means none reported. It is additive under *Evolution rules*, rule 2,
+and `proto` stays `1`; the server ignores it until a release defines what it stores.
+```
+
+**A2, `### up/hb — heartbeat`.** Insert directly after the closing fence of the hb JSON example, before the line "Interval from `dn/cfg`; ...":
+
+```markdown
+`min_free_heap` is the lowest free heap since this boot, in bytes
+(`esp_get_minimum_free_heap_size()`), beside the current `free_heap`. A value that keeps
+falling across heartbeats is the leak a board shows before it resets. It is additive under
+*Evolution rules*, rule 2, and `proto` stays `1`. It is absent from agents that predate it,
+and the server treats absent and `null` alike.
+```
+
+**A3, `## Presence — derived, never a socket state`.** Insert after the paragraph ending "...never the device's timestamp — see *Clock* below.", before `## Messages`:
+
+```markdown
+**Planned absence (reserved).** A device about to go quiet on purpose, for example a drone
+leaving its dock, may first publish its own retained presence:
+`{"online":false,"reason":"sortie","expected_back_s":1200}`. `reason` is an open vocabulary
+the server shows as-is. `expected_back_s` is how many seconds after receipt it expects to be
+back (receipt time, see *Clock*). The device then closes its session with a clean MQTT
+`DISCONNECT`: an unclean drop fires the LWT, whose bare `{"online":false}` replaces the
+retained lease. No v1 agent sends either field, and a v1 server treats the message as plain
+`online:false`. Both are additive under *Evolution rules*, rule 2, and `proto` stays `1`.
+Telling "away" from "overdue" is a later server's job. A parent publishing for its child is
+V3 (*Hierarchy*).
+```
+
+**A4, `### dn/cmd — commands`.** Add one bullet after the `artifact.sig` bullet (ending "...required on boards that announce signature verification."):
+
+```markdown
+- **`artifact.type` is absent in v1, and absent means `"app"`**: the device's own
+  application image, written to its inactive OTA slot. `mcu_fw` (a co-processor's
+  firmware), `model_weights` and `fpga_bitstream` are reserved for artifacts a device hands
+  to another processor or store it manages. A device that predates the field ignores it and
+  would treat any artifact as an app, so a server sends a type other than `app` only to a
+  device whose `capabilities` names a handler for it. It is unrelated to the command's own
+  `type`.
+```
+
+- **Patch B** (R4-FW-1's commit only, `spec/device-protocol.md`). Replace the `up/hb` JSON example line with the block below. It stays out of the owner's `spec:` commit so the spec example never shows a key the firmware does not yet send; R4-FW-1 also adds the test that parses the spec's hb example. `boot_ok` is already in the example and already emitted by `ff_identity.c`; R4-FW-1's "boot-success flag" is about its semantics, not a new key.
+
+**B, hb example line.**
+
+```json
+{"fw_version":"1.4.2","uptime_s":81234,"rssi":-61,"free_heap":142000,"min_free_heap":98000,"boot_ok":true}
+```
+
+- **Patch C** (owner, same `spec:` commit as A), `spec/open-questions.md`, two sentences. Each is appended to the end of the named paragraph.
+
+**C1, the `artifact.type` paragraph** (ending "...so the type may never need to cross the wire."):
+
+```markdown
+Answered (R4-spec-1): `device-protocol.md` → `dn/cmd` says absence means `app` and
+reserves `mcu_fw`, `model_weights` and `fpga_bitstream`.
+```
+
+**C2, the `device_id` format paragraph** (ending "...no device recall is involved."):
+
+```markdown
+The 2026-10-15 focus group proposes `^[a-z0-9_-]{1,32}$`; that shape admits the broker's
+service usernames, so any widening needs a reserved-name rule first (R4-spec-1, not built).
+```

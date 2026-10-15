@@ -483,7 +483,7 @@ Order: spec-1 (any time) · fw-1 → be-1 → fe-1 → test-1 · be-2 · fw-3 �
 
 ### Spec (proposals)
 
-- [ ] **R4-spec-1**: Propose the `proto: 1` additive reservations (P1, 0.5d)
+- [x] **R4-spec-1**: Propose the `proto: 1` additive reservations (P1, 0.5d) _(done 2026-10-15; proposal only: Patch A+C owner (`spec:` commit), Patch B in R4-fw-1's commit; device_id widening noted, not built; dry-run green; see DECISIONS.md and docs/features/health-telemetry.md)_
       From the report's item 9 and `docs/SWARM.md` 5.2-5.4: absent `artifact.type` on `dn/cmd` `stage` means `"app"` (reserve `mcu_fw`, `model_weights`, `fpga_bitstream` and `up/announce.sub_versions`); optional `reason` and `expected_back_s` on `up/presence`; `"dock"` in `link_type`; document `min_free_heap` in `up/hb`. Paste-ready patches in `docs/features/health-telemetry.md`, one section, same shape as the `reset_reason` proposal; a dry-run that the spec-reading tests stay green. Proposal only, nothing built. The `device_id` format widening (`^[a-z0-9_-]{1,32}$`) is a server schema change: note it, do not build it.
       Added: 2026-10-15
 
@@ -491,6 +491,7 @@ Order: spec-1 (any time) · fw-1 → be-1 → fe-1 → test-1 · be-2 · fw-3 �
 
 - [ ] **R4-fw-1**: `up/hb` carries `min_free_heap` and a boot-success flag (P0, 1d)
       `esp_get_minimum_free_heap_size()` beside `free_heap` (the leak signal a crash-looping board lacks); `boot_ok` true once the confirm path has run. Additive to `up/hb`; agent, ESP-IDF example and Arduino library through the same code. Simulator sends both. Acceptance (QEMU, no bench): the QEMU hb carries both keys; a spec-reading test pins them; `just agent-build-all` within the flash budget.
+      Apply R4-spec-1 Patch B (the hb example gains `min_free_heap`) in this commit, with a test that parses the spec's hb example.
       Added: 2026-10-15
 - [ ] **R4-fw-2**: User-defined telemetry channel with relative sample age (P1, 1.5d)
       `up/telemetry` batches `{"samples":[{"age_ms","name","value"}]}`; the server computes `sample_ts = received_at - age_ms` (`docs/SWARM.md` 5.1), so no wall clock on the board. A RAM ring buffer flushes on reconnect. Public API (`ff_telemetry()` / `Fleetforge.metric()`) is additive-only from release, so settle the names in a proposal first. CRITICAL (library public surface). Acceptance (simulator and QEMU): samples taken while disconnected arrive with their original spacing after reconnect.
