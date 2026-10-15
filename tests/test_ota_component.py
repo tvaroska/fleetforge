@@ -6,10 +6,15 @@ ADDITIVE-ONLY from that commit on, exactly like the wire protocol: a firmware bu
 goes to boards nobody can reach again. So the rule is held here, on every `just test`,
 rather than by review (DECISIONS 2026-10-08, R3-fw-2):
 
-* the public headers are exactly the `ff_*.h` headers `agent_main.c` includes;
-* every function they declare is one `agent_main.c` calls, and every `ff_*` call in
-  `agent_main.c` is declared in one of them — the public surface is what the first
-  consumer uses, no more and no less;
+* the public headers are exactly the `ff_*.h` headers `agent_main.c` includes, plus the
+  maker-API headers (`MAKER_HEADERS`);
+* every function the non-maker headers declare is one `agent_main.c` calls, and every
+  `ff_*` call in `agent_main.c` is declared in one of them — the agent's surface is what
+  the first consumer uses, no more and no less;
+* a maker-API header is one a firmware's OWN code calls (R4-fw-2, DECISIONS 2026-10-15):
+  the stock agent has no application, so it never includes one, and both worked examples
+  (`basic_idf/main/main.c` directly, the Arduino sketch through `Fleetforge.cpp`) call
+  every function it declares;
 * the calls that would let a firmware lie (publish `confirmed`, claim `rollback_capable`,
   build its own announce, drive the OTA or the transaction record) are component-private;
 * `main` reaches the component only through `include/`;
@@ -28,10 +33,12 @@ from tests.agent_src import (
     AGENT_DIR,
     AGENT_MAIN_C,
     AGENT_MAIN_DIR,
+    ARDUINO_WRAPPER_CPP,
     COMPONENT_CMAKE,
     COMPONENT_INCLUDE,
     COMPONENT_MANIFEST,
     COMPONENT_SRC,
+    IDF_EXAMPLE_MAIN_C,
     MAIN_CMAKE,
 )
 from tests.test_agent_fault_injection import _cmake_code
@@ -41,8 +48,13 @@ JUSTFILE = AGENT_DIR.parent / "justfile"
 
 PRIVATE_WHOLE_HEADERS = ("ff_ota.h", "ff_txn.h", "ff_net_adapter.h", "ff_marker.h")
 INTERNAL_HEADERS = tuple(
-    f"ff_{name}_internal.h" for name in ("identity", "mqtt", "net", "store", "time")
+    f"ff_{name}_internal.h" for name in ("identity", "mqtt", "net", "store", "telemetry", "time")
 )
+# The maker API (R4-fw-2, DECISIONS 2026-10-15): public headers for a firmware's own code.
+# The stock agent has no application and no honest reason to call them, so they are the
+# one exception to "include/ is what agent_main.c includes"; the examples prove them instead.
+# R4-fw-3 (ff_logf) and R5-fw-1 (ff_selftest_fn) join this list.
+MAKER_HEADERS = ("ff_telemetry.h",)
 
 # The spellings that must never become public API. Each one is a way for a firmware built
 # on the component to report something that did not happen.
@@ -81,17 +93,41 @@ def _main_calls() -> set[str]:
     return set(re.findall(r"\b(ff_[a-z0-9_]+)\s*\(", _code(AGENT_MAIN_C)))
 
 
+def _agent_headers() -> list[Path]:
+    return [path for path in _public_headers() if path.name not in MAKER_HEADERS]
+
+
 class TestThePublicSurface:
     def test_public_headers_are_exactly_what_agent_main_includes(self) -> None:
         public = {path.name for path in _public_headers()}
         included = _main_included_ff_headers()
         assert included, "agent_main.c includes no ff_*.h header"
-        assert public == included
+        assert set(MAKER_HEADERS) <= public, "a maker header is listed but not public"
+        assert public - set(MAKER_HEADERS) == included
+
+    def test_agent_main_includes_no_maker_header(self) -> None:
+        """The stock agent has no application: a maker call there would be a fake one."""
+        included = _main_included_ff_headers()
+        assert included.isdisjoint(MAKER_HEADERS), sorted(included & set(MAKER_HEADERS))
+        main = _code(AGENT_MAIN_C)
+        for header in MAKER_HEADERS:
+            for name in _declared_functions(COMPONENT_INCLUDE / header):
+                assert not re.search(rf"\b{name}\s*\(", main), name
+
+    def test_every_maker_function_is_called_by_both_examples(self) -> None:
+        idf_example = _code(IDF_EXAMPLE_MAIN_C)
+        arduino_wrapper = _code(ARDUINO_WRAPPER_CPP)
+        for header in MAKER_HEADERS:
+            functions = _declared_functions(COMPONENT_INCLUDE / header)
+            assert functions, f"{header} declares no function"
+            for name in functions:
+                assert re.search(rf"\b{name}\s*\(", idf_example), f"basic_idf: {name}"
+                assert re.search(rf"\b{name}\s*\(", arduino_wrapper), f"Fleetforge.cpp: {name}"
 
     def test_every_public_function_is_called_by_agent_main(self) -> None:
         main = _code(AGENT_MAIN_C)
         declared: set[str] = set()
-        for header in _public_headers():
+        for header in _agent_headers():
             functions = _declared_functions(header)
             assert functions, f"{header.name} declares no function"
             declared |= functions

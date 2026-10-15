@@ -57,6 +57,7 @@
 #include "ff_net.h"
 #include "ff_progress.h"
 #include "ff_store.h"
+#include "ff_telemetry.h"
 #include "ff_time.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -86,7 +87,7 @@ static const char *TAG = "ff-lib";
  * tests/test_arduino_library.py pins this list to the TAGs in src/. */
 static const char *const FF_LOG_TAGS[] = {
     "ff-cfg", "ff-enroll", "ff-eth", "ff-id", "ff-lib", "ff-mqtt", "ff-net",
-    "ff-ota", "ff-progress", "ff-store", "ff-time", "ff-txn", "ff-wifi",
+    "ff-ota", "ff-progress", "ff-store", "ff-tel", "ff-time", "ff-txn", "ff-wifi",
 };
 
 FleetforgeClass Fleetforge;
@@ -260,6 +261,12 @@ bool FleetforgeClass::begin(const char *fw_version)
     }
     s_started = true;
     return true;
+}
+
+/* R4-fw-2: the maker API, through the component's public include/ (ff_telemetry.h). */
+bool FleetforgeClass::metric(const char *name, double value)
+{
+    return ff_telemetry(name, value) == ESP_OK;
 }
 
 #endif /* ARDUINO */

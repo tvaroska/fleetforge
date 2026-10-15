@@ -14,6 +14,22 @@ rollback. It is the same C as the stock agent. This one directory is an Arduino 
 The library confirms an update only after the board has reached the fleet. A build that
 cannot reach it is rolled back by the board itself.
 
+## Telemetry
+
+Report a number to the fleet from anywhere in your firmware:
+
+- **Arduino / PlatformIO:** `Fleetforge.metric("battery_v", 3.71);` (returns `bool`).
+- **ESP-IDF:** `#include "ff_telemetry.h"`, then `ff_telemetry("battery_v", 3.71);` (returns
+  `ESP_OK` or `ESP_ERR_INVALID_ARG`).
+
+A name is 1-31 characters of `a-z`, `0-9` and `_` and starts with a letter. Names starting
+`ff_` are reserved for the library. The value is any finite number. The call never blocks: it
+records the sample in RAM, where the newest 64 are kept, and it works before `begin()` and
+while the board is offline. The library sends samples on `up/telemetry` at most once every
+5 s while connected, and right after a reconnect. Each sample keeps the time it was taken, so
+samples recorded offline arrive with their original spacing. A reboot loses samples not yet
+sent. Both examples report `morse_loops`, one sample per blinked message.
+
 ## Quickstart: pick your toolchain
 
 | Toolchain | Go to |
@@ -74,7 +90,8 @@ is the library's version; in an ESP-IDF build it is your `PROJECT_VER`.
 ## Public headers
 
 - `include/`: `ff_cfg.h`, `ff_enroll.h`, `ff_identity.h`, `ff_mqtt.h`, `ff_net.h`,
-  `ff_progress.h`, `ff_store.h`, `ff_time.h`. This is the ESP-IDF surface.
+  `ff_progress.h`, `ff_store.h`, `ff_telemetry.h`, `ff_time.h`. This is the ESP-IDF surface.
+  `ff_telemetry.h` is the maker API: your firmware calls it, the stock agent does not.
 - `src/Fleetforge.h`: the Arduino surface. It lives in `src/` because the Arduino build
   reads `src/`.
 

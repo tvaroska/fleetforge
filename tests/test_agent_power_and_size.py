@@ -182,16 +182,24 @@ FORBIDDEN_OPTIONS = [
 # esp32c3 1,070,560 -> 1,070,672 (+112 B), esp32c6 1,120,112 -> 1,120,208 (+96 B). The
 # added code is the `min_free_heap` key in ff_identity_heartbeat_json (the key string and
 # the esp_get_minimum_free_heap_size() call); boot_ok() changed its comment only.
+#
+# Raised 2026-10-15 (R4-fw-2) for **all four targets**, all rebuilt, to the exact measured
+# byte: esp32 1,031,056 -> 1,032,288 (+1,232 B), esp32s3 1,011,056 -> 1,012,304 (+1,248 B),
+# esp32c3 1,070,672 -> 1,072,464 (+1,792 B), esp32c6 1,120,208 -> 1,122,032 (+1,824 B). The
+# added code is ff_telemetry.c (the name check, the ring, the hand-written JSON with its
+# %.15g/%.17g value printing and strtod round-trip, the flush task and its log lines) and
+# ff_mqtt.c's third topic snprintf plus the two session calls. The stock agent records no
+# sample; the ring and the payload buffer are BSS (about 4.4 KB of RAM, no flash).
 APP_SIZE_BUDGET_BYTES = {
-    "esp32": 1_031_056,
+    "esp32": 1_032_288,
     # Raised from 973_136 for the OTA-capable agent (R1-fw-1/R1-fw-2), which cost every
     # target ~18 KB. Only esp32 was raised at the time: this gate reads whatever is in
     # `agent/dist/`, so a target nobody had built locally is not checked and does not
     # fail. The other two were still carrying 0.2.0-era numbers until R2b-fw-1 raised
     # them — that was a gap in the gate, not slack here.
-    "esp32s3": 1_011_056,
-    "esp32c3": 1_070_672,
-    "esp32c6": 1_120_208,
+    "esp32s3": 1_012_304,
+    "esp32c3": 1_072_464,
+    "esp32c6": 1_122_032,
 }
 
 # An app may occupy at most this much of an OTA slot. Not a style rule: R2 downloads the

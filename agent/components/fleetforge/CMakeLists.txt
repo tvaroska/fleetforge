@@ -9,10 +9,12 @@
 # wire protocol: a firmware built on it can be shipped to boards nobody can reach again,
 # so nothing in it is ever removed or changed incompatibly. It holds exactly the headers
 # agent_main.c includes, and every function declared there is one agent_main.c calls
-# (tests/test_ota_component.py pins both).
+# (tests/test_ota_component.py pins both), plus the maker-API headers (ff_telemetry.h)
+# that a firmware's own code calls and the stock agent never does: both worked examples
+# call every function those declare (DECISIONS 2026-10-15, R4-fw-2).
 #
 # src/ is PRIVATE (PRIV_INCLUDE_DIRS): every .c, plus ff_ota.h, ff_txn.h,
-# ff_net_adapter.h and the five *_internal.h halves. A consumer's main cannot include
+# ff_net_adapter.h and the six *_internal.h halves. A consumer's main cannot include
 # them, which is what keeps `ff_mqtt_publish_status`, the rollback_capable writers and the
 # announce builder out of reach: a firmware that could call them could publish
 # `confirmed` for an image that never confirmed, or claim a rollback it never measured.
@@ -36,6 +38,7 @@ idf_component_register(SRCS "src/ff_cfg.c"
                             "src/ff_ota.c"
                             "src/ff_progress.c"
                             "src/ff_store.c"
+                            "src/ff_telemetry.c"
                             "src/ff_time.c"
                             "src/ff_txn.c"
                        INCLUDE_DIRS "include"

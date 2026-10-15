@@ -493,7 +493,7 @@ Order: spec-1 (any time) · fw-1 → be-1 → fe-1 → test-1 · be-2 · fw-3 �
       `esp_get_minimum_free_heap_size()` beside `free_heap` (the leak signal a crash-looping board lacks); `boot_ok` true once the confirm path has run. Additive to `up/hb`; agent, ESP-IDF example and Arduino library through the same code. Simulator sends both. Acceptance (QEMU, no bench): the QEMU hb carries both keys; a spec-reading test pins them; `just agent-build-all` within the flash budget.
       Apply R4-spec-1 Patch B (the hb example gains `min_free_heap`) in this commit, with a test that parses the spec's hb example.
       Added: 2026-10-15
-- [ ] **R4-fw-2**: User-defined telemetry channel with relative sample age (P1, 1.5d)
+- [x] **R4-fw-2**: User-defined telemetry channel with relative sample age (P1, 1.5d) _(done 2026-10-15; proposal: Patch A owner (spec: commit) before release; built unreleased; reviewed; see DECISIONS.md and docs/features/health-telemetry.md)_
       `up/telemetry` batches `{"samples":[{"age_ms","name","value"}]}`; the server computes `sample_ts = received_at - age_ms` (`docs/SWARM.md` 5.1), so no wall clock on the board. A RAM ring buffer flushes on reconnect. Public API (`ff_telemetry()` / `Fleetforge.metric()`) is additive-only from release, so settle the names in a proposal first. CRITICAL (library public surface). Acceptance (simulator and QEMU): samples taken while disconnected arrive with their original spacing after reconnect.
       Added: 2026-10-15
 - [ ] **R4-fw-3**: Forward firmware log lines on `up/log` (P0, 1.5d) — **needs the owner to apply `S0-fw-5` Patches A+B first**

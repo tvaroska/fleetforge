@@ -22,6 +22,7 @@ static const uint8_t LED_PIN = 2;  // the LED of most ESP32 DevKits
 #endif
 
 static const unsigned UNIT_MS = 200;  // one dot; a dash is three
+static unsigned loops = 0;  // messages blinked since boot: the metric below
 static const char *const CODES[36] = {  // A-Z, then 0-9
   ".-", "-...", "-.-.", "-..", ".", "..-.", "--.", "....", "..", ".---", "-.-", ".-..",
   "--", "-.", "---", ".--.", "--.-", ".-.", "...", "-", "..-", "...-", ".--", "-..-",
@@ -54,6 +55,7 @@ void setup() {
 // Your firmware. It keeps blinking whether or not the board ever reaches the network.
 void loop() {
   Serial.printf("morse: %s (firmware %s)\n", MORSE_MESSAGE, FW_VERSION);
+  Fleetforge.metric("morse_loops", ++loops);  // sent to the fleet on up/telemetry
   for (const char *letter = MORSE_MESSAGE; *letter != '\0'; letter++) {
     blink(*letter);
   }

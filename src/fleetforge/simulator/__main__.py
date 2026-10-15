@@ -7,6 +7,7 @@ just sim --name blinker --ssid shed --known-networks 2  # announces the network 
 just sim --name blinker --flash-chip-size 4194304 --partition-sha 1fa6… --rollback-capable true
 just sim --token ffe_… --power-class sleepy --wake-interval 20 --awake-s 3
 just sim --name blinker --crash-after 15                # ungraceful: the LWT fires
+just sim --name blinker --telemetry-every 5             # R4-fw-2: sim_counter on up/telemetry
 just sim-fleet 3 --heartbeat-interval 5                 # issues its own tokens
 docker compose exec -T api python -m fleetforge.simulator run --host mosquitto --port 1883 …
 ```
@@ -226,6 +227,7 @@ async def _run_board(
             confirm=args.confirm,
             confirm_timeout_s=args.confirm_timeout,
             broken_marker=args.broken_marker,
+            telemetry_every_s=args.telemetry_every,
             step=step,
         )
         return
@@ -242,6 +244,7 @@ async def _run_board(
         confirm=args.confirm,
         confirm_timeout_s=args.confirm_timeout,
         broken_marker=args.broken_marker,
+        telemetry_every_s=args.telemetry_every,
         step=step,
     )
 
@@ -375,6 +378,14 @@ async def _run_fleet(args: argparse.Namespace) -> None:
     await _with_timers(args, stop, body)
 
 
+def _positive_seconds(text: str) -> float:
+    """An argparse `type`: a period in seconds, > 0."""
+    value = float(text)
+    if not value > 0:
+        raise argparse.ArgumentTypeError(f"must be a positive number of seconds, not {text}")
+    return value
+
+
 def _shared(parser: argparse.ArgumentParser) -> None:
     """Flags both subcommands take. Environment defaults, CLI overrides."""
     parser.add_argument("--api-base", default=_default_api_base(), help="origin serving /v1")
@@ -481,6 +492,16 @@ def _shared(parser: argparse.ArgumentParser) -> None:
         default=DEFAULT_CONFIRM_TIMEOUT_S,
         metavar="SECONDS",
         help="the device-side confirm timer (spec/prd.md -> Timing: 300 s)",
+    )
+    parser.add_argument(
+        "--telemetry-every",
+        type=_positive_seconds,
+        default=None,
+        metavar="SECONDS",
+        help=(
+            "record sim_counter every N s, buffered while disconnected and sent on "
+            "up/telemetry (QoS 0). Off by default"
+        ),
     )
     parser.add_argument("--link", default=LINK_FAST, choices=LINK_PROFILES)
     parser.add_argument("--seed", type=int, default=0, help="makes --link slow reproducible")

@@ -19,6 +19,10 @@ COMPONENT_CMAKE = COMPONENT_DIR / "CMakeLists.txt"
 COMPONENT_MANIFEST = COMPONENT_DIR / "idf_component.yml"
 MAIN_CMAKE = AGENT_MAIN_DIR / "CMakeLists.txt"
 AGENT_MAIN_C = AGENT_MAIN_DIR / "agent_main.c"
+# R4-fw-2: the first maker-API header (a firmware's own code calls it; agent_main.c never does).
+FF_TELEMETRY_H = COMPONENT_INCLUDE / "ff_telemetry.h"
+FF_TELEMETRY_C = COMPONENT_SRC / "ff_telemetry.c"
+FF_TELEMETRY_INTERNAL_H = COMPONENT_SRC / "ff_telemetry_internal.h"
 
 # R3-fw-3: the same component directory is the Arduino library (library.json), and the
 # wrapper is its second consumer. The example and its partitions.csv travel together.

@@ -1,14 +1,20 @@
 /*
  * Fleetforge for Arduino — over-the-air updates with automatic rollback for ESP32 sketches.
  *
- * This is the whole Arduino API. It is ADDITIVE-ONLY from R3-fw-3, like the component's
- * include/: a firmware built on it goes to boards nobody can reach again.
+ * This is the whole Arduino API: begin() and metric(). It is ADDITIVE-ONLY from R3-fw-3,
+ * like the component's include/: a firmware built on it goes to boards nobody can reach
+ * again.
  *
  *     #include <Fleetforge.h>
  *
  *     void setup() {
  *       Fleetforge.begin("1.0.0");   // FIRST line of setup(); your firmware's version
  *       Serial.begin(115200);
+ *       ...
+ *     }
+ *
+ *     void loop() {
+ *       Fleetforge.metric("battery_v", readBattery());   // optional: a number for the fleet
  *       ...
  *     }
  *
@@ -58,6 +64,15 @@ class FleetforgeClass {
   // shows. Returns false (and logs why) if called twice, if fw_version is invalid, or if
   // the task cannot be created.
   bool begin(const char *fw_version);
+
+  // Report one sample of a metric to the fleet (`up/telemetry`, R4-fw-2). Safe to call
+  // before begin(), from any task (not from an ISR), connected or not: it records the
+  // sample in RAM (the newest 64 are kept) and never blocks. The library sends samples
+  // within about 5 s, or after the next connect, with the time they were taken.
+  // name: 1-31 of a-z, 0-9 and _, starting with a letter; names starting "ff_" are
+  // reserved for the library. value: a finite number. Returns false, recording nothing,
+  // when the name or the value is not acceptable.
+  bool metric(const char *name, double value);
 };
 
 extern FleetforgeClass Fleetforge;

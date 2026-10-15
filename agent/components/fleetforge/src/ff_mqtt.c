@@ -35,6 +35,7 @@
 #include "ff_identity_internal.h"
 #include "ff_ota.h"
 #include "ff_progress.h"
+#include "ff_telemetry_internal.h"
 #include "ff_txn.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -81,6 +82,7 @@ typedef struct {
     char topic_presence[TOPIC_MAX];
     char topic_hb[TOPIC_MAX];
     char topic_status[TOPIC_MAX];
+    char topic_telemetry[TOPIC_MAX];
     char topic_dn[TOPIC_MAX];
     int announce_msg_id;   /* the id whose PUBACK means "this board did its job" */
     bool session_confirmed; /* the announce has been acknowledged at least once */
@@ -525,6 +527,10 @@ static void on_connected(ff_mqtt_ctx_t *ctx)
                      ctx->topic_hb);
         }
     }
+
+    /* R4-fw-2. Last: identity, presence and the owed outcome are queued first, and the
+     * telemetry drain publishes through the same client lock, so it cannot overtake them. */
+    ff_telemetry_session_up(ctx->client, ctx->topic_telemetry);
 }
 
 /* The `up/status` body, key for key as `simulator/device.py::_status()` builds it and
@@ -827,6 +833,7 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base, int32_t event_i
         /* Not an error and not handled: esp-mqtt reconnects with its own backoff. Logged
          * because the serial console is the only diagnostic a board has. */
         ctx->connected = false;
+        ff_telemetry_session_down(); /* samples buffer until the next connect */
         ESP_LOGW(TAG, "mqtt disconnected; the client will reconnect");
         break;
 
@@ -915,6 +922,8 @@ esp_err_t ff_mqtt_run(const ff_cfg_t *cfg, const ff_cred_t *cred)
     snprintf(s_ctx.topic_presence, sizeof(s_ctx.topic_presence), TOPIC_ROOT "/%s/up/presence", id);
     snprintf(s_ctx.topic_hb, sizeof(s_ctx.topic_hb), TOPIC_ROOT "/%s/up/hb", id);
     snprintf(s_ctx.topic_status, sizeof(s_ctx.topic_status), TOPIC_ROOT "/%s/up/status", id);
+    snprintf(s_ctx.topic_telemetry, sizeof(s_ctx.topic_telemetry), TOPIC_ROOT "/%s/up/telemetry",
+             id);
     snprintf(s_ctx.topic_dn, sizeof(s_ctx.topic_dn), TOPIC_ROOT "/%s/dn/#", id);
 
     const esp_mqtt_client_config_t config = {

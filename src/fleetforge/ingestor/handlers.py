@@ -49,15 +49,18 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from fleetforge import partition_profiles
+from fleetforge.clock import device_time
 from fleetforge.db.models import Device
 from fleetforge.deploys import record_observed_status
 from fleetforge.events import DeviceEvent, EventType, emit
 from fleetforge.ingestor import store
 from fleetforge.ingestor.protocol import (
+    TELEMETRY_MAX_BYTES,
     AnnouncePayload,
     HeartbeatPayload,
     PresencePayload,
     StatusPayload,
+    TelemetryPayload,
     UpChannel,
     decode,
     parse_up_topic,
@@ -176,9 +179,11 @@ async def handle_up_message(
         )
 
     else:
-        # `up/telemetry` → **R4**; `up/log` → R4 and still an open item in the protocol
-        # doc. An unknown channel from a future agent lands here too. All of them only
-        # prove the board is alive: **no `deploy_events` row is written for them.**
+        # `up/telemetry` is decoded and logged below (R4-fw-2), never stored: storage is
+        # R4-be-1. `up/log` → R4 and still an open item in the protocol doc. An unknown
+        # channel from a future agent lands here too. All of them prove the board is alive,
+        # and `last_seen` moves before any decode, so an undecodable payload still counts.
+        # **No `deploy_events` row is written for them.**
         if retained:
             logger.debug("ignoring retained replay on %s", topic)
             return None
@@ -187,6 +192,10 @@ async def handle_up_message(
     if row is None:
         logger.info("ignoring message from unregistered or decommissioned device %s", device_id)
         return None
+
+    if parsed.channel == UpChannel.TELEMETRY:
+        # Live only (a retained replay returned above) and registered only.
+        _log_telemetry(device_id, topic, payload, received_at)
 
     if status is not None and status.cmd_id and status.state:
         # A status with no `cmd_id` (or no `state`) belongs to no transaction — `idle`
@@ -219,6 +228,42 @@ async def handle_up_message(
     )
     await emit(session, event)
     return event
+
+
+def _log_telemetry(device_id: str, topic: str, payload: bytes, received_at: dt.datetime) -> None:
+    """Decode an `up/telemetry` batch and log it; never raises, never stores (R4-be-1).
+
+    Each sample is stamped `received_at - age_ms` (`clock.device_time`), the device's
+    clock never read. Names are regex-validated and values are numbers, so nothing
+    free-text from the board reaches this log.
+    """
+    if len(payload) > TELEMETRY_MAX_BYTES:
+        logger.warning(
+            "device %s: telemetry payload of %d bytes dropped (over %d)",
+            device_id,
+            len(payload),
+            TELEMETRY_MAX_BYTES,
+        )
+        return
+    telemetry = decode(TelemetryPayload, topic, payload)
+    if telemetry is None or (not telemetry.samples and not telemetry.unusable):
+        return
+    logger.info(
+        "device %s telemetry samples=%d dropped=%d unusable=%d oldest_age_ms=%d",
+        device_id,
+        len(telemetry.samples),
+        telemetry.dropped or 0,
+        telemetry.unusable,
+        max((sample.age_ms for sample in telemetry.samples), default=0),
+    )
+    for sample in telemetry.samples:
+        logger.debug(
+            "device %s metric %s=%r at %s",
+            device_id,
+            sample.name,
+            sample.value,
+            device_time(received_at, sample.age_ms).isoformat(),
+        )
 
 
 def _online_snapshot(

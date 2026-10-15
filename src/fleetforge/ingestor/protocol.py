@@ -15,10 +15,20 @@ fleet-visibility outage caused by one board's firmware bug.
 
 import json
 import logging
+import math
+import re
 from dataclasses import dataclass
 from enum import StrEnum
 
-from pydantic import BaseModel, ConfigDict, ValidationError, ValidationInfo, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 from fleetforge.announce_fields import (
     normalize_flash_chip_size,
@@ -223,6 +233,100 @@ class StatusPayload(_TolerantPayload):
         if value is None or isinstance(value, str):
             return value
         return str(value)
+
+
+# `up/telemetry` (R4-fw-2; the payload is a proposal, docs/features/health-telemetry.md ->
+# *up/telemetry proposal*). The name rule is a valid Prometheus metric name, and the
+# firmware's FF_TELEMETRY_NAME_MAX (31) is `{0,30}` + 1: tests/test_telemetry.py holds the
+# two, and the simulator's retyped copy, together. `ff_` names are reserved for the agent,
+# not invalid, so the server accepts them.
+TELEMETRY_NAME_RE = re.compile(r"[a-z][a-z0-9_]{0,30}")
+# A payload over this is dropped whole (the device keeps one under 2048 B).
+TELEMETRY_MAX_BYTES = 8192
+# The retention window (spec/prd.md -> Retention: telemetry 30 days). An older sample could
+# never be kept, so it is unusable rather than stored and expired at once.
+TELEMETRY_MAX_AGE_MS = 30 * 86_400_000
+
+
+class TelemetrySample(_TolerantPayload):
+    """One `up/telemetry` sample. Strict: a sample that fails here is skipped on its own.
+
+    `age_ms` is the device's monotonic time from the sample being taken to the payload
+    being built; `clock.device_time` turns it into a timestamp. Absent means 0, negative is
+    read as 0.
+    """
+
+    name: str
+    value: float
+    age_ms: int = 0
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def _metric_name(cls, value: object) -> str:
+        if not isinstance(value, str) or TELEMETRY_NAME_RE.fullmatch(value) is None:
+            raise ValueError("not a metric name")
+        return value
+
+    @field_validator("value", mode="before")
+    @classmethod
+    def _finite_number(cls, value: object) -> float:
+        """A JSON number. `bool` is an `int` in Python and is not one here; `json.loads`
+        reads `1e999` as `inf`, and an integer too large for a double overflows."""
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            raise ValueError("not a number")
+        try:
+            number = float(value)
+        except OverflowError as exc:
+            raise ValueError("not a finite number") from exc
+        if not math.isfinite(number):
+            raise ValueError("not a finite number")
+        return number
+
+    @field_validator("age_ms", mode="before")
+    @classmethod
+    def _plausible_age(cls, value: object) -> int:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("age_ms is not an integer")
+        if value > TELEMETRY_MAX_AGE_MS:
+            raise ValueError("age_ms is beyond the retention window")
+        return max(value, 0)
+
+
+class TelemetryPayload(_TolerantPayload):
+    """`up/telemetry` — `{"dropped": n, "samples": [{"age_ms", "name", "value"}, ...]}`.
+
+    **One bad sample never costs the rest.** Each raw sample is validated on its own and
+    the unusable ones are counted in `unusable` (set here, never read off the wire), so a
+    firmware that reports one bad name still gets its other metrics through. `samples`
+    that is not a list is read as none; `dropped` that is not a non-negative integer is
+    `None`.
+    """
+
+    dropped: int | None = None
+    samples: list[TelemetrySample] = Field(default_factory=list)
+    unusable: int = 0
+
+    @model_validator(mode="before")
+    @classmethod
+    def _usable_samples(cls, data: object) -> object:
+        if not isinstance(data, dict):
+            return data  # not an object: the model refuses it and `decode` returns None
+        raw = data.get("samples")
+        items = raw if isinstance(raw, list) else []
+        samples: list[TelemetrySample] = []
+        for item in items:
+            try:
+                samples.append(TelemetrySample.model_validate(item))
+            except ValidationError:
+                continue
+        return {**data, "samples": samples, "unusable": len(items) - len(samples)}
+
+    @field_validator("dropped", mode="before")
+    @classmethod
+    def _plausible_dropped(cls, value: object) -> int | None:
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return None
+        return value
 
 
 def decode[T: _TolerantPayload](model: type[T], topic: str, payload: bytes) -> T | None:

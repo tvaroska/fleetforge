@@ -5,11 +5,11 @@
  * unchanged (layout ab-4m-v1) and flash the board's ff_cfg blob at 0x12000 (README.md).
  */
 #include <ctype.h>
-#include <stdbool.h>
 #include <stdio.h>
 
 #include "driver/gpio.h"
 #include "ff_identity.h"
+#include "ff_telemetry.h"
 #include "fleetforge_start.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -57,8 +57,9 @@ void app_main(void)
     gpio_set_direction(LED_GPIO, GPIO_MODE_OUTPUT);
 
     /* Your firmware. It keeps blinking whether or not the board ever reaches the network. */
-    while (true) {
+    for (unsigned loops = 1;; loops++) {
         printf("morse: %s (firmware %s)\n", MORSE_MESSAGE, ff_identity_fw_version());
+        ff_telemetry("morse_loops", loops); /* sent to the fleet on up/telemetry */
         for (const char *letter = MORSE_MESSAGE; *letter != '\0'; letter++) {
             blink(*letter);
         }

@@ -61,6 +61,7 @@ import aiomqtt
 from fleetforge.identity import DEVICE_ID_RE
 from fleetforge.simulator.errors import SimulatorError
 from fleetforge.simulator.state import Credential
+from fleetforge.simulator.telemetry import TELEMETRY_FLUSH_S, TELEMETRY_QOS, TelemetryBuffer
 
 # `spec/device-protocol.md` → *Topic namespace*. Spelled once, here.
 TOPIC_ROOT = "ff/v1/d"
@@ -69,6 +70,9 @@ ANNOUNCE = "announce"
 PRESENCE = "presence"
 HEARTBEAT = "hb"
 STATUS = "status"
+# R4-fw-2: QoS 0 and not retained (`telemetry.py`), and off unless --telemetry-every is given,
+# so the QoS-1 matrix of every other publish is untouched by default.
+TELEMETRY = "telemetry"
 # `dn/cmd`, the only downlink channel in R1. Retyped here rather than imported from
 # `broker/commands.py` for the reason `POWER_CLASSES` is retyped — see below.
 COMMAND = "cmd"
@@ -858,6 +862,66 @@ class StageRunner:
         step(f"status   {state}")
 
 
+async def _telemetry_loop(
+    client: aiomqtt.Client, device: DeviceIdentity, buffer: TelemetryBuffer, step: Step
+) -> None:
+    """`ff_telemetry.c::flush_task`: drain on connect, then at most one payload per 5 s.
+
+    QoS 0, **never retained**. A sample is committed (forgotten) only after its publish
+    went out, so a session that dies here leaves it for the next connect.
+    """
+    topic = up_topic(device.device_id, TELEMETRY)
+
+    async def publish_one() -> bool:
+        built = buffer.next_payload()
+        if built is None:
+            return False
+        payload, last_seq, dropped = built
+        await client.publish(topic, payload, qos=TELEMETRY_QOS, retain=False)
+        buffer.commit(last_seq, dropped)
+        samples = payload.count(b'"age_ms":')
+        step(
+            f"publish  {topic} (qos {TELEMETRY_QOS}, no retain, "
+            f"{samples} samples, dropped {dropped}, {len(payload)} B)"
+        )
+        return True
+
+    while await publish_one():
+        pass
+    while True:
+        await asyncio.sleep(TELEMETRY_FLUSH_S)
+        await publish_one()
+
+
+async def _sampler_loop(buffer: TelemetryBuffer, every_s: float, stop: asyncio.Event) -> None:
+    """The board's own firmware: `sim_counter` = 1, 2, 3, ... every `every_s`, connected or
+    not, on a fixed schedule (no drift), for the whole life of the process."""
+    start = time.monotonic()
+    counter = 0
+    while not stop.is_set():
+        counter += 1
+        buffer.record("sim_counter", counter)
+        await _sleep_until(stop, max(start + counter * every_s - time.monotonic(), 0.0))
+
+
+def _start_sampler(
+    every_s: float | None, stop: asyncio.Event
+) -> tuple[TelemetryBuffer | None, asyncio.Task[None] | None]:
+    """The buffer and its sampler, built OUTSIDE the reconnect/wake loop (like
+    `StageRunner`), so samples taken while disconnected survive to the next session."""
+    if every_s is None:
+        return None, None
+    buffer = TelemetryBuffer()
+    return buffer, asyncio.create_task(_sampler_loop(buffer, every_s, stop))
+
+
+async def _stop_sampler(task: asyncio.Task[None] | None) -> None:
+    if task is not None:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
 async def _command_loop(client: aiomqtt.Client, stage: StageRunner, step: Step) -> None:
     """Drain `dn/#` and hand every message to the stage runner.
 
@@ -885,6 +949,7 @@ async def run_session(
     boot_monotonic: float | None = None,
     endpoint: str = "broker",
     stage: StageRunner | None = None,
+    telemetry: TelemetryBuffer | None = None,
     step: Step = _silent,
 ) -> None:
     """One connected session: subscribe, announce, be present, beat, then leave.
@@ -897,7 +962,8 @@ async def run_session(
     3. `presence {"online":true}` (retained);
     4. whatever the last reboot left owed — `confirming`/`confirmed`, or `rolled_back`
        (`StageRunner.on_boot`);
-    5. heartbeats and the command reader, concurrently;
+    5. heartbeats and the command reader, concurrently, plus the `up/telemetry` drain
+       when `telemetry` is given (R4-fw-2: after the outcome, as in `ff_mqtt.c`);
     6. on a clean exit, the **goodbye** — retained `{"online":false}` — and only then
        the DISCONNECT the context manager sends.
 
@@ -970,6 +1036,8 @@ async def run_session(
             ),
             asyncio.create_task(_command_loop(client, stage, step)),
         ]
+        if telemetry is not None:
+            workers.append(asyncio.create_task(_telemetry_loop(client, device, telemetry, step)))
         # Two ways to be asked to leave, and they are not the same event: `stop` is the
         # operator, `stage.reboot` is the board restarting into the image it just applied
         # (or rolling back from it). The confirm timer is a sentinel too, NOT a worker: it
@@ -1044,6 +1112,7 @@ async def run_always_on(
     confirm: str = CONFIRM_AUTO,
     confirm_timeout_s: float = DEFAULT_CONFIRM_TIMEOUT_S,
     broken_marker: str | None = None,
+    telemetry_every_s: float | None = None,
     step: Step = _silent,
 ) -> None:
     """One session, forever, reconnecting with capped exponential backoff.
@@ -1062,7 +1131,48 @@ async def run_always_on(
     restarting into an image it just applied. It is the only path by which a new
     `fw_version` reaches the server, so it is handled here rather than swept into the
     generic reconnect — see `REBOOT_DELAY_S`.
+
+    `telemetry_every_s` (R4-fw-2) records `sim_counter` on that period for the board's
+    whole life; samples taken while the broker is away are sent after the reconnect.
     """
+    telemetry, sampler = _start_sampler(telemetry_every_s, stop)
+    try:
+        await _always_on(
+            device,
+            credential,
+            client_factory=client_factory,
+            link=link,
+            heartbeat_interval_s=heartbeat_interval_s,
+            stop=stop,
+            endpoint=endpoint,
+            safe_window=safe_window,
+            confirm=confirm,
+            confirm_timeout_s=confirm_timeout_s,
+            broken_marker=broken_marker,
+            telemetry=telemetry,
+            step=step,
+        )
+    finally:
+        await _stop_sampler(sampler)
+
+
+async def _always_on(
+    device: DeviceIdentity,
+    credential: Credential,
+    *,
+    client_factory: ClientFactory,
+    link: LinkProfile,
+    heartbeat_interval_s: float,
+    stop: asyncio.Event,
+    endpoint: str,
+    safe_window: str,
+    confirm: str,
+    confirm_timeout_s: float,
+    broken_marker: str | None,
+    telemetry: TelemetryBuffer | None,
+    step: Step,
+) -> None:
+    """`run_always_on`'s loop, given the board-lifetime telemetry buffer."""
     boot_monotonic = time.monotonic()
     connected = asyncio.Event()
     stage = StageRunner(
@@ -1087,6 +1197,7 @@ async def run_always_on(
                 boot_monotonic=boot_monotonic,
                 endpoint=endpoint,
                 stage=stage,
+                telemetry=telemetry,
                 step=step,
             )
         except (aiomqtt.MqttError, OSError) as exc:
@@ -1103,6 +1214,8 @@ async def run_always_on(
                 # carry the version that is now running.
                 stage.reboot.clear()
                 boot_monotonic = time.monotonic()
+                if telemetry is not None:
+                    telemetry.clear()  # the ring is RAM
                 step(f"boot     back in {REBOOT_DELAY_S:.0f}s on {stage.identity.fw_version}")
                 await _sleep_until(stop, REBOOT_DELAY_S)
                 delay = RECONNECT_INITIAL_DELAY_S
@@ -1128,6 +1241,7 @@ async def run_sleepy(
     confirm: str = CONFIRM_AUTO,
     confirm_timeout_s: float = DEFAULT_CONFIRM_TIMEOUT_S,
     broken_marker: str | None = None,
+    telemetry_every_s: float | None = None,
     step: Step = _silent,
 ) -> None:
     """wake → connect → announce/presence/hb → drain `dn/` → disconnect → sleep → repeat.
@@ -1137,7 +1251,52 @@ async def run_sleepy(
     noise the server is contractually required to ignore — and the ingestor would drop
     it anyway. This is the only mode that exercises the
     `2.5 x expected_wake_interval_s` branch end to end.
+
+    `telemetry_every_s` (R4-fw-2) keeps sampling through the sleep, so each wake drains
+    what the board recorded while it was away.
     """
+    telemetry, sampler = _start_sampler(telemetry_every_s, stop)
+    try:
+        await _sleepy(
+            device,
+            credential,
+            client_factory=client_factory,
+            link=link,
+            heartbeat_interval_s=heartbeat_interval_s,
+            wake_interval_s=wake_interval_s,
+            awake_s=awake_s,
+            stop=stop,
+            endpoint=endpoint,
+            safe_window=safe_window,
+            confirm=confirm,
+            confirm_timeout_s=confirm_timeout_s,
+            broken_marker=broken_marker,
+            telemetry=telemetry,
+            step=step,
+        )
+    finally:
+        await _stop_sampler(sampler)
+
+
+async def _sleepy(
+    device: DeviceIdentity,
+    credential: Credential,
+    *,
+    client_factory: ClientFactory,
+    link: LinkProfile,
+    heartbeat_interval_s: float,
+    wake_interval_s: float,
+    awake_s: float,
+    stop: asyncio.Event,
+    endpoint: str,
+    safe_window: str,
+    confirm: str,
+    confirm_timeout_s: float,
+    broken_marker: str | None,
+    telemetry: TelemetryBuffer | None,
+    step: Step,
+) -> None:
+    """`run_sleepy`'s loop, given the board-lifetime telemetry buffer."""
     boot_monotonic = time.monotonic()
     stage = StageRunner(
         identity=device,
@@ -1161,6 +1320,7 @@ async def run_sleepy(
             boot_monotonic=boot_monotonic,
             endpoint=endpoint,
             stage=stage,
+            telemetry=telemetry,
             step=step,
         )
         if stop.is_set():
@@ -1171,6 +1331,8 @@ async def run_sleepy(
             # rather than immediately — the same convergence, one wake interval later.
             stage.reboot.clear()
             boot_monotonic = time.monotonic()
+            if telemetry is not None:
+                telemetry.clear()  # the ring is RAM
             step(f"boot     rebooted onto {stage.identity.fw_version}")
         step(f"sleep    {wake_interval_s:.0f}s until the next wake")
         await _sleep_until(stop, wake_interval_s)
