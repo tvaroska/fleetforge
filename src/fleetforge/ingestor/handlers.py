@@ -63,8 +63,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from fleetforge import device_logs, faults, partition_profiles, telemetry_store
 from fleetforge.clock import device_time
-from fleetforge.db.models import Device
-from fleetforge.deploys import record_observed_status
+from fleetforge.db.models import DeployEvent, Device
+from fleetforge.deploys import record_observed_status, snapshot_detail
 from fleetforge.events import DeviceEvent, EventType, emit
 from fleetforge.ingestor import store
 from fleetforge.ingestor.protocol import (
@@ -234,6 +234,7 @@ async def handle_up_message(
     elif parsed.channel == UpChannel.LOG:
         await _store_log(session, device_id, topic, payload, received_at)
 
+    written: DeployEvent | None = None
     if status is not None and status.cmd_id and status.state:
         # A status with no `cmd_id` (or no `state`) belongs to no transaction — `idle`
         # with a null `cmd_id` is a board saying "nothing in flight" — and recording it
@@ -265,6 +266,14 @@ async def handle_up_message(
         # The stored (normalised) value, retained replays included; every other type
         # sends null (R4-be-1).
         reset_reason=row.last_reset_reason if event_type is EventType.DEVICE_ANNOUNCE else None,
+        # The written row's transaction (R4-be-2), never `status.detail` off the wire:
+        # the stored copy is sanitised (signed URLs redacted), and only a terminal row's.
+        cmd_id=written.cmd_id if written is not None else None,
+        state=written.state if written is not None else None,
+        is_terminal=written.is_terminal if written is not None else None,
+        detail=(
+            snapshot_detail(written.detail) if written is not None and written.is_terminal else None
+        ),
     )
     await emit(session, event)
     return event

@@ -185,6 +185,30 @@ describe('useFleet', () => {
     expect(deviceCalls().length - before).toBe(1)
   })
 
+  it('re-reads once on a device.deploy frame carrying the transaction and renders nothing from it', async () => {
+    fetchMock.mockImplementation(responds({ devices: [device()] }))
+
+    render(<FleetView onSessionExpired={vi.fn()} createEventSource={factory} />)
+    await settle()
+    const before = deviceCalls().length
+
+    await act(async () => {
+      latest().message({
+        ...HEARTBEAT,
+        type: 'device.deploy',
+        cmd_id: 'c-1',
+        state: 'failed',
+        is_terminal: true,
+        detail: 'get <url> failed <b>markup</b>',
+      })
+    })
+    await advance(COALESCE_MS + 10)
+
+    expect(deviceCalls().length - before).toBe(1)
+    expect(screen.queryByText(/markup/)).toBeNull()
+    expect(screen.queryByText(/c-1/)).toBeNull()
+  })
+
   it('takes presence from /v1/devices and NEVER from the event payload', async () => {
     // The frame insists the board is up; every read of the record says it is not (a
     // sleepy board whose wake window has expired, say). The row must stay offline both

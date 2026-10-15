@@ -543,3 +543,61 @@ async def test_a_reset_reason_on_an_announce_is_forwarded() -> None:
         forwarded = subscription.queue.get_nowait()
     assert forwarded == payload
     assert json.loads(forwarded)["reset_reason"] == "panic"
+
+
+def test_the_envelope_keys_are_pinned() -> None:
+    """CI waiters key on these names. Additions are fine but must be deliberate (update
+    this set); a removal or rename breaks them."""
+    assert set(json.loads(an_event().model_dump_json())) == {
+        "v",
+        "type",
+        "device_id",
+        "at",
+        "online",
+        "fw_version",
+        "reset_reason",
+        "cmd_id",
+        "state",
+        "is_terminal",
+        "detail",
+    }
+
+
+async def test_a_deploy_frame_carries_the_transaction_and_is_forwarded_verbatim() -> None:
+    """R4-be-2. An older api forwards the new keys too (see the unknown-extra-field test)."""
+    payload = an_event(
+        type=EventType.DEVICE_DEPLOY,
+        cmd_id="c-1",
+        state="failed",
+        is_terminal=True,
+        detail="verify failed",
+    ).model_dump_json()
+    hub = EventHub(queue_size=4, max_subscribers=4)
+    with hub.subscribe() as subscription:
+        a_listener(hub)._on_notify(None, 1, "ff_events", payload)
+        forwarded = subscription.queue.get_nowait()
+    assert forwarded == payload
+    body = json.loads(forwarded)
+    assert (body["cmd_id"], body["state"], body["is_terminal"], body["detail"]) == (
+        "c-1",
+        "failed",
+        True,
+        "verify failed",
+    )
+
+
+async def test_a_deploy_frame_from_an_older_ingestor_is_still_forwarded() -> None:
+    """New api, old ingestor: the four keys are absent and the frame still goes out."""
+    payload = json.dumps(
+        {
+            "v": 1,
+            "type": "device.deploy",
+            "device_id": DEVICE_ID,
+            "at": "2026-09-08T10:00:00+00:00",
+            "online": True,
+        }
+    )
+    hub = EventHub(queue_size=4, max_subscribers=4)
+    with hub.subscribe() as subscription:
+        a_listener(hub)._on_notify(None, 1, "ff_events", payload)
+        assert subscription.queue.get_nowait() == payload

@@ -24,6 +24,7 @@ policy, not just the ingest.
 | R4-FW-3 | Agent + library forward firmware log lines on `up/log` (explicit call; ring buffer; simulator; Basic/basic_idf forward `morse:`). Touches CRITICAL `Fleetforge.cpp`. Needs Patches A+B (*up/log proposal*) | P1 | 1d |
 | R4-BE-1 | Persist reset reason (+ fault counts derived on read), heartbeat health, telemetry and logs with SPEC retention (30 d telemetry, 7 d logs, 5 000 lines/device bound on write); `GET /v1/devices` fields, `/logs` and `/telemetry` sub-resources, `reset_reason` on `device.announce` (*R4-be-1 as built*; telemetry cap Patch proposed) | P0 | 2d |
 | R4-FE-1 | Live fleet status dashboard: online/offline, last-seen, boot-success, metrics (a Health column; *R4-fe-1 as built*) | P0 | 2d |
+| R4-BE-2 | `device.deploy` SSE frames carry `cmd_id`, `state`, `is_terminal` and a terminal `detail` so a CI waiter blocks on a frame instead of polling (*R4-be-2 as built*) | P1 | 0.5d |
 | R4-FE-2 | Per-device log tail (newest first, level, text, dropped gaps) | P1 | 1d |
 | R4-TEST-1 | E2E: metric emitted on device → visible live in dashboard | P0 | 0.5d |
 
@@ -506,3 +507,9 @@ are additive under *Evolution rules*, rule 2, and `proto` stays `1`.
   the server defines a number. No metric history or sparkline (`GET
   /v1/devices/{id}/telemetry` exists). The log tail is R4-fe-2. The reset reason cannot tell
   an operator re-plug from the dashboard console pulsing EN.
+
+### R4-be-2 as built
+
+`DeviceEvent` gains four optional fields after `reset_reason`: `cmd_id`, `state`, `is_terminal`, `detail`. They are set on `device.deploy` only (the frame emitted when `record_observed_status` wrote a row) and are `null` on every other type, including a deduped retained replay and a status with no `cmd_id` (both stay `device.seen`). `v` stays 1. `detail` is present only on a terminal row and is the stored, sanitised copy (`deploys.snapshot_detail`), never the wire value, so a signed URL cannot ride the stream. The dashboard still only re-reads (`fleet.ts` rule 1); no frontend source change.
+
+Waiter recipe: open `GET /v1/events` BEFORE the deploy POST (there is no replay), then wait for `type == "device.deploy" && cmd_id == X && is_terminal`. After a reconnect gap fall back to `GET /v1/devices` (`deploy.cmd_id`, `deploy.is_terminal`).

@@ -6,6 +6,14 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-15 — device.deploy frames carry cmd_id, state, is_terminal and a terminal detail; detail is the stored sanitised copy; v stays 1 (R4-be-2)
+
+- **Built.** `DeviceEvent` gains `cmd_id`, `state`, `is_terminal`, `detail` (optional, after `reset_reason`). `ingestor/handlers.py` fills them from the written `deploy_events` row; `deploys.snapshot_detail` is now public (alias `_snapshot_detail` kept). Supersedes the R1-be-4 line "the envelope gains no new field". No frontend source, spec, migration or new event type.
+- **Decisions.** (1) Four fields, not three: `is_terminal` is the server's answer, so a CI waiter never hardcodes the terminal vocabulary. (2) `device.deploy` only; null on every other type, a deduped replay and a status with no `cmd_id`. (3) `detail` only on a terminal row, and from the stored blob, never `status.detail` off the wire (the signed URL is a credential). (4) No `pct`. (5) No truncation of `cmd_id`/`state`: a hostile oversized value makes `emit` drop that frame with a WARNING, the row is still written. (6) `v` stays 1; skew is harmless both ways (old api forwards verbatim, new api defaults absent keys to null).
+- **Rejected.** Emitting `device.deploy` from the API for `requested`/`publish_failed` (the POST answers synchronously); a replay/Last-Event-ID; sha256/versions in the frame.
+- **T2 evidence.** Dev stack on 8088, `curl -N /v1/events` open across `just update-e2e`: 7/7 pass. Good cmd_id: 1 frame `state":"confirmed","is_terminal":true`, 7 frames `"is_terminal":false,"detail":null`. Broken cmd_id: 1 `rolled_back` terminal frame with the simulator's rollback text. 0 non-deploy frames carry a `cmd_id`; 0 occurrences of `http(s)://` on the stream; api healthy afterwards.
+- **Gotchas.** Open the stream before the POST (no replay). The dev `.env` password is quoted, strip the quotes before using it in curl. Kill every `curl -N` before editing code, or the api's graceful reload waits on it.
+
 ## 2026-10-15 — The fleet table gains one Health cell: a boxed warning badge for fault resets (8 names), server counts and heartbeat health rendered as-is, no thresholds (R4-fe-1)
 
 - **Built.** A `Health` column after Last seen (`FleetView.tsx::HealthCell`; logic in the new pure `deviceHealth.ts`, named so to avoid `health.ts`, the healthz poll): reset line, boot state, the server's fault count, heap low-water / uptime / rssi from the newest live heartbeat, and metrics (4 inline, `+N more`). `api.ts` mirrors `HealthSnapshot`, `FaultResets`, `MetricValue` and four OPTIONAL `DeviceSummary` fields before `deploy` (older API and fixtures keep working); `format.ts::formatBytes`; `.badge` in `index.css`. No backend change, no new hook or EventSource: the existing re-read already refreshes the cell live.

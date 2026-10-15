@@ -675,6 +675,10 @@ async def test_the_whole_walk_is_recorded_as_transitions(session: AsyncSession) 
         event = await publish(session, "status", {"cmd_id": CMD_ID, "state": state, "pct": pct})
         assert event is not None
         assert event.type is EventType.DEVICE_DEPLOY
+        assert event.cmd_id == CMD_ID
+        assert event.state == state
+        assert event.is_terminal is False
+        assert event.detail is None
 
     rows = await deploy_rows(session)
     assert [row.state for row in rows] == ["requested", *walk]
@@ -919,7 +923,7 @@ async def test_detail_is_sanitised_truncated_and_url_redacted(session: AsyncSess
     await seed_device(session)
     await seed_intent(session)
 
-    await publish(
+    event = await publish(
         session,
         "status",
         {
@@ -938,6 +942,72 @@ async def test_detail_is_sanitised_truncated_and_url_redacted(session: AsyncSess
     assert "sig=secret" not in stored
     assert "<url>" in stored
     assert "\n" not in stored
+    # R4-be-2: the frame carries the stored, redacted copy, never the wire's.
+    assert event is not None
+    assert event.detail == stored
+    assert "sig=secret" not in event.model_dump_json()
+    assert "host/v1" not in event.model_dump_json()
+
+
+async def test_a_deploy_event_carries_the_transaction_and_a_terminal_detail(
+    session: AsyncSession,
+) -> None:
+    """R4-be-2: `detail` only on a terminal row; non-terminal chatter never rides the frame."""
+    await seed_device(session)
+    await seed_intent(session)
+
+    walking = await publish(
+        session, "status", {"cmd_id": CMD_ID, "state": "downloading", "detail": "chunk 3"}
+    )
+    failed = await publish(
+        session, "status", {"cmd_id": CMD_ID, "state": "failed", "detail": "boom"}
+    )
+    odd = await publish(session, "status", {"cmd_id": CMD_ID, "state": "teleporting"})
+
+    assert walking is not None and walking.detail is None and walking.is_terminal is False
+    assert failed is not None
+    assert (failed.cmd_id, failed.state, failed.is_terminal, failed.detail) == (
+        CMD_ID,
+        "failed",
+        True,
+        "boom",
+    )
+    assert odd is not None and odd.state == "teleporting" and odd.is_terminal is False
+
+
+async def test_a_terminal_row_without_detail_has_a_null_detail(session: AsyncSession) -> None:
+    await seed_device(session)
+    await seed_intent(session)
+
+    event = await publish(session, "status", {"cmd_id": CMD_ID, "state": "confirmed"})
+
+    assert event is not None
+    assert event.is_terminal is True
+    assert event.detail is None
+
+
+async def test_non_deploy_events_carry_no_transaction_fields(session: AsyncSession) -> None:
+    """A deduped replay, a status with no cmd_id, and a heartbeat all leave the four null."""
+    await seed_device(session)
+    await seed_intent(session)
+    body = {"cmd_id": CMD_ID, "state": "confirmed", "detail": "ok"}
+    await publish(session, "status", body)
+
+    events = [
+        await publish(session, "status", body, retained=True),
+        await publish(session, "status", {"state": "idle"}),
+        await publish(session, "heartbeat", {"fw_version": "1.4.2"}),
+    ]
+
+    for event in events:
+        assert event is not None
+        assert event.type is not EventType.DEVICE_DEPLOY
+        assert (event.cmd_id, event.state, event.is_terminal, event.detail) == (
+            None,
+            None,
+            None,
+            None,
+        )
 
 
 # --- garbage in ---------------------------------------------------------------

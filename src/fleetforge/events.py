@@ -61,8 +61,9 @@ class EventType(StrEnum):
     # transition already on file).
     DEVICE_SEEN = "device.seen"
     # An `up/status` that actually wrote a `deploy_events` row (R1-be-4). Emitted only
-    # when a row was written — a deduped replay is not news. The envelope gains no new
-    # field: the consumer re-reads, like every other type.
+    # when a row was written — a deduped replay is not news. Since R4-be-2 the frame
+    # carries `cmd_id`, `state`, `is_terminal` and a terminal `detail` for non-browser
+    # waiters; the dashboard still only re-reads (`fleet.ts` rule 1).
     DEVICE_DEPLOY = "device.deploy"
     # A boot/enrol stage posted to `POST /v1/device-progress` (S0-fw-1). The only
     # event type whose `device_id` may name a board that is not in `devices` at all —
@@ -81,7 +82,8 @@ class DeviceEvent(BaseModel):
 
     Deliberately small: the consumer re-reads `GET /v1/devices` for detail, and
     anything richer invites someone to treat the notification as the record of truth,
-    which it must not be. `spec/prd.md` → *Timing* wants the dashboard to reflect a
+    which it must not be. The deploy fields (R4-be-2) are the transaction *key and
+    outcome*, still not the record; `GET /v1/devices` is. `spec/prd.md` → *Timing* wants the dashboard to reflect a
     change within 2 s, which this trivially satisfies.
     """
 
@@ -102,6 +104,17 @@ class DeviceEvent(BaseModel):
     # and when not reported. Already free of control characters, and
     # `api/eventstream._on_notify` refuses a raw newline anyway. Additive, so `v` stays 1.
     reset_reason: str | None = None
+    # R4-be-2: on `device.deploy` only, the transaction the written `deploy_events` row
+    # belongs to, so a CI or test runner can wait on a frame instead of polling
+    # `GET /v1/devices`. `null` on every other type. `cmd_id` and `state` are device-
+    # controlled text as recorded; `is_terminal` is the server's answer
+    # (`TERMINAL_DEPLOY_STATES` at write time) so no reader re-derives the vocabulary;
+    # `detail` only on a terminal row, and only the stored, sanitised text
+    # (`deploys.snapshot_detail`), never the wire's. Additive, so `v` stays 1.
+    cmd_id: str | None = None
+    state: str | None = None
+    is_terminal: bool | None = None
+    detail: str | None = None
 
 
 NOTIFY_SQL = text("SELECT pg_notify(:channel, :payload)")

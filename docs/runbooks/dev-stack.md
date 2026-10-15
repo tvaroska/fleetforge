@@ -186,6 +186,10 @@ just mqtt-pub "ff/v1/d/$DEV/up/hb" '{"fw_version":"1.4.2"}' 0 "$DEV" "$PW"
 # terminal 1, within ~2 s:
 #   data: {"v":1,"type":"device.heartbeat","device_id":"aabbccddeeff","at":"…","online":true,"fw_version":"1.4.2"}
 # and a `: keepalive` comment every 15 s while nothing happens.
+# A deploy transition is a `device.deploy` frame carrying the transaction (R4-be-2):
+#   data: {"v":1,"type":"device.deploy",…,"cmd_id":"…","state":"confirmed","is_terminal":true,"detail":null}
+# `detail` is set only when `is_terminal`. Open the stream BEFORE the deploy POST: there
+# is no replay, so a missed frame is only recoverable through `GET /v1/devices`.
 ```
 
 The event is only a hint. The fleet view is `curl -sS -H "Authorization: Bearer

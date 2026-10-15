@@ -577,8 +577,11 @@ def _snapshot_pct(detail: Any) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
 
 
-def _snapshot_detail(detail: Any) -> str | None:
+def snapshot_detail(detail: Any) -> str | None:
     """`detail` out of the JSONB blob — that key and no other.
+
+    Public since R4-be-2: the ingestor puts a terminal row's detail on the
+    `device.deploy` frame through it.
 
     A `requested` row's blob carries `sha256`/`size_bytes`/`target`/`apply`, which is
     not a lie but is not what `detail` means in the API, so nothing else is surfaced.
@@ -589,6 +592,9 @@ def _snapshot_detail(detail: Any) -> str | None:
         return None
     value = detail.get("detail")
     return value if isinstance(value, str) else None
+
+
+_snapshot_detail = snapshot_detail
 
 
 def _snapshot_sender(value: Any) -> SenderSnapshot | None:
