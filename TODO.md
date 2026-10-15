@@ -489,7 +489,7 @@ Order: spec-1 (any time) · fw-1 → be-1 → fe-1 → test-1 · be-2 · fw-3 �
 
 ### Firmware
 
-- [ ] **R4-fw-1**: `up/hb` carries `min_free_heap` and a boot-success flag (P0, 1d)
+- [x] **R4-fw-1**: `up/hb` carries `min_free_heap` and a boot-success flag (P0, 1d) _(done 2026-10-15; reviewed; see docs/features/health-telemetry.md)_
       `esp_get_minimum_free_heap_size()` beside `free_heap` (the leak signal a crash-looping board lacks); `boot_ok` true once the confirm path has run. Additive to `up/hb`; agent, ESP-IDF example and Arduino library through the same code. Simulator sends both. Acceptance (QEMU, no bench): the QEMU hb carries both keys; a spec-reading test pins them; `just agent-build-all` within the flash budget.
       Apply R4-spec-1 Patch B (the hb example gains `min_free_heap`) in this commit, with a test that parses the spec's hb example.
       Added: 2026-10-15

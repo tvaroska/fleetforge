@@ -488,8 +488,14 @@ class TestAnnounceMatchesTheSpec:
         assert '"token"' in source
 
     def test_heartbeat_carries_the_spec_fields(self) -> None:
+        """Every key of the spec's hb example, parsed (R4-fw-1), not a hard-coded list."""
+        # Imported here: test_heartbeat_health imports `_code` from this module.
+        from tests.test_heartbeat_health import spec_hb_keys
+
         source = _code(FF_IDENTITY_C)
-        for key in ("fw_version", "uptime_s", "rssi", "free_heap", "boot_ok"):
+        keys = spec_hb_keys()
+        assert "min_free_heap" in keys
+        for key in keys:
             assert f'"{key}"' in source
 
     def test_the_announce_claims_the_ota_capability(self) -> None:

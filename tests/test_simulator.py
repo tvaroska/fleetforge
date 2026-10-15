@@ -70,6 +70,7 @@ from fleetforge.simulator.device import (
     STATUS,
     DeviceIdentity,
     LinkProfile,
+    PendingConfirm,
     StageRunner,
     derive_device_id,
     dn_filter,
@@ -421,7 +422,14 @@ def test_enroll_body_is_flat_and_validates_against_enrollrequest(device: DeviceI
 
 def test_heartbeat_body_is_the_spec_body() -> None:
     body = DeviceIdentity(device_id="a4cf12b3de90").heartbeat(41)
-    assert set(body) == {"fw_version", "uptime_s", "rssi", "free_heap", "boot_ok"}
+    assert set(body) == {
+        "fw_version",
+        "uptime_s",
+        "rssi",
+        "free_heap",
+        "min_free_heap",
+        "boot_ok",
+    }
     assert body["uptime_s"] == 41
 
 
@@ -1215,6 +1223,65 @@ async def test_a_reconnect_resumes_the_confirm_timer_rather_than_restarting_it(
         STATE_ROLLING_BACK,
     ]
     assert stage.reboot.is_set() and stage.rolled_back == "cmd-stage-1"
+
+
+# ---------------------------------------------------------------------------
+# R4-fw-1: `up/hb.boot_ok` is false only while the image the board rebooted into waits to
+# confirm, the firmware's "otadata is PENDING_VERIFY". `one_session` beats once, at start.
+# ---------------------------------------------------------------------------
+
+
+def boot_oks(fake: FakeClient) -> list[object]:
+    return [hb["boot_ok"] for hb in channel_payloads(fake, "a4cf12b3de90", HEARTBEAT)]
+
+
+async def test_a_heartbeat_inside_the_confirm_window_says_boot_ok_false(
+    downloads: list[str],
+) -> None:
+    stage = await applied_stage(confirm=CONFIRM_NEVER, confirm_timeout_s=0.3)
+    assert stage.boot_ok is False, "rebooted into an unconfirmed image"
+
+    on_new = FakeClient()
+    await one_session(stage, on_new, awake_s=None)  # ends when the confirm timer fires
+    assert channel_payloads(on_new, "a4cf12b3de90", HEARTBEAT)[0]["fw_version"] == "1.5.0"
+    assert boot_oks(on_new) == [False]
+    assert [report["state"] for report in statuses(on_new)] == [
+        STATE_CONFIRMING,
+        STATE_ROLLING_BACK,
+    ]
+
+    stage.reboot.clear()
+    back = FakeClient()
+    await one_session(stage, back)
+    assert channel_payloads(back, "a4cf12b3de90", HEARTBEAT)[0]["fw_version"] == "1.4.2"
+    assert boot_oks(back) == [True], "the image it returned to is the confirmed one"
+
+
+async def test_a_heartbeat_after_the_confirm_says_boot_ok_true(downloads: list[str]) -> None:
+    stage = await applied_stage(confirm=CONFIRM_AUTO)
+    assert stage.boot_ok is False, "not confirmed until the announce is acknowledged"
+
+    on_new = FakeClient()
+    await one_session(stage, on_new)
+    assert [report["state"] for report in statuses(on_new)] == list(CONFIRM_WALK)
+    assert channel_payloads(on_new, "a4cf12b3de90", HEARTBEAT)[0]["fw_version"] == "1.5.0"
+    assert boot_oks(on_new) == [True]
+    assert stage.boot_ok is True
+
+
+def test_boot_ok_stays_true_on_the_running_image_after_an_apply() -> None:
+    """An apply sets `pending` and `reboot` together: the image still running until the
+    session ends is the old, confirmed one, as on metal."""
+    stage = StageRunner(
+        identity=DeviceIdentity(device_id="a4cf12b3de90", fw_version="1.4.2"),
+        link=LinkProfile(LINK_FAST),
+    )
+    assert stage.boot_ok is True
+    stage.pending = PendingConfirm(cmd_id="cmd-stage-1", previous_identity=stage.identity)
+    stage.reboot.set()
+    assert stage.boot_ok is True
+    stage.reboot.clear()  # the next session runs the new image
+    assert stage.boot_ok is False
 
 
 # ---------------------------------------------------------------------------

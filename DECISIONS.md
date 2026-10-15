@@ -6,6 +6,19 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-15 — up/hb carries min_free_heap; boot_ok keeps meaning "not PENDING_VERIFY", read per heartbeat (R4-fw-1)
+
+- **Built.** `ff_identity_heartbeat_json()` adds `min_free_heap` = `esp_get_minimum_free_heap_size()` between `free_heap` and `boot_ok`. One builder serves the agent, the ESP-IDF example and the Arduino library; no other firmware file changed. `proto` 1, agent/library version not bumped, nothing server-side (`HeartbeatPayload` ignores extra keys; storage is R4-be-1).
+- **Semantics.** `boot_ok` = "the confirm path has run, or there was none to run": true unless otadata says `ESP_OTA_IMG_PENDING_VERIFY` (serially flashed true; OTA boot before the announce PUBACK false; after `confirm_this_image()` true; confirm timer fired false; `ESP_OTA_IMG_NEW` true). Body unchanged; the stale R0 comment was rewritten. Table: `docs/features/health-telemetry.md` -> *min_free_heap and boot_ok as built (R4-fw-1)*.
+- **Simulator.** Sends `min_free_heap: 98000`; `StageRunner.boot_ok` is false only while the image it rebooted into is `pending` (not during the apply session itself, whose running image is the old, confirmed one), polled every beat by `_heartbeat_loop`.
+- **Spec.** Patch B only (the hb example line); A (with A2's prose) and C stay the owner's.
+- **Flash budget.** All four rebuilt; raised to the exact measured bytes (+128 / +112 / +112 / +96 B).
+- **Rejected.** (1) `false` for `ESP_OTA_IMG_NEW`: an image OTA'd by a pre-0.4.0 agent onto a rollback-less bootloader would report `false` forever. (2) Deriving it from `ff_mqtt.c`'s `session_confirmed`: couples health to the CRITICAL confirm path and makes a serially flashed board "not ok" until its first PUBACK. (3) Caching at boot like `reset_reason`: a confirmed OTA boot would say `false` for its whole life.
+- **T2 evidence.** QEMU esp32, Ethernet, `--hb 10`: `{"fw_version":"0.5.0","uptime_s":20,"rssi":null,"free_heap":227384,"min_free_heap":220764,"boot_ok":true}` (six hbs, all mechanically checked; ingestor decoded them). `boot_ok:false` from firmware is not observable in QEMU (an OTA reboot after the network panics before `app_main`); proven by the source-reading test and the simulator's `--confirm never` session.
+- **Gotcha.** On this box the dev stack is on `FF_HTTP_PORT=8088` (8080 belongs to another container), so the runbook's `localhost:8080` / `10.0.2.2:8080` read as 8088; login uses `FF_ADMIN_PASSWORD` from `.env`.
+
+---
+
 ## 2026-10-15 — The proto: 1 reservations are proposed, not applied: absent artifact.type means app, sub_versions, a presence lease, link_type dock, min_free_heap; the device_id widening is noted, not built (R4-spec-1)
 
 - **Proposed** (all additive, Evolution rule 2, `proto` stays 1; no agent <= 0.5.x sends any of it, the server already ignores unknown fields). (1) `dn/cmd` `stage`: absent `artifact.type` means `app`; `mcu_fw`, `model_weights`, `fpga_bitstream` reserved. (2) `up/announce.sub_versions` (component -> version string), prose only: `TestAnnounceMatchesTheSpec` parses the announce example's keys and requires `ff_identity.c` to emit each, so the example is not touched. (3) `up/presence` optional `reason` and `expected_back_s`, a retained planned-absence lease. (4) `link_type` `dock` (the field is already an open vocabulary server-side). (5) `up/hb.min_free_heap` documented. Paste-ready text: `docs/features/health-telemetry.md` -> *proto: 1 reservations proposal (R4-spec-1, proposed)*. Nothing under `spec/`, `src/`, `agent/`, `tests/` or `alembic/` changed.

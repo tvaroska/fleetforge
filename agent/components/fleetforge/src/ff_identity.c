@@ -394,9 +394,20 @@ static uint32_t running_slot_size(void)
     return running->size;
 }
 
-/* True unless the bootloader is still waiting for this image to confirm itself. Reported
- * in up/hb as `boot_ok`; at R0 it is always true on a serially flashed board (ff_mqtt.c
- * explains why), and it becomes load-bearing the moment R2 ships OTA. */
+/* Reported in up/hb as `boot_ok`: "the confirm path has run, or there was none to run".
+ * True unless the running slot's otadata state is ESP_OTA_IMG_PENDING_VERIFY, i.e. the
+ * bootloader is still waiting for this image to confirm itself (ff_mqtt.c).
+ *   - Serially flashed (UNDEFINED / VALID): true; no confirm window exists.
+ *   - OTA boot before the announce PUBACK: false. After confirm_this_image() marked it
+ *     valid: true. Confirm timer fired and the board is rolling back: still false.
+ *   - An image the bootloader never armed (ESP_OTA_IMG_NEW, TXN_BOOTED_NEW): true. Nothing
+ *     can roll it back, so there is nothing to wait on; reporting false would be a
+ *     permanent false alarm on a working board OTA'd onto a rollback-less bootloader.
+ * Read fresh on EVERY heartbeat, never cached like reset_reason: a cached value would say
+ * false for the whole life of an OTA boot that confirmed. Timing (R4-fw-1): the heartbeat
+ * task starts in on_connected() and first publishes hb_s after that connect, so a healthy
+ * OTA boot has normally confirmed by its first hb and reads true; an image stuck in its
+ * confirm window reads false until it rolls back. */
 static bool boot_ok(void)
 {
     const esp_partition_t *running = esp_ota_get_running_partition();
@@ -593,6 +604,9 @@ char *ff_identity_heartbeat_json(uint32_t uptime_s)
     }
 
     cJSON_AddNumberToObject(root, "free_heap", esp_get_free_heap_size());
+    /* R4-fw-1: the low-water mark since this boot, the leak signal a crash-looping board
+     * lacks (free_heap alone recovers between samples). Always available, never null. */
+    cJSON_AddNumberToObject(root, "min_free_heap", esp_get_minimum_free_heap_size());
     cJSON_AddBoolToObject(root, "boot_ok", boot_ok());
 
     char *json = cJSON_PrintUnformatted(root);

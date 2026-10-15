@@ -365,14 +365,21 @@ class DeviceIdentity:
         """
         return {"token": token, **self.announce()}
 
-    def heartbeat(self, uptime_s: int) -> dict[str, object]:
-        """`up/hb`, verbatim from the spec. The health fields are R4 and are constants."""
+    def heartbeat(self, uptime_s: int, *, boot_ok: bool = True) -> dict[str, object]:
+        """`up/hb`, keys in the spec example's order.
+
+        `rssi`, `free_heap` and `min_free_heap` are the spec example's constants (a
+        simulated board has no radio and no heap; the low-water mark stays `<= free_heap`).
+        `boot_ok` comes from the caller: `StageRunner.boot_ok`, false while the image this
+        board rebooted into still waits to confirm (R4-fw-1).
+        """
         return {
             "fw_version": self.fw_version,
             "uptime_s": uptime_s,
             "rssi": -61,
             "free_heap": 142000,
-            "boot_ok": True,
+            "min_free_heap": 98000,
+            "boot_ok": boot_ok,
         }
 
 
@@ -452,15 +459,20 @@ async def _heartbeat_loop(
     interval_s: float,
     boot_monotonic: float,
     step: Step,
+    boot_ok: Callable[[], bool] = lambda: True,
 ) -> None:
-    """One `up/hb` every `interval_s`, starting immediately. **Never retained.**"""
+    """One `up/hb` every `interval_s`, starting immediately. **Never retained.**
+
+    `boot_ok` is called on every beat, never cached, as `ff_identity.c::boot_ok()` reads
+    otadata on every heartbeat: a cached value would outlive the confirm.
+    """
     while True:
         uptime_s = int(time.monotonic() - boot_monotonic)
         await _paced_publish(
             client,
             link,
             up_topic(device.device_id, HEARTBEAT),
-            encode(device.heartbeat(uptime_s)),
+            encode(device.heartbeat(uptime_s, boot_ok=boot_ok())),
             retain=False,
             step=step,
         )
@@ -563,6 +575,17 @@ class StageRunner:
         if self.broken_marker == "":
             # `"" in version` is always true: every image would be the broken one.
             raise SimulatorError("--broken-marker must not be empty")
+
+    @property
+    def boot_ok(self) -> bool:
+        """`up/hb.boot_ok`: false only while the running image waits to confirm (R4-fw-1).
+
+        The firmware's predicate is "otadata is not PENDING_VERIFY". Here that is a
+        `pending` transaction this board has already rebooted into. An apply in the
+        current session sets `pending` and `reboot` together: the image still running is
+        the old, confirmed one, so it stays true until the session ends.
+        """
+        return self.pending is None or self.reboot.is_set()
 
     def _is_broken(self, version: str) -> bool:
         """An image whose version carries `broken_marker` never confirms (substring match)."""
@@ -935,7 +958,15 @@ async def run_session(
 
         workers = [
             asyncio.create_task(
-                _heartbeat_loop(client, device, link, heartbeat_interval_s, boot_monotonic, step)
+                _heartbeat_loop(
+                    client,
+                    device,
+                    link,
+                    heartbeat_interval_s,
+                    boot_monotonic,
+                    step,
+                    boot_ok=lambda: stage.boot_ok,
+                )
             ),
             asyncio.create_task(_command_loop(client, stage, step)),
         ]

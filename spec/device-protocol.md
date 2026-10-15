@@ -221,7 +221,7 @@ by subtype through the partition table, never by a hardcoded offset.
 ### `up/hb` — heartbeat
 
 ```json
-{"fw_version":"1.4.2","uptime_s":81234,"rssi":-61,"free_heap":142000,"boot_ok":true}
+{"fw_version":"1.4.2","uptime_s":81234,"rssi":-61,"free_heap":142000,"min_free_heap":98000,"boot_ok":true}
 ```
 
 Interval from `dn/cfg`; defaults in [prd.md](prd.md) → *Requirements & targets → Timing*.
