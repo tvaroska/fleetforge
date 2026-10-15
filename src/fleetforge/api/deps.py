@@ -12,6 +12,7 @@ off `AdminDep` and copies nothing.
 import datetime as dt
 import ipaddress
 import logging
+import threading
 import uuid
 from dataclasses import dataclass
 from typing import Annotated
@@ -269,30 +270,61 @@ def get_command_publisher(settings: SettingsDep) -> CommandPublisher:
 CommandPublisherDep = Annotated[CommandPublisher, Depends(get_command_publisher)]
 
 
+# The settings the store is built from. Anything `storage.factory` reads belongs here: a
+# value missing from this list is a setting that changes and silently keeps the old store.
+_STORE_SETTINGS = (
+    "object_store_backend",
+    "object_get_max_bytes",
+    "object_store_timeout_s",
+    "signed_url_ttl_s",
+    "s3_endpoint_url",
+    "s3_public_endpoint_url",
+    "s3_bucket",
+    "s3_prefix",
+    "s3_region",
+    "s3_access_key",
+    "s3_secret_key",
+    "gcs_bucket",
+    "gcs_prefix",
+    "gcs_credentials_file",
+    "gcs_impersonate_service_account",
+)
+_store_lock = threading.Lock()
+_store_cache: tuple[tuple[object, ...], ObjectStore] | None = None
+
+
 def get_object_store(settings: SettingsDep) -> ObjectStore:
     """The configured artifact store, or a 503 that does not say what the credential is.
 
-    A plain dependency rather than something cached on `app.state`, so
-    `dependency_overrides[get_object_store]` works exactly as it does for
-    `get_broker_provisioner`. The cost that matters — building the SDK client — is
-    cached inside the factory closure, not here.
+    Still a plain dependency, so `dependency_overrides[get_object_store]` works exactly as
+    it does for `get_broker_provisioner`. The store itself is built once per process and
+    kept (S0-bug-4): `create_object_store` builds a boto3 session and client, or a GCS
+    client that resolves ADC and mints an impersonation token, and doing that per request
+    cost ~4.4 MiB of RSS per request, never fully returned, and a new TLS connection and
+    token call every time. The module-level cache is keyed on the settings the store reads;
+    a failed build is never cached, so a fixed configuration is picked up on the next call.
 
     `storage.factory` is imported lazily so `create_app()` does not pull boto3 and
     google-cloud-storage into a 256 M container that may never serve an artifact.
-
-    Nothing in R0 depends on this; R1-BE-1/2/3 do.
     """
-    from fleetforge.storage.factory import create_object_store
+    global _store_cache
+    key = tuple(getattr(settings, name) for name in _STORE_SETTINGS)
+    with _store_lock:
+        if _store_cache is not None and _store_cache[0] == key:
+            return _store_cache[1]
+        from fleetforge.storage.factory import create_object_store
 
-    try:
-        return create_object_store(settings)
-    except ObjectStoreConfigError as exc:
-        # The reason names buckets and settings, so it goes to the log, not the body.
-        logger.error("object store unavailable: %s", exc)
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="object store not configured",
-        ) from exc
+        try:
+            store = create_object_store(settings)
+        except ObjectStoreConfigError as exc:
+            # The reason names buckets and settings, so it goes to the log, not the body.
+            logger.error("object store unavailable: %s", exc)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="object store not configured",
+            ) from exc
+        _store_cache = (key, store)
+        return store
 
 
 ObjectStoreDep = Annotated[ObjectStore, Depends(get_object_store)]

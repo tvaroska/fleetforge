@@ -1846,3 +1846,10 @@ Found by S0-bug-1: prod's index served 0.3.2 (esp32s3) and 0.2.0 (esp32/c3/c6) w
   were rebuilt at 0.4.5 and published to the dev MinIO.
 - **Owed:** the publish to prod's GCS needs the operator's go-ahead; the command is under
   the task in TODO.md. The task closes when `just agent-check-prod` exits 0.
+
+## The api built a new object-store client on every request (S0-bug-4, 2026-10-15)
+
+- **What:** prod's `prod-fleetforge-api` sat at 214 MiB of its 256 MiB limit after the 2026-10-14 bench session, and `monitor-resources.sh` warned every 10 minutes. `get_object_store` built a new store (boto3 session and client, or a GCS client with ADC and an impersonation token) per request. It now keeps one per process (`api/deps.py`, keyed on `_STORE_SETTINGS`, failures never cached).
+- **Why:** the factory's "clients are built once" cache lived inside the per-request store. Measured on the v0.6.0 image against MinIO: about 4.4 MiB of RSS per request, not returned by `gc.collect()`; 15 downloads of one 1 MB agent part peaked at 243 MiB. With the fix, 50 downloads stay at 119-124 MiB. Detail: DECISIONS.md 2026-10-15.
+- **Evidence (T2):** the v0.6.0 prod image with the fixed `src` mounted, same download loop: 76 MiB idle, 96 after login, 119 after the manifest, 124 after 50 downloads. T1: `just test` 1756 passed, lint and type-check clean.
+- **Seams and gotchas:** a new setting read by `storage/factory.py` must join `_STORE_SETTINGS`. GCS (prod's backend) is unmeasured; read prod RSS after the deploy. The api memory limit and the monitor's "CPU or memory" wording are unchanged.

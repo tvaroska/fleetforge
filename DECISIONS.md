@@ -6,6 +6,17 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-15 — The object store is built once per process, not once per request (S0-bug-4)
+
+- **Symptom.** `monitor-resources.sh` warned every 10 minutes ("containers exceeding 80% CPU or 80% memory"); load was 0.13 on 2 vCPUs, so it was memory: `prod-fleetforge-api-16` at 214 MiB of 256 MiB (84%), up from 75 MiB. It stepped at 21:40-21:50 UTC and 22:00-22:10 on 2026-10-14, the bench session (login, catalog load, enrol, upload), and never came back.
+- **Cause.** `get_object_store` called `create_object_store(settings)` on every request that took `ObjectStoreDep`. `storage/factory.py` says clients are built once per store, but the cache dict lives inside the store, and the store was new each request. Each request therefore built a boto3 `Session` and client. Measured on the v0.6.0 image: 30 reads through one store +12 MiB, 30 reads with a new store each +133 MiB (about 4.4 MiB per request), and `gc.collect()` returned only 24 MiB. A 1 MB agent-part download repeated 15 times peaked at 243 MiB. `MALLOC_ARENA_MAX=2` helped only a little (225 MiB). Uploads were not the problem (about +1 MiB each). Argon2 login costs a one-off ~20 MiB, and the first store use ~23 MiB; both are expected and flat.
+- **Fix.** `api/deps.py` keeps one store in a module-level cache, keyed on the 15 settings the factory reads (`_STORE_SETTINGS`), under a lock. A failed build raises the same 503 and is never cached. `get_object_store` stays a plain dependency, so `dependency_overrides` still work. After: 50 downloads 119 to 124 MiB.
+- **GCS is unmeasured.** The profile used MinIO (S3). On prod (GCS, impersonation) each request also resolved ADC and minted a token, so the cost there is probably higher and every request paid a token call; not measured, to avoid reading prod's bucket. Check prod RSS after the deploy.
+- **Gotcha for later.** A new store setting must be added to `_STORE_SETTINGS`, or a changed value keeps the old store. The CLI paths (`firmware`, `storage`, `deploycheck`) still call `create_object_store` once per process, which is fine.
+- **Not done.** The api memory limit (256M in `services/prod/docker-compose.yml`) is unchanged; whether to raise it is the owner's call. The alert message still says "CPU or memory" and cannot tell which tripped.
+
+---
+
 ## 2026-10-14 — Firmware logs are R4, not Sprint 0; the up/log payload (batched lines with age_ms) and a 5 000-line-per-device bound are proposed, not applied (S0-fw-5)
 
 - **Decided: R4.** (1) Sprint 0 is bricking, broker auth and security; a missing remote log is none of these (the board updates, confirms and rolls back without it, and "Watch a board" still shows every line over serial). (2) Storage needs a new table and an Alembic migration (CRITICAL) plus retention, which is R4-BE-1's existing scope (7d logs). (3) R4 is the next release. (4) R0 shipped without `up/log` and nothing broke: the ingestor already only moves `last_seen` for it. (5) Filing the proposal now settles the payload before R4-FW-2 designs `up/telemetry`, so both share `age_ms` (SWARM 5.1). Counter-point: "Watch a board" pulses EN and reboots the board (S0-bug-3), so a running board's log cannot be read without a restart. Real friction, not Sprint 0 class; the owner can pull R4-FW-3 forward if it hurts.

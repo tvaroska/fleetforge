@@ -52,7 +52,7 @@ run could show, so the pass rests on the deterministic judge. Task list below; b
 - `S0-bug-1` and `R2b-test-1` withdrawn 2026-10-09 (hardware-gated, no-bench approach).
 
 <!-- Counters: spec=1 infra=7 db=1 be=6 fe=7 sec=1 fw=4 test=3 -->
-<!-- Sprint 0 counters: fe=8 fw=6 infra=10 test=4 ops=1 bug=3 -->
+<!-- Sprint 0 counters: fe=8 fw=6 infra=10 test=4 ops=1 bug=4 -->
 <!-- R1 counters: be=3 fe=1 fw=2 test=1 -->
 <!-- R2 counters: fw=6 be=1 fe=1 test=2 spec=1 (fw-3 is the R1-landed confirm timer) -->
 <!-- R3 counters: spec=3 fw=8 be=2 fe=1 test=2 rel=1 -->
@@ -117,6 +117,9 @@ Bricking risks, broker auth and security issues get filed here as they surface.
 - [ ] **S0-fw-6**: Announce `reset_reason` so a spontaneous reboot names itself (P3, 0.5d) — Patch A applied 2026-10-15 (owner)
       From S0-bug-3: a reboot with no deploy cannot say whether it was the operator or a crash. Proposal and paste-ready Patch A/B: `docs/features/health-telemetry.md` → *Reset reason proposal*. Build: `ff_identity.c` emits it (before `lib_marker`), apply Patch B in the same commit, simulator sends `poweron`/`sw`, ingestor logs it on a live announce (no storage). Acceptance (QEMU, no bench): `just agent-qemu esp32 --fresh` announces `poweron`; after a QEMU OTA reboot it announces `sw`; a build with an injected `abort()` after connect announces `panic` on the next boot; spec-reading tests green. Withdraw it if the operator confirms S0-bug-3's event 1 and nobody needs crash attribution before R4.
       Added: 2026-10-14
+- [x] **S0-bug-4**: The api builds a new object-store client on every request: prod `prod-fleetforge-api` sits at 84% of its 256 MiB limit (P1, 0.5d) _(done 2026-10-15; `get_object_store` now builds the store once per process, keyed on the settings the factory reads; see DECISIONS.md and docs/features/infrastructure.md)_
+      Found 2026-10-15 from the `monitor-resources.sh` warnings (message says "CPU or memory"; it was memory). Prod api RSS stepped 75 to 218 MiB during the 2026-10-14 bench session and has stayed there. Cause: `api/deps.py::get_object_store` called `create_object_store` per request, so each request built a boto3 session and client (GCS: ADC resolution and an impersonation token) and the factory's "built once" cache lived inside the per-request store. Acceptance (local, v0.6.0 image with the fixed `src` mounted): 50 repeated downloads of a 1 MB agent part stay within +5 MiB (before: 157 / 196 / 243 MiB peak over 15 downloads).
+      Added: 2026-10-15
 
 ---
 
