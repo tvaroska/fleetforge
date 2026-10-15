@@ -197,6 +197,28 @@ update-e2e *args:
 health-e2e *args:
     cd frontend && PLAYWRIGHT_MODULE="${PLAYWRIGHT_MODULE:-$(npm root -g)/playwright/index.mjs}" node scripts/fleet-health-e2e.mjs {{args}}
 
+# ── Device log end to end (R4-fe-2) ──────────────────────────────────────────
+#
+# The per-device log tail in a real Chromium against the dev stack (`just up`), with two
+# simulated boards. Nothing on a device sends `up/log` yet (R4-fw-3), so `up/log` batches
+# are published AS the talker board, with its own broker credential, which a python child
+# reads from .sim/ (never argv, never printed), through the real broker, ingestor and DB.
+# Scenarios: tail-order, levels, untrusted-text, live-line (a new batch shows within 5 s
+# with no reload), gap-marker, switch-board, api-agrees, traps. Prints PASS/FAIL per
+# scenario and `N/8 pass`. Evidence: /tmp/ff-r4-fe-2/ (a .txt and a section .png per
+# scenario, the simulator logs, run.json). Leaves two simulated boards per run and the
+# talker's log lines in the dev DB; deletes nothing.
+# `E2E_BREAK=<scenario id> just log-e2e` flips one expectation: the run must then FAIL.
+# Exit 0 all pass, 1 a scenario failed, 2 setup failed. The admin password comes from
+# $FF_ADMIN_PASSWORD or the repo-root .env, never argv; the broker is 127.0.0.1:$FF_MQTT_PORT.
+#
+#     just log-e2e
+#     just log-e2e http://localhost:8088 /tmp/somewhere-else
+#
+# Play the device log tail against the dev stack with simulated boards (exit 0 = all eight pass).
+log-e2e *args:
+    cd frontend && PLAYWRIGHT_MODULE="${PLAYWRIGHT_MODULE:-$(npm root -g)/playwright/index.mjs}" node scripts/device-log-e2e.mjs {{args}}
+
 # ── Simulated boards (R0-test-1) ─────────────────────────────────────────────
 #
 # A fake ESP32 that enrolls, connects, announces, holds presence and heartbeats,

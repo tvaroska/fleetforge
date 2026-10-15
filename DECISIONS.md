@@ -6,6 +6,16 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-15 — The device log tail follows the strip's selected board, re-reads on that board's last_seen, renders the server's order with gaps below their line; T2 publishes up/log as a simulated board (R4-fe-2)
+
+- **Built.** A `Device log` section after the fleet table (`DeviceLog.tsx`, `deviceLog.ts`), `api.deviceLogs`, `just log-e2e` (`frontend/scripts/device-log-e2e.mjs`). Frontend only: no spec, Python, migration or simulator change.
+- **Decisions.** (1) Placement: its own section for the effective board, not inside the table (150 dev rows, a log is wide); fetch only for an id that is a fleet row, since an arrival would 404. (2) Hint: the selected board's `last_seen` string is the re-read trigger (an `up/log` batch moves it and `useFleet` already re-reads on the frame). (3) Gap below the line that carries `dropped`; `text: null` is a gap row only; adjacent gaps are not merged. (4) Level text is the raw level, `E`/`W` bold, `D`/`V` muted, open vocabulary; the label is in a `title`. (5) Always `limit=200`, and a muted note at exactly 200. (6) State is stored with its device id so a board switch reads as loading. (7) Text is React text in `<bdi>`.
+- **Rejected.** A second EventSource or a log SSE event type (`sse_max_clients` slots, `fleet.ts` rule 1); reading the frame body; a per-row log in the table; client-side re-sort (the server's `logged_at DESC, id DESC` is the order); a simulator `--log-every` (R4-fw-3's half, owner-gated); paging (no server cursor).
+- **T2 evidence.** `just log-e2e` against 8088: 8/8 pass, live line visible 1.1 s after the publish returned with no reload; `E2E_BREAK=tail-order` and `live-line` each exit 1. Details in `docs/features/health-telemetry.md`.
+- **Gotchas.** The first CLI argument of the harness is the base URL, the second the out dir. A denied MQTT publish is silent, so setup checks the API after the first batch. `lines ?? []` matters: every existing Dashboard test answers the new URL with `{}`.
+
+---
+
 ## 2026-10-15 — device.deploy frames carry cmd_id, state, is_terminal and a terminal detail; detail is the stored sanitised copy; v stays 1 (R4-be-2)
 
 - **Built.** `DeviceEvent` gains `cmd_id`, `state`, `is_terminal`, `detail` (optional, after `reset_reason`). `ingestor/handlers.py` fills them from the written `deploy_events` row; `deploys.snapshot_detail` is now public (alias `_snapshot_detail` kept). Supersedes the R1-be-4 line "the envelope gains no new field". No frontend source, spec, migration or new event type.

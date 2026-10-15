@@ -514,7 +514,7 @@ Order: spec-1 (any time) · fw-1 → be-1 → fe-1 → test-1 · be-2 · fw-3 �
 - [x] **R4-fe-1**: Live fleet status (P0, 2d) _(done 2026-10-15; see DECISIONS.md and docs/features/health-telemetry.md)_
       Online/offline, last seen, boot success, last reset reason as a warning badge, `min_free_heap`, metrics. Acceptance: jsdom tests, and a real Chromium run against the simulator showing a `panic` reset badge.
       Added: 2026-10-15
-- [ ] **R4-fe-2**: Per-device log tail (P1, 1d)
+- [x] **R4-fe-2**: Per-device log tail (P1, 1d) _(done 2026-10-15; see DECISIONS.md and docs/features/health-telemetry.md)_
       Newest first, level, text, `dropped` gaps. Depends on R4-be-1. Acceptance: jsdom, and Chromium against the simulator.
       Added: 2026-10-15
 

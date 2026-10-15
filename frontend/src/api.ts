@@ -191,6 +191,21 @@ export type ArrivalSummary = {
 
 export type DeviceList = { devices: DeviceSummary[]; arrivals: ArrivalSummary[] }
 
+// R4-be-1. Mirrors `DeviceLogLine` / `DeviceLogTail` in api/schemas.py, field for field and
+// in order. `text` is sanitised server-side (no control characters, URLs replaced by
+// `<url>`, 200 characters) but still DEVICE-CONTROLLED: render it as text only.
+// `text: null` is a gap marker (a batch that lost lines and had none usable). `dropped` is
+// the number of lines lost IMMEDIATELY BEFORE this one. `level` is an open vocabulary.
+export type DeviceLogLine = {
+  id: number
+  logged_at: string
+  received_at: string
+  level: string
+  text: string | null
+  dropped: number
+}
+export type DeviceLogTail = { device_id: string; lines: DeviceLogLine[] }
+
 // Mirrors `firmware/manifest.py::ConfigPartition`. Optional in the schema ON PURPOSE:
 // bundles built before R0-fw-1 have nowhere to write a board's config, and the flasher
 // must refuse those rather than silently flash a board that can never enroll.
@@ -454,6 +469,11 @@ export const api = {
       method: 'PATCH',
       body: JSON.stringify(patch),
     }),
+
+  // R4-fe-2. A board's log tail: admin-only, newest first, the last 7 days, at most `limit`
+  // lines (server range 1..5000). The path is relative, like every other call here.
+  deviceLogs: (deviceId: string, limit: number) =>
+    request<DeviceLogTail>(`/v1/devices/${encodeURIComponent(deviceId)}/logs?limit=${limit}`),
 
   listEnrollmentTokens: () => request<{ tokens: EnrollmentTokenSummary[] }>('/v1/enrollment-tokens'),
 

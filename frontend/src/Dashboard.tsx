@@ -12,11 +12,14 @@
 // The profiles section (R3-fe-1) owns one profile read, re-read on the fleet's announce
 // hint (`fleet.announceSeq`), and shares that list with the upload form, whose layout
 // options are the adopted profile names.
+// The device log (R4-fe-2) follows the strip's board and is re-read when THAT board's
+// `last_seen` changes (an `up/log` batch moves it): no new stream, no frame body read.
 
 import { useState } from 'react'
 import { type Me } from './api'
 import { buildInfo, type BuildInfo } from './buildInfo'
 import { useArtifacts } from './deploy'
+import { DeviceLog } from './DeviceLog'
 import { EnrollBoard } from './EnrollBoard'
 import { type FlasherFactory } from './flasher'
 import { FlashBoard } from './FlashBoard'
@@ -54,6 +57,9 @@ export function Dashboard({
   const [selected, setSelected] = useState<string | null>(null)
   const board = describeBoard(selected, fleet.devices, fleet.arrivals)
   const effective = board.kind === 'board' ? board.deviceId : null
+  // An arrival is a `board` with no fleet row yet: the log endpoint would 404 for it.
+  const logDevice =
+    effective === null ? null : (fleet.devices?.find((d) => d.device_id === effective) ?? null)
   // One read for the flasher's result card and the table's update result cards (R2b-fe-10).
   const versions = describeVersions(ui, health)
 
@@ -78,6 +84,12 @@ export function Dashboard({
         selectedDeviceId={effective}
         onSelect={setSelected}
         versions={versions}
+      />
+      <DeviceLog
+        deviceId={effective}
+        device={logDevice}
+        hasBoards={(fleet.devices?.length ?? 0) > 0}
+        onSessionExpired={expire}
       />
       {/* Naming a detected flash map comes before uploading a build for it. */}
       <PartitionProfiles

@@ -109,3 +109,17 @@ describe('api.listPartitionProfiles and api.adoptPartitionProfile (R3-fe-1)', ()
     expect(err.message).toBe('a name is final once adopted')
   })
 })
+
+describe('api.deviceLogs (R4-fe-2)', () => {
+  it('reads the tail from the relative path with the limit and no body', async () => {
+    const spy = respond(200, '{"device_id":"a4cf12b3de90","lines":[]}')
+    await expect(api.deviceLogs('a4cf12b3de90', 200)).resolves.toEqual({
+      device_id: 'a4cf12b3de90',
+      lines: [],
+    })
+    const [url, init] = spy.mock.calls[0]
+    expect(url).toBe('/v1/devices/a4cf12b3de90/logs?limit=200')
+    expect(init?.credentials).toBe('same-origin')
+    expect(init?.body).toBeUndefined()
+  })
+})

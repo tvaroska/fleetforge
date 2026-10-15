@@ -68,7 +68,10 @@ function json(body: unknown, status = 200) {
   })
 }
 
-function mockApi(devices: DeviceSummary[]) {
+// The log tail the mocked `GET /v1/devices/{id}/logs` answers with, per device id.
+type LogLines = Record<string, unknown[]>
+
+function mockApi(devices: DeviceSummary[] | (() => DeviceSummary[]), logs: () => LogLines = () => ({})) {
   // Once an upload has been POSTed the list read returns the newer version first, the
   // way the server's `created_at DESC` does.
   let uploaded = false
@@ -108,7 +111,13 @@ function mockApi(devices: DeviceSummary[]) {
       return json({ cmd_id: 'c', device_id: 'x', version: '1.5.0', apply: 'auto', reused: false })
     }
     if (url === '/v1/partition-profiles') return json({ profiles: [builtinProfile] })
-    if (url === '/v1/devices') return json({ devices, arrivals: [] })
+    if (url.startsWith('/v1/devices/') && url.includes('/logs')) {
+      const id = url.split('/')[3]!
+      return json({ device_id: id, lines: logs()[id] ?? [] })
+    }
+    if (url === '/v1/devices') {
+      return json({ devices: typeof devices === 'function' ? devices() : devices, arrivals: [] })
+    }
     if (url === '/v1/agent/manifest') {
       return json({
         agent_version: '0.4.5',
@@ -252,6 +261,79 @@ describe('Dashboard', () => {
       }),
     )
     await waitFor(() => expect(reads()).toBe(2), { timeout: 2000 })
+  })
+
+  describe('device log (R4-fe-2)', () => {
+    const logLine = (over: Record<string, unknown>) => ({
+      id: 1,
+      logged_at: '2026-09-10T11:59:00Z',
+      received_at: '2026-09-10T11:59:00Z',
+      level: 'I',
+      text: 'hello',
+      dropped: 0,
+      ...over,
+    })
+    const logReads = (spy: ReturnType<typeof mockApi>, id?: string) =>
+      spy.mock.calls
+        .map(([input]) => String(input))
+        .filter((u) => u.includes('/logs') && (id === undefined || u.includes(id)))
+
+    it('follows the implied board of a one-board fleet', async () => {
+      const spy = mockApi([device()])
+      renderDashboard()
+      const section = await screen.findByTestId('device-log')
+      expect(within(section).getByRole('heading', { name: 'Device log' })).toBeInTheDocument()
+      await waitFor(() => expect(logReads(spy)).toEqual(['/v1/devices/a4cf12b3de90/logs?limit=200']))
+    })
+
+    it('asks for a pick with two boards, then reads the picked one', async () => {
+      const B = 'b26a938324ab'
+      const spy = mockApi([device(), device({ device_id: B })], () => ({
+        [B]: [logLine({ text: 'from the second board' })],
+      }))
+      renderDashboard()
+      expect(await screen.findByTestId('device-log-none')).toBeInTheDocument()
+      expect(logReads(spy)).toEqual([])
+
+      const row = (await screen.findAllByTestId('device-row'))[1]!
+      await userEvent.click(within(row).getByRole('button', { name: B }))
+      expect(await screen.findByText('from the second board')).toBeInTheDocument()
+      expect(logReads(spy)).toEqual([`/v1/devices/${B}/logs?limit=200`])
+    })
+
+    it('re-reads on the board’s last_seen, not on a frame alone', async () => {
+      let seen = '2026-09-10T11:59:30Z'
+      let lines: unknown[] = [logLine({ id: 1, text: 'first' })]
+      const spy = mockApi(
+        () => [device({ last_seen: seen })],
+        () => ({ a4cf12b3de90: lines }),
+      )
+      const { sources } = renderDashboard()
+      await screen.findByText('first')
+      expect(logReads(spy)).toHaveLength(1)
+
+      const source = sources.mock.results[0]!.value as EventSourceLike
+      const frame = () =>
+        source.onmessage?.(
+          new MessageEvent('message', {
+            data: JSON.stringify({ v: 1, type: 'device.seen', device_id: 'a4cf12b3de90' }),
+          }),
+        )
+
+      // A frame with an unchanged last_seen re-reads the fleet but not the log.
+      frame()
+      await waitFor(
+        () => expect(spy.mock.calls.filter(([i]) => String(i) === '/v1/devices').length).toBeGreaterThan(1),
+        { timeout: 2000 },
+      )
+      expect(logReads(spy)).toHaveLength(1)
+
+      seen = '2026-09-10T11:59:55Z'
+      lines = [logLine({ id: 2, text: 'second' }), ...lines]
+      frame()
+      expect(await screen.findByText('second', {}, { timeout: 2000 })).toBeInTheDocument()
+      expect(logReads(spy)).toHaveLength(2)
+    })
   })
 
   describe('pre-flight card', () => {

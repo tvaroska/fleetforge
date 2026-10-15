@@ -25,7 +25,7 @@ policy, not just the ingest.
 | R4-BE-1 | Persist reset reason (+ fault counts derived on read), heartbeat health, telemetry and logs with SPEC retention (30 d telemetry, 7 d logs, 5 000 lines/device bound on write); `GET /v1/devices` fields, `/logs` and `/telemetry` sub-resources, `reset_reason` on `device.announce` (*R4-be-1 as built*; telemetry cap Patch proposed) | P0 | 2d |
 | R4-FE-1 | Live fleet status dashboard: online/offline, last-seen, boot-success, metrics (a Health column; *R4-fe-1 as built*) | P0 | 2d |
 | R4-BE-2 | `device.deploy` SSE frames carry `cmd_id`, `state`, `is_terminal` and a terminal `detail` so a CI waiter blocks on a frame instead of polling (*R4-be-2 as built*) | P1 | 0.5d |
-| R4-FE-2 | Per-device log tail (newest first, level, text, dropped gaps) | P1 | 1d |
+| R4-FE-2 | Per-device log tail (newest first, level, text, dropped gaps; *R4-fe-2 as built*) | P1 | 1d |
 | R4-TEST-1 | E2E: metric emitted on device → visible live in dashboard | P0 | 0.5d |
 
 R4-BE-1's `up/log` half follows *up/log proposal*: its own table (migration 0009), bounded on write like `progress.py`, `deploys.sanitise_device_text` on `text`, `logged_at = received_at − age_ms`, and an hourly sweep plus an age predicate on every read so a silent board's lines still expire. Built: see *R4-be-1 as built*.
@@ -513,3 +513,30 @@ are additive under *Evolution rules*, rule 2, and `proto` stays `1`.
 `DeviceEvent` gains four optional fields after `reset_reason`: `cmd_id`, `state`, `is_terminal`, `detail`. They are set on `device.deploy` only (the frame emitted when `record_observed_status` wrote a row) and are `null` on every other type, including a deduped retained replay and a status with no `cmd_id` (both stay `device.seen`). `v` stays 1. `detail` is present only on a terminal row and is the stored, sanitised copy (`deploys.snapshot_detail`), never the wire value, so a signed URL cannot ride the stream. The dashboard still only re-reads (`fleet.ts` rule 1); no frontend source change.
 
 Waiter recipe: open `GET /v1/events` BEFORE the deploy POST (there is no replay), then wait for `type == "device.deploy" && cmd_id == X && is_terminal`. After a reconnect gap fall back to `GET /v1/devices` (`deploy.cmd_id`, `deploy.is_terminal`).
+
+### R4-fe-2 as built
+
+A `Device log` section sits on the Dashboard right after the fleet table (`DeviceLog.tsx`; the read and the pure helpers are in `deviceLog.ts`, the `profiles.ts` shape). It follows the board the status strip shows: the picked row, or the only board. Two or more boards with none picked shows `Pick a board in the Fleet table to read the log it sent.`; an arrival that is not a fleet row yet shows a muted line and does no fetch (the endpoint would 404). An empty fleet renders nothing. The `pick-board` button title now says it also shows the log.
+
+**Live trigger, no new stream.** An `up/log` batch moves the board's `last_seen` (the ingestor touches it before decoding) and emits `device.seen`; `useFleet` re-reads `GET /v1/devices` 250 ms later. `useDeviceLog` re-reads `GET /v1/devices/{id}/logs?limit=200` whenever the selected board's `last_seen` string changes. No second EventSource (each costs an `sse_max_clients` slot), no poll, no change to `fleet.ts`, and no SSE body is ever read. A frame that leaves `last_seen` unchanged re-reads the fleet but not the log (tested).
+
+**Rows.** The server's order is the order (`logged_at DESC, id DESC`); nothing sorts. A line's `dropped` is the loss immediately before it, so its gap row is drawn below it. A `text: null` row is a gap marker and renders as a gap only. Adjacent gaps are not merged. The level text is the raw level; `E` is bold and underline-free inside `.log`, `W` bold, `D`/`V` muted, `I` and unknown plain, so colour is never the only axis, and the title carries the label. Text is React text inside `<bdi>`, already sanitised server-side (no control characters, `<url>` for URLs, 200 characters). State is stored with its device id, so a board switch reads as `Loading…` and board A's lines never show under board B's heading.
+
+**Why T2 publishes as a simulated board.** Nothing on a device sends `up/log` (R4-fw-3 is gated on the owner applying Patches A+B), and a simulator `--log-every` is that task's half. `just log-e2e` enrolls two real simulator boards and publishes `up/log` batches as the talker with its own credential, read from `.sim/<id>.json` by a python child, through the real broker, ingestor, DB and API.
+
+**T2 (`just log-e2e`, dev stack on 8088).** Exit 0:
+```
+PASS tail-order: as expected
+PASS levels: as expected
+PASS untrusted-text: as expected
+PASS live-line: as expected [publish 256 ms; visible 1133 ms after the publish returned]
+PASS gap-marker: as expected
+PASS switch-board: as expected
+PASS api-agrees: as expected
+PASS traps: as expected
+
+8/8 pass
+```
+`E2E_BREAK=tail-order` and `E2E_BREAK=live-line` each exit 1 with the matching FAIL. API cross-check (curl, cookie jar): newest first, the `dropped:7` marker (`text: null`), `live`, the `<img> <url>` line, `boom` with `dropped: 3`, then W and I; the ingestor logged `log lines=… dropped=…` per batch and `evil.example` appears in none of its output.
+
+**Named follow-ups, not built.** Paging beyond 200 (the API allows 5 000 but has no `before` cursor); a level filter and text search; a log tail in the status strip or the table row; the firmware sender and the simulator's own `up/log` (R4-fw-3); the end-to-end "a log line emitted on a device reaches the dashboard live" (R4-test-1); relative ages per line.

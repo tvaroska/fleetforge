@@ -223,7 +223,7 @@ function DeviceRow({
             type="button"
             className="pick-board"
             aria-pressed={selected}
-            title="Show this board in the status strip"
+            title="Show this board in the status strip and its log below"
             onClick={() => onSelect(device.device_id)}
           >
             {identity}

@@ -326,6 +326,21 @@ progress::-moz-progress-bar {
   word-break: break-all;
 }
 
+/* R4-fe-2. The device log tail is a table inside `.log`'s box: lines wrap rather than
+   scroll sideways, the time never wraps, and cells top-align so a wrapped line stays one row. */
+.device-log .log-text {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.device-log td {
+  vertical-align: top;
+}
+
+.device-log td:first-child {
+  white-space: nowrap;
+}
+
 /* S0-fe-1. The board's own console. Taller than the esptool log: it is read while you
    wait, not skimmed afterwards, and the interesting line is usually the last one. */
 .console {
