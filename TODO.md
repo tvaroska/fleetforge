@@ -511,7 +511,7 @@ Order: spec-1 (any time) · fw-1 → be-1 → fe-1 → test-1 · be-2 · fw-3 �
 - [ ] **R4-be-2**: `device.deploy` SSE events carry the transaction (P1, 0.5d)
       Add `cmd_id`, `state` and terminal `detail` to the `DeviceEvent` payload so a CI or test runner can wait on an event instead of polling `GET /v1/devices`. Additive; an old frontend must still render it. Acceptance: `tests/test_events_stream.py` pins the keys; `just update-e2e` still passes.
       Added: 2026-10-15
-- [ ] **R4-fe-1**: Live fleet status (P0, 2d)
+- [x] **R4-fe-1**: Live fleet status (P0, 2d) _(done 2026-10-15; see DECISIONS.md and docs/features/health-telemetry.md)_
       Online/offline, last seen, boot success, last reset reason as a warning badge, `min_free_heap`, metrics. Acceptance: jsdom tests, and a real Chromium run against the simulator showing a `panic` reset badge.
       Added: 2026-10-15
 - [ ] **R4-fe-2**: Per-device log tail (P1, 1d)

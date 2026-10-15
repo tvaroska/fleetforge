@@ -178,6 +178,25 @@ capacity-check-prod *args:
 update-e2e *args:
     cd frontend && PLAYWRIGHT_MODULE="${PLAYWRIGHT_MODULE:-$(npm root -g)/playwright/index.mjs}" node scripts/update-flow-e2e.mjs {{args}}
 
+# ── Fleet health end to end (R4-fe-1) ────────────────────────────────────────
+#
+# The fleet table's Health cell in a real Chromium against the dev stack (`just up`), with
+# two simulated boards: one that announces `reset_reason: panic` and records a metric every
+# 2 s, and a poweron control. Scenarios: panic-badge, health-fields, live-metric (the metric
+# rises with no reload), traps. Prints PASS/FAIL per scenario and `N/4 pass`. Evidence:
+# /tmp/ff-r4-fe-1/ (a .txt and a row .png per scenario, the simulator logs, run.json).
+# Leaves two simulated boards per run in the dev DB; deletes nothing.
+# `E2E_BREAK=<scenario id> just health-e2e` flips one expectation: the run must then FAIL.
+# Exit 0 all pass, 1 a scenario failed, 2 setup failed. The admin password comes from
+# $FF_ADMIN_PASSWORD or the repo-root .env, never argv.
+#
+#     just health-e2e
+#     just health-e2e http://localhost:8088 /tmp/somewhere-else
+#
+# Play the Health cell against the dev stack with simulated boards (exit 0 = all four pass).
+health-e2e *args:
+    cd frontend && PLAYWRIGHT_MODULE="${PLAYWRIGHT_MODULE:-$(npm root -g)/playwright/index.mjs}" node scripts/fleet-health-e2e.mjs {{args}}
+
 # ── Simulated boards (R0-test-1) ─────────────────────────────────────────────
 #
 # A fake ESP32 that enrolls, connects, announces, holds presence and heartbeats,

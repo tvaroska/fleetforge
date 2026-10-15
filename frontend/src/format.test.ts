@@ -10,7 +10,7 @@
 //    a negative or NaN duration as `0 s`.
 
 import { describe, expect, it } from 'vitest'
-import { formatAgo, formatDuration, formatWhen } from './format'
+import { formatAgo, formatBytes, formatDuration, formatWhen } from './format'
 
 const NOW = Date.parse('2026-09-10T12:00:00Z')
 const ago = (seconds: number) => new Date(NOW - seconds * 1000).toISOString()
@@ -63,5 +63,21 @@ describe('formatDuration', () => {
   it('never prints a negative or NaN duration', () => {
     expect(formatDuration(-5_000)).toBe('0 s')
     expect(formatDuration(Number.NaN)).toBe('0 s')
+  })
+})
+
+describe('formatBytes', () => {
+  it('steps through B, KiB and MiB', () => {
+    expect(formatBytes(0)).toBe('0 B')
+    expect(formatBytes(1023)).toBe('1023 B')
+    expect(formatBytes(1024)).toBe('1.0 KiB')
+    expect(formatBytes(98000)).toBe('95.7 KiB')
+    expect(formatBytes(142000)).toBe('138.7 KiB')
+    expect(formatBytes(5 * 1048576)).toBe('5.0 MiB')
+  })
+
+  it('reads a negative or NaN count as a dash', () => {
+    expect(formatBytes(Number.NaN)).toBe('—')
+    expect(formatBytes(-1)).toBe('—')
   })
 })

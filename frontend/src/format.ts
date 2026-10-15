@@ -48,3 +48,16 @@ export function formatDuration(ms: number): string {
   if (seconds < 3600) return `${Math.floor(seconds / 60)} min ${seconds % 60} s`
   return `${Math.floor(seconds / 3600)} h ${Math.floor((seconds % 3600) / 60)} min`
 }
+
+/**
+ * A byte count: `512 B` / `95.7 KiB` / `5.0 MiB` (R4-fe-1). Negative or NaN reads `—`.
+ *
+ * Binary units, because a heap is sized in them. One decimal and no `GiB`: nothing this
+ * app shows is that large.
+ */
+export function formatBytes(n: number): string {
+  if (!Number.isFinite(n) || n < 0) return '—'
+  if (n < 1024) return `${n} B`
+  if (n < 1048576) return `${(n / 1024).toFixed(1)} KiB`
+  return `${(n / 1048576).toFixed(1)} MiB`
+}

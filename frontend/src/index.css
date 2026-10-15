@@ -151,6 +151,13 @@ code {
   font-weight: 700;
 }
 
+/* R4-fe-1. The fault-reset badge's second axis: a box, not a tint. Word + weight + box. */
+.badge {
+  border: 1px solid var(--ff-line-hi);
+  padding: 0 0.3em;
+  white-space: nowrap;
+}
+
 /* S0-fe-6. The recovery button lives INSIDE a `.bad` / `.warn` paragraph, and
    `text-decoration` inherits into a nested button — so `.bad`'s underline would run
    through the button's own label. */

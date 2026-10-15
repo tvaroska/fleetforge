@@ -13,7 +13,7 @@ import { act } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { FleetView } from './FleetView'
 import { LAST_ON_TITLE } from './network'
-import { type EventSourceLike } from './fleet'
+import { COALESCE_MS, type EventSourceLike } from './fleet'
 
 const NOW = new Date('2026-09-10T12:00:00Z')
 
@@ -316,5 +316,177 @@ describe('the network (R2b-fe-13)', () => {
   it('isolates a device-controlled SSID in <bdi>', async () => {
     await renderFleet([device({ ssid: '\u202Eevil', known_networks: 1 })])
     expect(within(rowOf()).getByText('\u202Eevil').tagName).toBe('BDI')
+  })
+})
+
+describe('health (R4-fe-1)', () => {
+  const rowOf = () => screen.getAllByTestId('device-row')[0]
+  const cell = () => within(rowOf()).getByTestId('health-cell')
+
+  const health = (overrides: Partial<Record<string, unknown>> = {}) => ({
+    at: '2026-09-10T11:59:55Z',
+    uptime_s: 20,
+    rssi: -61,
+    free_heap: 142000,
+    min_free_heap: 98000,
+    boot_ok: true,
+    ...overrides,
+  })
+  const faults = (overrides: Partial<Record<string, unknown>> = {}) => ({
+    window_s: 86400,
+    panic: 0,
+    task_wdt: 0,
+    brownout: 0,
+    ...overrides,
+  })
+
+  it('adds a Health column after Last seen, and a cell on every row', async () => {
+    await renderFleet([device(), device({ device_id: 'b2000000dead' })])
+    const headers = screen.getAllByRole('columnheader').map((h) => h.textContent)
+    expect(headers).toEqual(['Status', 'Device', 'Platform', 'Firmware', 'Last seen', 'Health', 'Power', 'Deploy'])
+    expect(screen.getAllByTestId('health-cell')).toHaveLength(2)
+  })
+
+  it('badges a panic reset with the word, a weight class and the raw reason', async () => {
+    await renderFleet([device({ last_reset_reason: 'panic' })])
+    const badge = within(rowOf()).getByTestId('reset-badge')
+    expect(badge).toHaveTextContent('last reset: panic')
+    expect(badge).toHaveClass('warn')
+    expect(badge).toHaveAttribute('data-reason', 'panic')
+    expect(badge).toHaveAttribute('title')
+  })
+
+  it('shows poweron and an unknown name without a badge', async () => {
+    await renderFleet([device({ last_reset_reason: 'poweron' }), device({ device_id: 'b2000000dead', last_reset_reason: 'quantum_flip' })])
+    const rows = screen.getAllByTestId('device-row')
+    expect(within(rows[0]).queryByTestId('reset-badge')).toBeNull()
+    expect(within(rows[0]).getByTestId('reset-reason')).toHaveTextContent('last reset: poweron')
+    expect(within(rows[0]).getByTestId('reset-reason')).toHaveClass('muted')
+    expect(within(rows[1]).queryByTestId('reset-badge')).toBeNull()
+    expect(within(rows[1]).getByTestId('reset-reason')).toHaveTextContent('last reset: quantum_flip')
+  })
+
+  it('says "boot not confirmed" for boot_ok false and "boot ok" for true', async () => {
+    await renderFleet([device({ health: health({ boot_ok: false }) }), device({ device_id: 'b2000000dead', health: health() })])
+    const rows = screen.getAllByTestId('device-row')
+    const bad = within(rows[0]).getByText('boot not confirmed')
+    expect(bad).toHaveClass('bad')
+    expect(within(rows[1]).getByTestId('boot-state')).toHaveTextContent('boot ok')
+  })
+
+  it('shows the heap low-water mark, uptime and signal', async () => {
+    await renderFleet([device({ health: health() })])
+    const vitals = within(cell()).getByTestId('device-vitals')
+    expect(vitals).toHaveTextContent('heap low 95.7 KiB')
+    expect(vitals).toHaveTextContent('up 20 s')
+    expect(vitals).toHaveTextContent('-61 dBm')
+    expect(vitals).not.toHaveClass('muted')
+  })
+
+  it('shows the server fault count, and nothing when it is all zero', async () => {
+    await renderFleet([
+      device({ fault_resets: faults({ panic: 2 }) }),
+      device({ device_id: 'b2000000dead', fault_resets: faults() }),
+    ])
+    const rows = screen.getAllByTestId('device-row')
+    expect(within(rows[0]).getByTestId('fault-resets')).toHaveTextContent('panic ×2 in 24 h')
+    expect(within(rows[1]).queryByTestId('fault-resets')).toBeNull()
+  })
+
+  it('lists metrics by name', async () => {
+    await renderFleet([
+      device({
+        metrics: [
+          { name: 'sim_counter', value: 16, at: '2026-09-10T11:59:50Z' },
+          { name: 'temp_c', value: 21.5, at: '2026-09-10T11:59:50Z' },
+        ],
+      }),
+    ])
+    const metrics = within(cell()).getAllByTestId('metric')
+    expect(metrics.map((m) => m.getAttribute('data-name'))).toEqual(['sim_counter', 'temp_c'])
+    expect(metrics[0]).toHaveTextContent('sim_counter 16')
+    expect(metrics[1]).toHaveTextContent('temp_c 21.5')
+    expect(within(cell()).queryByText(/more$/)).toBeNull()
+  })
+
+  it('folds metrics past the fourth behind "+N more"', async () => {
+    const metrics = ['a', 'b', 'c', 'd', 'e', 'f'].map((name, i) => ({ name: `m_${name}`, value: i, at: '2026-09-10T11:59:50Z' }))
+    await renderFleet([device({ metrics })])
+    expect(within(cell()).getAllByTestId('metric')).toHaveLength(6)
+    const more = within(cell()).getByText('+2 more')
+    expect(more.tagName).toBe('SUMMARY')
+    expect(more.closest('details')).toHaveTextContent('m_e')
+    expect(more.closest('details')).not.toHaveTextContent('m_d')
+  })
+
+  it('says "last reported" and mutes the vitals of an offline board', async () => {
+    await renderFleet([device({ online: false, health: health() })])
+    const vitals = within(cell()).getByTestId('device-vitals')
+    expect(vitals.textContent).toMatch(/^last reported /)
+    expect(vitals).toHaveClass('muted')
+    expect(vitals.getAttribute('title')).toContain('reported ')
+  })
+
+  it('renders an old-API row (none of the new keys) as a dash', async () => {
+    await renderFleet([device()])
+    expect(cell()).toHaveTextContent('—')
+    expect(within(cell()).queryByTestId('reset-badge')).toBeNull()
+  })
+})
+
+// The same controllable source as `fleet.test.tsx`, minimal: one `emit()`.
+class FakeSource implements EventSourceLike {
+  readyState = 1
+  onopen: ((ev: Event) => unknown) | null = null
+  onmessage: ((ev: MessageEvent<string>) => unknown) | null = null
+  onerror: ((ev: Event) => unknown) | null = null
+  close() {
+    this.readyState = 2
+  }
+  emit(payload: unknown) {
+    this.onmessage?.(new MessageEvent('message', { data: JSON.stringify(payload) }))
+  }
+}
+
+describe('health, live (R4-fe-1)', () => {
+  async function live(first: string) {
+    let reason = first
+    const source = new FakeSource()
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input?: unknown) => {
+      const body =
+        String(input) === '/v1/artifact'
+          ? { artifacts: [] }
+          : { devices: [device({ last_reset_reason: reason })], arrivals: [] }
+      return new Response(JSON.stringify(body), { status: 200, headers: { 'content-type': 'application/json' } })
+    })
+    render(<FleetView onSessionExpired={vi.fn()} createEventSource={() => source} />)
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    const frame = async (payload: unknown) => {
+      await act(async () => {
+        source.emit(payload)
+        await vi.advanceTimersByTimeAsync(COALESCE_MS + 1)
+      })
+    }
+    return { frame, set: (r: string) => (reason = r) }
+  }
+
+  const ANNOUNCE = { v: 1, type: 'device.announce', device_id: 'a4cf12b3de90', at: '2026-09-10T12:00:00Z', online: true }
+
+  it('shows the badge after a frame triggers a re-read, with no reload', async () => {
+    const { frame, set } = await live('poweron')
+    expect(screen.queryByTestId('reset-badge')).toBeNull()
+    set('panic')
+    await frame(ANNOUNCE)
+    expect(screen.getByTestId('reset-badge')).toHaveAttribute('data-reason', 'panic')
+  })
+
+  it('never renders a reset reason carried by the frame body', async () => {
+    const { frame } = await live('poweron')
+    await frame({ ...ANNOUNCE, reset_reason: 'panic' })
+    expect(screen.queryByTestId('reset-badge')).toBeNull()
+    expect(screen.getByTestId('reset-reason')).toHaveTextContent('last reset: poweron')
   })
 })

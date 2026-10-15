@@ -23,7 +23,7 @@ policy, not just the ingest.
 | R4-FW-2 | User-defined telemetry channel, `up/telemetry` with `age_ms`; `ff_telemetry()`/`Fleetforge.metric()`; proposal Patch A owner (*up/telemetry proposal*, *up/telemetry as built*) | P1 | 1.5d |
 | R4-FW-3 | Agent + library forward firmware log lines on `up/log` (explicit call; ring buffer; simulator; Basic/basic_idf forward `morse:`). Touches CRITICAL `Fleetforge.cpp`. Needs Patches A+B (*up/log proposal*) | P1 | 1d |
 | R4-BE-1 | Persist reset reason (+ fault counts derived on read), heartbeat health, telemetry and logs with SPEC retention (30 d telemetry, 7 d logs, 5 000 lines/device bound on write); `GET /v1/devices` fields, `/logs` and `/telemetry` sub-resources, `reset_reason` on `device.announce` (*R4-be-1 as built*; telemetry cap Patch proposed) | P0 | 2d |
-| R4-FE-1 | Live fleet status dashboard: online/offline, last-seen, boot-success, metrics | P0 | 2d |
+| R4-FE-1 | Live fleet status dashboard: online/offline, last-seen, boot-success, metrics (a Health column; *R4-fe-1 as built*) | P0 | 2d |
 | R4-FE-2 | Per-device log tail (newest first, level, text, dropped gaps) | P1 | 1d |
 | R4-TEST-1 | E2E: metric emitted on device → visible live in dashboard | P0 | 0.5d |
 
@@ -453,3 +453,56 @@ are additive under *Evolution rules*, rule 2, and `proto` stays `1`.
   about 7.8 M rows per device in 30 days, on a shared prod VM; the up/log proposal bounded
   logs for the same reason. Order-independent with up/log Patch B (a different row). No test
   turns red when it is applied (the test reads the prd row once it carries a bound).
+
+### R4-fe-1 as built
+
+- **What the table shows.** One new column, **Health**, after Last seen (every other cell
+  keeps its index). Online/offline and last seen were already rendered and are not repeated.
+  Top to bottom, each line only when the server has something to say: the reset line; boot
+  state (`boot ok`, or the bold underlined `boot not confirmed` for `boot_ok: false`, meaning
+  the running image has not confirmed and rolls back if it never does); the server's fault
+  count (`panic ×2, brownout ×1 in 24 h`, zeros omitted); the vitals (`heap low 95.7 KiB ·
+  up 2 h 3 min · -61 dBm`, from the newest live heartbeat); and the latest metrics (first 4
+  inline, the rest behind `+N more`, in the server's name order). A board that reported
+  nothing (an old API, an agent < 0.5.0) shows a muted `—`. An offline board's vitals read
+  `last reported ...` and are muted, with the heartbeat's receipt time in the title.
+- **Badge rule.** `panic`, `int_wdt`, `task_wdt`, `wdt`, `brownout`, `cpu_lockup`,
+  `pwr_glitch` and `efuse` get a boxed bold `! last reset: <reason>` badge
+  (`data-testid=reset-badge`, `data-reason`); the plain-language label is in its title. Every
+  other name (`poweron`, `ext`, `sw`, `deepsleep`, `usb`, `jtag`, `sdio`, `unknown`, and any
+  name this dashboard has not heard of) is muted text, never a badge: an unknown future name
+  is shown as itself and no fault is claimed that we cannot name. The set is broader than the
+  server's three counters because the badge describes the current boot's cause and the
+  counters are the server's history. The badge is not aged out client-side: a board that
+  panicked a week ago and has run since still says `panic`, which is true, and the `up 6 d`
+  beside it gives the age.
+- **Theme.** Monochrome: the warning is a word, `.warn` weight and a `.badge` border, with an
+  aria-hidden `!` glyph; no tint.
+- **Live.** Nothing new: every heartbeat, telemetry batch and announce frame already triggers
+  `useFleet`'s coalesced `GET /v1/devices`, and the frame body is never read (a test sends a
+  frame carrying `reset_reason: panic` while the API says `poweron` and no badge appears).
+- **API mirror.** `api.ts` gains `HealthSnapshot`, `FaultResets`, `MetricValue` and four
+  optional `DeviceSummary` fields before `deploy`, so an older API and every older fixture
+  still render. Logic is in `deviceHealth.ts` (pure); `format.ts` gains `formatBytes`.
+- **T2 (dev stack, `FF_HTTP_PORT=8088`).** `just health-e2e` (a Chromium driving the real
+  dashboard against a `--reset-reason panic --telemetry-every 2 --heartbeat-interval 5`
+  simulator and a poweron control):
+
+  ```
+  PASS panic-badge: as expected
+  PASS health-fields: as expected
+  PASS live-metric: as expected [sim_counter 3 -> 6]
+  PASS traps: as expected
+
+  4/4 pass; wrote to /tmp/ff-r4-fe-1
+  ```
+
+  The badge computed to weight 700 with a solid border; the control row showed `last reset:
+  poweron` and no badge. `E2E_BREAK=<id>` made each of the four scenarios FAIL (exit 1).
+  API cross-check for the fault board: `last_reset_reason` panic, `fault_resets.panic` 1,
+  `health.min_free_heap` 98000, `boot_ok` true, last key `deploy`.
+- **Not built (named follow-ups).** The status strip does not show the reset badge (a
+  `Segment` with tone `warn` would). No low-heap or weak-RSSI threshold: neither the spec nor
+  the server defines a number. No metric history or sparkline (`GET
+  /v1/devices/{id}/telemetry` exists). The log tail is R4-fe-2. The reset reason cannot tell
+  an operator re-plug from the dashboard console pulsing EN.

@@ -17,11 +17,26 @@
 // from a board that was never flashed. It is a separate list rather than a table row
 // because an arriving board has no fleet row yet — most columns would be em-dashes and
 // the `Status` one would be a lie.
+//
+// The Health cell (R4-fe-1) shows what the server stored about the board's current boot:
+// the last reset reason, boot confirmation, the server's own fault count, the newest
+// heartbeat's heap, uptime and signal, and the latest metrics. It renders server answers
+// only (fresh data arrives through `useFleet`'s re-read, never from an SSE body). A fault
+// reset is a boxed bold word, not a tint: the theme is monochrome and state is never
+// carried by colour alone.
 
 import { type ArrivalSummary, type ArtifactSummary, type DeviceSummary } from './api'
 import { DeployCell } from './DeployCell'
 import { useArtifacts, type Artifacts } from './deploy'
 import { STAGE_LABELS, useFleet, type Fleet, type EventSourceFactory } from './fleet'
+import {
+  METRICS_INLINE,
+  describeBoot,
+  describeFaults,
+  describeReset,
+  describeVitals,
+  formatMetricValue,
+} from './deviceHealth'
 import { formatAgo, formatWhen } from './format'
 import { LAST_ON_TITLE, knowsNetworks, networkPlace } from './network'
 import { type VersionLine } from './statusStrip'
@@ -63,6 +78,99 @@ function NetworkNote({ device }: { device: DeviceSummary }) {
         </>
       )}
     </>
+  )
+}
+
+function HealthCell({ device }: { device: DeviceSummary }) {
+  const reset = describeReset(device.last_reset_reason)
+  const boot = describeBoot(device.health)
+  const faults = describeFaults(device.fault_resets)
+  const vitals = describeVitals(device.health, device.online, formatWhen)
+  const metrics = device.metrics ?? []
+  const inline = metrics.slice(0, METRICS_INLINE)
+  const more = metrics.slice(METRICS_INLINE)
+
+  if (reset === null && boot === null && faults === null && vitals === null && metrics.length === 0) {
+    return (
+      <td data-testid="health-cell" className="muted">
+        —
+      </td>
+    )
+  }
+
+  const metric = (m: (typeof metrics)[number]) => (
+    <span key={m.name} data-testid="metric" data-name={m.name} title={formatWhen(m.at)}>
+      {/* Device-controlled name: React text only. */}
+      {m.name} {formatMetricValue(m.value)}{' '}
+    </span>
+  )
+
+  return (
+    <td data-testid="health-cell">
+      {reset !== null &&
+        (reset.fault ? (
+          <div>
+            <strong
+              className="warn badge"
+              data-testid="reset-badge"
+              data-reason={reset.reason}
+              title={`The board's last reset: ${reset.label ?? reset.reason}`}
+            >
+              <span aria-hidden="true">! </span>
+              last reset: {reset.reason}
+            </strong>
+          </div>
+        ) : (
+          <div
+            className="muted"
+            data-testid="reset-reason"
+            title={reset.label ?? 'a reset reason this dashboard does not know'}
+          >
+            last reset: {reset.reason}
+          </div>
+        ))}
+      {boot === 'unconfirmed' && (
+        <div data-testid="boot-state">
+          <strong
+            className="bad"
+            title="The running image has not confirmed yet; the board rolls back on its own if it never does."
+          >
+            boot not confirmed
+          </strong>
+        </div>
+      )}
+      {boot === 'ok' && (
+        <div data-testid="boot-state" className="ok">
+          boot ok
+        </div>
+      )}
+      {faults !== null && (
+        <div data-testid="fault-resets" className="warn">
+          {faults}
+        </div>
+      )}
+      {vitals !== null && (
+        <div
+          data-testid="device-vitals"
+          className={vitals.stale ? 'muted' : undefined}
+          title={vitals.title}
+        >
+          {vitals.stale && 'last reported '}
+          {vitals.parts.join(' · ')}
+        </div>
+      )}
+      {metrics.length > 0 && (
+        <div data-testid="metrics">
+          {inline.map(metric)}
+          {more.length > 0 && (
+            <details>
+              <summary>+{more.length} more</summary>
+              {more.map(metric)}
+            </details>
+          )}
+        </div>
+      )}
+    </td>
   )
 }
 
@@ -133,6 +241,7 @@ function DeviceRow({
       <td title={device.last_seen === null ? undefined : formatWhen(device.last_seen)}>
         {formatAgo(device.last_seen, now)}
       </td>
+      <HealthCell device={device} />
       <td title={power}>{device.power_class}</td>
       <DeployCell
         device={device}
@@ -281,6 +390,7 @@ export function FleetTable({
               <th scope="col">Platform</th>
               <th scope="col">Firmware</th>
               <th scope="col">Last seen</th>
+              <th scope="col">Health</th>
               <th scope="col">Power</th>
               <th scope="col">Deploy</th>
             </tr>

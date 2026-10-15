@@ -53,6 +53,27 @@ export type EnrollmentTokenIssued = {
   created_at: string
 }
 
+// R4-be-1: the newest live heartbeat's health group. `at` is the RECEIPT time of that
+// heartbeat, so for an offline board it is what the board said last, not now. Every inner
+// field is nullable (a malformed value is stored as NULL). `boot_ok` false = the running
+// image has not confirmed yet and rolls back if it never does; null = not reported.
+export type HealthSnapshot = {
+  at: string
+  uptime_s: number | null
+  rssi: number | null
+  free_heap: number | null
+  min_free_heap: number | null
+  boot_ok: boolean | null
+}
+
+// R4-be-1: the server's own count of fault announces inside `window_s`. Never re-derived
+// here: the window and the reconnect de-duplication live in `faults.py`.
+export type FaultResets = { window_s: number; panic: number; task_wdt: number; brownout: number }
+
+// R4-be-1: the latest value of one device metric. `name` is device-controlled (server
+// validated, still render it as text); `at` is receipt time minus the sample's age.
+export type MetricValue = { name: string; value: number; at: string }
+
 // Mirrors `DeviceSummary` in api/schemas.py, field for field and in its order.
 //
 // `online` is computed SERVER-SIDE on every read, by `fleetforge.presence.is_online`.
@@ -88,6 +109,15 @@ export type DeviceSummary = {
   enrolled_at: string
   broker_provisioned_at: string | null
   online: boolean
+  // R4-be-1, OPTIONAL like the R2b-be-6 block above: a dashboard served against an older
+  // API, and every fixture written before R4-fe-1, must keep working. Absent and null both
+  // mean "not reported". `last_reset_reason` is an OPEN vocabulary (the newest announce's
+  // normalised name, agents >= 0.5.0): render an unknown name as itself. `fault_resets` is
+  // the server's count, `health.at` a receipt time, `metrics` sorted by name by the server.
+  last_reset_reason?: string | null
+  fault_resets?: FaultResets | null
+  health?: HealthSnapshot | null
+  metrics?: MetricValue[]
   deploy: DeploySummary | null
 }
 
