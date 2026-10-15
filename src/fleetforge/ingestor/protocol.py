@@ -16,7 +16,6 @@ fleet-visibility outage caused by one board's firmware bug.
 import json
 import logging
 import math
-import re
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -39,6 +38,8 @@ from fleetforge.announce_fields import (
     normalize_ssid,
 )
 from fleetforge.identity import DEVICE_ID_RE
+from fleetforge.retention import LOG_RETENTION, TELEMETRY_RETENTION
+from fleetforge.telemetry_store import TELEMETRY_NAME_RE
 
 logger = logging.getLogger(__name__)
 
@@ -127,9 +128,10 @@ class AnnouncePayload(_TolerantPayload):
     (`store.py::_measurement_values`), and malformed coercing to `None`. They are
     declared after `device_id` so a log line can name the board.
 
-    `reset_reason` (S0-fw-6) is read only to be logged on a live announce
-    (`handlers.py`): no column, no API field, so `store.ANNOUNCE_FIELDS` leaves it out.
-    Malformed coerces to `None` like the rest.
+    `reset_reason` (S0-fw-6) is logged on a live announce and, since R4-be-1, stored on
+    every announce as `devices.last_reset_reason` (`store.py::_reset_values`, absent
+    meaning "not reported", so `store.ANNOUNCE_FIELDS` leaves it out) and counted as a
+    fault on a live one (`fleetforge.faults`). Malformed coerces to `None` like the rest.
     """
 
     proto: int | None = None
@@ -193,10 +195,58 @@ class PresencePayload(_TolerantPayload):
     online: bool | None = None
 
 
+# Bounds for the heartbeat's health fields (R4-be-1). Generous: they only keep a value
+# that is not a reading (or would not fit its column) out of the database.
+UPTIME_MAX_S = 315_360_000  # ten years
+RSSI_MIN_DBM = -127
+HEAP_MAX_BYTES = 2**40
+
+
+def _bounded_int(value: object, low: int, high: int) -> int | None:
+    """An integer in `[low, high]`, or `None`. `bool` is an `int` in Python and is not one here."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    return value if low <= value <= high else None
+
+
 class HeartbeatPayload(_TolerantPayload):
-    """`up/hb` — the liveness beat. Its health fields (`uptime_s`, `rssi`, …) are R4."""
+    """`up/hb` — the liveness beat, and since R4-be-1 the health snapshot.
+
+    `{"fw_version","uptime_s","rssi","free_heap","min_free_heap","boot_ok"}`
+    (`spec/device-protocol.md` -> `up/hb`). The five health fields are written as a group
+    on every live heartbeat (`store.py::_health_values`), so each is **tolerant**: a
+    malformed one is `None` ("not reported"), never a `ValidationError` that would lose
+    the heartbeat, its `last_seen` and its `fw_version`. `rssi` is null on ethernet;
+    `min_free_heap` is absent from agents before 0.5.0 (R4-fw-1); `boot_ok` must be a
+    real JSON boolean (`1` is not coerced).
+    """
 
     fw_version: str | None = None
+    uptime_s: int | None = None
+    rssi: int | None = None
+    free_heap: int | None = None
+    min_free_heap: int | None = None
+    boot_ok: bool | None = None
+
+    @field_validator("uptime_s", mode="before")
+    @classmethod
+    def _plausible_uptime(cls, value: object) -> int | None:
+        return _bounded_int(value, 0, UPTIME_MAX_S)
+
+    @field_validator("rssi", mode="before")
+    @classmethod
+    def _plausible_rssi(cls, value: object) -> int | None:
+        return _bounded_int(value, RSSI_MIN_DBM, 0)
+
+    @field_validator("free_heap", "min_free_heap", mode="before")
+    @classmethod
+    def _plausible_heap(cls, value: object) -> int | None:
+        return _bounded_int(value, 0, HEAP_MAX_BYTES)
+
+    @field_validator("boot_ok", mode="before")
+    @classmethod
+    def _real_boolean(cls, value: object) -> bool | None:
+        return value if isinstance(value, bool) else None
 
 
 class StatusPayload(_TolerantPayload):
@@ -236,16 +286,17 @@ class StatusPayload(_TolerantPayload):
 
 
 # `up/telemetry` (R4-fw-2; the payload is a proposal, docs/features/health-telemetry.md ->
-# *up/telemetry proposal*). The name rule is a valid Prometheus metric name, and the
-# firmware's FF_TELEMETRY_NAME_MAX (31) is `{0,30}` + 1: tests/test_telemetry.py holds the
-# two, and the simulator's retyped copy, together. `ff_` names are reserved for the agent,
-# not invalid, so the server accepts them.
-TELEMETRY_NAME_RE = re.compile(r"[a-z][a-z0-9_]{0,30}")
+# *up/telemetry proposal*). `TELEMETRY_NAME_RE` (imported above) is a valid Prometheus
+# metric name, and the firmware's FF_TELEMETRY_NAME_MAX (31) is `{0,30}` + 1:
+# tests/test_telemetry.py holds the two, and the simulator's retyped copy, together. It
+# lives in `fleetforge.telemetry_store` since R4-be-1, because the API validates the
+# `?name=` of the series read with it and may not import `fleetforge.ingestor`. `ff_`
+# names are reserved for the agent, not invalid, so the server accepts them.
 # A payload over this is dropped whole (the device keeps one under 2048 B).
 TELEMETRY_MAX_BYTES = 8192
 # The retention window (spec/prd.md -> Retention: telemetry 30 days). An older sample could
 # never be kept, so it is unusable rather than stored and expired at once.
-TELEMETRY_MAX_AGE_MS = 30 * 86_400_000
+TELEMETRY_MAX_AGE_MS = int(TELEMETRY_RETENTION.total_seconds() * 1000)
 
 
 class TelemetrySample(_TolerantPayload):
@@ -320,6 +371,97 @@ class TelemetryPayload(_TolerantPayload):
             except ValidationError:
                 continue
         return {**data, "samples": samples, "unusable": len(items) - len(samples)}
+
+    @field_validator("dropped", mode="before")
+    @classmethod
+    def _plausible_dropped(cls, value: object) -> int | None:
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return None
+        return value
+
+
+# `up/log` (R4-be-1 builds the server half of the up/log proposal,
+# docs/features/health-telemetry.md -> *up/log proposal*, Patch A owner pending). The
+# device keeps a payload under 2048 B; one over this is dropped whole, liveness kept.
+LOG_MAX_BYTES = 8192
+# The retention window (spec/prd.md -> Retention: device logs 7 days): an older line is
+# unusable rather than stored and expired at once.
+LOG_MAX_AGE_MS = int(LOG_RETENTION.total_seconds() * 1000)
+# The level when absent or unusable (the proposal: "absent means `I`").
+LOG_DEFAULT_LEVEL = "I"
+LOG_LEVEL_MAX_CHARS = 8
+
+
+class LogLine(_TolerantPayload):
+    """One `up/log` line. A line that fails here is skipped on its own and counted.
+
+    `text` must be a string (anything else is an unusable line); it is stored through
+    `deploys.sanitise_device_text`, and a lone surrogate (which `json.loads` produces from
+    `"\\ud800"` and PostgreSQL cannot store) is replaced here. `level` is an open
+    vocabulary: a printable string of 1-8 characters is kept as sent, anything else is
+    `I`. `age_ms` follows `TelemetrySample`'s rule, against the 7-day window.
+    """
+
+    text: str
+    level: str = LOG_DEFAULT_LEVEL
+    age_ms: int = 0
+
+    @field_validator("text", mode="before")
+    @classmethod
+    def _line_text(cls, value: object) -> str:
+        if not isinstance(value, str):
+            raise ValueError("text is not a string")
+        return value.encode("utf-8", "replace").decode("utf-8")
+
+    @field_validator("level", mode="before")
+    @classmethod
+    def _usable_level(cls, value: object) -> str:
+        if (
+            isinstance(value, str)
+            and 1 <= len(value) <= LOG_LEVEL_MAX_CHARS
+            and value.isprintable()
+            and not value.isspace()
+        ):
+            return value
+        return LOG_DEFAULT_LEVEL
+
+    @field_validator("age_ms", mode="before")
+    @classmethod
+    def _plausible_age(cls, value: object) -> int:
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ValueError("age_ms is not an integer")
+        if value > LOG_MAX_AGE_MS:
+            raise ValueError("age_ms is beyond the retention window")
+        return max(value, 0)
+
+
+class LogPayload(_TolerantPayload):
+    """`up/log` — `{"dropped": n, "lines": [{"age_ms", "level", "text"}, ...]}`, oldest first.
+
+    The telemetry pair's shape on purpose: **one bad line never costs the rest**, the
+    unusable ones are counted in `unusable` (set here, never read off the wire); `lines`
+    that is not a list is read as none; `dropped` that is not a non-negative integer is
+    `None`.
+    """
+
+    dropped: int | None = None
+    lines: list[LogLine] = Field(default_factory=list)
+    unusable: int = 0
+
+    @model_validator(mode="before")
+    @classmethod
+    def _usable_lines(cls, data: object) -> object:
+        if not isinstance(data, dict):
+            return data  # not an object: the model refuses it and `decode` returns None
+        raw = data.get("lines")
+        items = raw if isinstance(raw, list) else []
+        lines: list[LogLine] = []
+        for item in items:
+            try:
+                lines.append(LogLine.model_validate(item))
+            except ValidationError:
+                continue
+        return {**data, "lines": lines, "unusable": len(items) - len(lines)}
 
     @field_validator("dropped", mode="before")
     @classmethod

@@ -54,9 +54,11 @@ class EventType(StrEnum):
     DEVICE_ANNOUNCE = "device.announce"
     DEVICE_PRESENCE = "device.presence"
     DEVICE_HEARTBEAT = "device.heartbeat"
-    # Any `up/` channel that only moves `last_seen`: telemetry (R4), log (R4), an
-    # unknown channel from a future agent — and an `up/status` that recorded no row
-    # (no `cmd_id`, or a retained replay of a transition already on file).
+    # Any other live `up/` message: telemetry and log (R4-be-1 stores them; the type
+    # stays `device.seen`, since every frame already triggers the dashboard's re-read and
+    # no new type is needed), an unknown channel from a future agent — and an
+    # `up/status` that recorded no row (no `cmd_id`, or a retained replay of a
+    # transition already on file).
     DEVICE_SEEN = "device.seen"
     # An `up/status` that actually wrote a `deploy_events` row (R1-be-4). Emitted only
     # when a row was written — a deduped replay is not news. The envelope gains no new
@@ -95,6 +97,11 @@ class DeviceEvent(BaseModel):
     # yet (S0-bug-2). Required: every emitter must still decide.
     online: bool | None
     fw_version: str | None = None
+    # R4-be-1: on `device.announce` only, the board's normalised `reset_reason` as stored
+    # (`devices.last_reset_reason`, retained replays included); `null` on every other type
+    # and when not reported. Already free of control characters, and
+    # `api/eventstream._on_notify` refuses a raw newline anyway. Additive, so `v` stays 1.
+    reset_reason: str | None = None
 
 
 NOTIFY_SQL = text("SELECT pg_notify(:channel, :payload)")

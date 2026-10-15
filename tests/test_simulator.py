@@ -1784,3 +1784,35 @@ def test_flatten_unwraps_task_group_failures() -> None:
     )
     assert [str(exc) for exc in cli.flatten(group)] == ["a", "b"]
     assert [str(exc) for exc in cli.flatten(SimulatorError("solo"))] == ["solo"]
+
+
+async def test_reset_reason_names_the_first_boot_and_the_apply_reboot_is_sw(
+    downloads: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """R4-be-1: `--reset-reason panic` is this run's first boot; an OTA reboot is still `sw`."""
+    monkeypatch.setattr("fleetforge.simulator.device.REBOOT_DELAY_S", 0.0)
+    args = cli.build_parser().parse_args(["run", "--reset-reason", "panic"])
+    identity = cli._identity_for(args, "a4cf12b3de90")
+    assert identity.reset_reason == "panic"
+    assert cli.build_parser().parse_args(["run"]).reset_reason == "poweron"
+    for bad in ("", "Panic", "x" * 17, "a-b"):
+        with pytest.raises(SystemExit):
+            cli.build_parser().parse_args(["run", "--reset-reason", bad])
+    clients, factory = session_factory(identity.device_id, stage_command(version=""))
+    stop = asyncio.Event()
+
+    await drive_until(
+        run_always_on(
+            identity,
+            credential_for(identity.device_id),
+            client_factory=factory,
+            link=LinkProfile(LINK_FAST),
+            heartbeat_interval_s=0.01,
+            stop=stop,
+        ),
+        lambda: len(clients) == 2,
+        stop,
+    )
+
+    assert channel_payloads(clients[0], identity.device_id, ANNOUNCE)[0]["reset_reason"] == "panic"
+    assert channel_payloads(clients[1], identity.device_id, ANNOUNCE)[0]["reset_reason"] == "sw"

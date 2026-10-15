@@ -1,10 +1,12 @@
 """The fleetforge registry schema — R0-db-1, plus `device_progress` (S0-fw-1), the
 content-addressed artifact tables (S0-infra-4), the version labels over them
-(R1-be-1) and the partition profiles (R3-be-2).
+(R1-be-1), the partition profiles (R3-be-2) and the stored device health, faults, logs
+and telemetry (R4-be-1).
 
-Ten tables: `device_groups`, `devices`, `enrollment_tokens`, `admin_tokens`,
+Fourteen tables: `device_groups`, `devices`, `enrollment_tokens`, `admin_tokens`,
 `deploy_events`, `device_progress`, `artifacts`, `artifact_versions`, `builds`,
-`partition_profiles`. Two of them (`enrollment_tokens`, `admin_tokens`) are CRITICAL.md
+`partition_profiles`, `device_faults`, `device_logs`, `device_telemetry`,
+`device_metrics`. Two of them (`enrollment_tokens`, `admin_tokens`) are CRITICAL.md
 paths; read their docstrings before changing anything.
 
 Three conventions that hold across the whole file, each with a reason that is not
@@ -28,12 +30,14 @@ obvious from the code:
    own `ts` (`spec/device-protocol.md` → *Clock*: a board may boot with a 1970 clock
    and only fix it after SNTP).
 
-Deliberately deferred, all additive — they are not oversights:
-`boot_ok` and heartbeat health fields (`uptime_s`, `rssi`, `free_heap`) → R4
-telemetry, which is where the hypertable lives; the current `up/status` transaction
-state and the `deploys` table → R1; per-device deploy policy → R11. (`artifacts` is
-no longer on that list — S0-infra-4 landed it early and empty, on purpose: freezing a
-key scheme is free before the first object exists and a data migration afterwards.)
+Deliberately deferred, all additive — they are not oversights: a time series of the
+heartbeat's health fields (R4-be-1 keeps only the latest snapshot on `devices`); the
+current `up/status` transaction state and the `deploys` table → R1; per-device deploy
+policy → R11. (`artifacts` is no longer on that list — S0-infra-4 landed it early and
+empty, on purpose: freezing a key scheme is free before the first object exists and a
+data migration afterwards.) **No table is a Timescale hypertable**: R4 chose plain
+tables with app-side retention (`fleetforge.retention`), see DECISIONS 2026-10-15
+(R4-be-1).
 """
 
 import datetime as dt
@@ -44,6 +48,7 @@ from sqlalchemy import (
     BigInteger,
     Boolean,
     CheckConstraint,
+    Double,
     ForeignKey,
     Identity,
     Index,
@@ -283,6 +288,24 @@ class Device(Base):
     capabilities: Mapped[list[str]] = mapped_column(
         ARRAY(Text), nullable=False, server_default=text("'{}'::text[]")
     )
+    # R4-be-1: the normalised `reset_reason` of the newest announce, live or retained,
+    # written on EVERY announce (absent or malformed -> NULL, "not reported"; see
+    # `ingestor/store.py::_reset_values`). Fault counts are NOT stored here: they are
+    # derived from `device_faults` on read.
+    last_reset_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # R4-be-1: the latest LIVE heartbeat's health, written as a group on every one
+    # (absent or malformed -> NULL). `health_at` is that heartbeat's receipt time, so a
+    # reader can tell a fresh snapshot from one an offline board left behind. No CHECKs:
+    # `ingestor/protocol.py::HeartbeatPayload` bounds every field first.
+    health_at: Mapped[dt.datetime | None] = mapped_column(TimestampTZ, nullable=True)
+    uptime_s: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # dBm, -127..0; NULL on ethernet is normal.
+    rssi: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
+    free_heap: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # The IDF low-water mark since boot (agent 0.5.0, R4-fw-1); NULL from older agents.
+    min_free_heap: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    # False only while the running image is PENDING_VERIFY (R4-fw-1).
+    boot_ok: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     group_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid,
         ForeignKey("device_groups.id", ondelete="SET NULL"),
@@ -443,7 +466,8 @@ class DeployEvent(Base):
 
     This is **not** a Timescale hypertable and must not become one: forever
     retention, tiny volume (<= 25 devices in v1), and an outgoing FK that hypertables
-    only complicate. R4's telemetry table is the hypertable case.
+    only complicate. R4 chose plain tables for telemetry too, see DECISIONS 2026-10-15
+    (R4-be-1).
     """
 
     __tablename__ = "deploy_events"
@@ -769,3 +793,135 @@ class PartitionProfile(Base):
     )
     # NULL = pending.
     adopted_at: Mapped[dt.datetime | None] = mapped_column(TimestampTZ, nullable=True)
+
+
+class DeviceFault(Base):
+    """One boot that ended in a fault reset: `panic`, `task_wdt` or `brownout`. R4-be-1.
+
+    Written by `fleetforge.faults`, the table's one owner, on a **live** announce whose
+    `reset_reason` is in `faults.FAULT_REASONS`; a retained replay never writes one.
+    The fleet view's "N panics in the last day" is a count over this table, **derived
+    on read** (the `stalled` / `is_online` discipline), never a stored counter that is
+    wrong the moment nothing decrements it.
+
+    The agent re-announces on every broker connect, so a Wi-Fi blip repeats the boot's
+    reason; the next live heartbeat's `uptime_s` dates the boot and
+    `faults.forget_reconnects` deletes the extra rows (the safety argument is in that
+    module's docstring).
+
+    Bounded twice: the newest 1 000 rows per device on write, and 30 days by the sweep
+    (`fleetforge.retention`). `ON DELETE CASCADE`: debugging data about a board, never
+    KPI history.
+    """
+
+    __tablename__ = "device_faults"
+    __table_args__ = (Index("ix_device_faults_device_id_at", "device_id", text("at DESC")),)
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(always=False), primary_key=True)
+    device_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("devices.device_id", ondelete="CASCADE"), nullable=False
+    )
+    # Receipt time of the announce, never a device clock.
+    at: Mapped[dt.datetime] = mapped_column(TimestampTZ, nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+
+
+class DeviceLog(Base):
+    """Firmware log lines from `up/log`. R4-be-1.
+
+    The payload is the up/log proposal (`docs/features/health-telemetry.md`, Patch A,
+    owner pending). `fleetforge.device_logs` is the one owner of this table.
+
+    * **Retention:** the newest 5 000 lines per device, trimmed **on write** in the
+      inserting transaction (the `progress.py` idiom), and 7 days (`spec/prd.md` ->
+      *Retention*), by the sweep and by the read's age predicate.
+    * `logged_at` = `received_at - age_ms` (`clock.device_time`): the device's clock is
+      never read. `received_at` is kept too, so a reader can tell a backlog flushed
+      after a reconnect from live lines.
+    * `text` is device-controlled and stored **sanitised** (no control characters, URLs
+      redacted, at most 200 characters: `deploys.sanitise_device_text`). It is never
+      written into a server log. **`text IS NULL` means "gap marker only"**: a batch that
+      reported lost lines and carried no usable line.
+    * `dropped` = lines lost immediately before this one (the device's own `dropped`
+      plus lines the server could not use), stored on a batch's first stored line.
+    * `level` is an open vocabulary (`E`, `W`, `I`, ...), stored as sent; `I` when
+      absent or unusable.
+
+    `ON DELETE CASCADE`: debugging data about a board, never KPI history.
+    """
+
+    __tablename__ = "device_logs"
+    __table_args__ = (
+        CheckConstraint("dropped >= 0", name="dropped_non_negative"),
+        Index(
+            "ix_device_logs_device_id_logged_at",
+            "device_id",
+            text("logged_at DESC"),
+            text("id DESC"),
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(always=False), primary_key=True)
+    device_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("devices.device_id", ondelete="CASCADE"), nullable=False
+    )
+    logged_at: Mapped[dt.datetime] = mapped_column(TimestampTZ, nullable=False)
+    received_at: Mapped[dt.datetime] = mapped_column(TimestampTZ, nullable=False)
+    level: Mapped[str] = mapped_column(Text, nullable=False)
+    dropped: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    # Declared last: the attribute shadows `sqlalchemy.text` inside this class body.
+    text: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class DeviceTelemetry(Base):
+    """`up/telemetry` samples. R4-be-1. A plain table, not a hypertable (module docstring).
+
+    `sample_at` = `received_at - age_ms` (`clock.device_time`). `name` is regex-validated
+    (`telemetry_store.TELEMETRY_NAME_RE`) and `value` a finite double, so nothing here is
+    free text.
+
+    Retention (`fleetforge.retention`): 30 days (`spec/prd.md` -> *Retention*) and the
+    newest 500 000 samples per device (proposed by R4-be-1), both by the hourly sweep,
+    plus an age predicate on every read. Not bounded on write: trimming that many rows
+    per batch costs more than the sweep. `ON DELETE CASCADE`, as `device_logs`.
+    """
+
+    __tablename__ = "device_telemetry"
+    __table_args__ = (
+        Index(
+            "ix_device_telemetry_device_id_name_sample_at",
+            "device_id",
+            "name",
+            text("sample_at DESC"),
+        ),
+        Index("ix_device_telemetry_sample_at", "sample_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(always=False), primary_key=True)
+    device_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("devices.device_id", ondelete="CASCADE"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    value: Mapped[float] = mapped_column(Double, nullable=False)
+    sample_at: Mapped[dt.datetime] = mapped_column(TimestampTZ, nullable=False)
+
+
+class DeviceMetric(Base):
+    """The latest value of each metric of each device. R4-be-1.
+
+    Exists so `GET /v1/devices`, re-read on every SSE hint, never scans
+    `device_telemetry`: PostgreSQL 16 has no skip scan, so a `DISTINCT ON (device_id,
+    name)` there walks every sample of every device. Upserted per batch by
+    `telemetry_store.record_samples`, and only forwards in `sample_at`, so a backlog
+    flushed after a reconnect never overwrites a newer value. Swept with telemetry
+    (30 days); the API also hides a row older than that.
+    """
+
+    __tablename__ = "device_metrics"
+
+    device_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("devices.device_id", ondelete="CASCADE"), primary_key=True
+    )
+    name: Mapped[str] = mapped_column(Text, primary_key=True)
+    value: Mapped[float] = mapped_column(Double, nullable=False)
+    sample_at: Mapped[dt.datetime] = mapped_column(TimestampTZ, nullable=False)

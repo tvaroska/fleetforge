@@ -312,17 +312,24 @@ _INTENT_SQL = text(
 )
 
 
-def _sanitise_detail(value: str) -> str:
+def sanitise_device_text(value: str) -> str:
     """Make device-controlled text safe to keep forever.
 
     Three rules, each with a precedent: no control characters (a device that can inject
     a newline can forge a log line — `api/schemas.py::_printable_detail`), no URLs (the
     signed link is a credential), and bounded length (`MAX_PROGRESS_DETAIL`).
     Redaction happens before truncation so a URL cannot be half-kept.
+
+    Public since R4-be-1: `device_logs.py` stores `up/log` text through it, whose 200-byte
+    bound is the same number. One regex, one rule, two tables.
     """
     redacted = _URL_RE.sub("<url>", value)
     stripped = "".join(ch for ch in redacted if ch >= " " and ch != "\x7f")
     return stripped[:MAX_OBSERVED_DETAIL]
+
+
+# The name this module's own writer has always used.
+_sanitise_detail = sanitise_device_text
 
 
 def _observed_detail(pct: int | None, detail: str | None) -> dict[str, Any] | None:

@@ -22,12 +22,12 @@ policy, not just the ingest.
 | R4-FW-1 | `up/hb` gains `min_free_heap`; `boot_ok` semantics pinned (false only while PENDING_VERIFY, read per heartbeat); spec Patch B; simulator sends both (*min_free_heap and boot_ok as built*) | P0 | 1d |
 | R4-FW-2 | User-defined telemetry channel, `up/telemetry` with `age_ms`; `ff_telemetry()`/`Fleetforge.metric()`; proposal Patch A owner (*up/telemetry proposal*, *up/telemetry as built*) | P1 | 1.5d |
 | R4-FW-3 | Agent + library forward firmware log lines on `up/log` (explicit call; ring buffer; simulator; Basic/basic_idf forward `morse:`). Touches CRITICAL `Fleetforge.cpp`. Needs Patches A+B (*up/log proposal*) | P1 | 1d |
-| R4-BE-1 | Ingest + persist health/telemetry with SPEC retention (30d telemetry, 7d logs). Expose via API + SSE | P0 | 1.5d |
+| R4-BE-1 | Persist reset reason (+ fault counts derived on read), heartbeat health, telemetry and logs with SPEC retention (30 d telemetry, 7 d logs, 5 000 lines/device bound on write); `GET /v1/devices` fields, `/logs` and `/telemetry` sub-resources, `reset_reason` on `device.announce` (*R4-be-1 as built*; telemetry cap Patch proposed) | P0 | 2d |
 | R4-FE-1 | Live fleet status dashboard: online/offline, last-seen, boot-success, metrics | P0 | 2d |
 | R4-FE-2 | Per-device log tail (newest first, level, text, dropped gaps) | P1 | 1d |
 | R4-TEST-1 | E2E: metric emitted on device → visible live in dashboard | P0 | 0.5d |
 
-R4-BE-1's `up/log` half follows *up/log proposal* (its own table + migration, bounded on write like `progress.py`, `_sanitise_detail` on `text`, `logged_at = received_at − age_ms`, plus an age sweep or predicate so a silent board's lines still expire).
+R4-BE-1's `up/log` half follows *up/log proposal*: its own table (migration 0009), bounded on write like `progress.py`, `deploys.sanitise_device_text` on `text`, `logged_at = received_at − age_ms`, and an hourly sweep plus an age predicate on every read so a silent board's lines still expire. Built: see *R4-be-1 as built*.
 
 **Done when:** you can watch fleet health live.
 
@@ -371,3 +371,85 @@ cannot decode, whole and without refusing the device. It keeps samples as [prd.m
 *Retention* says. Like every live `up/` message, an `up/telemetry` moves `last_seen`. The fields
 are additive under *Evolution rules*, rule 2, and `proto` stays `1`.
 ````
+
+### R4-be-1 as built
+
+- **What was built.** Migration `0009` (CRITICAL): seven nullable `devices` columns
+  (`last_reset_reason`, `health_at`, `uptime_s`, `rssi`, `free_heap`, `min_free_heap`,
+  `boot_ok`; no defaults, so no rewrite) and four plain tables, all `ON DELETE CASCADE`:
+  `device_faults` (one row per fault boot), `device_logs` (`up/log` lines),
+  `device_telemetry` (`up/telemetry` samples) and `device_metrics` (latest value per metric).
+  New modules, each the owner of its table: `retention.py` (every number, plus `sweep`),
+  `faults.py`, `device_logs.py`, `telemetry_store.py`. `deploys._sanitise_detail` is public as
+  `sanitise_device_text` (one regex, two tables). The ingestor writes `last_reset_reason` on
+  every announce (live or retained, absent -> NULL), the health group on every live heartbeat
+  (malformed field -> NULL, never a lost heartbeat), a fault row on a live `panic` /
+  `task_wdt` / `brownout` announce, and stores telemetry and log batches; each INSERT runs in
+  a SAVEPOINT that logs a WARNING and keeps `last_seen` and the event on failure. The
+  ingestor also runs the retention sweep (once at start, always logged; then hourly, logged
+  when it deleted something). API: `GET /v1/devices` rows gain `last_reset_reason`,
+  `fault_resets` (`window_s` = `fault_window_s`, default 86 400), `health` (null before the
+  first live heartbeat) and `metrics` (32 newest by update, sorted by name), all before
+  `deploy`, which stays last; the PATCH response carries the same. New admin-only
+  sub-resources `GET /v1/devices/{id}/logs?limit=` (1..5000, default 200, newest first) and
+  `GET /v1/devices/{id}/telemetry?name=&limit=` (name rule as the ingestor, 1..5000, default
+  500). `DeviceEvent` gains `reset_reason` (set on `device.announce` only; `v` stays 1). The
+  simulator gains `--reset-reason NAME` for the first boot of a run.
+- **Fault counts and the reconnect rule.** Derived on read (count of rows in the window),
+  never a stored counter. The agent re-announces on every broker connect, so a live
+  heartbeat with `uptime_s` dates the boot (`floor = received_at - uptime_s - 1 s`) and deletes
+  every fault row of the device at or after the floor but the earliest. All times are server
+  receipt times; latency only moves the floor later, so an earlier boot's row is never
+  deleted (a boot that died within about a second of announcing can instead cost the next
+  boot's row, below). Named gap: reconnects in a boot that never heartbeats are counted.
+- **Retention.** Logs: newest 5 000 per device trimmed on write, 7 days by sweep and read
+  predicate. Telemetry: 30 days and the newest 500 000 samples per device, both by the sweep
+  (trimming 500 k rows per batch would cost far more than the hourly pass; between sweeps a
+  device can add at most ~11 k rows). Faults: 1 000 per device on write, 30 days by sweep.
+  `device_metrics` rows older than 30 days are swept and hidden by the read.
+- **Reconnect floor, one deviation from the plan.** The floor is `received_at - uptime_s -
+  1 s`: `uptime_s` truncates, so without the second the boot's own first announce (sent
+  within a second of the uptime origin, as the simulator's is) fell below the floor and the
+  reconnect row survived as "the earliest" (seen on the dev stack: `panic` read 2 after a
+  broker restart). The cost is named in `faults.py`: a fault boot that died and rebooted
+  within about a second of announcing merges with the next boot (count low by one).
+- **T2 evidence (dev stack, 2026-10-15).** Migration on the populated dev DB: 0008 -> 0009,
+  149 devices before and after, 7 columns and 4 tables present; ingestor start logged
+  `retention sweep deleted logs=0 telemetry_expired=0 telemetry_capped=0 metrics=0 faults=0`.
+  Simulator `--reset-reason panic --telemetry-every 2 --heartbeat-interval 5` (device
+  `1e60c99c020f`): SSE `"type":"device.announce",...,"reset_reason":"panic"`, heartbeats
+  `"reset_reason":null`; the `/v1/devices` row:
+  `{"last_reset_reason":"panic","fault_resets":{"window_s":86400,"panic":1,"task_wdt":0,"brownout":0},"health":{"uptime_s":20,"rssi":-61,"free_heap":142000,"min_free_heap":98000,"boot_ok":true,...},"metrics":[{"name":"sim_counter","value":13.0,...}],"last_key":"deploy"}`,
+  six seconds later `uptime_s` 30 and `sim_counter` 16; `/telemetry?name=sim_counter&limit=5`
+  returned 18, 17, 16, 15, 14, 2.0 s apart. `docker compose restart mosquitto`: re-announce
+  of `panic` in the same boot, then `fault_resets.panic` 1 and one `device_faults` row.
+  `just mqtt-pub` as the device with the proposal's example plus a URL:
+  `[{"level":"W","text":"sensor: no reply <url>","dropped":0},{"level":"I","text":"morse: HELLO (firmware 1.0.1)","dropped":3}]`,
+  `logged_at` 5.12 s apart; ingestor `device 1e60c99c020f log lines=2 dropped=3 unusable=0`,
+  zero ingestor lines containing `morse: HELLO` or `evil.example`. Flood of 90 x 60 lines:
+  exactly 5 000 rows, newest `flood 89-59`. An 8-day log and a 31-day sample were deleted by
+  the start-up sweep (`logs=1 telemetry_expired=1`). Downgrade to 0008 with 5 000 logs and
+  263 samples present removed the tables and columns and kept every device; upgrade to 0009
+  and ingest resumed. Proven by tests only: the 500 000 telemetry cap, the fault-row trim,
+  the fault and metric sweeps, every malformed-field case.
+- **Not built (named follow-ups).** A time series of heartbeat health (`min_free_heap` trend:
+  ~4 300 rows/device/day); new SSE event types (every frame already triggers the re-read); the
+  frontend (R4-fe-1 mirrors the new `DeviceSummary` fields into `frontend/src/api.ts`, R4-fe-2
+  reads `/logs`); the firmware `up/log` sender (R4-fw-3, still gated on the owner's Patches
+  A+B).
+- **Spec status.** Nothing under `spec/` changed. The up/log payload (Patch A) and its 5 000
+  bound (Patch B) and the up/telemetry payload (R4-fw-2 Patch A) are still owner-pending; the
+  server is built ahead of them, as R4-fw-2 was. `tests/test_device_health.py` reads the spec's
+  up/log example once pasted (the proposal's copy until then) and reads both per-device
+  bounds from `spec/prd.md` once applied, from the proposals until then.
+- **Telemetry cap proposal (R4-be-1, proposed; owner, `spec:` commit).** `spec/prd.md` ->
+  *Retention*. Replace the row `| Telemetry samples | **30 days** |` with:
+
+  ```
+  | Telemetry samples | **30 days**, and at most the newest **500 000** samples per device |
+  ```
+
+  Why: the firmware's own limits allow ~3 samples/s sustained (about 15 per 5 s payload),
+  about 7.8 M rows per device in 30 days, on a shared prod VM; the up/log proposal bounded
+  logs for the same reason. Order-independent with up/log Patch B (a different row). No test
+  turns red when it is applied (the test reads the prd row once it carries a bound).

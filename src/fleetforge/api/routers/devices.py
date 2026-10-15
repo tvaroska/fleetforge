@@ -29,6 +29,14 @@ Deliberately absent, each with a reason:
 * `GET /v1/devices/{device_id}` and pagination — `spec/prd.md` → *Capacity* is 25
   devices; the list is the read model. Same reasoning as `LIST_LIMIT`.
 
+Two per-device **sub-resources** exist (R4-be-1), and they are not on the list because
+they are unbounded per device: `GET /v1/devices/{device_id}/logs` (up to 5 000 stored
+lines, `fleetforge.device_logs`) and `GET /v1/devices/{device_id}/telemetry?name=` (up
+to 500 000 samples, `fleetforge.telemetry_store`). The list carries only what is
+bounded: `last_reset_reason`, the fault counts over `settings.fault_window_s`
+(`fleetforge.faults`, derived on read), the latest heartbeat's `health`, and the latest
+value of at most 32 `metrics`, each read for exactly the ids the list already holds.
+
 `arrivals` (S0-fw-1) rides on this response rather than getting an endpoint of its
 own, for the same reason: the dashboard already re-reads this on every `ff_events`
 hint, so boards *arriving* need no second fetch and no poll. They are the boards that
@@ -53,11 +61,16 @@ Since R2b-fe-9 it also carries the current transaction's steps and the confirm w
 for the dashboard's update timeline.
 """
 
+import datetime as dt
 import logging
+from collections.abc import Sequence
+from dataclasses import dataclass, field
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from fleetforge.api.deps import (
     AdminDep,
@@ -72,15 +85,26 @@ from fleetforge.api.schemas import (
     DeployStep,
     DeploySummary,
     DeviceList,
+    DeviceLogLine,
+    DeviceLogTail,
     DeviceSummary,
     DeviceUpdate,
+    FaultResets,
+    HealthSnapshot,
+    MetricValue,
+    TelemetryPoint,
+    TelemetrySeries,
 )
 from fleetforge.clock import now_utc
 from fleetforge.db.models import Device, DeviceGroup
 from fleetforge.deploys import DeploySnapshot, latest_deploys
+from fleetforge.device_logs import read_tail
 from fleetforge.events import DeviceEvent, EventType, emit
+from fleetforge.faults import fault_counts
 from fleetforge.presence import is_online
 from fleetforge.progress import has_already_arrived, latest_progress
+from fleetforge.retention import LOG_MAX_LINES_PER_DEVICE
+from fleetforge.telemetry_store import TELEMETRY_NAME_RE, latest_metrics, read_series
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +117,61 @@ router = APIRouter(
 # Same cap and same reason as `routers/enrollment.py`: a guard against an unbounded
 # response, not real paging, at a fleet size of ~25.
 LIST_LIMIT = 200
+
+# The sub-resources' page sizes (R4-be-1). A log tail can ask for everything a device
+# keeps; a series for at most as many points.
+LOG_TAIL_DEFAULT = 200
+SERIES_DEFAULT = 500
+SERIES_MAX = 5_000
+
+
+@dataclass(slots=True)
+class _HealthExtras:
+    """What R4-be-1 adds to each row, read once for all the ids a response holds."""
+
+    window_s: int
+    faults: dict[str, dict[str, int]] = field(default_factory=dict)
+    metrics: dict[str, list[MetricValue]] = field(default_factory=dict)
+
+    def fault_resets(self, device_id: str) -> FaultResets:
+        counts = self.faults.get(device_id, {})
+        return FaultResets(
+            window_s=self.window_s,
+            panic=counts.get("panic", 0),
+            task_wdt=counts.get("task_wdt", 0),
+            brownout=counts.get("brownout", 0),
+        )
+
+
+async def _health_extras(
+    session: AsyncSession, *, device_ids: Sequence[str], now: dt.datetime, window_s: int
+) -> _HealthExtras:
+    """Fault counts and latest metrics for exactly `device_ids` (the `latest_deploys` rule)."""
+    ids = list(device_ids)
+    counts = await fault_counts(session, device_ids=ids, since=now - dt.timedelta(seconds=window_s))
+    snapshots = await latest_metrics(session, device_ids=ids, now=now)
+    return _HealthExtras(
+        window_s=window_s,
+        faults=counts,
+        metrics={
+            device_id: [MetricValue(name=m.name, value=m.value, at=m.at) for m in metrics]
+            for device_id, metrics in snapshots.items()
+        },
+    )
+
+
+def _health_snapshot(row: Device) -> HealthSnapshot | None:
+    """The stored heartbeat snapshot, or `None` when no live heartbeat ever arrived."""
+    if row.health_at is None:
+        return None
+    return HealthSnapshot(
+        at=row.health_at,
+        uptime_s=row.uptime_s,
+        rssi=row.rssi,
+        free_heap=row.free_heap,
+        min_free_heap=row.min_free_heap,
+        boot_ok=row.boot_ok,
+    )
 
 
 def _deploy_summary(
@@ -124,7 +203,9 @@ def _deploy_summary(
     )
 
 
-def _device_summary(row: Device, *, online: bool, deploy: DeploySummary | None) -> DeviceSummary:
+def _device_summary(
+    row: Device, *, online: bool, deploy: DeploySummary | None, extras: _HealthExtras
+) -> DeviceSummary:
     """One row as the fleet view sees it. Field by field, `from_attributes` stays off."""
     return DeviceSummary(
         device_id=row.device_id,
@@ -149,6 +230,10 @@ def _device_summary(row: Device, *, online: bool, deploy: DeploySummary | None) 
         enrolled_at=row.enrolled_at,
         broker_provisioned_at=row.broker_provisioned_at,
         online=online,
+        last_reset_reason=row.last_reset_reason,
+        fault_resets=extras.fault_resets(row.device_id),
+        health=_health_snapshot(row),
+        metrics=extras.metrics.get(row.device_id, []),
         deploy=deploy,
     )
 
@@ -179,6 +264,12 @@ async def list_devices(
         # Handed the ids this response already read, so there is no second unbounded
         # scan and the deploy read inherits `LIST_LIMIT` for free.
         deploys = await latest_deploys(session, device_ids=[row.device_id for row in rows])
+        extras = await _health_extras(
+            session,
+            device_ids=[row.device_id for row in rows],
+            now=now,
+            window_s=settings.fault_window_s,
+        )
 
     online_now = {
         row.device_id
@@ -198,6 +289,7 @@ async def list_devices(
                 deploy=_deploy_summary(
                     deploys.get(row.device_id), confirm_timeout_s=settings.confirm_timeout_s
                 ),
+                extras=extras,
             )
             for row in rows
         ],
@@ -290,15 +382,83 @@ async def update_device(
                 ) from None
 
         deploys = await latest_deploys(session, device_ids=[device_id])
+        extras = await _health_extras(
+            session, device_ids=[device_id], now=now, window_s=settings.fault_window_s
+        )
         summary = _device_summary(
             device,
             online=is_online(device, now=now, tolerance=settings.presence_tolerance),
             deploy=_deploy_summary(
                 deploys.get(device_id), confirm_timeout_s=settings.confirm_timeout_s
             ),
+            extras=extras,
         )
 
     logger.info(
         "device %s updated by %s: %s", device_id, admin.token_id, sorted(changed) or "no change"
     )
     return summary
+
+
+async def _live_device_or_404(session: AsyncSession, device_id: str) -> Device:
+    """The device, or the PATCH route's 404 for an unknown or decommissioned one."""
+    device = await session.get(Device, device_id)
+    if device is None or device.decommissioned_at is not None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"no such device: {device_id}")
+    return device
+
+
+@router.get(
+    "/{device_id}/logs",
+    response_model=DeviceLogTail,
+    summary="A device's newest firmware log lines (up/log), newest first",
+)
+async def device_log_tail(
+    device_id: str,
+    admin: AdminDep,
+    sessionmaker: SessionMakerDep,
+    limit: Annotated[int, Query(ge=1, le=LOG_MAX_LINES_PER_DEVICE)] = LOG_TAIL_DEFAULT,
+) -> DeviceLogTail:
+    """Stored lines inside the 7-day window. `text` is sanitised device text; never logged."""
+    now = now_utc()
+    async with sessionmaker() as session:
+        await _live_device_or_404(session, device_id)
+        lines = await read_tail(session, device_id=device_id, now=now, limit=limit)
+    return DeviceLogTail(
+        device_id=device_id,
+        lines=[
+            DeviceLogLine(
+                id=line.id,
+                logged_at=line.logged_at,
+                received_at=line.received_at,
+                level=line.level,
+                text=line.text,
+                dropped=line.dropped,
+            )
+            for line in lines
+        ],
+    )
+
+
+@router.get(
+    "/{device_id}/telemetry",
+    response_model=TelemetrySeries,
+    summary="One metric's newest samples (up/telemetry), newest first",
+)
+async def device_telemetry_series(
+    device_id: str,
+    admin: AdminDep,
+    sessionmaker: SessionMakerDep,
+    name: Annotated[str, Query(pattern=f"^{TELEMETRY_NAME_RE.pattern}$")],
+    limit: Annotated[int, Query(ge=1, le=SERIES_MAX)] = SERIES_DEFAULT,
+) -> TelemetrySeries:
+    """Samples inside the 30-day window; `name` is the ingestor's metric-name rule."""
+    now = now_utc()
+    async with sessionmaker() as session:
+        await _live_device_or_404(session, device_id)
+        points = await read_series(session, device_id=device_id, name=name, now=now, limit=limit)
+    return TelemetrySeries(
+        device_id=device_id,
+        name=name,
+        samples=[TelemetryPoint(at=point.at, value=point.value) for point in points],
+    )

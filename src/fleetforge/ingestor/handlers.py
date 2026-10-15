@@ -31,12 +31,23 @@ stored `presence_reported` still describes the previous one, so the event says `
 ("this session's `up/presence` follows") unless presence already derives online
 (S0-bug-2). A retained announce replay keeps the derived value.
 
-**The ingestor's one INSERT is a detected partition profile (R3-be-2)**, and only for a
-live, registered device: after an announce has updated the device row, a partition table
-nobody knows becomes one pending `partition_profiles` row
-(`partition_profiles.note_detected`, idempotent and capped). It runs in a SAVEPOINT and a
-failure there is logged and never costs the announce. `store.py` still never INSERTs: its
-rule is about `devices`, the enrollment boundary.
+**The ingestor's INSERTs**, each only for a live (or, for profiles, any) message of a
+registered device, each in its own SAVEPOINT so a failure is logged and never costs the
+message's `last_seen` or event (`_savepoint`):
+
+* a partition table nobody knows becomes one pending `partition_profiles` row
+  (R3-be-2, `partition_profiles.note_detected`, idempotent and capped; retained
+  announces too, a detected map is state);
+* a live announce whose `reset_reason` is a fault becomes a `device_faults` row, and a
+  live heartbeat's `uptime_s` deletes the same boot's reconnect repeats
+  (R4-be-1, `fleetforge.faults`);
+* a live `up/telemetry` batch becomes `device_telemetry` rows and moves
+  `device_metrics` forward (R4-be-1, `fleetforge.telemetry_store`);
+* a live `up/log` batch becomes `device_logs` rows, trimmed to the newest 5 000 per
+  device in the same SAVEPOINT (R4-be-1, `fleetforge.device_logs`). Log text is never
+  written into this process's log: counts only.
+
+`store.py` still never INSERTs: its rule is about `devices`, the enrollment boundary.
 
 This module does not commit — the caller owns the transaction, which is what lets the
 test suite drive it through the rolled-back `session` fixture.
@@ -44,20 +55,24 @@ test suite drive it through the rolled-back `session` fixture.
 
 import datetime as dt
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from fleetforge import partition_profiles
+from fleetforge import device_logs, faults, partition_profiles, telemetry_store
 from fleetforge.clock import device_time
 from fleetforge.db.models import Device
 from fleetforge.deploys import record_observed_status
 from fleetforge.events import DeviceEvent, EventType, emit
 from fleetforge.ingestor import store
 from fleetforge.ingestor.protocol import (
+    LOG_MAX_BYTES,
     TELEMETRY_MAX_BYTES,
     AnnouncePayload,
     HeartbeatPayload,
+    LogPayload,
     PresencePayload,
     StatusPayload,
     TelemetryPayload,
@@ -121,14 +136,24 @@ async def handle_up_message(
         event_type = EventType.DEVICE_ANNOUNCE
         if row is not None:
             if not retained:
-                # S0-fw-6: logged, never stored (R4). A live announce only: a retained
-                # replay repeats an old boot's reason on every ingestor reconnect.
-                # `None` covers absent (agents <= 0.5.0), null and malformed alike.
+                # S0-fw-6: logged on a live announce only: a retained replay repeats an
+                # old boot's reason on every ingestor reconnect. `None` covers absent
+                # (agents <= 0.5.0), null and malformed alike. Stored on every announce
+                # since R4-be-1 (`store.py::_reset_values`), and counted as a fault here,
+                # live only, for the same replay reason.
                 logger.info(
                     "device %s announced reset_reason=%s",
                     device_id,
                     announce.reset_reason if announce.reset_reason is not None else "null",
                 )
+                if announce.reset_reason is not None and faults.is_fault(announce.reset_reason):
+                    async with _savepoint(session, device_id, "fault bookkeeping", "announce"):
+                        await faults.record_fault(
+                            session,
+                            device_id=device_id,
+                            reason=announce.reset_reason,
+                            at=received_at,
+                        )
             # Retained replays too: a detected map is state, not liveness.
             await _note_detected_profile(session, row)
 
@@ -159,8 +184,19 @@ async def handle_up_message(
             heartbeat.fw_version,
             received_at,
             advance_last_seen=not retained,
+            health=heartbeat,
         )
         event_type = EventType.DEVICE_HEARTBEAT
+        if row is not None and not retained and heartbeat.uptime_s is not None:
+            # `uptime_s` dates this boot; fault rows inside it but its first were
+            # reconnect announces (`fleetforge.faults` has the safety argument).
+            async with _savepoint(session, device_id, "fault reconnect dedupe", "heartbeat"):
+                await faults.forget_reconnects(
+                    session,
+                    device_id=device_id,
+                    received_at=received_at,
+                    uptime_s=heartbeat.uptime_s,
+                )
 
     elif parsed.channel == UpChannel.STATUS:
         status = decode(StatusPayload, topic, payload)
@@ -179,11 +215,10 @@ async def handle_up_message(
         )
 
     else:
-        # `up/telemetry` is decoded and logged below (R4-fw-2), never stored: storage is
-        # R4-be-1. `up/log` → R4 and still an open item in the protocol doc. An unknown
-        # channel from a future agent lands here too. All of them prove the board is alive,
-        # and `last_seen` moves before any decode, so an undecodable payload still counts.
-        # **No `deploy_events` row is written for them.**
+        # `up/telemetry` and `up/log` are decoded and stored below (R4-fw-2, R4-be-1); an
+        # unknown channel from a future agent lands here too. All of them prove the board
+        # is alive, and `last_seen` moves before any decode, so an undecodable payload
+        # still counts. **No `deploy_events` row is written for them.**
         if retained:
             logger.debug("ignoring retained replay on %s", topic)
             return None
@@ -195,7 +230,9 @@ async def handle_up_message(
 
     if parsed.channel == UpChannel.TELEMETRY:
         # Live only (a retained replay returned above) and registered only.
-        _log_telemetry(device_id, topic, payload, received_at)
+        await _store_telemetry(session, device_id, topic, payload, received_at)
+    elif parsed.channel == UpChannel.LOG:
+        await _store_log(session, device_id, topic, payload, received_at)
 
     if status is not None and status.cmd_id and status.state:
         # A status with no `cmd_id` (or no `state`) belongs to no transaction — `idle`
@@ -225,17 +262,39 @@ async def handle_up_message(
             tolerance=tolerance,
         ),
         fw_version=row.fw_version,
+        # The stored (normalised) value, retained replays included; every other type
+        # sends null (R4-be-1).
+        reset_reason=row.last_reset_reason if event_type is EventType.DEVICE_ANNOUNCE else None,
     )
     await emit(session, event)
     return event
 
 
-def _log_telemetry(device_id: str, topic: str, payload: bytes, received_at: dt.datetime) -> None:
-    """Decode an `up/telemetry` batch and log it; never raises, never stores (R4-be-1).
+@asynccontextmanager
+async def _savepoint(
+    session: AsyncSession, device_id: str, what: str, kept: str
+) -> AsyncIterator[None]:
+    """Run the body in a SAVEPOINT; on failure log a WARNING and carry on.
+
+    The `_note_detected_profile` shape, shared by R4-be-1's writes: a failure (including
+    a new-image ingestor on a schema the api has not migrated yet, `UndefinedTableError`)
+    rolls back only the nested statements, and the message's own write and event stand.
+    """
+    try:
+        async with session.begin_nested():
+            yield
+    except SQLAlchemyError:
+        logger.warning("device %s: %s failed; %s kept", device_id, what, kept, exc_info=True)
+
+
+async def _store_telemetry(
+    session: AsyncSession, device_id: str, topic: str, payload: bytes, received_at: dt.datetime
+) -> None:
+    """Decode an `up/telemetry` batch, store it, and log a summary; never raises.
 
     Each sample is stamped `received_at - age_ms` (`clock.device_time`), the device's
     clock never read. Names are regex-validated and values are numbers, so nothing
-    free-text from the board reaches this log.
+    free-text from the board reaches this log or the table.
     """
     if len(payload) > TELEMETRY_MAX_BYTES:
         logger.warning(
@@ -263,6 +322,43 @@ def _log_telemetry(device_id: str, topic: str, payload: bytes, received_at: dt.d
             sample.name,
             sample.value,
             device_time(received_at, sample.age_ms).isoformat(),
+        )
+    if telemetry.samples:
+        async with _savepoint(session, device_id, "telemetry storage", "liveness"):
+            await telemetry_store.record_samples(
+                session, device_id=device_id, samples=telemetry.samples, received_at=received_at
+            )
+
+
+async def _store_log(
+    session: AsyncSession, device_id: str, topic: str, payload: bytes, received_at: dt.datetime
+) -> None:
+    """Decode an `up/log` batch and store it, bounded; never raises, never logs `text`.
+
+    The one INFO line carries counts only: the lines are device-controlled text, and this
+    process's log is not a second, unsanitised copy of the table.
+    """
+    if len(payload) > LOG_MAX_BYTES:
+        logger.warning(
+            "device %s: log payload of %d bytes dropped (over %d)",
+            device_id,
+            len(payload),
+            LOG_MAX_BYTES,
+        )
+        return
+    batch = decode(LogPayload, topic, payload)
+    if batch is None or (not batch.lines and not batch.unusable and not batch.dropped):
+        return
+    logger.info(
+        "device %s log lines=%d dropped=%d unusable=%d",
+        device_id,
+        len(batch.lines),
+        batch.dropped or 0,
+        batch.unusable,
+    )
+    async with _savepoint(session, device_id, "log storage", "liveness"):
+        await device_logs.record_log_batch(
+            session, device_id=device_id, payload=batch, received_at=received_at
         )
 
 

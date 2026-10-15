@@ -505,7 +505,7 @@ Order: spec-1 (any time) · fw-1 → be-1 → fe-1 → test-1 · be-2 · fw-3 �
 
 ### Backend and dashboard
 
-- [ ] **R4-be-1**: Persist and serve health, reset reason and logs (P0, 2d)
+- [x] **R4-be-1**: Persist and serve health, reset reason and logs (P0, 2d) _(done 2026-10-15; reviewed; migration 0009; release: api and ingestor ship together (a new ingestor on an unmigrated schema loses the announce/heartbeat UPDATE, the 0005/0006 skew), downgrade drops stored health/faults/logs/telemetry only; 500 k telemetry cap and up/log 5 000 bound are owner-pending spec Patches; R4-fe-1 mirrors the new `DeviceSummary` fields into `frontend/src/api.ts`; see DECISIONS.md and docs/features/health-telemetry.md)_
       Migration (CRITICAL): `devices.last_reset_reason` plus rolling fault counts for `panic`/`task_wdt`/`brownout`, a log table bounded to the newest 5 000 lines per device and 7 days, telemetry 30 days (SPEC retention). `GET /v1/devices` and the `device.announce` SSE frame carry the reset reason; the ingestor stops being log-only for it. Acceptance: integration tests for ingest, bound-on-write and retention; `just test` green; the migration upgrades and downgrades on a populated dev DB.
       Added: 2026-10-15
 - [ ] **R4-be-2**: `device.deploy` SSE events carry the transaction (P1, 0.5d)

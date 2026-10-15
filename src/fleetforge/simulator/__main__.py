@@ -8,6 +8,7 @@ just sim --name blinker --flash-chip-size 4194304 --partition-sha 1fa6… --roll
 just sim --token ffe_… --power-class sleepy --wake-interval 20 --awake-s 3
 just sim --name blinker --crash-after 15                # ungraceful: the LWT fires
 just sim --name blinker --telemetry-every 5             # R4-fw-2: sim_counter on up/telemetry
+just sim --name blinker --reset-reason panic           # R4-be-1: the first boot announces panic
 just sim-fleet 3 --heartbeat-interval 5                 # issues its own tokens
 docker compose exec -T api python -m fleetforge.simulator run --host mosquitto --port 1883 …
 ```
@@ -41,6 +42,7 @@ import asyncio
 import contextlib
 import datetime as dt
 import os
+import re
 import signal
 import sys
 from collections.abc import Awaitable, Callable
@@ -141,6 +143,7 @@ def _identity_for(args: argparse.Namespace, device_id: str) -> DeviceIdentity:
         partition_table_sha256=args.partition_sha,
         rollback_capable=_ROLLBACK_CAPABLE[args.rollback_capable],
         capabilities=tuple(args.capabilities or ()),
+        reset_reason=args.reset_reason,
     )
 
 
@@ -386,6 +389,16 @@ def _positive_seconds(text: str) -> float:
     return value
 
 
+_RESET_REASON_RE = re.compile(r"[a-z0-9_]{1,16}")
+
+
+def _reset_reason(text: str) -> str:
+    """An argparse `type`: an `esp_reset_reason()` name as the agent spells it (R4-be-1)."""
+    if _RESET_REASON_RE.fullmatch(text) is None:
+        raise argparse.ArgumentTypeError(f"must be 1-16 characters of [a-z0-9_], not {text!r}")
+    return text
+
+
 def _shared(parser: argparse.ArgumentParser) -> None:
     """Flags both subcommands take. Environment defaults, CLI overrides."""
     parser.add_argument("--api-base", default=_default_api_base(), help="origin serving /v1")
@@ -501,6 +514,16 @@ def _shared(parser: argparse.ArgumentParser) -> None:
         help=(
             "record sim_counter every N s, buffered while disconnected and sent on "
             "up/telemetry (QoS 0). Off by default"
+        ),
+    )
+    parser.add_argument(
+        "--reset-reason",
+        type=_reset_reason,
+        default="poweron",
+        metavar="NAME",
+        help=(
+            "the reset_reason the first boot of this run announces (panic, task_wdt, "
+            "brownout, ...); a simulated OTA reboot still announces sw. Default poweron"
         ),
     )
     parser.add_argument("--link", default=LINK_FAST, choices=LINK_PROFILES)

@@ -347,6 +347,16 @@ class DeviceSummary(BaseModel):
     # works from (`WHERE broker_provisioned_at IS NULL`).
     broker_provisioned_at: dt.datetime | None
     online: bool
+    # R4-be-1, all defaulted so no other constructor breaks and placed before `deploy`.
+    # The normalised `reset_reason` of the newest announce; NULL = not reported (agents
+    # before 0.5.0). An open vocabulary: render unknown names as text.
+    last_reset_reason: str | None = None
+    # Fault resets inside the server's window, derived on read from `device_faults`.
+    fault_resets: "FaultResets | None" = None
+    # The latest live heartbeat's health, or `None` when the board never sent one.
+    health: "HealthSnapshot | None" = None
+    # The latest value of each metric (`up/telemetry`), newest 32 by update, sorted by name.
+    metrics: list["MetricValue"] = Field(default_factory=list)
     # The newest deploy transaction's current state, or `None` for a board that has
     # never been deployed to. Rides on this response for the same reason `arrivals`
     # does — see `DeploySummary` and `routers/devices.py`.
@@ -355,6 +365,79 @@ class DeviceSummary(BaseModel):
     # and in its order", and *Evolution rules* say an added field must not break a
     # client built before it existed.
     deploy: "DeploySummary | None" = None
+
+
+class HealthSnapshot(BaseModel):
+    """The latest live heartbeat's health (R4-be-1). Device-reported; NULL = not reported.
+
+    `at` is that heartbeat's receipt time: for an offline board this is what it said
+    last, not a claim about now. `boot_ok` is false only while the running image is
+    pending verification (R4-fw-1).
+    """
+
+    at: dt.datetime
+    uptime_s: int | None
+    rssi: int | None
+    free_heap: int | None
+    min_free_heap: int | None
+    boot_ok: bool | None
+
+
+class FaultResets(BaseModel):
+    """Boots that ended in a fault reset inside the last `window_s` seconds (R4-be-1).
+
+    Derived on read from `device_faults`, one row per boot: a board that only
+    reconnected is not counted twice once its next heartbeat dates the boot.
+    """
+
+    window_s: int
+    panic: int = 0
+    task_wdt: int = 0
+    brownout: int = 0
+
+
+class MetricValue(BaseModel):
+    """The latest value of one `up/telemetry` metric (R4-be-1). `at` = receipt - age_ms."""
+
+    name: str
+    value: float
+    at: dt.datetime
+
+
+class DeviceLogLine(BaseModel):
+    """One stored `up/log` line (R4-be-1).
+
+    `text` is device-controlled, stored sanitised (no control characters, URLs as
+    `<url>`, at most 200 characters); `null` marks a gap with no line. `dropped` is the
+    number of lines lost immediately before this one. `logged_at` = receipt - `age_ms`.
+    """
+
+    id: int
+    logged_at: dt.datetime
+    received_at: dt.datetime
+    level: str
+    text: str | None
+    dropped: int
+
+
+class DeviceLogTail(BaseModel):
+    """A device's newest log lines, newest first (R4-be-1)."""
+
+    device_id: str
+    lines: list[DeviceLogLine]
+
+
+class TelemetryPoint(BaseModel):
+    at: dt.datetime
+    value: float
+
+
+class TelemetrySeries(BaseModel):
+    """One metric's newest samples, newest first (R4-be-1)."""
+
+    device_id: str
+    name: str
+    samples: list[TelemetryPoint]
 
 
 class DeployStep(BaseModel):

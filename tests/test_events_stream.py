@@ -15,6 +15,7 @@ which nothing can fake usefully — and they use the shipped producer
 
 import asyncio
 import contextlib
+import datetime as dt
 import json
 from collections.abc import AsyncIterator, Callable, Iterator
 from typing import Any
@@ -524,3 +525,21 @@ async def test_a_dropped_connection_ends_every_stream_and_then_recovers(
 
         payload = await notify(engine, an_event(type=EventType.DEVICE_ANNOUNCE))
         assert await asyncio.wait_for(subscription.queue.get(), timeout=5) == payload
+
+
+async def test_a_reset_reason_on_an_announce_is_forwarded() -> None:
+    """R4-be-1: `device.announce` carries the stored `reset_reason`; the model accepts it."""
+    payload = DeviceEvent(
+        type=EventType.DEVICE_ANNOUNCE,
+        device_id=DEVICE_ID,
+        at=dt.datetime(2026, 9, 8, 10, 0, tzinfo=dt.UTC),
+        online=None,
+        fw_version="1.4.2",
+        reset_reason="panic",
+    ).model_dump_json()
+    hub = EventHub(queue_size=4, max_subscribers=4)
+    with hub.subscribe() as subscription:
+        a_listener(hub)._on_notify(None, 1, "ff_events", payload)
+        forwarded = subscription.queue.get_nowait()
+    assert forwarded == payload
+    assert json.loads(forwarded)["reset_reason"] == "panic"

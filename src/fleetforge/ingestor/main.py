@@ -6,6 +6,10 @@ workers `LISTEN` on that channel and fan out over SSE (R0-be-5). **This process 
 never run with more than one instance**: N subscribers would ingest every message N
 times and split the SSE audience.
 
+It also runs the retention sweep (R4-be-1, `retention_loop`): hourly, in its own task and
+its own transactions, independent of the broker session. Being the single instance is
+exactly why it lives here and not in the api's N workers.
+
 Three things it deliberately does not do. It never `INSERT`s a device — the only way
 into the registry is a burned enrollment token (`ingestor/store.py`). It never
 publishes to `dn/*` — commands come from the API. And it never runs migrations
@@ -33,6 +37,7 @@ import aiomqtt
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from fleetforge import retention
 from fleetforge.clock import now_utc
 from fleetforge.config import get_settings
 from fleetforge.db.base import get_engine, get_sessionmaker
@@ -231,6 +236,50 @@ async def run(
         delay = min(delay * 2, RECONNECT_MAX_DELAY)
 
 
+async def sweep_once(
+    sessionmaker: async_sessionmaker[AsyncSession], *, always_log: bool = False
+) -> retention.SweepResult | None:
+    """One retention pass in its own session and transaction; `None` if it failed.
+
+    Never raises for a database or network failure: the next pass retries, and the
+    read predicates keep expired rows hidden meanwhile. Counts are logged, never rows.
+    """
+    try:
+        async with sessionmaker() as session:
+            result = await retention.sweep(session, now=now_utc())
+            await session.commit()
+    except (SQLAlchemyError, OSError) as exc:
+        logger.error("retention sweep failed: %s", exc)
+        return None
+    if always_log or result.total:
+        logger.info(
+            "retention sweep deleted logs=%d telemetry_expired=%d telemetry_capped=%d "
+            "metrics=%d faults=%d",
+            result.logs,
+            result.telemetry_expired,
+            result.telemetry_capped,
+            result.metrics,
+            result.faults,
+        )
+    return result
+
+
+async def retention_loop(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    interval_s: float = retention.SWEEP_INTERVAL_S,
+) -> None:
+    """Sweep once at start (always logged), then every `interval_s`, until cancelled.
+
+    Its own task, so a broker outage does not stop retention and a slow sweep does not
+    stall ingestion; it never touches the liveness file.
+    """
+    await sweep_once(sessionmaker, always_log=True)
+    while True:
+        await asyncio.sleep(interval_s)
+        await sweep_once(sessionmaker)
+
+
 async def main() -> None:
     """Entrypoint: wire SIGTERM/SIGINT to a clean shutdown, then run."""
     logging.basicConfig(
@@ -254,6 +303,8 @@ async def main() -> None:
         )
     )
 
+    sweeper = asyncio.create_task(retention_loop(sessionmaker))
+
     # `docker compose down` sends SIGTERM; cancelling the task lets aiomqtt send a
     # proper DISCONNECT instead of leaving a half-open session on the broker.
     for sig in (signal.SIGTERM, signal.SIGINT):
@@ -262,6 +313,9 @@ async def main() -> None:
 
     with contextlib.suppress(asyncio.CancelledError):
         await task
+    sweeper.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await sweeper
     # Close the pool rather than leaving connections for the server to reap.
     await get_engine().dispose()
     logger.info("ingestor stopped")

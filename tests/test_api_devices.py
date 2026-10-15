@@ -26,7 +26,16 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from fleetforge.clock import now_utc
 from fleetforge.db.base import asyncpg_dsn
-from fleetforge.db.models import DeployEvent, Device, DeviceGroup, DeviceProgress
+from fleetforge.db.models import (
+    DeployEvent,
+    Device,
+    DeviceFault,
+    DeviceGroup,
+    DeviceLog,
+    DeviceMetric,
+    DeviceProgress,
+    DeviceTelemetry,
+)
 from fleetforge.deploys import MAX_DEPLOY_STEPS
 from fleetforge.events import EVENTS_CHANNEL, EventType
 from tests.conftest import (
@@ -202,6 +211,10 @@ async def test_the_summary_carries_the_fleet_view_and_no_presence_ingredients(
         "enrolled_at",
         "broker_provisioned_at",
         "online",
+        "last_reset_reason",
+        "fault_resets",
+        "health",
+        "metrics",
         "deploy",
     }
     assert row["fw_version"] == "1.4.2"
@@ -1240,3 +1253,239 @@ async def test_each_board_gets_its_own_sender(admin_app: FastAPI, fleet: AsyncSe
         "a4cf12b3de40": "dashboard session (a)",
         "a4cf12b3de41": None,
     }
+
+
+# ---------------------------------------------------------------------------
+# R4-be-1: reset reason, fault counts, health and metrics on the list; the log and
+# telemetry sub-resources. Rows are seeded relative to the real clock (`now_utc()`):
+# these requests go through HTTP, which reads it.
+# ---------------------------------------------------------------------------
+
+
+async def test_the_health_fields_ride_on_the_list_before_deploy(
+    admin_app: FastAPI, fleet: AsyncSession
+) -> None:
+    now = now_utc()
+    await add_device(
+        fleet,
+        last_reset_reason="panic",
+        health_at=now - dt.timedelta(seconds=30),
+        uptime_s=81234,
+        rssi=-61,
+        free_heap=142000,
+        min_free_heap=98000,
+        boot_ok=True,
+    )
+    await add_device(fleet, OTHER_ID)
+    fleet.add_all(
+        [
+            DeviceFault(device_id=DEVICE_ID, at=now - dt.timedelta(hours=2), reason="panic"),
+            DeviceFault(device_id=DEVICE_ID, at=now - dt.timedelta(hours=3), reason="brownout"),
+            DeviceFault(device_id=DEVICE_ID, at=now - dt.timedelta(days=2), reason="panic"),
+        ]
+    )
+    await fleet.commit()
+
+    devices = (await list_devices(admin_app, await login_admin(admin_app)))["devices"]
+    by_id = {row["device_id"]: row for row in devices}
+    row, quiet = by_id[DEVICE_ID], by_id[OTHER_ID]
+
+    assert row["last_reset_reason"] == "panic"
+    assert row["fault_resets"] == {"window_s": 86400, "panic": 1, "task_wdt": 0, "brownout": 1}
+    assert row["health"] == {
+        "at": row["health"]["at"],
+        "uptime_s": 81234,
+        "rssi": -61,
+        "free_heap": 142000,
+        "min_free_heap": 98000,
+        "boot_ok": True,
+    }
+    assert dt.datetime.fromisoformat(row["health"]["at"]) == now - dt.timedelta(seconds=30)
+    assert row["metrics"] == []
+    assert quiet["last_reset_reason"] is None
+    assert quiet["health"] is None
+    assert quiet["fault_resets"] == {"window_s": 86400, "panic": 0, "task_wdt": 0, "brownout": 0}
+    keys = list(row)
+    online = keys.index("online")
+    assert keys[online + 1 :] == [
+        "last_reset_reason",
+        "fault_resets",
+        "health",
+        "metrics",
+        "deploy",
+    ], "frontend/src/api.ts mirrors this order; deploy stays last"
+
+
+async def test_metrics_are_the_latest_per_name_sorted_and_capped(
+    admin_app: FastAPI, fleet: AsyncSession
+) -> None:
+    now = now_utc()
+    await add_device(fleet)
+    fleet.add_all(
+        [
+            DeviceMetric(
+                device_id=DEVICE_ID,
+                name=f"m{i:02d}",
+                value=float(i),
+                sample_at=now - dt.timedelta(seconds=i),
+            )
+            for i in range(40)
+        ]
+        + [
+            DeviceMetric(
+                device_id=DEVICE_ID,
+                name="ancient",
+                value=1.0,
+                sample_at=now - dt.timedelta(days=31),
+            )
+        ]
+    )
+    await fleet.commit()
+
+    row = await row_of(admin_app, await login_admin(admin_app))
+
+    names = [metric["name"] for metric in row["metrics"]]
+    assert names == [f"m{i:02d}" for i in range(32)], "the 32 newest, sorted by name"
+    assert row["metrics"][3]["value"] == 3.0
+    assert set(row["metrics"][0]) == {"name", "value", "at"}
+
+
+async def test_the_patch_response_carries_the_health_fields_too(
+    admin_app: FastAPI, fleet: AsyncSession
+) -> None:
+    now = now_utc()
+    await add_device(fleet, last_reset_reason="task_wdt", health_at=now, boot_ok=False)
+    fleet.add(DeviceFault(device_id=DEVICE_ID, at=now, reason="task_wdt"))
+    fleet.add(DeviceMetric(device_id=DEVICE_ID, name="temp_c", value=21.5, sample_at=now))
+    await fleet.commit()
+    token = await login_admin(admin_app)
+
+    response = await patch_device(admin_app, token, DEVICE_ID, {"name": "coop door"})
+
+    body = response.json()
+    assert body == await row_of(admin_app, token)
+    assert body["fault_resets"]["task_wdt"] == 1
+    assert body["health"]["boot_ok"] is False
+    assert body["metrics"][0]["name"] == "temp_c"
+
+
+async def get_sub(app: FastAPI, path: str, token: str | None) -> httpx.Response:
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    async with client_for(app) as client:
+        return await client.get(path, headers=headers)
+
+
+async def test_the_log_tail_is_newest_first_limited_and_unexpired(
+    admin_app: FastAPI, fleet: AsyncSession
+) -> None:
+    now = now_utc()
+    await add_device(fleet)
+    fleet.add_all(
+        [
+            DeviceLog(
+                device_id=DEVICE_ID,
+                logged_at=now - dt.timedelta(seconds=10 - i),
+                received_at=now,
+                level="I",
+                text=f"line {i}",
+                dropped=3 if i == 0 else 0,
+            )
+            for i in range(5)
+        ]
+        + [
+            DeviceLog(
+                device_id=DEVICE_ID,
+                logged_at=now - dt.timedelta(days=8),
+                received_at=now - dt.timedelta(days=8),
+                level="I",
+                text="expired",
+            ),
+            DeviceLog(
+                device_id=DEVICE_ID, logged_at=now, received_at=now, level="I", text=None, dropped=4
+            ),
+        ]
+    )
+    await fleet.commit()
+    token = await login_admin(admin_app)
+
+    response = await get_sub(admin_app, f"/v1/devices/{DEVICE_ID}/logs", token)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["device_id"] == DEVICE_ID
+    assert [line["text"] for line in body["lines"]] == [
+        None,
+        "line 4",
+        "line 3",
+        "line 2",
+        "line 1",
+        "line 0",
+    ]
+    assert body["lines"][0]["dropped"] == 4 and body["lines"][-1]["dropped"] == 3
+    assert set(body["lines"][0]) == {"id", "logged_at", "received_at", "level", "text", "dropped"}
+
+    limited = await get_sub(admin_app, f"/v1/devices/{DEVICE_ID}/logs?limit=2", token)
+    assert [line["text"] for line in limited.json()["lines"]] == [None, "line 4"]
+    for bad in ("0", "5001", "x"):
+        response = await get_sub(admin_app, f"/v1/devices/{DEVICE_ID}/logs?limit={bad}", token)
+        assert response.status_code == 422, bad
+
+
+async def test_the_sub_resources_are_404_for_unknown_and_decommissioned_devices(
+    admin_app: FastAPI, fleet: AsyncSession
+) -> None:
+    await add_device(fleet, OTHER_ID, decommissioned_at=now_utc())
+    token = await login_admin(admin_app)
+    for device_id in ("a4cf12b3de00", OTHER_ID):
+        for path in ("logs", "telemetry?name=temp_c"):
+            response = await get_sub(admin_app, f"/v1/devices/{device_id}/{path}", token)
+            assert response.status_code == 404, (device_id, path)
+            assert response.json()["detail"] == f"no such device: {device_id}"
+
+
+async def test_the_sub_resources_need_a_credential(admin_app: FastAPI, fleet: AsyncSession) -> None:
+    await add_device(fleet)
+    for path in ("logs", "telemetry?name=temp_c"):
+        response = await get_sub(admin_app, f"/v1/devices/{DEVICE_ID}/{path}", None)
+        assert response.status_code == 401, path
+
+
+async def test_a_telemetry_series_is_newest_first_limited_and_validated(
+    admin_app: FastAPI, fleet: AsyncSession
+) -> None:
+    now = now_utc()
+    await add_device(fleet)
+    fleet.add_all(
+        [
+            DeviceTelemetry(
+                device_id=DEVICE_ID,
+                name="temp_c",
+                value=float(i),
+                sample_at=now - dt.timedelta(seconds=10 - i),
+            )
+            for i in range(5)
+        ]
+        + [
+            DeviceTelemetry(device_id=DEVICE_ID, name="other", value=9.0, sample_at=now),
+            DeviceTelemetry(
+                device_id=DEVICE_ID,
+                name="temp_c",
+                value=-1.0,
+                sample_at=now - dt.timedelta(days=31),
+            ),
+        ]
+    )
+    await fleet.commit()
+    token = await login_admin(admin_app)
+
+    response = await get_sub(admin_app, f"/v1/devices/{DEVICE_ID}/telemetry?name=temp_c", token)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert (body["device_id"], body["name"]) == (DEVICE_ID, "temp_c")
+    assert [point["value"] for point in body["samples"]] == [4.0, 3.0, 2.0, 1.0, 0.0]
+    limited = await get_sub(
+        admin_app, f"/v1/devices/{DEVICE_ID}/telemetry?name=temp_c&limit=2", token
+    )
+    assert [point["value"] for point in limited.json()["samples"]] == [4.0, 3.0]
+    for query in ("name=Temp", "name=", "name=a%0Ab", "", "name=temp_c&limit=0"):
+        response = await get_sub(admin_app, f"/v1/devices/{DEVICE_ID}/telemetry?{query}", token)
+        assert response.status_code == 422, query

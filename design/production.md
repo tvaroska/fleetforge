@@ -32,9 +32,13 @@ is "not public" in the product sense (no signup, one admin) which SPEC already s
 | **Agent build** | pinned ESP-IDF container | `R0-INFRA-2`. Images served by the API |
 | **Tests** | pytest, pytest-asyncio. `pytest-embedded` from R5 | plus the Python device simulator (`R0-TEST-1`) |
 
-**TimescaleDB is already preloaded on the shared Postgres** (`shared_preload_libraries=timescaledb`).
-R4 telemetry is a hypertable and SPEC's 30-day retention is a Timescale retention policy —
-not a cron job. This is free and was not previously noticed.
+**TimescaleDB is preloaded on the shared Postgres** (`shared_preload_libraries=timescaledb`),
+but fleetforge does not use it. R4's telemetry, log and fault tables are **plain tables**
+and SPEC's retention (30 days telemetry, 7 days logs) is app-side: logs are bounded on write
+and an hourly sweep runs inside the single-instance ingestor (`fleetforge.retention`,
+`ingestor/main.py::retention_loop`), with an age predicate on every read. Reason: dev and
+the test suite run plain `postgres:16`, and a prod-only hypertable would be a schema no test
+runs against. See DECISIONS 2026-10-15 (R4-be-1).
 
 ## The single-subscriber rule
 

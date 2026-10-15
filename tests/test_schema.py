@@ -21,8 +21,12 @@ EXPECTED_TABLES = {
     "artifacts",
     "builds",
     "deploy_events",
+    "device_faults",
     "device_groups",
+    "device_logs",
+    "device_metrics",
     "device_progress",
+    "device_telemetry",
     "devices",
     "enrollment_tokens",
     "partition_profiles",
@@ -115,6 +119,41 @@ async def test_artifacts_refuses_a_zero_byte_artifact(session: AsyncSession) -> 
             ),
             {"d": "a" * 64},
         )
+
+
+async def test_device_logs_refuses_a_negative_gap(session: AsyncSession) -> None:
+    """R4-be-1: `dropped` counts lost lines; a negative count is a writer bug, not data."""
+    await session.execute(
+        text(
+            "INSERT INTO devices (device_id, platform_type, link_type, power_class) "
+            "VALUES ('a4cf12b3de9f', 'esp32', 'wifi', 'always_on')"
+        )
+    )
+    with pytest.raises(IntegrityError, match="ck_device_logs_dropped_non_negative"):
+        await session.execute(
+            text(
+                "INSERT INTO device_logs (device_id, logged_at, received_at, level, dropped) "
+                "VALUES ('a4cf12b3de9f', now(), now(), 'I', -1)"
+            )
+        )
+
+
+async def test_the_device_health_columns_are_nullable_with_no_default(
+    session: AsyncSession,
+) -> None:
+    """R4-be-1, migration 0009: NULL = not reported, and adding them rewrote no row."""
+    rows = (
+        await session.execute(
+            text(
+                "SELECT column_name, is_nullable, column_default FROM information_schema.columns "
+                "WHERE table_schema = 'public' AND table_name = 'devices' AND column_name IN "
+                "('last_reset_reason', 'health_at', 'uptime_s', 'rssi', 'free_heap', "
+                "'min_free_heap', 'boot_ok')"
+            )
+        )
+    ).all()
+    assert len(rows) == 7
+    assert {(row[1], row[2]) for row in rows} == {("YES", None)}
 
 
 async def test_artifacts_has_a_nullable_boolean_library_marker_verdict(

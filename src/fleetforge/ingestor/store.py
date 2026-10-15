@@ -16,6 +16,12 @@ signal that its broker credential was never revoked.
 `RETURNING` the whole row is what lets the caller derive `online` from post-write
 state inside the same transaction, with no read-then-write.
 
+Two groups are written **every time**, present or not (R4-be-1), because the message is
+the device's full report and absent means "not reported": `last_reset_reason` on every
+announce (`_reset_values`), and the heartbeat's health snapshot on every live heartbeat
+(`_health_values`). The INSERTs R4-be-1 added (fault rows, log lines, telemetry) live in
+their own modules and are called by `handlers.py`; this module still never INSERTs.
+
 Nothing here commits: the caller owns the transaction, the same convention the API's
 routers follow.
 """
@@ -28,16 +34,16 @@ from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from fleetforge.db.models import Device, PowerClass
-from fleetforge.ingestor.protocol import AnnouncePayload
+from fleetforge.ingestor.protocol import AnnouncePayload, HeartbeatPayload
 
 logger = logging.getLogger(__name__)
 
 # Identity fields an announce is allowed to move, each only when present. `device_id`,
 # `group_id`, `name`, `parent_device_id`, `enrolled_at` and `broker_provisioned_at` are
 # operator or enrollment facts, never device claims, so they are absent on purpose.
-# `ssid` / `known_networks` and the three board measurements are absent too, but for
-# the opposite reason: they are written on *every* announce, present or not — see
-# `_network_values` and `_measurement_values`.
+# `ssid` / `known_networks`, the three board measurements and `reset_reason` are absent
+# too, but for the opposite reason: they are written on *every* announce, present or not
+# — see `_network_values`, `_measurement_values` and `_reset_values`.
 ANNOUNCE_FIELDS = (
     "proto",
     "platform_type",
@@ -104,10 +110,11 @@ async def apply_announce(
     """Apply the identity fields an announce actually carried.
 
     Fields absent from the payload mean "no change" and are not written
-    (`spec/device-protocol.md` → *Evolution rules*) — with two exceptions, both
+    (`spec/device-protocol.md` → *Evolution rules*) — with three exceptions, all
     written on every announce because the spec reads absent as "not reported" /
-    "unknown": `ssid` / `known_networks` (`_network_values`) and the board
-    measurements (`_measurement_values`). `link_type` is written straight
+    "unknown": `ssid` / `known_networks` (`_network_values`), the board
+    measurements (`_measurement_values`) and the reset reason (`_reset_values`).
+    `link_type` is written straight
     through however odd it looks — the column is TEXT and there are no PG enums, so a
     board on a link nobody has invented yet still shows up in the dashboard.
     """
@@ -119,6 +126,7 @@ async def apply_announce(
     values.update(_power_class_values(device_id, payload))
     values.update(_network_values(payload))
     values.update(_measurement_values(payload))
+    values.update(_reset_values(payload))
     if advance_last_seen:
         values["last_seen"] = _last_seen_value(at)
     if not values:
@@ -170,6 +178,22 @@ def _measurement_values(payload: AnnouncePayload) -> dict[str, Any]:
         "partition_table_sha256": payload.partition_table_sha256,
         "rollback_capable": payload.rollback_capable,
     }
+
+
+def _reset_values(payload: AnnouncePayload) -> dict[str, Any]:
+    """`last_reset_reason`: written on **every** announce, live or retained (R4-be-1).
+
+    The third exception to "absent means no change", for the `_measurement_values`
+    reasons: the announce is the full identity and the retained copy is always the
+    latest, so a board that OTAs back to an agent before 0.5.0 (which does not send the
+    key) must read "not reported", not repeat a reason it no longer vouches for. A
+    retained replay writes it too: it is the newest boot's reason, state rather than
+    liveness. Counting it as a fault is `fleetforge.faults`, on a live announce only.
+
+    Already normalised (`announce_fields.normalize_reset_reason`): 1-16 characters, no
+    control character or lone surrogate, unknown names kept, malformed `None`.
+    """
+    return {"last_reset_reason": payload.reset_reason}
 
 
 def _power_class_values(device_id: str, payload: AnnouncePayload) -> dict[str, Any]:
@@ -247,18 +271,42 @@ async def apply_heartbeat(
     at: dt.datetime,
     *,
     advance_last_seen: bool,
+    health: HeartbeatPayload | None = None,
 ) -> Device | None:
-    """Advance `last_seen`, and take the reported firmware version if there is one.
+    """Advance `last_seen`, take the reported firmware version, record the health snapshot.
 
     `up/hb` is QoS 1 with retain **no**, so `advance_last_seen` is always true in
     practice; it is a parameter rather than an assumption so that the retained rule
-    lives in exactly one place for all four writers.
+    lives in exactly one place for all four writers. The health group (R4-be-1) follows
+    the same rule: written only with a live `last_seen`.
     """
     values: dict[str, Any] = {}
     if advance_last_seen:
         values["last_seen"] = _last_seen_value(at)
+        if health is not None:
+            values.update(_health_values(health, at))
     if fw_version is not None:
         values["fw_version"] = fw_version
     if not values:
         return await fetch_live_device(session, device_id)
     return await _apply(session, device_id, values)
+
+
+def _health_values(health: HeartbeatPayload, at: dt.datetime) -> dict[str, Any]:
+    """The heartbeat's health snapshot, written as a group on every live heartbeat (R4-be-1).
+
+    Absent and malformed alike are NULL ("not reported"): the heartbeat is the device's
+    whole report, so a field it stopped sending must not keep a stale value, exactly as
+    `_measurement_values` treats the announce. `health_at` is this heartbeat's receipt
+    time, so a reader can tell a fresh snapshot from one an offline board left behind.
+    Every field is already bounded by `HeartbeatPayload`, so nothing here can violate a
+    column type.
+    """
+    return {
+        "health_at": at,
+        "uptime_s": health.uptime_s,
+        "rssi": health.rssi,
+        "free_heap": health.free_heap,
+        "min_free_heap": health.min_free_heap,
+        "boot_ok": health.boot_ok,
+    }

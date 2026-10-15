@@ -129,6 +129,14 @@ class Settings(BaseSettings):
     progress_rate_limit_per_ip: int = 60
     progress_rate_limit_global: int = 300
 
+    # --- Device health (R4-be-1) ---------------------------------------------
+    # The window `GET /v1/devices` counts fault resets over (`panic`, `task_wdt`,
+    # `brownout`; `fleetforge.faults`). Derived on read, never stored — the same
+    # discipline as `progress_stall_s`. A day: long enough that a board which panicked
+    # overnight still shows it in the morning, short enough that one fixed by an OTA
+    # stops being flagged tomorrow. `device_faults` keeps 30 days, so this can widen.
+    fault_window_s: int = 86_400
+
     # --- Broker credential provisioning (R0-be-4 / R0-sec-1) ------------------
     # The Mosquitto dynamic-security ADMIN credential — broker-root, and a
     # different privilege from `mqtt_username`/`mqtt_password` above. BOTH unset

@@ -1059,7 +1059,8 @@ async def test_notify_is_delivered_on_commit_and_never_on_rollback(
 
 
 # ---------------------------------------------------------------------------
-# reset_reason (S0-fw-6): logged on a live announce, never stored
+# reset_reason (S0-fw-6): logged on a live announce; stored since R4-be-1
+# (tests/test_device_health.py covers the column, the faults and the SSE field)
 # ---------------------------------------------------------------------------
 
 
@@ -1130,9 +1131,11 @@ async def test_an_absent_reset_reason_logs_null(session: AsyncSession) -> None:
     assert _reset_reason_lines(records) == [f"device {DEVICE_ID} announced reset_reason=null"]
 
 
-def test_reset_reason_is_never_stored() -> None:
-    """No column, no migration (R4): the store's column list and the model leave it out."""
+def test_reset_reason_is_stored_on_every_announce_not_only_when_present() -> None:
+    """R4-be-1: a column exists, and `ANNOUNCE_FIELDS` ("only when present") leaves it out
+    because `store.py::_reset_values` writes it on every announce, absent meaning NULL."""
     from fleetforge.ingestor.store import ANNOUNCE_FIELDS
 
     assert "reset_reason" not in ANNOUNCE_FIELDS
-    assert "reset_reason" not in Device.__table__.columns
+    assert "last_reset_reason" not in ANNOUNCE_FIELDS
+    assert "last_reset_reason" in Device.__table__.columns
