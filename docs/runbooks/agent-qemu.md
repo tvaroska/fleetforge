@@ -454,6 +454,14 @@ QEMU: our bootloader always arms rollback, and forging otadata is not a test. Th
 otadata row above is unchanged: a torn newest sector boots the *previous* slot, so it is
 still `stale … discarded`.
 
+Since S0-fw-6 the boot also prints `I ff-id: reset_reason poweron (announced)` just before
+`device_id`, and the announce carries `"reset_reason":"poweron"` right before `"lib_marker":1`.
+A cold start (`--fresh`, or stop/start) is always `poweron`. To see `sw` or `panic` the
+software reset must come from an image that never started the network (a `-hangtest`
+rolling back at 300 s gives `sw`, a `-bltest` abort gives `panic`, both on the old slot): a
+soft reset after the network ran hits the `esp_timer_impl_init` panic above and never
+reaches `app_main` (`docs/features/health-telemetry.md` -> *reset_reason as built*).
+
 **No token and no password appear anywhere in that transcript, by design**. If one ever
 does, that is a bug in the firmware's logging, not a detail of the harness.
 

@@ -178,6 +178,10 @@ LINK_PROFILES = (LINK_FAST, LINK_SLOW)
 # There is a tripwire test asserting the two agree.
 POWER_CLASSES = ("always_on", "sleepy")
 
+# S0-fw-6, `spec/device-protocol.md` -> up/announce `reset_reason`: what a board reads
+# after `esp_restart()`. The first start is the `DeviceIdentity` default, `poweron`.
+RESET_REASON_SW = "sw"
+
 ClientFactory = Callable[[], aiomqtt.Client]
 Step = Callable[[str], None]
 
@@ -288,6 +292,10 @@ class DeviceIdentity:
     partition_table_sha256: str | None = None
     rollback_capable: bool | None = None
     capabilities: tuple[str, ...] = ()
+    # S0-fw-6, `esp_reset_reason()` of the current boot, lowercased: `poweron` on the
+    # first start, `sw` after the simulated OTA reboot (`StageRunner`). Not checked by
+    # `validate()`: the server logs whatever arrives, and junk is how that is tested.
+    reset_reason: str | None = "poweron"
     proto: int = 1
 
     def validate(self) -> None:
@@ -344,6 +352,8 @@ class DeviceIdentity:
             "partition_table_sha256": self.partition_table_sha256,
             "rollback_capable": self.rollback_capable,
             "capabilities": list(self.capabilities),
+            # S0-fw-6: after `capabilities`, as the spec prints it.
+            "reset_reason": self.reset_reason,
         }
 
     def enroll_body(self, token: str) -> dict[str, object]:
@@ -704,6 +714,8 @@ class StageRunner:
         # rollback returns the board to.
         self.pending = PendingConfirm(cmd_id=cmd_id, previous_identity=self.identity)
         self._confirm_deadline = None
+        # The apply reboot is `esp_restart()`, so the next boot reads ESP_RST_SW (S0-fw-6).
+        self.identity = replace(self.identity, reset_reason=RESET_REASON_SW)
         if isinstance(version, str) and version:
             # The board comes back running the new image: later announces and heartbeats
             # say so, which is what makes "delivery success" checkable end to end.
@@ -783,7 +795,8 @@ class StageRunner:
             await self._status(client, pending.cmd_id, STATE_ROLLING_BACK, step)
         except aiomqtt.MqttError as exc:
             step(f"confirm  {STATE_ROLLING_BACK} not delivered ({exc}); rolling back anyway")
-        self.identity = pending.previous_identity
+        # The confirm timer's rollback ends in `esp_restart()` too: `sw` (S0-fw-6).
+        self.identity = replace(pending.previous_identity, reset_reason=RESET_REASON_SW)
         self.rolled_back = pending.cmd_id
         self.pending = None
         self._confirm_deadline = None

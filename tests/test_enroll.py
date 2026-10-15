@@ -219,6 +219,31 @@ async def test_unknown_body_fields_are_ignored(enroll_app: FastAPI) -> None:
     assert (await post_enroll(enroll_app, body)).status_code == 200
 
 
+@pytest.mark.parametrize(
+    ("device_id", "reset_reason"),
+    [
+        ("a4cf12b3de61", "poweron"),
+        ("a4cf12b3de62", "sw"),
+        ("a4cf12b3de63", 7),
+        ("a4cf12b3de64", "x" * 40),
+        ("a4cf12b3de65", None),
+    ],
+)
+async def test_the_enroll_body_carries_reset_reason_and_it_is_ignored(
+    enroll_app: FastAPI, device_id: str, reset_reason: object
+) -> None:
+    """S0-fw-6: the enroll body is the announce plus a token, so it carries `reset_reason`.
+    `EnrollRequest` has `extra="ignore"`, so any value, malformed included, enrolls."""
+    from fleetforge.api.schemas import EnrollRequest
+
+    assert EnrollRequest.model_config.get("extra") == "ignore"
+    assert "reset_reason" not in EnrollRequest.model_fields
+    issued = await issue_token(enroll_app)
+    body = enroll_body(issued["token"], device_id, reset_reason=reset_reason)
+
+    assert (await post_enroll(enroll_app, body)).status_code == 200
+
+
 async def test_the_endpoint_is_unauthenticated(enroll_app: FastAPI) -> None:
     """No cookie, no Authorization header — a board with no credential is the caller."""
     issued = await issue_token(enroll_app)

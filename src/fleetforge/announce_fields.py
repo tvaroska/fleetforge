@@ -35,6 +35,16 @@ ceiling, the `uint32_t` the agent reads it into. It is load-bearing: an integer 
 int64 (`2**63`, or a JSON literal like `1e30` written out in full) makes asyncpg raise
 inside the transaction, and the announce it rode in on is lost.
 
+**`reset_reason` (S0-fw-6)** is logged, never stored: the ingestor names it on a live
+announce and nothing else reads it (storage and display are R4). It is the one announced
+value whose content IS logged, because it is a fixed firmware vocabulary
+(`esp_reset_reason()` lowercased), not the operator's data. A value the server does not
+know is logged as-is, never refused (*Evolution rules*, rule 2). Malformed means not a
+string, or longer than 16 characters (the longest real name, `pwr_glitch` or
+`cpu_lockup`, is 10); a control character or a lone surrogate counts too, so a board
+cannot write a line break or undecodable text into the server log. Malformed becomes
+`None`, never a lost announce.
+
 This lives outside both `fleetforge.api` and `fleetforge.ingestor` because the API may
 not import from the ingestor (the precedent is `identity.py`). It is named for
 announced fields in general.
@@ -57,6 +67,10 @@ KNOWN_NETWORKS_MAX = 64
 # The `uint32_t` that `esp_flash_get_physical_size` writes. Also keeps every stored value
 # inside the BIGINT column: past int64, asyncpg raises and the announce is lost.
 FLASH_CHIP_SIZE_MAX = 0xFFFF_FFFF
+
+# `reset_reason`: longer than this is malformed (S0-fw-6, docs/features/health-telemetry.md
+# -> *Reset reason proposal*).
+RESET_REASON_MAX_CHARS = 16
 
 # Exactly 64 lowercase hex characters, used with `fullmatch`. An explicit class on
 # purpose: `\d` would accept Unicode digits such as "٠", and `re.match(...$)` would
@@ -165,3 +179,25 @@ def normalize_rollback_capable(value: object, *, device_id: str | None = None) -
         return value
     _unusable("rollback_capable", "not a boolean", device_id)
     return None
+
+
+def normalize_reset_reason(value: object, *, device_id: str | None = None) -> str | None:
+    """Why the chip last reset, as the board reported it, or `None` if it is unusable.
+
+    Not checked against the known names: an unknown value is logged as-is (*Evolution
+    rules*, rule 2). Empty is "not reported", like `ssid`, and logs nothing.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        _unusable("reset_reason", "not a string", device_id)
+        return None
+    if value == "":
+        return None
+    if len(value) > RESET_REASON_MAX_CHARS:
+        _unusable("reset_reason", f"longer than {RESET_REASON_MAX_CHARS} characters", device_id)
+        return None
+    if any(unicodedata.category(ch) in ("Cc", "Cs") for ch in value):
+        _unusable("reset_reason", "control character or lone surrogate", device_id)
+        return None
+    return value

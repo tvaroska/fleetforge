@@ -268,6 +268,7 @@ ANNOUNCE_KEYS = {
     "partition_table_sha256",
     "rollback_capable",
     "capabilities",
+    "reset_reason",
 }
 
 
@@ -301,6 +302,16 @@ def test_announce_carries_the_network_in_spec_order() -> None:
 
     bare = DeviceIdentity(device_id="a4cf12b3de90").announce()
     assert (bare["ssid"], bare["known_networks"]) == (None, None)
+
+
+def test_announce_carries_reset_reason_after_capabilities() -> None:
+    """S0-fw-6: `poweron` on the first start, after `capabilities`, as the spec prints it."""
+    body = DeviceIdentity(device_id="a4cf12b3de90").announce()
+    keys = list(body)
+    assert keys[keys.index("capabilities") + 1] == "reset_reason"
+    assert body["reset_reason"] == "poweron"
+    parsed = AnnouncePayload.model_validate(json.loads(json.dumps(body)))
+    assert parsed.reset_reason == "poweron"
 
 
 MEASUREMENTS = ["flash_chip_size", "partition_table_sha256", "rollback_capable"]
@@ -935,6 +946,9 @@ async def test_an_apply_ends_the_session_and_the_next_one_reports_the_new_versio
     # long as this defect was open, and the announce is what a dashboard row is built from.
     assert channel_payloads(after, device_id, ANNOUNCE)[0]["fw_version"] == "1.6.0"
     assert channel_payloads(after, device_id, HEARTBEAT)[0]["fw_version"] == "1.6.0"
+    # S0-fw-6: the first start is a power-on, the apply reboot an `esp_restart()`.
+    assert channel_payloads(before, device_id, ANNOUNCE)[0]["reset_reason"] == "poweron"
+    assert channel_payloads(after, device_id, ANNOUNCE)[0]["reset_reason"] == "sw"
     # The last thing the old session said was `rebooting`, and it did not say goodbye:
     # a restarting board stops mid-sentence, it does not report itself offline.
     assert [report["state"] for report in statuses(before)] == list(STAGE_WALK)
@@ -969,6 +983,7 @@ async def test_an_apply_with_no_version_still_reboots(
     )
 
     assert channel_payloads(clients[1], identity.device_id, ANNOUNCE)[0]["fw_version"] == "1.4.2"
+    assert channel_payloads(clients[1], identity.device_id, ANNOUNCE)[0]["reset_reason"] == "sw"
 
 
 async def test_a_sleepy_board_reports_the_new_version_on_its_next_wake(
@@ -1147,6 +1162,11 @@ async def test_an_image_that_never_confirms_rolls_back_and_the_old_one_reports_i
     ]
     assert channel_payloads(back, device_id, ANNOUNCE)[0]["fw_version"] == "1.4.2"
     assert channel_payloads(back, device_id, HEARTBEAT)[0]["fw_version"] == "1.4.2"
+    # S0-fw-6: the confirm timer's rollback is an `esp_restart()` too.
+    assert [
+        channel_payloads(fake, device_id, ANNOUNCE)[0]["reset_reason"]
+        for fake in (applied, on_new, back)
+    ] == ["poweron", "sw", "sw"]
     rolled = statuses(back)
     assert [report["state"] for report in rolled] == [STATE_ROLLED_BACK]
     assert rolled[0]["cmd_id"] == "cmd-stage-1"

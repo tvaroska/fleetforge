@@ -55,6 +55,53 @@ static bool s_have_partition_sha256;
  * every read and no lock is needed. */
 static bool s_rollback_capable;
 
+/* S0-fw-6, spec/device-protocol.md -> up/announce `reset_reason`: why the chip last reset,
+ * read once in ff_identity_init() (every boot path calls it: agent_main.c,
+ * fleetforge_start.c, Fleetforge.cpp) and never again, so a reconnect inside one boot
+ * repeats it. Same threading argument as s_rollback_capable. A string literal, never NULL. */
+static const char *s_reset_reason = "unknown";
+
+/* `esp_reset_reason_t` lowercased without the `ESP_RST_` prefix (IDF 5.5). Every name is
+ * spelled out: a value this build does not know becomes `unknown`, never a number. */
+static const char *reset_reason_name(esp_reset_reason_t reason)
+{
+    switch (reason) {
+    case ESP_RST_POWERON:
+        return "poweron";
+    case ESP_RST_EXT:
+        return "ext";
+    case ESP_RST_SW:
+        return "sw";
+    case ESP_RST_PANIC:
+        return "panic";
+    case ESP_RST_INT_WDT:
+        return "int_wdt";
+    case ESP_RST_TASK_WDT:
+        return "task_wdt";
+    case ESP_RST_WDT:
+        return "wdt";
+    case ESP_RST_DEEPSLEEP:
+        return "deepsleep";
+    case ESP_RST_BROWNOUT:
+        return "brownout";
+    case ESP_RST_SDIO:
+        return "sdio";
+    case ESP_RST_USB:
+        return "usb";
+    case ESP_RST_JTAG:
+        return "jtag";
+    case ESP_RST_EFUSE:
+        return "efuse";
+    case ESP_RST_PWR_GLITCH:
+        return "pwr_glitch";
+    case ESP_RST_CPU_LOCKUP:
+        return "cpu_lockup";
+    case ESP_RST_UNKNOWN:
+    default:
+        return "unknown";
+    }
+}
+
 /* R3-fw-5: every partition layout this firmware knows, by its geometry fingerprint. All of
  * them, not just this build's own: a board says what map it carries. spec/device-protocol.md
  * -> Partition layouts, retyped; pinned equal to BUILTIN_LAYOUTS by
@@ -282,6 +329,9 @@ esp_err_t ff_identity_init(void)
      * of the last ff-id line, and this one has no 12-character hex run. */
     ESP_LOGI(TAG, "image: fleetforge library %s, lib_marker %u", ff_lib_marker.lib_version,
              (unsigned)ff_lib_marker.format);
+    /* S0-fw-6: before the device_id line too, for the same reason (no hex run). */
+    s_reset_reason = reset_reason_name(esp_reset_reason());
+    ESP_LOGI(TAG, "reset_reason %s (announced)", s_reset_reason);
     ESP_LOGI(TAG, "device_id %s", s_device_id);
 
     /* R2b-fw-2. After the MAC, and never fatal: an unknown measurement is announced as
@@ -487,6 +537,8 @@ static cJSON *announce_object(const ff_cfg_t *cfg)
     cJSON *capabilities = cJSON_CreateArray();
     cJSON_AddItemToArray(capabilities, cJSON_CreateString("ota"));
     cJSON_AddItemToObject(root, "capabilities", capabilities);
+    /* S0-fw-6: after `capabilities`, before `lib_marker`, as the spec prints it. */
+    cJSON_AddStringToObject(root, "reset_reason", s_reset_reason);
     /* R3-fw-6, spec/device-protocol.md -> up/announce `lib_marker`: the `format` of the
      * library marker in the RUNNING image, the last key. This read from another TU is what
      * keeps the marker linked (ff_marker.c): nothing force-keeps it. */

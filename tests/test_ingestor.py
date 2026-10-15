@@ -1056,3 +1056,83 @@ async def test_notify_is_delivered_on_commit_and_never_on_rollback(
             await cleanup.execute(
                 text("DELETE FROM devices WHERE device_id = :d"), {"d": device_id}
             )
+
+
+# ---------------------------------------------------------------------------
+# reset_reason (S0-fw-6): logged on a live announce, never stored
+# ---------------------------------------------------------------------------
+
+
+def _reset_reason_lines(records: list[logging.LogRecord]) -> list[str]:
+    return [r.getMessage() for r in records if "announced reset_reason=" in r.getMessage()]
+
+
+async def test_a_live_announce_logs_its_reset_reason(session: AsyncSession) -> None:
+    await seed_device(session)
+    with capture_logs() as records:
+        event = await publish(session, "announce", {**ANNOUNCE, "reset_reason": "panic"})
+
+    assert event is not None
+    assert _reset_reason_lines(records) == [f"device {DEVICE_ID} announced reset_reason=panic"]
+
+
+async def test_a_retained_announce_does_not_log_a_reset_reason(session: AsyncSession) -> None:
+    """A replay repeats an old boot's reason on every ingestor reconnect."""
+    await seed_device(session)
+    with capture_logs() as records:
+        event = await publish(
+            session, "announce", {**ANNOUNCE, "reset_reason": "panic"}, retained=True
+        )
+
+        assert event is not None
+        assert _reset_reason_lines(records) == []
+        # The capture works (else the check above is vacuous): a live one is logged.
+        await publish(session, "announce", {**ANNOUNCE, "reset_reason": "sw"})
+
+    assert _reset_reason_lines(records) == [f"device {DEVICE_ID} announced reset_reason=sw"]
+
+
+async def test_an_unknown_reset_reason_is_logged_as_is(session: AsyncSession) -> None:
+    """*Evolution rules*, rule 2: a name from a later IDF is never refused."""
+    await seed_device(session)
+    with capture_logs() as records:
+        await publish(session, "announce", {**ANNOUNCE, "reset_reason": "new_in_idf_6"})
+
+    assert _reset_reason_lines(records) == [
+        f"device {DEVICE_ID} announced reset_reason=new_in_idf_6"
+    ]
+
+
+@pytest.mark.parametrize(
+    "value",
+    [7, True, ["sw"], {"r": "sw"}, "x" * 17, "sw\nfake log line", None],
+)
+async def test_a_malformed_reset_reason_logs_null_and_keeps_the_announce(
+    session: AsyncSession, value: object
+) -> None:
+    await seed_device(session)
+    with capture_logs() as records:
+        event = await publish(
+            session, "announce", {**ANNOUNCE, "fw_version": "9.9.9", "reset_reason": value}
+        )
+
+    assert event is not None
+    assert (await reload(session)).fw_version == "9.9.9"
+    assert _reset_reason_lines(records) == [f"device {DEVICE_ID} announced reset_reason=null"]
+
+
+async def test_an_absent_reset_reason_logs_null(session: AsyncSession) -> None:
+    """Every agent <= 0.5.0."""
+    await seed_device(session)
+    with capture_logs() as records:
+        await publish(session, "announce", ANNOUNCE)
+
+    assert _reset_reason_lines(records) == [f"device {DEVICE_ID} announced reset_reason=null"]
+
+
+def test_reset_reason_is_never_stored() -> None:
+    """No column, no migration (R4): the store's column list and the model leave it out."""
+    from fleetforge.ingestor.store import ANNOUNCE_FIELDS
+
+    assert "reset_reason" not in ANNOUNCE_FIELDS
+    assert "reset_reason" not in Device.__table__.columns

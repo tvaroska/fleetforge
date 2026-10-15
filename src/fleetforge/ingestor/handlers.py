@@ -117,6 +117,15 @@ async def handle_up_message(
         )
         event_type = EventType.DEVICE_ANNOUNCE
         if row is not None:
+            if not retained:
+                # S0-fw-6: logged, never stored (R4). A live announce only: a retained
+                # replay repeats an old boot's reason on every ingestor reconnect.
+                # `None` covers absent (agents <= 0.5.0), null and malformed alike.
+                logger.info(
+                    "device %s announced reset_reason=%s",
+                    device_id,
+                    announce.reset_reason if announce.reset_reason is not None else "null",
+                )
             # Retained replays too: a detected map is state, not liveness.
             await _note_detected_profile(session, row)
 

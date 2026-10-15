@@ -111,6 +111,7 @@ own receipt time**, never the device's timestamp — see *Clock* below.
   "partition_layout": "ab-4m-v1",
   "ota_slot_size": 1966080,
   "capabilities": ["ota", "selftest", "identify"],
+  "reset_reason": "poweron",
   "lib_marker": 1
 }
 ```

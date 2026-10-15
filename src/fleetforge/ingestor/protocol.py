@@ -24,6 +24,7 @@ from fleetforge.announce_fields import (
     normalize_flash_chip_size,
     normalize_known_networks,
     normalize_partition_table_sha256,
+    normalize_reset_reason,
     normalize_rollback_capable,
     normalize_ssid,
 )
@@ -115,6 +116,10 @@ class AnnouncePayload(_TolerantPayload):
     the same two rules: written as a triple on every announce, absent meaning "unknown"
     (`store.py::_measurement_values`), and malformed coercing to `None`. They are
     declared after `device_id` so a log line can name the board.
+
+    `reset_reason` (S0-fw-6) is read only to be logged on a live announce
+    (`handlers.py`): no column, no API field, so `store.ANNOUNCE_FIELDS` leaves it out.
+    Malformed coerces to `None` like the rest.
     """
 
     proto: int | None = None
@@ -133,6 +138,7 @@ class AnnouncePayload(_TolerantPayload):
     partition_table_sha256: str | None = None
     rollback_capable: bool | None = None
     capabilities: list[str] | None = None
+    reset_reason: str | None = None
 
     @field_validator("ssid", mode="before")
     @classmethod
@@ -163,6 +169,12 @@ class AnnouncePayload(_TolerantPayload):
     def _usable_rollback_capable(cls, value: object, info: ValidationInfo) -> bool | None:
         """A real JSON boolean, or `None` — `"true"` and `1` are not coerced."""
         return normalize_rollback_capable(value, device_id=_logged_device_id(info))
+
+    @field_validator("reset_reason", mode="before")
+    @classmethod
+    def _usable_reset_reason(cls, value: object, info: ValidationInfo) -> str | None:
+        """A short string, or `None` — never a `ValidationError` (S0-fw-6)."""
+        return normalize_reset_reason(value, device_id=_logged_device_id(info))
 
 
 class PresencePayload(_TolerantPayload):
