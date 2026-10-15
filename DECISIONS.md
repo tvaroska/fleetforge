@@ -6,6 +6,20 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-15 — The focus-group report: R4 and R5 are filed, groups, CI tokens and bench tooling are not
+
+- **Input.** `~/Desktop/focus_group_consensus_report.md`, nine recommendations, 5/5 "AGREE" from five model-simulated personas. Synthetic, not customer evidence: it is a checklist of gaps, and unanimity on all nine carries no ranking. The PRD still targets about 5 boards and 25 devices.
+- **Checked against the code** (all hold): `ff_mqtt.c` ignores `reboot`/`rollback`/`apply`/`cancel` ("not implemented by this agent"), parses and ignores `confirm_timeout_s`, and `confirm_timeout_cb` reboots with no safe-window check; `LIST_LIMIT = 200`; `examples/Basic` builds only `esp32` and `esp32s3`; `reset_reason` is logged, not stored (by design, S0-bug-3). One slip: it blames "Watch a board resets the board" on S0-bug-3, which was the investigation; the EN pulse is S0-fe-5.
+- **Against the roadmap.**
+  - Items 1-2 (health, `reset_reason` persistence, `up/log`) are **R4** as already planned, plus `min_free_heap`, the deploy-event enrichment and the `age_ms` batching. Filed: R4-fw-1..4, R4-be-1..2, R4-fe-1..2, R4-test-1.
+  - Items 3-4 (self-test, command seam, safe window, sleepy helpers) are **R5** as planned, plus the verbs, the safe-window gate and `confirm_timeout_s`, which the roadmap does not name. Filed: R5-spec-1, fw-1..7, be-1..2, fe-1, test-1. The safe-window gate on the rollback reboot is the one with a safety argument (SWARM.md section 2); that is why R5 leads with it.
+  - Item 5 (signing, `Range` resume) is **R6** as planned. The one amendment worth taking: a detached signature verified against a device keyring, so the server never holds a production private key. Not filed: R6 is not active; amend `R6-SEC-1/2` when it opens.
+  - Item 9 (additive `proto: 1` reservations) is not in any release. Filed as **R4-spec-1**, a proposal only; the `device_id` format widening is a server schema change and stays unbuilt.
+  - Items 6 (machine tokens, provenance, CI CLI), 7 (flash-bench CLI, registry publishing, Wi-Fi rotation, `ca` in `ff_cfg`) and 8 (groups CRUD, ring rollouts, list pagination) **contradict the stated plan**: groups and bulk deploy are V3 (`spec/prd.md`, `groups-deploy.md`: "five heterogeneous boards have nothing to bulk-deploy"), provenance and push ingestion are R7/R8. Deferred until there is a second operator or a homogeneous fleet. The `ca` in `ff_cfg` and "watch serial without reset" are the two cheap pieces; revisit them with the V3 gateway work and the console.
+- **Rejected.** Pulling ring rollouts forward as "late V1": it needs `groups` and `max_parallel_apply`, which only matter at fleet size.
+
+---
+
 ## 2026-10-15 — reset_reason is built: the agent announces esp_reset_reason() once per boot, the ingestor logs it on a live announce and stores nothing; sw and panic proven in QEMU only through reboots that precede the network (S0-fw-6)
 
 - **Built.** `ff_identity.c` reads `esp_reset_reason()` once in `ff_identity_init()` (all three boot paths call it, so agent, ESP-IDF example and Arduino library stay identical with no new call), maps the 15 IDF 5.5 names lowercased, anything else `unknown`, and emits `reset_reason` after `capabilities`, before `lib_marker`. Patch B applied to the spec example in this commit (Patch A: owner, 74b6bcb). `proto` 1, agent version untouched. Simulator: `poweron` first, `sw` after the apply reboot and the confirm-timer rollback. Ingestor: `AnnouncePayload.reset_reason` via `announce_fields.normalize_reset_reason`; logged on a live announce only; no column, migration or API field. `EnrollRequest` (`extra="ignore"`) verified by test.

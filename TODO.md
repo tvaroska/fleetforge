@@ -56,6 +56,8 @@ run could show, so the pass rests on the deterministic judge. Task list below; b
 <!-- R1 counters: be=3 fe=1 fw=2 test=1 -->
 <!-- R2 counters: fw=6 be=1 fe=1 test=2 spec=1 (fw-3 is the R1-landed confirm timer) -->
 <!-- R3 counters: spec=3 fw=8 be=2 fe=1 test=2 rel=1 -->
+<!-- R4 counters: spec=1 fw=4 be=2 fe=2 test=1 -->
+<!-- R5 counters: spec=1 fw=7 be=2 fe=1 test=1 -->
 <!-- R2b counters: spec=3 fe=13 be=5 fw=1 test=4 -->
 
 Live status lives ONLY here. States: `- [ ]` open · `- [x]` done · `- [!]`
@@ -466,3 +468,112 @@ Order: spec-3 → fw-2 → fw-3/fw-4 → fw-5/fw-6/be-1 → test-1 → spec-2 �
 3. `R2b-fe-8`..`fe-10`, `R2b-fe-4`, `R2b-fe-5`, `R2b-be-1`/`fe-6`. 4. `R2b-spec-1`, then `R2b-fw-1`,
 `fe-12`, `be-5`, `fe-13`; `R2b-spec-2`'s follow-ups (`be-6`, `be-7`, `fw-2`) once the owner
 applies Patch A; 5. `R2b-test-1` last. `R2b-spec-3` can run any time and gates future Improv work.
+
+---
+
+## R4: Health & telemetry view
+
+Opened 2026-10-15 from the focus-group report (`~/Desktop/focus_group_consensus_report.md`,
+synthetic personas; comparison and what was deferred: `DECISIONS.md` 2026-10-15). Fleet
+visibility: what a board is doing, why it last reset, and what it logged. Plan substance:
+[docs/features/health-telemetry.md](docs/features/health-telemetry.md) (*up/log proposal*,
+*reset_reason as built*). **No hardware: every acceptance is QEMU, the simulator, a compile
+or a unit test.** `spec/` is protected: spec tasks file proposals, the owner applies them.
+Order: spec-1 (any time) · fw-1 → be-1 → fe-1 → test-1 · be-2 · fw-3 → fe-2 · fw-2 · fw-4.
+
+### Spec (proposals)
+
+- [ ] **R4-spec-1**: Propose the `proto: 1` additive reservations (P1, 0.5d)
+      From the report's item 9 and `docs/SWARM.md` 5.2-5.4: absent `artifact.type` on `dn/cmd` `stage` means `"app"` (reserve `mcu_fw`, `model_weights`, `fpga_bitstream` and `up/announce.sub_versions`); optional `reason` and `expected_back_s` on `up/presence`; `"dock"` in `link_type`; document `min_free_heap` in `up/hb`. Paste-ready patches in `docs/features/health-telemetry.md`, one section, same shape as the `reset_reason` proposal; a dry-run that the spec-reading tests stay green. Proposal only, nothing built. The `device_id` format widening (`^[a-z0-9_-]{1,32}$`) is a server schema change: note it, do not build it.
+      Added: 2026-10-15
+
+### Firmware
+
+- [ ] **R4-fw-1**: `up/hb` carries `min_free_heap` and a boot-success flag (P0, 1d)
+      `esp_get_minimum_free_heap_size()` beside `free_heap` (the leak signal a crash-looping board lacks); `boot_ok` true once the confirm path has run. Additive to `up/hb`; agent, ESP-IDF example and Arduino library through the same code. Simulator sends both. Acceptance (QEMU, no bench): the QEMU hb carries both keys; a spec-reading test pins them; `just agent-build-all` within the flash budget.
+      Added: 2026-10-15
+- [ ] **R4-fw-2**: User-defined telemetry channel with relative sample age (P1, 1.5d)
+      `up/telemetry` batches `{"samples":[{"age_ms","name","value"}]}`; the server computes `sample_ts = received_at - age_ms` (`docs/SWARM.md` 5.1), so no wall clock on the board. A RAM ring buffer flushes on reconnect. Public API (`ff_telemetry()` / `Fleetforge.metric()`) is additive-only from release, so settle the names in a proposal first. CRITICAL (library public surface). Acceptance (simulator and QEMU): samples taken while disconnected arrive with their original spacing after reconnect.
+      Added: 2026-10-15
+- [ ] **R4-fw-3**: Forward firmware log lines on `up/log` (P0, 1.5d) — **needs the owner to apply `S0-fw-5` Patches A+B first**
+      `ff_logf(level, fmt, ...)` and `Fleetforge.logf()`, explicit opt-in (customer privacy, cellular caps); batches under 2048 B, at most one publish per 5 s, `text` <= 200 B, `dropped` count. An optional compile-time `esp_log` sink, level-filtered and guarded against `ff-mqtt`/`mqtt_client`/`mbedtls` recursion, for debug and test builds only. Basic and basic_idf forward their `morse:` line. Acceptance (QEMU and simulator): the morse line arrives in the server's log table with an `age_ms`-derived time; a flood produces `dropped`, not a stalled heartbeat.
+      Added: 2026-10-15
+- [ ] **R4-fw-4**: Crash-surviving log tail (P2, 1d)
+      Keep the last few lines in a magic-and-CRC-guarded `RTC_NOINIT_ATTR` buffer so lines written just before a `panic` or `task_wdt` flush on the recovery boot. A named gap in the up/log proposal. Acceptance (QEMU): an injected `abort()` three lines after a log call delivers those lines after reboot. The `FF_FAULT_TEST` images and the runbook's QEMU soft-reset limit apply; say plainly which part was proven.
+      Added: 2026-10-15
+
+### Backend and dashboard
+
+- [ ] **R4-be-1**: Persist and serve health, reset reason and logs (P0, 2d)
+      Migration (CRITICAL): `devices.last_reset_reason` plus rolling fault counts for `panic`/`task_wdt`/`brownout`, a log table bounded to the newest 5 000 lines per device and 7 days, telemetry 30 days (SPEC retention). `GET /v1/devices` and the `device.announce` SSE frame carry the reset reason; the ingestor stops being log-only for it. Acceptance: integration tests for ingest, bound-on-write and retention; `just test` green; the migration upgrades and downgrades on a populated dev DB.
+      Added: 2026-10-15
+- [ ] **R4-be-2**: `device.deploy` SSE events carry the transaction (P1, 0.5d)
+      Add `cmd_id`, `state` and terminal `detail` to the `DeviceEvent` payload so a CI or test runner can wait on an event instead of polling `GET /v1/devices`. Additive; an old frontend must still render it. Acceptance: `tests/test_events_stream.py` pins the keys; `just update-e2e` still passes.
+      Added: 2026-10-15
+- [ ] **R4-fe-1**: Live fleet status (P0, 2d)
+      Online/offline, last seen, boot success, last reset reason as a warning badge, `min_free_heap`, metrics. Acceptance: jsdom tests, and a real Chromium run against the simulator showing a `panic` reset badge.
+      Added: 2026-10-15
+- [ ] **R4-fe-2**: Per-device log tail (P1, 1d)
+      Newest first, level, text, `dropped` gaps. Depends on R4-be-1. Acceptance: jsdom, and Chromium against the simulator.
+      Added: 2026-10-15
+
+### Test
+
+- [ ] **R4-test-1**: A metric and a log line emitted on a device reach the dashboard live (P0, 0.5d)
+      Simulator and QEMU, no bench. Depends on R4-fw-2, R4-fw-3, R4-be-1, R4-fe-1.
+      Added: 2026-10-15
+
+---
+
+## R5: Custom self-test confirm, command seam and safe window
+
+Opened 2026-10-15 (focus-group report, as R4). Catches "boots but the app is broken", and
+adds the verbs the protocol already names but the agent ignores. `ff_mqtt.c` logs "not
+implemented" for `reboot`/`rollback`/`apply`/`cancel`, parses `confirm_timeout_s` and
+ignores it, and reboots on a confirm timeout with no safe-window check, which
+`docs/SWARM.md` calls out for anything that flies. Plan substance:
+[docs/features/self-test.md](docs/features/self-test.md). Every firmware task below is
+CRITICAL (confirm timer, rollback path, A/B apply): stronger model and a review before commit.
+Order: spec-1 → fw-1 → fw-2 → fw-3 → fw-4 → fw-5 → be-1 → be-2 → fe-1 → test-1 · fw-6, fw-7 last.
+
+### Spec (proposals)
+
+- [ ] **R5-spec-1**: Propose the R5 wire and API semantics (P0, 1d)
+      The self-test hold and its structured `detail` (<= 64 B, `selftest failed: <reason>; returned to ota_x`); `confirm_timeout_s` honoured; the `apply`/`reboot`/`rollback`/`cancel` verbs and their acks; the safe-window predicate as the gate on **both** `apply` (`awaiting_safe_window`) and a confirm-timeout rollback reboot; `safe_mode` and `power_class: sleepy` helpers. Proposal only, paste-ready patches, spec-reading tests dry-run.
+      Added: 2026-10-15
+
+### Firmware
+
+- [ ] **R5-fw-1**: Self-test entrypoint contract (P0, 1d)
+      `ff_selftest_fn` / `Fleetforge.onSelfTest(fn)`, additive-only public surface. Acceptance (compile, QEMU): the Basic and basic_idf examples register one.
+      Added: 2026-10-15
+- [ ] **R5-fw-2**: Hold slot confirmation until the self-test passes; fail rolls back with a reason (P0, 1.5d)
+      `esp_ota_mark_app_valid_cancel_rollback()` waits for the callback within `confirm_timeout_s`; the failure string is kept in `ff_txn` NVS and reported in `up/status.detail`. Acceptance (QEMU): a build whose self-test fails comes back on the old slot with the reason on the wire.
+      Added: 2026-10-15
+- [ ] **R5-fw-3**: Honour `dn/cmd.confirm_timeout_s` (P1, 0.5d)
+      Persist it in `ff_txn` NVS and arm the confirm timer with it on the OTA boot; 300 s when omitted. Acceptance (QEMU): a `30` s command rolls a hung image back at about 30 s.
+      Added: 2026-10-15
+- [ ] **R5-fw-4**: Implement `apply`, `reboot`, `rollback` and `cancel` (P0, 2d)
+      Release a `staged` `apply: "on_command"` slot; the other verbs per R5-spec-1. Acceptance (QEMU): each verb drives the documented state change and ack; `apply` on nothing staged is refused with a reason.
+      Added: 2026-10-15
+- [ ] **R5-fw-5**: Safe-window predicate gates apply and the rollback reboot (P0, 1.5d)
+      `ff_set_safe_window_cb` / `Fleetforge.onSafeWindow(fn)`. While it says unsafe, `apply` reports `awaiting_safe_window` and a confirm-timeout rollback reboot is deferred. Decide and test what a board does when unsafe lasts longer than the confirm window. Acceptance (QEMU): unsafe defers both; safe releases them.
+      Added: 2026-10-15
+- [ ] **R5-fw-6**: Rapid-crash safe mode (P2, 1d)
+      Three `panic`/watchdog resets within 60 s on an already-confirmed slot hold the board in an OTA-only recovery loop, without running the sketch. Acceptance (QEMU).
+      Added: 2026-10-15
+- [ ] **R5-fw-7**: Sleepy lifecycle helpers (P2, 1d)
+      `Fleetforge.isConnected()`, `Fleetforge.isReadyForSleep()` and the `power_class: "sleepy"` configuration in `Fleetforge.h`.
+      Added: 2026-10-15
+
+### Backend and dashboard
+
+- [ ] **R5-be-1**: Deploys honour the self-test result (P0, 1d)
+- [ ] **R5-be-2**: REST endpoints for `apply`, `reboot`, `rollback` and `cancel` (P1, 1d)
+      Under `deploys.py` / `devices.py`, behind the admin credential, validated against the device's announced capabilities.
+- [ ] **R5-fe-1**: Dashboard shows the self-test result, the rollback `detail` and Apply/Reboot controls (P1, 1d)
+
+### Test
+
+- [ ] **R5-test-1**: Failing self-test rolls back; `apply` waits for the safe window (P0, 1d)
+      QEMU and simulator, no bench. Depends on R5-fw-2, R5-fw-4, R5-fw-5, R5-be-1.
