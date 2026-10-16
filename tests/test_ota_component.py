@@ -49,7 +49,17 @@ JUSTFILE = AGENT_DIR.parent / "justfile"
 PRIVATE_WHOLE_HEADERS = ("ff_ota.h", "ff_txn.h", "ff_net_adapter.h", "ff_marker.h")
 INTERNAL_HEADERS = tuple(
     f"ff_{name}_internal.h"
-    for name in ("identity", "mqtt", "net", "safe_window", "selftest", "store", "telemetry", "time")
+    for name in (
+        "identity",
+        "mqtt",
+        "net",
+        "safe_mode",
+        "safe_window",
+        "selftest",
+        "store",
+        "telemetry",
+        "time",
+    )
 )
 # The maker API (R4-fw-2, DECISIONS 2026-10-15): public headers for a firmware's own code.
 # The stock agent has no application and no honest reason to call them, so they are the

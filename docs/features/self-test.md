@@ -1211,6 +1211,151 @@ Answered (R5-spec-1): it stays awake from `staging` until `confirmed` or `rolled
     boot-loop panic*); the same bundle booted cleanly without the TTY. `agent/tools/otadata.py`
     needs a `flash_size` the library bundle's manifest lacks (patched copy used).
 
+### R5-fw-6 as built
+
+- **What was built.** Rapid-crash safe mode (R5-spec-1 D13), unreleased (no version bump; the
+  release waits for the owner's Patch A). New PUBLIC, non-maker header `include/ff_safe_mode.h`
+  (`bool ff_safe_mode_check(void)`), `src/ff_safe_mode.c` (TAG `ff-safemode`) and
+  `src/ff_safe_mode_internal.h` (`ff_safe_mode_active()`). All three boot paths call the check
+  right after `ff_mqtt_arm_confirm_timer()`: `agent_main.c` (its second statement; it never
+  holds), `Fleetforge.cpp` `begin()` and `basic_idf/main/fleetforge_start.c` (both CRITICAL),
+  which start the agent and then hold the calling task in `hold_in_safe_mode()`. `ff_identity.c`:
+  `ff_identity_reset_reason_name()` (a wrapper of the static `reset_reason_name()`), the
+  `safe_mode true (announced)` boot line and the `safe_mode` announce key. `Fleetforge.h` and
+  `fleetforge_start.h` document the non-returning case; `ff-safemode` joins `FF_LOG_TAGS`. No
+  spec, server, simulator, frontend, `ff_mqtt.c`, `ff_ota.c`, partition or sdkconfig change.
+- **Decisions.**
+  - (1) **One `RTC_NOINIT_ATTR` record, never NVS**: magic `FFS6`, the running slot's address,
+    a saturating crash count, the latch, the current boot's lifetime bound and the two last
+    crashed boots' lifetimes, `esp_rom_crc32_le` over the rest, re-sealed after every write. RTC
+    memory survives panic, watchdog and software resets and is lost at power-on, which is the
+    spec's "a power cycle leaves". A bad magic or crc is a fresh record (fail-safe).
+  - (2) **The window**: three counted resets T1 < T2 < T3 are within 60 s when T3 - T1 <= 60 s,
+    i.e. the two lifetimes between them sum to <= 60 s (`FF_SAFE_MODE_CRASHES 3`,
+    `FF_SAFE_MODE_WINDOW_S 60`, both `_Static_assert`ed). The lifetimes are generic in
+    `FF_SAFE_MODE_CRASHES - 1`.
+  - (3) **The breadcrumb is a FreeRTOS task (`ff_alive`, 2 KB, priority 5, self-deleting),
+    never an esp_timer**, and runs only on a boot that began with a counted crash and is not
+    latched: every second it writes an upper bound of the lifetime (over-estimating makes safe
+    mode harder to enter) until 60 s. No log, no NVS, no lock. A task that cannot be created
+    means 60 ("unknown" never counts). An esp_timer alarm pending across a reset is the likely
+    trigger of QEMU's `esp_timer_impl_init` panic loop.
+  - (4) **The ladder**: a fresh record when the record is invalid, the reason is `poweron`, the
+    slot differs (an update, a rollback, a bootloader return) or the image is not confirmed
+    (NEW, PENDING_VERIFY, INVALID, ABORTED; VALID, UNDEFINED and "no otadata entry" are
+    confirmed, the D5 rule). Otherwise `panic`/`int_wdt`/`task_wdt`/`wdt` count (shift the
+    lifetimes, count, latch inside the window; a crash while latched stays latched); `brownout`
+    clears the count and keeps the latch; anything else (sw, ext, usb, jtag, deepsleep, sdio,
+    efuse, pwr_glitch, cpu_lockup, unknown) is a fresh record. `sw` is the `reboot` verb's exit:
+    in safe mode only the agent runs and every agent `esp_restart()` is a reboot, an apply or a
+    rollback, so no line of `ff_mqtt.c` changes. Idempotent (`s_checked`).
+  - (5) **Public, non-maker header**: every non-maker public function must be called by
+    `agent_main.c` and every `ff_*` call of `agent_main.c` must be made by both ladders, and all
+    three call it, so no surface rule changed. `ff_safe_mode_active()` is private (only the
+    announce reads it; a maker call could only ever read false).
+  - (6) **The hold** is a per-ladder `static void hold_in_safe_mode(void) __attribute__((noreturn))`
+    (park()'s twin): a W line every 5 min, `vTaskDelay`, never a reboot, an abort, a return or a
+    progress report (safe mode is not `halted`). It runs after `s_started = true` and before
+    `return true`, so the agent task exists; the check runs before the twice-called test so the
+    first call counts. The sketch's `onSelfTest`/`onSafeWindow` are never registered, so a
+    board in safe mode announces neither (truthful) and reboots at once when told. A `begin()`
+    that fails for another reason returns false as before.
+  - (7) **Logs**: one line per boot, only when worth saying: `crash reset N of 3`, `SAFE MODE:
+    …`, `still in SAFE MODE (last reset: …)`, `safe mode left: …` (another image / a software
+    restart / reset by X), and the ladders' hold line. Reason names are ff_identity's one
+    vocabulary.
+  - (8) **Announce**: `"safe_mode": true` after `reset_reason`, before `lib_marker`, only when
+    active, never `false`; boot line `ff-id: safe_mode true (announced)` before the `device_id`
+    line. Not in `up/hb`, no `up/status` state. The enroll body shares `announce_object()`
+    (`EnrollRequest` ignores extra keys): no server change.
+  - (9) **A failed update** returns to the slot that crashed, as "another image ran last", so the
+    old sketch runs again and re-enters safe mode three crashes later. Accepted.
+- **Deviations from the plan.** (a) The first counted crash after a non-crash boot logs `after
+  60 s or more (or unmeasured)` rather than `after <= 60 s` (that boot's lifetime is not
+  measured; "<= 60" would be false). (b) `safe mode left: reset by poweron` is logged when a
+  valid latched record meets a power-on reason (the ESP32 EN button reads POWERON and may keep
+  RTC memory); a real power cycle has no valid record and logs nothing. (c) T2 step 5: the
+  `reboot` verb's next boot always hits the emulator's `esp_timer_impl_init` loop (retried
+  once, same), so the `sw` exit was proven with an extra variant whose own task calls
+  `esp_restart()` before any network. (d) T2 step 7 used `on_command` + `apply` + a power cycle
+  instead of `auto`: an `auto` apply's soft reset after the network ran never reaches X's
+  `app_main` in QEMU. (e) `TODO.md` is not flipped by the implementer (CRITICAL: the reviewer
+  commits).
+- **Rejected.** NVS or any flash write (wear, needs NVS before the hold, breaks the bltest's
+  property); an esp_timer breadcrumb (QEMU reset loop); `esp_rtc_get_time_us()` timestamps
+  (correct on silicon, unknown across a QEMU reset); a `safe_mode` status state or a recovery
+  partition (R5-spec-1); a maker read of the flag; holding the stock agent; counting
+  `cpu_lockup` (not in the spec's list); touching `ff_mqtt.c` for the `reboot` exit.
+- **Named gaps.** Crashes before `begin()`/`fleetforge_start()` (global constructors, sketch
+  lines above `begin()`) are invisible, and code before the hold still runs. Lifetimes are
+  measured from the check at 1 s resolution, not from the reset (bootloader + startup, about
+  0.3-1 s per boot, uncounted), so the effective window is a little over 60 s. A crash in the
+  middle of a record write leaves a bad crc (a fresh record, fail-safe). An RTC watchdog
+  configured to reset the RTC domain wipes the record (no safe mode). A breadcrumb starved by a
+  hog at priority >= 5 under-reports a lifetime. A PENDING_VERIFY image that crashes before
+  reaching its own check (or QEMU's `esp_timer_impl_init` loop) is charged as one crash to the
+  image the bootloader returns to. The stock agent can be "in safe mode" with nothing to hold.
+  The log says `crash reset 4 of 3` once the count passes three outside the window.
+- **Proposed spec addenda (paste-ready, for the owner; `spec/` is not edited).**
+  - Patch A6, append to the `safe_mode` paragraph: "The three resets count only while the same
+    confirmed image runs; a USB-flashed image counts as confirmed. "Within 60 s" is measured
+    over the lifetimes of the boots between the first and the third reset. A brownout neither
+    counts nor leaves safe mode; any other reset (a software restart, the reset pin, USB, JTAG,
+    a deep-sleep wake) leaves it. An update that fails returns to the image that crashed, which
+    re-enters safe mode after three more crashes. A device that runs only the agent reports
+    `safe_mode` too."
+  - Open question: should `cpu_lockup` (a RISC-V double exception) count?
+- **Tests.** New `tests/test_safe_mode.py` (33): the header (one public non-maker function,
+  `extern "C"`, the contract written down, the read private, compiled), the boot paths
+  (agent_main: arm then check, never holds; both ladders: check right after the arm and before
+  the twice-called test, the hold guarded after `s_started = true` and before `return true`, a
+  `noreturn` loop that never returns/reboots/aborts/reports, the hold line, the tag, `main.c`
+  unchanged), the module (RTC_NOINIT + magic + crc, every write sealed, exactly the four
+  counted reasons, the fresh-record conditions incl. the slot compare, the confirmed states,
+  shift/latch, brownout keeps the latch, the constants, idempotence, no NVS/esp_timer/reboot,
+  the quiet self-deleting breadcrumb only on a counted unlatched boot, the shared vocabulary,
+  the log lines), the announce (true only when active, between `reset_reason` and
+  `lib_marker`, the boot line before `device_id`, not in hb, not in the spec example), and no
+  verb path mentions safe mode. Changed on purpose: `test_ota_component.py::INTERNAL_HEADERS`
+  (+`safe_mode`), `test_agent_power_and_size.py` budgets. Mutation checks, each red then
+  reverted: brownout added to the counted set; the slot compare dropped; the hold removed from
+  `begin()`; `safe_mode` emitted as `false` unconditionally; an `esp_timer_get_time()` call in
+  `ff_safe_mode.c`.
+- **T1.** `just test` 2334 passed (ruff, format, mypy clean); `just agent-build-all` four
+  `BUNDLE OK`, 0 warnings, app sizes esp32 1,048,032 / esp32s3 1,027,872 / esp32c3 1,089,872 /
+  esp32c6 1,139,440 (+1.6-1.8 KB, the budgets raised to these bytes); `just lib-arduino-check`
+  `== PASS` (0 warnings, `T verifyRollbackLater` in both ELFs); `just lib-quickstart` (full,
+  with QEMU, which includes the build-only half) `== PASS (2366 s)`, 0 warnings in all five
+  builds; `just agent-qemu-smoke esp32` `HARNESS OK`.
+- **T2** (QEMU esp32, dev stack on 8088, uncommitted Basic.ino variants that print `fw6x:` and
+  `abort()` right after `begin()`, host-time-stamped transcripts, `just mqtt-sub` wire
+  capture). (1) X35 + corrupted cfg, `--fresh`, 7 boots in 7 min: `crash reset 1 of 3` (`60 s
+  or more (or unmeasured)`), then `after <= 36 s` `2 of 3` … `6 of 3`, `fw6x:` on every boot,
+  zero `SAFE MODE`. (2) X25 + corrupted cfg: `after <= 26 s` `2 of 3`, then on boot 4 `SAFE
+  MODE: three crash resets within 60 s on this confirmed image (last: panic)…`, the hold line,
+  `halted: no usable ff_cfg`, and no `fw6x:` for the remaining 185 s. (3) X + good cfg + fresh
+  token: three `fw6x:` and three `rst:0xc` in 68 s, `SAFE MODE`, `ff-id: reset_reason panic
+  (announced)`, `ff-id: safe_mode true (announced)`, enroll 200, connected, announce acked; on
+  the wire `…"capabilities":["ota","apply","cancel","rollback","reboot"],"reset_reason":"panic",
+  "safe_mode":true,"lib_marker":1}`, heartbeats every 10 s up to `uptime_s` 212, and no `fw6x:`
+  or `rst:` for 225 s; `GET /v1/devices` showed the board `online: true` (step 5's run). (4)
+  Power cycle (no `--fresh`): `fw6x:` on the first boot, safe mode again three crashes later,
+  `reusing the stored credential`, connected. (5) `reboot`: `up/ack`
+  `{"type":"reboot","result":"accepted",…}`, `rebooting for command 81b5c556…`, then the
+  emulator's `esp_timer_impl_init` panic loop (retried once: same). Variant XS (its own task
+  calls `esp_restart()` 3 s into boot 4, corrupted cfg): `SAFE MODE`, `fw6s: esp_restart()…`,
+  `rst:0xc`, `I ff-safemode: safe mode left: a software restart (a reboot command, an update or
+  a rollback)`, `fw6x: … (boot 5)`, then `crash reset 1 of 3` again. (6) From safe mode, B
+  `1.1.0-fw6-1792170686` staged `on_command` (`ota_1 is staged and bootable`), `apply` acked
+  `accepted`, power cut at `rebooting into it`, restart: `confirming on ota_1`, `custom
+  self-test passed`, `CONFIRMED`, `up/status confirmed` `selftest passed`, `morse:` lines; B's
+  announce has no `safe_mode` and lists `selftest`, `safe_window`. (7) From B, X
+  `1.2.0-fw6x-1792170970` staged and applied the same way: X boots PENDING_VERIFY, prints
+  `fw6x:`, aborts; B comes back with `reset_reason panic`, zero `ff-safemode` lines, and
+  `rolled_back` `returned to ota_1; ota_0 did not confirm`. (8) The full `lib-quickstart` and a
+  stock-agent `--fresh` boot: 13 announces, none with `safe_mode`, no `ff-safemode` line on a
+  power-on boot. The api's 10.0.2.2 origins were restored afterwards; no variant was committed.
+
 ### R5-be-1 as built
 
 - **What was built.** The server reads the firmware's self-test result out of a deploy's

@@ -31,6 +31,10 @@ FF_SELFTEST_INTERNAL_H = COMPONENT_SRC / "ff_selftest_internal.h"
 FF_SAFE_WINDOW_H = COMPONENT_INCLUDE / "ff_safe_window.h"
 FF_SAFE_WINDOW_C = COMPONENT_SRC / "ff_safe_window.c"
 FF_SAFE_WINDOW_INTERNAL_H = COMPONENT_SRC / "ff_safe_window_internal.h"
+# R5-fw-6: rapid-crash safe mode. A PUBLIC, non-maker header: all three boot paths call it.
+FF_SAFE_MODE_H = COMPONENT_INCLUDE / "ff_safe_mode.h"
+FF_SAFE_MODE_C = COMPONENT_SRC / "ff_safe_mode.c"
+FF_SAFE_MODE_INTERNAL_H = COMPONENT_SRC / "ff_safe_mode_internal.h"
 
 # R3-fw-3: the same component directory is the Arduino library (library.json), and the
 # wrapper is its second consumer. The example and its partitions.csv travel together.

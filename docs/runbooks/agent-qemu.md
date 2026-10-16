@@ -441,6 +441,59 @@ What to expect (W, `apply: on_command` stage, then the verb as the commander):
 `agent/tools/otadata.py` reads a library image too if the bundle's `manifest.json` is given a
 `"flash_size": "4MB"` (copy the bundle first).
 
+#### Rapid-crash safe mode (R5-fw-6)
+
+Three `panic`/watchdog resets within 60 s on the same confirmed image put the board in safe
+mode (`ff_safe_mode.c`, TAG `ff-safemode`): the library's `begin()` (and the ESP-IDF
+example's `fleetforge_start()`) starts the agent and never returns, so `setup()` past
+`begin()` and `loop()` do not run, and the announce carries `"safe_mode":true`. The stock agent
+makes the same check and announces it, but has nothing to hold. The state is an RTC_NOINIT
+record, which the emulator keeps across a panic reset and loses when QEMU is killed (a power
+cycle). Its watchdogs are disabled (`wdt_disable`), so only `panic` can be driven here.
+
+Drive it with sketch variants (never commit them; same recipe as the safe-window variants):
+add, right after `Fleetforge.begin(FW_VERSION);` in `setup()`,
+`printf("fw6x: setup() ran past begin()\n"); delay(CRASH_MS); abort();`. The crash must come
+**before the agent reaches the network**: a soft reset after the network ran panics in
+`esp_timer_impl_init` forever (above). So use `CRASH_MS` 0 with a good `ff_cfg`, or a longer
+delay with a corrupted `ff_cfg` (copy `.qemu/ff_cfg.bin` aside and flip one byte; the agent
+parks at `ff_cfg: crc32 mismatch`; put the good one back afterwards).
+
+```bash
+# X25 (delay 25000) + corrupted cfg, --fresh: boots 1-3 print fw6x:, boot 4 holds
+W ff-safemode: the last boot ended in panic after 60 s or more (or unmeasured): crash reset 1 of 3 on this image (three within 60 s hold it in safe mode)
+W ff-safemode: the last boot ended in panic after <= 26 s: crash reset 2 of 3 on this image …
+W ff-safemode: SAFE MODE: three crash resets within 60 s on this confirmed image (last: panic). Only the fleetforge agent runs; …
+W ff-lib: safe mode: setup() and loop() are not running — only the fleetforge agent is (an update, a reboot command or a power cycle leaves)
+# X35 (delay 35000): "after <= 36 s", "crash reset 3 of 3", "4 of 3", … and never SAFE MODE (36 + 36 > 60)
+# X (delay 0) + good cfg + fresh token: three fw6x: lines in ~30 s, then SAFE MODE, and
+I ff-id: reset_reason panic (announced)
+I ff-id: safe_mode true (announced)
+# wire: …"capabilities":["ota","apply","cancel","rollback","reboot"],"reset_reason":"panic","safe_mode":true,"lib_marker":1}
+```
+
+The first counted crash after a power-on says `60 s or more (or unmeasured)`: only a boot that
+began with a counted crash measures its own lifetime (a one-second task, upper bound, stops at
+60 s). The window is the sum of the two lifetimes between the first and the third crash.
+
+The exits, as the emulator shows them:
+
+- **Power cycle**: `just agent-qemu-stop esp32; just lib-qemu` (no `--fresh`): the RTC record is
+  gone, the first boot prints `fw6x:` again, and X re-enters safe mode three crashes later.
+- **`reboot` command**: `up/ack` `accepted` and `rebooting for command <id>`, then the emulator's
+  `esp_timer_impl_init` panic loop (the network ran), every time. Proven instead with a variant
+  whose own task calls `esp_restart()` 3 s into the fourth boot, with a corrupted cfg (no
+  network): `I ff-safemode: safe mode left: a software restart (a reboot command, an update or
+  a rollback)`, then `fw6x:` again. Every agent `esp_restart()` is that reset reason.
+- **Update**: stage B `on_command`, `apply`, kill QEMU at `rebooting into it` and start it again
+  (the runbook's usual workaround): B confirms (`selftest passed`), and its announce has no
+  `safe_mode` key and lists `selftest`, `safe_window`. On silicon the apply's software reset
+  into another slot leaves twice over (`another image is running`).
+- **Not counted on an unconfirmed image**: from B, stage X `on_command`, apply, kill, start: X
+  boots PENDING_VERIFY, prints `fw6x:`, aborts, the bootloader returns to B, and B (reset reason
+  `panic`) logs no `ff-safemode` line and reports `rolled_back`: X's own check had written its
+  slot, so B starts afresh.
+
 ### Driving a failure: boot loop, power cut, torn otadata, hang (R2-test-1)
 
 Four more outcomes, each from a **real** OTA'd image or a state a power cut really

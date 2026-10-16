@@ -35,6 +35,7 @@
 #include "esp_timer.h"
 #include "ff_marker.h"
 #include "ff_net_internal.h"
+#include "ff_safe_mode_internal.h"
 #include "ff_store_internal.h"
 #include "mbedtls/sha256.h"
 
@@ -105,6 +106,11 @@ static const char *reset_reason_name(esp_reset_reason_t reason)
     default:
         return "unknown";
     }
+}
+
+const char *ff_identity_reset_reason_name(esp_reset_reason_t reason)
+{
+    return reset_reason_name(reason);
 }
 
 /* R3-fw-5: every partition layout this firmware knows, by its geometry fingerprint. All of
@@ -337,6 +343,11 @@ esp_err_t ff_identity_init(void)
     /* S0-fw-6: before the device_id line too, for the same reason (no hex run). */
     s_reset_reason = reset_reason_name(esp_reset_reason());
     ESP_LOGI(TAG, "reset_reason %s (announced)", s_reset_reason);
+    /* R5-fw-6: only when held, and before the device_id line for the same reason (no hex run).
+     * Every boot path runs ff_safe_mode_check() first, right after the confirm timer. */
+    if (ff_safe_mode_active()) {
+        ESP_LOGI(TAG, "safe_mode true (announced)");
+    }
     ESP_LOGI(TAG, "device_id %s", s_device_id);
 
     /* R2b-fw-2. After the MAC, and never fatal: an unknown measurement is announced as
@@ -585,6 +596,12 @@ static cJSON *announce_object(const ff_cfg_t *cfg)
     cJSON_AddItemToObject(root, "capabilities", capabilities);
     /* S0-fw-6: after `capabilities`, before `lib_marker`, as the spec prints it. */
     cJSON_AddStringToObject(root, "reset_reason", s_reset_reason);
+    /* R5-fw-6, R5-spec-1 D13: `safe_mode` true while held after three crash resets within 60 s;
+     * absent otherwise, never false (the server treats absent and false alike). Not in the
+     * spec's example, so after `reset_reason` and before `lib_marker`, which stays last. */
+    if (ff_safe_mode_active()) {
+        cJSON_AddTrueToObject(root, "safe_mode");
+    }
     /* R3-fw-6, spec/device-protocol.md -> up/announce `lib_marker`: the `format` of the
      * library marker in the RUNNING image, the last key. This read from another TU is what
      * keeps the marker linked (ff_marker.c): nothing force-keeps it. */

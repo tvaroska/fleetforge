@@ -15,6 +15,7 @@
 #include <stdint.h>
 
 #include "esp_err.h"
+#include "esp_system.h"
 #include "ff_cfg.h"
 #include "ff_identity.h"
 
@@ -82,6 +83,11 @@ void ff_identity_note_selftest(bool registered);
  * reboot it makes waits for the firmware's safe-window rule. Called once, by ff_mqtt_run(),
  * with ff_safe_window_freeze()'s answer, on the same terms as ff_identity_note_selftest(). */
 void ff_identity_note_safe_window(bool registered);
+
+/* R5-fw-6. The one reset-reason vocabulary (`esp_reset_reason_t` lowercased without
+ * `ESP_RST_`, the announce's `reset_reason`), for ff_safe_mode.c's log lines. A string
+ * literal, never NULL; `unknown` for a value this build does not know. */
+const char *ff_identity_reset_reason_name(esp_reset_reason_t reason);
 
 /* The 12-hex-digit device id. Valid after ff_identity_init(); "" before. */
 const char *ff_device_id(void);

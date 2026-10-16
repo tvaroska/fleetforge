@@ -47,6 +47,7 @@
 #include "ff_mqtt.h"
 #include "ff_net.h"
 #include "ff_progress.h"
+#include "ff_safe_mode.h"
 #include "ff_store.h"
 #include "ff_time.h"
 #include "freertos/FreeRTOS.h"
@@ -221,6 +222,14 @@ void app_main(void)
      * the lines below set up (ff_mqtt.h). */
     ff_mqtt_arm_confirm_timer();
 
+    /* R5-fw-6. Second, right after the arm (the library's begin() and the ESP-IDF example's
+     * fleetforge_start() make the same call at the same place). Three crash resets within
+     * 60 s on this confirmed image put the board in safe mode, where only the agent runs.
+     * The stock agent has no firmware of its own to hold back, so in safe mode it runs
+     * exactly as always and its announce says `safe_mode: true`: a crash-looping agent is
+     * visible to the fleet. It does not hold. RTC memory only, never NVS or flash. */
+    (void)ff_safe_mode_check();
+
     log_power_fault();
     log_boot_facts();
 
@@ -232,7 +241,8 @@ void app_main(void)
      *
      * Here, after log_boot_facts() so the transcript names the slot and its state first, and
      * before nvs_ready() so none of our code runs: no NVS write, no network, no ff_txn touch,
-     * so the returned image still finds its record and reports `rolled_back`. Never
+     * so the returned image still finds its record and reports `rolled_back`. (The safe-mode
+     * check above writes RTC memory only, and a PENDING_VERIFY image never counts.) Never
      * published (firmware/publish.py refuses -bltest): serially flashed, this loops forever. */
     ESP_LOGE(TAG, "FF_FAULT_TEST=bootloop: aborting on purpose, on every boot. The bootloader "
                   "must put the previous slot back at the next reset");

@@ -33,7 +33,14 @@
  *     does: reads the board's ff_cfg partition, brings up the link (Wi-Fi from the
  *     known-networks list, or Ethernet), sets the clock, enrolls once with the enrollment
  *     token, then keeps the MQTT session: announce, heartbeat, and stage / apply / confirm
- *     / rollback of updates. setup() and loop() keep running; begin() returns at once.
+ *     / rollback of updates. setup() and loop() keep running; begin() returns at once,
+ *     except in safe mode (point 3).
+ *  3. Safe mode (R5-fw-6): after three crash resets (a panic or a watchdog) within 60 s on
+ *     this image, begin() starts the library and never returns, so the rest of setup() and
+ *     loop() do not run until an update, a reboot command or a power cycle. The board stays
+ *     online and announces `"safe_mode": true`, so a crash-looping sketch can be updated out
+ *     of trouble. A brownout does not count; crashes of an update still waiting for its
+ *     confirm do not either (it rolls back instead).
  *
  * What the library owns, so the sketch must not touch it:
  *
@@ -66,7 +73,7 @@ class FleetforgeClass {
   // Call as the FIRST line of setup(). fw_version: this firmware's version, a string
   // literal compiled into the image (1-31 printable ASCII); it is what the fleet dashboard
   // shows. Returns false (and logs why) if called twice, if fw_version is invalid, or if
-  // the task cannot be created.
+  // the task cannot be created. In safe mode it does not return at all (see point 3 above).
   bool begin(const char *fw_version);
 
   // Report one sample of a metric to the fleet (`up/telemetry`, R4-fw-2). Safe to call

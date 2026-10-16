@@ -29,6 +29,12 @@
  *  3. begin() arms the confirm timer before anything that can fail or wait, exactly as
  *     agent_main.c's app_main does (R2-fw-4). Confirmation itself happens only inside
  *     ff_mqtt_run, on the announce PUBACK; nothing in this file confirms, marks or reboots.
+ *
+ * And one is the library's crash posture (R5-fw-6): right after the arm, begin() asks
+ * ff_safe_mode_check() whether this boot is in safe mode (three crash resets within 60 s on
+ * this confirmed image). If it is, begin() starts the library and then holds the calling
+ * task forever (hold_in_safe_mode()), so the rest of setup() and loop() never run and the
+ * board stays reachable for an update. It never reboots out of it.
  */
 
 #if defined(ARDUINO)
@@ -56,6 +62,7 @@
 #include "ff_mqtt.h"
 #include "ff_net.h"
 #include "ff_progress.h"
+#include "ff_safe_mode.h"
 #include "ff_safe_window.h"
 #include "ff_selftest.h"
 #include "ff_store.h"
@@ -89,8 +96,8 @@ static const char *TAG = "ff-lib";
  * tests/test_arduino_library.py pins this list to the TAGs in src/. */
 static const char *const FF_LOG_TAGS[] = {
     "ff-cfg", "ff-enroll", "ff-eth", "ff-id", "ff-lib", "ff-mqtt", "ff-net",
-    "ff-ota", "ff-progress", "ff-safe", "ff-selftest", "ff-store", "ff-tel", "ff-time",
-    "ff-txn", "ff-wifi",
+    "ff-ota", "ff-progress", "ff-safe", "ff-safemode", "ff-selftest", "ff-store", "ff-tel",
+    "ff-time", "ff-txn", "ff-wifi",
 };
 
 FleetforgeClass Fleetforge;
@@ -113,6 +120,21 @@ static void park(const char *reason)
 
     while (true) {
         ESP_LOGE(TAG, "halted: %s", reason);
+        vTaskDelay(pdMS_TO_TICKS(300000));
+    }
+}
+
+/* Safe mode (R5-fw-6): park()'s twin, for a boot whose sketch crashed three times within 60 s.
+ * The library runs (it was started just before); the sketch does not: begin() never returns,
+ * so the rest of setup() and loop() are held until an update, a reboot command or a power
+ * cycle. Says so every five minutes. Never reboots, never returns, never reports a stage:
+ * safe mode is not `halted`. */
+static void hold_in_safe_mode(void) __attribute__((noreturn));
+static void hold_in_safe_mode(void)
+{
+    while (true) {
+        ESP_LOGW(TAG, "safe mode: setup() and loop() are not running — only the fleetforge "
+                      "agent is (an update, a reboot command or a power cycle leaves)");
         vTaskDelay(pdMS_TO_TICKS(300000));
     }
 }
@@ -247,6 +269,10 @@ bool FleetforgeClass::begin(const char *fw_version)
      * a serially flashed image; idempotent on a second call. */
     ff_mqtt_arm_confirm_timer();
 
+    /* R5-fw-6, right after the arm and before the twice-called check, so the first call is
+     * the one that counts (it is idempotent). Needs no NVS and no netif. */
+    const bool safe_mode = ff_safe_mode_check();
+
     if (s_started) {
         ESP_LOGE(TAG, "Fleetforge.begin() was called twice; the second call is ignored");
         return false;
@@ -263,6 +289,9 @@ bool FleetforgeClass::begin(const char *fw_version)
         return false;
     }
     s_started = true;
+    if (safe_mode) {
+        hold_in_safe_mode(); /* the library runs; setup() and loop() do not (file header) */
+    }
     return true;
 }
 

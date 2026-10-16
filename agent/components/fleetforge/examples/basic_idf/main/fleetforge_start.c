@@ -13,6 +13,10 @@
  *  2. fleetforge_start() arms the confirm timer before anything that can fail or wait, as
  *     agent_main.c's app_main does (R2-fw-4). Confirmation happens only inside ff_mqtt_run,
  *     on the announce PUBACK; nothing in this file confirms, marks or reboots.
+ *  3. Right after the arm it asks ff_safe_mode_check() whether this boot is in safe mode
+ *     (R5-fw-6: three crash resets within 60 s on this confirmed image). If it is,
+ *     fleetforge_start() starts the agent and does not return (hold_in_safe_mode()), so your
+ *     app_main never runs past it and the board stays reachable for an update.
  *
  * Nothing here reboots on failure, either: every failure retries on a capped backoff or
  * parks with one log line saying what to fix (agent_main.c's file header says why).
@@ -40,6 +44,7 @@
 #include "ff_mqtt.h"
 #include "ff_net.h"
 #include "ff_progress.h"
+#include "ff_safe_mode.h"
 #include "ff_store.h"
 #include "ff_time.h"
 #include "freertos/FreeRTOS.h"
@@ -73,6 +78,21 @@ static void park(const char *reason)
 
     while (true) {
         ESP_LOGE(TAG, "halted: %s", reason);
+        vTaskDelay(pdMS_TO_TICKS(300000));
+    }
+}
+
+/* Safe mode (R5-fw-6): park()'s twin, for a boot whose firmware crashed three times within
+ * 60 s. The agent runs (it was started just before); your app_main does not get past
+ * fleetforge_start() until an update, a reboot command or a power cycle. Says so every five
+ * minutes. Never reboots, never returns, never reports a stage: safe mode is not `halted`. */
+static void hold_in_safe_mode(void) __attribute__((noreturn));
+static void hold_in_safe_mode(void)
+{
+    while (true) {
+        ESP_LOGW(TAG, "safe mode: your app_main is not running past fleetforge_start() — only "
+                      "the fleetforge agent is (an update, a reboot command or a power cycle "
+                      "leaves)");
         vTaskDelay(pdMS_TO_TICKS(300000));
     }
 }
@@ -196,6 +216,7 @@ static void fleetforge_task(void *arg)
 bool fleetforge_start(void)
 {
     ff_mqtt_arm_confirm_timer(); /* FIRST of everything: see the file header, point 2 */
+    const bool safe_mode = ff_safe_mode_check(); /* right after it: point 3 */
 
     if (s_started) {
         ESP_LOGE(TAG, "fleetforge_start() was called twice; the second call is ignored");
@@ -208,5 +229,8 @@ bool fleetforge_start(void)
         return false;
     }
     s_started = true;
+    if (safe_mode) {
+        hold_in_safe_mode(); /* the agent runs; your app_main does not (point 3) */
+    }
     return true;
 }

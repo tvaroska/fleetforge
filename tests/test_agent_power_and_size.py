@@ -231,16 +231,24 @@ FORBIDDEN_OPTIONS = [
 # hold, the stage refusal, ff_ota's apply:auto wait and checkpoint 6, and their log strings.
 # The stock agent registers no rule, but every hook is referenced, so nothing is
 # garbage-collected. The gate's 4 KB stack and TCB are .bss, not app.
+#
+# R5-fw-6: +1.6-1.8 KB each. Raised 2026-10-16 for **all four targets**, all rebuilt, to the
+# exact measured byte: esp32 1,046,288 -> 1,048,032 (+1,744 B), esp32s3 1,026,240 ->
+# 1,027,872 (+1,632 B), esp32c3 1,088,048 -> 1,089,872 (+1,824 B), esp32c6 1,137,632 ->
+# 1,139,440 (+1,808 B). The added code is ff_safe_mode.c (the RTC record's crc and seal, the
+# reset-reason ladder, the otadata read, the breadcrumb task and its starter, and the six log
+# strings), the reset-reason wrapper, the `safe_mode` announce branch and its boot line. The
+# 20-byte record is RTC_NOINIT, not app.
 APP_SIZE_BUDGET_BYTES = {
-    "esp32": 1_046_288,
+    "esp32": 1_048_032,
     # Raised from 973_136 for the OTA-capable agent (R1-fw-1/R1-fw-2), which cost every
     # target ~18 KB. Only esp32 was raised at the time: this gate reads whatever is in
     # `agent/dist/`, so a target nobody had built locally is not checked and does not
     # fail. The other two were still carrying 0.2.0-era numbers until R2b-fw-1 raised
     # them — that was a gap in the gate, not slack here.
-    "esp32s3": 1_026_240,
-    "esp32c3": 1_088_048,
-    "esp32c6": 1_137_632,
+    "esp32s3": 1_027_872,
+    "esp32c3": 1_089_872,
+    "esp32c6": 1_139_440,
 }
 
 # An app may occupy at most this much of an OTA slot. Not a style rule: R2 downloads the

@@ -10,8 +10,11 @@
  *     brings up the link, sets the clock, enrolls once, then keeps the MQTT session:
  *     announce, heartbeat, and stage / apply / confirm / rollback of updates;
  *
- * and returns at once, so your firmware runs alongside it. Returns false (and logs why) if
- * it was already called or the task cannot be created; the confirm timer is armed either way.
+ * and returns at once, so your firmware runs alongside it, except in safe mode (R5-fw-6):
+ * after three crash resets (a panic or a watchdog) within 60 s on this image it starts the
+ * task and never returns, so the board stays online for an update and your firmware is held
+ * until an update, a reboot command or a power cycle. Returns false (and logs why) if it was
+ * already called or the task cannot be created; the confirm timer is armed either way.
  *
  * What the library owns, so your firmware must not touch it: Wi-Fi/Ethernet and SNTP, NVS
  * namespace "ff", the ff_cfg partition, and the OTA confirm decision (never call
