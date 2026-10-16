@@ -21,8 +21,14 @@ extern "C" {
  * (R2-be-1), and ONLY ff_mqtt.c publishes them, from the session that observed it:
  * `confirming` once the new image has a broker session, `confirmed` at the announce PUBACK
  * that confirms it, `rolling_back` best-effort when the confirm timer fires, and
- * `rolled_back` from the image the board RETURNED to. `awaiting_safe_window` is absent
- * because an always-on board has no window to wait for.
+ * `rolled_back` from the image the board RETURNED to.
+ *
+ * R5-fw-5: `awaiting_safe_window` is the wait for the firmware's safe-window rule
+ * (ff_safe_window.h), and it is reported only when the rule says unsafe at the moment a reboot
+ * is due: before an apply's reboot (pct 100, like `staged`/`applying`; detail
+ * FF_DETAIL_APPLY_WAITS), published by ff_ota.c for apply:auto and enqueued by the session for
+ * the `apply` command; and before a decided rollback's reboot (pct null, like `rolling_back`;
+ * detail FF_DETAIL_ROLLBACK_WAITS), by the session only. A board with no rule never reports it.
  *
  * R5-fw-4: `cancelled` belongs to the pre-reboot walk too. It ends a transaction that the
  * `cancel` command stopped before its reboot: published by ff_ota.c's task when the cancel
@@ -42,6 +48,17 @@ extern "C" {
 #define FF_STATUS_ROLLING_BACK "rolling_back"
 #define FF_STATUS_ROLLED_BACK "rolled_back"
 #define FF_STATUS_CANCELLED "cancelled"
+#define FF_STATUS_AWAITING_SAFE_WINDOW "awaiting_safe_window"
+
+/* R5-fw-5, R5-spec-1 D12: the two `detail`s of `awaiting_safe_window`, which say which reboot
+ * waits. Deliberately not named FF_STATUS_*: they are details, not states. Each fits the
+ * 63-byte detail budget. */
+#define FF_DETAIL_APPLY_WAITS "apply waits for a safe window"
+#define FF_DETAIL_ROLLBACK_WAITS "rollback waits for a safe window"
+#ifndef __cplusplus
+_Static_assert(sizeof(FF_DETAIL_APPLY_WAITS) <= 64, "an up/status detail is at most 63 bytes");
+_Static_assert(sizeof(FF_DETAIL_ROLLBACK_WAITS) <= 64, "an up/status detail is at most 63 bytes");
+#endif
 
 /* `pct` for a state that has no meaningful percentage: published as JSON `null` rather
  * than as a plausible-looking 0, for the same reason ff_identity reports a null `rssi`. */

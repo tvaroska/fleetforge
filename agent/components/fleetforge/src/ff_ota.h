@@ -30,6 +30,11 @@
  * clears the record of a staged one: the transaction ends `cancelled`. `apply` itself needs
  * nothing from this module: the boot pointer already names the staged slot, so the session's
  * reboot is the apply.
+ *
+ * The safe window (R5-fw-5): an apply:auto past `staged` waits in the ota task until the
+ * firmware's rule (ff_safe_window.h) says safe, reporting `awaiting_safe_window` when it does
+ * not at first, and stays cancellable until the window releases it (FF_OTA_TXN_AWAITING). The
+ * commanded apply's wait is the session's (ff_mqtt.c).
  */
 
 #pragma once
@@ -96,7 +101,9 @@ typedef enum {
     FF_OTA_TXN_NONE = 0, /* no update for that cmd_id (or, for NULL, none at all) */
     FF_OTA_TXN_TRANSFER, /* staging/downloading/verifying, or finish() running: cancellable */
     FF_OTA_TXN_STAGED,   /* apply:on_command, record saved, boot pointer names it: waits */
-    FF_OTA_TXN_APPLYING, /* apply:auto past staged: the ota task is about to reboot */
+    FF_OTA_TXN_AWAITING, /* R5-fw-5: apply:auto past `staged`, not yet released by the safe
+                          * window (ff_safe_window.h): cancellable; an `apply` is a no-op */
+    FF_OTA_TXN_APPLYING, /* apply:auto released: the ota task is about to reboot */
 } ff_ota_txn_t;
 
 /* R5-fw-4. The phase of the transaction `cmd_id`, or of whatever update this board holds when
@@ -119,12 +126,13 @@ ff_ota_txn_t ff_ota_txn_phase(const char *cmd_id, char *held, size_t held_len);
  *
  * ESP_OK                — accepted. `*reported` true: the ota task is still running and
  *                         publishes `cancelled` itself, at its next checkpoint (the transfer
- *                         is aborted, or the boot pointer put back, before it says so).
+ *                         is aborted, or the boot pointer put back, before it says so; an
+ *                         apply:auto waiting for the safe window, R5-fw-5, is put back too).
  *                         `*reported` false: the staged image was waiting; the boot pointer is
  *                         already back on the running image and the record cleared, and the
  *                         CALLER must report `cancelled` (enqueue: it runs in the handler).
  * ESP_ERR_NOT_FOUND     — nothing to cancel under that cmd_id.
- * ESP_ERR_INVALID_STATE — the transaction is past `staged` (apply:auto, about to reboot).
+ * ESP_ERR_INVALID_STATE — apply:auto released by the safe window (about to reboot).
  * ESP_FAIL              — the staged image's boot pointer could not be put back; nothing else
  *                         was done, the record is untouched and it still boots at a reset.
  * ESP_ERR_INVALID_ARG   — NULL or "" cmd_id, or NULL `reported`. */

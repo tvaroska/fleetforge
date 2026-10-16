@@ -29,6 +29,14 @@
  * this handler returns, so a reboot here would be redelivered after every boot. The handler
  * starts a task that reboots COMMAND_REBOOT_DRAIN_MS later, and the id is kept in NVS
  * (ff_txn_note_reboot_cmd) so its redelivery after the boot is a duplicate.
+ *
+ * The safe window (R5-fw-5, R5-spec-1 D7/D12): every reboot this file makes waits for the
+ * firmware's rule (ff_safe_window.h) when one is registered. A verb whose handler finds the
+ * moment unsafe answers `deferred` (apply and rollback also report `awaiting_safe_window`);
+ * the reboot task polls the rule and carries the reboot out when it says safe. A rollback that
+ * the confirm deadline or a failed self-test decides is latched at once, and only its reboot
+ * waits, in its own task (rollback_gate_task), never in the esp_timer task. No rule = every
+ * moment safe: the stock agent's timer path is the R5-fw-4 one, line for line.
  */
 
 #include "ff_mqtt_internal.h"
@@ -46,6 +54,7 @@
 #include "ff_identity_internal.h"
 #include "ff_ota.h"
 #include "ff_progress.h"
+#include "ff_safe_window_internal.h"
 #include "ff_selftest_internal.h"
 #include "ff_telemetry_internal.h"
 #include "ff_txn.h"
@@ -96,6 +105,14 @@ _Static_assert(CONFIRM_TIMEOUT_MIN_S <= CONFIRM_TIMEOUT_S &&
 #define ROLLBACK_REPORT_GRACE_MS 2000
 /* cJSON + one log line; the heartbeat task does the same work in the same size. */
 #define ROLLBACK_REPORT_STACK 4096
+/* R5-fw-5. The rollback gate (rollback_gate_task): two statuses (cJSON), a few log lines and
+ * the maker's safe-window rule. Static, so a decided rollback can never be lost for lack of
+ * heap. Bytes: IDF's StackType_t is uint8_t. */
+#define ROLLBACK_GATE_STACK 4096
+/* Above every agent task (esp-mqtt 5, ff_ota 5, ff_hb/ff_tel 4, ff_reboot 3) and the Arduino
+ * loop (1), below IDF's own (esp_timer 22, wifi 23): a broken image spinning at <= 5 cannot
+ * starve the rollback it decided. */
+#define ROLLBACK_GATE_PRIO 6
 
 static const char PRESENCE_ONLINE[] = "{\"online\":true}";
 static const char PRESENCE_OFFLINE[] = "{\"online\":false}";
@@ -155,8 +172,9 @@ typedef enum {
  * `;` in it, and not under DETAIL_SELFTEST_PREFIX: it is not a self-test outcome. */
 #define DETAIL_ROLLED_BACK_BY_COMMAND "rolled back by command"
 
-/* R5-fw-4, R5-spec-1 D2/A5: `up/ack` `result` values. `deferred` is R5-fw-5's (the safe
- * window); nothing answers it yet. */
+/* R5-fw-4, R5-spec-1 D2/A5: `up/ack` `result` values. `deferred` (R5-fw-5): the verb is
+ * carried out once the firmware's safe window opens; only the verb that starts a wait gets it,
+ * and a repeat or a no-op is `accepted` (D3). */
 #define ACK_ACCEPTED "accepted"
 #define ACK_DEFERRED "deferred"
 #define ACK_REFUSED "refused"
@@ -201,12 +219,18 @@ ACK_FITS(ACK_CANNOT_PUT_BACK);
  * sends the command's PUBACK and the queued ack and statuses leave the wire first (the
  * OTA_PUBLISH_DRAIN_MS reasoning in ff_ota.c). */
 #define COMMAND_REBOOT_DRAIN_MS 1500
-/* One log line and esp_restart(); the R5-fw-5 safe-window poll will run here too. Static, so
- * scheduling the reboot can never fail for lack of heap (a rollback has already marked the
- * image invalid by then). Bytes: IDF's StackType_t is uint8_t. */
+/* A few log lines, the release statuses (cJSON), the safe-window poll (R5-fw-5: the maker's
+ * rule runs on this stack) and esp_restart(). Static, so scheduling the reboot can never fail
+ * for lack of heap (a rollback has already marked the image invalid by then). Bytes: IDF's
+ * StackType_t is uint8_t. */
 #define COMMAND_REBOOT_STACK 4096
 /* Below the heartbeat (4) and esp-mqtt (5): it only waits. */
 #define COMMAND_REBOOT_PRIO 3
+
+/* A command reboot is scheduled: one per boot (R5-fw-5: until a cancel takes a deferred apply
+ * back), and every verb that could ask for another answers first (accepted no-op or refused).
+ * Declared up here because on_stage() refuses a stage while it is set. */
+static volatile bool s_cmd_reboot_pending;
 
 static struct {
     txn_kind_t kind;
@@ -339,6 +363,16 @@ static volatile bool s_selftest_registered;
  * run inside a portMUX critical section. */
 static portMUX_TYPE s_decide_lock = portMUX_INITIALIZER_UNLOCKED;
 static bool s_confirm_claimed;
+/* R5-fw-5. Under s_decide_lock. The `rollback` command claimed the decision (on_rollback): its
+ * own reboot task carries the reboot out, after the safe window, and the deadline's backstop
+ * must not start a second party for the same rollback. */
+static bool s_rollback_commanded;
+/* R5-fw-5. Under s_decide_lock. The rollback gate task has been started (once per boot, by
+ * whoever decided first: the deadline, a failed self-test, or the backstop). */
+static bool s_gate_started;
+/* R5-fw-5. The gate is waiting for the safe window with the rollback decided: a reconnect
+ * repeats `awaiting_safe_window` (report_txn_on_connect). Single writer: the gate task. */
+static volatile bool s_rollback_waiting;
 
 /* R5-fw-2. `selftest failed: <reason>`, with the reason (already printable ASCII without `;`,
  * ff_selftest.c) shortened so that the returned-to image's `<head>; returned to <slot>` fits
@@ -400,6 +434,81 @@ static void rollback_report_task(void *arg)
     vTaskDelete(NULL);
 }
 
+/* ── the rollback gate (R5-fw-5, R5-spec-1 D12) ───────────────────────────────────────
+ *
+ * Used ONLY when the firmware registered a safe-window rule. The confirm deadline and a
+ * failed self-test still decide on time (the s_decide_lock latch, the stored reason), and the
+ * image is never confirmed afterwards; only the REBOOT waits for the rule, in this task, with
+ * no deadline on the wait. Never in the esp_timer task: the rule is maker code. With no rule
+ * the esp_timer path below is the R5-fw-4 one, line for line.
+ *
+ * It never touches the confirm timer (D10: the deadline is not paused, extended or re-armed).
+ * The image is marked invalid at the end, by the same call as before: until then it is still
+ * PENDING_VERIFY, so a reset during the wait returns the board too (the bootloader ABORTs it). */
+static StaticTask_t s_gate_tcb;
+static StackType_t s_gate_stack[ROLLBACK_GATE_STACK];
+
+static void rollback_gate_task(void *arg)
+{
+    (void)arg;
+    const txn_kind_t kind = s_txn.kind;
+    const bool owed = kind == TXN_CONFIRMING || kind == TXN_BOOTED_NEW;
+    if (!ff_safe_window_is_safe()) {
+        s_rollback_waiting = true;
+        ESP_LOGW(TAG, "the rollback is decided and waits for a safe window — this image keeps "
+                      "running until then; a reset rolls it back too");
+        if (owed && s_ctx.connected) {
+            (void)enqueue_status(s_txn.cmd_id, FF_STATUS_AWAITING_SAFE_WINDOW,
+                                 FF_STATUS_PCT_NONE, FF_DETAIL_ROLLBACK_WAITS);
+        }
+        while (!ff_safe_window_is_safe()) {
+            vTaskDelay(pdMS_TO_TICKS(FF_SAFE_WINDOW_POLL_MS));
+        }
+        ESP_LOGW(TAG, "a safe window: rolling back now");
+    }
+    s_rollback_waiting = false;
+    if (owed && s_ctx.connected) {
+        (void)enqueue_status(s_txn.cmd_id, FF_STATUS_ROLLING_BACK, FF_STATUS_PCT_NONE, NULL);
+        /* The R2-be-1 grace, so the queued report can leave the wire before the reboot. */
+        vTaskDelay(pdMS_TO_TICKS(ROLLBACK_REPORT_GRACE_MS));
+    } else if (owed) {
+        ESP_LOGW(TAG, "no broker session: %s for %s is not reported", FF_STATUS_ROLLING_BACK,
+                 s_txn.cmd_id);
+    }
+    /* Asked again immediately before the reboot: a window that closed during the grace is
+     * waited for again, silently (the rollback is said already). */
+    while (!ff_safe_window_is_safe()) {
+        vTaskDelay(pdMS_TO_TICKS(FF_SAFE_WINDOW_POLL_MS));
+    }
+    esp_ota_mark_app_invalid_rollback_and_reboot(); /* does not return on success */
+    ESP_LOGE(TAG, "esp_ota_mark_app_invalid_rollback_and_reboot returned — there is no other "
+                  "bootable slot to go back to");
+    vTaskDelete(NULL);
+}
+
+/* Start the gate, once per boot; later calls do nothing. Callable from the esp_timer task
+ * (confirm_timeout_cb) and the self-test task: it claims under s_decide_lock and creates a
+ * STATIC task, so it allocates nothing, never calls the rule, never writes flash and never
+ * takes the mqtt client's lock. */
+static void start_rollback_gate(void)
+{
+    bool first;
+    portENTER_CRITICAL(&s_decide_lock);
+    first = !s_gate_started;
+    s_gate_started = true;
+    portEXIT_CRITICAL(&s_decide_lock);
+    if (!first) {
+        return;
+    }
+    if (xTaskCreateStatic(rollback_gate_task, "ff_rbgate", ROLLBACK_GATE_STACK, NULL,
+                          ROLLBACK_GATE_PRIO, s_gate_stack, &s_gate_tcb) == NULL) {
+        /* Impossible with static buffers. The rollback is decided: it happens, unwaited. */
+        ESP_LOGE(TAG, "cannot start the rollback gate — rolling back without waiting for a "
+                      "safe window");
+        esp_ota_mark_app_invalid_rollback_and_reboot(); /* does not return on success */
+    }
+}
+
 /* The negative branch. Runs once, s_confirm_deadline_s after image start (CONFIRM_TIMEOUT_S
  * until the transaction record re-arms it, R5-fw-3), and only for an image the
  * bootloader is still waiting on. A board that cannot reach its fleet with a new image is
@@ -422,9 +531,11 @@ static void confirm_timeout_cb(void *arg)
      * claims, and this is the plain `s_rollback_decided = true` it always was. */
     bool confirm_claimed;
     bool already_decided;
+    bool commanded;
     portENTER_CRITICAL(&s_decide_lock);
     confirm_claimed = s_confirm_claimed;
     already_decided = s_rollback_decided;
+    commanded = s_rollback_commanded;
     if (!confirm_claimed && !already_decided) {
         s_rollback_decided = true;
     }
@@ -436,6 +547,16 @@ static void confirm_timeout_cb(void *arg)
         return;
     }
     if (already_decided) {
+        /* R5-fw-5: with a safe-window rule the wait has no deadline (D12), so the backstop
+         * does not cut it short. A failed self-test's rollback goes through the gate (started
+         * here if its task has not got that far, else a no-op); a `rollback` command's waits
+         * in its own reboot task. */
+        if (ff_safe_window_registered()) {
+            if (!commanded) {
+                start_rollback_gate();
+            }
+            return;
+        }
         /* The backstop: the self-test failed and claimed the rollback, but its task (priority
          * 1) has not got as far as the reboot by the deadline. Nothing to report here. */
         ESP_LOGE(TAG, "the failed self-test's rollback has not happened by the confirm "
@@ -451,6 +572,13 @@ static void confirm_timeout_cb(void *arg)
         ESP_LOGE(TAG, "no working session %d s after an OTA boot — marking this image invalid "
                       "and rolling back to the previous slot",
                  (int)s_confirm_deadline_s);
+    }
+
+    /* R5-fw-5: with a safe-window rule the decision above stands and only the reboot waits,
+     * in the gate task (never here: this is the esp_timer task, and the rule is maker code). */
+    if (ff_safe_window_registered()) {
+        start_rollback_gate();
+        return;
     }
 
     /* The invariant: past the guard above, every path leaves either the rollback timer
@@ -543,6 +671,12 @@ static void selftest_done(bool passed, const char *reason)
     }
     ESP_LOGE(TAG, "the custom self-test failed — marking this image invalid and rolling back to "
                   "the previous slot");
+    /* R5-fw-5: the reason is stored and the decision latched; with a safe-window rule only the
+     * reboot waits, in the gate task. */
+    if (ff_safe_window_registered()) {
+        start_rollback_gate();
+        return;
+    }
 
     if (owed && s_rollback_timer == NULL) {
         /* TXN_BOOTED_NEW: no confirm timer was armed, so nothing created this. Task context,
@@ -840,6 +974,13 @@ static void report_txn_on_connect(void)
     default:
         break;
     }
+    /* R5-fw-5: a decided rollback still waiting for the safe window says so again, after
+     * `confirming`, so the retained state is the wait (a repeat is harmless: the server
+     * records idempotently). */
+    if (s_rollback_waiting && (s_txn.kind == TXN_CONFIRMING || s_txn.kind == TXN_BOOTED_NEW)) {
+        (void)enqueue_status(s_txn.cmd_id, FF_STATUS_AWAITING_SAFE_WINDOW, FF_STATUS_PCT_NONE,
+                             FF_DETAIL_ROLLBACK_WAITS);
+    }
 }
 
 /* ── the session ──────────────────────────────────────────────────────────────────── */
@@ -1080,6 +1221,17 @@ static void on_stage(const cJSON *root, const char *id)
                  cmd.cmd_id);
         return;
     }
+    /* R5-fw-5: nothing new is staged while a reboot is on its way: a verb's reboot (which may
+     * now wait for the safe window for as long as it takes) would boot it unannounced, and a
+     * decided rollback is about to return to the very slot a stage would overwrite. */
+    const bool decided = s_rollback_decided;
+    if (s_cmd_reboot_pending || decided) {
+        ESP_LOGW(TAG, "stage id=%s refused: %s", cmd.cmd_id,
+                 decided ? ACK_ROLLBACK_DECIDED : ACK_REBOOT_PENDING);
+        ff_mqtt_publish_status(cmd.cmd_id, FF_STATUS_FAILED, FF_STATUS_PCT_NONE,
+                               decided ? ACK_ROLLBACK_DECIDED : ACK_REBOOT_PENDING);
+        return;
+    }
 
     const cJSON *artifact = cJSON_GetObjectItemCaseSensitive(root, "artifact");
     if (!cJSON_IsObject(artifact)) {
@@ -1237,9 +1389,6 @@ static void enqueue_ack(const char *id, const char *type, const char *result, co
  * ff_mqtt_run() before the first connect, and set again by schedule_command_reboot(). Outside
  * s_ctx, which ff_mqtt_run() memsets. on_command() drops a command with this id. */
 static char s_reboot_cmd_id[FF_TXN_MAX_CMD_ID];
-/* A command reboot is scheduled: one per boot, and every verb that could ask for another
- * answers first (accepted no-op or refused). */
-static volatile bool s_cmd_reboot_pending;
 /* The transaction an accepted `apply` released, so its repeat is a no-op and a `cancel` of it
  * is refused (the walk is past `staged` now). */
 static char s_reboot_txn_id[FF_TXN_MAX_CMD_ID];
@@ -1249,17 +1398,120 @@ static char s_rollback_txn_id[FF_TXN_MAX_CMD_ID];
 
 static StaticTask_t s_reboot_tcb;
 static StackType_t s_reboot_stack[COMMAND_REBOOT_STACK];
+/* R5-fw-5. The reboot task is created ONCE (schedule_command_reboot) and then woken with a
+ * task notification: a cancelled deferred apply returns it to idle and a later verb reuses it.
+ * Never re-created: a static TCB must not be handed to xTaskCreateStatic again while a deleted
+ * task may still sit on the termination list. Written by the esp-mqtt task only. */
+static TaskHandle_t s_reboot_task;
+
+/* R5-fw-5. Which verb the pending reboot is for, so the reboot task knows what to report when
+ * the safe window releases a deferred one. Set by the verb immediately before
+ * schedule_command_reboot(), read by the reboot task after its wake-up. */
+typedef enum {
+    CMD_REBOOT_PLAIN,    /* `reboot`: no transaction, nothing to report */
+    CMD_REBOOT_APPLY,    /* `apply`: `applying`, `rebooting` on s_reboot_txn_id */
+    CMD_REBOOT_ROLLBACK, /* `rollback`: `rolling_back` on s_rollback_txn_id */
+} cmd_reboot_kind_t;
+static cmd_reboot_kind_t s_reboot_kind;
+
+/* R5-fw-5. The handshake between the reboot task and a `cancel` of a deferred apply (D4: a
+ * pre-apply `awaiting_safe_window` is cancellable). Under s_reboot_lock, never held across a
+ * flash write, a log line or the maker's rule:
+ *  - s_reboot_deferred: the verb's handler answered `deferred` (the rule said unsafe), so the
+ *    release statuses are still owed;
+ *  - s_reboot_committed: the reboot task found the window open and is past the point of no
+ *    return (a cancel is refused from here);
+ *  - s_reboot_hold: on_cancel is taking the apply back right now; the task does not commit;
+ *  - s_reboot_abort: the cancel succeeded; the task goes idle without rebooting. */
+static portMUX_TYPE s_reboot_lock = portMUX_INITIALIZER_UNLOCKED;
+static bool s_reboot_deferred;
+static bool s_reboot_committed;
+static bool s_reboot_hold;
+static bool s_reboot_abort;
+
+/* R5-fw-5. Wait until the firmware's safe-window rule says safe, then commit the reboot under
+ * s_reboot_lock. Returns true when committed, false when a cancel took the apply back. The rule
+ * is asked OUTSIDE the lock; a commit happens only with no hold and no abort. No rule = safe at
+ * once, so the R5-fw-4 timing is unchanged. */
+static bool wait_for_the_window(void)
+{
+    bool logged = false;
+    for (;;) {
+        bool abort_now;
+        bool hold;
+        portENTER_CRITICAL(&s_reboot_lock);
+        abort_now = s_reboot_abort;
+        hold = s_reboot_hold;
+        portEXIT_CRITICAL(&s_reboot_lock);
+        if (abort_now) {
+            return false;
+        }
+        if (!hold && ff_safe_window_is_safe()) {
+            bool committed;
+            portENTER_CRITICAL(&s_reboot_lock);
+            committed = !s_reboot_hold && !s_reboot_abort;
+            if (committed) {
+                s_reboot_committed = true;
+            }
+            portEXIT_CRITICAL(&s_reboot_lock);
+            if (committed) {
+                return true;
+            }
+            continue; /* a cancel arrived between the answer and the commit */
+        }
+        if (!hold && !logged) {
+            ESP_LOGW(TAG, "command %s: the reboot waits for a safe window", s_reboot_cmd_id);
+            logged = true;
+        }
+        vTaskDelay(pdMS_TO_TICKS(FF_SAFE_WINDOW_POLL_MS));
+    }
+}
 
 /* Its own task, started after the handler's work is queued: the handler returns, esp-mqtt sends
  * the command's PUBACK, the ack and statuses drain, THEN the reboot. Never an esp_timer
- * callback: R5-fw-5 polls the safe window here, and that wait may be long. */
+ * callback: the safe-window wait (R5-fw-5, D7, D12) may be long, and runs the maker's rule. */
 static void command_reboot_task(void *arg)
 {
     (void)arg;
-    vTaskDelay(pdMS_TO_TICKS(COMMAND_REBOOT_DRAIN_MS));
-    /* R5-fw-5: the safe-window poll goes here; only this reboot waits (D7, D12). */
-    ESP_LOGW(TAG, "rebooting for command %s", s_reboot_cmd_id);
-    esp_restart(); /* does not return */
+    for (;;) {
+        (void)ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        vTaskDelay(pdMS_TO_TICKS(COMMAND_REBOOT_DRAIN_MS));
+        if (!wait_for_the_window()) {
+            /* A `cancel` took the deferred apply back (the boot pointer is on this image again):
+             * back to idle. s_reboot_cmd_id and the NVS reboot id keep the apply's id, so its
+             * redelivery is still a duplicate. */
+            portENTER_CRITICAL(&s_reboot_lock);
+            s_reboot_committed = false;
+            s_reboot_hold = false;
+            s_reboot_abort = false;
+            s_reboot_deferred = false;
+            s_reboot_txn_id[0] = '\0';
+            s_cmd_reboot_pending = false;
+            portEXIT_CRITICAL(&s_reboot_lock);
+            ESP_LOGW(TAG, "command %s: the deferred apply was cancelled — no reboot",
+                     s_reboot_cmd_id);
+            continue;
+        }
+        if (s_reboot_deferred) {
+            /* The window released a verb answered `deferred`: from here it walks as if it had
+             * been accepted (D3), then the statuses drain. */
+            if (s_reboot_kind == CMD_REBOOT_APPLY) {
+                (void)enqueue_status(s_reboot_txn_id, FF_STATUS_APPLYING, 100, NULL);
+                (void)enqueue_status(s_reboot_txn_id, FF_STATUS_REBOOTING, 100, NULL);
+            } else if (s_reboot_kind == CMD_REBOOT_ROLLBACK) {
+                (void)enqueue_status(s_rollback_txn_id, FF_STATUS_ROLLING_BACK,
+                                     FF_STATUS_PCT_NONE, NULL);
+            }
+            vTaskDelay(pdMS_TO_TICKS(COMMAND_REBOOT_DRAIN_MS));
+            /* Asked again immediately before the reboot; committed, so a closed window is
+             * waited for again silently. */
+            while (!ff_safe_window_is_safe()) {
+                vTaskDelay(pdMS_TO_TICKS(FF_SAFE_WINDOW_POLL_MS));
+            }
+        }
+        ESP_LOGW(TAG, "rebooting for command %s", s_reboot_cmd_id);
+        esp_restart(); /* does not return */
+    }
 }
 
 /* Called by a verb handler last, after every refusal check and every flash write it does. */
@@ -1281,12 +1533,18 @@ static void schedule_command_reboot(const char *id)
     }
     strlcpy(s_reboot_cmd_id, id, sizeof(s_reboot_cmd_id));
     s_cmd_reboot_pending = true;
-    /* Static TCB and stack: cannot fail for lack of heap. */
-    if (xTaskCreateStatic(command_reboot_task, "ff_reboot", COMMAND_REBOOT_STACK, NULL,
-                          COMMAND_REBOOT_PRIO, s_reboot_stack, &s_reboot_tcb) == NULL) {
+    /* Static TCB and stack: cannot fail for lack of heap. Created once; woken thereafter. */
+    if (s_reboot_task == NULL) {
+        s_reboot_task = xTaskCreateStatic(command_reboot_task, "ff_reboot", COMMAND_REBOOT_STACK,
+                                          NULL, COMMAND_REBOOT_PRIO, s_reboot_stack,
+                                          &s_reboot_tcb);
+    }
+    if (s_reboot_task == NULL) {
         ESP_LOGE(TAG, "command %s: cannot start the reboot task — reset the board to finish",
                  id);
+        return;
     }
+    xTaskNotifyGive(s_reboot_task);
 }
 
 /* D5: the other slot holds an image the board may return to: one that booted and was
@@ -1360,13 +1618,14 @@ static void on_apply(const cJSON *root, const char *id)
         enqueue_ack(id, "apply", ACK_REFUSED, NULL, ACK_NOTHING_STAGED);
         return;
     }
-    /* Already past `staged`: this boot released it, or rebooted into it (confirming,
-     * confirmed, rolled back), or apply:auto is about to reboot into it. A no-op. */
+    /* Already past `staged`: this boot released it (accepted or deferred), or rebooted into it
+     * (confirming, confirmed, rolled back), or apply:auto is about to reboot into it or waits
+     * for the safe window to do so (R5-fw-5). A no-op, answered `accepted` (D3). */
     const bool released = s_cmd_reboot_pending && strcmp(s_reboot_txn_id, cmd_id) == 0;
     const bool booted = held_txn_id() != NULL && strcmp(s_txn.cmd_id, cmd_id) == 0;
     char held[FF_TXN_MAX_CMD_ID];
     const ff_ota_txn_t phase = ff_ota_txn_phase(cmd_id, held, sizeof(held));
-    if (released || booted || phase == FF_OTA_TXN_APPLYING) {
+    if (released || booted || phase == FF_OTA_TXN_APPLYING || phase == FF_OTA_TXN_AWAITING) {
         enqueue_ack(id, "apply", ACK_ACCEPTED, cmd_id, NULL);
         return;
     }
@@ -1382,12 +1641,24 @@ static void on_apply(const cJSON *root, const char *id)
         return;
     }
 
-    enqueue_ack(id, "apply", ACK_ACCEPTED, cmd_id, NULL);
-    /* D3: from here it walks exactly like apply:auto (no awaiting_safe_window before fw-5). */
-    (void)enqueue_status(cmd_id, FF_STATUS_APPLYING, 100, NULL);
-    (void)enqueue_status(cmd_id, FF_STATUS_REBOOTING, 100, NULL);
-    ESP_LOGW(TAG, "apply %s: releasing the staged update %s — rebooting into it", id, cmd_id);
+    /* R5-fw-5: the firmware's rule, asked once here (after every refusal), picks the answer.
+     * Unsafe: `deferred` and `awaiting_safe_window`; the reboot task reports `applying` and
+     * `rebooting` when the window releases it. A cancel can still take it back until then. */
+    const bool safe = ff_safe_window_is_safe();
+    if (safe) {
+        enqueue_ack(id, "apply", ACK_ACCEPTED, cmd_id, NULL);
+        /* D3: from here it walks exactly like apply:auto. */
+        (void)enqueue_status(cmd_id, FF_STATUS_APPLYING, 100, NULL);
+        (void)enqueue_status(cmd_id, FF_STATUS_REBOOTING, 100, NULL);
+        ESP_LOGW(TAG, "apply %s: releasing the staged update %s — rebooting into it", id, cmd_id);
+    } else {
+        enqueue_ack(id, "apply", ACK_DEFERRED, cmd_id, NULL);
+        (void)enqueue_status(cmd_id, FF_STATUS_AWAITING_SAFE_WINDOW, 100, FF_DETAIL_APPLY_WAITS);
+        ESP_LOGW(TAG, "apply %s: the staged update %s waits for a safe window", id, cmd_id);
+    }
     strlcpy(s_reboot_txn_id, cmd_id, sizeof(s_reboot_txn_id));
+    s_reboot_kind = CMD_REBOOT_APPLY;
+    s_reboot_deferred = !safe;
     schedule_command_reboot(id);
 }
 
@@ -1414,14 +1685,38 @@ static void on_cancel(const cJSON *root, const char *id)
                     decided ? ACK_ROLLBACK_DECIDED : ACK_ALREADY_APPLYING);
         return;
     }
-    if ((s_cmd_reboot_pending && strcmp(s_reboot_txn_id, cmd_id) == 0) ||
-        ff_ota_txn_phase(cmd_id, NULL, 0) == FF_OTA_TXN_APPLYING) {
+    /* Released by an apply: refused, unless that apply was answered `deferred` and the safe
+     * window has not released it yet (R5-fw-5, D4: a pre-apply `awaiting_safe_window` is
+     * cancellable). Then the reboot task is held while ff_ota puts the boot pointer back, and
+     * aborted only if that worked. */
+    bool took_back = false;
+    if (s_cmd_reboot_pending && strcmp(s_reboot_txn_id, cmd_id) == 0) {
+        portENTER_CRITICAL(&s_reboot_lock);
+        if (s_reboot_kind == CMD_REBOOT_APPLY && s_reboot_deferred && !s_reboot_committed) {
+            s_reboot_hold = true;
+            took_back = true;
+        }
+        portEXIT_CRITICAL(&s_reboot_lock);
+        if (!took_back) {
+            enqueue_ack(id, "cancel", ACK_REFUSED, cmd_id, ACK_ALREADY_APPLYING);
+            return;
+        }
+    } else if (ff_ota_txn_phase(cmd_id, NULL, 0) == FF_OTA_TXN_APPLYING) {
         enqueue_ack(id, "cancel", ACK_REFUSED, cmd_id, ACK_ALREADY_APPLYING);
         return;
     }
 
     bool reported = false;
     esp_err_t err = ff_ota_cancel(cmd_id, &reported);
+    if (took_back) {
+        /* A refusal changes nothing: the hold is lifted and the deferred apply goes on. */
+        portENTER_CRITICAL(&s_reboot_lock);
+        s_reboot_hold = false;
+        if (err == ESP_OK) {
+            s_reboot_abort = true;
+        }
+        portEXIT_CRITICAL(&s_reboot_lock);
+    }
     if (err == ESP_ERR_NOT_FOUND) {
         enqueue_ack(id, "cancel", ACK_REFUSED, NULL, ACK_NOTHING_TO_CANCEL);
         return;
@@ -1486,6 +1781,7 @@ static void on_rollback(const char *id)
         beaten = s_rollback_decided;
         if (!confirm_first && !beaten) {
             s_rollback_decided = true;
+            s_rollback_commanded = true; /* R5-fw-5: this command's task reboots */
         }
         portEXIT_CRITICAL(&s_decide_lock);
         if (confirm_first) {
@@ -1529,10 +1825,26 @@ static void on_rollback(const char *id)
         }
     }
 
-    ESP_LOGW(TAG, "rollback %s: this image is marked invalid — returning to the other slot", id);
-    enqueue_ack(id, "rollback", ACK_ACCEPTED, txn, NULL);
-    (void)enqueue_status(txn, FF_STATUS_ROLLING_BACK, FF_STATUS_PCT_NONE, NULL);
+    /* R5-fw-5 (D12 shape): decided and marked; only the reboot waits for the safe window. The
+     * rule, asked once here, picks `accepted` + `rolling_back` or `deferred` +
+     * `awaiting_safe_window` (the reboot task reports `rolling_back` at the window). */
+    const bool safe = ff_safe_window_is_safe();
+    if (safe) {
+        ESP_LOGW(TAG, "rollback %s: this image is marked invalid — returning to the other slot",
+                 id);
+        enqueue_ack(id, "rollback", ACK_ACCEPTED, txn, NULL);
+        (void)enqueue_status(txn, FF_STATUS_ROLLING_BACK, FF_STATUS_PCT_NONE, NULL);
+    } else {
+        ESP_LOGW(TAG, "rollback %s: this image is marked invalid — the return waits for a safe "
+                      "window",
+                 id);
+        enqueue_ack(id, "rollback", ACK_DEFERRED, txn, NULL);
+        (void)enqueue_status(txn, FF_STATUS_AWAITING_SAFE_WINDOW, FF_STATUS_PCT_NONE,
+                             FF_DETAIL_ROLLBACK_WAITS);
+    }
     strlcpy(s_rollback_txn_id, txn, sizeof(s_rollback_txn_id));
+    s_reboot_kind = CMD_REBOOT_ROLLBACK;
+    s_reboot_deferred = !safe;
     schedule_command_reboot(id);
 }
 
@@ -1563,7 +1875,16 @@ static void on_reboot(const char *id)
         return;
     }
 
-    enqueue_ack(id, "reboot", ACK_ACCEPTED, NULL, NULL);
+    /* R5-fw-5: `deferred` when the firmware's rule says unsafe now; never a status (no
+     * transaction), and nothing to report when the window releases it. */
+    if (ff_safe_window_is_safe()) {
+        enqueue_ack(id, "reboot", ACK_ACCEPTED, NULL, NULL);
+    } else {
+        enqueue_ack(id, "reboot", ACK_DEFERRED, NULL, NULL);
+        ESP_LOGW(TAG, "reboot %s: waits for a safe window", id);
+    }
+    s_reboot_kind = CMD_REBOOT_PLAIN;
+    s_reboot_deferred = false;
     schedule_command_reboot(id);
 }
 
@@ -1810,6 +2131,9 @@ esp_err_t ff_mqtt_run(const ff_cfg_t *cfg, const ff_cred_t *cred)
      * session_confirmed, never at the ack. */
     s_selftest_registered = ff_selftest_freeze();
     ff_identity_note_selftest(s_selftest_registered);
+    /* R5-fw-5: the safe-window rule is fixed here too, before the first connect builds an
+     * announce (the `safe_window` capability) and before classify_txn(). */
+    ff_identity_note_safe_window(ff_safe_window_freeze());
 
     /* What the last reboot left to report. The confirm timer is NOT armed here: it was
      * armed first thing in app_main (R2-fw-4, ff_mqtt_arm_confirm_timer), so it may fire

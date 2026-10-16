@@ -1,7 +1,8 @@
 /*
  * Fleetforge for Arduino — over-the-air updates with automatic rollback for ESP32 sketches.
  *
- * This is the whole Arduino API: begin(), metric(), onSelfTest() and selfTestDone(). It is
+ * This is the whole Arduino API: begin(), metric(), onSelfTest(), selfTestDone() and
+ * onSafeWindow(). It is
  * ADDITIVE-ONLY from R3-fw-3, like the component's include/: a firmware built on it goes to
  * boards nobody can reach again.
  *
@@ -10,6 +11,7 @@
  *     void setup() {
  *       Fleetforge.begin("1.0.0");   // FIRST line of setup(); your firmware's version
  *       Fleetforge.onSelfTest(selfTest);   // optional: right after begin()
+ *       Fleetforge.onSafeWindow(safeNow);  // optional: then this
  *       Serial.begin(115200);
  *       ...
  *     }
@@ -92,6 +94,18 @@ class FleetforgeClass {
   // result; a call when nothing is waiting returns false and is harmless, so loop() may
   // call it on every pass.
   bool selfTestDone(bool passed, const char *reason = nullptr);
+
+  // Register when this sketch may be rebooted (R5-fw-5): isSafe() returns true when a reboot
+  // right now is safe (between two jobs, say). Every reboot the library makes waits for it:
+  // applying an update, rolling one back, and the fleet's rollback and reboot commands. The
+  // fleet sees the board waiting. Crashes, watchdogs and power loss do not wait, and the
+  // confirm deadline keeps counting: a rollback is decided on time, only its reboot waits.
+  // Call it right after begin() (and onSelfTest()) in setup(). isSafe() must be quick and
+  // must not block (read a flag); the library calls it from its own tasks, every 250 ms or
+  // so while a reboot waits. Without it every moment is safe.
+  // Returns false for nullptr, for a second registration, or once the library's session
+  // has started (so do not register after slow initialisation).
+  bool onSafeWindow(bool (*isSafe)());
 };
 
 extern FleetforgeClass Fleetforge;

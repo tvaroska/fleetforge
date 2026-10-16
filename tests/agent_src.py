@@ -27,6 +27,10 @@ FF_TELEMETRY_INTERNAL_H = COMPONENT_SRC / "ff_telemetry_internal.h"
 FF_SELFTEST_H = COMPONENT_INCLUDE / "ff_selftest.h"
 FF_SELFTEST_C = COMPONENT_SRC / "ff_selftest.c"
 FF_SELFTEST_INTERNAL_H = COMPONENT_SRC / "ff_selftest_internal.h"
+# R5-fw-5: the third maker-API header (the safe-window rule) and its registration.
+FF_SAFE_WINDOW_H = COMPONENT_INCLUDE / "ff_safe_window.h"
+FF_SAFE_WINDOW_C = COMPONENT_SRC / "ff_safe_window.c"
+FF_SAFE_WINDOW_INTERNAL_H = COMPONENT_SRC / "ff_safe_window_internal.h"
 
 # R3-fw-3: the same component directory is the Arduino library (library.json), and the
 # wrapper is its second consumer. The example and its partitions.csv travel together.

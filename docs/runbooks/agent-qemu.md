@@ -350,6 +350,11 @@ queued, msg_id N) id=… result=… detail=…`. Its effect on a transaction is 
 | `reboot` with nothing open | `accepted`, `cmd_id` null | none (the next announce says `reset_reason` `sw`) |
 | `reboot` while staged or confirming | `refused`, `an update is in progress` / `the running image is not confirmed yet` | none |
 | `identify`, `set_cfg`, anything else | `refused`, `not implemented` | none |
+| `apply` while the image's safe-window rule says unsafe (R5-fw-5) | `deferred`, the stage's `cmd_id` | `awaiting_safe_window` `apply waits for a safe window`; at the window `applying`, `rebooting` |
+| `cancel` of an apply answered `deferred`, before the window | `accepted` | `cancelled` (no reboot) |
+| `rollback` while unsafe | `deferred`, `cmd_id` as for `accepted` | `awaiting_safe_window` `rollback waits for a safe window`; at the window `rolling_back` |
+| `reboot` while unsafe | `deferred`, `cmd_id` null | none |
+| `stage` while a reboot waits (or a rollback is decided) | none (a stage is not a verb) | `failed` `a reboot is already pending` / `a rollback is already decided` |
 
 A verb that reboots never reboots inside its own delivery: the board logs `rebooting for
 command <id>` about 1.5 s after the `dn/cmd` line, then the emulator shows one `rst:0xc
@@ -365,6 +370,58 @@ confirms again at its announce ack, with no `transaction` line (R5-spec-1's name
 `rollback` refuses a NEW other slot, so let that re-confirm happen before you test a rollback to
 it.
 
+
+#### The safe window (R5-fw-5)
+
+The stock agent registers no safe-window rule (`no safe-window rule registered: this agent
+reboots as soon as it must`), so every reboot above is immediate. A firmware that registers one
+(`ff_set_safe_window_cb()` / `Fleetforge.onSafeWindow()`; the Basic example reboots only in the
+gap between two messages) announces `safe_window` and logs `a safe-window rule is registered:
+every reboot this agent makes waits for it` before `connecting to`. To drive the wait, build
+sketch variants whose rule is a clock (never commit them): copy `Basic.ino` aside, replace the
+one-line `static bool safeNow() { … }` and the version/message, `just lib-bundle esp32-qemu`,
+copy `lib-qemu/.pio/bundle/esp32-qemu` to a scratch dir, and put `Basic.ino` back.
+
+```bash
+# W: unsafe 60 s, safe 20 s, every 80 s           L: unsafe until 400 s, self-test answered at 320 s
+static bool safeNow() { return millis() % 80000 >= 60000; }
+static bool safeNow() { return millis() > 400000; }   # plus: if (millis() > 320000) Fleetforge.selfTestDone(true);
+```
+
+**Read the board's clock off the wall, not the log.** The `I (12345)` timestamps are FreeRTOS
+ticks, and in QEMU they run 5-8 s ahead of `millis()` (esp_timer follows the host clock). Prefix
+every QEMU line with the host time (`… | python3 -u -c 'import sys,time
+[print(int(time.time()*1000), l, end="", flush=True) for l in sys.stdin]'`) and take
+`millis() ≈ now - (time of the last rst: line) - 1.2 s`. Send a verb when `millis() % 80000` is
+below ~45000, so it lands well inside an unsafe stretch.
+
+What to expect (W, `apply: on_command` stage, then the verb as the commander):
+
+- `apply` → `up/ack` `deferred`, `up/status` `awaiting_safe_window` `apply waits for a safe
+  window`, the board logs `apply <id>: the staged update <cmd> waits for a safe window` and
+  `command <id>: the reboot waits for a safe window`. At the window (one 250 ms poll after
+  `millis() % 80000` reaches 60000): `applying`, `rebooting`, and 1.5 s later `rebooting for
+  command <id>`. To see the new image confirm, kill QEMU right after that line (before the
+  soft reset's `esp_timer_impl_init` panic aborts the PENDING_VERIFY image) and start it again.
+- `cancel` of that apply before the window → `accepted`, `boot partition put back…`,
+  `cancelled`, `command <id>: the deferred apply was cancelled — no reboot`; nothing reboots at
+  the next window.
+- `apply: auto` → `staged`, `ota_N is staged; the reboot into it waits for a safe window`,
+  `awaiting_safe_window`; at the window `applying`, `rebooting`, `rebooting into ota_N`, then a
+  1.5 s drain (kill QEMU there to confirm the new image by a power cycle).
+- `reboot` → `deferred`, no status; a deploy meanwhile is refused (`failed` `a reboot is already
+  pending`, no `staging`).
+- `rollback` → `deferred`, `awaiting_safe_window` `rollback waits for a safe window`,
+  `rolling_back` at the window. The other slot must be VALID: after a staged cancel the running
+  entry is NEW until a power cycle re-confirms it.
+- L (deploy it `on_command`, power-cycle): `no self-test result 300 s …`, `the rollback is
+  decided and waits for a safe window — this image keeps running until then; a reset rolls it
+  back too`, `awaiting_safe_window` `rollback waits for a safe window`, the late pass `NOT
+  confirming`, then at 400 s `a safe window: rolling back now`, `rolling_back`, and the old image
+  reports `rolled_back` `selftest timed out; returned to ota_X`. Never `CONFIRMED`.
+
+`agent/tools/otadata.py` reads a library image too if the bundle's `manifest.json` is given a
+`"flash_size": "4MB"` (copy the bundle first).
 
 ### Driving a failure: boot loop, power cut, torn otadata, hang (R2-test-1)
 
@@ -922,8 +979,9 @@ What it does:
    printed or put in argv). Mint a token. `just agent-cfg` (ethernet, `--hb 10`). Then
    `just lib-qemu --fresh` stands in for the USB flash. Wait for `ff-enroll: enroll 200`,
    `announce acknowledged by the broker` and `morse: SOS (firmware 1.0.0)`, then
-   `GET /v1/devices`: online, `fw_version 1.0.0`, `ab-4m-arduino-v1`, `capabilities
-   ["ota", "selftest"]` (the committed sketch registers a self-test; R5-fw-2).
+   `GET /v1/devices`: online, `fw_version 1.0.0`, `ab-4m-arduino-v1`, `capabilities`
+   containing `ota`, `selftest` and `safe_window` (the committed sketch registers a self-test,
+   R5-fw-2, and a safe-window rule, R5-fw-5).
 4. **The OTA.** Upload bundle B's `app.bin` (`partition_layout=ab-4m-arduino-v1`). Deploy
    with **`apply: "on_command"`**: QEMU cannot survive the self-reboot (*The emulator cannot
    survive `esp_restart()`*), and a real board takes the dashboard default `auto`. Wait for

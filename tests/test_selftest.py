@@ -52,7 +52,13 @@ PUBLIC_FUNCTIONS = {"ff_set_selftest", "ff_selftest_report"}
 PRIVATE_HOOKS = ("ff_selftest_freeze", "ff_selftest_run")
 # The esp_timer callbacks and the arming that runs before NVS: never a place for the
 # self-test, not in fw-2 either.
-TIMER_CONTEXT = ("confirm_timeout_cb", "rollback_now_cb", "ff_mqtt_arm_confirm_timer")
+# R5-fw-5: start_rollback_gate() is called from confirm_timeout_cb, so it is timer context too.
+TIMER_CONTEXT = (
+    "confirm_timeout_cb",
+    "rollback_now_cb",
+    "ff_mqtt_arm_confirm_timer",
+    "start_rollback_gate",
+)
 
 
 def _src() -> str:
@@ -232,8 +238,11 @@ class TestTheSessionWiring:
         freeze = run.index("ff_selftest_freeze(")
         note = run.index("ff_identity_note_selftest(s_selftest_registered);")
         assert freeze < note
+        # R5-fw-5: the safe-window rule is frozen right after, on the same terms.
+        safe = run.index("ff_identity_note_safe_window(ff_safe_window_freeze());")
+        assert note < safe
         for later in ("ff_txn_init(", "classify_txn(", "esp_mqtt_client_start("):
-            assert note < run.index(later), later
+            assert safe < run.index(later), later
         assert code.count("s_selftest_registered =") == 1, "written once, in ff_mqtt_run"
 
     def test_never_from_timer_context(self) -> None:
@@ -257,7 +266,10 @@ PINNED_BOOTED_NEW = "s_txn.kind == TXN_BOOTED_NEW && accept_unverified_image()"
 PINNED_LATE_ACK = "if (s_rollback_decided)"
 # The esp_timer side of the confirm/rollback pair never writes flash, never takes the
 # client lock and never touches the self-test API (the pre-store makes `timed out` free).
+# R5-fw-5: nor the maker's safe-window rule (ff_safe_window_registered() is allowed: it only
+# reads the registration).
 TIMER_FORBIDDEN = (
+    "ff_safe_window_is_safe",
     "esp_mqtt_client_",
     "enqueue_status",
     "ff_mqtt_publish_status",
@@ -347,7 +359,12 @@ class TestTheHold:
         # The backstop and the plain rollback both stay outside the lock.
         assert body.count("esp_ota_mark_app_invalid_rollback_and_reboot()") == 2
         assert leave < body.index("esp_ota_mark_app_invalid_rollback_and_reboot()")
-        for name in ("confirm_timeout_cb", "rollback_now_cb", "rollback_report_task"):
+        for name in (
+            "confirm_timeout_cb",
+            "rollback_now_cb",
+            "rollback_report_task",
+            "start_rollback_gate",
+        ):
             fn = _function_body(code, name)
             for forbidden in TIMER_FORBIDDEN:
                 if name == "rollback_report_task" and forbidden == "enqueue_status":

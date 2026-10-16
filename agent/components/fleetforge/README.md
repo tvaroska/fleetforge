@@ -56,6 +56,34 @@ self-test announces the `selftest` capability. The deploy then ends `confirmed` 
 `selftest passed`, or `rolled_back` with `selftest failed: <reason>; returned to <slot>` or
 `selftest timed out; returned to <slot>`.
 
+## Safe window
+
+Let your firmware say when the board may be rebooted, so an update or a rollback never cuts a
+job short:
+
+- **Arduino / PlatformIO:** `Fleetforge.onSafeWindow(isSafe);` right after `begin()` (and
+  `onSelfTest()`) in `setup()`. `isSafe()` returns `true` when a reboot right now is safe.
+- **ESP-IDF:** `#include "ff_safe_window.h"`, then `ff_set_safe_window_cb(fn, ctx);` right
+  after `fleetforge_start()` (and `ff_set_selftest()`). `fn(ctx)` returns `true` when a reboot
+  right now is safe.
+
+Every reboot the library makes waits for it: applying an update (`apply: auto` or the `apply`
+command), the rollback after a failed confirm or a failed self-test, and the `rollback` and
+`reboot` commands. While it says unsafe the fleet sees `awaiting_safe_window` with the detail
+`apply waits for a safe window` or `rollback waits for a safe window`, and a command is answered
+`deferred`; when it says safe, the reboot follows within about a quarter of a second plus the
+time the last messages need to leave. Crashes, watchdogs, brownouts and power loss do not wait.
+The confirm deadline keeps counting while the rule says unsafe: a rollback is decided on time,
+the image is not confirmed afterwards, and only the reboot waits, with no limit. A reset during
+that wait returns the board to the previous image too. A rule that never says safe holds the
+board until it is reset.
+
+The rule must be quick and must not block (read a flag): the library calls it from its own
+tasks, every 250 ms while a reboot waits and once more just before it, never from an interrupt.
+One rule per image, never removed; a registration after the library's session has started is
+refused. Without a rule every moment is safe. Both examples reboot only in the gap between two
+blinked messages. An image that registers a rule announces the `safe_window` capability.
+
 ## Quickstart: pick your toolchain
 
 | Toolchain | Go to |
@@ -116,9 +144,9 @@ is the library's version; in an ESP-IDF build it is your `PROJECT_VER`.
 ## Public headers
 
 - `include/`: `ff_cfg.h`, `ff_enroll.h`, `ff_identity.h`, `ff_mqtt.h`, `ff_net.h`,
-  `ff_progress.h`, `ff_selftest.h`, `ff_store.h`, `ff_telemetry.h`, `ff_time.h`. This is the
-  ESP-IDF surface. `ff_selftest.h` and `ff_telemetry.h` are the maker API: your firmware calls
-  them, the stock agent does not.
+  `ff_progress.h`, `ff_safe_window.h`, `ff_selftest.h`, `ff_store.h`, `ff_telemetry.h`,
+  `ff_time.h`. This is the ESP-IDF surface. `ff_safe_window.h`, `ff_selftest.h` and
+  `ff_telemetry.h` are the maker API: your firmware calls them, the stock agent does not.
 - `src/Fleetforge.h`: the Arduino surface. It lives in `src/` because the Arduino build
   reads `src/`.
 

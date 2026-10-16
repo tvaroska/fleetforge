@@ -56,6 +56,7 @@
 #include "ff_mqtt.h"
 #include "ff_net.h"
 #include "ff_progress.h"
+#include "ff_safe_window.h"
 #include "ff_selftest.h"
 #include "ff_store.h"
 #include "ff_telemetry.h"
@@ -88,8 +89,8 @@ static const char *TAG = "ff-lib";
  * tests/test_arduino_library.py pins this list to the TAGs in src/. */
 static const char *const FF_LOG_TAGS[] = {
     "ff-cfg", "ff-enroll", "ff-eth", "ff-id", "ff-lib", "ff-mqtt", "ff-net",
-    "ff-ota", "ff-progress", "ff-selftest", "ff-store", "ff-tel", "ff-time", "ff-txn",
-    "ff-wifi",
+    "ff-ota", "ff-progress", "ff-safe", "ff-selftest", "ff-store", "ff-tel", "ff-time",
+    "ff-txn", "ff-wifi",
 };
 
 FleetforgeClass Fleetforge;
@@ -298,6 +299,29 @@ bool FleetforgeClass::onSelfTest(void (*test)())
 bool FleetforgeClass::selfTestDone(bool passed, const char *reason)
 {
     return ff_selftest_report(passed, reason) == ESP_OK;
+}
+
+/* R5-fw-5: the maker API (ff_safe_window.h). The sketch's rule takes no arguments; the C rule
+ * forwards its answer. Called only from the library's own tasks, never from an ISR or the
+ * esp_timer task. */
+static bool (*s_sketch_safe_window)();
+
+static bool sketch_safe_window(void *)
+{
+    return s_sketch_safe_window();
+}
+
+bool FleetforgeClass::onSafeWindow(bool (*isSafe)())
+{
+    if (isSafe == nullptr || s_sketch_safe_window != nullptr) {
+        return false;
+    }
+    s_sketch_safe_window = isSafe;
+    if (ff_set_safe_window_cb(sketch_safe_window, nullptr) != ESP_OK) {
+        s_sketch_safe_window = nullptr;
+        return false;
+    }
+    return true;
 }
 
 #endif /* ARDUINO */

@@ -78,6 +78,11 @@ void ff_identity_note_rollback_capable(void);
  * the first announce updates the server's row. */
 void ff_identity_note_selftest(bool registered);
 
+/* R5-fw-5, R5-spec-1 D9. `safe_window` in `capabilities` is a CLAIM about this image: every
+ * reboot it makes waits for the firmware's safe-window rule. Called once, by ff_mqtt_run(),
+ * with ff_safe_window_freeze()'s answer, on the same terms as ff_identity_note_selftest(). */
+void ff_identity_note_safe_window(bool registered);
+
 /* The 12-hex-digit device id. Valid after ff_identity_init(); "" before. */
 const char *ff_device_id(void);
 

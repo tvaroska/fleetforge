@@ -987,7 +987,8 @@ def phase_enroll(run: Run, port_guest: str) -> Path:
     run.token_burned = True
     row = wait_for_device(
         run,
-        f"online at {VERSION_A} with layout {ARDUINO_LAYOUT} and capabilities ota, selftest",
+        f"online at {VERSION_A} with layout {ARDUINO_LAYOUT} and capabilities ota, selftest, "
+        "safe_window",
         lambda r: (
             r.get("online") is True
             and r.get("fw_version") == VERSION_A
@@ -995,6 +996,8 @@ def phase_enroll(run: Run, port_guest: str) -> Path:
             and "ota" in (r.get("capabilities") or [])
             # R5-fw-2: the committed sketch registers a self-test, and the announce says so.
             and "selftest" in (r.get("capabilities") or [])
+            # R5-fw-5: and a safe-window rule (reboots only between messages).
+            and "safe_window" in (r.get("capabilities") or [])
         ),
         timeout=60,
         log=log,

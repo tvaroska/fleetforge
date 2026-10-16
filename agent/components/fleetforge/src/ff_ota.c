@@ -63,8 +63,9 @@
  *    while the update carried on (DECISIONS 2026-10-03, R2-fw-6).
  * 8. **A `cancel` stops the transfer or puts the boot pointer back, never both orders**
  *    (R5-fw-4, R5-spec-1 D4). ff_ota_cancel() decides under `s_cancel_lock`; ota_task looks at
- *    the request at five checkpoints (before the fetch, every perform() pass, before finish(),
- *    after finish() and before the record, and at the staged exit). Before finish() a cancel
+ *    the request at six checkpoints (before the fetch, every perform() pass, before finish(),
+ *    after finish() and before the record, at the staged exit, and R5-fw-5's at the end of an
+ *    apply:auto's safe-window wait, before `applying`). Before finish() a cancel
  *    is an esp_https_ota_abort(): otadata never moved. After finish() it is
  *    restore_boot_partition() FIRST and only then the record cleared, so a power cut in
  *    between leaves a record no otadata evidence backs (discarded as stale at boot), never the
@@ -72,6 +73,12 @@
  *    `applying`, never accepted and dropped, and never carried out twice: whoever reads the
  *    request under the lock acts on it. Only ota_task publishes `cancelled` for a transaction
  *    it still runs; for a staged image that waits, the command seam does (it enqueues).
+ * 9. **apply:auto waits for the safe window, and the confirm path is not touched** (R5-fw-5,
+ *    R5-spec-1 D7). After `staged`, while the firmware's rule (ff_safe_window.h) says unsafe,
+ *    the task reports `awaiting_safe_window` once and polls every FF_SAFE_WINDOW_POLL_MS; the
+ *    phase is FF_OTA_TXN_AWAITING, which a `cancel` still reaches (D4). Checkpoint 6 commits
+ *    `applying` under the lock; from there it is the old walk, plus one more look at the rule
+ *    after the drain, immediately before esp_restart(). No rule = no wait, the R5-fw-4 walk.
  */
 
 #include "ff_ota.h"
@@ -90,6 +97,7 @@
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "ff_mqtt_internal.h"
+#include "ff_safe_window_internal.h"
 #include "ff_txn.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -766,7 +774,8 @@ static void ota_task(void *arg)
 
     /* Cancel checkpoint 4. finish() has moved the boot pointer, and nothing is recorded yet.
      * Under the lock: either a cancel is already here, or the walk moves past it for good
-     * (`staged` can still be cancelled, at the exit below; `applying` never). A cancel here
+     * (`staged` can still be cancelled, at the exit below, and so can an apply:auto waiting
+     * for the safe window, at checkpoint 6; `applying` never). A cancel here
      * puts the pointer back and never saves the record, in both apply modes (D4: cancel is
      * valid in `verifying`). If the pointer cannot be put back, the image WILL boot at the
      * next reset, so the transaction carries on as if no cancel had come, record and all,
@@ -775,7 +784,7 @@ static void ota_task(void *arg)
     portENTER_CRITICAL(&s_cancel_lock);
     cancel_now = s_cancel;
     if (!cancel_now) {
-        s_phase = cmd->apply_now ? FF_OTA_TXN_APPLYING : FF_OTA_TXN_STAGED;
+        s_phase = cmd->apply_now ? FF_OTA_TXN_AWAITING : FF_OTA_TXN_STAGED;
     }
     portEXIT_CRITICAL(&s_cancel_lock);
     if (cancel_now) {
@@ -788,7 +797,7 @@ static void ota_task(void *arg)
                  cmd->cmd_id, target->label);
         portENTER_CRITICAL(&s_cancel_lock);
         s_cancel = false;
-        s_phase = cmd->apply_now ? FF_OTA_TXN_APPLYING : FF_OTA_TXN_STAGED;
+        s_phase = cmd->apply_now ? FF_OTA_TXN_AWAITING : FF_OTA_TXN_STAGED;
         portEXIT_CRITICAL(&s_cancel_lock);
     }
 
@@ -818,13 +827,42 @@ static void ota_task(void *arg)
         /* `apply: "on_command"`. The device owns the reboot (design/architecture.md
          * principle 5), so this board stays here — the same place the simulator stops —
          * until the `apply` command (R5-fw-4: the session's reboot is the apply; the boot
-         * pointer already names the slot) or a `cancel`. Deliberately NOT
-         * `awaiting_safe_window` before R5-fw-5. Until then, a further `stage` is refused
-         * (choose_target_slot(): the boot pointer no longer names the running slot). */
+         * pointer already names the slot) or a `cancel`. It stops at `staged`, never
+         * `awaiting_safe_window`: the spec's on_command walk waits for the command, and the
+         * commanded apply's safe-window wait is the session's (ff_mqtt.c, R5-fw-5). Until then,
+         * a further `stage` is refused (choose_target_slot(): the boot pointer no longer names
+         * the running slot). */
         ESP_LOGW(TAG, "update %s: apply=on_command — staged and waiting for the apply "
                       "command (a further stage is refused until this board reboots or the "
                       "update is cancelled)",
                  cmd->cmd_id);
+        goto done;
+    }
+
+    /* R5-fw-5 (property 9): apply:auto waits for the firmware's safe window. Reported only when
+     * the rule says unsafe at first: a board that judges the moment safe goes straight on. The
+     * wait ends at a safe answer or at a cancel; the confirm deadline is not involved (this
+     * image is not the new one). */
+    if (!cancel_requested() && !ff_safe_window_is_safe()) {
+        ESP_LOGW(TAG, "update %s: %s is staged; the reboot into it waits for a safe window",
+                 cmd->cmd_id, target->label);
+        ff_mqtt_publish_status(cmd->cmd_id, FF_STATUS_AWAITING_SAFE_WINDOW, 100,
+                               FF_DETAIL_APPLY_WAITS);
+        while (!cancel_requested() && !ff_safe_window_is_safe()) {
+            vTaskDelay(pdMS_TO_TICKS(FF_SAFE_WINDOW_POLL_MS));
+        }
+    }
+    /* Cancel checkpoint 6. Under the lock: a cancel that came during the wait is acted on at
+     * `done:` (the staged exit: put back, then the record cleared, then `cancelled`); otherwise
+     * the walk is `applying` from here and a cancel is refused. */
+    bool cancel_apply;
+    portENTER_CRITICAL(&s_cancel_lock);
+    cancel_apply = s_cancel;
+    if (!cancel_apply) {
+        s_phase = FF_OTA_TXN_APPLYING;
+    }
+    portEXIT_CRITICAL(&s_cancel_lock);
+    if (cancel_apply) {
         goto done;
     }
 
@@ -838,18 +876,26 @@ static void ota_task(void *arg)
      * up — or the one the bootloader falls back to — reports `confirming`/`confirmed` or
      * `rolled_back` against this cmd_id. That is ff_mqtt.c's job, not this file's. */
     vTaskDelay(pdMS_TO_TICKS(OTA_PUBLISH_DRAIN_MS));
+    /* R5-fw-5: the rule is asked once more immediately before the reboot. A window that closed
+     * during the drain is waited for again, silently: `applying` is already said, and the walk
+     * is committed (no cancel any more). */
+    while (!ff_safe_window_is_safe()) {
+        vTaskDelay(pdMS_TO_TICKS(FF_SAFE_WINDOW_POLL_MS));
+    }
     esp_restart(); /* does not return */
 
 done:
     /* Cancel checkpoint 5, and the end of the update as far as a cancel can see. Under the
-     * lock: a cancel accepted while the staged image was being recorded is acted on HERE; any
+     * lock: a cancel accepted while the staged image was being recorded, or while apply:auto
+     * waited for the safe window (R5-fw-5, checkpoint 6), is acted on HERE; any
      * other leaves `s_running` false in the same critical section, so from then on
      * ff_ota_cancel() finds the task gone and cancels a staged image itself. A cancel that
      * found a path which then ended `failed` is not reported again: `failed` is the truth. */
     for (;;) {
         bool cancel_staged_now;
         portENTER_CRITICAL(&s_cancel_lock);
-        cancel_staged_now = s_cancel && s_phase == FF_OTA_TXN_STAGED;
+        cancel_staged_now =
+            s_cancel && (s_phase == FF_OTA_TXN_STAGED || s_phase == FF_OTA_TXN_AWAITING);
         s_cancel = false;
         if (!cancel_staged_now) {
             s_phase = FF_OTA_TXN_NONE;
@@ -1031,7 +1077,9 @@ esp_err_t ff_ota_cancel(const char *cmd_id, bool *reported)
     if (s_running && strcmp(cmd_id, s_running_cmd_id) == 0) {
         in_flight = true;
         if (s_phase == FF_OTA_TXN_APPLYING) {
-            rc = ESP_ERR_INVALID_STATE; /* about to reboot into it: `rollback` is the verb */
+            /* Released (apply:auto past its safe window, R5-fw-5): about to reboot into it, and
+             * `rollback` is the verb. TRANSFER, STAGED and AWAITING are cancellable. */
+            rc = ESP_ERR_INVALID_STATE;
         } else if (s_phase == FF_OTA_TXN_NONE) {
             rc = ESP_ERR_NOT_FOUND; /* the task has already ended this transaction */
         } else {

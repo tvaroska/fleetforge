@@ -1002,6 +1002,215 @@ Answered (R5-spec-1): it stays awake from `staging` until `confirmed` or `rolled
     `esp_ota_begin()` invalidates the inactive otadata sector, so a stage after a staged cancel
     wipes the cancelled image's NEW entry.
 
+### R5-fw-5 as built
+
+- **What was built.** The firmware's safe-window rule gates every reboot the agent makes,
+  unreleased (no version bump; the release waits for the owner's Patch A). New maker header
+  `include/ff_safe_window.h` (`typedef bool (*ff_safe_window_fn)(void *ctx)`,
+  `esp_err_t ff_set_safe_window_cb(ff_safe_window_fn fn, void *ctx)`), `src/ff_safe_window.c`
+  (TAG `ff-safe`) and `src/ff_safe_window_internal.h` (`ff_safe_window_freeze()`,
+  `ff_safe_window_registered()`, `ff_safe_window_is_safe()`, `FF_SAFE_WINDOW_POLL_MS 250`).
+  `ff_mqtt.c` (CRITICAL): the freeze and the `safe_window` capability, the rollback gate task,
+  the command reboot task's window wait, the `deferred` answers, the cancel of a deferred
+  apply, a stage refused while a reboot is on its way. `ff_ota.c`/`ff_ota.h` (CRITICAL): the
+  apply:auto wait in a new phase `FF_OTA_TXN_AWAITING` and a sixth cancel checkpoint.
+  `Fleetforge.cpp`/`.h` (CRITICAL): `bool onSafeWindow(bool (*isSafe)())` and the `ff-safe`
+  log tag. `ff_mqtt_internal.h`: `FF_STATUS_AWAITING_SAFE_WINDOW` and the two details. Both
+  worked examples register a rule ("reboot only between two messages"). No spec, server,
+  simulator, frontend, `fleetforge_start.c`, `agent_main.c`, partition or sdkconfig change.
+- **Decisions.**
+  - (1) **API.** C: `ff_set_safe_window_cb(fn, ctx)`, ESP_OK / ESP_ERR_INVALID_ARG (NULL) /
+    ESP_ERR_INVALID_STATE (already registered, or the session has frozen the registration; one
+    E log line per refusal). One rule per image, never removed. Arduino:
+    `Fleetforge.onSafeWindow(isSafe)`, false for nullptr, a second call or after the freeze.
+    Unregistered = always safe. The header's contract: true when a reboot right now is safe;
+    cheap, non-blocking, reentrant; called from the agent's own tasks (MQTT, OTA, the reboot
+    tasks), possibly at once, every 250 ms while a reboot waits and immediately before every
+    agent reboot; never from an ISR or the esp_timer task. What waits: apply (auto and
+    commanded), the rollback after a failed confirm or self-test, the `rollback` and `reboot`
+    commands. What does not: crashes, watchdogs, brownouts, power loss, and the confirm
+    deadline itself (decided on time; only the reboot waits).
+  - (2) **Frozen at session start**, the self-test's precedent (R5-fw-1): `ff_mqtt_run()` calls
+    `ff_identity_note_safe_window(ff_safe_window_freeze())` right after the self-test freeze,
+    before `ff_txn_init()`, `classify_txn()` and the first connect. The freeze logs once:
+    `a safe-window rule is registered: every reboot this agent makes waits for it` / `no
+    safe-window rule registered: this agent reboots as soon as it must`.
+  - (3) **Capability** `safe_window` (D9), after `selftest`, only when registered.
+  - (4) **Poll 250 ms** (`_Static_assert` <= 1000): the examples' window is the 800 ms gap
+    between two messages, and a 1 s poll could phase-lock past it.
+  - (5) **`awaiting_safe_window` only when the first evaluation says unsafe**; a board that
+    judges the moment safe goes straight on. Details `apply waits for a safe window` (pct 100)
+    and `rollback waits for a safe window` (pct null), `FF_DETAIL_*` (not `FF_STATUS_*`: a test
+    regex reads those as states), each `_Static_assert`ed <= 63 B.
+  - (6) **The deadline / self-test rollback (D12): a static gate task, used ONLY with a rule.**
+    `confirm_timeout_cb` (after its claim and its two unchanged log lines), the backstop branch
+    and `selftest_done`'s fail (after the head store) call `start_rollback_gate()` when
+    `ff_safe_window_registered()`; with no rule every line of the R5-fw-4 esp_timer path is
+    unchanged. `start_rollback_gate()` claims `s_gate_started` under `s_decide_lock` and creates
+    `ff_rbgate` with `xTaskCreateStatic` (4 KB, priority 6: above every agent task and the
+    Arduino loop, below esp_timer/wifi); it never calls the rule, writes flash or takes the
+    client lock. `rollback_gate_task`: unsafe → `s_rollback_waiting`, W `the rollback is decided
+    and waits for a safe window — this image keeps running until then; a reset rolls it back
+    too`, `awaiting_safe_window` + rollback detail if owed and connected, poll, W `a safe window:
+    rolling back now`; then `rolling_back` + the 2 s grace (only when a report was queued), the
+    rule asked again (a window that closed in the grace is waited for silently),
+    `esp_ota_mark_app_invalid_rollback_and_reboot()`. It never touches the confirm timer (D10).
+    `report_txn_on_connect()` repeats `awaiting_safe_window` while the gate waits.
+  - (7) **Command reboots (D7, D8): `ff_reboot` is persistent**, created once and woken with
+    `xTaskNotifyGive` (a static TCB is never re-created). Loop: notify → drain 1.5 s →
+    `wait_for_the_window()` (abort → idle; the rule asked outside `s_reboot_lock`; commit under
+    the lock only without hold or abort; W `command <id>: the reboot waits for a safe window`
+    once) → for a verb answered `deferred`, the release statuses (`applying`, `rebooting` /
+    `rolling_back`), drain again, the rule asked again → `rebooting for command <id>` →
+    `esp_restart()`.
+  - (8) **Verb answers (D2).** The rule is asked once, after every refusal (and after
+    rollback's mark-invalid, the D12 shape): `apply` → `accepted` + `applying`, `rebooting`, or
+    `deferred` + `awaiting_safe_window` `apply waits for a safe window`; `rollback` → `accepted` +
+    `rolling_back`, or `deferred` + `awaiting_safe_window` `rollback waits for a safe window`;
+    `reboot` → `accepted` or `deferred`, never a status. Repeats and no-ops keep `accepted`;
+    `apply` on an apply:auto in AWAITING is an `accepted` no-op.
+  - (9) **`cancel` of a deferred commanded apply (D4).** On a released apply whose answer was
+    `deferred` and which the window has not committed, `on_cancel` sets `s_reboot_hold` under
+    `s_reboot_lock`, makes its one `ff_ota_cancel()` call, then lifts the hold and sets
+    `s_reboot_abort` only on ESP_OK; the reboot task goes idle (`the deferred apply was
+    cancelled — no reboot`). An apply answered `accepted` stays uncancellable.
+  - (10) **apply:auto waits in `ota_task`.** Checkpoint 4 moves to AWAITING (not APPLYING); after
+    `staged`, if the rule says unsafe, `awaiting_safe_window` is published and the task polls
+    until safe or cancelled; checkpoint 6 commits APPLYING under `s_cancel_lock`; `done:` treats
+    AWAITING as staged (put back, record cleared, `cancelled`); after the drain the rule is asked
+    again before `esp_restart()`. An `on_command` stage still stops at `staged`.
+  - (11) **A `stage` is refused while a reboot is on its way** (closes R5-fw-4 gap (b)):
+    `on_stage`, after the re-delivery drop, publishes `failed` `a reboot is already pending` /
+    `a rollback is already decided`.
+  - (12) **Examples** register the rule as the third statement: a `volatile` flag set false at
+    the top of each message and true after its last letter; `basic_idf/main/main.c` stays at 70
+    lines.
+- **Deviations from the plan.** (a) A `rollback` command's claim now also sets
+  `s_rollback_commanded` (under `s_decide_lock`), and the backstop starts no gate for it: its
+  own reboot task already waits for the window, and a second party would repeat the statuses
+  and call mark-invalid on an image already marked (IDF then targets the active otadata entry,
+  which is the previous image's). (b) The gate waits the 2 s grace only when it queued
+  `rolling_back`; with nothing reported the reboot follows the window at once, as the R5-fw-4
+  path does. (c) A deferred plain `reboot` has no second drain (nothing to report). (d) T2 used
+  a fourth artifact D for apply:auto (the server does not know `cancelled` as terminal until
+  R5-be-2, so redeploying C would reuse its cancelled `cmd_id`) and re-confirmed B before the
+  rollback (after the staged cancel B's entry was NEW, which a rollback refuses: R5-fw-4 gap
+  (a)). (e) `scripts/lib_quickstart.py` phase 2a now also requires `safe_window`.
+- **Rejected.** Calling the rule from esp_timer; one shared static task for the command reboot
+  and the gate (two parties could create it); a dynamic gate task (a heap failure would skip
+  the window or the rollback); pausing or extending the confirm deadline; a deadline or timeout
+  on the wait; `force`; routing the unregistered path through the gate; answering repeats
+  `deferred`; announcing `awaiting_safe_window` when the first evaluation is safe; marking
+  invalid at the deadline's decision time; a test-only build flag for the window.
+- **Named gaps.** A verb answered `accepted` that finds the window closed after its 1.5 s drain
+  waits with `applying`/`rebooting` (or `rolling_back`) already reported, logged only; the same
+  after the final drain/grace re-checks. A rule stuck at unsafe holds the board (an unconfirmed
+  or INVALID image) until a reset, which returns it. A hog above priority 6 starves the gate
+  the same way. The backstop can start the gate before a starved self-test task stored its fail
+  head (reports `selftest timed out`). A reset during a pre-apply wait boots the staged image
+  (R5-spec-1, unchanged). A cancelled deferred apply's id stays the remembered reboot id (its
+  redelivery is dropped with the "already rebooted" wording). The deadline's backstop without
+  a rule still reboots at once inside a `rollback` command's 1.5 s drain (R5-fw-4 behaviour,
+  its second mark-invalid fails harmlessly).
+- **Proposed spec addenda (paste-ready, for the owner; `spec/` is not edited).**
+  - Patch A2, after the *Every reboot waits…* bullet: "A `stage` that arrives while a reboot
+    waits for the safe window, or after the device has decided to roll back, is refused."
+  - Patch A4, *The safe window gates the rollback too*, append: "The device reports
+    `awaiting_safe_window` only when it judges the moment unsafe; otherwise it goes straight on."
+  - Patch A5, after the `deferred` bullet: "A command that repeats one already accepted or
+    deferred is answered `accepted`; only the command that starts a wait is answered `deferred`."
+- **Tests.** New `tests/test_safe_window.py` (45): the header, the registration (refusals, the
+  freeze logs once, the rule called once outside the lock, `registered` never calls it, no log
+  in either hook), the poll (<= 1000, every wait loop sleeps it), the timer side (no rule call
+  in esp_timer context, the three hand-offs and their positions, the static gate started once,
+  wait → report → grace → re-check → reboot, no confirm-timer touch, the reconnect repeat, every
+  hand-off behind the registered check), the command task (created once, notify, drain < window
+  < log < restart, commit under the lock without hold/abort, release statuses, idle on abort),
+  the verbs' deferred branches, the cancel hold, ff_ota (AWAITING, checkpoint 6, the re-check,
+  the staged exit), the stage refusal, the capability, the Arduino member, both examples.
+  Updated on purpose: `test_ff_cfg.py` (`awaiting_safe_window` in the declared walk),
+  `test_agent_verbs.py` (checkpoint 4 assigns AWAITING, the staged exit takes AWAITING, the
+  enum order, `safe_window` from a negative to a positive pin), `test_selftest.py`
+  (`ff_safe_window_is_safe` in `TIMER_FORBIDDEN`, `start_rollback_gate` a timer-context
+  function, the freeze-order pin), `test_ota_component.py` (`MAKER_HEADERS`,
+  `INTERNAL_HEADERS`, `HAZARDS`), `test_agent_power_and_size.py` (budgets). **Mutation
+  checks**, each red and then reverted: (i) the rule called in `confirm_timeout_cb` (4 red);
+  (ii) the backstop's hand-off dropped (2); (iii) checkpoint 4 back to APPLYING (2); (iv) the
+  commit without checking `s_reboot_hold` (1); (v) the `on_stage` refusal removed (1); (vi)
+  `esp_timer_stop(s_confirm_timer)` in the gate (1).
+- **T1.** `just test`: 2108 passed; ruff, format and mypy clean. `just agent-build-all`: four
+  `BUNDLE OK`, 0 warnings. `APP_SIZE_BUDGET_BYTES` raised to the measured byte: esp32 1,046,288
+  (+2,960), esp32s3 1,026,240 (+2,992), esp32c3 1,088,048 (+3,360), esp32c6 1,137,632 (+3,376).
+  `just lib-quickstart --build-only`: `== PASS (554 s)` (Arduino A esp32
+  1,193,744 B / esp32s3 1,186,800 B, own project, build B, basic_idf esp32 1,121,856 B / esp32s3
+  1,127,184 B; 0 library warnings). `just lib-arduino-check`: `== PASS (241 s)`, 0 warnings, `T verifyRollbackLater` in both ELFs (esp32 1,183,088 B, esp32s3 1,173,760 B). `just
+  agent-qemu-smoke esp32`: `HARNESS OK`.
+- **T2 (local dev stack on 8088; api recreated with 10.0.2.2 origins, restored afterwards).**
+  Arduino Basic variants, never committed: W (rule `millis() % 80000 >= 60000`: unsafe 60 s,
+  safe 20 s) as A `1.0.0-fw5w`, B `1.5.0-fw5-1792152873`, C `1.6.0-…`, D `1.6.1-…`; L (rule
+  `millis() > 400000`, the loop answers the self-test only after 320 s) as
+  `1.7.0-fw5-1792152873-late`. Verbs published as `ff-commander`; the wire captured with
+  `just mqtt-sub 'ff/v1/d/+/up/#'`. Timing: the log timestamps are FreeRTOS ticks, which run
+  5-8 s ahead of `millis()` (esp_timer) in QEMU, so `millis()` was estimated from the wall clock
+  since the ROM reset line (minus 1.2 s); each release below landed 250-260 ms after the window
+  opened by that estimate, one poll.
+  - (1) A `--fresh`: `ff-safe: a safe-window rule is registered…` (12652) before `connecting to`
+    (12702); `GET /v1/devices` `capabilities ["ota","apply","cancel","rollback","reboot","selftest","safe_window"]`.
+  - (2) B staged `on_command` (`bf6be9fc…`); `apply` `fw5-ap1-…` at millis ~121 s →
+    `{"id":"fw5-ap1-1792152873","type":"apply","result":"deferred","cmd_id":"bf6be9fc…","detail":null}`,
+    `{"state":"awaiting_safe_window","pct":100,"detail":"apply waits for a safe window"}`,
+    `command fw5-ap1-…: the reboot waits for a safe window`; nothing for 18 s; at millis ~140.25 s
+    `applying`, `rebooting`, and 1.5 s later `rebooting for command fw5-ap1-…`. QEMU was killed
+    226 ms after that line (before the soft reset), and the cold boot ran B: `confirming on
+    ota_1`, `custom self-test passed`, `CONFIRMED`, `confirmed` `selftest passed`.
+  - (3) C staged (`a295a513…`); `apply` → `deferred` + `awaiting_safe_window`; `cancel`
+    `fw5-cx2-…` 4 s later in the same unsafe stretch → `boot partition put back to ota_1: the
+    update was cancelled by command…`, `record cleared`, ack `accepted`, `cancelled`, `command
+    fw5-ap2-…: the deferred apply was cancelled — no reboot`; through the whole safe stretch
+    140-160 s (checked at ~172 s): no `rebooting for command`, no `rst:`, still `morse: HI`.
+  - (4) D deployed `apply: auto` (`e47f9e08…`): `staged` → W `ota_0 is staged; the reboot into it
+    waits for a safe window` → `awaiting_safe_window` `apply waits for a safe window` at millis
+    ~245 s → `applying`, `rebooting` at ~300.25 s; killed in the drain, cold boot D: `confirming on
+    ota_0`, `CONFIRMED`, `confirmed` `selftest passed`.
+  - (5) On D, `reboot` `fw5-rb5-…` at ~80 s → `{"result":"deferred","cmd_id":null,"detail":null}`,
+    no `up/status`; a deploy of B meanwhile → `stage id=e40b347b… refused: a reboot is already
+    pending`, `up/status failed` `a reboot is already pending`, no `staging`; `rebooting for
+    command fw5-rb5-…` at ~140.25 s, `rst:0xc`. The soft reset then hit the emulator's
+    `esp_timer_impl_init` panic loop, so `reset_reason sw` could not be observed; the power cycle
+    announced `poweron`.
+  - (6) After re-confirming B (`c07f654c…`, staged + power cycle), `rollback` `fw5-rl6-…` at ~80 s
+    → record `fw5-rl6-…` + head stored, `this image is marked invalid — the return waits for a
+    safe window`, `{"result":"deferred","cmd_id":"fw5-rl6-1792152873"}`, `awaiting_safe_window`
+    `rollback waits for a safe window`; at ~140.25 s `rolling_back`, `rebooting for command
+    fw5-rl6-…`, `rst:0xc` (panic loop); power cycle: D reports `rolled_back` `rolled back by
+    command; returned to ota_0`.
+  - (7) THE D12 case. L staged from D (`793c6f0f…`), power-cycled: `OTA boot: 300 s`, `confirming
+    on ota_1`, `running the custom self-test`; at millis ~303 s `no self-test result 300 s after
+    an OTA boot — marking this image invalid…`, `the rollback is decided and waits for a safe
+    window — this image keeps running until then; a reset rolls it back too`, `up/status
+    awaiting_safe_window` `rollback waits for a safe window` (L's `cmd_id`); at ~323 s `the
+    self-test answered after the confirm deadline — the rollback already decided stands; NOT
+    confirming`; at ~400.26 s `a safe window: rolling back now`, `rolling_back`, `rst:0xc`; the
+    emulator booted D on its own: `transaction 793c6f0f…: rolled_back (selftest timed out;
+    returned to ota_0)`. Never `CONFIRMED` (0 lines), never `confirmed` on the wire; otadata
+    ota_1 `INVALID`, ota_0 `VALID`; the API row: `rolled_back`, terminal, `fw_version` D, steps
+    `… staged, confirming, awaiting_safe_window, rolling_back, rolled_back`.
+  - (8) Regressions. `just lib-quickstart` (the committed example now has a rule): `== PASS (2375 s)`;
+    2a `capabilities ['ota', 'apply', 'cancel', 'rollback', 'reboot', 'selftest', 'safe_window']`;
+    2b `confirmed`, detail `selftest passed`; 2c `no working session 60 s`, `rolled_back`
+    `returned to ota_1; ota_0 did not confirm`, steps `… confirming, awaiting_safe_window,
+    rolling_back, rolled_back` (the gate, released in the gap between messages); 2d `selftest
+    failed: i2c sensor 0x48 did not ans; returned to ota_1` (63 B), the same steps; 2e `no
+    self-test result 300 s`, `selftest timed out; returned to ota_1`, the same steps; no
+    `confirmed` anywhere; credentials in 0 of 29 transcripts. The stock agent (`agent-qemu esp32
+    --fresh`): `no safe-window rule registered: this agent reboots as soon as it must` before
+    `connecting to`, `capabilities ["ota","apply","cancel","rollback","reboot"]` (no
+    `safe_window`); `just agent-qemu-smoke esp32`: `HARNESS OK`.
+  - Gotchas: the first `lib-qemu --fresh` (run under `script` for a TTY) panicked in
+    `task_wdt_isr` before `app_main` (the known boot-loop panic, *What we know about the
+    boot-loop panic*); the same bundle booted cleanly without the TTY. `agent/tools/otadata.py`
+    needs a `flash_size` the library bundle's manifest lacks (patched copy used).
+
 ## Reuse note
 
 The self-test entrypoint defined here moves by the simulation gate

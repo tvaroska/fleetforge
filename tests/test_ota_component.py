@@ -49,13 +49,14 @@ JUSTFILE = AGENT_DIR.parent / "justfile"
 PRIVATE_WHOLE_HEADERS = ("ff_ota.h", "ff_txn.h", "ff_net_adapter.h", "ff_marker.h")
 INTERNAL_HEADERS = tuple(
     f"ff_{name}_internal.h"
-    for name in ("identity", "mqtt", "net", "selftest", "store", "telemetry", "time")
+    for name in ("identity", "mqtt", "net", "safe_window", "selftest", "store", "telemetry", "time")
 )
 # The maker API (R4-fw-2, DECISIONS 2026-10-15): public headers for a firmware's own code.
 # The stock agent has no application and no honest reason to call them, so they are the
 # one exception to "include/ is what agent_main.c includes"; the examples prove them instead.
-# R5-fw-1 (ff_selftest.h) joined it; R4-fw-3 (ff_logf) joins this list.
-MAKER_HEADERS = ("ff_selftest.h", "ff_telemetry.h")
+# R5-fw-1 (ff_selftest.h) and R5-fw-5 (ff_safe_window.h) joined it; R4-fw-3 (ff_logf) joins
+# this list.
+MAKER_HEADERS = ("ff_safe_window.h", "ff_selftest.h", "ff_telemetry.h")
 
 # The spellings that must never become public API. Each one is a way for a firmware built
 # on the component to report something that did not happen.
@@ -63,6 +64,7 @@ HAZARDS = (
     "ff_mqtt_publish_status",  # publish `confirmed` for an image that never confirmed
     "ff_identity_note_rollback_capable",  # CLAIM rollback_capable (measured, never claimed)
     "ff_identity_note_selftest",  # CLAIM the selftest capability (R5-fw-2)
+    "ff_identity_note_safe_window",  # CLAIM the safe_window capability (R5-fw-5)
     "ff_store_save_rollback_capable",
     "ff_identity_announce_json",  # the announce is the component's, not the firmware's
     "ff_ota_start",  # the A/B apply path runs only from the session

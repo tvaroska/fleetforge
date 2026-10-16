@@ -57,6 +57,8 @@ static bool s_rollback_capable;
 /* R5-fw-2. Set by ff_identity_note_selftest() from ff_mqtt_run() — main task, before
  * esp_mqtt_client_start(); same threading argument as s_rollback_capable. */
 static bool s_selftest_registered;
+/* R5-fw-5. Set by ff_identity_note_safe_window() from ff_mqtt_run(); same threading argument. */
+static bool s_safe_window_registered;
 
 /* S0-fw-6, spec/device-protocol.md -> up/announce `reset_reason`: why the chip last reset,
  * read once in ff_identity_init() (every boot path calls it: agent_main.c,
@@ -374,6 +376,11 @@ void ff_identity_note_selftest(bool registered)
     s_selftest_registered = registered;
 }
 
+void ff_identity_note_safe_window(bool registered)
+{
+    s_safe_window_registered = registered;
+}
+
 const char *ff_device_id(void)
 {
     return s_device_id;
@@ -549,8 +556,8 @@ static cJSON *announce_object(const ff_cfg_t *cfg)
      * claim about what the board can be asked to DO, so it stays as short as the truth —
      * it was empty at R0 for exactly the same reason. R5-fw-4 (R5-spec-1 D9): `apply`,
      * `cancel`, `rollback` and `reboot` are now true of every image of this agent (ff_mqtt.c
-     * carries them out and answers on up/ack), so they are unconditional. No `safe_window`
-     * until a predicate can be registered (R5-fw-5).
+     * carries them out and answers on up/ack), so they are unconditional. `selftest` and
+     * `safe_window` follow, each only when this image registered one (R5-fw-2, R5-fw-5).
      *
      * It is also load-bearing server-side: `POST /v1/devices/{id}/deploy` answers 409 to a
      * device whose `capabilities` does not contain `ota`, so an agent that performs OTA
@@ -568,6 +575,12 @@ static cJSON *announce_object(const ff_cfg_t *cfg)
      * The stock agent registers none and announces no `selftest`. */
     if (s_selftest_registered) {
         cJSON_AddItemToArray(capabilities, cJSON_CreateString("selftest"));
+    }
+    /* R5-fw-5 (R5-spec-1 D9): `safe_window` only when this image registered a rule. A server
+     * reads it as "this board's reboots wait for its own safe moment, and may be answered
+     * `deferred`", which ff_mqtt.c and ff_ota.c make true. The stock agent has none. */
+    if (s_safe_window_registered) {
+        cJSON_AddItemToArray(capabilities, cJSON_CreateString("safe_window"));
     }
     cJSON_AddItemToObject(root, "capabilities", capabilities);
     /* S0-fw-6: after `capabilities`, before `lib_marker`, as the spec prints it. */

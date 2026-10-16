@@ -18,8 +18,9 @@ rollback into an image that never booted, or a cancel that leaves a stale boot p
 * rollback: only to a VALID/UNDEFINED other slot that IDF also accepts; the confirming case
   claims the R5-fw-2 latch before it writes; the own-transaction case records, marks, and
   reverts the record if the mark fails; the returned-to image composes the command head;
-* ff_ota: the phase query is read-only; the five cancel checkpoints sit where the plan puts
-  them; the staged cancel puts the boot pointer back BEFORE it clears the record;
+* ff_ota: the phase query is read-only; the six cancel checkpoints sit where the plans put
+  them (R5-fw-5 adds the sixth, at the end of an apply:auto's safe-window wait); the staged
+  cancel puts the boot pointer back BEFORE it clears the record;
 * the capabilities and the reboot-id store.
 
 Comments are stripped before any grep (`_code`), the idiom of the other agent tripwires.
@@ -346,6 +347,12 @@ class TestFfOta:
         for name in ("FF_OTA_TXN_NONE = 0", "FF_OTA_TXN_TRANSFER", "FF_OTA_TXN_STAGED"):
             assert name in header
         assert "FF_OTA_TXN_APPLYING" in header
+        # R5-fw-5: between STAGED and APPLYING.
+        assert (
+            header.index("FF_OTA_TXN_STAGED")
+            < header.index("FF_OTA_TXN_AWAITING")
+            < header.index("FF_OTA_TXN_APPLYING")
+        )
 
     def test_the_phase_query_is_read_only(self) -> None:
         for name in ("ff_ota_txn_phase", "staged_phase"):
@@ -400,8 +407,10 @@ class TestFfOta:
         assert (
             enter
             < window.index("cancel_now = s_cancel;")
-            < window.index("s_phase = cmd->apply_now ? FF_OTA_TXN_APPLYING : FF_OTA_TXN_STAGED;")
+            # R5-fw-5: apply:auto now waits for the safe window first (AWAITING, cancellable).
+            < window.index("s_phase = cmd->apply_now ? FF_OTA_TXN_AWAITING : FF_OTA_TXN_STAGED;")
         )
+        assert "FF_OTA_TXN_APPLYING" not in window, "applying is committed at checkpoint 6"
         cancel = window.index("if (cancel_now)")
         branch = window[cancel : window.index("goto done", cancel)]
         assert "restore_boot_partition(WHY_CANCELLED)" in branch
@@ -412,7 +421,10 @@ class TestFfOta:
         task = _function_body(_ota(), "ota_task")
         done = task[task.index("done:") :]
         enter = done.index("portENTER_CRITICAL(&s_cancel_lock)")
-        decide = done.index("s_cancel && s_phase == FF_OTA_TXN_STAGED")
+        # R5-fw-5: an apply:auto cancelled during its safe-window wait exits here too.
+        decide = done.index(
+            "s_cancel && (s_phase == FF_OTA_TXN_STAGED || s_phase == FF_OTA_TXN_AWAITING)"
+        )
         free_slot = done.index("s_running = false;")
         leave = done.index("portEXIT_CRITICAL(&s_cancel_lock)")
         assert enter < decide < free_slot < leave, "decided and freed in one critical section"
@@ -466,7 +478,15 @@ class TestCapabilities:
         assert ota < positions[0] < positions[1] < positions[2] < positions[3] < selftest
         between = identity[ota:selftest]
         assert "if (" not in between, "unconditional: every image of this agent does them"
-        assert '"safe_window"' not in identity, "R5-fw-5"
+        # R5-fw-5: `safe_window` is claimed only when a rule is registered, after `selftest`.
+        assert identity.count('cJSON_CreateString("safe_window")') == 1
+        safe = re.search(
+            r"if \(s_safe_window_registered\) \{\s*cJSON_AddItemToArray\(capabilities, "
+            r'cJSON_CreateString\("safe_window"\)\);\s*\}',
+            identity,
+        )
+        assert safe is not None
+        assert identity.index('cJSON_CreateString("selftest")') < safe.start()
 
 
 class TestTheRebootIdStore:

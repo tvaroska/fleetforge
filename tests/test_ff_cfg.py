@@ -594,9 +594,9 @@ class TestStatusStatesMatchTheSpec:
         """ff_ota.c walks to `rebooting`; since R2-be-1 ff_mqtt.c reports the outcome after
         the reboot — `confirming`/`confirmed`, or `rolling_back`/`rolled_back` from the
         image the board returned to. R5-fw-4 adds `cancelled`, the end of a transaction the
-        `cancel` command stopped before its reboot. `awaiting_safe_window` stays absent: it
-        belongs to a board with a window to wait for, and this agent is always-on (until
-        R5-fw-5)."""
+        `cancel` command stopped before its reboot. R5-fw-5 adds `awaiting_safe_window`: an
+        image that registered a safe-window rule reports it while a reboot (an apply or a
+        decided rollback) waits for the rule."""
         declared = set(
             re.findall(r'#define FF_STATUS_[A-Z_]+ "([a-z_]+)"', FF_MQTT_INTERNAL_H.read_text())
         )
@@ -613,4 +613,5 @@ class TestStatusStatesMatchTheSpec:
             "rolling_back",
             "rolled_back",
             "cancelled",  # R5-fw-4: the cancel verb (R5-spec-1 D4, Patch A3)
+            "awaiting_safe_window",  # R5-fw-5: the safe-window wait (R5-spec-1 D7, D12)
         }
