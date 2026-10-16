@@ -22,7 +22,14 @@ extern "C" {
  * `confirming` once the new image has a broker session, `confirmed` at the announce PUBACK
  * that confirms it, `rolling_back` best-effort when the confirm timer fires, and
  * `rolled_back` from the image the board RETURNED to. `awaiting_safe_window` is absent
- * because an always-on board has no window to wait for. */
+ * because an always-on board has no window to wait for.
+ *
+ * R5-fw-4: `cancelled` belongs to the pre-reboot walk too. It ends a transaction that the
+ * `cancel` command stopped before its reboot: published by ff_ota.c's task when the cancel
+ * caught the transfer (or the staged wait) still running, enqueued by the session when the
+ * staged image was already waiting. It is ahead of the spec: R5-spec-1 Patch A3 adds it to
+ * spec/device-protocol.md's machine, and is not applied yet. Never a status for the `cancel`
+ * command itself, whose answer goes to `up/ack`. */
 #define FF_STATUS_STAGING "staging"
 #define FF_STATUS_DOWNLOADING "downloading"
 #define FF_STATUS_VERIFYING "verifying"
@@ -34,6 +41,7 @@ extern "C" {
 #define FF_STATUS_CONFIRMED "confirmed"
 #define FF_STATUS_ROLLING_BACK "rolling_back"
 #define FF_STATUS_ROLLED_BACK "rolled_back"
+#define FF_STATUS_CANCELLED "cancelled"
 
 /* `pct` for a state that has no meaningful percentage: published as JSON `null` rather
  * than as a plausible-looking 0, for the same reason ff_identity reports a null `rssi`. */

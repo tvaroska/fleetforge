@@ -212,16 +212,25 @@ FORBIDDEN_OPTIONS = [
 # (esp_timer_stop + esp_timer_start_once and its four log lines), the stage-side resolve and
 # its two warnings in on_stage(), and the `confirm_s` u32 write in ff_txn_save() and read in
 # ff_txn_load(); most of the bytes are the new log strings.
+#
+# R5-fw-4: +5.9-6.6 KB each. Raised 2026-10-16 for **all four targets**, all rebuilt, to the
+# exact measured byte: esp32 1,037,360 -> 1,043,328 (+5,968 B), esp32s3 1,017,344 ->
+# 1,023,248 (+5,904 B), esp32c3 1,078,080 -> 1,084,688 (+6,608 B), esp32c6 1,127,648 ->
+# 1,134,256 (+6,608 B). The added code is the four verb handlers, enqueue_ack() (a second
+# cJSON body), the reboot task and its scheduling, other_slot_is_returnable(), the ack
+# vocabulary and the verbs' log lines in ff_mqtt.c; ff_ota_txn_phase(), ff_ota_cancel(), the
+# five cancel checkpoints and the staged-cancel sequence in ff_ota.c; the reboot-id store in
+# ff_txn.c; four capability strings. The reboot task's 4 KB stack and TCB are .bss, not app.
 APP_SIZE_BUDGET_BYTES = {
-    "esp32": 1_037_360,
+    "esp32": 1_043_328,
     # Raised from 973_136 for the OTA-capable agent (R1-fw-1/R1-fw-2), which cost every
     # target ~18 KB. Only esp32 was raised at the time: this gate reads whatever is in
     # `agent/dist/`, so a target nobody had built locally is not checked and does not
     # fail. The other two were still carrying 0.2.0-era numbers until R2b-fw-1 raised
     # them — that was a gap in the gate, not slack here.
-    "esp32s3": 1_017_344,
-    "esp32c3": 1_078_080,
-    "esp32c6": 1_127_648,
+    "esp32s3": 1_023_248,
+    "esp32c3": 1_084_688,
+    "esp32c6": 1_134_256,
 }
 
 # An app may occupy at most this much of an OTA slot. Not a style rule: R2 downloads the

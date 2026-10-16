@@ -1,7 +1,8 @@
 /*
  * ff_txn — see ff_txn.h. One static mutex serialises the two writers: ff_ota's task saves
  * a record, the esp-mqtt task clears one, and a save racing a clear is exactly the case
- * ff_txn_clear_if() exists for.
+ * ff_txn_clear_if() exists for. R5-fw-4's reboot-command id (its own namespace) takes the same
+ * lock, so no two NVS writers of this module ever interleave.
  */
 
 #include "ff_txn.h"
@@ -279,4 +280,70 @@ esp_err_t ff_txn_set_detail(const char *cmd_id, const char *detail)
     nvs_close(handle);
     unlock();
     return rc;
+}
+
+esp_err_t ff_txn_note_reboot_cmd(const char *id)
+{
+    if (id == NULL || id[0] == '\0' || strlen(id) >= FF_TXN_MAX_CMD_ID) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!lock()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    /* Its own namespace, overwritten in place: nothing here erases, so the transaction
+     * record in FF_TXN_NAMESPACE is never touched by it. */
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(FF_TXN_CMD_NAMESPACE, NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        unlock();
+        ESP_LOGE(TAG, "cannot open nvs namespace '%s': %s", FF_TXN_CMD_NAMESPACE,
+                 esp_err_to_name(err));
+        return err;
+    }
+    err = nvs_set_str(handle, FF_TXN_KEY_REBOOT_CMD, id);
+    if (err == ESP_OK) {
+        err = nvs_commit(handle);
+    }
+    nvs_close(handle);
+    unlock();
+
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "cannot remember command %s across the reboot: %s", id,
+                 esp_err_to_name(err));
+        return err;
+    }
+    ESP_LOGI(TAG, "command %s remembered across the reboot", id);
+    return ESP_OK;
+}
+
+esp_err_t ff_txn_last_reboot_cmd(char *out, size_t len)
+{
+    if (out == NULL || len == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    out[0] = '\0';
+    if (!lock()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    /* Read-only: the common boot follows no reboot command, and writes nothing. */
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(FF_TXN_CMD_NAMESPACE, NVS_READONLY, &handle);
+    if (err == ESP_OK) {
+        size_t got = len;
+        err = nvs_get_str(handle, FF_TXN_KEY_REBOOT_CMD, out, &got);
+        nvs_close(handle);
+    }
+    unlock();
+
+    if (err != ESP_OK) {
+        out[0] = '\0';
+        if (err != ESP_ERR_NVS_NOT_FOUND) {
+            ESP_LOGW(TAG, "cannot read the last reboot command (%s) — its redelivery would not "
+                          "be recognised",
+                     esp_err_to_name(err));
+        }
+    }
+    return err;
 }

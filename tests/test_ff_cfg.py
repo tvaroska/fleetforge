@@ -51,6 +51,10 @@ FF_CFG_TS = REPO_ROOT / "frontend" / "src" / "ffcfg.ts"
 FF_CFG_VECTOR = REPO_ROOT / "frontend" / "src" / "ffcfg.vector.json"
 FF_CFG_NETS_VECTOR = REPO_ROOT / "frontend" / "src" / "ffcfg.nets.vector.json"
 DEVICE_PROTOCOL = REPO_ROOT / "spec" / "device-protocol.md"
+# R5-spec-1's proposal: Patch A3 (the `cancelled` line of the up/status machine) lives here
+# until the owner pastes it into the spec.
+SELF_TEST_DOC = REPO_ROOT / "docs" / "features" / "self-test.md"
+PATCH_A3_HEADING = "**A3, `up/status` state machine.**"
 
 # Retyped from the format's documentation, never imported from the module under test.
 # `<4sHHII` = magic, version, reserved, payload_len, crc32.
@@ -558,7 +562,24 @@ class TestStatusStatesMatchTheSpec:
         # JSON example.
         fence = text.index("```", text.index("```", text.index("```json", start) + 7) + 3)
         block = text[fence : text.index("```", fence + 3)]
+        states = set(re.findall(r"[a-z_]{4,}", block))
+        # R5-fw-4 builds `cancelled` ahead of the owner's Patch A3 (the R4-fw-2 precedent).
+        # Until the spec's machine prints it, the proposal's A3 line counts too; once it is
+        # pasted this switches itself off and the spec alone decides again.
+        if "cancelled" not in states:
+            states |= self._patch_a3_states()
+        return states
+
+    def _patch_a3_states(self) -> set[str]:
+        doc = SELF_TEST_DOC.read_text()
+        start = doc.index("\n" + PATCH_A3_HEADING) + 1
+        fence = doc.index("```", start)
+        block = doc[fence + 3 : doc.index("```", fence + 3)]
         return set(re.findall(r"[a-z_]{4,}", block))
+
+    def test_patch_a3_adds_only_cancelled(self) -> None:
+        """The proposal this class leans on is exactly one state (R5-spec-1 A3)."""
+        assert self._patch_a3_states() == {"cancelled"}
 
     def test_every_state_the_firmware_can_publish_is_in_the_machine(self) -> None:
         declared = set(
@@ -572,8 +593,10 @@ class TestStatusStatesMatchTheSpec:
     def test_the_walk_the_agent_performs_is_declared(self) -> None:
         """ff_ota.c walks to `rebooting`; since R2-be-1 ff_mqtt.c reports the outcome after
         the reboot — `confirming`/`confirmed`, or `rolling_back`/`rolled_back` from the
-        image the board returned to. `awaiting_safe_window` stays absent: it belongs to a
-        board with a window to wait for, and this agent is always-on."""
+        image the board returned to. R5-fw-4 adds `cancelled`, the end of a transaction the
+        `cancel` command stopped before its reboot. `awaiting_safe_window` stays absent: it
+        belongs to a board with a window to wait for, and this agent is always-on (until
+        R5-fw-5)."""
         declared = set(
             re.findall(r'#define FF_STATUS_[A-Z_]+ "([a-z_]+)"', FF_MQTT_INTERNAL_H.read_text())
         )
@@ -589,4 +612,5 @@ class TestStatusStatesMatchTheSpec:
             "confirmed",
             "rolling_back",
             "rolled_back",
+            "cancelled",  # R5-fw-4: the cancel verb (R5-spec-1 D4, Patch A3)
         }

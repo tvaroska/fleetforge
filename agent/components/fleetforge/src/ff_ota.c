@@ -5,7 +5,7 @@
  * already walks `staging → downloading → verifying → staged → applying → rebooting`, the
  * ingestor parses what it publishes, and this file repeats that walk on real flash. What
  * happens after the reboot (`confirming` → `confirmed` | `rolling_back` → `rolled_back`) is
- * reported by ff_mqtt.c from the record this file writes at `staged` (ff_txn.h). Seven
+ * reported by ff_mqtt.c from the record this file writes at `staged` (ff_txn.h). Eight
  * properties are worth stating out loud, because each one is a silent wrong answer rather
  * than an error:
  *
@@ -31,7 +31,8 @@
  *    image is abandoned with esp_https_ota_abort() and otadata is never written. Before
  *    R2-fw-1 the switch came first and was undone afterwards, and in between — the whole
  *    read-back of up to 1.9 MB — a power cut or a watchdog booted an unverified image. The
- *    only path that can still need restore_boot_partition() is a failed finish().
+ *    only paths that can still need restore_boot_partition() are a failed finish() and a
+ *    `cancel` that arrives after it (property 8).
  * 4. **The URL is never logged.** It is the authorization (R1-be-3: "signed URL never
  *    persisted, never logged"), so it does not appear in a log line, in a `detail`, or
  *    truncated "just for debugging". Everything else about a failure is said plainly.
@@ -60,6 +61,17 @@
  *    in flight or the image staged and waiting, and the command seam drops it without a
  *    status. Before, it was refused against itself (`failed`), which ended the server's row
  *    while the update carried on (DECISIONS 2026-10-03, R2-fw-6).
+ * 8. **A `cancel` stops the transfer or puts the boot pointer back, never both orders**
+ *    (R5-fw-4, R5-spec-1 D4). ff_ota_cancel() decides under `s_cancel_lock`; ota_task looks at
+ *    the request at five checkpoints (before the fetch, every perform() pass, before finish(),
+ *    after finish() and before the record, and at the staged exit). Before finish() a cancel
+ *    is an esp_https_ota_abort(): otadata never moved. After finish() it is
+ *    restore_boot_partition() FIRST and only then the record cleared, so a power cut in
+ *    between leaves a record no otadata evidence backs (discarded as stale at boot), never the
+ *    cancelled image booting with no record. A cancel is never accepted once the walk is
+ *    `applying`, never accepted and dropped, and never carried out twice: whoever reads the
+ *    request under the lock acts on it. Only ota_task publishes `cancelled` for a transaction
+ *    it still runs; for a staged image that waits, the command seam does (it enqueues).
  */
 
 #include "ff_ota.h"
@@ -153,6 +165,34 @@ static char s_running_cmd_id[sizeof(((ff_ota_cmd_t *)0)->cmd_id)];
 _Static_assert(sizeof(s_running_cmd_id) == FF_TXN_MAX_CMD_ID,
                "s_running_cmd_id, ff_ota_cmd_t.cmd_id and the ff_txn record hold the same ids");
 
+/* R5-fw-4. The cancel handshake (property 8). `s_phase` says where the update `s_running` is
+ * about stands; `s_cancel` is a cancel accepted for it and not yet acted on. Both, and the
+ * true -> false move of `s_running` at `done:`, change only under this lock, so a cancel is
+ * decided against one consistent picture: ff_ota_cancel() (esp-mqtt task) either sees the
+ * ota task still able to act, or sees it gone and acts itself. Never held across a flash
+ * write, a publish or a log line. Meaningful only while `s_running` is true. */
+static portMUX_TYPE s_cancel_lock = portMUX_INITIALIZER_UNLOCKED;
+static volatile ff_ota_txn_t s_phase = FF_OTA_TXN_NONE;
+static bool s_cancel;
+
+static bool cancel_requested(void)
+{
+    bool requested;
+    portENTER_CRITICAL(&s_cancel_lock);
+    requested = s_cancel;
+    portEXIT_CRITICAL(&s_cancel_lock);
+    return requested;
+}
+
+/* ota_task's own report of a cancel it carried out: its own task, so an immediate publish
+ * (the ff_mqtt_publish_status() contract), exactly like fail(). `cancelled` is terminal and
+ * carries no detail. */
+static void report_cancelled(const ff_ota_cmd_t *cmd)
+{
+    ESP_LOGW(TAG, "update %s: cancelled by command", cmd->cmd_id);
+    ff_mqtt_publish_status(cmd->cmd_id, FF_STATUS_CANCELLED, FF_STATUS_PCT_NONE, NULL);
+}
+
 static void fail(const ff_ota_cmd_t *cmd, const char *detail)
 {
     ESP_LOGE(TAG, "update %s failed: %s", cmd->cmd_id, detail);
@@ -212,10 +252,11 @@ static esp_err_t partition_digest(const esp_partition_t *part, size_t length, ch
 }
 
 /* Point the boot partition at the running slot again, in case a FAILED
- * esp_https_ota_finish() left it anywhere else. Since R2-fw-1 a sha256 mismatch never gets
- * here — it is caught before finish() and nothing was moved (property 3) — so this is the
- * belt-and-braces branch for an image IDF itself refused. It is also the only call to
- * esp_ota_set_boot_partition() in this file. Logged at ERROR either way — an operator needs
+ * esp_https_ota_finish() left it anywhere else, or because a `cancel` arrived after finish()
+ * moved it (R5-fw-4; `why` is the second half of the log line). Since R2-fw-1 a sha256
+ * mismatch never gets here — it is caught before finish() and nothing was moved (property
+ * 3) — so for a failure this is the belt-and-braces branch for an image IDF itself
+ * refused. It is also the only call to esp_ota_set_boot_partition() in this file. Logged at ERROR either way — an operator needs
  * to know a board is carrying a rejected image in its spare slot.
  *
  * It writes otadata ONLY if the pointer actually moved (R2-fw-2). finish() reaches
@@ -224,21 +265,28 @@ static esp_err_t partition_digest(const esp_partition_t *part, size_t length, ch
  * boot == running in every case short of a torn otadata write. "Putting it back" anyway is
  * not a no-op. It is IDF's equal-seq rewrite (property 5): a duplicate entry for the
  * running slot, in state NEW, written over the previous image's entry, and depending on
- * sector parity the known-good image then boots PENDING_VERIFY. */
-static void restore_boot_partition(void)
+ * sector parity the known-good image then boots PENDING_VERIFY.
+ *
+ * When the pointer DID move (a cancel after a successful finish()) the same rewrite is the
+ * point, and its side effect is R5-spec-1's named gap: the running image's new entry is NEW,
+ * so it boots PENDING_VERIFY once at the next reset and confirms again.
+ *
+ * Returns true when the boot pointer names the running slot afterwards (it already did, or it
+ * was put back), false when that cannot be said. */
+static bool restore_boot_partition(const char *why)
 {
     const esp_partition_t *running = esp_ota_get_running_partition();
     if (running == NULL) {
         ESP_LOGE(TAG, "cannot read the running partition to undo the boot switch — this "
                       "board may reboot into an image that failed verification");
-        return;
+        return false;
     }
     const esp_partition_t *boot = esp_ota_get_boot_partition();
     if (boot == running) {
         ESP_LOGW(TAG, "boot partition still names %s; nothing to undo — otadata was not "
                       "touched",
                  running->label);
-        return;
+        return true;
     }
     if (boot == NULL) {
         ESP_LOGE(TAG, "cannot read the boot partition; putting it back to %s anyway",
@@ -246,14 +294,31 @@ static void restore_boot_partition(void)
     }
     esp_err_t err = esp_ota_set_boot_partition(running);
     if (err == ESP_OK) {
-        ESP_LOGE(TAG, "boot partition put back to %s: the staged image was rejected and "
-                      "will NOT be booted",
-                 running->label);
-    } else {
-        ESP_LOGE(TAG, "CANNOT undo the boot switch (%s) — this board will reboot into an "
-                      "image that failed verification",
-                 esp_err_to_name(err));
+        ESP_LOGE(TAG, "boot partition put back to %s: %s", running->label, why);
+        return true;
     }
+    ESP_LOGE(TAG, "CANNOT undo the boot switch (%s) — this board will reboot into the staged "
+                  "image",
+             esp_err_to_name(err));
+    return false;
+}
+
+#define WHY_REJECTED "the staged image was rejected and will NOT be booted"
+#define WHY_CANCELLED "the update was cancelled by command and will NOT be booted"
+
+/* R5-fw-4. The staged-cancel sequence (R5-spec-1 D4), the order load-bearing: the boot pointer
+ * back on the running image FIRST, the record cleared only if that worked. A power cut in
+ * between leaves a record whose slot is neither running nor invalid, which classify_txn()
+ * discards as stale. The reverse order would boot the cancelled image with no record, and it
+ * would confirm itself without a word. Nothing else is erased: the staged image stays in its
+ * slot, and its otadata entry stays NEW, which no rollback ever returns to. */
+static bool cancel_staged(const char *cmd_id)
+{
+    if (!restore_boot_partition(WHY_CANCELLED)) {
+        return false;
+    }
+    (void)ff_txn_clear_if(cmd_id);
+    return true;
 }
 
 /* Where the `Location` of the one redirect we follow is collected, out of the HTTP event
@@ -510,6 +575,11 @@ static void ota_task(void *arg)
         fail(cmd, "cannot open the artifact");
         goto done;
     }
+    /* Cancel checkpoint 1 (property 8): nothing fetched into the slot yet, nothing to abort. */
+    if (cancel_requested()) {
+        report_cancelled(cmd);
+        goto done;
+    }
 
     esp_http_client_config_t http = {
         .url = resolved,
@@ -557,7 +627,13 @@ static void ota_task(void *arg)
     int last_len = 0;
     int64_t last_progress_us = esp_timer_get_time();
     bool stalled = false;
+    bool cancel_seen = false;
     while ((err = esp_https_ota_perform(handle)) == ESP_ERR_HTTPS_OTA_IN_PROGRESS) {
+        /* Cancel checkpoint 2: once per perform() pass, so a cancel waits at most one read. */
+        if (cancel_requested()) {
+            cancel_seen = true;
+            break;
+        }
         int so_far = esp_https_ota_get_image_len_read(handle);
         /* BEFORE the size-less `continue` below, or a command without a size would never
          * be guarded. */
@@ -580,6 +656,13 @@ static void ota_task(void *arg)
         }
     }
 
+    /* Like the stall below, a cancel leaves the loop with `err` still IN_PROGRESS. Abort,
+     * never finish(): otadata and the transaction record are not touched. */
+    if (cancel_seen) {
+        esp_https_ota_abort(handle);
+        report_cancelled(cmd);
+        goto done;
+    }
     /* BEFORE the `download failed` branch: after the break `err` is still IN_PROGRESS,
      * which would read as a failed download. Same posture as that branch: abort, never
      * finish(), so otadata and the transaction record are not touched. */
@@ -653,6 +736,13 @@ static void ota_task(void *arg)
         fail(cmd, "sha256 mismatch");
         goto done;
     }
+    /* Cancel checkpoint 3, the last moment a cancel costs nothing: otadata has not moved.
+     * A cancel that lands while finish() runs is caught by checkpoint 4. */
+    if (cancel_requested()) {
+        esp_https_ota_abort(handle);
+        report_cancelled(cmd);
+        goto done;
+    }
     ESP_LOGI(TAG, "update %s: sha256 %s matches what is on flash in %s; switching the boot "
                   "partition",
              cmd->cmd_id, digest, target->label);
@@ -670,8 +760,36 @@ static void ota_task(void *arg)
         }
         /* finish() only sets the boot partition on its own success path, but an image
          * that failed validation must not be left bootable under any reading of that. */
-        restore_boot_partition();
+        (void)restore_boot_partition(WHY_REJECTED);
         goto done;
+    }
+
+    /* Cancel checkpoint 4. finish() has moved the boot pointer, and nothing is recorded yet.
+     * Under the lock: either a cancel is already here, or the walk moves past it for good
+     * (`staged` can still be cancelled, at the exit below; `applying` never). A cancel here
+     * puts the pointer back and never saves the record, in both apply modes (D4: cancel is
+     * valid in `verifying`). If the pointer cannot be put back, the image WILL boot at the
+     * next reset, so the transaction carries on as if no cancel had come, record and all,
+     * and its outcome is reported after that reset. */
+    bool cancel_now;
+    portENTER_CRITICAL(&s_cancel_lock);
+    cancel_now = s_cancel;
+    if (!cancel_now) {
+        s_phase = cmd->apply_now ? FF_OTA_TXN_APPLYING : FF_OTA_TXN_STAGED;
+    }
+    portEXIT_CRITICAL(&s_cancel_lock);
+    if (cancel_now) {
+        if (restore_boot_partition(WHY_CANCELLED)) {
+            report_cancelled(cmd);
+            goto done;
+        }
+        ESP_LOGE(TAG, "update %s: the cancel cannot be carried out — the boot partition stays "
+                      "on %s, so the update goes on and its outcome is reported",
+                 cmd->cmd_id, target->label);
+        portENTER_CRITICAL(&s_cancel_lock);
+        s_cancel = false;
+        s_phase = cmd->apply_now ? FF_OTA_TXN_APPLYING : FF_OTA_TXN_STAGED;
+        portEXIT_CRITICAL(&s_cancel_lock);
     }
 
     /* The transaction is live from HERE, not from `applying`: finish() has just moved the
@@ -698,14 +816,14 @@ static void ota_task(void *arg)
 
     if (!cmd->apply_now) {
         /* `apply: "on_command"`. The device owns the reboot (design/architecture.md
-         * principle 5) and R1 ships no `apply` command, so this board stays here — the
-         * same place the simulator stops. Deliberately NOT `awaiting_safe_window`: this
-         * agent is always-on and has no window to wait for, so reporting one would be a
-         * state nothing will ever leave. Until it reboots, a further `stage` is refused
+         * principle 5), so this board stays here — the same place the simulator stops —
+         * until the `apply` command (R5-fw-4: the session's reboot is the apply; the boot
+         * pointer already names the slot) or a `cancel`. Deliberately NOT
+         * `awaiting_safe_window` before R5-fw-5. Until then, a further `stage` is refused
          * (choose_target_slot(): the boot pointer no longer names the running slot). */
-        ESP_LOGW(TAG, "update %s: apply=on_command — staged and waiting (no apply command "
-                      "exists before R2; a further stage is refused until this board "
-                      "reboots)",
+        ESP_LOGW(TAG, "update %s: apply=on_command — staged and waiting for the apply "
+                      "command (a further stage is refused until this board reboots or the "
+                      "update is cancelled)",
                  cmd->cmd_id);
         goto done;
     }
@@ -723,9 +841,40 @@ static void ota_task(void *arg)
     esp_restart(); /* does not return */
 
 done:
+    /* Cancel checkpoint 5, and the end of the update as far as a cancel can see. Under the
+     * lock: a cancel accepted while the staged image was being recorded is acted on HERE; any
+     * other leaves `s_running` false in the same critical section, so from then on
+     * ff_ota_cancel() finds the task gone and cancels a staged image itself. A cancel that
+     * found a path which then ended `failed` is not reported again: `failed` is the truth. */
+    for (;;) {
+        bool cancel_staged_now;
+        portENTER_CRITICAL(&s_cancel_lock);
+        cancel_staged_now = s_cancel && s_phase == FF_OTA_TXN_STAGED;
+        s_cancel = false;
+        if (!cancel_staged_now) {
+            s_phase = FF_OTA_TXN_NONE;
+            s_running = false;
+        }
+        portEXIT_CRITICAL(&s_cancel_lock);
+        if (!cancel_staged_now) {
+            break;
+        }
+        if (cancel_staged(cmd->cmd_id)) {
+            report_cancelled(cmd);
+        } else {
+            ESP_LOGE(TAG, "update %s: the cancel cannot be carried out — the staged image "
+                          "still boots at the next reset",
+                     cmd->cmd_id);
+        }
+        /* Either way this task is done with the transaction: a further cancel finds
+         * FF_OTA_TXN_NONE (nothing to cancel) until the next pass frees the slot, after which a
+         * staged image still waiting is cancelled by ff_ota_cancel() itself. */
+        portENTER_CRITICAL(&s_cancel_lock);
+        s_phase = FF_OTA_TXN_NONE;
+        portEXIT_CRITICAL(&s_cancel_lock);
+    }
     free(resolved);
     free(cmd);
-    s_running = false;
     vTaskDelete(NULL);
 }
 
@@ -751,9 +900,17 @@ esp_err_t ff_ota_start(const ff_ota_cmd_t *cmd)
     /* Before `s_running = true`, so the predicate never sees the flag with a stale id.
      * cmd_id is NUL-terminated and fits: on_stage() refused a longer one. */
     strlcpy(s_running_cmd_id, cmd->cmd_id, sizeof(s_running_cmd_id));
+    /* R5-fw-4: a fresh transaction, cancellable from its first byte (property 8). */
+    portENTER_CRITICAL(&s_cancel_lock);
+    s_cancel = false;
+    s_phase = FF_OTA_TXN_TRANSFER;
     s_running = true;
+    portEXIT_CRITICAL(&s_cancel_lock);
     if (xTaskCreate(ota_task, "ff_ota", OTA_TASK_STACK, copy, OTA_TASK_PRIO, NULL) != pdPASS) {
+        portENTER_CRITICAL(&s_cancel_lock);
+        s_phase = FF_OTA_TXN_NONE;
         s_running = false;
+        portEXIT_CRITICAL(&s_cancel_lock);
         free(copy);
         return ESP_ERR_NO_MEM;
     }
@@ -789,4 +946,113 @@ bool ff_ota_is_handling(const char *cmd_id)
         return false;
     }
     return strcmp(rec.cmd_id, cmd_id) == 0;
+}
+
+/* R5-fw-4. The staged-and-waiting answer outside the ota task: the boot pointer names another
+ * slot, and the record is for that slot (and, when asked, for `cmd_id`). Read-only. */
+static ff_ota_txn_t staged_phase(const char *cmd_id, char *held, size_t held_len)
+{
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    const esp_partition_t *boot = esp_ota_get_boot_partition();
+    if (running == NULL || boot == NULL || boot == running) {
+        return FF_OTA_TXN_NONE;
+    }
+    /* The record, not RAM: a refused second `stage` reuses the running-id slot, and the
+     * staged transaction must stay addressable through it. ff_txn_load() discards a torn
+     * record, as ff_ota_is_handling() and the boot already accept. */
+    ff_txn_t rec;
+    const bool recorded = ff_txn_load(&rec) == ESP_OK && rec.target_addr == boot->address;
+    if (cmd_id == NULL) {
+        /* Any update: whatever the pointer names boots at the next reset. */
+        if (recorded && held != NULL) {
+            strlcpy(held, rec.cmd_id, held_len);
+        }
+        return FF_OTA_TXN_STAGED;
+    }
+    if (!recorded || strcmp(rec.cmd_id, cmd_id) != 0) {
+        return FF_OTA_TXN_NONE;
+    }
+    if (held != NULL) {
+        strlcpy(held, rec.cmd_id, held_len);
+    }
+    return FF_OTA_TXN_STAGED;
+}
+
+ff_ota_txn_t ff_ota_txn_phase(const char *cmd_id, char *held, size_t held_len)
+{
+    if (held != NULL && held_len > 0) {
+        held[0] = '\0';
+    } else {
+        held = NULL;
+    }
+    bool running;
+    bool match;
+    bool cancel;
+    ff_ota_txn_t phase;
+    portENTER_CRITICAL(&s_cancel_lock);
+    running = s_running;
+    phase = s_phase;
+    cancel = s_cancel;
+    match = running && cmd_id != NULL && strcmp(cmd_id, s_running_cmd_id) == 0;
+    if (running && held != NULL && (cmd_id == NULL || match)) {
+        strlcpy(held, s_running_cmd_id, held_len);
+    }
+    portEXIT_CRITICAL(&s_cancel_lock);
+
+    if (running && cmd_id == NULL) {
+        /* Until the task has ended the boot pointer may still be moving, cancelled or not. */
+        return phase != FF_OTA_TXN_NONE ? phase : FF_OTA_TXN_TRANSFER;
+    }
+    if (match) {
+        if (cancel || phase == FF_OTA_TXN_NONE) {
+            if (held != NULL) {
+                held[0] = '\0';
+            }
+            return FF_OTA_TXN_NONE;
+        }
+        return phase;
+    }
+    /* Not the update in flight (or none is): an earlier stage may still wait for a reboot. */
+    return staged_phase(cmd_id, held, held != NULL ? held_len : 0);
+}
+
+esp_err_t ff_ota_cancel(const char *cmd_id, bool *reported)
+{
+    if (cmd_id == NULL || cmd_id[0] == '\0' || reported == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    *reported = false;
+
+    /* 1. The update in flight: decided under the lock that ota_task's checkpoints and its
+     *    `done:` read (property 8), so the request is acted on by exactly one party. */
+    bool in_flight = false;
+    esp_err_t rc = ESP_ERR_NOT_FOUND;
+    portENTER_CRITICAL(&s_cancel_lock);
+    if (s_running && strcmp(cmd_id, s_running_cmd_id) == 0) {
+        in_flight = true;
+        if (s_phase == FF_OTA_TXN_APPLYING) {
+            rc = ESP_ERR_INVALID_STATE; /* about to reboot into it: `rollback` is the verb */
+        } else if (s_phase == FF_OTA_TXN_NONE) {
+            rc = ESP_ERR_NOT_FOUND; /* the task has already ended this transaction */
+        } else {
+            s_cancel = true; /* idempotent: a second cancel finds it set and is the same */
+            *reported = true;
+            rc = ESP_OK;
+        }
+    }
+    portEXIT_CRITICAL(&s_cancel_lock);
+    if (in_flight) {
+        return rc;
+    }
+
+    /* 2. Staged by `apply: "on_command"` and waiting, with the ota task gone: cancelled here,
+     *    in the caller's task (a flash write, never under the lock). */
+    if (staged_phase(cmd_id, NULL, 0) != FF_OTA_TXN_STAGED) {
+        return ESP_ERR_NOT_FOUND;
+    }
+    if (!cancel_staged(cmd_id)) {
+        return ESP_FAIL;
+    }
+    ESP_LOGW(TAG, "update %s: cancelled by command (the staged image will not boot)", cmd_id);
+    return ESP_OK;
 }

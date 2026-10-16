@@ -131,7 +131,8 @@ recorded below: a peripheral that QEMU does not reset with the CPU.
 
 Workaround for an OTA acceptance run, which is what proves the *applied* image boots — ask
 for `apply: "on_command"`, so the agent stages the slot and **parks** instead of rebooting
-itself (`ff_ota.c`: "apply=on_command — staged and waiting"), then power-cycle it yourself:
+itself (`ff_ota.c`: "apply=on_command — staged and waiting for the apply command"), then
+power-cycle it yourself (or, since R5-fw-4, send it `apply`; see *Driving the verbs*):
 
 ```bash
 curl -sS -X POST "$BASE/v1/devices/000000000000/deploy" -H "Authorization: Bearer $TOKEN" \
@@ -313,6 +314,56 @@ rolled_back (returned to ota_0; ota_1 did not confirm)`. A command below 30 (say
 clamped at the stage (`confirm_timeout_s is outside 30-3600 s — using 30 s`) and behaves the
 same. An image that hangs BEFORE its session (the `-hangtest` row below) never reads the
 record and keeps the boot arm's 300 s, by design.
+
+#### Driving the verbs (R5-fw-4)
+
+The agent carries out `apply`, `cancel`, `rollback` and `reboot` and announces them
+(`capabilities` `["ota","apply","cancel","rollback","reboot"]`). Each verb has its own `id`;
+`apply` and `cancel` also name the stage's `cmd_id`. No server endpoint sends them yet
+(R5-be-2), so every one is hand-built JSON published as the **commander**, and the answer is
+read off the wire. The api must hand out `10.0.2.2` origins for the stages (see above).
+
+```bash
+set -a; . ./.env; set +a
+PYTHONUNBUFFERED=1 just mqtt-sub 'ff/v1/d/+/up/#' | tee /tmp/verbs-wire.log &   # acks AND statuses
+pub() { just mqtt-pub 'ff/v1/d/000000000000/dn/cmd' "$1" 0 "$MQTT_COMMAND_USERNAME" "$MQTT_COMMAND_PASSWORD"; }
+pub '{"id":"ap0-1","type":"apply","cmd_id":"nope-1"}'
+pub '{"id":"rb-1","type":"reboot"}'
+pub '{"id":"rl-1","type":"rollback"}'
+pub '{"id":"cx-1","type":"cancel","cmd_id":"<the stage id>"}'
+```
+
+Every verb gets exactly one answer on `ff/v1/d/<id>/up/ack` (QoS 1, **not retained**), keys
+`id, type, result, cmd_id, detail`; the board logs it as `publish …/up/ack (qos 1, no retain,
+queued, msg_id N) id=… result=… detail=…`. Its effect on a transaction is on `up/status`.
+
+| Verb, situation | `up/ack` | `up/status` |
+|---|---|---|
+| `apply`, nothing staged under that `cmd_id` | `refused`, `nothing staged for this cmd_id`, `cmd_id` null | none |
+| `apply`, the `on_command` stage is `staged` | `accepted`, the stage's `cmd_id` | `applying`, `rebooting`, then (new image) `confirming`, `confirmed` |
+| `cancel` while `staging`/`downloading`/`verifying` | `accepted`, the stage's `cmd_id` | `cancelled` |
+| `cancel` of a `staged` image | `accepted` | `cancelled` |
+| `rollback` while the board holds an update | `refused`, `cancel first` | none |
+| `rollback` on a confirmed image, other slot VALID | `accepted`, `cmd_id` = the rollback's own `id` | `rolling_back`, then (old image) `rolled_back` `rolled back by command; returned to ota_0` |
+| `rollback` while `confirming` | `accepted`, the stage's `cmd_id` | `rolling_back`, then `rolled_back` with the same detail |
+| `rollback`, other slot INVALID/NEW/empty | `refused`, `no confirmed image to return to` | none |
+| `reboot` with nothing open | `accepted`, `cmd_id` null | none (the next announce says `reset_reason` `sw`) |
+| `reboot` while staged or confirming | `refused`, `an update is in progress` / `the running image is not confirmed yet` | none |
+| `identify`, `set_cfg`, anything else | `refused`, `not implemented` | none |
+
+A verb that reboots never reboots inside its own delivery: the board logs `rebooting for
+command <id>` about 1.5 s after the `dn/cmd` line, then the emulator shows one `rst:0xc
+(SW_CPU_RESET)` and `Loaded app from partition at offset 0x…`. That id is kept in NVS (namespace
+`ff_cmd`), so a redelivery after the boot logs `duplicate command id=… — ignored (this board
+already rebooted for it)` and is not answered. The soft reset is subject to the `esp_restart()`
+limit above: if the next boot panics in `esp_timer_impl_init`, `sleep 10; just agent-qemu-stop
+esp32; just agent-qemu esp32` and read the result off that boot.
+
+After a `cancel` of a **staged** image the boot pointer is written back with IDF's rewrite, which
+marks the running slot's entry `NEW`: the next power cycle boots it `pending_verify` once and it
+confirms again at its announce ack, with no `transaction` line (R5-spec-1's named gap). A
+`rollback` refuses a NEW other slot, so let that re-confirm happen before you test a rollback to
+it.
 
 
 ### Driving a failure: boot loop, power cut, torn otadata, hang (R2-test-1)

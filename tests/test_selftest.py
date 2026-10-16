@@ -400,7 +400,9 @@ class TestTheHold:
         assert "FF_STATUS_ROLLING_BACK" in body and "s_ctx.connected" in body
 
     def test_only_the_session_stores_a_detail(self) -> None:
-        assert _code(FF_MQTT_C).count("ff_txn_set_detail(") == 2
+        # 3 since R5-fw-4: the ack pre-store, the fail head, and store_rollback_head() (the
+        # `rolled back by command` head of the rollback verb).
+        assert _code(FF_MQTT_C).count("ff_txn_set_detail(") == 3
         for path in agent_sources():
             if path.name not in ("ff_mqtt.c", "ff_txn.c", "ff_txn.h"):
                 assert "ff_txn_set_detail" not in _code(path), path.name

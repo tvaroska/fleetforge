@@ -803,6 +803,205 @@ Answered (R5-spec-1): it stays awake from `staging` until `confirmed` or `rolled
     (`rst:0xc (SW_CPU_RESET)`, then `Loaded app … 0x20000`), so no stop/start was needed for the
     rollback; the otadata was read after a stop.
 
+### R5-fw-4 as built
+
+- **What was built.** The agent carries out `apply`, `cancel`, `rollback` and `reboot`, and
+  answers every verb once on a new topic `up/ack`, unreleased (no version bump; the release
+  waits for the owner's Patch A). `ff_mqtt.c` (CRITICAL): `topic_ack`, `enqueue_ack()`, the ack
+  vocabulary, `on_apply`/`on_cancel`/`on_rollback`/`on_reboot`, the `not implemented` answer for
+  every other id'd type, `schedule_command_reboot()` and its static reboot task, the persisted
+  reboot-id dedupe, `other_slot_is_returnable()`, and `classify_txn` composing the command head.
+  `ff_ota.c`/`ff_ota.h` (CRITICAL): `ff_ota_txn_phase()`, `ff_ota_cancel()`, a cancel handshake
+  under `s_cancel_lock` with five checkpoints in `ota_task`, and `restore_boot_partition(why)`
+  returning whether the pointer names the running slot. `ff_txn`: the reboot-id store in its
+  own NVS namespace `ff_cmd`. `ff_mqtt_internal.h`: `FF_STATUS_CANCELLED` (ahead of Patch A3).
+  `ff_identity.c`: `capabilities` `["ota","apply","cancel","rollback","reboot"]` (plus
+  `"selftest"` when registered). No spec, server, simulator, frontend, `Fleetforge.cpp`,
+  `fleetforge_start.c`, `agent_main.c`, partition or sdkconfig change.
+- **Decisions.**
+  - (1) **`up/ack`**, QoS 1, retain 0, enqueued (handler context), keys in A5's order
+    `id, type, result, cmd_id, detail` with explicit nulls (`type` null when the command had
+    none). Every `detail` is a `#define` of at most 63 printable bytes, each `_Static_assert`ed
+    (`ACK_FITS`) and logged with the ack (never a URL). Never `up/status`.
+  - (2) **The ack `cmd_id`** is the transaction acted on (apply/cancel: the named one; rollback
+    while confirming: the stage's; rollback on a confirmed image: its own `id`; reboot: null) or,
+    on a refusal, the transaction the device holds that caused it; otherwise null.
+  - (3) **Vocabulary** (the first four are R5-spec-1's, `not implemented` from A5; the rest are
+    this agent's words, text for a server to show, never to parse):
+
+    | Constant | Text | When |
+    |---|---|---|
+    | `ACK_NOTHING_STAGED` | `nothing staged for this cmd_id` | apply: no staged transaction under that `cmd_id` (also before `staged`) |
+    | `ACK_NO_IMAGE` | `no confirmed image to return to` | rollback: the other slot is not VALID/UNDEFINED, or IDF says no |
+    | `ACK_CANCEL_FIRST` | `cancel first` | rollback while an update is between `staging` and `rebooting` |
+    | `ACK_NOT_IMPLEMENTED` | `not implemented` | any id'd type but `stage` and the four verbs |
+    | `ACK_NOTHING_TO_CANCEL` | `nothing to cancel for this cmd_id` | cancel: no such transaction before its reboot |
+    | `ACK_ALREADY_APPLYING` | `already applying; use rollback` | cancel from `applying` on, or of a booted transaction |
+    | `ACK_ROLLBACK_DECIDED` | `a rollback is already decided` | cancel/reboot against a decided rollback |
+    | `ACK_UPDATE_IN_PROGRESS` | `an update is in progress` | reboot between `staging` and `rebooting` |
+    | `ACK_NOT_CONFIRMED` | `the running image is not confirmed yet` | reboot while confirming (or BOOTED_NEW) |
+    | `ACK_REBOOT_PENDING` | `a reboot is already pending` | a second reboot-causing verb inside the 1.5 s drain |
+    | `ACK_CMD_ID_MISSING` | `cmd_id missing` | apply/cancel without `cmd_id` |
+    | `ACK_ID_TOO_LONG` | `command id too long` | an id of 64 bytes or more |
+    | `ACK_CONFIRMING_NOW` | `the image is confirming right now` | rollback after a passing self-test claimed the confirm |
+    | `ACK_CANNOT_MARK` | `cannot mark this image invalid` | rollback of a confirmed image whose mark-invalid failed (record reverted) |
+    | `ACK_CANNOT_PUT_BACK` | `cannot put the boot slot back` | cancel of a staged image whose otadata write failed |
+
+    `refused` means nothing changed: every refusal is decided before any status, record write,
+    mark-invalid or reboot (the one exception, `cannot mark`, reverts its record first).
+  - (4) **D8.** No verb reboots in the handler. `schedule_command_reboot(id)` runs last: it
+    stores the id with `ff_txn_note_reboot_cmd()` (failure logged W), copies it to
+    `s_reboot_cmd_id`, and starts `ff_reboot` with `xTaskCreateStatic` (static 4 KB stack and TCB,
+    priority 3), which waits `COMMAND_REBOOT_DRAIN_MS` 1500, logs `rebooting for command <id>` and
+    calls `esp_restart()`. The comment `R5-fw-5: the safe-window poll goes here` marks the spot.
+    `ff_mqtt_run()` loads the id after `ff_txn_init()` and before `classify_txn()`; `on_command()`
+    drops a command with that id (`duplicate command id=… — ignored (this board already rebooted
+    for it)`), unanswered.
+  - (5) **NVS, not RTC**, for the reboot id: RTC memory dies at a power cut and at every QEMU
+    stop/start. Its own namespace (`FF_TXN_CMD_NAMESPACE "ff_cmd"`, key `reboot_id`), because
+    `ff_txn_save()` erases `ff_txn` at every stage; overwritten in place, never erased.
+  - (6) **ff_ota owns otadata for a stage.** `ff_ota_txn_phase(cmd_id, held, len)` answers NONE,
+    TRANSFER, STAGED or APPLYING (read-only). `ff_ota_cancel(cmd_id, &reported)` decides under
+    `s_cancel_lock`: in flight → set `s_cancel` (the task reports `cancelled` itself), APPLYING →
+    `ESP_ERR_INVALID_STATE`; ota task gone and the image staged → the staged-cancel sequence
+    inline, and the caller enqueues `cancelled`. The checkpoints: before `esp_https_ota_begin()`;
+    the top of every perform pass (abort after the loop, before the stall branch); before
+    `finish()` (abort); after a successful `finish()` and before the record (decided under the
+    lock: either the put-back and `cancelled`, never the record, or the phase moves to
+    STAGED/APPLYING); and at `done:`, where a cancel that came during the staged exit is acted on
+    and `s_running` goes false in the same critical section as the decision. So a cancel is never
+    accepted and dropped, never acted on twice, never accepted once APPLYING.
+  - (7) **Staged cancel order**: `restore_boot_partition()` first, `ff_txn_clear_if()` only if it
+    worked. Nothing else is erased.
+  - (8) **Rollback** (`on_rollback`): a rollback already on its way (this verb's, or the
+    deadline's/self-test's latch) is `accepted` again; a pending reboot is refused; an update in
+    hand is `cancel first`; then `other_slot_is_returnable()` (other slot VALID or UNDEFINED, and
+    `esp_ota_check_rollback_is_possible()`; NEW, PENDING_VERIFY, INVALID, ABORTED and no entry are
+    refused). An unconfirmed image (`pending_verify()` or BOOTED_NEW) claims the R5-fw-2 latch
+    under `s_decide_lock` (a passing self-test that claimed first wins: `confirming right now`),
+    stores `rolled back by command` over the transaction's head (or opens its own record when
+    there is none), marks invalid (no reboot variant; a failure is logged and the reboot goes
+    ahead), enqueues `rolling_back` and schedules the reboot. A confirmed image opens its own
+    transaction: `ff_txn_save(id, running, 0)`, the head, mark invalid (failure: record cleared,
+    `cannot mark`), `rolling_back`, reboot. The returned-to image composes `rolled back by
+    command; returned to ota_0` (40 B), outside the self-test prefix.
+  - (9) **Reboot** is refused while a rollback is decided, while an update is in hand, and while
+    the image is unconfirmed; an owed `confirmed`/`rolled_back` does not block it.
+  - (10) **Apply**: a repeat or a transaction already past `staged` is an `accepted` no-op;
+    `STAGED` → `accepted`, `applying`, `rebooting` (enqueued, D3: exactly like auto), reboot;
+    anything else, including an apply before `staged`, is `nothing staged for this cmd_id`.
+- **Deviations from the plan.** (a) `ff_ota_txn_phase()` takes an out-parameter for the held
+  `cmd_id` (the refusals echo it) and, outside the ota task, decides STAGED from otadata plus
+  the ff_txn record (its slot and `cmd_id`), not from a RAM phase: a refused second `stage`
+  reuses `s_running_cmd_id`, and the staged transaction must stay addressable. (b) A NULL query
+  keeps answering TRANSFER while the ota task runs, even with a cancel pending: the boot pointer
+  may still be moving, so `reboot`/`rollback` wait for the task to end. (c) A put-back that fails
+  at checkpoint 4 does not report `cancelled` (the image would boot at the next reset): the
+  transaction carries on, record and all. (d) UNDEFINED in `other_slot_is_returnable` is IDF's
+  "state never set" entry; a slot USB-flashed with blank otadata has NO entry, which IDF itself
+  cannot roll back to (`esp_ota_check_rollback_is_possible()` needs the inactive entry).
+- **Rejected.** Rebooting from the handler or from an esp_timer callback; RTC memory for the
+  reboot id; `xTaskCreate` for the reboot task (a heap failure after mark-invalid would leave an
+  INVALID image running); an "apply on arrival" latch; acks on `up/status`; erasing the cancelled
+  slot or the inactive otadata sector; `esp_ota_mark_app_invalid_rollback_and_reboot()` in a verb;
+  announcing `safe_window`; verbs behind a build flag.
+- **Named gaps.** (a) After a staged cancel the old image boots `pending_verify` once and
+  re-confirms (IDF writes its entry NEW); if that boot fails, the bootloader may fall back to the
+  cancelled image, which then confirms itself with no record (in QEMU the next stage's
+  `esp_ota_begin()` wiped that entry anyway). (b) A `stage` inside the 1.5 s before a command
+  reboot is not refused (R5-fw-5 must refuse it once the wait is unbounded). (c) A redelivered
+  `stage` with a cancelled transaction's id runs again (the server must not resend it, R5-be-2).
+  (d) An own-transaction `rolled_back` lands in `deploy_events` with no `requested` row (R5-be-2
+  keeps it out of the KPIs). (e) The ack is lost if the board is disconnected when it is queued
+  and then reboots (the server allows for no answer, A5). (f) A rollback of a confirmed image
+  overwrites a record whose `confirmed`/`rolled_back` was still owed; the queued report usually
+  leaves inside the drain. (g) The staged cancel's two flash writes run in the esp-mqtt handler:
+  7.8 s in QEMU (otadata validates the running image), well inside the 30 s keepalive.
+- **Proposed spec addenda (paste-ready, for the owner; `spec/` is not edited).**
+  - Patch A2, `apply` bullet, append: "An `apply` that arrives before its transaction reaches
+    `staged` is refused; a server sends it after `staged`."
+  - Patch A2, `cancel` bullet, append: "A `cancel` that arrives while the device is verifying is
+    carried out even if the boot slot has just moved; the device moves it back before `staged`."
+  - Patch A5, after the `detail` sentence: "The refusal `detail` texts are not a contract; a
+    server shows them as text."
+- **Tests.** New `tests/test_agent_verbs.py` (41): the wire (topic, key order, nulls, retain 0,
+  never `up/status`, no immediate publish in the handler, the three spec refusals, every detail
+  <= 63 printable bytes with its `ACK_FITS`, the command head), dispatch, D8 (no reboot on the
+  handler path, the static task after the drain, persist before start, load before connect, the
+  duplicate), refusal before change in every verb, rollback (returnable states, the latch, the
+  own-transaction order and revert, one head store, the classify compose, reboot refusals),
+  ff_ota (the API, the read-only phase query, the five checkpoints, put-back before clear,
+  cancel decided under the lock, one boot switch, the fresh handshake), capabilities, the
+  reboot-id store. Updated: `test_ff_cfg.py` (`_spec_states` unions Patch A3's line from this
+  doc while the spec lacks `cancelled`, switching itself off once pasted; `cancelled` in the
+  declared walk; a check that A3 adds only `cancelled`), `test_selftest.py`
+  (`ff_txn_set_detail(` count 2 → 3), `test_agent_power_and_size.py` (budgets). **Mutation
+  checks**, each red and then reverted: (i) `esp_restart()` in `on_reboot`
+  (`test_nothing_on_the_handler_path_reboots`); (ii) the staged cancel clearing before the
+  put-back (`test_the_staged_cancel_puts_back_before_it_clears`); (iii) NEW accepted as
+  returnable (`test_only_a_valid_or_undefined_slot_is_returnable`); (iv) the pre-finish cancel
+  check dropped (`test_a_cancel_before_finish_aborts`); (v) the ack retained
+  (`test_queued_qos1_never_retained`).
+- **T1.** `just test`: 2063 passed; ruff, format and mypy clean. `just agent-build-all`: four
+  `BUNDLE OK`, 0 warnings. `APP_SIZE_BUDGET_BYTES` raised to the measured byte: esp32 1,043,328
+  (+5,968), esp32s3 1,023,248 (+5,904), esp32c3 1,084,688 (+6,608), esp32c6 1,134,256 (+6,608).
+  `just lib-quickstart --build-only`: `== PASS (728 s)` (Arduino A esp32 1,190,352 B / esp32s3 1,183,504 B, own project, build B, basic_idf esp32 1,118,704 B / esp32s3 1,123,792 B; 0 library warnings). `just agent-qemu-smoke esp32`: `HARNESS OK`.
+- **T2 (local dev stack on 8088; api recreated with 10.0.2.2 origins, restored afterwards).**
+  Board A = `agent/dist/esp32` (agent 0.5.0, `--fresh`); B = the same source with version 0.5.9
+  (uploaded as `0.5.9-fw4-1792143537`); R = `FF_ROLLBACK_TEST=1` (`0.5.0-rbtest-fw4-1792143537`).
+  Every command hand-built and published as `ff-commander`; the wire captured with
+  `PYTHONUNBUFFERED=1 just mqtt-sub 'ff/v1/d/+/up/#'`.
+  - (0) `GET /v1/devices`: `capabilities ["ota","apply","cancel","rollback","reboot"]`.
+  - (1) THE acceptance: `{"id":"fw4-ap0-…","type":"apply","cmd_id":"nope-…"}` →
+    `up/ack {"id":"fw4-ap0-1792143537","type":"apply","result":"refused","cmd_id":null,"detail":"nothing staged for this cmd_id"}`
+    (board: `I (23324) … publish …/up/ack (qos 1, no retain, queued …)`); no `up/status`, no
+    reboot. A fresh subscriber to `up/ack` afterwards received nothing: not retained.
+  - (2) `identify` → `refused` / `not implemented`.
+  - (3) `reboot` `fw4-rb1-…`: `dn/cmd` at 42044, ack `accepted` (`cmd_id` null) at 42444,
+    `ff-txn: command … remembered across the reboot` 42704, `W (44214) rebooting for command
+    fw4-rb1-…`, then `rst:0xc (SW_CPU_RESET)` and `Loaded app from partition at offset 0x20000`;
+    no `up/status`. The emulator then hit the known `esp_timer_impl_init` panic loop; after a
+    stop/start the same message logged `duplicate command id=fw4-rb1-… — ignored (this board
+    already rebooted for it)`, no ack, no reset.
+  - (4) Cancel in transfer: stage B `fw4-c1-…`; at `downloading` the cancel → ack `accepted`
+    (`cmd_id` `fw4-c1-…`), `W (403323) update …: cancelled by command`, `up/status cancelled`;
+    never `staged`, no put-back line; otadata (stopped): `sector0 ota_0 VALID`, sector1 empty.
+  - (5) Cancel of a staged image: `fw4-c2-…` staged (`recorded` 144382, `is staged and bootable`
+    144402); the cancel at 144982 → `E (149232) boot partition put back to ota_0: the update was
+    cancelled by command and will NOT be booted`, `transaction fw4-c2-… closed — record cleared`,
+    ack `accepted`, `up/status cancelled` (enqueued by the session). A new stage `fw4-c3-…` was
+    NOT refused (it reached `downloading`; cancelled too). Power cycle: `Loaded app … 0x20000`,
+    `ota state pending_verify`, `CONFIRMED`, no `transaction` line, no new `fw4-c2` rows.
+  - (6) Apply: `fw4-a1-…` staged; `reboot` → `refused`, `an update is in progress`, `cmd_id`
+    `fw4-a1-…`; `rollback` → `refused`, `cancel first`, `cmd_id` `fw4-a1-…`; `apply` →
+    `accepted` (`fw4-a1-…`), `applying`, `rebooting`, `W (216879) rebooting for command
+    fw4-ap1-…`, `rst:0xc`, `Loaded app from partition at offset 0x200000` (B's slot). QEMU then
+    panicked in `esp_timer_impl_init` while PENDING_VERIFY, so the bootloader aborted it (ota_1
+    `ABORTED`) and A reported `rolled_back (returned to ota_0; ota_1 did not confirm)`: the
+    emulator limit, not the verb. The repeated apply id was a `duplicate … already rebooted for
+    it`. B was then confirmed by stage `fw4-a2-…` + power cycle (`confirming on ota_1`,
+    `CONFIRMED`).
+  - (7) Rollback on confirmed B: `fw4-rl1-…` → `recorded (target slot at 0x00200000, confirm 0
+    s)`, `detail stored`, ack `accepted` with `cmd_id` `fw4-rl1-…`, `rolling_back`, `rebooting for
+    command fw4-rl1-…`, `rst:0xc`, `Loaded app … 0x20000`. On A: `transaction fw4-rl1-…:
+    rolled_back (rolled back by command; returned to ota_0)`, and on the wire
+    `{"cmd_id":"fw4-rl1-1792143537","state":"rolled_back","pct":null,"detail":"rolled back by command; returned to ota_0"}`.
+    otadata: ota_1 **INVALID**, ota_0 VALID.
+  - (8) A second rollback on A → `refused`, `no confirmed image to return to`, no reset.
+  - (9) Rollback while confirming: R staged as `fw4-r1-…`, power-cycled: `OTA boot: 60 s`
+    (4679), `confirming on ota_1` (15919). `reboot` → `refused`, `the running image is not
+    confirmed yet`, `cmd_id` `fw4-r1-…`; `rollback` `fw4-rl3-…` at 21969 → `detail stored`,
+    ack `accepted` with `cmd_id` `fw4-r1-…`, `rolling_back` for `fw4-r1-…`, `rebooting for command
+    fw4-rl3-…` (28689), `rst:0xc`, `Loaded app … 0x20000`; never `no working session`, never
+    `confirmed`. On A: `transaction fw4-r1-…: rolled_back (rolled back by command; returned to
+    ota_0)`, the same detail on the wire; otadata ota_1 INVALID.
+  - (10) Regression: `just lib-quickstart` `== PASS (2383 s)`: 2a `capabilities ['ota', 'apply', 'cancel', 'rollback', 'reboot', 'selftest']`; 2b `confirmed`, detail `selftest passed`; 2c `no working session 60 s`, `rolled_back` `returned to ota_1; ota_0 did not confirm`; 2d `selftest failed: i2c sensor 0x48 did not ans; returned to ota_1` (63 B); 2e `selftest timed out; returned to ota_1`; credentials in 0 of 29 transcripts.
+  - Gotchas: QEMU's soft reset panicked in `esp_timer_impl_init` after EVERY command reboot in
+    this run (R5-fw-3 saw it survive), so the proof is the `rebooting for command` line, one
+    `rst:0xc` and the bootloader's `Loaded app` offset, and results were read after a stop/start.
+    `esp_ota_begin()` invalidates the inactive otadata sector, so a stage after a staged cancel
+    wipes the cancelled image's NEW entry.
+
 ## Reuse note
 
 The self-test entrypoint defined here moves by the simulation gate

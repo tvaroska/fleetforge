@@ -547,7 +547,10 @@ static cJSON *announce_object(const ff_cfg_t *cfg)
     /* `["ota"]` since R1-fw-1: this agent downloads through the signed URL, writes the
      * inactive slot, verifies the digest and reboots into it (ff_ota.c). The list is a
      * claim about what the board can be asked to DO, so it stays as short as the truth —
-     * it was empty at R0 for exactly the same reason.
+     * it was empty at R0 for exactly the same reason. R5-fw-4 (R5-spec-1 D9): `apply`,
+     * `cancel`, `rollback` and `reboot` are now true of every image of this agent (ff_mqtt.c
+     * carries them out and answers on up/ack), so they are unconditional. No `safe_window`
+     * until a predicate can be registered (R5-fw-5).
      *
      * It is also load-bearing server-side: `POST /v1/devices/{id}/deploy` answers 409 to a
      * device whose `capabilities` does not contain `ota`, so an agent that performs OTA
@@ -555,10 +558,14 @@ static cJSON *announce_object(const ff_cfg_t *cfg)
      * anywhere near the cause. */
     cJSON *capabilities = cJSON_CreateArray();
     cJSON_AddItemToArray(capabilities, cJSON_CreateString("ota"));
+    cJSON_AddItemToArray(capabilities, cJSON_CreateString("apply"));
+    cJSON_AddItemToArray(capabilities, cJSON_CreateString("cancel"));
+    cJSON_AddItemToArray(capabilities, cJSON_CreateString("rollback"));
+    cJSON_AddItemToArray(capabilities, cJSON_CreateString("reboot"));
     /* R5-fw-2 (R5-spec-1 D9): `selftest` only when this image registered one. Same rule as
      * `ota`, a claim about what the board does: a server reads it as "an update of this
      * firmware confirms only after its self-test passes", which ff_mqtt.c's hold makes true.
-     * The stock agent registers none and stays `["ota"]`. */
+     * The stock agent registers none and announces no `selftest`. */
     if (s_selftest_registered) {
         cJSON_AddItemToArray(capabilities, cJSON_CreateString("selftest"));
     }

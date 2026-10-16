@@ -19,6 +19,16 @@
  * 6. a denied publish is invisible in MQTT 3.1.1: the broker drops it silently. "It
  *    published and nothing happened" is an ACL or credential symptom — which is why every
  *    publish is logged with its message id and the operator checks GET /v1/devices.
+ *
+ * The verbs (R5-fw-4, R5-spec-1 D1-D9): `apply`, `cancel`, `rollback` and `reboot` each carry
+ * their own `id` and are answered once on `up/ack` (QoS 1, NEVER retained: an answer is an
+ * event, not state), never on `up/status`, which carries only their effect on a transaction.
+ * Every other type but `stage` is answered `refused` / `not implemented`. `refused` means
+ * nothing changed: every refusal is decided before any flash write, status or reboot. A verb
+ * that reboots never reboots inside its own delivery (D8): esp-mqtt sends the PUBACK only after
+ * this handler returns, so a reboot here would be redelivered after every boot. The handler
+ * starts a task that reboots COMMAND_REBOOT_DRAIN_MS later, and the id is kept in NVS
+ * (ff_txn_note_reboot_cmd) so its redelivery after the boot is a duplicate.
  */
 
 #include "ff_mqtt_internal.h"
@@ -31,6 +41,7 @@
 #include "esp_crt_bundle.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
+#include "esp_system.h"
 #include "esp_timer.h"
 #include "ff_identity_internal.h"
 #include "ff_ota.h"
@@ -97,6 +108,7 @@ typedef struct {
     char topic_hb[TOPIC_MAX];
     char topic_status[TOPIC_MAX];
     char topic_telemetry[TOPIC_MAX];
+    char topic_ack[TOPIC_MAX]; /* R5-fw-4: verb answers, never retained */
     char topic_dn[TOPIC_MAX];
     int announce_msg_id;   /* the id whose PUBACK means "this board did its job" */
     bool session_confirmed; /* the announce has been acknowledged at least once */
@@ -137,6 +149,64 @@ typedef enum {
 #define DETAIL_RETURNED_TO "; returned to "
 #define DETAIL_NO_REASON "no reason given"
 #define DETAIL_MAX 63
+
+/* R5-fw-4, R5-spec-1 D5: the head the board's record carries when a `rollback` command ended
+ * the transaction; the returned-to image appends `; returned to <slot>` (classify_txn). No
+ * `;` in it, and not under DETAIL_SELFTEST_PREFIX: it is not a self-test outcome. */
+#define DETAIL_ROLLED_BACK_BY_COMMAND "rolled back by command"
+
+/* R5-fw-4, R5-spec-1 D2/A5: `up/ack` `result` values. `deferred` is R5-fw-5's (the safe
+ * window); nothing answers it yet. */
+#define ACK_ACCEPTED "accepted"
+#define ACK_DEFERRED "deferred"
+#define ACK_REFUSED "refused"
+
+/* R5-fw-4: every `up/ack` `detail` this agent sends. Agent constants (never a URL, so they are
+ * logged), each at most DETAIL_MAX bytes of printable ASCII. The first four are R5-spec-1's;
+ * the rest are this agent's words, which a server shows as text and never parses. */
+#define ACK_NOTHING_STAGED "nothing staged for this cmd_id"
+#define ACK_NO_IMAGE "no confirmed image to return to"
+#define ACK_CANCEL_FIRST "cancel first"
+#define ACK_NOT_IMPLEMENTED "not implemented"
+#define ACK_NOTHING_TO_CANCEL "nothing to cancel for this cmd_id"
+#define ACK_ALREADY_APPLYING "already applying; use rollback"
+#define ACK_ROLLBACK_DECIDED "a rollback is already decided"
+#define ACK_UPDATE_IN_PROGRESS "an update is in progress"
+#define ACK_NOT_CONFIRMED "the running image is not confirmed yet"
+#define ACK_REBOOT_PENDING "a reboot is already pending"
+#define ACK_CMD_ID_MISSING "cmd_id missing"
+#define ACK_ID_TOO_LONG "command id too long"
+#define ACK_CONFIRMING_NOW "the image is confirming right now"
+#define ACK_CANNOT_MARK "cannot mark this image invalid"
+#define ACK_CANNOT_PUT_BACK "cannot put the boot slot back"
+#define ACK_FITS(text) _Static_assert(sizeof(text) <= DETAIL_MAX + 1, text " is over 63 bytes")
+ACK_FITS(DETAIL_ROLLED_BACK_BY_COMMAND DETAIL_RETURNED_TO "ota_0");
+ACK_FITS(ACK_NOTHING_STAGED);
+ACK_FITS(ACK_NO_IMAGE);
+ACK_FITS(ACK_CANCEL_FIRST);
+ACK_FITS(ACK_NOT_IMPLEMENTED);
+ACK_FITS(ACK_NOTHING_TO_CANCEL);
+ACK_FITS(ACK_ALREADY_APPLYING);
+ACK_FITS(ACK_ROLLBACK_DECIDED);
+ACK_FITS(ACK_UPDATE_IN_PROGRESS);
+ACK_FITS(ACK_NOT_CONFIRMED);
+ACK_FITS(ACK_REBOOT_PENDING);
+ACK_FITS(ACK_CMD_ID_MISSING);
+ACK_FITS(ACK_ID_TOO_LONG);
+ACK_FITS(ACK_CONFIRMING_NOW);
+ACK_FITS(ACK_CANNOT_MARK);
+ACK_FITS(ACK_CANNOT_PUT_BACK);
+
+/* R5-fw-4, D8: how long a reboot-causing verb waits after its handler returned, so esp-mqtt
+ * sends the command's PUBACK and the queued ack and statuses leave the wire first (the
+ * OTA_PUBLISH_DRAIN_MS reasoning in ff_ota.c). */
+#define COMMAND_REBOOT_DRAIN_MS 1500
+/* One log line and esp_restart(); the R5-fw-5 safe-window poll will run here too. Static, so
+ * scheduling the reboot can never fail for lack of heap (a rollback has already marked the
+ * image invalid by then). Bytes: IDF's StackType_t is uint8_t. */
+#define COMMAND_REBOOT_STACK 4096
+/* Below the heartbeat (4) and esp-mqtt (5): it only waits. */
+#define COMMAND_REBOOT_PRIO 3
 
 static struct {
     txn_kind_t kind;
@@ -713,9 +783,11 @@ static void classify_txn(void)
         if (invalid != NULL && invalid->address == rec.target_addr) {
             s_txn.kind = TXN_ROLLED_BACK;
             if (strncmp(rec.detail, DETAIL_SELFTEST_PREFIX, strlen(DETAIL_SELFTEST_PREFIX)) ==
-                0) {
+                    0 ||
+                strcmp(rec.detail, DETAIL_ROLLED_BACK_BY_COMMAND) == 0) {
                 /* R5-fw-2: the image under test stored why it is gone (its self-test failed,
-                 * or no result came before the deadline or a reset). */
+                 * or no result came before the deadline or a reset). R5-fw-4: or a `rollback`
+                 * command ended it (`rolled back by command; returned to <slot>`). */
                 compose_returned_detail(s_txn.detail, sizeof(s_txn.detail), rec.detail,
                                         running->label);
             } else {
@@ -1106,17 +1178,408 @@ static void on_stage(const cJSON *root, const char *id)
     }
 }
 
+/* ── the verbs (R5-fw-4, R5-spec-1 D1-D9) ─────────────────────────────────────────────
+ *
+ * apply / cancel / rollback / reboot, each answered once on `up/ack`. All of this runs in the
+ * esp-mqtt event handler: statuses and answers are ENQUEUED (never ff_mqtt_publish_status),
+ * flash writes happen outside any spinlock, and nothing here reboots: a verb that reboots
+ * hands that to command_reboot_task (D8). */
+
+/* The `up/ack` body, keys in exactly A5's order, explicit nulls, then QUEUED: QoS 1,
+ * retain 0 (an answer is an event; a retained one would be replayed to every subscriber as if
+ * it were new), store = true. `type` echoes the command (null when it had none); `cmd_id` is
+ * the transaction acted on or null (D2), never an id the device does not hold. */
+static void enqueue_ack(const char *id, const char *type, const char *result, const char *cmd_id,
+                        const char *detail)
+{
+    if (s_ctx.client == NULL) {
+        ESP_LOGE(TAG, "cannot answer command %s: there is no mqtt session yet", id);
+        return;
+    }
+    cJSON *root = cJSON_CreateObject();
+    if (root == NULL) {
+        ESP_LOGE(TAG, "out of memory building the answer to command %s", id);
+        return;
+    }
+    cJSON_AddStringToObject(root, "id", id);
+    if (type != NULL) {
+        cJSON_AddStringToObject(root, "type", type);
+    } else {
+        cJSON_AddNullToObject(root, "type");
+    }
+    cJSON_AddStringToObject(root, "result", result);
+    if (cmd_id != NULL) {
+        cJSON_AddStringToObject(root, "cmd_id", cmd_id);
+    } else {
+        cJSON_AddNullToObject(root, "cmd_id");
+    }
+    if (detail != NULL) {
+        cJSON_AddStringToObject(root, "detail", detail);
+    } else {
+        cJSON_AddNullToObject(root, "detail");
+    }
+    char *payload = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (payload == NULL) {
+        ESP_LOGE(TAG, "out of memory serialising the answer to command %s", id);
+        return;
+    }
+    int msg_id = esp_mqtt_client_enqueue(s_ctx.client, s_ctx.topic_ack, payload, 0, QOS, 0, true);
+    /* An ack's detail is always one of this file's constants, never a URL: logged. */
+    ESP_LOGI(TAG, "publish %s (qos 1, no retain, queued, msg_id %d) id=%s type=%s result=%s "
+                  "cmd_id=%s detail=%s",
+             s_ctx.topic_ack, msg_id, id, type != NULL ? type : "null", result,
+             cmd_id != NULL ? cmd_id : "null", detail != NULL ? detail : "null");
+    free(payload);
+}
+
+/* D8. The id of the command this board reboots (or last rebooted) for: loaded from NVS in
+ * ff_mqtt_run() before the first connect, and set again by schedule_command_reboot(). Outside
+ * s_ctx, which ff_mqtt_run() memsets. on_command() drops a command with this id. */
+static char s_reboot_cmd_id[FF_TXN_MAX_CMD_ID];
+/* A command reboot is scheduled: one per boot, and every verb that could ask for another
+ * answers first (accepted no-op or refused). */
+static volatile bool s_cmd_reboot_pending;
+/* The transaction an accepted `apply` released, so its repeat is a no-op and a `cancel` of it
+ * is refused (the walk is past `staged` now). */
+static char s_reboot_txn_id[FF_TXN_MAX_CMD_ID];
+/* The transaction an accepted `rollback` ended (the confirming one, or its own), so a second
+ * rollback is the same answer. */
+static char s_rollback_txn_id[FF_TXN_MAX_CMD_ID];
+
+static StaticTask_t s_reboot_tcb;
+static StackType_t s_reboot_stack[COMMAND_REBOOT_STACK];
+
+/* Its own task, started after the handler's work is queued: the handler returns, esp-mqtt sends
+ * the command's PUBACK, the ack and statuses drain, THEN the reboot. Never an esp_timer
+ * callback: R5-fw-5 polls the safe window here, and that wait may be long. */
+static void command_reboot_task(void *arg)
+{
+    (void)arg;
+    vTaskDelay(pdMS_TO_TICKS(COMMAND_REBOOT_DRAIN_MS));
+    /* R5-fw-5: the safe-window poll goes here; only this reboot waits (D7, D12). */
+    ESP_LOGW(TAG, "rebooting for command %s", s_reboot_cmd_id);
+    esp_restart(); /* does not return */
+}
+
+/* Called by a verb handler last, after every refusal check and every flash write it does. */
+static void schedule_command_reboot(const char *id)
+{
+    if (s_cmd_reboot_pending) {
+        /* Unreachable: every handler answers a pending reboot before it gets here. */
+        ESP_LOGE(TAG, "command %s: a command reboot is already scheduled — not scheduling "
+                      "another",
+                 id);
+        return;
+    }
+    /* Belt and braces, so not fatal: a failed write only means a redelivery after the boot
+     * is not recognised (RAM dedupe still covers the next 1.5 s). */
+    esp_err_t err = ff_txn_note_reboot_cmd(id);
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "command %s: cannot keep its id across the reboot (%s)", id,
+                 esp_err_to_name(err));
+    }
+    strlcpy(s_reboot_cmd_id, id, sizeof(s_reboot_cmd_id));
+    s_cmd_reboot_pending = true;
+    /* Static TCB and stack: cannot fail for lack of heap. */
+    if (xTaskCreateStatic(command_reboot_task, "ff_reboot", COMMAND_REBOOT_STACK, NULL,
+                          COMMAND_REBOOT_PRIO, s_reboot_stack, &s_reboot_tcb) == NULL) {
+        ESP_LOGE(TAG, "command %s: cannot start the reboot task — reset the board to finish",
+                 id);
+    }
+}
+
+/* D5: the other slot holds an image the board may return to: one that booted and was
+ * confirmed there (VALID), or an entry whose state no rollback-enabled app ever set
+ * (UNDEFINED: written without rollback, the USB-flashed/legacy case). Not NEW (written, never
+ * booted: IDF itself would accept it), PENDING_VERIFY, INVALID, ABORTED, nor a slot with no
+ * otadata entry (IDF cannot go back to that either). Then IDF's own check, which validates the
+ * image. esp_ota_get_next_update_partition(NULL) IS the other slot: every layout this agent
+ * accepts (ab-4m-v1, ab-4m-arduino-v1) has exactly two OTA slots. */
+static bool other_slot_is_returnable(void)
+{
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    const esp_partition_t *other = esp_ota_get_next_update_partition(NULL);
+    if (running == NULL || other == NULL || other == running) {
+        return false;
+    }
+    esp_ota_img_states_t state = ESP_OTA_IMG_INVALID;
+    if (esp_ota_get_state_partition(other, &state) != ESP_OK) {
+        return false;
+    }
+    if (state != ESP_OTA_IMG_VALID && state != ESP_OTA_IMG_UNDEFINED) {
+        return false;
+    }
+    return esp_ota_check_rollback_is_possible();
+}
+
+/* The one place this file stores the command-rollback head (D5). */
+static void store_rollback_head(const char *txn_id)
+{
+    (void)ff_txn_set_detail(txn_id, DETAIL_ROLLED_BACK_BY_COMMAND);
+}
+
+/* D5: a rollback with no transaction to end becomes its own, under the rollback's id: the
+ * record `(id, running slot)` with the command head, so the image the board returns to finds
+ * running != target and last-invalid == target and reports `rolled_back` for `id`. 0 = no
+ * confirm deadline (this is not an apply). Report-only, like ff_ota's save: a failure loses
+ * the report, never the rollback. Returns whether the record was written. */
+static bool open_rollback_txn(const char *id)
+{
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    esp_err_t err = running != NULL ? ff_txn_save(id, running->address, 0) : ESP_ERR_NOT_FOUND;
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "rollback %s: cannot record the transaction (%s) — rolled_back will not "
+                      "be reported after the reboot",
+                 id, esp_err_to_name(err));
+        return false;
+    }
+    store_rollback_head(id);
+    return true;
+}
+
+/* The id this boot's own transaction holds, or NULL. */
+static const char *held_txn_id(void)
+{
+    return s_txn.kind != TXN_NONE && s_txn.cmd_id[0] != '\0' ? s_txn.cmd_id : NULL;
+}
+
+/* D3. Release a transaction staged under `apply: "on_command"`. The boot pointer already names
+ * the staged slot and the record was saved at `staged`, so the reboot IS the apply, and the
+ * new image reports `confirming`/`confirmed` exactly as after `apply: "auto"`. */
+static void on_apply(const cJSON *root, const char *id)
+{
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(root, "cmd_id");
+    if (!cJSON_IsString(item) || item->valuestring[0] == '\0') {
+        enqueue_ack(id, "apply", ACK_REFUSED, NULL, ACK_CMD_ID_MISSING);
+        return;
+    }
+    const char *cmd_id = item->valuestring;
+    if (strlen(cmd_id) >= FF_TXN_MAX_CMD_ID) {
+        /* No transaction this board holds can have it. */
+        enqueue_ack(id, "apply", ACK_REFUSED, NULL, ACK_NOTHING_STAGED);
+        return;
+    }
+    /* Already past `staged`: this boot released it, or rebooted into it (confirming,
+     * confirmed, rolled back), or apply:auto is about to reboot into it. A no-op. */
+    const bool released = s_cmd_reboot_pending && strcmp(s_reboot_txn_id, cmd_id) == 0;
+    const bool booted = held_txn_id() != NULL && strcmp(s_txn.cmd_id, cmd_id) == 0;
+    char held[FF_TXN_MAX_CMD_ID];
+    const ff_ota_txn_t phase = ff_ota_txn_phase(cmd_id, held, sizeof(held));
+    if (released || booted || phase == FF_OTA_TXN_APPLYING) {
+        enqueue_ack(id, "apply", ACK_ACCEPTED, cmd_id, NULL);
+        return;
+    }
+    if (phase != FF_OTA_TXN_STAGED) {
+        /* Including an apply that arrives before `staged` (the transfer still runs): the server
+         * sends apply only after `staged`, so there is no "apply on arrival" latch. */
+        enqueue_ack(id, "apply", ACK_REFUSED, phase == FF_OTA_TXN_TRANSFER ? cmd_id : NULL,
+                    ACK_NOTHING_STAGED);
+        return;
+    }
+    if (s_cmd_reboot_pending) {
+        enqueue_ack(id, "apply", ACK_REFUSED, cmd_id, ACK_REBOOT_PENDING);
+        return;
+    }
+
+    enqueue_ack(id, "apply", ACK_ACCEPTED, cmd_id, NULL);
+    /* D3: from here it walks exactly like apply:auto (no awaiting_safe_window before fw-5). */
+    (void)enqueue_status(cmd_id, FF_STATUS_APPLYING, 100, NULL);
+    (void)enqueue_status(cmd_id, FF_STATUS_REBOOTING, 100, NULL);
+    ESP_LOGW(TAG, "apply %s: releasing the staged update %s — rebooting into it", id, cmd_id);
+    strlcpy(s_reboot_txn_id, cmd_id, sizeof(s_reboot_txn_id));
+    schedule_command_reboot(id);
+}
+
+/* D4. End a transaction before its reboot: the transfer stopped, or the staged image's boot
+ * pointer put back and its record cleared; the transaction ends `cancelled`. ff_ota does the
+ * otadata part; this file never moves the boot pointer for a stage. */
+static void on_cancel(const cJSON *root, const char *id)
+{
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(root, "cmd_id");
+    if (!cJSON_IsString(item) || item->valuestring[0] == '\0') {
+        enqueue_ack(id, "cancel", ACK_REFUSED, NULL, ACK_CMD_ID_MISSING);
+        return;
+    }
+    const char *cmd_id = item->valuestring;
+    if (strlen(cmd_id) >= FF_TXN_MAX_CMD_ID) {
+        enqueue_ack(id, "cancel", ACK_REFUSED, NULL, ACK_NOTHING_TO_CANCEL);
+        return;
+    }
+    /* Past `rebooting` (this boot runs it, or returned from it), or released by an apply: the
+     * verb for that is rollback, unless a rollback is already decided. */
+    if (held_txn_id() != NULL && strcmp(s_txn.cmd_id, cmd_id) == 0) {
+        const bool decided = s_rollback_decided;
+        enqueue_ack(id, "cancel", ACK_REFUSED, cmd_id,
+                    decided ? ACK_ROLLBACK_DECIDED : ACK_ALREADY_APPLYING);
+        return;
+    }
+    if ((s_cmd_reboot_pending && strcmp(s_reboot_txn_id, cmd_id) == 0) ||
+        ff_ota_txn_phase(cmd_id, NULL, 0) == FF_OTA_TXN_APPLYING) {
+        enqueue_ack(id, "cancel", ACK_REFUSED, cmd_id, ACK_ALREADY_APPLYING);
+        return;
+    }
+
+    bool reported = false;
+    esp_err_t err = ff_ota_cancel(cmd_id, &reported);
+    if (err == ESP_ERR_NOT_FOUND) {
+        enqueue_ack(id, "cancel", ACK_REFUSED, NULL, ACK_NOTHING_TO_CANCEL);
+        return;
+    }
+    if (err == ESP_ERR_INVALID_STATE) {
+        enqueue_ack(id, "cancel", ACK_REFUSED, cmd_id, ACK_ALREADY_APPLYING);
+        return;
+    }
+    if (err != ESP_OK) {
+        enqueue_ack(id, "cancel", ACK_REFUSED, cmd_id, ACK_CANNOT_PUT_BACK);
+        return;
+    }
+
+    enqueue_ack(id, "cancel", ACK_ACCEPTED, cmd_id, NULL);
+    if (!reported) {
+        /* The staged image was waiting and ff_ota has already put the pointer back: the
+         * terminal state is this file's to report (enqueued: handler context). */
+        (void)enqueue_status(cmd_id, FF_STATUS_CANCELLED, FF_STATUS_PCT_NONE, NULL);
+    }
+}
+
+/* D5. Return the board to its other slot. Mark-invalid at decision time, reboot later (the D12
+ * shape): any reset in between returns the board too. */
+static void on_rollback(const char *id)
+{
+    /* 1. A rollback is already on its way: this command's, or the confirm deadline's or a
+     *    failed self-test's (its 2 s grace runs). The same answer, nothing new. */
+    if (s_rollback_txn_id[0] != '\0') {
+        enqueue_ack(id, "rollback", ACK_ACCEPTED, s_rollback_txn_id, NULL);
+        return;
+    }
+    const bool decided = s_rollback_decided;
+    if (decided) {
+        enqueue_ack(id, "rollback", ACK_ACCEPTED, held_txn_id(), NULL);
+        return;
+    }
+    if (s_cmd_reboot_pending) {
+        enqueue_ack(id, "rollback", ACK_REFUSED, NULL, ACK_REBOOT_PENDING);
+        return;
+    }
+    /* 2. An update between `staging` and `rebooting`: the boot pointer may name it. */
+    char held[FF_TXN_MAX_CMD_ID];
+    if (ff_ota_txn_phase(NULL, held, sizeof(held)) != FF_OTA_TXN_NONE) {
+        enqueue_ack(id, "rollback", ACK_REFUSED, held[0] != '\0' ? held : NULL, ACK_CANCEL_FIRST);
+        return;
+    }
+    /* 3. Somewhere to go back to (both remaining cases). */
+    if (!other_slot_is_returnable()) {
+        enqueue_ack(id, "rollback", ACK_REFUSED, NULL, ACK_NO_IMAGE);
+        return;
+    }
+
+    const char *txn = id;
+    if (pending_verify() || s_txn.kind == TXN_BOOTED_NEW) {
+        /* 4. The running image is unconfirmed: this ends its transaction. Claim the decision
+         *    (s_decide_lock, the R5-fw-2 latch) so a late announce ack or self-test pass
+         *    cannot confirm it, and a passing self-test that claimed first wins. */
+        bool confirm_first;
+        bool beaten;
+        portENTER_CRITICAL(&s_decide_lock);
+        confirm_first = s_confirm_claimed;
+        beaten = s_rollback_decided;
+        if (!confirm_first && !beaten) {
+            s_rollback_decided = true;
+        }
+        portEXIT_CRITICAL(&s_decide_lock);
+        if (confirm_first) {
+            enqueue_ack(id, "rollback", ACK_REFUSED, held_txn_id(), ACK_CONFIRMING_NOW);
+            return;
+        }
+        if (beaten) {
+            /* The deadline claimed it between the read above and here. */
+            enqueue_ack(id, "rollback", ACK_ACCEPTED, held_txn_id(), NULL);
+            return;
+        }
+        const txn_kind_t kind = s_txn.kind;
+        if (kind == TXN_CONFIRMING || kind == TXN_BOOTED_NEW) {
+            /* Over a pre-stored `selftest timed out`, correctly: this is why it ended. */
+            store_rollback_head(s_txn.cmd_id);
+            txn = s_txn.cmd_id;
+        } else {
+            /* No record (an image OTA'd before 0.4.0, or the re-confirm boot after a staged
+             * cancel): the rollback is its own transaction. */
+            (void)open_rollback_txn(id);
+        }
+        esp_err_t err = esp_ota_mark_app_invalid_rollback();
+        if (err != ESP_OK) {
+            /* Decided anyway: a reset of a PENDING_VERIFY image returns the board regardless,
+             * and the confirm is already refused by the latch. */
+            ESP_LOGE(TAG, "rollback %s: cannot mark this image invalid (%s) — rebooting anyway",
+                     id, esp_err_to_name(err));
+        }
+    } else {
+        /* 5. The running image is confirmed: the rollback is its own transaction. */
+        const bool recorded = open_rollback_txn(id);
+        esp_err_t err = esp_ota_mark_app_invalid_rollback();
+        if (err != ESP_OK) {
+            if (recorded) {
+                (void)ff_txn_clear_if(id);
+            }
+            ESP_LOGE(TAG, "rollback %s: cannot mark this image invalid (%s) — not rolling back",
+                     id, esp_err_to_name(err));
+            enqueue_ack(id, "rollback", ACK_REFUSED, NULL, ACK_CANNOT_MARK);
+            return;
+        }
+    }
+
+    ESP_LOGW(TAG, "rollback %s: this image is marked invalid — returning to the other slot", id);
+    enqueue_ack(id, "rollback", ACK_ACCEPTED, txn, NULL);
+    (void)enqueue_status(txn, FF_STATUS_ROLLING_BACK, FF_STATUS_PCT_NONE, NULL);
+    strlcpy(s_rollback_txn_id, txn, sizeof(s_rollback_txn_id));
+    schedule_command_reboot(id);
+}
+
+/* D6. Restart on the running image; no transaction, no status. The next announce's
+ * `reset_reason: sw` is the evidence. A `confirmed`/`rolled_back` still owed does not block:
+ * the record survives the reboot and the next boot says it again (the server deduplicates). */
+static void on_reboot(const char *id)
+{
+    if (s_cmd_reboot_pending) {
+        enqueue_ack(id, "reboot", ACK_ACCEPTED, NULL, NULL);
+        return;
+    }
+    const bool decided = s_rollback_decided;
+    if (decided) {
+        enqueue_ack(id, "reboot", ACK_REFUSED, held_txn_id(), ACK_ROLLBACK_DECIDED);
+        return;
+    }
+    /* Once staged the boot pointer names the new image: a reboot would apply it. */
+    char held[FF_TXN_MAX_CMD_ID];
+    if (ff_ota_txn_phase(NULL, held, sizeof(held)) != FF_OTA_TXN_NONE) {
+        enqueue_ack(id, "reboot", ACK_REFUSED, held[0] != '\0' ? held : NULL,
+                    ACK_UPDATE_IN_PROGRESS);
+        return;
+    }
+    /* A reset while confirming rolls the image back. */
+    if (pending_verify() || s_txn.kind == TXN_CONFIRMING || s_txn.kind == TXN_BOOTED_NEW) {
+        enqueue_ack(id, "reboot", ACK_REFUSED, held_txn_id(), ACK_NOT_CONFIRMED);
+        return;
+    }
+
+    enqueue_ack(id, "reboot", ACK_ACCEPTED, NULL, NULL);
+    schedule_command_reboot(id);
+}
+
 static void on_command(ff_mqtt_ctx_t *ctx, const char *topic, int topic_len, const char *data,
                        int data_len)
 {
     cJSON *root = cJSON_ParseWithLength(data, (size_t)data_len);
     const char *type = "?";
+    const char *type_echo = NULL; /* what an answer echoes: null when the command had none */
     const char *id = NULL;
     if (root != NULL) {
         const cJSON *type_item = cJSON_GetObjectItemCaseSensitive(root, "type");
         const cJSON *id_item = cJSON_GetObjectItemCaseSensitive(root, "id");
         if (cJSON_IsString(type_item)) {
             type = type_item->valuestring;
+            type_echo = type;
         }
         if (cJSON_IsString(id_item)) {
             id = id_item->valuestring;
@@ -1127,6 +1590,14 @@ static void on_command(ff_mqtt_ctx_t *ctx, const char *topic, int topic_len, con
      * spec/device-protocol.md makes commands idempotent by id for exactly this reason. */
     if (id != NULL && strcmp(id, ctx->last_command_id) == 0) {
         ESP_LOGW(TAG, "duplicate command id=%s — ignored (QoS 1 redelivery)", id);
+        cJSON_Delete(root);
+        return;
+    }
+    /* R5-fw-4, D8: the command the last boot rebooted for (kept in NVS), redelivered by the
+     * persistent session after that boot. Acting on it again would reboot again, forever. */
+    if (id != NULL && s_reboot_cmd_id[0] != '\0' && strcmp(id, s_reboot_cmd_id) == 0) {
+        ESP_LOGW(TAG, "duplicate command id=%s — ignored (this board already rebooted for it)",
+                 id);
         cJSON_Delete(root);
         return;
     }
@@ -1145,12 +1616,27 @@ static void on_command(ff_mqtt_ctx_t *ctx, const char *topic, int topic_len, con
         } else {
             on_stage(root, id);
         }
+    } else if (id == NULL) {
+        /* An answer is addressed by the command's id: without one there is nothing to answer
+         * against, and nothing to deduplicate. */
+        ESP_LOGW(TAG, "command type=%s has no id — ignored; there is nothing to answer against",
+                 type);
+    } else if (strlen(id) >= FF_TXN_MAX_CMD_ID) {
+        /* No verb can keep it (the reboot-id record, the RAM dedupe): refused, echoed. */
+        enqueue_ack(id, type_echo, ACK_REFUSED, NULL, ACK_ID_TOO_LONG);
+    } else if (strcmp(type, "apply") == 0) {
+        on_apply(root, id);
+    } else if (strcmp(type, "cancel") == 0) {
+        on_cancel(root, id);
+    } else if (strcmp(type, "rollback") == 0) {
+        on_rollback(id);
+    } else if (strcmp(type, "reboot") == 0) {
+        on_reboot(id);
     } else {
-        /* Every other type in spec/device-protocol.md — apply, cancel, rollback, identify,
-         * reboot, set_cfg — is unimplemented at R1. NOT reported as `failed`: an unknown
-         * type is not a failed deploy, it has no cmd_id the server is tracking as one, and
-         * MQTT 3.1.1 gives the broker no way to deny it anyway. */
-        ESP_LOGW(TAG, "command type=%s is not implemented by this agent — ignored", type);
+        /* R5-spec-1 A5: every other type (identify, set_cfg, anything unknown) is answered
+         * `refused` / `not implemented` on up/ack. NOT `failed` on up/status: it is not a
+         * failed deploy, and it has no transaction the server tracks as one. */
+        enqueue_ack(id, type_echo, ACK_REFUSED, NULL, ACK_NOT_IMPLEMENTED);
     }
     cJSON_Delete(root);
 }
@@ -1281,6 +1767,7 @@ esp_err_t ff_mqtt_run(const ff_cfg_t *cfg, const ff_cred_t *cred)
     snprintf(s_ctx.topic_status, sizeof(s_ctx.topic_status), TOPIC_ROOT "/%s/up/status", id);
     snprintf(s_ctx.topic_telemetry, sizeof(s_ctx.topic_telemetry), TOPIC_ROOT "/%s/up/telemetry",
              id);
+    snprintf(s_ctx.topic_ack, sizeof(s_ctx.topic_ack), TOPIC_ROOT "/%s/up/ack", id);
     snprintf(s_ctx.topic_dn, sizeof(s_ctx.topic_dn), TOPIC_ROOT "/%s/dn/#", id);
 
     const esp_mqtt_client_config_t config = {
@@ -1331,6 +1818,9 @@ esp_err_t ff_mqtt_run(const ff_cfg_t *cfg, const ff_cred_t *cred)
      * kind becomes TXN_CONFIRMING only after cmd_id is written; and the report task copes
      * with no client (s_ctx.connected, enqueue_status). */
     ff_txn_init();
+    /* R5-fw-4, D8: the command the last boot rebooted for, BEFORE the first connect drains the
+     * persistent session, so its redelivery is a duplicate and not a second reboot. */
+    (void)ff_txn_last_reboot_cmd(s_reboot_cmd_id, sizeof(s_reboot_cmd_id));
     classify_txn();
 
     ESP_LOGI(TAG, "connecting to %s as %s", cfg->mqtt_uri, id);

@@ -31,10 +31,19 @@
  * clamped by the command seam, which the new image re-reads at boot to re-arm its confirm
  * deadline from image start. Written before `cmd_id`, so every complete record carries it; a
  * record without it (written before R5-fw-3) is complete and keeps the default deadline.
+ *
+ * R5-fw-4 adds a SECOND, separate fact that crosses a reboot: the id of the last command the
+ * board rebooted for (`apply`, `rollback`, `reboot`; R5-spec-1 D8), so a persistent session
+ * that redelivers that command after the boot gets a duplicate, not a second reboot. It lives
+ * in its own namespace, FF_TXN_CMD_NAMESPACE, because ff_txn_save() erases FF_TXN_NAMESPACE on
+ * every stage. NVS, not RTC memory: RTC memory dies at a power cut (and at every QEMU stop),
+ * which is exactly when a redelivery happens. One write per reboot command. That namespace is
+ * never erased either: the key is overwritten in place.
  */
 
 #pragma once
 
+#include <stddef.h>
 #include <stdint.h>
 
 #include "esp_err.h"
@@ -49,6 +58,10 @@ extern "C" {
 #define FF_TXN_KEY_TARGET "tgt_addr"
 #define FF_TXN_KEY_DETAIL "detail" /* R5-fw-2: optional, see above */
 #define FF_TXN_KEY_CONFIRM "confirm_s" /* R5-fw-3: optional, see above */
+
+/* R5-fw-4: the last reboot-causing command id, in its own namespace (see above). */
+#define FF_TXN_CMD_NAMESPACE "ff_cmd"
+#define FF_TXN_KEY_REBOOT_CMD "reboot_id"
 
 /* Same size as `ff_ota_cmd_t.cmd_id`: an id that did not fit there never got this far. */
 #define FF_TXN_MAX_CMD_ID 64
@@ -101,6 +114,17 @@ esp_err_t ff_txn_clear_if(const char *cmd_id);
  * is for another cmd_id (left alone). Writes flash: never from esp_timer or under a
  * spinlock. */
 esp_err_t ff_txn_set_detail(const char *cmd_id, const char *detail);
+
+/* R5-fw-4. Remember `id` as the command this board is about to reboot for (R5-spec-1 D8).
+ * Overwrites the previous one; never touches the transaction record.
+ * ESP_OK when stored; ESP_ERR_INVALID_ARG for NULL, "" or an id of FF_TXN_MAX_CMD_ID bytes or
+ * more. Writes flash: never from esp_timer or under a spinlock. */
+esp_err_t ff_txn_note_reboot_cmd(const char *id);
+
+/* R5-fw-4. The id ff_txn_note_reboot_cmd() last stored, into `out` (`len` >= 1).
+ * ESP_OK with the id; ESP_ERR_NVS_NOT_FOUND with `out` "" when none was ever stored; anything
+ * else (`out` "") when NVS could not be read. Read-only. */
+esp_err_t ff_txn_last_reboot_cmd(char *out, size_t len);
 
 #ifdef __cplusplus
 }

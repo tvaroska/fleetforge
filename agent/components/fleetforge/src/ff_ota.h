@@ -22,6 +22,14 @@
  *
  * A re-delivered stage (R2-fw-6): ff_ota_is_handling() lets the command seam drop a stage
  * for the transaction already in flight or staged, instead of failing it.
+ *
+ * The verbs (R5-fw-4): ff_ota_txn_phase() tells the command seam where a transaction stands
+ * (in transfer, staged and waiting, or applying), so `apply`, `cancel`, `rollback` and
+ * `reboot` can be answered without ff_mqtt.c ever reading or writing otadata for a stage.
+ * ff_ota_cancel() stops a transfer, or puts the boot pointer back on the running image and
+ * clears the record of a staged one: the transaction ends `cancelled`. `apply` itself needs
+ * nothing from this module: the boot pointer already names the staged slot, so the session's
+ * reboot is the apply.
  */
 
 #pragma once
@@ -82,6 +90,45 @@ esp_err_t ff_ota_start(const ff_ota_cmd_t *cmd);
  * `failed` against it would end the server's row while the update carries on.
  * Read-only. Call from the same task as ff_ota_start() (the esp-mqtt task). */
 bool ff_ota_is_handling(const char *cmd_id);
+
+/* R5-fw-4. Where an update transaction stands, for the verbs. */
+typedef enum {
+    FF_OTA_TXN_NONE = 0, /* no update for that cmd_id (or, for NULL, none at all) */
+    FF_OTA_TXN_TRANSFER, /* staging/downloading/verifying, or finish() running: cancellable */
+    FF_OTA_TXN_STAGED,   /* apply:on_command, record saved, boot pointer names it: waits */
+    FF_OTA_TXN_APPLYING, /* apply:auto past staged: the ota task is about to reboot */
+} ff_ota_txn_t;
+
+/* R5-fw-4. The phase of the transaction `cmd_id`, or of whatever update this board holds when
+ * `cmd_id` is NULL. With `held` non-NULL (`held_len` >= 1) it also receives the cmd_id of the
+ * transaction found, or "" when none is found or the id is unknown (a slot the boot pointer
+ * names with no record for it).
+ *
+ * A cancel already accepted for `cmd_id` reads as FF_OTA_TXN_NONE for that id, but a NULL
+ * query keeps answering FF_OTA_TXN_TRANSFER until the ota task has ended: the boot pointer may
+ * still be moving. STAGED outside the ota task means: the boot pointer names a slot that is
+ * not the running one, and the transaction record (ff_txn) is for that slot and this cmd_id.
+ * For a NULL query, a boot pointer on another slot alone answers STAGED: a reboot would boot
+ * it.
+ *
+ * Read-only: no publish, no otadata write, no ff_txn save or clear (ff_txn_load() discards a
+ * torn record, as at boot). Call from the esp-mqtt task, like ff_ota_start(). */
+ff_ota_txn_t ff_ota_txn_phase(const char *cmd_id, char *held, size_t held_len);
+
+/* R5-fw-4. Cancel the transaction `cmd_id` (R5-spec-1 D4). Call from the esp-mqtt task.
+ *
+ * ESP_OK                — accepted. `*reported` true: the ota task is still running and
+ *                         publishes `cancelled` itself, at its next checkpoint (the transfer
+ *                         is aborted, or the boot pointer put back, before it says so).
+ *                         `*reported` false: the staged image was waiting; the boot pointer is
+ *                         already back on the running image and the record cleared, and the
+ *                         CALLER must report `cancelled` (enqueue: it runs in the handler).
+ * ESP_ERR_NOT_FOUND     — nothing to cancel under that cmd_id.
+ * ESP_ERR_INVALID_STATE — the transaction is past `staged` (apply:auto, about to reboot).
+ * ESP_FAIL              — the staged image's boot pointer could not be put back; nothing else
+ *                         was done, the record is untouched and it still boots at a reset.
+ * ESP_ERR_INVALID_ARG   — NULL or "" cmd_id, or NULL `reported`. */
+esp_err_t ff_ota_cancel(const char *cmd_id, bool *reported);
 
 #ifdef __cplusplus
 }
