@@ -547,7 +547,7 @@ Order: spec-1 → fw-1 → fw-2 → fw-3 → fw-4 → fw-5 → be-1 → be-2 →
 
 Per R5-spec-1: firmware tasks may build ahead of the owner's spec Patch A, unreleased (the R4-fw-2 precedent); the next agent/library release waits for Patch A.
 
-- [ ] **R5-fw-1**: Self-test entrypoint contract (P0, 1d)
+- [x] **R5-fw-1**: Self-test entrypoint contract (P0, 1d) _(done 2026-10-15; reviewed; built unreleased, not yet run (R5-fw-2 wires the hold); see DECISIONS.md and docs/features/self-test.md)_
       `ff_selftest_fn` / `Fleetforge.onSelfTest(fn)`, additive-only public surface. Acceptance (compile, QEMU): the Basic and basic_idf examples register one.
       Per R5-spec-1: names and semantics in docs/features/self-test.md → *R5 wire and API proposal* → *API* (`ff_selftest_fn` returning `FF_SELFTEST_PASS`/`FAIL`/`PENDING`, `ff_set_selftest(fn, ctx)`, `ff_selftest_report(passed, reason)`, `Fleetforge.onSelfTest(fn)`/`selfTestDone(passed, reason)`). A maker-API header (`MAKER_HEADERS` in `tests/test_ota_component.py`). Register before `fleetforge_start()`/`begin()`. Run the test in its own task, never in the mqtt event handler or the esp_timer task.
       Added: 2026-10-15

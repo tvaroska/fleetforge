@@ -46,8 +46,11 @@ static void blink(char letter) {
   delay(2 * UNIT_MS);  // the gap between letters (3 units in all)
 }
 
+static void selfTest() {}  // asked once, after an update reaches the fleet: loop() answers
+
 void setup() {
   Fleetforge.begin(FW_VERSION);  // FIRST: arms the rollback timer, then runs in its own task
+  Fleetforge.onSelfTest(selfTest);  // keep an update only if loop() still runs (below)
   Serial.begin(115200);
   pinMode(LED_PIN, OUTPUT);
 }
@@ -59,5 +62,6 @@ void loop() {
   for (const char *letter = MORSE_MESSAGE; *letter != '\0'; letter++) {
     blink(*letter);
   }
+  Fleetforge.selfTestDone(true);  // a whole message blinked: this firmware works
   delay(4 * UNIT_MS);  // the gap before the message repeats (7 units in all)
 }

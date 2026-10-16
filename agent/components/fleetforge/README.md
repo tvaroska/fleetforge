@@ -30,6 +30,31 @@ while the board is offline. The library sends samples on `up/telemetry` at most 
 samples recorded offline arrive with their original spacing. A reboot loses samples not yet
 sent. Both examples report `morse_loops`, one sample per blinked message.
 
+## Self-test
+
+Keep an update only if your firmware says it works, not just because it reached the fleet:
+
+- **Arduino / PlatformIO:** `Fleetforge.onSelfTest(test);` right after `begin()` in
+  `setup()`, then answer with `Fleetforge.selfTestDone(passed, reason)` (`reason` optional),
+  from inside `test()` or later from `loop()` or any task.
+- **ESP-IDF:** `#include "ff_selftest.h"`, then `ff_set_selftest(fn, ctx);` right after
+  `fleetforge_start()`. `fn` returns `FF_SELFTEST_PASS`, `FF_SELFTEST_FAIL` (with a reason
+  written into its buffer) or `FF_SELFTEST_PENDING`, and a pending test is answered later with
+  `ff_selftest_report(passed, reason)`.
+
+The library asks at most once per boot, and only on an image an OTA just wrote: after the
+board has reached the fleet, in the library's own low-priority task (never `loop()`'s, never
+an interrupt). The update is kept only if the answer is a pass before the confirm deadline;
+a fail or no answer returns the board to the previous image. A serially flashed board is
+never asked. One self-test per image; register it right after `begin()`/`fleetforge_start()`,
+because a registration after the library's session has started is refused. The first answer
+wins, and an answer when nothing is waiting is a harmless no-op, so `loop()` may answer on
+every pass. A fail's reason is printable ASCII, and the fleet sees at most 27 characters of
+it. Both examples keep an update only if their loop still runs: the test answers "pending",
+and the loop answers a pass after every whole blinked message. Until R5-fw-2 the library
+records the registration but does not run it yet: an OTA'd image still confirms on reaching
+the fleet.
+
 ## Quickstart: pick your toolchain
 
 | Toolchain | Go to |
@@ -90,8 +115,9 @@ is the library's version; in an ESP-IDF build it is your `PROJECT_VER`.
 ## Public headers
 
 - `include/`: `ff_cfg.h`, `ff_enroll.h`, `ff_identity.h`, `ff_mqtt.h`, `ff_net.h`,
-  `ff_progress.h`, `ff_store.h`, `ff_telemetry.h`, `ff_time.h`. This is the ESP-IDF surface.
-  `ff_telemetry.h` is the maker API: your firmware calls it, the stock agent does not.
+  `ff_progress.h`, `ff_selftest.h`, `ff_store.h`, `ff_telemetry.h`, `ff_time.h`. This is the
+  ESP-IDF surface. `ff_selftest.h` and `ff_telemetry.h` are the maker API: your firmware calls
+  them, the stock agent does not.
 - `src/Fleetforge.h`: the Arduino surface. It lives in `src/` because the Arduino build
   reads `src/`.
 

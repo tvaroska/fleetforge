@@ -48,13 +48,14 @@ JUSTFILE = AGENT_DIR.parent / "justfile"
 
 PRIVATE_WHOLE_HEADERS = ("ff_ota.h", "ff_txn.h", "ff_net_adapter.h", "ff_marker.h")
 INTERNAL_HEADERS = tuple(
-    f"ff_{name}_internal.h" for name in ("identity", "mqtt", "net", "store", "telemetry", "time")
+    f"ff_{name}_internal.h"
+    for name in ("identity", "mqtt", "net", "selftest", "store", "telemetry", "time")
 )
 # The maker API (R4-fw-2, DECISIONS 2026-10-15): public headers for a firmware's own code.
 # The stock agent has no application and no honest reason to call them, so they are the
 # one exception to "include/ is what agent_main.c includes"; the examples prove them instead.
-# R4-fw-3 (ff_logf) and R5-fw-1 (ff_selftest_fn) join this list.
-MAKER_HEADERS = ("ff_telemetry.h",)
+# R5-fw-1 (ff_selftest.h) joined it; R4-fw-3 (ff_logf) joins this list.
+MAKER_HEADERS = ("ff_selftest.h", "ff_telemetry.h")
 
 # The spellings that must never become public API. Each one is a way for a firmware built
 # on the component to report something that did not happen.
@@ -78,10 +79,14 @@ def _public_headers() -> list[Path]:
 
 def _declared_functions(header: Path) -> set[str]:
     """`ff_*` names followed by `(` in a header, with comments and `#` lines removed: a
-    header here holds prototypes, types and macros, so what is left is the prototypes."""
+    header here holds prototypes, types and macros, so what is left is the prototypes.
+    Function-pointer typedefs are removed too (R5-fw-1): in
+    `typedef ff_selftest_result_t (*ff_selftest_fn)(...);` the return type is followed by
+    `(`, and it is a type, not a function anyone could call."""
     code = "\n".join(
         line for line in _code(header).splitlines() if not line.lstrip().startswith("#")
     )
+    code = re.sub(r"\btypedef\s+\w+\s*\(\s*\*\s*\w+\s*\)\s*\([^;]*\)\s*;", "", code)
     return set(re.findall(r"\b(ff_[a-z0-9_]+)\s*\(", code))
 
 

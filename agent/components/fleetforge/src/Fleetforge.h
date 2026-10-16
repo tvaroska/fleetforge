@@ -1,20 +1,22 @@
 /*
  * Fleetforge for Arduino — over-the-air updates with automatic rollback for ESP32 sketches.
  *
- * This is the whole Arduino API: begin() and metric(). It is ADDITIVE-ONLY from R3-fw-3,
- * like the component's include/: a firmware built on it goes to boards nobody can reach
- * again.
+ * This is the whole Arduino API: begin(), metric(), onSelfTest() and selfTestDone(). It is
+ * ADDITIVE-ONLY from R3-fw-3, like the component's include/: a firmware built on it goes to
+ * boards nobody can reach again.
  *
  *     #include <Fleetforge.h>
  *
  *     void setup() {
  *       Fleetforge.begin("1.0.0");   // FIRST line of setup(); your firmware's version
+ *       Fleetforge.onSelfTest(selfTest);   // optional: right after begin()
  *       Serial.begin(115200);
  *       ...
  *     }
  *
  *     void loop() {
  *       Fleetforge.metric("battery_v", readBattery());   // optional: a number for the fleet
+ *       Fleetforge.selfTestDone(true);   // optional: this firmware works
  *       ...
  *     }
  *
@@ -73,6 +75,23 @@ class FleetforgeClass {
   // reserved for the library. value: a finite number. Returns false, recording nothing,
   // when the name or the value is not acceptable.
   bool metric(const char *name, double value);
+
+  // Register this sketch's self-test (R5-fw-1): keep an update only if the sketch says it
+  // works. Call it right after begin() in setup(). The library calls test() once, in its
+  // own task (not loop()'s), after an image an OTA just wrote has reached the fleet, and
+  // keeps the update only if the sketch answers selfTestDone(true) before the confirm
+  // deadline; otherwise the board returns to the previous image. A serially flashed board
+  // never calls it. Until R5-fw-2: registered, not yet run.
+  // Returns false for nullptr, for a second registration, or once the library's session
+  // has started (so do not register after slow initialisation).
+  bool onSelfTest(void (*test)());
+
+  // Answer the self-test, from inside test() or later from loop() or any task (not from an
+  // ISR). reason: why it failed, printable ASCII, the fleet sees at most 27 characters;
+  // ignored on a pass. The first answer wins. Returns true only when this call decided the
+  // result; a call when nothing is waiting returns false and is harmless, so loop() may
+  // call it on every pass.
+  bool selfTestDone(bool passed, const char *reason = nullptr);
 };
 
 extern FleetforgeClass Fleetforge;

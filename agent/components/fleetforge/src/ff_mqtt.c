@@ -35,6 +35,7 @@
 #include "ff_identity_internal.h"
 #include "ff_ota.h"
 #include "ff_progress.h"
+#include "ff_selftest_internal.h"
 #include "ff_telemetry_internal.h"
 #include "ff_txn.h"
 #include "freertos/FreeRTOS.h"
@@ -958,6 +959,10 @@ esp_err_t ff_mqtt_run(const ff_cfg_t *cfg, const ff_cred_t *cred)
     }
     ESP_ERROR_CHECK(esp_mqtt_client_register_event(s_ctx.client, ESP_EVENT_ANY_ID,
                                                    mqtt_event_handler, &s_ctx));
+
+    /* R5-fw-1: the firmware's self-test registration is fixed from here, before the first
+     * connect builds an announce. R5-fw-2 runs it after the announce ack on an OTA boot. */
+    (void)ff_selftest_freeze();
 
     /* What the last reboot left to report. The confirm timer is NOT armed here: it was
      * armed first thing in app_main (R2-fw-4, ff_mqtt_arm_confirm_timer), so it may fire

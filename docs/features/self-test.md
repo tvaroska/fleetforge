@@ -398,6 +398,133 @@ Its semantics: `device-protocol.md` → `up/status` → *Custom self-test* (R5-s
 Answered (R5-spec-1): it stays awake from `staging` until `confirmed` or `rolled_back` ([device-protocol.md](device-protocol.md) → `up/status`).
 ```
 
+### R5-fw-1 as built
+
+- **What was built.** The self-test entrypoint, unreleased, ahead of R5-fw-2: the agent records
+  and freezes a registration but does not run it yet. Firmware: `include/ff_selftest.h` (new,
+  public, maker API), `src/ff_selftest.c` and `src/ff_selftest_internal.h` (new, private), one
+  `(void)ff_selftest_freeze();` in `ff_mqtt_run()` after the client is created and before
+  `ff_txn_init()`/`classify_txn()` and the first `esp_mqtt_client_start()`; nothing else in
+  `ff_mqtt.c` changed (not the confirm timer, `rollback_now_cb`, `confirm_this_image`, the
+  PUBLISHED branch, `on_connected` or `classify_txn`). Arduino: `Fleetforge.onSelfTest()` and
+  `Fleetforge.selfTestDone()` in `Fleetforge.h`/`Fleetforge.cpp`, plus the `ff-selftest` log
+  tag. Both worked examples register one; the library README has a *Self-test* section. No
+  wire, server, simulator or spec change; no version bump.
+- **Signatures.** C: `typedef enum { FF_SELFTEST_PASS = 0, FF_SELFTEST_FAIL = 1,
+  FF_SELFTEST_PENDING = 2 } ff_selftest_result_t;`,
+  `typedef ff_selftest_result_t (*ff_selftest_fn)(void *ctx, char *reason, size_t reason_len);`,
+  `esp_err_t ff_set_selftest(ff_selftest_fn fn, void *ctx);`,
+  `esp_err_t ff_selftest_report(bool passed, const char *reason);`. Arduino:
+  `bool onSelfTest(void (*test)());`, `bool selfTestDone(bool passed, const char *reason = nullptr);`
+  (the callback takes nothing and returns nothing; the sketch answers through `selfTestDone`,
+  from inside the callback or later, so the trampoline always returns PENDING).
+- **Semantics.** One self-test per image (`ESP_ERR_INVALID_STATE` on a second one, and once the
+  session has started; `ESP_ERR_INVALID_ARG` for NULL; a refusal is the only log line). The
+  runner (`ff_selftest_run(done)`, private, non-blocking) creates its own task, `ff_selftest`,
+  6144 B, priority 1 (below `ff_hb`/`ff_tel` at 4 and esp-mqtt at 5), which calls the function
+  once, then waits on a static binary semaphore for a pending answer, logs
+  `custom self-test passed` or `custom self-test failed: <reason>`, calls `done`, and deletes
+  itself. The first answer wins: a report made while the function runs beats its return; any
+  return other than PASS/PENDING is FAIL. The reason (64 B buffer, zeroed, ff_txn's
+  `detail[64]`) is sanitized to bytes `0x20..0x7e` without `;`, a report's scan bounded at 256
+  B; it is `""` on a pass. `ff_selftest_report()` never logs, allocates or blocks (a spinlock
+  around a few stores and one `xSemaphoreGive`). A static semaphore and not a task notification:
+  a report may race the task's exit, and notifying a deleted task is a use-after-free.
+- **Registration point and the freeze.** The TODO line says "register before
+  `fleetforge_start()`/`begin()`", but `begin()`/`fleetforge_start()` FIRST is the CRITICAL
+  rollback posture, pinned by `test_the_example_calls_begin_first` and
+  `test_app_main_calls_fleetforge_start_first`. Read as "before the session": the examples
+  register as the SECOND statement, and `ff_mqtt_run()` freezes the registration before its first
+  connect (after link bring-up and SNTP, seconds later). A later registration is a
+  deterministic refusal, logged. The freeze logs once, either
+  `a custom self-test is registered for this image` or
+  `no custom self-test registered: an OTA'd image confirms once its announce is acknowledged`
+  (both true today and after fw-2). Precedent for fw-5 `onSafeWindow` and fw-7 `setPowerClass`.
+- **Deliberately not here (fw-2).** The `selftest` capability (claiming it before the hold
+  exists is a capability the image does not have), the hold itself, the `detail` grammar, NVS
+  reason storage and the 27 B shortening. `ff_selftest_run()` has no caller.
+- **The examples.** "Keep an update only if the firmware's loop still runs": the self-test
+  answers pending, and the loop answers a pass after every whole blinked message
+  (`ff_selftest_report(true, NULL)` / `Fleetforge.selfTestDone(true)`); before the agent asks
+  and after it decided, the call is a harmless no-op. After fw-2, build B confirms within one
+  message (~6.8 s) of its announce ack, and the `-rbtest` build R never acks, so it still times
+  out: `just lib-quickstart` stays meaningful. `main.c` is exactly 70 lines (`ONE_SCREEN`
+  unchanged; the header comment and the LED comment compressed), `Basic.ino` 67.
+- **Tests.** `tests/test_selftest.py` (25): the header (two functions, exact prototypes and
+  typedef, explicit enum values, `extern "C"`, three includes, private hooks in no public
+  header), the runner (the registered function called once, only in `selftest_task`; its own
+  `xTaskCreate`, no pinning, prio < 4, stack >= 4096, buffer 64; no log/alloc/block in
+  `ff_selftest_report`; static semaphore, no task notification; the sanitizer's literals;
+  `== FF_SELFTEST_PASS` and no `== FF_SELFTEST_FAIL`; first answer wins; the refusals; the TAG),
+  the session wiring (one freeze in `ff_mqtt_run` before `ff_txn_init` and
+  `esp_mqtt_client_start`, no `ff_selftest_run` yet, nothing in `confirm_timeout_cb`,
+  `rollback_now_cb` or `ff_mqtt_arm_confirm_timer`, nothing in `agent_main.c`), the Arduino
+  members (one ff call each, PENDING trampoline, the tag) and both examples (register second,
+  answer from the loop after the blink). `test_ota_component.py`: `MAKER_HEADERS` gains
+  `ff_selftest.h`, `INTERNAL_HEADERS` gains `selftest`, and `_declared_functions` now removes
+  function-pointer typedefs (else `ff_selftest_result_t` would count as a "function").
+  Mutation checks, each red: calling `s_fn` inside `ff_selftest_run`
+  (`test_the_registered_function_is_called_from_its_task_only`), an `ESP_LOGI` in
+  `ff_selftest_report` (`test_report_never_logs_allocates_or_blocks`), dropping the `';'`
+  filter (`test_the_reason_is_printable_ascii_without_semicolon`).
+- **T1.** `just agent-build-all`: four `BUNDLE OK`, 0 warnings. `APP_SIZE_BUDGET_BYTES`: +400 B
+  each (esp32 1,032,688, esp32s3 1,012,704, esp32c3 1,072,864, esp32c6 1,122,432): the freeze
+  and its two log strings; the rest of `ff_selftest.c` is garbage-collected in the stock agent.
+  `just lib-quickstart --build-only`: PASS (Arduino Basic esp32 1,179,616 B / esp32s3
+  1,172,944 B, build B, the own-project path, basic_idf esp32 1,107,280 B / esp32s3
+  1,112,480 B; 0 warnings). `just lib-arduino-check`: PASS (arduino-cli 1.5.1, esp32:esp32@3.3.12,
+  esp32 1,169,024 B / esp32s3 1,159,856 B, 0 warnings, `T verifyRollbackLater` in both).
+  `just test`: 1986 passed; ruff, format, mypy clean.
+- **T2 (local dev stack on 8088 only).**
+  - (a) The Arduino Basic example in QEMU (`just lib-bundle esp32-qemu`, `just agent-cfg ...
+    --token <fresh>`, `just lib-qemu --fresh`): `I (13268) ff-selftest: a custom self-test is
+    registered for this image` at line 44, `I (13340) ff-mqtt: connecting to
+    mqtt://10.0.2.2:8883 as 000000000000` at line 45, `announce acknowledged by the broker` at
+    53, then `morse: SOS (firmware 1.0.0)` 4 times in the next 20 s; judge:
+    `SELFTEST REGISTRATION OK (freeze@44 < connect@45, ack@53, morse-after-ack=4, boots=1)`
+    (exactly one freeze line, no run/pass/fail line, no refusal, no panic, one `rst:`).
+    `GET /v1/devices`: `000000000000` with `capabilities: ["ota"]` (no `selftest` yet).
+  - (b) The stock agent (`just agent-qemu esp32 --fresh`, fresh token): `I (8228) ff-selftest:
+    no custom self-test registered: an OTA'd image confirms once its announce is acknowledged`
+    at line 100, before `connecting to` (101) and the ack (108); judge
+    `SELFTEST REGISTRATION OK`. `just agent-qemu-smoke esp32`: `HARNESS OK`.
+  - (c) The OTA confirm/rollback path is unchanged with a registered self-test: `just
+    lib-quickstart` (api recreated with 10.0.2.2 origins, restored afterwards) `== PASS (1754 s)`:
+    build B `1.1.0-qs1792114485` `deploy confirmed (is_terminal True), 77 s after the deploy`
+    (`this image was written by OTA and is now CONFIRMED`: the announce ack, no hold), build R
+    `-rbtest` `deploy rolled_back`, `detail 'returned to ota_1; ota_0 did not confirm'`, no
+    confirmed step, the board back on B. A second run with `--keep --skip-idf` (`== PASS (1345
+    s)`, the kept tree deleted afterwards: it held a live credential) kept the transcripts:
+    `ff-selftest: a custom self-test is registered for this image` exactly once in each of
+    `qemu-A.log`, `qemu-B.log`, `qemu-R.log` and `qemu-R2.log` (the boot after the rollback),
+    each before `connecting to`, and 0 run/pass/fail/refusal lines in all four.
+- **Not provable here.** The runner (the task, pending/report, first answer wins, the done
+  callback) is not invoked on a device until R5-fw-2 wires it; its QEMU proof is fw-2's
+  acceptance ("a build whose self-test fails comes back on the old slot"). Here it is covered
+  by the source pins and a clean `-Werror` build. `basic_idf` is proven by compile plus the
+  shared component, not booted (as for R4-fw-1/R4-fw-2).
+- **Notes for R5-fw-2.** (1) Call `ff_selftest_run(done)` from the PUBLISHED branch on the
+  announce ack of a boot that needs confirming, instead of `confirm_this_image()`, when
+  `ff_selftest_freeze()` returned true; it only creates a task, so it is legal there. (2) `done`
+  runs in the `ff_selftest` task (priority 1). It may `enqueue_status` (as
+  `rollback_report_task` does) and call `esp_ota_mark_app_valid_cancel_rollback()`, but it must
+  check `s_rollback_decided` first: a late pass after the deadline must not confirm (D12). (3)
+  Store `ff_selftest_freeze()`'s return value to announce `selftest` (D9) and to choose the
+  confirm path. (4) The reason that arrives is already printable ASCII without `;`, up to 63 B;
+  shorten it to fit the 63-byte `detail` (27 B worst case) and write it to `ff_txn` at decision
+  time. (5) Delete the "Until R5-fw-2" lines in `ff_selftest.h`, `Fleetforge.h` and the README.
+- **Rejected.** (1) Registering before `begin()`/`fleetforge_start()` in the examples: breaks the
+  CRITICAL first-statement posture and its pins for a pointer store; the freeze gives the same
+  guarantee. (2) An Arduino callback returning a three-value enum: a second result path in a
+  beginner API. (3) Running the function in the esp-mqtt event handler, on esp_timer, or
+  synchronously in `ff_selftest_run()`: stalls the session/PUBACK or every timer, the confirm
+  timer included. (4) A task notification to wake the runner: races the task's exit. (5)
+  Logging or blocking in `ff_selftest_report()`: the R4-fw-3 recursion, and it is called on
+  every loop. (6) Announcing `selftest` now. (7) Wiring the runner "advisory" after the confirm
+  for on-device evidence now: transitional semantics in the CRITICAL confirm path. (8) A
+  QEMU-only probe flag to run the self-test on a serial flash: test-only code in the component.
+  (9) Raising `ONE_SCREEN`.
+
 ## Reuse note
 
 The self-test entrypoint defined here moves by the simulation gate

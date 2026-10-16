@@ -190,16 +190,22 @@ FORBIDDEN_OPTIONS = [
 # %.15g/%.17g value printing and strtod round-trip, the flush task and its log lines) and
 # ff_mqtt.c's third topic snprintf plus the two session calls. The stock agent records no
 # sample; the ring and the payload buffer are BSS (about 4.4 KB of RAM, no flash).
+#
+# R5-fw-1: +400 B each. Raised 2026-10-15 for **all four targets**, all rebuilt, to the
+# exact measured byte: esp32 1,032,288 -> 1,032,688, esp32s3 1,012,304 -> 1,012,704,
+# esp32c3 1,072,464 -> 1,072,864, esp32c6 1,122,032 -> 1,122,432. The added code is
+# ff_selftest_freeze() and its two log lines, linked through ff_mqtt_run(); the stock agent
+# never registers a self-test, so the rest of ff_selftest.c is garbage-collected.
 APP_SIZE_BUDGET_BYTES = {
-    "esp32": 1_032_288,
+    "esp32": 1_032_688,
     # Raised from 973_136 for the OTA-capable agent (R1-fw-1/R1-fw-2), which cost every
     # target ~18 KB. Only esp32 was raised at the time: this gate reads whatever is in
     # `agent/dist/`, so a target nobody had built locally is not checked and does not
     # fail. The other two were still carrying 0.2.0-era numbers until R2b-fw-1 raised
     # them — that was a gap in the gate, not slack here.
-    "esp32s3": 1_012_304,
-    "esp32c3": 1_072_464,
-    "esp32c6": 1_122_032,
+    "esp32s3": 1_012_704,
+    "esp32c3": 1_072_864,
+    "esp32c6": 1_122_432,
 }
 
 # An app may occupy at most this much of an OTA slot. Not a style rule: R2 downloads the

@@ -23,6 +23,10 @@ AGENT_MAIN_C = AGENT_MAIN_DIR / "agent_main.c"
 FF_TELEMETRY_H = COMPONENT_INCLUDE / "ff_telemetry.h"
 FF_TELEMETRY_C = COMPONENT_SRC / "ff_telemetry.c"
 FF_TELEMETRY_INTERNAL_H = COMPONENT_SRC / "ff_telemetry_internal.h"
+# R5-fw-1: the second maker-API header (the self-test entrypoint) and its runner.
+FF_SELFTEST_H = COMPONENT_INCLUDE / "ff_selftest.h"
+FF_SELFTEST_C = COMPONENT_SRC / "ff_selftest.c"
+FF_SELFTEST_INTERNAL_H = COMPONENT_SRC / "ff_selftest_internal.h"
 
 # R3-fw-3: the same component directory is the Arduino library (library.json), and the
 # wrapper is its second consumer. The example and its partitions.csv travel together.

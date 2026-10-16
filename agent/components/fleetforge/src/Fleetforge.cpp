@@ -56,6 +56,7 @@
 #include "ff_mqtt.h"
 #include "ff_net.h"
 #include "ff_progress.h"
+#include "ff_selftest.h"
 #include "ff_store.h"
 #include "ff_telemetry.h"
 #include "ff_time.h"
@@ -87,7 +88,8 @@ static const char *TAG = "ff-lib";
  * tests/test_arduino_library.py pins this list to the TAGs in src/. */
 static const char *const FF_LOG_TAGS[] = {
     "ff-cfg", "ff-enroll", "ff-eth", "ff-id", "ff-lib", "ff-mqtt", "ff-net",
-    "ff-ota", "ff-progress", "ff-store", "ff-tel", "ff-time", "ff-txn", "ff-wifi",
+    "ff-ota", "ff-progress", "ff-selftest", "ff-store", "ff-tel", "ff-time", "ff-txn",
+    "ff-wifi",
 };
 
 FleetforgeClass Fleetforge;
@@ -267,6 +269,35 @@ bool FleetforgeClass::begin(const char *fw_version)
 bool FleetforgeClass::metric(const char *name, double value)
 {
     return ff_telemetry(name, value) == ESP_OK;
+}
+
+/* R5-fw-1: the maker API (ff_selftest.h). The sketch's callback takes no arguments and
+ * answers through selfTestDone(), so the C function always says "pending"; an answer the
+ * sketch gave inside its callback has already won (first answer wins). */
+static void (*s_sketch_selftest)();
+
+static ff_selftest_result_t sketch_selftest(void *, char *, size_t)
+{
+    s_sketch_selftest();
+    return FF_SELFTEST_PENDING;
+}
+
+bool FleetforgeClass::onSelfTest(void (*test)())
+{
+    if (test == nullptr || s_sketch_selftest != nullptr) {
+        return false;
+    }
+    s_sketch_selftest = test;
+    if (ff_set_selftest(sketch_selftest, nullptr) != ESP_OK) {
+        s_sketch_selftest = nullptr;
+        return false;
+    }
+    return true;
+}
+
+bool FleetforgeClass::selfTestDone(bool passed, const char *reason)
+{
+    return ff_selftest_report(passed, reason) == ESP_OK;
 }
 
 #endif /* ARDUINO */
