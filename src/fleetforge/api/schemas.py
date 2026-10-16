@@ -461,6 +461,20 @@ class DeploySender(BaseModel):
     credential: str | None
 
 
+class DeploySelfTest(BaseModel):
+    """The custom self-test's outcome (R5-be-1), parsed by the server from the device's
+    `detail` (the R5-spec-1 D11 grammar), so no client keeps a second copy of the regex.
+
+    `DeploySummary.selftest` is null when the detail is not a self-test outcome: no
+    self-test was registered, a pre-R5 agent, a never-armed image's `confirmed` (it keeps
+    its own detail), a command rollback or a legacy timeout. `reason` (failed only) and
+    `returned_to` (the slot label) are device-controlled text: render them as text."""
+
+    outcome: Literal["passed", "failed", "timed_out"]
+    reason: str | None
+    returned_to: str | None
+
+
 class DeploySummary(BaseModel):
     """A board's newest deploy state, as the fleet view sees it. R1-fe-1.
 
@@ -490,6 +504,9 @@ class DeploySummary(BaseModel):
 
     `sent_by` (R2b-be-4) is who opened this transaction; null when it was recorded before
     that existed or has no `requested` row.
+
+    `selftest` (R5-be-1) is the self-test outcome the server parsed from `detail`, on a
+    terminal `confirmed` / `rolled_back` row only; null otherwise (`DeploySelfTest`).
     """
 
     # NULL only for a row written before `cmd_id` was known — the column is nullable, so
@@ -512,6 +529,7 @@ class DeploySummary(BaseModel):
     # compiled rollback timer is authoritative and equal to it in a production build.
     confirm_timeout_s: int
     sent_by: DeploySender | None = None
+    selftest: DeploySelfTest | None = None
 
 
 class ArrivalSummary(BaseModel):

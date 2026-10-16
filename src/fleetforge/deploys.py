@@ -92,6 +92,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from fleetforge.db.models import TERMINAL_DEPLOY_STATES, DeployEvent, DeployState
+from fleetforge.selftest_outcome import SelfTestOutcome, selftest_outcome
 
 logger = logging.getLogger(__name__)
 
@@ -551,6 +552,10 @@ class DeploySnapshot:
 
     `sent_by` (R2b-be-4) is the sender recorded on that transaction's `requested` row, or
     None for transactions recorded before it existed or with no `requested` row.
+
+    `selftest` (R5-be-1) is the custom self-test's outcome, derived on read from the
+    stored `detail` by `selftest_outcome.selftest_outcome` (grammar plus the state rule),
+    never stored. None means "not a self-test outcome".
     """
 
     cmd_id: str | None
@@ -563,6 +568,7 @@ class DeploySnapshot:
     detail: str | None
     steps: tuple[DeployStepSnapshot, ...]
     sent_by: SenderSnapshot | None
+    selftest: SelfTestOutcome | None
 
 
 def _snapshot_pct(detail: Any) -> int | None:
@@ -641,8 +647,10 @@ async def latest_deploys(
     steps: dict[str, list[DeployStepSnapshot]] = {}
     for step in step_rows:
         steps.setdefault(step.device_id, []).append(DeployStepSnapshot(step.state, step.at))
-    return {
-        row.device_id: DeploySnapshot(
+    snapshots: dict[str, DeploySnapshot] = {}
+    for row in rows:
+        detail = _snapshot_detail(row.detail)
+        snapshots[row.device_id] = DeploySnapshot(
             cmd_id=row.cmd_id,
             state=row.state,
             at=row.at,
@@ -650,9 +658,9 @@ async def latest_deploys(
             artifact_version=row.artifact_version,
             from_version=row.from_version,
             pct=_snapshot_pct(row.detail),
-            detail=_snapshot_detail(row.detail),
+            detail=detail,
             steps=tuple(steps.get(row.device_id) or [DeployStepSnapshot(row.state, row.at)]),
             sent_by=senders.get(row.device_id),
+            selftest=selftest_outcome(row.state, detail),
         )
-        for row in rows
-    }
+    return snapshots

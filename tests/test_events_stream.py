@@ -37,6 +37,7 @@ from fleetforge.clock import now_utc
 from fleetforge.config import get_settings
 from fleetforge.db.base import asyncpg_dsn
 from fleetforge.events import DeviceEvent, EventType, emit
+from fleetforge.selftest_outcome import SelfTestOutcome
 from tests.conftest import (
     TEST_DB_NAME,
     client_for,
@@ -560,6 +561,7 @@ def test_the_envelope_keys_are_pinned() -> None:
         "state",
         "is_terminal",
         "detail",
+        "selftest",
     }
 
 
@@ -584,6 +586,28 @@ async def test_a_deploy_frame_carries_the_transaction_and_is_forwarded_verbatim(
         True,
         "verify failed",
     )
+
+
+async def test_a_selftest_outcome_on_a_deploy_frame_is_forwarded_verbatim() -> None:
+    """R5-be-1: the nested object survives the api's `model_validate_json` round trip."""
+    payload = an_event(
+        type=EventType.DEVICE_DEPLOY,
+        cmd_id="c-1",
+        state="rolled_back",
+        is_terminal=True,
+        detail="selftest failed: boom; returned to ota_1",
+        selftest=SelfTestOutcome("failed", "boom", "ota_1"),
+    ).model_dump_json()
+    hub = EventHub(queue_size=4, max_subscribers=4)
+    with hub.subscribe() as subscription:
+        a_listener(hub)._on_notify(None, 1, "ff_events", payload)
+        forwarded = subscription.queue.get_nowait()
+    assert forwarded == payload
+    assert json.loads(forwarded)["selftest"] == {
+        "outcome": "failed",
+        "reason": "boom",
+        "returned_to": "ota_1",
+    }
 
 
 async def test_a_deploy_frame_from_an_older_ingestor_is_still_forwarded() -> None:

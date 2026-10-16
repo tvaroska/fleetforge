@@ -26,6 +26,7 @@ from fleetforge.db.models import DeployEvent, Device
 from fleetforge.deploys import DeploySender, record_requested
 from fleetforge.events import EVENTS_CHANNEL, DeviceEvent, EventType
 from fleetforge.ingestor.handlers import handle_up_message
+from fleetforge.selftest_outcome import SelfTestOutcome
 from tests.conftest import TEST_DB_NAME, capture_logs, database_url_for
 
 DEVICE_ID = "a4cf12b3de90"
@@ -973,6 +974,93 @@ async def test_a_deploy_event_carries_the_transaction_and_a_terminal_detail(
         "boom",
     )
     assert odd is not None and odd.state == "teleporting" and odd.is_terminal is False
+
+
+async def test_a_terminal_row_carries_the_selftest_outcome(session: AsyncSession) -> None:
+    """R5-be-1: parsed from the stored detail, on a terminal row of the right state only."""
+    await seed_device(session)
+    await seed_intent(session)
+
+    walking = await publish(
+        session,
+        "status",
+        {"cmd_id": CMD_ID, "state": "rolling_back", "detail": "selftest failed: boom"},
+    )
+    failed = await publish(
+        session,
+        "status",
+        {
+            "cmd_id": CMD_ID,
+            "state": "rolled_back",
+            "detail": "selftest failed: boom; returned to ota_1",
+        },
+    )
+    replay = await publish(
+        session,
+        "status",
+        {
+            "cmd_id": CMD_ID,
+            "state": "rolled_back",
+            "detail": "selftest failed: boom; returned to ota_1",
+        },
+        retained=True,
+    )
+
+    assert walking is not None and walking.selftest is None
+    assert failed is not None
+    assert failed.selftest == SelfTestOutcome("failed", "boom", "ota_1")
+    assert replay is None or replay.selftest is None
+
+
+async def test_a_passed_selftest_rides_the_confirmed_frame(session: AsyncSession) -> None:
+    await seed_device(session)
+    await seed_intent(session)
+
+    event = await publish(
+        session,
+        "status",
+        {"cmd_id": CMD_ID, "state": "confirmed", "detail": "selftest passed", "pct": 100},
+    )
+
+    assert event is not None
+    assert event.selftest == SelfTestOutcome("passed", None, None)
+    assert json.loads(event.model_dump_json())["selftest"] == {
+        "outcome": "passed",
+        "reason": None,
+        "returned_to": None,
+    }
+
+
+async def test_the_selftest_reason_is_the_stored_redacted_copy(session: AsyncSession) -> None:
+    await seed_device(session)
+    await seed_intent(session)
+
+    event = await publish(
+        session,
+        "status",
+        {
+            "cmd_id": CMD_ID,
+            "state": "rolled_back",
+            "detail": "selftest failed: https://host/x?sig=secret boom; returned to ota_0",
+        },
+    )
+
+    assert event is not None and event.selftest is not None
+    assert event.selftest.reason == "<url> boom"
+    assert "sig=secret" not in event.model_dump_json()
+
+
+async def test_a_confirmed_without_selftest_words_has_a_null_selftest(
+    session: AsyncSession,
+) -> None:
+    await seed_device(session)
+    await seed_intent(session)
+
+    event = await publish(
+        session, "status", {"cmd_id": CMD_ID, "state": "confirmed", "detail": "ok"}
+    )
+
+    assert event is not None and event.is_terminal is True and event.selftest is None
 
 
 async def test_a_terminal_row_without_detail_has_a_null_detail(session: AsyncSession) -> None:

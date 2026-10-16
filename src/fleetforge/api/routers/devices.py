@@ -81,6 +81,7 @@ from fleetforge.api.deps import (
 )
 from fleetforge.api.schemas import (
     ArrivalSummary,
+    DeploySelfTest,
     DeploySender,
     DeployStep,
     DeploySummary,
@@ -198,6 +199,15 @@ def _deploy_summary(
         sent_by=(
             DeploySender(subject=snapshot.sent_by.subject, credential=snapshot.sent_by.credential)
             if snapshot.sent_by is not None
+            else None
+        ),
+        selftest=(
+            DeploySelfTest(
+                outcome=snapshot.selftest.outcome,
+                reason=snapshot.selftest.reason,
+                returned_to=snapshot.selftest.returned_to,
+            )
+            if snapshot.selftest is not None
             else None
         ),
     )

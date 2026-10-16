@@ -230,6 +230,7 @@ async def _run_board(
             confirm=args.confirm,
             confirm_timeout_s=args.confirm_timeout,
             broken_marker=args.broken_marker,
+            selftest_fail_marker=args.selftest_fail_marker,
             telemetry_every_s=args.telemetry_every,
             step=step,
         )
@@ -247,6 +248,7 @@ async def _run_board(
         confirm=args.confirm,
         confirm_timeout_s=args.confirm_timeout,
         broken_marker=args.broken_marker,
+        selftest_fail_marker=args.selftest_fail_marker,
         telemetry_every_s=args.telemetry_every,
         step=step,
     )
@@ -497,6 +499,18 @@ def _shared(parser: argparse.ArgumentParser) -> None:
             "is `<ver>-rbtest`); every other image follows --confirm. Write it with an `=` "
             "when it starts with a dash: --broken-marker=-rbtest (argparse reads a bare "
             "-rbtest as an option)"
+        ),
+    )
+    parser.add_argument(
+        "--selftest-fail-marker",
+        default=None,
+        metavar="TEXT",
+        help=(
+            "an image whose version contains TEXT fails its custom self-test (R5): the board "
+            "reports rolling_back at once and then `selftest failed: simulated self-test "
+            "failure; returned to <slot>`. Needs --capabilities selftest (a self-test must be "
+            "registered). Write it with an `=` when it starts with a dash: "
+            "--selftest-fail-marker=-stfail"
         ),
     )
     parser.add_argument(

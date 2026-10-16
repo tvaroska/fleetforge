@@ -1211,6 +1211,41 @@ Answered (R5-spec-1): it stays awake from `staging` until `confirmed` or `rolled
     boot-loop panic*); the same bundle booted cleanly without the TTY. `agent/tools/otadata.py`
     needs a `flash_size` the library bundle's manifest lacks (patched copy used).
 
+### R5-be-1 as built
+
+- **What was built.** The server reads the firmware's self-test result out of a deploy's
+  `detail` and gives clients a structured `selftest`. New pure module
+  `src/fleetforge/selftest_outcome.py` (`SELFTEST_DETAIL_RE` with `.fullmatch()`,
+  `SelfTestOutcome`, `parse_selftest_detail`, `selftest_outcome(state, detail)`).
+  `DeploySnapshot.selftest` (`deploys.py`, read from the newest row), `DeploySelfTest` +
+  `DeploySummary.selftest` on `GET /v1/devices`, `DeviceEvent.selftest` on the terminal
+  `device.deploy` frame (`events.py`, `ingestor/handlers.py`). The simulator learns a
+  self-test (`selftest` capability, `--selftest-fail-marker`, slot labels).
+- **Decisions.** Parsed on read, never stored (no migration, no backfill, `deploy_events`
+  writes unchanged). The grammar counts only on its own state: `passed` on `confirmed` with
+  no tail, `failed` / `timed_out` on `rolled_back`; anything else is null. KPIs and the
+  terminal vocabulary do not change: a self-test rollback is a `rolled_back`, no
+  `selftest_failed` state. Outcome names are `passed`, `failed`, `timed_out`. Details:
+  `DECISIONS.md` -> R5-be-1.
+- **Not provable here.** The real agent's wire (covered by R5-fw-2/4/5 T2 and the firmware
+  parity test, which reads the `#define`s from `ff_mqtt.c`), and the dashboard rendering
+  (R5-fe-1, which mirrors `DeploySelfTest` into `frontend/src/api.ts` as an optional field).
+  The simulator does not gate the rollback on a safe window (D12).
+- **Tests.** `tests/test_selftest_outcome.py` (grammar table, firmware `#define` parity,
+  state-consistency table); `test_api_devices` (seven states and the `requested` blob),
+  `test_ingestor` (terminal frame, walking row, replay, redacted reason), `test_events_stream`
+  (key set gains `selftest`, nested object forwarded verbatim), `test_simulator` (pass, fail,
+  hang, legacy wording, slot flips, flag validation, every composed detail parsed by the
+  server's parser). Mutation checks (state rule, `.match`, frame guard) are in DECISIONS.
+- **T1.** `just test`: 2174 passed, ruff, format and mypy clean.
+- **T2.** Dev stack, simulated boards `r5be1-1792163058-01` (self-test registered) and a control:
+  good build `confirmed` / `selftest passed` / `passed`; `-stfail` `rolled_back` /
+  `selftest failed: simulated self-test failure; returned to ota_1` (63 B) / `failed` with
+  the reason and `ota_1`; `-hang` `rolled_back` after 9.6 s / `selftest timed out; returned to
+  ota_1` / `timed_out`; control `confirmed`, detail and selftest null. One terminal frame per
+  transaction, equal to the API; `selftest` null on every other frame; no URL on the stream;
+  no token in the logs.
+
 ## Reuse note
 
 The self-test entrypoint defined here moves by the simulation gate

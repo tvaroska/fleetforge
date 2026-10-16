@@ -658,6 +658,74 @@ async def test_a_requested_rows_sha256_does_not_leak_into_the_api_detail(
     assert deploy["pct"] is None
 
 
+@pytest.mark.parametrize(
+    ("state", "detail", "is_terminal", "expected"),
+    [
+        (
+            "confirmed",
+            "selftest passed",
+            True,
+            {"outcome": "passed", "reason": None, "returned_to": None},
+        ),
+        (
+            "rolled_back",
+            "selftest failed: i2c sensor 0x48 did not ans; returned to ota_1",
+            True,
+            {"outcome": "failed", "reason": "i2c sensor 0x48 did not ans", "returned_to": "ota_1"},
+        ),
+        (
+            "rolled_back",
+            "selftest timed out; returned to ota_1",
+            True,
+            {"outcome": "timed_out", "reason": None, "returned_to": "ota_1"},
+        ),
+        ("rolled_back", "returned to 1.4.2; the new image did not confirm", True, None),
+        ("confirmed", None, True, None),
+        # Not terminal, or the wrong state for the words: the server shows nothing.
+        ("rolling_back", "selftest failed: boom; returned to ota_1", False, None),
+        ("confirmed", "selftest failed: boom; returned to ota_1", True, None),
+    ],
+)
+async def test_the_selftest_outcome_is_parsed_from_the_stored_detail(
+    admin_app: FastAPI,
+    fleet: AsyncSession,
+    state: str,
+    detail: str | None,
+    is_terminal: bool,
+    expected: dict[str, Any] | None,
+) -> None:
+    """R5-be-1: `deploy.selftest` is derived on read, only on the state the grammar belongs to."""
+    await add_device(fleet)
+    await add_deploy_event(
+        fleet,
+        DEVICE_ID,
+        state,
+        cmd_id="cmd-a",
+        is_terminal=is_terminal,
+        detail=None if detail is None else {"detail": detail},
+    )
+
+    deploy = await deploy_of(admin_app)
+
+    assert deploy["selftest"] == expected
+    assert deploy["detail"] == detail
+
+
+async def test_a_requested_rows_blob_is_never_read_as_a_selftest(
+    admin_app: FastAPI, fleet: AsyncSession
+) -> None:
+    await add_device(fleet)
+    await add_deploy_event(
+        fleet,
+        DEVICE_ID,
+        "requested",
+        cmd_id="cmd-a",
+        detail={"sha256": "a" * 64, "detail": "selftest passed"},
+    )
+
+    assert (await deploy_of(admin_app))["selftest"] is None
+
+
 async def test_a_state_this_server_has_never_heard_of_is_reported_as_itself(
     admin_app: FastAPI, fleet: AsyncSession
 ) -> None:

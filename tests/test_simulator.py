@@ -34,9 +34,11 @@ from fleetforge.api.schemas import EnrollRequest
 from fleetforge.db.models import DeployState, PowerClass
 from fleetforge.identity import DEVICE_ID_RE
 from fleetforge.ingestor.protocol import AnnouncePayload, PresencePayload, parse_up_topic
+from fleetforge.selftest_outcome import SelfTestOutcome, parse_selftest_detail
 from fleetforge.simulator import __main__ as cli
 from fleetforge.simulator.device import (
     ANNOUNCE,
+    CAPABILITY_SELFTEST,
     CONFIRM_AUTO,
     CONFIRM_NEVER,
     CONFIRM_WALK,
@@ -49,9 +51,14 @@ from fleetforge.simulator.device import (
     PRESENCE_OFFLINE,
     PRESENCE_ONLINE,
     QOS,
+    RETURNED_TO,
     ROLLBACK_WALK,
     SAFE_WINDOW_AUTO,
     SAFE_WINDOW_HOLD,
+    SELFTEST_FAIL_REASON,
+    SELFTEST_FAILED,
+    SELFTEST_PASSED,
+    SELFTEST_TIMED_OUT,
     SLOW_MAX_DELAY_S,
     SLOW_MIN_DELAY_S,
     STAGE_WALK,
@@ -1083,10 +1090,14 @@ async def one_session(
     return lines
 
 
-async def applied_stage(*, version: str = "1.5.0", **kwargs: Any) -> StageRunner:
+async def applied_stage(
+    *, version: str = "1.5.0", capabilities: tuple[str, ...] = (), **kwargs: Any
+) -> StageRunner:
     """A board on 1.4.2 that has just applied `version` (`cmd-stage-1`) and is rebooting."""
     stage = StageRunner(
-        identity=DeviceIdentity(device_id="a4cf12b3de90", fw_version="1.4.2"),
+        identity=DeviceIdentity(
+            device_id="a4cf12b3de90", fw_version="1.4.2", capabilities=capabilities
+        ),
         link=LinkProfile(LINK_FAST),
         **kwargs,
     )
@@ -1816,3 +1827,143 @@ async def test_reset_reason_names_the_first_boot_and_the_apply_reboot_is_sw(
 
     assert channel_payloads(clients[0], identity.device_id, ANNOUNCE)[0]["reset_reason"] == "panic"
     assert channel_payloads(clients[1], identity.device_id, ANNOUNCE)[0]["reset_reason"] == "sw"
+
+
+# ---------------------------------------------------------------------------
+# R5-be-1: a simulated custom self-test. Registered = the `selftest` capability. The
+# details it composes must be ones the server's parser reads (the simulator may not
+# import the server; this test file may).
+# ---------------------------------------------------------------------------
+
+SELFTEST_CAPS = (CAPABILITY_SELFTEST,)
+
+
+def parsed_details(*fakes: FakeClient) -> list[SelfTestOutcome | None]:
+    return [parse_selftest_detail(r.get("detail")) for fake in fakes for r in statuses(fake)]
+
+
+async def test_a_registered_selftest_that_passes_reports_it_on_the_confirmed(
+    downloads: list[str],
+) -> None:
+    stage = await applied_stage(capabilities=SELFTEST_CAPS, selftest_fail_marker="-stfail")
+    on_new = FakeClient()
+    await one_session(stage, on_new)
+
+    reports = statuses(on_new)
+    assert [r["state"] for r in reports] == list(CONFIRM_WALK)
+    assert reports[-1]["detail"] == "selftest passed" == SELFTEST_PASSED
+    assert reports[-1]["pct"] == 100
+    assert parse_selftest_detail(reports[-1]["detail"]) == SelfTestOutcome("passed", None, None)
+
+
+async def test_a_board_without_a_selftest_confirms_with_no_detail(downloads: list[str]) -> None:
+    stage = await applied_stage()
+    on_new = FakeClient()
+    await one_session(stage, on_new)
+
+    assert statuses(on_new)[-1].get("detail") is None
+
+
+async def test_a_failing_selftest_rolls_back_at_once_and_names_the_slot(
+    downloads: list[str],
+) -> None:
+    stage = await applied_stage(
+        version="1.5.0-stfail", capabilities=SELFTEST_CAPS, selftest_fail_marker="-stfail"
+    )
+    on_new = FakeClient()
+    await one_session(stage, on_new, awake_s=None)  # ends by the rollback's reboot
+
+    assert [r["state"] for r in statuses(on_new)] == [STATE_CONFIRMING, STATE_ROLLING_BACK]
+    assert stage.reboot.is_set()
+    assert stage.identity.fw_version == "1.4.2"
+    stage.reboot.clear()
+
+    back = FakeClient()
+    await one_session(stage, back)
+    rolled = statuses(back)
+    assert [r["state"] for r in rolled] == [STATE_ROLLED_BACK]
+    detail = rolled[0]["detail"]
+    assert detail == "selftest failed: simulated self-test failure; returned to ota_0"
+    assert detail == f"{SELFTEST_FAILED}{SELFTEST_FAIL_REASON}{RETURNED_TO}ota_0"
+    assert len(detail.encode()) == 63
+    assert parse_selftest_detail(detail) == SelfTestOutcome("failed", SELFTEST_FAIL_REASON, "ota_0")
+    assert stage.rolled_back is None and stage.rolled_back_head is None
+
+
+async def test_a_hung_selftest_reports_timed_out(downloads: list[str]) -> None:
+    stage = await applied_stage(
+        version="1.5.0-hang",
+        capabilities=SELFTEST_CAPS,
+        broken_marker="-hang",
+        selftest_fail_marker="-hang",  # broken (hangs) beats fail-marked
+        confirm_timeout_s=0.2,
+    )
+    on_new = FakeClient()
+    await one_session(stage, on_new, awake_s=None)
+    assert [r["state"] for r in statuses(on_new)] == [STATE_CONFIRMING, STATE_ROLLING_BACK]
+    stage.reboot.clear()
+
+    back = FakeClient()
+    await one_session(stage, back)
+    detail = statuses(back)[0]["detail"]
+    assert detail == f"{SELFTEST_TIMED_OUT}{RETURNED_TO}ota_0"
+    assert parse_selftest_detail(detail) == SelfTestOutcome("timed_out", None, "ota_0")
+
+
+async def test_a_board_without_a_selftest_keeps_the_legacy_rollback_detail(
+    downloads: list[str],
+) -> None:
+    stage = await applied_stage(
+        version="1.5.0-rbtest", broken_marker="-rbtest", confirm_timeout_s=0.2
+    )
+    await one_session(stage, FakeClient(), awake_s=None)
+    stage.reboot.clear()
+
+    back = FakeClient()
+    await one_session(stage, back)
+    assert statuses(back)[0]["detail"] == "returned to 1.4.2; the new image did not confirm"
+    assert parsed_details(back) == [None]
+
+
+async def test_the_slot_flips_on_an_apply_and_back_on_a_rollback(downloads: list[str]) -> None:
+    stage = await applied_stage(capabilities=SELFTEST_CAPS, selftest_fail_marker="-stfail")
+    assert stage.slot == "ota_1"
+    await one_session(stage, FakeClient())
+    assert stage.pending is None and stage.slot == "ota_1"
+
+    failing = FakeClient()
+    failing.inbox.put_nowait(
+        FakeMessage(
+            "ff/v1/d/a4cf12b3de90/dn/cmd",
+            stage_command(cmd_id="cmd-stage-2", version="1.6.0-stfail"),
+        )
+    )
+    await one_session(stage, failing, awake_s=None)
+    assert stage.slot == "ota_0"
+    stage.reboot.clear()
+    await one_session(stage, FakeClient(), awake_s=None)  # the new image fails its self-test
+    assert stage.slot == "ota_1"
+    stage.reboot.clear()
+
+    back = FakeClient()
+    await one_session(stage, back)
+    detail = statuses(back)[0]["detail"]
+    assert detail.endswith("returned to ota_1")
+    assert parse_selftest_detail(detail) == SelfTestOutcome("failed", SELFTEST_FAIL_REASON, "ota_1")
+
+
+def test_the_selftest_marker_needs_a_registered_selftest_and_a_value() -> None:
+    plain = DeviceIdentity(device_id="a4cf12b3de90")
+    registered = DeviceIdentity(device_id="a4cf12b3de90", capabilities=SELFTEST_CAPS)
+    with pytest.raises(SimulatorError, match="selftest"):
+        StageRunner(identity=plain, link=LinkProfile(LINK_FAST), selftest_fail_marker="-stfail")
+    with pytest.raises(SimulatorError):
+        StageRunner(identity=registered, link=LinkProfile(LINK_FAST), selftest_fail_marker="")
+
+
+def test_the_cli_takes_the_selftest_fail_marker_with_an_equals_sign() -> None:
+    args = cli.build_parser().parse_args(
+        ["run", "--capabilities", "selftest", "--selftest-fail-marker=-stfail"]
+    )
+    assert args.selftest_fail_marker == "-stfail"
+    assert cli.build_parser().parse_args(["fleet"]).selftest_fail_marker is None

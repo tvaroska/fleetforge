@@ -101,6 +101,21 @@ STATE_CONFIRMED = "confirmed"
 STATE_ROLLING_BACK = "rolling_back"
 STATE_ROLLED_BACK = "rolled_back"
 
+# R5-fw-2 / R5-spec-1 D11, retyped from `ff_mqtt.c` (`DETAIL_SELFTEST_*`): the simulator
+# imports nothing from the server, so `tests/test_simulator.py` asserts that the server's
+# parser (`selftest_outcome`) reads every detail composed from these.
+# The simulator does NOT gate the rollback on a safe window (D12) and does NOT read
+# `confirm_timeout_s` from the stage command (R5-be-2 / R5-test-1).
+CAPABILITY_SELFTEST = "selftest"
+SELFTEST_PASSED = "selftest passed"
+SELFTEST_TIMED_OUT = "selftest timed out"
+SELFTEST_FAILED = "selftest failed: "
+RETURNED_TO = "; returned to "
+# 27 bytes: with the prefix and `; returned to ota_N` the whole detail is 63 bytes, the
+# firmware's `DETAIL_MAX`.
+SELFTEST_FAIL_REASON = "simulated self-test failure"
+SLOT_LABELS = ("ota_0", "ota_1")
+
 # The walk a healthy `apply: "auto"` deploy makes up to the reboot. `awaiting_safe_window`
 # is NOT in it: a board that judges the window safe immediately goes straight from
 # `staged` to `applying` (`--safe-window hold` is the other case, and it never leaves).
@@ -516,6 +531,9 @@ class PendingConfirm:
 
     cmd_id: str
     previous_identity: DeviceIdentity
+    # The OTA slot the board ran from before the apply: what a self-test rollback names
+    # in `; returned to <slot>` (R5-be-1).
+    previous_slot: str = SLOT_LABELS[0]
 
 
 @dataclass(slots=True)
@@ -539,6 +557,12 @@ class StageRunner:
       because `cmd_id` would otherwise die with the image that received the `stage`.
     * `rolled_back` — the `cmd_id` a rollback still owes a `rolled_back` for. Reported by
       the session on the image the board **returned to**, exactly as on metal.
+    * `rolled_back_head` — the stored head of that `rolled_back` detail (`ff_txn.detail`):
+      `selftest failed: <reason>` or `selftest timed out` when a registered self-test
+      decided the rollback; None for the legacy wording. `on_boot` appends
+      `; returned to <slot>`.
+    * `slot` — the OTA slot label the running image is in. An apply flips it, a rollback
+      flips it back; only the self-test details name it (R5-be-1).
     * `staged` — the `cmd_id` of an `apply: "on_command"` stage, whose image the boot
       pointer now names. While it is set, a further `stage` is refused (R2-fw-2), as the
       firmware refuses to write a slot the boot pointer names. **Nothing in the simulator
@@ -552,6 +576,8 @@ class StageRunner:
     confirm: str = CONFIRM_AUTO
     confirm_timeout_s: float = DEFAULT_CONFIRM_TIMEOUT_S
     broken_marker: str | None = None
+    # An image whose version carries this fails its registered self-test (R5-be-1).
+    selftest_fail_marker: str | None = None
     seen: set[str] = field(default_factory=set)
     downloads: int = 0
     # Not arguments: a caller passing in a pre-set event would start a board that reboots
@@ -559,6 +585,8 @@ class StageRunner:
     reboot: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     pending: PendingConfirm | None = field(default=None, init=False)
     rolled_back: str | None = field(default=None, init=False)
+    rolled_back_head: str | None = field(default=None, init=False)
+    slot: str = field(default=SLOT_LABELS[0], init=False)
     staged: str | None = field(default=None, init=False)
     # When the confirm timer of the current boot fires (monotonic). Armed once per boot,
     # like the firmware's esp_timer: a reconnect resumes it rather than restarting it.
@@ -581,6 +609,13 @@ class StageRunner:
         if self.broken_marker == "":
             # `"" in version` is always true: every image would be the broken one.
             raise SimulatorError("--broken-marker must not be empty")
+        if self.selftest_fail_marker == "":
+            raise SimulatorError("--selftest-fail-marker must not be empty")
+        if self.selftest_fail_marker is not None and not self._selftest_registered:
+            raise SimulatorError(
+                "an image can fail a self-test only if one is registered: "
+                f"add --capabilities {CAPABILITY_SELFTEST}"
+            )
 
     @property
     def boot_ok(self) -> bool:
@@ -592,6 +627,15 @@ class StageRunner:
         the old, confirmed one, so it stays true until the session ends.
         """
         return self.pending is None or self.reboot.is_set()
+
+    @property
+    def _selftest_registered(self) -> bool:
+        """A custom self-test is registered when the board announces the capability."""
+        return CAPABILITY_SELFTEST in self.identity.capabilities
+
+    def _fails_selftest(self, version: str) -> bool:
+        """An image whose version carries `selftest_fail_marker` fails its self-test."""
+        return self.selftest_fail_marker is not None and self.selftest_fail_marker in version
 
     def _is_broken(self, version: str) -> bool:
         """An image whose version carries `broken_marker` never confirms (substring match)."""
@@ -741,7 +785,10 @@ class StageRunner:
         # nothing here can reset between the two, so recording it at the reboot is the
         # same). `previous_identity` is taken BEFORE the rebind below: it is what a
         # rollback returns the board to.
-        self.pending = PendingConfirm(cmd_id=cmd_id, previous_identity=self.identity)
+        self.pending = PendingConfirm(
+            cmd_id=cmd_id, previous_identity=self.identity, previous_slot=self.slot
+        )
+        self.slot = SLOT_LABELS[1] if self.slot == SLOT_LABELS[0] else SLOT_LABELS[0]
         self._confirm_deadline = None
         # The apply reboot is `esp_restart()`, so the next boot reads ESP_RST_SW (S0-fw-6).
         self.identity = replace(self.identity, reset_reason=RESET_REASON_SW)
@@ -773,14 +820,20 @@ class StageRunner:
         must treat as a sentinel: it ends the session by setting `reboot`.
         """
         if self.rolled_back is not None:
+            head = self.rolled_back_head
             await self._status(
                 client,
                 self.rolled_back,
                 STATE_ROLLED_BACK,
                 step,
-                detail=f"returned to {self.identity.fw_version}; the new image did not confirm",
+                detail=(
+                    f"{head}{RETURNED_TO}{self.slot}"
+                    if head is not None
+                    else f"returned to {self.identity.fw_version}; the new image did not confirm"
+                ),
             )
             self.rolled_back = None
+            self.rolled_back_head = None
             return None
 
         pending = self.pending
@@ -788,8 +841,26 @@ class StageRunner:
             return None
         await self._status(client, pending.cmd_id, STATE_CONFIRMING, step)
         broken = self._is_broken(self.identity.fw_version)
+        registered = self._selftest_registered
         if self.confirm == CONFIRM_AUTO and not broken:
-            await self._status(client, pending.cmd_id, STATE_CONFIRMED, step, pct=100)
+            if registered and self._fails_selftest(self.identity.fw_version):
+                # R5-fw-2: the self-test failed, so the image never confirms and the
+                # agent rolls back at once. `rolling_back` is best-effort; the reboot
+                # that follows ends this session before any heartbeat.
+                step(
+                    f"selftest {self.identity.fw_version} failed its self-test "
+                    f"({SELFTEST_FAIL_REASON}) — rolling back now"
+                )
+                await self._rollback(client, pending, SELFTEST_FAILED + SELFTEST_FAIL_REASON, step)
+                return None
+            await self._status(
+                client,
+                pending.cmd_id,
+                STATE_CONFIRMED,
+                step,
+                pct=100,
+                detail=SELFTEST_PASSED if registered else None,
+            )
             step(f"confirm  {self.identity.fw_version} confirmed at the announce ack")
             self.pending = None
             self._confirm_deadline = None
@@ -820,13 +891,29 @@ class StageRunner:
             f"confirm  no confirm {self.confirm_timeout_s:g}s after boot — rolling back to "
             f"{pending.previous_identity.fw_version}"
         )
+        # The firmware pre-stores `selftest timed out` at the ack, so a registered
+        # self-test that never finished reports that; otherwise the legacy wording.
+        await self._rollback(
+            client, pending, SELFTEST_TIMED_OUT if self._selftest_registered else None, step
+        )
+
+    async def _rollback(
+        self, client: aiomqtt.Client, pending: PendingConfirm, head: str | None, step: Step
+    ) -> None:
+        """The one rollback both the confirm timer and a failed self-test end in.
+
+        `rolling_back` is attempted BEFORE the reboot is triggered (see `_confirm_timeout`);
+        `head` is the stored detail head the next session completes with the slot label.
+        """
         try:
             await self._status(client, pending.cmd_id, STATE_ROLLING_BACK, step)
         except aiomqtt.MqttError as exc:
             step(f"confirm  {STATE_ROLLING_BACK} not delivered ({exc}); rolling back anyway")
-        # The confirm timer's rollback ends in `esp_restart()` too: `sw` (S0-fw-6).
+        # The rollback ends in `esp_restart()` too: `sw` (S0-fw-6).
         self.identity = replace(pending.previous_identity, reset_reason=RESET_REASON_SW)
+        self.slot = pending.previous_slot
         self.rolled_back = pending.cmd_id
+        self.rolled_back_head = head
         self.pending = None
         self._confirm_deadline = None
         self.reboot.set()
@@ -1114,6 +1201,7 @@ async def run_always_on(
     confirm: str = CONFIRM_AUTO,
     confirm_timeout_s: float = DEFAULT_CONFIRM_TIMEOUT_S,
     broken_marker: str | None = None,
+    selftest_fail_marker: str | None = None,
     telemetry_every_s: float | None = None,
     step: Step = _silent,
 ) -> None:
@@ -1151,6 +1239,7 @@ async def run_always_on(
             confirm=confirm,
             confirm_timeout_s=confirm_timeout_s,
             broken_marker=broken_marker,
+            selftest_fail_marker=selftest_fail_marker,
             telemetry=telemetry,
             step=step,
         )
@@ -1171,6 +1260,7 @@ async def _always_on(
     confirm: str,
     confirm_timeout_s: float,
     broken_marker: str | None,
+    selftest_fail_marker: str | None,
     telemetry: TelemetryBuffer | None,
     step: Step,
 ) -> None:
@@ -1184,6 +1274,7 @@ async def _always_on(
         confirm=confirm,
         confirm_timeout_s=confirm_timeout_s,
         broken_marker=broken_marker,
+        selftest_fail_marker=selftest_fail_marker,
     )
     delay = RECONNECT_INITIAL_DELAY_S
     while not stop.is_set():
@@ -1243,6 +1334,7 @@ async def run_sleepy(
     confirm: str = CONFIRM_AUTO,
     confirm_timeout_s: float = DEFAULT_CONFIRM_TIMEOUT_S,
     broken_marker: str | None = None,
+    selftest_fail_marker: str | None = None,
     telemetry_every_s: float | None = None,
     step: Step = _silent,
 ) -> None:
@@ -1273,6 +1365,7 @@ async def run_sleepy(
             confirm=confirm,
             confirm_timeout_s=confirm_timeout_s,
             broken_marker=broken_marker,
+            selftest_fail_marker=selftest_fail_marker,
             telemetry=telemetry,
             step=step,
         )
@@ -1295,6 +1388,7 @@ async def _sleepy(
     confirm: str,
     confirm_timeout_s: float,
     broken_marker: str | None,
+    selftest_fail_marker: str | None,
     telemetry: TelemetryBuffer | None,
     step: Step,
 ) -> None:
@@ -1307,6 +1401,7 @@ async def _sleepy(
         confirm=confirm,
         confirm_timeout_s=confirm_timeout_s,
         broken_marker=broken_marker,
+        selftest_fail_marker=selftest_fail_marker,
     )
     while not stop.is_set():
         step(f"wake     staying up {awake_s:.0f}s")

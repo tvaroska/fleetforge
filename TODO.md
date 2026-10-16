@@ -578,7 +578,7 @@ Per R5-spec-1: firmware tasks may build ahead of the owner's spec Patch A, unrel
 
 ### Backend and dashboard
 
-- [ ] **R5-be-1**: Deploys honour the self-test result (P0, 1d)
+- [x] **R5-be-1**: Deploys honour the self-test result (P0, 1d) _(done 2026-10-16; the server parses the D11 grammar on read (never stored), only on its own state, onto `deploy.selftest` and the terminal `device.deploy` frame; KPIs unchanged; the simulator learns a self-test; see docs/features/self-test.md)_
       Per R5-spec-1: parse `^selftest (passed|failed: [^;]*|timed out)(; returned to \S+)?$` from `detail`; an unknown detail means "not a self-test outcome".
 - [ ] **R5-be-2**: REST endpoints for `apply`, `reboot`, `rollback` and `cancel` (P1, 1d)
       Under `deploys.py` / `devices.py`, behind the admin credential, validated against the device's announced capabilities.

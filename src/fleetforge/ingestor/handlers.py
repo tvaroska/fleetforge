@@ -81,6 +81,7 @@ from fleetforge.ingestor.protocol import (
     parse_up_topic,
 )
 from fleetforge.presence import is_online
+from fleetforge.selftest_outcome import selftest_outcome
 
 logger = logging.getLogger(__name__)
 
@@ -252,6 +253,10 @@ async def handle_up_message(
         if written is not None:
             event_type = EventType.DEVICE_DEPLOY
 
+    # Bound once: the terminal row's stored detail feeds both `detail` and `selftest`.
+    terminal_detail = (
+        snapshot_detail(written.detail) if written is not None and written.is_terminal else None
+    )
     event = DeviceEvent(
         type=event_type,
         device_id=device_id,
@@ -271,8 +276,12 @@ async def handle_up_message(
         cmd_id=written.cmd_id if written is not None else None,
         state=written.state if written is not None else None,
         is_terminal=written.is_terminal if written is not None else None,
-        detail=(
-            snapshot_detail(written.detail) if written is not None and written.is_terminal else None
+        detail=terminal_detail,
+        # R5-be-1: the self-test outcome, parsed from that same stored text, terminal row only.
+        selftest=(
+            selftest_outcome(written.state, terminal_detail)
+            if written is not None and written.is_terminal
+            else None
         ),
     )
     await emit(session, event)

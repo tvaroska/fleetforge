@@ -33,6 +33,8 @@ from pydantic import BaseModel
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from fleetforge.selftest_outcome import SelfTestOutcome
+
 logger = logging.getLogger(__name__)
 
 # The exact channel R0-be-5 LISTENs on. One constant, two processes.
@@ -115,6 +117,11 @@ class DeviceEvent(BaseModel):
     state: str | None = None
     is_terminal: bool | None = None
     detail: str | None = None
+    # R5-be-1: on `device.deploy` only, on a terminal row only (the `detail` rule), the
+    # custom self-test's outcome parsed from the stored, sanitised detail by
+    # `selftest_outcome.selftest_outcome` (grammar plus state rule). `null` otherwise.
+    # `reason` / `returned_to` are device-controlled text. Additive, so `v` stays 1.
+    selftest: SelfTestOutcome | None = None
 
 
 NOTIFY_SQL = text("SELECT pg_notify(:channel, :payload)")
