@@ -65,6 +65,7 @@
 #include "ff_safe_mode.h"
 #include "ff_safe_window.h"
 #include "ff_selftest.h"
+#include "ff_sleep.h"
 #include "ff_store.h"
 #include "ff_telemetry.h"
 #include "ff_time.h"
@@ -96,8 +97,8 @@ static const char *TAG = "ff-lib";
  * tests/test_arduino_library.py pins this list to the TAGs in src/. */
 static const char *const FF_LOG_TAGS[] = {
     "ff-cfg", "ff-enroll", "ff-eth", "ff-id", "ff-lib", "ff-mqtt", "ff-net",
-    "ff-ota", "ff-progress", "ff-safe", "ff-safemode", "ff-selftest", "ff-store", "ff-tel",
-    "ff-time", "ff-txn", "ff-wifi",
+    "ff-ota", "ff-progress", "ff-safe", "ff-safemode", "ff-selftest", "ff-sleep", "ff-store",
+    "ff-tel", "ff-time", "ff-txn", "ff-wifi",
 };
 
 FleetforgeClass Fleetforge;
@@ -351,6 +352,34 @@ bool FleetforgeClass::onSafeWindow(bool (*isSafe)())
         return false;
     }
     return true;
+}
+
+/* R5-fw-7: the maker API (ff_sleep.h), one call each. The enumerators are mapped explicitly,
+ * so the Arduino enum's values never have to match the C one's. */
+bool FleetforgeClass::setPowerClass(PowerClass powerClass, uint32_t wakeIntervalSeconds)
+{
+    ff_power_class_t power_class;
+    switch (powerClass) {
+    case ALWAYS_ON:
+        power_class = FF_POWER_ALWAYS_ON;
+        break;
+    case SLEEPY:
+        power_class = FF_POWER_SLEEPY;
+        break;
+    default:
+        return false;
+    }
+    return ff_set_power_class(power_class, wakeIntervalSeconds) == ESP_OK;
+}
+
+bool FleetforgeClass::isConnected()
+{
+    return ff_is_connected();
+}
+
+bool FleetforgeClass::isReadyForSleep()
+{
+    return ff_is_ready_for_sleep();
 }
 
 #endif /* ARDUINO */

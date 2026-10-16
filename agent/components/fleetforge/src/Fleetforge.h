@@ -1,8 +1,8 @@
 /*
  * Fleetforge for Arduino — over-the-air updates with automatic rollback for ESP32 sketches.
  *
- * This is the whole Arduino API: begin(), metric(), onSelfTest(), selfTestDone() and
- * onSafeWindow(). It is
+ * This is the whole Arduino API: begin(), metric(), onSelfTest(), selfTestDone(),
+ * onSafeWindow(), setPowerClass(), isConnected() and isReadyForSleep(). It is
  * ADDITIVE-ONLY from R3-fw-3, like the component's include/: a firmware built on it goes to
  * boards nobody can reach again.
  *
@@ -12,6 +12,7 @@
  *       Fleetforge.begin("1.0.0");   // FIRST line of setup(); your firmware's version
  *       Fleetforge.onSelfTest(selfTest);   // optional: right after begin()
  *       Fleetforge.onSafeWindow(safeNow);  // optional: then this
+ *       Fleetforge.setPowerClass(Fleetforge.SLEEPY, 3600);  // optional: a board that sleeps
  *       Serial.begin(115200);
  *       ...
  *     }
@@ -20,6 +21,7 @@
  *       Fleetforge.metric("battery_v", readBattery());   // optional: a number for the fleet
  *       Fleetforge.selfTestDone(true);   // optional: this firmware works
  *       ...
+ *       if (Fleetforge.isReadyForSleep()) esp_deep_sleep(3600ULL * 1000000);  // optional
  *     }
  *
  * What begin() does, in order:
@@ -63,6 +65,8 @@
  */
 
 #pragma once
+
+#include <stdint.h>
 
 #ifdef __cplusplus
 
@@ -113,6 +117,37 @@ class FleetforgeClass {
   // Returns false for nullptr, for a second registration, or once the library's session
   // has started (so do not register after slow initialisation).
   bool onSafeWindow(bool (*isSafe)());
+
+  // How the fleet decides this board is offline (R5-fw-7): ALWAYS_ON, offline as soon as its
+  // connection drops; SLEEPY, offline only when it misses its expected wake.
+  enum PowerClass : uint8_t { ALWAYS_ON = 0, SLEEPY = 1 };
+
+  // Declare this sketch's power class: Fleetforge.setPowerClass(Fleetforge.SLEEPY, 3600) for
+  // a board that deep-sleeps and wakes every hour. The board announces it instead of the
+  // power class in its ff_cfg (which no update rewrites), so a sketch that starts sleeping
+  // through an update is not shown offline after its first sleep. SLEEPY needs a wake
+  // interval of 1 to 2147483647 seconds; ALWAYS_ON takes 0. Call it right after begin() (and
+  // onSelfTest()/onSafeWindow()) in setup().
+  // Returns false for an invalid class or interval, for a second call, or once the library's
+  // session has started (so do not call it after slow initialisation).
+  bool setPowerClass(PowerClass powerClass, uint32_t wakeIntervalSeconds = 0);
+
+  // True while the board is connected to the fleet: its broker session is up and the fleet
+  // acknowledged its announce on it. False before begin() and while the link or the broker
+  // is down. Call it from loop() or any task, not from an ISR. It never logs.
+  bool isConnected();
+
+  // True when a deep sleep right now loses nothing and breaks nothing. A deep-sleep wake is a
+  // reset, and a reset boots whatever update is staged and rolls back one not yet confirmed,
+  // so it is false until this wake has checked in with the fleet, while an update is in
+  // progress or staged (until its apply), while the running image waits for its confirm or
+  // self-test, while a rollback or a reboot waits, and while a message to the fleet is not
+  // yet acknowledged. A metric() sample is published within about 5 s, so readiness can lag
+  // the last metric() by that much. Call it from loop() or any task, not from an ISR; it may
+  // wait briefly for the connection, and it never logs. Give your loop its own wake limit
+  // (a wake that cannot reach the fleet never becomes ready), longer than the confirm
+  // deadline (300 s by default) so a slow network does not roll an update back.
+  bool isReadyForSleep();
 };
 
 extern FleetforgeClass Fleetforge;

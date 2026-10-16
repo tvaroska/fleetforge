@@ -7,6 +7,8 @@
 
 #pragma once
 
+#include <stdbool.h>
+
 #include "ff_mqtt.h"
 
 #ifdef __cplusplus
@@ -81,6 +83,17 @@ _Static_assert(sizeof(FF_DETAIL_ROLLBACK_WAITS) <= 64, "an up/status detail is a
  * static enqueue variant in ff_mqtt.c instead (esp_mqtt_client_enqueue: queued, sent by
  * the mqtt task). Before the client exists it logs and drops. */
 void ff_mqtt_publish_status(const char *cmd_id, const char *state, int pct, const char *detail);
+
+/* R5-fw-7 (ff_sleep.h). A broker session is up and its announce was acknowledged on this
+ * connection. Any task (never an ISR); never blocks, never logs. */
+bool ff_mqtt_is_connected(void);
+
+/* R5-fw-7 (ff_sleep.h). NULL when nothing the session holds forbids a deep sleep now, else a
+ * short reason: this boot has not checked in, a rollback is decided or waits, a command reboot
+ * is pending, the cross-reboot transaction is not closed, or the outbox is not empty. Task
+ * context (never an ISR or the esp_timer task); may wait for the client lock (the outbox read);
+ * never logs, never touches NVS. */
+const char *ff_mqtt_sleep_blocker(void);
 
 #ifdef __cplusplus
 }

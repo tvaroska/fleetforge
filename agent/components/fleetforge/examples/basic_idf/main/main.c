@@ -1,12 +1,12 @@
-/* Fleetforge basic (ESP-IDF) — a Morse-code blinker that updates itself over the air.
- * fleetforge_start() FIRST, then your firmware. Ship partitions.csv and sdkconfig.defaults
- * unchanged (layout ab-4m-v1) and flash the board's ff_cfg blob at 0x12000 (README.md). */
+/* Fleetforge basic (ESP-IDF): a Morse blinker updated over the air. fleetforge_start() FIRST;
+ * ship partitions.csv + sdkconfig.defaults unchanged (ab-4m-v1), ff_cfg at 0x12000 (README.md) */
 #include <ctype.h>
 #include <stdio.h>
 #include "driver/gpio.h"
 #include "ff_identity.h"
 #include "ff_safe_window.h"
 #include "ff_selftest.h"
+#include "ff_sleep.h"
 #include "ff_telemetry.h"
 #include "fleetforge_start.h"
 #include "freertos/FreeRTOS.h"
@@ -29,11 +29,8 @@ static const char *const CODES[36] = { /* A-Z, then 0-9 */
 static volatile bool s_idle; /* true in the gap after a whole message: see app_main */
 static void wait_units(int units) { vTaskDelay(pdMS_TO_TICKS(units * UNIT_MS)); }
 static bool between_messages(void *ctx) { (void)ctx; return s_idle; } /* the safe window */
-static ff_selftest_result_t selftest(void *ctx, char *reason, size_t reason_len)
-{
-    (void)ctx, (void)reason, (void)reason_len;
-    return FF_SELFTEST_PENDING; /* asked once, after an update reaches the fleet; see below */
-}
+static ff_selftest_result_t selftest(void *ctx, char *reason, size_t len) /* asked once, after */
+{ (void)ctx, (void)reason, (void)len; return FF_SELFTEST_PENDING; } /* an update lands: see below */
 
 static void blink(char letter)
 {
@@ -54,11 +51,14 @@ void app_main(void)
     fleetforge_start(); /* FIRST: arms the rollback timer, then runs in its own task */
     ff_set_selftest(selftest, NULL); /* keep an update only if the loop below still runs */
     ff_set_safe_window_cb(between_messages, NULL); /* reboot only between two messages */
+    ff_set_power_class(FF_POWER_ALWAYS_ON, 0); /* never sleeps; a battery board: FF_POWER_SLEEPY */
     gpio_reset_pin(LED_GPIO);
     gpio_set_direction(LED_GPIO, GPIO_MODE_OUTPUT);
     for (unsigned loops = 1;; loops++) { /* your firmware: it blinks, network or not */
         s_idle = false; /* a message starts: no reboot until it is done */
         printf("morse: %s (firmware %s)\n", MORSE_MESSAGE, ff_identity_fw_version());
+        printf("fleet: %s, %s\n", ff_is_connected() ? "connected" : "not connected",
+               ff_is_ready_for_sleep() ? "could sleep now" : "must stay awake");
         ff_telemetry("morse_loops", loops); /* sent to the fleet on up/telemetry */
         for (const char *letter = MORSE_MESSAGE; *letter != '\0'; letter++) {
             blink(*letter);

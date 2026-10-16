@@ -37,6 +37,11 @@
  * the confirm deadline or a failed self-test decides is latched at once, and only its reboot
  * waits, in its own task (rollback_gate_task), never in the esp_timer task. No rule = every
  * moment safe: the stock agent's timer path is the R5-fw-4 one, line for line.
+ *
+ * The sleep helpers (R5-fw-7, ff_sleep.h): two flags set at the announce PUBACK say whether the
+ * fleet heard this board on this connection and since this boot, and ff_mqtt_sleep_blocker()
+ * reads what the session still holds. Neither decides anything here: no confirm, rollback,
+ * verb or reboot path reads them.
  */
 
 #include "ff_mqtt_internal.h"
@@ -56,6 +61,7 @@
 #include "ff_progress.h"
 #include "ff_safe_window_internal.h"
 #include "ff_selftest_internal.h"
+#include "ff_sleep_internal.h"
 #include "ff_telemetry_internal.h"
 #include "ff_txn.h"
 #include "freertos/FreeRTOS.h"
@@ -373,6 +379,16 @@ static bool s_gate_started;
 /* R5-fw-5. The gate is waiting for the safe window with the rollback decided: a reconnect
  * repeats `awaiting_safe_window` (report_txn_on_connect). Single writer: the gate task. */
 static volatile bool s_rollback_waiting;
+
+/* R5-fw-7. The announce was acknowledged on the CURRENT connection (ff_mqtt_is_connected):
+ * cleared at every connect before the announce is published and at every disconnect, set at
+ * its PUBACK. Single writer: the esp-mqtt task. Outside s_ctx, which ff_mqtt_run() memsets. */
+static volatile bool s_acked_this_connection;
+/* R5-fw-7. An announce was acknowledged at least once since this boot: this wake reached the
+ * fleet (ff_mqtt_sleep_blocker's first rule). Set at the PUBACK, never cleared; single writer:
+ * the esp-mqtt task. Unlike s_ctx.session_confirmed it is outside s_ctx, so a reader racing
+ * ff_mqtt_run()'s memset sees false, never a torn struct. */
+static volatile bool s_checked_in;
 
 /* R5-fw-2. `selftest failed: <reason>`, with the reason (already printable ASCII without `;`,
  * ff_selftest.c) shortened so that the returned-to image's `<head>; returned to <slot>` fits
@@ -1015,6 +1031,10 @@ static void on_connected(ff_mqtt_ctx_t *ctx)
      * the gap between this and the announce landing is where a broker ACL problem
      * lives. A no-op on a board that had a stored credential and never enrolled. */
     ff_progress_report(FF_PROGRESS_MQTT_CONNECTED, NULL);
+
+    /* R5-fw-7: not "connected" for the firmware until THIS connection's announce is
+     * acknowledged. Before the publish below: its PUBACK can only come later. */
+    s_acked_this_connection = false;
 
     /* FIRST, before any publish: a command queued in the persistent session must be
      * drained before this board tells the fleet it is here. */
@@ -1977,6 +1997,7 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base, int32_t event_i
         /* Not an error and not handled: esp-mqtt reconnects with its own backoff. Logged
          * because the serial console is the only diagnostic a board has. */
         ctx->connected = false;
+        s_acked_this_connection = false; /* R5-fw-7: isConnected() */
         ff_telemetry_session_down(); /* samples buffer until the next connect */
         ESP_LOGW(TAG, "mqtt disconnected; the client will reconnect");
         break;
@@ -1989,6 +2010,10 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base, int32_t event_i
         /* The PUBACK for the retained announce is the moment this board has demonstrably
          * done its job: authenticated, authorised (property 6 — a denied publish never
          * gets here) and accepted. It is the only thing allowed to confirm an OTA image. */
+        if (event->msg_id == ctx->announce_msg_id) {
+            s_acked_this_connection = true; /* R5-fw-7: isConnected() */
+            s_checked_in = true;            /* R5-fw-7: this wake reached the fleet */
+        }
         if (event->msg_id == ctx->announce_msg_id && !ctx->session_confirmed) {
             ctx->session_confirmed = true;
             ESP_LOGI(TAG, "announce acknowledged by the broker");
@@ -2134,6 +2159,9 @@ esp_err_t ff_mqtt_run(const ff_cfg_t *cfg, const ff_cred_t *cred)
     /* R5-fw-5: the safe-window rule is fixed here too, before the first connect builds an
      * announce (the `safe_window` capability) and before classify_txn(). */
     ff_identity_note_safe_window(ff_safe_window_freeze());
+    /* R5-fw-7: the declared power class is fixed here too, before the first connect builds an
+     * announce (the `power_class` it carries). */
+    ff_sleep_freeze(cfg);
 
     /* What the last reboot left to report. The confirm timer is NOT armed here: it was
      * armed first thing in app_main (R2-fw-4, ff_mqtt_arm_confirm_timer), so it may fire
@@ -2159,4 +2187,39 @@ esp_err_t ff_mqtt_run(const ff_cfg_t *cfg, const ff_cred_t *cred)
     while (true) {
         vTaskDelay(portMAX_DELAY);
     }
+}
+
+/* ── the sleep helpers' view of the session (R5-fw-7, ff_sleep.h) ──────────────────────
+ *
+ * Reads only: volatile flags and the aligned s_txn.kind (the accepted race selftest_done()
+ * already lives with), and the outbox size. No log, no NVS, no enqueue, no lock of this file,
+ * nothing that changes a decision. Never called from the esp_timer task. */
+
+bool ff_mqtt_is_connected(void)
+{
+    return s_ctx.connected && s_acked_this_connection;
+}
+
+const char *ff_mqtt_sleep_blocker(void)
+{
+    /* FIRST: before the first ack s_ctx may still be under ff_mqtt_run()'s memset, and the
+     * client is not to be touched. From here on s_ctx.client is set for good. */
+    if (!s_checked_in) {
+        return "not checked in with the fleet yet";
+    }
+    if (s_rollback_decided || s_rollback_waiting) {
+        return "a rollback is decided";
+    }
+    if (s_cmd_reboot_pending) {
+        return "a reboot is pending";
+    }
+    if (s_txn.kind != TXN_NONE) {
+        return "a transaction is not closed";
+    }
+    /* QoS 1 messages queued or awaiting their PUBACK (and an unacknowledged subscribe). Takes
+     * the client's lock: may wait while the mqtt task holds it. */
+    if (esp_mqtt_client_get_outbox_size(s_ctx.client) > 0) {
+        return "messages await their PUBACK";
+    }
+    return NULL;
 }

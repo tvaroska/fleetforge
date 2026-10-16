@@ -571,7 +571,7 @@ Per R5-spec-1: firmware tasks may build ahead of the owner's spec Patch A, unrel
       Three `panic`/watchdog resets within 60 s on an already-confirmed slot hold the board in an OTA-only recovery loop, without running the sketch. Acceptance (QEMU).
       Per R5-spec-1: the `safe_mode` announce key (prose only, the example is untouched); the counter covers `panic`/`int_wdt`/`task_wdt`/`wdt`, not `brownout`; leaves on a successful update, a `reboot` command or a power cycle.
       Added: 2026-10-15
-- [ ] **R5-fw-7**: Sleepy lifecycle helpers (P2, 1d)
+- [x] **R5-fw-7**: Sleepy lifecycle helpers (P2, 1d) _(done 2026-10-16; reviewed; built unreleased; `ff_sleep.h` maker API + Arduino `setPowerClass()`/`isConnected()`/`isReadyForSleep()`; a code-set power class overrides ff_cfg in the announce (frozen at session start, strict validation); isConnected = announce acked on this connection; isReadyForSleep = D14 plus "checked in this wake" and "telemetry drained", no NVS, never ff_ota_txn_phase(); confirm/rollback decisions unchanged; follow-up proposed: re-mark the running image valid after a boot-slot put-back; see DECISIONS.md and docs/features/self-test.md)_
       `Fleetforge.isConnected()`, `Fleetforge.isReadyForSleep()` and the `power_class: "sleepy"` configuration in `Fleetforge.h`.
       Per R5-spec-1: stay-awake rule (D14: no sleep from `staging` to `rebooting`, nor on an unconfirmed image); `isReadyForSleep()` false while D14 forbids sleep, a self-test or deferred reboot is pending, or the QoS 1 outbox is not empty; a code-set power class (`Fleetforge.setPowerClass()`) overrides `ff_cfg` and is announced (contestable; flagged).
       Added: 2026-10-15

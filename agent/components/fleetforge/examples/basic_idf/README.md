@@ -5,6 +5,9 @@ The ESP-IDF flavour of the worked example; the Arduino one is [`../Basic`](../Ba
 the message and the version, upload the new build to your fleet, and the board updates
 itself over the air. If the new build cannot reach the fleet, the board rolls back to the
 old one on its own. Your firmware keeps blinking the whole time, network or not.
+It declares itself `always_on` (it never sleeps), whatever the `ff_cfg` blob says, and prints
+on each message whether it is connected to the fleet and whether it could sleep now (see
+[*Sleepy boards*](../../README.md#sleepy-boards)).
 
 The library itself: [`../../README.md`](../../README.md).
 

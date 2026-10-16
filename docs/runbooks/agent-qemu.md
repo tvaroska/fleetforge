@@ -494,6 +494,46 @@ The exits, as the emulator shows them:
   `panic`) logs no `ff-safemode` line and reports `rolled_back`: X's own check had written its
   slot, so B starts afresh.
 
+#### Sleepy helpers (R5-fw-7)
+
+The stock agent declares no power class (`ff-sleep: no power class declared by the firmware:
+power_class always_on from ff_cfg`, before `connecting to`) and announces `ff_cfg`'s. A firmware
+that calls `ff_set_power_class()` / `Fleetforge.setPowerClass()` logs `W ff-sleep: the firmware
+declares power_class sleepy (wake 120 s): announced instead of ff_cfg's always_on (wake_s 0)`
+at the same place, and its announce carries the declared class. To watch the readiness rules,
+build sketch variants the same way as for the safe window (copy `Basic.ino` aside, edit, `just
+lib-bundle esp32-qemu`, copy the bundle to a scratch dir, put `Basic.ino` back, never commit):
+
+```cpp
+static bool safeNow() { return millis() % 80000 >= 60000; }   // W: unsafe 60 s, safe 20 s
+  Fleetforge.onSafeWindow(safeNow);
+  Fleetforge.setPowerClass(Fleetforge.SLEEPY, 120);           // right after onSafeWindow
+void loop() {
+  Serial.printf("fw7: connected=%d ready=%d (firmware %s)\n", Fleetforge.isConnected(),
+                Fleetforge.isReadyForSleep(), FW_VERSION);
+  Fleetforge.selfTestDone(true);                              // F: (false, "fw7 forced fail")
+  delay(1000);
+}
+```
+
+What to expect (S = that sketch, S2 = the same with a new version, F = the failing self-test):
+
+- S `--fresh`: `connected=0 ready=0` on every line until `announce acknowledged by the broker`,
+  `connected=1 ready=1` about a second later. `GET /v1/devices`: `power_class: sleepy`,
+  `expected_wake_interval_s: 120`.
+- S2 deployed `on_command`: `ready=0` from `staging`, through `staged` (for as long as it waits
+  for `apply`), the deferred `apply` and its wait, until `rebooting for command`. Kill QEMU
+  there and start it again (the usual workaround).
+- S2's boot: `ready=0` until after `CONFIRMED` and the `confirmed` PUBACK (`transaction …
+  closed — record cleared`), `ready=1` right after it.
+- F: `ready=0` on every line of its life (its self-test fails, the rollback waits for the
+  window); S2 then says `ready=0` until its `rolled_back` is acknowledged.
+- A `reboot` in an unsafe stretch: `ready=0` until `rebooting for command` at the window.
+- After a staged `cancel` the running image's otadata entry is NEW until a power cycle (R5-fw-4
+  gap (a)), so the board stays `ready=0`: do not cancel in a readiness run, or power-cycle.
+
+QEMU has no RTC-timer wake, so a real deep sleep and wake is a bench test.
+
 ### Driving a failure: boot loop, power cut, torn otadata, hang (R2-test-1)
 
 Four more outcomes, each from a **real** OTA'd image or a state a power cut really

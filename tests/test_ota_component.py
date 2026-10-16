@@ -56,6 +56,7 @@ INTERNAL_HEADERS = tuple(
         "safe_mode",
         "safe_window",
         "selftest",
+        "sleep",
         "store",
         "telemetry",
         "time",
@@ -64,9 +65,9 @@ INTERNAL_HEADERS = tuple(
 # The maker API (R4-fw-2, DECISIONS 2026-10-15): public headers for a firmware's own code.
 # The stock agent has no application and no honest reason to call them, so they are the
 # one exception to "include/ is what agent_main.c includes"; the examples prove them instead.
-# R5-fw-1 (ff_selftest.h) and R5-fw-5 (ff_safe_window.h) joined it; R4-fw-3 (ff_logf) joins
-# this list.
-MAKER_HEADERS = ("ff_safe_window.h", "ff_selftest.h", "ff_telemetry.h")
+# R5-fw-1 (ff_selftest.h), R5-fw-5 (ff_safe_window.h) and R5-fw-7 (ff_sleep.h) joined it;
+# R4-fw-3 (ff_logf) joins this list.
+MAKER_HEADERS = ("ff_safe_window.h", "ff_selftest.h", "ff_sleep.h", "ff_telemetry.h")
 
 # The spellings that must never become public API. Each one is a way for a firmware built
 # on the component to report something that did not happen.

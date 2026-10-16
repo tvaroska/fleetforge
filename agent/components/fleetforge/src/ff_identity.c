@@ -36,6 +36,7 @@
 #include "ff_marker.h"
 #include "ff_net_internal.h"
 #include "ff_safe_mode_internal.h"
+#include "ff_sleep_internal.h"
 #include "ff_store_internal.h"
 #include "mbedtls/sha256.h"
 
@@ -533,9 +534,16 @@ static cJSON *announce_object(const ff_cfg_t *cfg)
     } else {
         cJSON_AddNullToObject(root, "known_networks");
     }
-    cJSON_AddStringToObject(root, "power_class", cfg->power);
-    if (cfg->wake_s > 0) {
-        cJSON_AddNumberToObject(root, "expected_wake_interval_s", cfg->wake_s);
+    /* R5-fw-7: a power class the firmware declared (ff_sleep.h) replaces ff_cfg's, which no
+     * update ever rewrites. Only once the session froze the declaration: the enroll body,
+     * built by the same function before ff_mqtt_run(), keeps ff_cfg's, and the first announce
+     * corrects it. */
+    const char *power = cfg->power;
+    int wake_s = cfg->wake_s;
+    (void)ff_sleep_power_override(&power, &wake_s);
+    cJSON_AddStringToObject(root, "power_class", power);
+    if (wake_s > 0) {
+        cJSON_AddNumberToObject(root, "expected_wake_interval_s", wake_s);
     } else {
         cJSON_AddNullToObject(root, "expected_wake_interval_s");
     }

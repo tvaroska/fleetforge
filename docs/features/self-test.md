@@ -155,7 +155,10 @@ Proposal only; nothing is built. `spec/` is protected, so the patches are paste-
     a self-test or a deferred reboot is pending, or while the QoS 1 outbox is not empty. A
     code-set power class (`Fleetforge.setPowerClass(sleepy, wake_s)` before `begin()`)
     overrides `ff_cfg` `power`/`wake_s` and is announced, because the firmware knows how it
-    behaves and the flasher only guesses. R5-fw-7 may contest this; flagged.
+    behaves and the flasher only guesses. R5-fw-7 may contest this; flagged. **Decided by
+    R5-fw-7: accepted.** The class is declared right after `begin()`, not before it, and is
+    frozen at session start. `isReadyForSleep()` also waits for this boot's first check-in and
+    for unpublished telemetry (see *R5-fw-7 as built*).
 - **Facts it rests on** (IDF 5.5 sources under
   `~/.platformio-fleetforge-qemu/packages/framework-espidf/components/`):
   - The bootloader marks any otadata entry still `PENDING_VERIFY` as `ABORTED` at every boot
@@ -1355,6 +1358,187 @@ Answered (R5-spec-1): it stays awake from `staging` until `confirmed` or `rolled
   `rolled_back` `returned to ota_1; ota_0 did not confirm`. (8) The full `lib-quickstart` and a
   stock-agent `--fresh` boot: 13 announces, none with `safe_mode`, no `ff-safemode` line on a
   power-on boot. The api's 10.0.2.2 origins were restored afterwards; no variant was committed.
+
+### R5-fw-7 as built
+
+- **What was built.** The sleepy lifecycle helpers, unreleased (no version bump; the release
+  waits for the owner's Patch A). New maker header `include/ff_sleep.h`
+  (`ff_power_class_t` with `FF_POWER_ALWAYS_ON = 0` / `FF_POWER_SLEEPY = 1`,
+  `ff_set_power_class(power_class, wake_s)`, `ff_is_connected()`, `ff_is_ready_for_sleep()`),
+  `src/ff_sleep.c` (TAG `ff-sleep`) and `src/ff_sleep_internal.h` (`ff_sleep_freeze(cfg)`,
+  `ff_sleep_power_override(&power, &wake_s)`). `ff_mqtt.c` (CRITICAL): two file statics
+  `s_acked_this_connection` / `s_checked_in`, one clear in `on_connected()` before the announce,
+  one in `MQTT_EVENT_DISCONNECTED`, one `if` before the unchanged confirm block in
+  `MQTT_EVENT_PUBLISHED`, `ff_sleep_freeze(cfg);` in `ff_mqtt_run()` after the safe-window
+  freeze and before `ff_txn_init()`, and the two read-only hooks `ff_mqtt_is_connected()` /
+  `ff_mqtt_sleep_blocker()` at the end of the file. `ff_ota.c`/`ff_ota.h` (CRITICAL): the
+  read-only `ff_ota_in_flight()` (`s_running` under `s_cancel_lock`). `ff_telemetry.c`: the
+  read-only `ff_telemetry_drained()`. `ff_identity.c::announce_object()`: `power_class` and
+  `expected_wake_interval_s` come from the override when there is one. Arduino (CRITICAL file,
+  no posture change): `Fleetforge.h` gains `enum PowerClass : uint8_t { ALWAYS_ON = 0, SLEEPY = 1 }`,
+  `setPowerClass(PowerClass, uint32_t wakeIntervalSeconds = 0)`, `isConnected()`,
+  `isReadyForSleep()`; `Fleetforge.cpp` maps the enum with a `switch` and makes one ff call per
+  member; `ff-sleep` joins `FF_LOG_TAGS`. `examples/basic_idf/main/main.c` declares
+  `FF_POWER_ALWAYS_ON` as its fourth statement and prints `fleet: connected|not connected,
+  could sleep now|must stay awake` after the pinned morse line (still 70 lines). No spec,
+  server, simulator, frontend, partition, sdkconfig, `agent_main.c`, `fleetforge_start.c` or
+  `Basic.ino` change; no new capability, announce key or wire change. The agent itself never
+  sleeps.
+- **Decisions.**
+  - (1) **The code-set power class overrides `ff_cfg` and is announced (the API bullet's
+    flag, decided: accepted, not contested).** `ff_cfg` is written at flash time and no update
+    rewrites it, so a firmware that becomes a sleeper through an update would announce
+    `always_on` for ever; the server would apply the LWT-authoritative presence rule (offline
+    after the first sleep) and miss the `sleepy` pre-check warning. The server already updates
+    `power_class` on every announce (`ingestor/store.py::_power_class_values`). Two sources of
+    truth are made visible: the session logs once which class it announces and which `ff_cfg`
+    value it replaces.
+  - (2) **Frozen at session start** (the R5-fw-1/fw-5 precedent): accepted until
+    `ff_mqtt_run()` freezes it, then refused. Called right after `begin()`/
+    `fleetforge_start()` and the other registrations, never before (`begin()` FIRST is the
+    pinned posture; the API bullet's "before `begin()`" is superseded). The enroll body is
+    built before the freeze and keeps `ff_cfg`'s class, as `capabilities` stays `["ota"]`
+    there; the first announce updates the row.
+  - (3) **Strict validation** (an additive API can relax later, never tighten): sleepy needs
+    `1 <= wake_s <= INT32_MAX` (the server's `sleepy_wake_interval` CHECK and the 32-bit
+    column), always_on needs 0; anything else `ESP_ERR_INVALID_ARG`; a second declaration or
+    one after the freeze `ESP_ERR_INVALID_STATE`. One `ESP_LOGE` per refusal, nothing on
+    success.
+  - (4) **`isConnected()` is per connection**: a broker session is up AND its announce was
+    acknowledged on it. Cleared at every connect (before the announce is published) and at
+    every disconnect, set at the announce PUBACK. Under `FF_ROLLBACK_TEST` the ack is discarded
+    on purpose, so it stays false there.
+  - (5) **`isReadyForSleep()`**, first hit wins: (a) this boot has not checked in (no announce
+    acknowledged since boot; a wake IS a boot); (b) a rollback is decided or the gate waits;
+    (c) a command reboot is scheduled or waits; (d) the cross-reboot transaction is not closed
+    (`s_txn.kind != TXN_NONE`); (e) the esp-mqtt outbox is not empty; (f) an update is in
+    flight in ff_ota; (g) the boot pointer names another slot than the running one; (h) the
+    running image is not confirmed (VALID, UNDEFINED, `ESP_ERR_NOT_FOUND` and
+    `ESP_ERR_NOT_SUPPORTED` are confirmed, any other error is not: fail-safe for sleep);
+    (i) a telemetry sample is not yet published. (a) and (i) are **additions to the R5-spec-1
+    list, on purpose**: without (a) `if (isReadyForSleep()) esp_deep_sleep(...)` at the end of
+    `loop()` sleeps before the first connect and a sleepy board never receives a `stage`
+    (commands queued in the persistent session arrive before the announce's PUBACK, and
+    `ff_ota_start()` sets `s_running` before it returns, so a queued update is in flight by the
+    ack); without (i) a RAM sample is lost at the sleep (QoS 0 never shows in the outbox). The
+    session's rules (a-e) are ff_mqtt.c's and come first, because before the first ack `s_ctx`
+    may still be under `ff_mqtt_run()`'s memset; the outbox is read only after (a).
+  - (6) **No NVS and never `ff_ota_txn_phase()`** in the readiness path: its staged branch
+    calls `ff_txn_load()`, which erases a torn record and could race a save in another task.
+    (f) + (g) equal "phase != NONE" for a NULL query without touching NVS.
+  - (7) **Never logs** in the helpers (a loop calls them every pass), never from an ISR or the
+    esp_timer task; the outbox read takes esp-mqtt's API lock, which the mqtt task holds during
+    a reconnect attempt, so the call may wait (documented in the header).
+  - (8) **Telemetry readiness is not nudged**: waking the flush task from the readiness check
+    would publish one payload per loop pass and defeat R4-fw-2's one-payload-per-5-s bound, so
+    readiness can lag the last `metric()` by up to `FF_TELEMETRY_FLUSH_MS` (5 s), documented.
+- **Deviations from the plan.** None in the code. Docs: the ESP-IDF example's README says it
+  declares itself `always_on` whatever its `ff_cfg` says. The size comment records that the
+  refusal strings stay in the stock agent (one merged string section with the freeze's) while
+  the readiness path is garbage-collected (none of its literals is in `app.bin`). T2 step 6
+  (stopping the shared dev broker) was not run (optional).
+- **Rejected.** Contesting the override (keep `ff_cfg` authoritative); a new capability or
+  announce key for sleep; reading `ff_ota_txn_phase()` from the helpers; waking the telemetry
+  flush from readiness; "disconnected = not ready" (the outbox already says it once a heartbeat
+  queues); registering before `begin()`.
+- **Named gaps.**
+  - After a `cancel` of a staged image (and after a failed `finish()`),
+    `restore_boot_partition()` rewrites the running slot's otadata entry as NEW (R5-fw-4 gap
+    (a)), so (h) keeps a sleepy board awake until a reset or power cycle re-confirms it: D14
+    taken literally, correct but costly on a battery. **Proposed follow-up**: "Re-mark the
+    running image valid after a boot-slot put-back (closes R5-fw-4 gap (a); sleepy boards stay
+    awake after a cancel)" (`esp_ota_mark_app_valid_cancel_rollback()` accepts a NEW running
+    entry in IDF 5.5, see `accept_unverified_image()`); it changes ff_ota.c's cancel path, so
+    not here.
+  - An `on_command` stage keeps a sleepy board awake until its `apply` (or `cancel`) (D14).
+  - A wake that never reaches the broker never becomes ready; the firmware needs its own wake
+    limit, and a limit shorter than the confirm deadline (300 s default) rolls an update back on
+    a slow network (the sleep is a reset on an unconfirmed image).
+  - The agent's first heartbeat comes `hb_s` (default 60 s) after the connect, so a short wake
+    sends none (the announce still moves `last_seen`); the spec's "a sleepy device sends one
+    per wake" is not met by the agent. Candidate follow-up.
+  - A real deep-sleep cycle is not provable in QEMU (no RTC-timer wake); bench later.
+- **Tests.** New `tests/test_sleep.py` (36): the header (three prototypes, the enum values,
+  `extern "C"`, exactly `<stdbool.h>`/`<stdint.h>`/`"esp_err.h"`, the contract written down, a
+  maker header, no hook public, compiled after `ff_selftest.c`, no ARDUINO/esp_timer/NVS/sleep
+  call), the registration (validation before the lock, decided under it, one `ESP_LOGE` per
+  refusal each followed by its return, never cleared), the freeze (once in `ff_mqtt_run`, after
+  the safe-window note and before `ff_txn_init`/`classify_txn`/`esp_mqtt_client_start`, logs
+  once naming both values, spellings from `FF_CFG_DEFAULT_POWER`), the announce (override asked
+  before the key, only frozen AND declared, no new key), the flags (outside `s_ctx`, cleared
+  before the subscribe/announce and at disconnect, set only at the announce ack, `s_checked_in`
+  never cleared, the confirm block follows unchanged, no decision reads them), readiness (both
+  rule orders, the confirmed rule, no log, no `ff_ota_txn_phase(`/`ff_txn_`/`nvs_`/`enqueue_`/
+  `esp_timer_`/`xTaskNotify`/publish/restart/mark on the path, never from timer context,
+  `ff_ota_in_flight` and `ff_telemetry_drained` under their locks), the Arduino members (the
+  enum, signatures, one ff call each, the switch, the tag) and the IDF example (statement [3],
+  both helpers in the loop, <= 70 lines). Changed on purpose: `test_ota_component.py`
+  (`MAKER_HEADERS` + `ff_sleep.h`, `INTERNAL_HEADERS` + `sleep`), `test_telemetry.py` (the
+  internal header declares `ff_telemetry_drained` too), `test_agent_power_and_size.py`
+  (budgets), `agent_src.py` (paths). **Mutation checks**, each red then reverted: (i) the
+  boot-pointer check dropped → `test_the_component_rules_in_order_the_session_first`; (ii) the
+  outbox check dropped → `test_the_session_rules_in_order_and_the_outbox_last`; (iii)
+  `s_checked_in = true` in `on_connected` → `test_set_only_at_the_announce_ack`; (iv) the
+  freeze after `esp_mqtt_client_start(` →
+  `test_once_in_ff_mqtt_run_before_the_transaction_and_the_connect`; (v) the override answering
+  before the freeze → `test_the_override_answers_only_once_frozen_and_declared`; (vi)
+  `ff_ota_txn_phase(NULL, NULL, 0)` in `sleep_blocker` →
+  `test_nothing_on_the_path_writes_loads_or_wakes`.
+- **T1.** `just test` 2370 passed (ruff, format, mypy clean). `just agent-build-all`: four
+  `BUNDLE OK`, 0 warnings, app sizes esp32 1,048,928 / esp32s3 1,028,784 / esp32c3 1,090,848 /
+  esp32c6 1,140,400 (+0.9-1.0 KB; the budgets raised to these bytes). `just lib-quickstart
+  --build-only` `== PASS (557 s)`: Arduino A esp32 1,196,560 B / esp32s3 1,189,536 B, own
+  project, build B 1,196,576 B, basic_idf esp32 1,126,048 B / esp32s3 1,131,472 B, 0 library
+  warnings. `just lib-arduino-check` `== PASS (250 s)`, 0 warnings, `T verifyRollbackLater` in
+  both ELFs. `just agent-qemu-smoke esp32` `HARNESS OK`.
+- **T2 (local dev stack on 8088; api recreated with 10.0.2.2 origins, restored afterwards).**
+  Arduino Basic variants, never committed, built with `just lib-bundle esp32-qemu` and run with
+  `just lib-qemu`: S `1.0.0-fw7s` (`setPowerClass(Fleetforge.SLEEPY, 120)` after
+  `onSafeWindow`, `safeNow()` = `millis() % 80000 >= 60000`, `loop()` prints `fw7:
+  connected=%d ready=%d (firmware %s)` every second and calls `selfTestDone(true)`), S2
+  `1.1.0-fw7-1792178680`, F `1.2.0-fw7-1792178680-stfail` (`selfTestDone(false, "fw7 forced
+  fail")`). QEMU lines prefixed with the host time; the wire captured with
+  `PYTHONUNBUFFERED=1 just mqtt-sub 'ff/v1/d/+/up/#'`; verbs sent over REST.
+  - (1) S `--fresh` with a fresh token: `W (12125) ff-sleep: the firmware declares power_class
+    sleepy (wake 120 s): announced instead of ff_cfg's always_on (wake_s 0)` before `connecting
+    to` (12194); the 6 `fw7:` lines before `announce acknowledged by the broker` all
+    `connected=0 ready=0`; the first `connected=1 ready=1` 1.007 s after the ack, then 36 more,
+    all 1/1. Wire: `…"power_class":"sleepy","expected_wake_interval_s":120,…`. `GET
+    /v1/devices`: `power_class: sleepy`, `expected_wake_interval_s: 120`, capabilities
+    `["ota","apply","cancel","rollback","reboot","selftest","safe_window"]` (no new one).
+  - (2) S2 deployed `apply: on_command` (`4f4daa63…`): `staging` → `staged` in 56 s; from the
+    `staging` line to the reboot all 123 `fw7:` lines read `connected=1 ready=0`, 67 s of them
+    after `staged`. `apply` (`e92636dc…`) at millis ~197 s (phase ~37 s): `up/ack`
+    `{"type":"apply","result":"deferred","cmd_id":"4f4daa63…"}`, `awaiting_safe_window`,
+    `command …: the reboot waits for a safe window`; at phase ~60.06 s `applying`, `rebooting`,
+    1.5 s later `rebooting for command e92636dc…`; QEMU killed 0.9 s after that line.
+  - (3) S2 cold boot: `confirming on ota_1`, `custom self-test passed`, `CONFIRMED`; the 5 `fw7:`
+    lines before `CONFIRMED` (4 × 0/0, 1 × 1/0) and the one between it and the `confirmed`
+    PUBACK (1/0) have zero `ready=1`; `up/status confirmed` `selftest passed`; the first
+    `ready=1` 0.11 s after `transaction 4f4daa63… closed — record cleared` (the PUBACK), then 41
+    lines, none `ready=0`.
+  - (4) F deployed `on_command` (`6479600a…`), `apply` (`a084d8db…`) `deferred`, released at the
+    window, killed after `rebooting for command`. F's whole life: 6 × 0/0 and 50 × 1/0, zero
+    `ready=1`: `custom self-test failed: fw7 forced fail`, `the rollback is decided and waits for
+    a safe window`, at F's window `a safe window: rolling back now`, `rolling_back`, `rst:0xc`
+    (then the emulator's panic loop; killed). Power cycle: S2 `transaction 6479600a…:
+    rolled_back (selftest failed: fw7 forced fail; returned to ota_1)`, `ready=0` until `closed
+    — record cleared`, `ready=1` 0.89 s later.
+  - (5) On S2, `reboot` (`73a7540d…`) at phase ~36 s: `up/ack`
+    `{"type":"reboot","result":"deferred","cmd_id":null,"detail":null}`, `reboot …: waits for a
+    safe window`; the 20 `fw7:` lines until `rebooting for command 73a7540d…` at the window all
+    1/0.
+  - (6) Not run (optional; it stops the shared dev broker).
+  - (7) Stock agent `just agent-qemu esp32 --fresh` (fresh token): `I (8476) ff-sleep: no power
+    class declared by the firmware: power_class always_on from ff_cfg` before `connecting to`
+    (8536); the announce `"power_class":"always_on","expected_wake_interval_s":null`,
+    capabilities `["ota","apply","cancel","rollback","reboot"]`.
+  - (8) Regression: full `just lib-quickstart` `== PASS (2349 s)`; 2a capabilities `['ota',
+    'apply', 'cancel', 'rollback', 'reboot', 'selftest', 'safe_window']` (no new one); 2b
+    `confirmed` `selftest passed`; 2c `rolled_back (returned to ota_1; ota_0 did not confirm)`;
+    2d `selftest failed: i2c sensor 0x48 did not ans; returned to ota_1`; 2e `selftest timed
+    out; returned to ota_1`; credentials in 0 of 29 transcripts. The api's 10.0.2.2 origins were
+    restored afterwards; no variant was committed.
 
 ### R5-be-1 as built
 

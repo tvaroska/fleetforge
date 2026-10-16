@@ -138,6 +138,12 @@ ff_ota_txn_t ff_ota_txn_phase(const char *cmd_id, char *held, size_t held_len);
  * ESP_ERR_INVALID_ARG   — NULL or "" cmd_id, or NULL `reported`. */
 esp_err_t ff_ota_cancel(const char *cmd_id, bool *reported);
 
+/* R5-fw-7. Whether ota_task is carrying out an update right now (staging through APPLYING,
+ * the AWAITING wait included). Any task, never an ISR: reads `s_running` under s_cancel_lock;
+ * no NVS, no otadata, no log. A staged update whose task has ended answers false: the boot
+ * pointer on another slot says that one (ff_sleep.c checks it). */
+bool ff_ota_in_flight(void);
+
 #ifdef __cplusplus
 }
 #endif

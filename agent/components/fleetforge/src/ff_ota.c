@@ -1104,3 +1104,11 @@ esp_err_t ff_ota_cancel(const char *cmd_id, bool *reported)
     ESP_LOGW(TAG, "update %s: cancelled by command (the staged image will not boot)", cmd_id);
     return ESP_OK;
 }
+
+bool ff_ota_in_flight(void)
+{
+    portENTER_CRITICAL(&s_cancel_lock);
+    const bool in_flight = s_running;
+    portEXIT_CRITICAL(&s_cancel_lock);
+    return in_flight;
+}

@@ -35,6 +35,10 @@ FF_SAFE_WINDOW_INTERNAL_H = COMPONENT_SRC / "ff_safe_window_internal.h"
 FF_SAFE_MODE_H = COMPONENT_INCLUDE / "ff_safe_mode.h"
 FF_SAFE_MODE_C = COMPONENT_SRC / "ff_safe_mode.c"
 FF_SAFE_MODE_INTERNAL_H = COMPONENT_SRC / "ff_safe_mode_internal.h"
+# R5-fw-7: the fourth maker-API header (power class and the sleep helpers).
+FF_SLEEP_H = COMPONENT_INCLUDE / "ff_sleep.h"
+FF_SLEEP_C = COMPONENT_SRC / "ff_sleep.c"
+FF_SLEEP_INTERNAL_H = COMPONENT_SRC / "ff_sleep_internal.h"
 
 # R3-fw-3: the same component directory is the Arduino library (library.json), and the
 # wrapper is its second consumer. The example and its partitions.csv travel together.

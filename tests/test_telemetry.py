@@ -266,7 +266,12 @@ class TestTheSessionWiring:
 
     def test_the_hooks_are_private(self) -> None:
         internal = _declared_functions(FF_TELEMETRY_INTERNAL_H)
-        assert internal == {"ff_telemetry_session_up", "ff_telemetry_session_down"}
+        # R5-fw-7: ff_sleep.c's read-only readiness hook joined the session's two.
+        assert internal == {
+            "ff_telemetry_session_up",
+            "ff_telemetry_session_down",
+            "ff_telemetry_drained",
+        }
         assert FF_TELEMETRY_INTERNAL_H.parent == COMPONENT_SRC
 
 

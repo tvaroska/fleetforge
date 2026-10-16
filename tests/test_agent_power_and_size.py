@@ -239,16 +239,25 @@ FORBIDDEN_OPTIONS = [
 # reset-reason ladder, the otadata read, the breadcrumb task and its starter, and the six log
 # strings), the reset-reason wrapper, the `safe_mode` announce branch and its boot line. The
 # 20-byte record is RTC_NOINIT, not app.
+#
+# R5-fw-7: +0.9-1.0 KB each. Raised 2026-10-16 for **all four targets**, all rebuilt, to the
+# exact measured byte: esp32 1,048,032 -> 1,048,928 (+896 B), esp32s3 1,027,872 -> 1,028,784
+# (+912 B), esp32c3 1,089,872 -> 1,090,848 (+976 B), esp32c6 1,139,440 -> 1,140,400 (+960 B).
+# The added code is ff_sleep_freeze() and its two log strings, ff_sleep_power_override() read
+# by the announce, the two ack flags in ff_mqtt.c, and ff_sleep.c's string literals (the
+# refusal lines share a merged string section with the freeze's). The stock agent never calls
+# ff_is_connected() or ff_is_ready_for_sleep(), so the readiness path is garbage-collected
+# from it (none of its reason literals is in app.bin).
 APP_SIZE_BUDGET_BYTES = {
-    "esp32": 1_048_032,
+    "esp32": 1_048_928,
     # Raised from 973_136 for the OTA-capable agent (R1-fw-1/R1-fw-2), which cost every
     # target ~18 KB. Only esp32 was raised at the time: this gate reads whatever is in
     # `agent/dist/`, so a target nobody had built locally is not checked and does not
     # fail. The other two were still carrying 0.2.0-era numbers until R2b-fw-1 raised
     # them — that was a gap in the gate, not slack here.
-    "esp32s3": 1_027_872,
-    "esp32c3": 1_089_872,
-    "esp32c6": 1_139_440,
+    "esp32s3": 1_028_784,
+    "esp32c3": 1_090_848,
+    "esp32c6": 1_140_400,
 }
 
 # An app may occupy at most this much of an OTA slot. Not a style rule: R2 downloads the

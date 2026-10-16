@@ -258,3 +258,11 @@ void ff_telemetry_session_down(void)
 {
     s_connected = false;
 }
+
+bool ff_telemetry_drained(void)
+{
+    portENTER_CRITICAL(&s_lock);
+    const bool drained = s_head == s_unsent;
+    portEXIT_CRITICAL(&s_lock);
+    return drained;
+}

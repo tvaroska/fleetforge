@@ -84,6 +84,60 @@ One rule per image, never removed; a registration after the library's session ha
 refused. Without a rule every moment is safe. Both examples reboot only in the gap between two
 blinked messages. An image that registers a rule announces the `safe_window` capability.
 
+## Sleepy boards
+
+A board that deep-sleeps between jobs declares it, and asks before each sleep whether a sleep
+right now loses anything:
+
+- **Arduino / PlatformIO:** `Fleetforge.setPowerClass(Fleetforge.SLEEPY, wakeSeconds);` right
+  after `begin()` (and `onSelfTest()`/`onSafeWindow()`) in `setup()`; then
+  `Fleetforge.isReadyForSleep()` and `Fleetforge.isConnected()` from `loop()`.
+- **ESP-IDF:** `#include "ff_sleep.h"`, then `ff_set_power_class(FF_POWER_SLEEPY, wake_s);`
+  right after `fleetforge_start()` and the other registrations; then `ff_is_ready_for_sleep()`
+  and `ff_is_connected()` from your loop.
+
+```cpp
+void loop() {
+  doTheWork();
+  if (Fleetforge.isReadyForSleep() || millis() > WAKE_LIMIT_MS) {
+    esp_deep_sleep(WAKE_SECONDS * 1000000ULL);
+  }
+  delay(100);
+}
+```
+
+The power class tells the fleet when the board is offline: `always_on` as soon as its
+connection drops, `sleepy` only when it misses its expected wake. The board announces the
+declared class and interval instead of the ones in its `ff_cfg` blob, which is written at flash
+time and never by an update, so firmware that starts sleeping through an update is not shown as
+offline after its first sleep. `SLEEPY` needs an interval of 1 to 2147483647 seconds,
+`ALWAYS_ON` takes 0. You can declare it once per image, before the library's session starts;
+a later call is refused. The serial log says which class the board announces in place of the
+`ff_cfg` value. The enrollment that may come before the first connection still carries the
+`ff_cfg` class, and the first announce replaces it.
+
+A deep-sleep wake is a reset. At a reset the board boots whatever update is staged, and rolls
+back an update that is not yet confirmed. So `isReadyForSleep()` is false until this wake has
+checked in with the fleet (an update queued while the board slept has started by then), and
+again while any of these holds:
+
+- an update is in progress, or staged with `apply: on_command` and waiting for its `apply`;
+- the running image waits for its confirm or its self-test;
+- the fleet has not yet acknowledged the outcome (`confirmed`, `rolled_back`) this boot owes it;
+- a rollback is decided, or a rollback or reboot waits for the safe window;
+- a message to the fleet is not yet acknowledged (heartbeats included, so a wake whose network
+  dropped is normally not ready);
+- a `metric()` sample has not been published yet (samples go out at most every 5 s, so readiness
+  can lag the last `metric()` by that much).
+
+`isConnected()` is true while the broker connection is up and the fleet has acknowledged this
+board's announce on it. Neither function logs, so `loop()` can call them on every pass. Call
+them from a task, never from an interrupt. `isReadyForSleep()` may wait briefly for the
+connection. Give your loop its own wake limit, because a wake that cannot reach the fleet never
+becomes ready. Make the limit longer than the confirm deadline (300 s by default) on a slow
+network: if the board sleeps before a new image is confirmed, it rolls the update back. The
+library itself never sleeps the board.
+
 ## Quickstart: pick your toolchain
 
 | Toolchain | Go to |
@@ -144,9 +198,10 @@ is the library's version; in an ESP-IDF build it is your `PROJECT_VER`.
 ## Public headers
 
 - `include/`: `ff_cfg.h`, `ff_enroll.h`, `ff_identity.h`, `ff_mqtt.h`, `ff_net.h`,
-  `ff_progress.h`, `ff_safe_window.h`, `ff_selftest.h`, `ff_store.h`, `ff_telemetry.h`,
-  `ff_time.h`. This is the ESP-IDF surface. `ff_safe_window.h`, `ff_selftest.h` and
-  `ff_telemetry.h` are the maker API: your firmware calls them, the stock agent does not.
+  `ff_progress.h`, `ff_safe_window.h`, `ff_selftest.h`, `ff_sleep.h`, `ff_store.h`,
+  `ff_telemetry.h`, `ff_time.h`. This is the ESP-IDF surface. `ff_safe_window.h`,
+  `ff_selftest.h`, `ff_sleep.h` and `ff_telemetry.h` are the maker API: your firmware calls
+  them, the stock agent does not.
 - `src/Fleetforge.h`: the Arduino surface. It lives in `src/` because the Arduino build
   reads `src/`.
 
