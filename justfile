@@ -219,6 +219,27 @@ health-e2e *args:
 log-e2e *args:
     cd frontend && PLAYWRIGHT_MODULE="${PLAYWRIGHT_MODULE:-$(npm root -g)/playwright/index.mjs}" node scripts/device-log-e2e.mjs {{args}}
 
+# ── Command controls end to end (R5-fe-1) ────────────────────────────────────
+#
+# The self-test result, the safe-window wording and the Apply / Cancel update / Reboot
+# controls in a real Chromium against the dev stack (`just up`), with three simulated boards:
+# V (ota apply cancel rollback reboot selftest, fails the self-test of a `-stfail` image), H
+# (the same with --safe-window hold) and L (legacy, `ota` only). Scenarios: selftest-passed,
+# selftest-failed, apply, cancel, apply-waits, auto-hold, reboot, refused-and-legacy, traps.
+# Prints PASS/FAIL per scenario, `N/9 pass`, the cmd_ids and the command ids. Evidence:
+# /tmp/ff-r5-fe-1/ (a .txt and an element .png per scenario, the simulator logs, run.json).
+# Leaves three simulated boards and seven labels per run in the dev DB; deletes nothing.
+# `E2E_BREAK=<scenario id> just commands-e2e` flips one expectation: the run must then FAIL.
+# Exit 0 all pass, 1 a scenario failed, 2 setup failed. The admin password comes from
+# $FF_ADMIN_PASSWORD or the repo-root .env, never argv.
+#
+#     just commands-e2e
+#     just commands-e2e http://localhost:8088 /tmp/somewhere-else
+#
+# Play the R5 command controls against the dev stack with simulated boards (exit 0 = all nine pass).
+commands-e2e *args:
+    cd frontend && PLAYWRIGHT_MODULE="${PLAYWRIGHT_MODULE:-$(npm root -g)/playwright/index.mjs}" node scripts/commands-e2e.mjs {{args}}
+
 # ── Simulated boards (R0-test-1) ─────────────────────────────────────────────
 #
 # A fake ESP32 that enrolls, connects, announces, holds presence and heartbeats,

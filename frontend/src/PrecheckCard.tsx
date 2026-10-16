@@ -26,6 +26,11 @@ export type PrecheckCardProps = {
   onSend: () => void
   onCancel: () => void
   sending: boolean
+  // R5-fe-1, all optional: the "hold at staged" box (`apply: "on_command"`). Rendered only
+  // when the cell says the board announces `apply` AND passes a handler.
+  holdAvailable?: boolean
+  hold?: boolean
+  onHold?: (on: boolean) => void
 }
 
 export function PrecheckCard({
@@ -35,6 +40,9 @@ export function PrecheckCard({
   onSend,
   onCancel,
   sending,
+  holdAvailable = false,
+  hold = false,
+  onHold,
 }: PrecheckCardProps) {
   const headingId = useId()
   const fit = fitLine(precheck)
@@ -93,6 +101,19 @@ export function PrecheckCard({
       )}
 
       {rollback !== null && <p data-testid="precheck-rollback">{rollback}</p>}
+
+      {precheck.deployable && holdAvailable && onHold && (
+        <p data-testid="precheck-hold">
+          <label>
+            <input
+              type="checkbox"
+              checked={hold}
+              onChange={(event) => onHold(event.target.checked)}
+            />{' '}
+            Hold at staged: install only when I click Apply
+          </label>
+        </p>
+      )}
 
       <p>
         {precheck.deployable && (

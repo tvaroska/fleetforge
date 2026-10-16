@@ -404,3 +404,172 @@ describe('deployResult — send again (R2b-fe-11)', () => {
     }
   })
 })
+
+// R5-fe-1: the self-test outcome comes from the server's `selftest` only; `cancelled` and a
+// command rollback are not failures of the image.
+describe('deployResult — self-test (R5-fe-1)', () => {
+  const fw = { fw_version: '1.4.2' }
+  const failedDetail = 'selftest failed: sensor bus dead; returned to ota_0'
+
+  it('good with a passed self-test says so, with a Self-test row after Board says', () => {
+    const result = must(
+      deployResult(
+        deploy({
+          detail: 'selftest passed',
+          selftest: { outcome: 'passed', reason: null, returned_to: null },
+        }),
+        { fw_version: '1.5.0' },
+        versions,
+        NOW,
+      ),
+    )
+    expect(result.outcome).toBe('good')
+    expect(result.word).toBe('good')
+    expect(result.reason).toBe(
+      'The board rebooted into 1.5.0, its self-test passed, and it confirmed it, so it keeps this image.',
+    )
+    const labels = result.rows.map((r) => r.label)
+    expect(labels.indexOf('Self-test')).toBe(labels.indexOf('Board says') + 1)
+    expect(row(result, 'Self-test')).toBe('passed')
+  })
+
+  it('a failed self-test names its reason, the slot, and a next action that is not "send it again"', () => {
+    const result = must(
+      deployResult(
+        deploy({
+          state: 'rolled_back',
+          detail: failedDetail,
+          selftest: { outcome: 'failed', reason: 'sensor bus dead', returned_to: 'ota_0' },
+        }),
+        fw,
+        versions,
+        NOW,
+      ),
+    )
+    expect(result.outcome).toBe('rolled-back')
+    expect(result.reason).toBe(
+      '1.5.0 started, but its own self-test failed: “sensor bus dead”, so the board went back to 1.4.2 at once.',
+    )
+    expect(result.next).toBe(
+      'Do not send 1.5.0 again as it is: fix what its self-test checks, then upload a fixed version.',
+    )
+    expect(result.next).not.toMatch(/send it again/i)
+    expect(result.sendAgain).toBeNull()
+    expect(row(result, 'Board says')).toBe(failedDetail)
+    expect(row(result, 'Self-test')).toBe('failed: sensor bus dead (returned to ota_0)')
+  })
+
+  it('a failed self-test with no reason reads plain "failed"', () => {
+    for (const reason of [null, '', '  ']) {
+      const result = must(
+        deployResult(
+          deploy({ state: 'rolled_back', detail: 'x', selftest: { outcome: 'failed', reason, returned_to: null } }),
+          fw,
+          versions,
+          NOW,
+        ),
+      )
+      expect(row(result, 'Self-test')).toBe('failed')
+      expect(result.reason).toBe('1.5.0 started, but its own self-test failed, so the board went back to 1.4.2 at once.')
+    }
+  })
+
+  it('a timed-out self-test reuses the board’s window', () => {
+    const result = must(
+      deployResult(
+        deploy({
+          state: 'rolled_back',
+          detail: 'selftest timed out; returned to ota_1',
+          confirm_timeout_s: 120,
+          selftest: { outcome: 'timed_out', reason: null, returned_to: 'ota_1' },
+        }),
+        { fw_version: '9.9.9' },
+        versions,
+        NOW,
+      ),
+    )
+    expect(result.reason).toBe(
+      '1.5.0 started, but its self-test did not report within 120 s of its reboot, so the board went back to the previous image.',
+    )
+    expect(result.next).toBe(
+      'Check on a board you can watch over USB that the self-test finishes in time, then upload a fixed version.',
+    )
+    expect(result.next).not.toMatch(/send it again/i)
+    expect(row(result, 'Self-test')).toBe('timed out (returned to ota_1)')
+  })
+
+  it('has no Self-test row for an older API, even when the detail has the grammar', () => {
+    // No client parse of `detail`: the server is the one parser (R5-be-1).
+    for (const selftest of [undefined, null]) {
+      const result = must(
+        deployResult(deploy({ state: 'rolled_back', detail: failedDetail, selftest }), fw, versions, NOW),
+      )
+      expect(row(result, 'Self-test')).toBeUndefined()
+      expect(row(result, 'Board says')).toBe(failedDetail)
+      expect(result.reason).toMatch(/did not confirm/)
+    }
+    const passed = must(deployResult(deploy({ detail: 'selftest passed' }), { fw_version: '1.5.0' }, versions, NOW))
+    expect(row(passed, 'Self-test')).toBeUndefined()
+    expect(passed.reason).toMatch(/reconnected to the server/)
+  })
+})
+
+describe('deployResult — cancelled and command rollback (R5-fe-1)', () => {
+  const cancelled = (overrides: Partial<DeploySummary> = {}) =>
+    deploy({ state: 'cancelled', steps: [step('requested', 60), step('staged', 30), step('cancelled', 10)], ...overrides })
+
+  it('cancelled is its own outcome, with no tone, no next action and no Send again', () => {
+    const result = must(deployResult(cancelled(), { fw_version: '1.4.2' }, versions, NOW))
+    expect(result.outcome).toBe('cancelled')
+    expect(result.word).toBe('cancelled')
+    expect(result.tone).toBeNull()
+    expect(result.reason).toBe(
+      'The update was cancelled before the board switched to it, so 1.5.0 was not installed.',
+    )
+    expect(result.next).toBeNull()
+    expect(result.sendAgain).toBeNull()
+    expect(row(result, 'After')).toBe('1.4.2, unchanged')
+  })
+
+  it('does not claim unchanged when the announce disagrees', () => {
+    const result = must(deployResult(cancelled(), { fw_version: '7.0.0' }, versions, NOW))
+    expect(row(result, 'After')).toBe('1.5.0 was not installed')
+  })
+
+  it('a command rollback blames nobody and has no next action', () => {
+    const result = must(
+      deployResult(
+        deploy({
+          state: 'rolled_back',
+          cmd_id: 'cmd-rb',
+          artifact_version: null,
+          from_version: null,
+          sent_by: null,
+          detail: 'rolled back by command; returned to ota_0',
+        }),
+        { fw_version: '1.4.2' },
+        versions,
+        NOW,
+      ),
+    )
+    expect(result.outcome).toBe('rolled-back')
+    expect(result.note).toBe('by an operator command')
+    expect(result.reason).toBe('A rollback command returned the board to the previous image.')
+    expect(result.next).toBeNull()
+    expect(result.sendAgain).toBeNull()
+    expect(row(result, 'Board says')).toBe('rolled back by command; returned to ota_0')
+  })
+
+  it.each([
+    ['self-test passed', deploy({ artifact_version: null, selftest: { outcome: 'passed', reason: null, returned_to: null } }), null],
+    ['self-test failed', deploy({ state: 'rolled_back', artifact_version: null, from_version: null, selftest: { outcome: 'failed', reason: null, returned_to: null } }), null],
+    ['self-test timed out', deploy({ state: 'rolled_back', artifact_version: null, from_version: null, confirm_timeout_s: Number.NaN, selftest: { outcome: 'timed_out', reason: null, returned_to: '' } }), null],
+    ['cancelled', deploy({ state: 'cancelled', artifact_version: null, from_version: null }), null],
+    ['command rollback', deploy({ state: 'rolled_back', artifact_version: null, from_version: null, detail: 'rolled back by command' }), null],
+  ])('never prints null, undefined, NaN, a percent or an arrow (%s)', (_name, d, fw) => {
+    const result = must(deployResult({ ...d, pct: 100, steps: [step('requested', 5)] }, { fw_version: fw }, null, NOW))
+    for (const s of strings(result)) {
+      expect(s).not.toMatch(/null|undefined|NaN|%|→/)
+    }
+  })
+})

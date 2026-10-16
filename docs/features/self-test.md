@@ -1654,6 +1654,57 @@ Answered (R5-spec-1): it stays awake from `staging` until `confirmed` or `rolled
   command id in `deploy_events`. No token or signed URL on the SSE stream; `late` never in the
   api or ingestor logs.
 
+### R5-fe-1 as built
+
+- **What was built.** Frontend only. `api.ts`: `DeploySelfTest`, `CommandSummary`,
+  `CommandAccepted`; OPTIONAL `DeploySummary.selftest` and `DeviceSummary.last_command`
+  (directly before `deploy`); `applyDeploy()` / `cancelDeploy()` / `rebootDevice()` (POST, no
+  body, both path segments encoded). `deploy.ts`: the `cancelled` label (not a bad state),
+  `safeWindowWait()` (apply vs rollback: the two exact detail strings, else "a wait after a
+  `rebooting`/`confirming` step is a rollback"), `deployStateLabel()`, `isCommandRollback()`
+  (head `rolled back by command`), and the verdict note `by an operator command`.
+  `deployTimeline.ts`: a rollback wait sits on no milestone (no regression to `staged`), and a
+  terminal `cancelled` ends with a new `ended` item (glyph ■, muted). `deployResult.ts`: outcome
+  `cancelled`, self-test reasons and next actions (passed / failed / timed out), a `Self-test`
+  row after `Board says` read ONLY from `deploy.selftest`, and the command-rollback reason. New
+  `commands.ts` (offer rules, last-command line) and `CommandControls.tsx` (Apply, Cancel
+  update, Reboot with a confirm step, the board's answer, verbatim server refusals).
+  `PrecheckCard` gets a "Hold at staged: install only when I click Apply" box (boards announcing
+  `apply` only, default off) and `DeployCell` sends `apply: "on_command"` when it is ticked.
+  T2 harness `frontend/scripts/commands-e2e.mjs`, `just commands-e2e`.
+- **Decisions** (details in `DECISIONS.md` -> R5-fe-1): Apply, Cancel update and Reboot are
+  offered; Rollback is not (destructive, REST only; its answer still renders). Offers are gated by
+  the board's announced `capabilities` and the server's read model; the board's answer and the
+  server's 409 sentence are always shown verbatim. Reboot needs a confirm; Apply and Cancel post on
+  one click. `result: null` reads "sent, no answer yet" for ever: no timeout, no spinner, no
+  `aria-live`. The pre-check is still asked with `apply: auto`; only Send carries the hold.
+- **Not done / follow-ups.** A Rollback button (proposed follow-up: "Dashboard Rollback control
+  with a confirm step, for a confirmed image"). `DeploySummary` carries no apply mode, so an
+  `auto` stage that is momentarily `staged` may show Apply; the server's 409 "was sent with apply:
+  auto" is shown verbatim if the operator races it.
+- **Tests.** New `commands.test.ts` (24), `CommandControls.test.tsx` (14); added cases in
+  `api.test.ts`, `deploy.test.ts`, `deployTimeline.test.ts`, `deployResult.test.ts`,
+  `DeployCell.test.tsx` (existing expectations unchanged). Frontend tests 741 -> 828.
+- **T1.** `npm run typecheck && npm test && npm run build` green. Mutation checks, each red then
+  reverted: Apply offered without the `apply` capability (4 red); `safeWindowWait` answering
+  `apply` for the rollback detail (3 red); a `Self-test` row parsed from `detail` (3 red); Reboot
+  posting without the confirm (2 red).
+- **T2.** Dev stack on 8088, `just commands-e2e`: 9/9 pass, exit 0 (run `mvbkiucs`). cmd_ids:
+  good `5249b402…`, stfail `5e8fffc5…`, apply `0d3a38b1…`, cancel `f4cb1e4e…`, hwait `037eca4c…`,
+  hauto `65a26fe0…`, hrefuse `ab481cc1…`. selftest-passed: card `good`, `Self-test passed`, API
+  `{"outcome":"passed"}`. selftest-failed: `Board says` = API detail `selftest failed: simulated
+  self-test failure; returned to ota_1`, `Self-test failed: simulated self-test failure (returned
+  to ota_1)`, no Send again. apply: POST body `on_command`, held at `staged` 3 s, `Apply ·
+  accepted` (command `cf0e435a…`), confirmed, no reload. cancel: `Cancel · accepted`, card
+  `cancelled`, `is_terminal: true`, fw unchanged, timeline end `ended`. apply-waits: `Apply ·
+  deferred: the board waits for a safe moment` (command `05fcf9a5…`), detail `apply waits for a
+  safe window`, 10 samples over 20 s all `awaiting_safe_window` with no stuck/timed out/spinner,
+  then cancelled. auto-hold: detail null, apply wording, timeline current `staged`, cancelled.
+  reboot: confirm step, 0 POSTs through Keep running, `Reboot · accepted`, the simulator
+  restarted, Health `last reset: sw … up 2 s`. refused-and-legacy: `Reboot · refused: an update is
+  in progress` (class `bad`); L: 0 buttons, no hold box, direct POST 409 "…does not implement
+  reboot (it announces: ota)…". traps: clean. Breaks: each `E2E_BREAK=<id>` run exits 1 with exactly that scenario FAIL and 8/9 pass (all nine ids). Regressions: `just update-e2e` 7/7, `just health-e2e` 4/4. Evidence `/tmp/ff-r5-fe-1/`.
+
 ## Reuse note
 
 The self-test entrypoint defined here moves by the simulation gate

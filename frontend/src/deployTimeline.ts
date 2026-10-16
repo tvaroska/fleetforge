@@ -19,7 +19,7 @@
 //    browser clock is compared against server receipt times).
 
 import { type DeploySummary, type DeviceSummary } from './api'
-import { DEPLOY_STATE_LABELS } from './deploy'
+import { DEPLOY_STATE_LABELS, deployStateLabel, safeWindowWait } from './deploy'
 import { formatDuration } from './format'
 
 // `agent/main/ff_ota.c` OTA_STALL_MS: the board aborts a download that has received no
@@ -75,7 +75,8 @@ export const MILESTONE_OF: Record<string, Milestone | undefined> = {
 export type TimelineItem = {
   key: string
   label: string
-  status: 'done' | 'implied' | 'current' | 'pending' | 'failed'
+  // `ended` (R5-fe-1) is a terminal end item that is not a failure: `cancelled` only.
+  status: 'done' | 'implied' | 'current' | 'pending' | 'failed' | 'ended'
   /** Already formatted (`+12 s`); null for implied and pending items, or an unparseable time. */
   offset: string | null
 }
@@ -202,9 +203,13 @@ export function deployTimeline(
     return i < 0 ? Number.NaN : times[i]
   }
 
-  // A milestone's time is the FIRST step mapped to it.
+  // A milestone's time is the FIRST step mapped to it. An `awaiting_safe_window` after
+  // the reboot is a ROLLBACK wait (R5-fe-1) and does not mean `staged` was reached.
   const reachedAt = new Map<Milestone, number>()
+  let pastReboot = false
   steps.forEach((step, i) => {
+    if (step.state === 'rebooting' || step.state === 'confirming') pastReboot = true
+    if (pastReboot && step.state === 'awaiting_safe_window') return
     const milestone = MILESTONE_OF[step.state]
     if (milestone !== undefined && !reachedAt.has(milestone)) reachedAt.set(milestone, times[i])
   })
@@ -226,16 +231,20 @@ export function deployTimeline(
 
   const terminal = deploy.is_terminal
   const items: TimelineItem[] = []
-  const currentMilestone = MILESTONE_OF[deploy.state]
+  // A rollback that waits for a safe window sits on no milestone (R5-fe-1): it must not
+  // regress the timeline to `staged`.
+  const currentMilestone =
+    safeWindowWait(deploy) === 'rollback' ? undefined : MILESTONE_OF[deploy.state]
 
   if (terminal) {
     for (const i of range(0, furthest + 1)) items.push(reached(i))
     if (currentMilestone !== 'confirmed') {
       // A failure, a rollback or a terminal state this file does not know: one end item.
+      // `cancelled` is the operator's choice, not a failure (R5-fe-1).
       items.push({
         key: `end:${deploy.state}`,
         label: stateLabel(deploy.state),
-        status: 'failed',
+        status: deploy.state === 'cancelled' ? 'ended' : 'failed',
         offset: offset(lastAt),
       })
     }
@@ -258,7 +267,7 @@ export function deployTimeline(
     for (const i of range(0, furthest + 1)) items.push(reached(i))
     items.push({
       key: `now:${deploy.state}`,
-      label: stateLabel(deploy.state),
+      label: deployStateLabel(deploy),
       status: 'current',
       offset: offset(lastAt),
     })
@@ -275,7 +284,7 @@ export function deployTimeline(
     elapsed: terminal
       ? `took ${formatDuration(lastAt - firstAt)}`
       : `elapsed ${formatDuration(now - firstAt)}`,
-    current: terminal ? null : `${stateLabel(deploy.state)} for ${formatDuration(now - lastAt)}`,
+    current: terminal ? null : `${deployStateLabel(deploy)} for ${formatDuration(now - lastAt)}`,
     deadline,
     stall,
   }

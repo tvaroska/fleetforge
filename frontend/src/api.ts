@@ -118,7 +118,44 @@ export type DeviceSummary = {
   fault_resets?: FaultResets | null
   health?: HealthSnapshot | null
   metrics?: MetricValue[]
+  // R5-be-2, OPTIONAL like the blocks above: a dashboard served against an older API, and
+  // every fixture written before R5-fe-1, must keep working. Absent and null both mean "no
+  // verb has been sent to this board". Sits directly before `deploy`, as on the server.
+  last_command?: CommandSummary | null
   deploy: DeploySummary | null
+}
+
+// Mirrors `CommandSummary` in api/schemas.py (R5-be-2): the newest verb sent to a board and
+// its first answer. `type` is an OPEN vocabulary (`apply` / `cancel` / `rollback` /
+// `reboot` today; a REST or CI caller may send any of them). `cmd_id` names the
+// transaction for apply / cancel, null otherwise.
+//
+// **`result: null` means "no answer yet" — and possibly never** (an agent older than R5
+// ignores verbs; an answer queued while the board was offline dies with a reboot). Nothing
+// here expires it. Otherwise `result` is the DEVICE's word (`accepted`, `deferred`,
+// `refused`, or a newer agent's value) and `detail` is device-controlled text: render both
+// as text, never parse them. What the verb did to a transaction shows on `deploy`.
+export type CommandSummary = {
+  command_id: string
+  type: string
+  cmd_id: string | null
+  sent_at: string
+  sent_by: DeploySender | null
+  result: string | null
+  detail: string | null
+  answered_at: string | null
+}
+
+// Mirrors `CommandAccepted` in api/schemas.py — the 202 body of the verb routes (R5-be-2).
+// 202 means recorded and handed to the broker, nothing more; the board's answer arrives on
+// `DeviceSummary.last_command`. `device_online` is REPORTED, never blocking: `false` is
+// "queued in the board's persistent session", not "failed".
+export type CommandAccepted = {
+  command_id: string
+  device_id: string
+  type: string
+  cmd_id: string | null
+  device_online: boolean
 }
 
 // Mirrors `DeviceUpdate` in api/schemas.py (R2b-be-1). MERGE-PATCH: an absent key leaves the
@@ -163,6 +200,18 @@ export type DeploySummary = {
   confirm_timeout_s?: number
   // Optional for the same reason as `steps`; null for transactions recorded before R2b-be-4.
   sent_by?: DeploySender | null
+  // R5-be-1, OPTIONAL for the same reason. The SERVER is the one parser of the self-test
+  // grammar in `detail`; this client never re-parses it (no regex for `selftest …`).
+  // Non-null only on a terminal `confirmed` (passed) or `rolled_back` (failed, timed_out).
+  selftest?: DeploySelfTest | null
+}
+
+// Mirrors `DeploySelfTest` in api/schemas.py (R5-be-1). `reason` (failed only) and
+// `returned_to` (a slot label) are DEVICE-CONTROLLED text: render them as text.
+export type DeploySelfTest = {
+  outcome: 'passed' | 'failed' | 'timed_out'
+  reason: string | null
+  returned_to: string | null
 }
 
 // Mirrors `DeployStep` in api/schemas.py: one recorded transition of the current
@@ -545,6 +594,27 @@ export const api = {
     request<DeployPrecheck>(`/v1/devices/${encodeURIComponent(deviceId)}/deploy/precheck`, {
       method: 'POST',
       body: JSON.stringify({ version, apply }),
+    }),
+
+  // R5-be-2 verbs. Admin cookie, NO body (so no content-type), 202 `CommandAccepted`. The
+  // errors are plain sentences in `detail` (404 unknown device or deploy, 409 a capability
+  // the board does not announce or a deploy already ended, 400 a bad cmd_id, 503 publish
+  // failed) and surface verbatim as `ApiError.message`. Both path segments are encoded.
+  applyDeploy: (deviceId: string, cmdId: string) =>
+    request<CommandAccepted>(
+      `/v1/devices/${encodeURIComponent(deviceId)}/deploys/${encodeURIComponent(cmdId)}/apply`,
+      { method: 'POST' },
+    ),
+
+  cancelDeploy: (deviceId: string, cmdId: string) =>
+    request<CommandAccepted>(
+      `/v1/devices/${encodeURIComponent(deviceId)}/deploys/${encodeURIComponent(cmdId)}/cancel`,
+      { method: 'POST' },
+    ),
+
+  rebootDevice: (deviceId: string) =>
+    request<CommandAccepted>(`/v1/devices/${encodeURIComponent(deviceId)}/reboot`, {
+      method: 'POST',
     }),
 
   // R3-fe-1. Every flash map this server knows: builtin, user and detected (pending ones

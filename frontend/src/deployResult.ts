@@ -30,19 +30,38 @@
 //    (a test pins `resend === /send it again/i.test(next)` for every entry). It opens the
 //    pre-check and never posts (`DeployCell.tsx`).
 //
+// 9. The self-test outcome (R5-fe-1) is read ONLY from `deploy.selftest`, which the server
+//    parses (R5-be-1). This file never parses the self-test grammar out of `detail`; an
+//    older API (no `selftest`) gets no `Self-test` row, whatever the detail says.
+// 10. `cancelled` (R5) is an operator's choice, not a failure: no tone, no next action, no
+//    Send again. A command rollback (`deploy.ts::isCommandRollback`) is not blamed on the
+//    image either.
+//
 // Not here, on purpose:
 // * `Sent by` is server-authored text (R2b-be-4), rendered as text; absent when not recorded.
 // * The failed boot's crash reason and last milestone after a rollback: the agent does not
 //   report them. Only the board's own `detail` is shown, verbatim.
 
-import { type DeploySummary, type DeviceSummary } from './api'
-import { DEPLOY_BAD_STATES, DEPLOY_STATE_LABELS, deployOutcome, driftText } from './deploy'
+import { type DeploySelfTest, type DeploySummary, type DeviceSummary } from './api'
+import {
+  DEPLOY_BAD_STATES,
+  DEPLOY_STATE_LABELS,
+  deployOutcome,
+  driftText,
+  isCommandRollback,
+} from './deploy'
 import { MILESTONE_OF } from './deployTimeline'
 import { formatAgo, formatWhen } from './format'
 import { type ResultRow } from './onboardingResult'
 import { type VersionLine } from './statusStrip'
 
-export type DeployResultOutcome = 'good' | 'drift' | 'rolled-back' | 'failed' | 'other'
+export type DeployResultOutcome =
+  | 'good'
+  | 'drift'
+  | 'rolled-back'
+  | 'failed'
+  | 'cancelled'
+  | 'other'
 
 export type DeployResult = {
   outcome: DeployResultOutcome
@@ -148,6 +167,28 @@ function failedBeforeReboot(deploy: DeploySummary): boolean {
   })
 }
 
+// The `Self-test` row's words per server outcome. A lookup with a fallback: an outcome
+// this file has not heard of renders as itself.
+const SELFTEST_WORDS: Record<string, string> = {
+  passed: 'passed',
+  failed: 'failed',
+  timed_out: 'timed out',
+}
+
+const nonEmpty = (text: string | null | undefined): string | null =>
+  typeof text === 'string' && text.trim() !== '' ? text : null
+
+/** The `Self-test` row value, from the server's parse only (rule 9). */
+export function selfTestRow(selftest: DeploySelfTest): string {
+  const outcome = String(selftest.outcome)
+  let value = Object.hasOwn(SELFTEST_WORDS, outcome) ? SELFTEST_WORDS[outcome] : outcome
+  const reason = nonEmpty(selftest.reason)
+  if (outcome === 'failed' && reason !== null) value += `: ${reason}`
+  const returned = nonEmpty(selftest.returned_to)
+  if (returned !== null) value += ` (returned to ${returned})`
+  return value
+}
+
 function failureLookup(detail: string | null): FailureReason {
   if (detail === null || detail.trim() === '') return SILENT_FAILURE
   const key = detail.split(':')[0].trim()
@@ -175,6 +216,7 @@ export function deployResult(
   const backOnFrom = from !== null && fw === from
 
   const verdict = deployOutcome(deploy, fw)
+  const selftest = deploy.selftest ?? null
 
   let outcome: DeployResultOutcome
   let word: string
@@ -191,7 +233,10 @@ export function deployResult(
     word = verdict.word
     tone = verdict.tone
     note = verdict.note
-    reason = `The board rebooted into ${target}, reconnected to the server and confirmed it, so it keeps this image.`
+    reason =
+      selftest?.outcome === 'passed'
+        ? `The board rebooted into ${target}, its self-test passed, and it confirmed it, so it keeps this image.`
+        : `The board rebooted into ${target}, reconnected to the server and confirmed it, so it keeps this image.`
     after = v ?? 'the new image'
   } else if (verdict?.kind === 'drift') {
     outcome = 'drift'
@@ -212,13 +257,28 @@ export function deployResult(
       typeof deploy.confirm_timeout_s === 'number' && Number.isFinite(deploy.confirm_timeout_s)
         ? `within ${deploy.confirm_timeout_s} s of its reboot`
         : 'in time'
-    reason =
-      `${target} did not confirm, so the board went back to ${back} on its own. ` +
-      `That happens when the new image does not reconnect ${window}, or resets before it confirms ` +
-      '(a crash, a boot loop or a power cut); the board does not say which.'
-    next =
-      `Do not send ${target} again as it is: check that it boots and reconnects on a board you ` +
-      'can watch over USB, then upload a fixed version.'
+    if (isCommandRollback(deploy)) {
+      // An operator's rollback command: nothing is wrong with an image, so no next action.
+      reason = `A rollback command returned the board to ${back}.`
+    } else if (selftest?.outcome === 'failed') {
+      const why = nonEmpty(selftest.reason)
+      reason =
+        `${target} started, but its own self-test failed${why !== null ? `: “${why}”` : ''}, ` +
+        `so the board went back to ${back} at once.`
+      next = `Do not send ${target} again as it is: fix what its self-test checks, then upload a fixed version.`
+    } else if (selftest?.outcome === 'timed_out') {
+      reason = `${target} started, but its self-test did not report ${window}, so the board went back to ${back}.`
+      next =
+        'Check on a board you can watch over USB that the self-test finishes in time, then upload a fixed version.'
+    } else {
+      reason =
+        `${target} did not confirm, so the board went back to ${back} on its own. ` +
+        `That happens when the new image does not reconnect ${window}, or resets before it confirms ` +
+        '(a crash, a boot loop or a power cut); the board does not say which.'
+      next =
+        `Do not send ${target} again as it is: check that it boots and reconnects on a board you ` +
+        'can watch over USB, then upload a fixed version.'
+    }
     after = backOnFrom ? `${from} again` : 'the previous image'
   } else if (deploy.state === 'failed') {
     outcome = 'failed'
@@ -234,6 +294,12 @@ export function deployResult(
     } else {
       after = fw !== null ? `the board reports ${fw}` : 'not reported'
     }
+  } else if (deploy.is_terminal && deploy.state === 'cancelled') {
+    outcome = 'cancelled'
+    word = 'cancelled'
+    tone = null
+    reason = `The update was cancelled before the board switched to it, so ${target} was not installed.`
+    after = backOnFrom ? `${from}, unchanged` : `${target} was not installed`
   } else {
     outcome = 'other'
     word = DEPLOY_STATE_LABELS[deploy.state] ?? deploy.state
@@ -246,6 +312,7 @@ export function deployResult(
     { label: 'After', value: after, tone: null },
   ]
   if (detail !== null) rows.push({ label: 'Board says', value: detail, tone: null })
+  if (selftest !== null) rows.push({ label: 'Self-test', value: selfTestRow(selftest), tone: null })
   const sentAt = deploy.steps?.[0]?.at
   if (sentAt !== undefined && Number.isFinite(Date.parse(sentAt))) {
     rows.push({ label: 'Sent', value: formatWhen(sentAt), tone: null })

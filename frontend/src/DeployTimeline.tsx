@@ -19,6 +19,7 @@ const GLYPHS: Record<TimelineItem['status'], string> = {
   current: '…',
   pending: '·',
   failed: '✗',
+  ended: '■',
 }
 
 function Items({ items, current }: { items: TimelineItem[]; current: string | null }) {

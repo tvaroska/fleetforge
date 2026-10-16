@@ -123,3 +123,48 @@ describe('api.deviceLogs (R4-fe-2)', () => {
     expect(init?.body).toBeUndefined()
   })
 })
+
+describe('api.applyDeploy / cancelDeploy / rebootDevice (R5-fe-1)', () => {
+  const accepted = (type: string, cmdId: string | null) => ({
+    command_id: 'c0ffee',
+    device_id: 'a4cf12b3de90',
+    type,
+    cmd_id: cmdId,
+    device_online: true,
+  })
+
+  it.each([
+    ['apply', () => api.applyDeploy('a4cf/12', 'cmd a/b'), '/v1/devices/a4cf%2F12/deploys/cmd%20a%2Fb/apply', 'cmd a/b'],
+    ['cancel', () => api.cancelDeploy('a4cf/12', 'cmd a/b'), '/v1/devices/a4cf%2F12/deploys/cmd%20a%2Fb/cancel', 'cmd a/b'],
+    ['reboot', () => api.rebootDevice('a4cf/12'), '/v1/devices/a4cf%2F12/reboot', null],
+  ] as const)('%s POSTs to the encoded relative path with no body', async (type, call, path, cmdId) => {
+    const body = accepted(type, cmdId)
+    const spy = respond(202, JSON.stringify(body))
+
+    await expect(call()).resolves.toEqual(body)
+
+    const [url, init] = spy.mock.calls[0]
+    expect(url).toBe(path)
+    expect(init?.method).toBe('POST')
+    expect(init?.body).toBeUndefined()
+    // No body means no JSON content-type either.
+    expect(JSON.stringify(init?.headers ?? {})).not.toContain('content-type')
+    expect(init?.credentials).toBe('same-origin')
+  })
+
+  it('passes the 409 capability sentence through verbatim', async () => {
+    const sentence =
+      "this board's agent does not implement reboot (it announces: ota); update its agent first"
+    respond(409, JSON.stringify({ detail: sentence }))
+    const err = await rejection(api.rebootDevice('a4cf12b3de90'))
+    expect(err.status).toBe(409)
+    expect(err.message).toBe(sentence)
+  })
+
+  it('passes the 409 already-ended sentence through verbatim', async () => {
+    const sentence = 'deploy cmd-a already ended (confirmed); there is nothing to apply'
+    respond(409, JSON.stringify({ detail: sentence }))
+    const err = await rejection(api.applyDeploy('a4cf12b3de90', 'cmd-a'))
+    expect(err.message).toBe(sentence)
+  })
+})

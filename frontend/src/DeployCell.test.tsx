@@ -1063,3 +1063,81 @@ describe('DeployCell — send again (R2b-fe-11)', () => {
     expect(screen.queryByTestId('precheck-card')).toBeNull()
   })
 })
+
+// R5-fe-1: the hold-at-staged box, the live label of a rollback wait, and the command
+// controls inside the cell.
+describe('DeployCell — hold at staged and commands (R5-fe-1)', () => {
+  const capable = (overrides: Partial<DeviceSummary> = {}) =>
+    device({ capabilities: ['ota', 'apply', 'cancel', 'rollback', 'reboot', 'selftest'], ...overrides })
+  const HOLD = 'Hold at staged: install only when I click Apply'
+
+  it('offers no hold box to a board that does not announce apply', async () => {
+    routes()
+    renderCell()
+    await userEvent.click(screen.getByRole('button', { name: 'Deploy' }))
+    await screen.findByTestId('precheck-card')
+    expect(screen.queryByLabelText(HOLD)).toBeNull()
+    expect(screen.queryByTestId('command-controls')).toBeNull()
+  })
+
+  it('ticked, Send posts apply on_command; the pre-check itself stays auto', async () => {
+    const { fetchMock } = routes()
+    renderCell({ device: capable() })
+
+    await userEvent.click(screen.getByRole('button', { name: 'Deploy' }))
+    const box = await screen.findByLabelText(HOLD)
+    expect(box).not.toBeChecked()
+    await userEvent.click(box)
+    await userEvent.click(screen.getByRole('button', { name: 'Send' }))
+
+    await waitFor(() => expect(urls(fetchMock)).toHaveLength(2))
+    const [, check] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(JSON.parse(check.body as string)).toEqual({ version: '1.5.0', apply: 'auto' })
+    const [, init] = fetchMock.mock.calls[1] as [string, RequestInit]
+    expect(JSON.parse(init.body as string)).toEqual({ version: '1.5.0', apply: 'on_command' })
+  })
+
+  it('unticked, Send posts apply auto on a capable board', async () => {
+    const { fetchMock } = routes()
+    renderCell({ device: capable() })
+
+    await userEvent.click(screen.getByRole('button', { name: 'Deploy' }))
+    await screen.findByLabelText(HOLD)
+    await userEvent.click(screen.getByRole('button', { name: 'Send' }))
+
+    await waitFor(() => expect(urls(fetchMock)).toHaveLength(2))
+    const [, init] = fetchMock.mock.calls[1] as [string, RequestInit]
+    expect(JSON.parse(init.body as string)).toEqual({ version: '1.5.0', apply: 'auto' })
+  })
+
+  it('Cancel on the card clears the tick', async () => {
+    routes()
+    renderCell({ device: capable() })
+
+    await userEvent.click(screen.getByRole('button', { name: 'Deploy' }))
+    await userEvent.click(await screen.findByLabelText(HOLD))
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Deploy' }))
+    expect(await screen.findByLabelText(HOLD)).not.toBeChecked()
+  })
+
+  it('renders the command controls inside the cell for a held stage', () => {
+    renderCell({ device: capable({ deploy: deploy({ state: 'staged' }) }) })
+    const cell = screen.getByTestId('deploy-cell')
+    expect(within(cell).getByTestId('command-controls')).toBeInTheDocument()
+    expect(within(cell).getByRole('button', { name: 'Apply the staged update on a4cf12b3de90' })).toBeInTheDocument()
+    expect(within(cell).getByRole('button', { name: 'Cancel the update on a4cf12b3de90' })).toBeInTheDocument()
+    expect(within(cell).getByRole('button', { name: 'Reboot a4cf12b3de90' })).toBeInTheDocument()
+  })
+
+  it('names a rollback wait in the live state, with the board’s words, and offers no Cancel', () => {
+    renderCell({
+      device: capable({
+        deploy: deploy({ state: 'awaiting_safe_window', detail: 'rollback waits for a safe window' }),
+      }),
+    })
+    expect(screen.getByTestId('deploy-state')).toHaveTextContent(/^rolling back at the board’s next safe moment/)
+    expect(screen.getAllByText('rollback waits for a safe window').length).toBeGreaterThan(0)
+    expect(screen.queryByTestId('command-cancel')).toBeNull()
+  })
+})

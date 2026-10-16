@@ -45,6 +45,9 @@ export const DEPLOY_STATE_LABELS: Record<string, string> = {
   confirmed: 'confirmed by the board',
   rolling_back: 'rolling back',
   rolled_back: 'rolled back to the previous version',
+  // R5: an operator's Cancel ended the transaction before the board switched images.
+  // Not in `DEPLOY_BAD_STATES`: it is an operator action, not a failure.
+  cancelled: 'cancelled — the board keeps its current image',
   failed: 'failed',
   idle: 'idle',
 }
@@ -72,6 +75,57 @@ export const DEPLOY_BAD_STATES = new Set(['failed', 'rolled_back'])
 export const DEPLOY_OUTCOMES: Record<string, { word: string; tone: 'ok' | 'bad' }> = {
   confirmed: { word: 'good', tone: 'ok' },
   rolled_back: { word: 'rolled back', tone: 'bad' },
+}
+
+// The two exact strings the agent (firmware and simulator) writes on
+// `awaiting_safe_window` (R5-fw-5). Device text, matched by equality only.
+export const APPLY_WAIT_DETAIL = 'apply waits for a safe window'
+export const ROLLBACK_WAIT_DETAIL = 'rollback waits for a safe window'
+
+/** The label of a rollback that waits for the board's safe moment (R5-fe-1). */
+export const ROLLBACK_WAIT_LABEL =
+  'rolling back at the board’s next safe moment — it has decided, and may wait indefinitely'
+
+// Raw states from the reboot on. Kept here on raw names rather than through
+// `deployTimeline.ts::MILESTONE_OF`, which imports this file: no circular import.
+const AFTER_REBOOT_STATES = new Set(['rebooting', 'confirming'])
+
+/**
+ * What an `awaiting_safe_window` deploy is waiting to do (R5-fe-1), or null for any other
+ * state. The board's own detail decides when it is one of the two exact sentences;
+ * otherwise (no detail, e.g. an `apply: auto` stage held by the simulator, or a detail this
+ * file has not heard of) the recorded steps do: a wait after a reboot is a rollback wait.
+ * Never expires either wait (rule 2 in the header).
+ */
+export function safeWindowWait(
+  deploy: Pick<DeploySummary, 'state' | 'detail' | 'steps'>,
+): 'apply' | 'rollback' | null {
+  if (deploy.state !== 'awaiting_safe_window') return null
+  if (deploy.detail === ROLLBACK_WAIT_DETAIL) return 'rollback'
+  if (deploy.detail === APPLY_WAIT_DETAIL) return 'apply'
+  const steps = deploy.steps ?? []
+  return steps.some((step) => AFTER_REBOOT_STATES.has(step.state)) ? 'rollback' : 'apply'
+}
+
+/**
+ * The state's label, with the one case a state name alone cannot tell: a rollback that
+ * waits for a safe window. An apply wait keeps the `awaiting_safe_window` label.
+ */
+export function deployStateLabel(
+  deploy: Pick<DeploySummary, 'state' | 'detail' | 'steps'>,
+): string {
+  if (safeWindowWait(deploy) === 'rollback') return ROLLBACK_WAIT_LABEL
+  return DEPLOY_STATE_LABELS[deploy.state] ?? deploy.state
+}
+
+/**
+ * True for a `rolled_back` caused by an operator's rollback command (R5-be-2): firmware and
+ * simulator write the same head, `rolled back by command; returned to <slot>`. One rule,
+ * exact equality on the head; the detail is never otherwise interpreted.
+ */
+export function isCommandRollback(deploy: Pick<DeploySummary, 'state' | 'detail'>): boolean {
+  if (deploy.state !== 'rolled_back' || deploy.detail === null) return false
+  return deploy.detail.split(';')[0].trim() === 'rolled back by command'
 }
 
 export type DeployOutcome =
@@ -105,7 +159,11 @@ export function deployOutcome(
   }
   if (deploy.state === 'rolled_back') {
     const from = deploy.from_version
-    let note = v !== null ? `${v} did not confirm` : 'the new image did not confirm'
+    let note = isCommandRollback(deploy)
+      ? 'by an operator command'
+      : v !== null
+        ? `${v} did not confirm`
+        : 'the new image did not confirm'
     if (from !== null && fwVersion === from) note += `; back on ${from}`
     return { kind: 'verdict', ...entry, note }
   }

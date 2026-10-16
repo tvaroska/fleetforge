@@ -300,6 +300,75 @@ describe('deployTimeline — deadlines and stalls', () => {
   })
 })
 
+describe('deployTimeline — R5-fe-1 rollback wait and cancelled', () => {
+  const toConfirming = (base: number) => [
+    step('requested', base + 70),
+    step('staging', base + 65),
+    step('downloading', base + 60),
+    step('verifying', base + 40),
+    step('staged', base + 35),
+    step('applying', base + 30),
+    step('rebooting', base + 25),
+    step('confirming', base + 10),
+  ]
+
+  it('puts a rollback wait on no milestone: reached ones done, nothing pending after it', () => {
+    for (const device of [ONLINE, OFFLINE]) {
+      const t = timeline(
+        deploy([...toConfirming(7200), step('awaiting_safe_window', 7200)], {
+          detail: 'rollback waits for a safe window',
+        }),
+        device,
+      )
+      expect(statuses(t)).toEqual([
+        'sent:done',
+        'downloading:done',
+        'staged:done',
+        'rebooting:done',
+        'confirming:done',
+        expect.stringMatching(/^rolling back at the board’s next safe moment.*:current$/),
+      ])
+      expect(t.items.some((i) => i.status === 'pending')).toBe(false)
+      expect(t.items[t.items.length - 1].key).toBe('now:awaiting_safe_window')
+      expect(t.current).toMatch(/^rolling back at the board’s next safe moment.* for 2 h 0 min$/)
+      // Rule 2: no deadline and no stall, even hours in.
+      expect(t.deadline).toBeNull()
+      expect(t.stall).toBeNull()
+    }
+  })
+
+  it('infers the rollback wait from the steps when the detail is missing', () => {
+    const t = timeline(deploy([...toConfirming(100), step('awaiting_safe_window', 90)]))
+    expect(t.items.find((i) => i.status === 'current')?.key).toBe('now:awaiting_safe_window')
+  })
+
+  it('keeps an apply wait on `staged`', () => {
+    const t = timeline(
+      deploy([step('requested', 100), step('staged', 80), step('awaiting_safe_window', 60)], {
+        detail: 'apply waits for a safe window',
+      }),
+    )
+    expect(t.items.find((i) => i.status === 'current')?.label).toBe('staged')
+    expect(t.items.filter((i) => i.status === 'pending').map((i) => i.label)).toEqual([
+      'rebooting',
+      'confirming',
+      'confirmed',
+    ])
+  })
+
+  it('ends a cancelled transaction with an `ended` item, never `failed`', () => {
+    const t = timeline(
+      deploy([step('requested', 100), step('staging', 95), step('downloading', 90), step('verifying', 80), step('staged', 70), step('cancelled', 50)], {
+        is_terminal: true,
+      }),
+    )
+    const end = t.items[t.items.length - 1]
+    expect(end).toMatchObject({ key: 'end:cancelled', status: 'ended' })
+    expect(end.label).toBe('cancelled — the board keeps its current image')
+    expect(t.items.some((i) => i.status === 'failed')).toBe(false)
+  })
+})
+
 describe('deployTimeline — never prints a hole', () => {
   it('contains no %, null, undefined or NaN across every fixture above', () => {
     expect(seen.length).toBeGreaterThan(20)

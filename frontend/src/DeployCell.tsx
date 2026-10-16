@@ -38,6 +38,16 @@
 // have changed since the failure and the pre-check is where that is said. Disabled while a
 // check or send is in flight.
 //
+// R5-fe-1 adds the command seam. A board that announces `apply` gets a "Hold at staged"
+// box in the pre-check card (default off): ticked, Send posts `apply: "on_command"` and the
+// board stops at `staged` until the operator clicks Apply. `CommandControls` (its own file,
+// it ACTS too) renders the board's answer to the newest verb (`device.last_command`) and
+// the Apply / Cancel update / Reboot buttons, each gated by the board's announced
+// capabilities; after a 202 it calls `onDeployed` so the answer paints at once. The live
+// state names which way an `awaiting_safe_window` waits (apply or rollback,
+// `deploy.ts::deployStateLabel`), and the result card shows the self-test outcome the
+// SERVER parsed (`deploy.selftest`) and `cancelled`.
+//
 // Two things this cell deliberately does not do:
 //
 // * **No progress bar.** `pct` is a transition log, not a feed: our agent publishes
@@ -61,7 +71,8 @@ import {
 } from './api'
 import { overrideFor } from './deployPrecheck'
 import { PrecheckCard } from './PrecheckCard'
-import { DEPLOY_BAD_STATES, DEPLOY_STATE_LABELS, deployOutcome, driftText } from './deploy'
+import { DEPLOY_BAD_STATES, DEPLOY_STATE_LABELS, deployOutcome, deployStateLabel, driftText } from './deploy'
+import { CommandControls } from './CommandControls'
 import { deployResult } from './deployResult'
 import { DeployResultCard } from './DeployResultCard'
 import { type VersionLine } from './statusStrip'
@@ -127,7 +138,8 @@ function LiveState({ device, now }: { device: DeviceSummary; now: number }) {
 
   // `?? state` is the whole rule: a state this dashboard has never heard of renders as
   // itself rather than as a blank cell (`deploy.ts`).
-  const label = DEPLOY_STATE_LABELS[deploy.state] ?? deploy.state
+  // `deployStateLabel` adds the one case a state name cannot tell: a rollback wait.
+  const label = deployStateLabel(deploy)
   const bad = DEPLOY_BAD_STATES.has(deploy.state)
   const className = bad ? 'bad' : deploy.state === 'confirmed' ? 'ok' : undefined
 
@@ -171,6 +183,8 @@ export function DeployCell({
   const [phase, setPhase] = useState<'idle' | 'checking' | 'sending'>('idle')
   const [precheck, setPrecheck] = useState<DeployPrecheck | null>(null)
   const [ticked, setTicked] = useState<ReadonlySet<string>>(new Set())
+  // R5-fe-1: "Hold at staged" (`apply: "on_command"`). Default off; reset with the card.
+  const [hold, setHold] = useState(false)
   const [accepted, setAccepted] = useState<DeployAccepted | null>(null)
   const [error, setError] = useState<string | null>(null)
   // Bumped whenever the card stops being the thing the operator is looking at (version
@@ -200,6 +214,7 @@ export function DeployCell({
     seq.current++
     setPrecheck(null)
     setTicked(new Set())
+    setHold(false)
     setPhase('idle')
   }
 
@@ -210,6 +225,7 @@ export function DeployCell({
     setError(null)
     setAccepted(null)
     setTicked(new Set())
+    setHold(false)
     try {
       const result = await api.precheckDeploy(device.device_id, target)
       if (mine !== seq.current) return
@@ -235,10 +251,16 @@ export function DeployCell({
     setError(null)
     try {
       setAccepted(
-        await api.deployDevice(device.device_id, precheck.version, 'auto', overrideFor(precheck, ticked)),
+        await api.deployDevice(
+          device.device_id,
+          precheck.version,
+          holdAvailable && hold ? 'on_command' : 'auto',
+          overrideFor(precheck, ticked),
+        ),
       )
       setPrecheck(null)
       setTicked(new Set())
+      setHold(false)
       // Re-read now rather than waiting up to `POLL_MS` for the next poll: the
       // `requested` row is already committed, so this is what makes the cell respond to
       // the click immediately.
@@ -262,6 +284,8 @@ export function DeployCell({
   }
 
   const name = device.name ?? device.device_id
+  // The hold box needs the board's own `apply` (the server refuses `on_command` otherwise).
+  const holdAvailable = (device.capabilities ?? []).includes('apply')
   const result = deployResult(device.deploy, device, versions, now)
   const resendVersion =
     result?.sendAgain != null && artifacts.some((a) => a.version === result.sendAgain)
@@ -311,6 +335,9 @@ export function DeployCell({
           onSend={() => void send()}
           onCancel={discard}
           sending={phase === 'sending'}
+          holdAvailable={holdAvailable}
+          hold={hold}
+          onHold={setHold}
         />
       )}
 
@@ -335,6 +362,12 @@ export function DeployCell({
       ) : (
         <LiveState device={device} now={now} />
       )}
+      <CommandControls
+        device={device}
+        now={now}
+        onSent={onDeployed}
+        onSessionExpired={onSessionExpired}
+      />
       {device.deploy !== null && <DeployTimeline deploy={device.deploy} device={device} now={now} />}
     </td>
   )

@@ -412,6 +412,13 @@ textarea.log {
   text-underline-offset: 3px;
 }
 
+/* R5-fe-1: a terminal end item that is not a failure (`cancelled`). Muted, no underline:
+   the ■ glyph and the word carry it. */
+.milestones li.ended {
+  color: var(--ff-dim);
+  font-weight: 400;
+}
+
 .deploy-timeline summary {
   cursor: pointer;
 }
