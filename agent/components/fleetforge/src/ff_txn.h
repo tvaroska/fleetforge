@@ -26,6 +26,11 @@
  * <slot>`). It never decides whether a record exists: a record without it (every record an
  * agent before R5 wrote) is complete, and ff_txn_save() erases it with the rest, so a stale
  * detail never survives into a new transaction.
+ *
+ * R5-fw-3 adds one more OPTIONAL key, `confirm_s`: the stage's `confirm_timeout_s`, already
+ * clamped by the command seam, which the new image re-reads at boot to re-arm its confirm
+ * deadline from image start. Written before `cmd_id`, so every complete record carries it; a
+ * record without it (written before R5-fw-3) is complete and keeps the default deadline.
  */
 
 #pragma once
@@ -43,6 +48,7 @@ extern "C" {
 #define FF_TXN_KEY_CMD_ID "cmd_id"
 #define FF_TXN_KEY_TARGET "tgt_addr"
 #define FF_TXN_KEY_DETAIL "detail" /* R5-fw-2: optional, see above */
+#define FF_TXN_KEY_CONFIRM "confirm_s" /* R5-fw-3: optional, see above */
 
 /* Same size as `ff_ota_cmd_t.cmd_id`: an id that did not fit there never got this far. */
 #define FF_TXN_MAX_CMD_ID 64
@@ -57,6 +63,9 @@ typedef struct {
     /* R5-fw-2: the self-test head stored by ff_txn_set_detail(), or "" (none stored, or a
      * record written before R5). */
     char detail[FF_TXN_MAX_DETAIL];
+    /* R5-fw-3: the stage's confirm deadline in seconds. 0 = not stored (a pre-R5-fw-3
+     * record); already clamped by the stager, and clamped again by the reader. */
+    uint32_t confirm_timeout_s;
 } ff_txn_t;
 
 /* Create the lock. Call once, before any other ff_txn_* call (ff_mqtt_run does, before
@@ -65,13 +74,15 @@ void ff_txn_init(void);
 
 /* Replace whatever record exists with this one. The namespace is erased first, so a power
  * cut part-way leaves either nothing or a record missing a key — which ff_txn_load treats
- * as nothing — and never an old cmd_id paired with a new slot. */
-esp_err_t ff_txn_save(const char *cmd_id, uint32_t target_addr);
+ * as nothing — and never an old cmd_id paired with a new slot. `confirm_timeout_s` is
+ * stored as given (R5-fw-3: the command seam has already clamped it). */
+esp_err_t ff_txn_save(const char *cmd_id, uint32_t target_addr, uint32_t confirm_timeout_s);
 
-/* ESP_OK                  — *out holds the record (`detail` "" when none is stored).
+/* ESP_OK                  — *out holds the record (`detail` "" and `confirm_timeout_s` 0
+ *                           when none is stored).
  * ESP_ERR_NVS_NOT_FOUND   — there is none (a record missing cmd_id or target counts as
- *                           none: it is logged at WARN and cleared; a missing detail never
- *                           does).
+ *                           none: it is logged at WARN and cleared; a missing detail or
+ *                           confirm deadline never does).
  * anything else           — NVS could not be read; treat as none. */
 esp_err_t ff_txn_load(ff_txn_t *out);
 

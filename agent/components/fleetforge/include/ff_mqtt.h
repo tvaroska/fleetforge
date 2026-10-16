@@ -36,7 +36,9 @@ extern "C" {
  * (network bring-up, enrollment, park()). Needs nothing but esp_timer and otadata: no NVS,
  * no netif, no mqtt client. Inert unless the running image is PENDING_VERIFY, i.e. was
  * written by OTA and has not confirmed yet; on such an image it guarantees a rollback
- * CONFIRM_TIMEOUT_S after boot unless the announce PUBACK confirms it first (R2-fw-4). */
+ * CONFIRM_TIMEOUT_S after boot unless the announce PUBACK confirms it first (R2-fw-4).
+ * Once ff_mqtt_run() has read the transaction record, the deadline becomes the stage's
+ * confirm_timeout_s (clamped 30-3600 s), counted from the same start (R5-fw-3). */
 void ff_mqtt_arm_confirm_timer(void);
 
 /* Connect and stay connected. Does not return under normal operation: esp-mqtt owns

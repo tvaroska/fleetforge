@@ -28,6 +28,7 @@
 
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 #include "esp_err.h"
 
@@ -51,6 +52,9 @@ typedef struct {
     size_t size;            /* bytes, from the command; 0 = the server did not say */
     char version[32];       /* the artifact's version, for the log only */
     bool apply_now;         /* false only for `apply: "on_command"` */
+    /* R5-fw-3: the command's deadline, already clamped by on_stage (30-3600 s;
+     * CONFIRM_TIMEOUT_S when absent). ff_ota only records it. */
+    uint32_t confirm_timeout_s;
 } ff_ota_cmd_t;
 
 /* Spawn the OTA task and return immediately; every outcome is reported on `up/status`.

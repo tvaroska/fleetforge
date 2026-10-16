@@ -140,7 +140,9 @@ CONFIRM_AUTO = "auto"
 CONFIRM_NEVER = "never"
 CONFIRM_MODES = (CONFIRM_AUTO, CONFIRM_NEVER)
 # `spec/prd.md` → *Requirements & targets → Timing*: "confirm timeout 300 s". The real
-# agent ignores the command's `confirm_timeout_s` and so does this one.
+# agent honours the command's `confirm_timeout_s` since R5-fw-3 (clamped 30-3600 s,
+# counted from image start). This simulator keeps its own `--confirm-timeout`, which the
+# tests use to shorten the wait; teaching it the command is left to R5-be-2/R5-test-1.
 DEFAULT_CONFIRM_TIMEOUT_S = 300.0
 
 # Artifact downloads are chunked so a 1.9 MB image does not arrive as one read, the same

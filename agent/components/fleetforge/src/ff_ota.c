@@ -683,8 +683,9 @@ static void ota_task(void *arg)
      * "staged and bootable" line below, because that line is what an operator waits for
      * before pulling the plug.
      * Report-only: a failed save loses the outcome report, never the deploy or the
-     * rollback, so the update carries on. */
-    esp_err_t txn_err = ff_txn_save(cmd->cmd_id, target->address);
+     * rollback, so the update carries on. R5-fw-3: the command's confirm deadline rides
+     * along, already clamped by the command seam; this module never interprets it. */
+    esp_err_t txn_err = ff_txn_save(cmd->cmd_id, target->address, cmd->confirm_timeout_s);
     if (txn_err != ESP_OK) {
         ESP_LOGE(TAG, "update %s: cannot record the transaction (%s) — the outcome will not "
                       "be reported after the reboot",

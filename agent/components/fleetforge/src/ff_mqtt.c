@@ -55,15 +55,28 @@ static const char *TAG = "ff-mqtt";
  * socket dying rather than minutes later. */
 #define KEEPALIVE_S 30
 
-/* spec/prd.md -> Requirements & targets -> Timing: "confirm timeout 300 s". */
+/* spec/prd.md -> Requirements & targets -> Timing: "confirm timeout 300 s". The DEFAULT
+ * deadline, and the one the boot arm (ff_mqtt_arm_confirm_timer, first statement of app_main,
+ * before NVS) always starts with. R5-fw-3: once classify_txn() has read the transaction
+ * record, the stage's own `confirm_timeout_s` (clamped to CONFIRM_TIMEOUT_MIN_S..MAX_S) takes
+ * over, counted from the same image start (rearm_confirm_deadline). */
 #if FF_ROLLBACK_TEST
 /* 60 s in a rollback-test build. Shortening this does NOT weaken the test: the timer
  * under test is the one compiled into the NEW image, which is this one, so the
- * mechanism exercised is identical and only the wait is shorter. */
+ * mechanism exercised is identical and only the wait is shorter. R5-fw-3: the same flag caps
+ * a command's deadline at 60 s, so the server's 300 still gives 60 here (no re-arm, the
+ * quickstart's R phase is unchanged) while a shorter command gives its own value. */
 #define CONFIRM_TIMEOUT_S 60
+#define CONFIRM_TIMEOUT_MAX_S 60
 #else
 #define CONFIRM_TIMEOUT_S 300
+#define CONFIRM_TIMEOUT_MAX_S 3600
 #endif
+/* R5-spec-1 D10: a command's `confirm_timeout_s` is clamped to 30-3600 s. */
+#define CONFIRM_TIMEOUT_MIN_S 30
+_Static_assert(CONFIRM_TIMEOUT_MIN_S <= CONFIRM_TIMEOUT_S &&
+                   CONFIRM_TIMEOUT_S <= CONFIRM_TIMEOUT_MAX_S,
+               "the default confirm deadline must lie inside the clamp");
 
 /* How long a timed-out image keeps running after the confirm timer fires, so a queued
  * `rolling_back` can leave the wire before the reboot. Bounded by an esp_timer that is
@@ -219,6 +232,18 @@ static bool accept_unverified_image(void)
  * depends on. When it fires the grace period is over: roll back, reported or not. */
 static esp_timer_handle_t s_rollback_timer;
 
+/* R5-fw-3. The confirm timer itself, kept so rearm_confirm_deadline() can move it once the
+ * transaction record has been read. NULL until ff_mqtt_arm_confirm_timer() created it (and on
+ * every boot that is not an OTA boot). */
+static esp_timer_handle_t s_confirm_timer;
+/* R5-fw-3. esp_timer_get_time() at the moment the boot arm started the confirm timer: the
+ * "image start" every deadline is counted from. Written once, before the timer runs. */
+static int64_t s_confirm_origin_us;
+/* R5-fw-3. The deadline in force, in seconds from s_confirm_origin_us: what the timeout
+ * callback's log line reports. Read from the esp_timer task; an aligned 32-bit store is
+ * atomic, and it is written only while the timer is stopped (or before it ever starts). */
+static volatile uint32_t s_confirm_deadline_s = CONFIRM_TIMEOUT_S;
+
 /* Set by confirm_timeout_cb() the moment it decides to roll back. Before the grace timer
  * the reboot followed that decision within microseconds; now it follows within
  * ROLLBACK_REPORT_GRACE_MS, and an announce ack arriving inside that window must not
@@ -305,7 +330,8 @@ static void rollback_report_task(void *arg)
     vTaskDelete(NULL);
 }
 
-/* The negative branch. Runs once, CONFIRM_TIMEOUT_S after boot, and only for an image the
+/* The negative branch. Runs once, s_confirm_deadline_s after image start (CONFIRM_TIMEOUT_S
+ * until the transaction record re-arms it, R5-fw-3), and only for an image the
  * bootloader is still waiting on. A board that cannot reach its fleet with a new image is
  * a board that must go back to the one that worked — unattended, because by definition
  * nobody can reach it to help. */
@@ -350,11 +376,11 @@ static void confirm_timeout_cb(void *arg)
     if (s_ctx.session_confirmed) {
         ESP_LOGE(TAG, "no self-test result %d s after an OTA boot — marking this image invalid "
                       "and rolling back to the previous slot",
-                 CONFIRM_TIMEOUT_S);
+                 (int)s_confirm_deadline_s);
     } else {
         ESP_LOGE(TAG, "no working session %d s after an OTA boot — marking this image invalid "
                       "and rolling back to the previous slot",
-                 CONFIRM_TIMEOUT_S);
+                 (int)s_confirm_deadline_s);
     }
 
     /* The invariant: past the guard above, every path leaves either the rollback timer
@@ -518,6 +544,11 @@ void ff_mqtt_arm_confirm_timer(void)
     };
     esp_timer_handle_t timer = NULL;
     if (esp_timer_create(&args, &timer) == ESP_OK) {
+        /* R5-fw-3: kept, with its origin and deadline, so the transaction record can re-arm it
+         * for the stage's own deadline counted from this same moment. */
+        s_confirm_timer = timer;
+        s_confirm_deadline_s = CONFIRM_TIMEOUT_S;
+        s_confirm_origin_us = esp_timer_get_time();
         ESP_ERROR_CHECK(esp_timer_start_once(timer, (uint64_t)CONFIRM_TIMEOUT_S * 1000000ULL));
         ESP_LOGW(TAG, "OTA boot: %d s from now to reach the fleet or roll back",
                  CONFIRM_TIMEOUT_S);
@@ -525,6 +556,71 @@ void ff_mqtt_arm_confirm_timer(void)
         ESP_LOGE(TAG, "cannot create the confirm timer: this OTA image cannot roll itself "
                       "back — only a reset returns this board to its previous slot");
     }
+}
+
+/* R5-spec-1 D10: a requested confirm deadline, clamped to CONFIRM_TIMEOUT_MIN_S..MAX_S.
+ * Compared as a double BEFORE any cast (casting an out-of-range double is undefined): NaN,
+ * negatives and 0 give the minimum, anything past the maximum (inf too) gives the maximum,
+ * and a fraction is truncated. */
+static uint32_t confirm_timeout_clamp(double requested_s)
+{
+    if (!(requested_s >= CONFIRM_TIMEOUT_MIN_S)) {
+        return CONFIRM_TIMEOUT_MIN_S;
+    }
+    if (requested_s > CONFIRM_TIMEOUT_MAX_S) {
+        return CONFIRM_TIMEOUT_MAX_S;
+    }
+    return (uint32_t)requested_s;
+}
+
+/* R5-fw-3. Move the running confirm timer to `deadline_s` seconds after image start
+ * (s_confirm_origin_us), once classify_txn() has read the stage's deadline from the
+ * transaction record. Main task, before the first connect; never from esp_timer.
+ *
+ * The boot arm's 300 s (60 s under FF_ROLLBACK_TEST) stays the deadline for everything before
+ * this point: an image that hangs before ff_mqtt_run() never gets here and keeps it.
+ *
+ * esp_timer_stop() + esp_timer_start_once(), NEVER esp_timer_restart(): IDF 5.5's restart
+ * checks whether the timer is armed BEFORE it takes the timer-list lock, so it can re-insert a
+ * timer that has just been dispatched and the callback runs twice — the second run takes the
+ * backstop branch and reboots without the `rolling_back` report. esp_timer_stop() checks
+ * under the lock: when it fails the timer has fired (or is firing), the decision is made, and
+ * it stands.
+ *
+ * Not paused while the moment is unsafe (R5-spec-1 D10): the safe-window wait (R5-fw-5) must
+ * never stop, extend or re-arm this timer. Only the reboot waits. */
+static void rearm_confirm_deadline(uint32_t deadline_s)
+{
+    if (!s_confirm_armed || s_confirm_timer == NULL) {
+        ESP_LOGE(TAG, "transaction %s: no confirm timer to re-arm — the boot arm's outcome "
+                      "stands",
+                 s_txn.cmd_id);
+        return;
+    }
+    if (deadline_s == s_confirm_deadline_s) {
+        ESP_LOGI(TAG, "transaction %s: confirm deadline stays %u s", s_txn.cmd_id,
+                 (unsigned)deadline_s);
+        return;
+    }
+
+    int64_t remaining_us =
+        (int64_t)deadline_s * 1000000 - (esp_timer_get_time() - s_confirm_origin_us);
+    if (remaining_us < 0) {
+        remaining_us = 0; /* already overdue: it fires at once, in the esp_timer task */
+    }
+    if (esp_timer_stop(s_confirm_timer) != ESP_OK) {
+        ESP_LOGW(TAG, "transaction %s: the confirm timer has already fired — its decision "
+                      "stands",
+                 s_txn.cmd_id);
+        return;
+    }
+    /* Stopped: the callback cannot run until the start below, so this store is race-free. */
+    s_confirm_deadline_s = deadline_s;
+    /* Cannot fail after a successful stop. If it did, the abort resets an image still in
+     * PENDING_VERIFY and the bootloader rolls it back: the boot arm's own posture. */
+    ESP_ERROR_CHECK(esp_timer_start_once(s_confirm_timer, (uint64_t)remaining_us));
+    ESP_LOGW(TAG, "transaction %s: confirm deadline %u s from image start (%d s left)",
+             s_txn.cmd_id, (unsigned)deadline_s, (int)(remaining_us / 1000000));
 }
 
 /* ── the transaction that crossed the reboot (R2-be-1) ──────────────────────────────
@@ -572,6 +668,11 @@ static void classify_txn(void)
             if (state == ESP_OTA_IMG_PENDING_VERIFY) {
                 s_txn.kind = TXN_CONFIRMING;
                 ESP_LOGW(TAG, "transaction %s: confirming on %s", s_txn.cmd_id, running->label);
+                /* R5-fw-3: the stage's deadline, clamped again with THIS image's limits (an
+                 * FF_ROLLBACK_TEST image caps it at 60 s). 0 = a record from before R5-fw-3. */
+                rearm_confirm_deadline(rec.confirm_timeout_s == 0
+                                           ? CONFIRM_TIMEOUT_S
+                                           : confirm_timeout_clamp((double)rec.confirm_timeout_s));
                 return;
             }
             if (state == ESP_OTA_IMG_VALID) {
@@ -724,7 +825,7 @@ static void on_connected(ff_mqtt_ctx_t *ctx)
         ctx->announce_msg_id = -1;
         ESP_LOGE(TAG, "FF_ROLLBACK_TEST: ignoring the announce ack on purpose — this "
                       "image must roll back in %d s",
-                 CONFIRM_TIMEOUT_S);
+                 (int)s_confirm_deadline_s);
 #endif
         free(announce);
     } else {
@@ -971,13 +1072,24 @@ static void on_stage(const cJSON *root, const char *id)
         cmd.apply_now = false;
     }
 
-    /* `confirm_timeout_s` is parsed and IGNORED at R1: the compile-time CONFIRM_TIMEOUT_S
-     * above is already the spec's 300 s, and the confirm timer is armed at boot, long
-     * before any command arrives. R2-fw-3 makes it dynamic. */
+    /* `confirm_timeout_s` (R5-fw-3, R5-spec-1 D10): the new image's confirm deadline,
+     * counted from its start. Resolved HERE, the one place the wire is interpreted: clamped
+     * to 30-3600 s, CONFIRM_TIMEOUT_S when absent or not a number. ff_ota records it in the
+     * transaction; the new image re-arms its confirm timer with it once it reads the record.
+     * Logged without %f: newlib-nano's printf may have no float support. */
+    cmd.confirm_timeout_s = CONFIRM_TIMEOUT_S;
     const cJSON *confirm = cJSON_GetObjectItemCaseSensitive(root, "confirm_timeout_s");
-    if (cJSON_IsNumber(confirm) && (int)confirm->valuedouble != CONFIRM_TIMEOUT_S) {
-        ESP_LOGW(TAG, "command asks for a %d s confirm timeout; this firmware uses %d s",
-                 (int)confirm->valuedouble, CONFIRM_TIMEOUT_S);
+    if (cJSON_IsNumber(confirm)) {
+        cmd.confirm_timeout_s = confirm_timeout_clamp(confirm->valuedouble);
+        if (!(confirm->valuedouble >= CONFIRM_TIMEOUT_MIN_S &&
+              confirm->valuedouble <= CONFIRM_TIMEOUT_MAX_S)) {
+            ESP_LOGW(TAG, "stage id=%s: confirm_timeout_s is outside %d-%d s — using %u s",
+                     cmd.cmd_id, CONFIRM_TIMEOUT_MIN_S, CONFIRM_TIMEOUT_MAX_S,
+                     (unsigned)cmd.confirm_timeout_s);
+        }
+    } else if (confirm != NULL) {
+        ESP_LOGW(TAG, "stage id=%s: confirm_timeout_s is not a number — using %u s", cmd.cmd_id,
+                 (unsigned)cmd.confirm_timeout_s);
     }
 
     esp_err_t err = ff_ota_start(&cmd);

@@ -40,7 +40,12 @@ two things and nothing else:
    a console.
 2. **`CONFIRM_TIMEOUT_S` drops 300 → 60**. This does not weaken the test. The timer under
    test is the one compiled into the *new* image. Thus, the mechanism is identical and only
-   the wait is shorter.
+   the wait is shorter. Since R5-fw-3 the same flag also **caps a command's
+   `confirm_timeout_s` at 60 s** (`CONFIRM_TIMEOUT_MAX_S`). The server always sends its
+   `Settings.confirm_timeout_s` (300), which therefore still gives 60 here — no re-arm, the
+   same timing as before. A shorter command (30-59 s) gives its own value, which is how the
+   per-command deadline is proven in QEMU
+   ([agent-qemu.md](agent-qemu.md) → *A per-command confirm deadline*).
 
 The flag also appends `-rbtest` to `PROJECT_VER`, which travels through
 `esp_app_get_description()->version` into every `up/announce`. One switch, so there is no

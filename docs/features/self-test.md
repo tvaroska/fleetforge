@@ -601,7 +601,7 @@ Answered (R5-spec-1): it stays awake from `staging` until `confirmed` or `rolled
   dispatched (queue size 1), so it would stall while disconnected.
 - **Named gaps.** (1) BOOTED_NEW has no confirm deadline (R2b-fw-2). A never-armed image whose
   self-test never answers stays unconfirmed and unreported until it does. R5-fw-3 may arm an
-  app-side deadline. (2) A crash or reset mid-self-test reports `selftest timed out`. (3) A
+  app-side deadline. (R5-fw-3 did not arm one: see *R5-fw-3 as built*.) (2) A crash or reset mid-self-test reports `selftest timed out`. (3) A
   board returning to a pre-R5 agent loses the reason (R5-spec-1). (4) A pass whose mark-valid
   fails leaves PENDING_VERIFY with the confirm claimed: the bootloader rolls back at the next
   reset and reports `selftest timed out` (the pre-store). That is the same as today's ack-path
@@ -667,6 +667,141 @@ Answered (R5-spec-1): it stays awake from `staging` until `confirmed` or `rolled
   race, and the backstop. These are covered by the source pins only. The Arduino bootloader
   does not log `Loaded app from partition`, so "back on B" rests on B's firmware string in
   the morse line and the row's `fw_version`, as in phase 2c.
+
+### R5-fw-3 as built
+
+- **What was built.** The agent honours `dn/cmd.confirm_timeout_s`, unreleased (no version
+  bump; the release waits for the owner's Patch A). `on_stage()` (the command seam) resolves
+  the value: a number is clamped to 30-3600 s, an absent or non-number field gives
+  `CONFIRM_TIMEOUT_S` (300). The result travels in `ff_ota_cmd_t.confirm_timeout_s`;
+  `ff_ota.c` passes it to `ff_txn_save()` unread. `ff_txn` gains an optional u32 key
+  `confirm_s`. On the OTA boot, the first-statement arm still starts at `CONFIRM_TIMEOUT_S`
+  with no NVS; once `classify_txn()` has read the record and found `TXN_CONFIRMING`, the new
+  `rearm_confirm_deadline()` moves the running timer to the stage's deadline counted from the
+  same image start. No spec, server, `Fleetforge.cpp`, `fleetforge_start.c`, `agent_main.c`,
+  partition or sdkconfig change.
+- **Decisions.**
+  - (1) **Where the value lives.** `FF_TXN_KEY_CONFIRM "confirm_s"`, `ff_txn_t.confirm_timeout_s`,
+    0 when not stored (a record from before R5-fw-3). It follows the `detail` rule: it is read
+    only after the record has been judged complete, and a missing key is never a torn record.
+  - (2) **Who clamps.** `ff_mqtt.c`, twice. `on_stage()` with the stager's limits, and
+    `classify_txn()` again with the NEW image's limits (`0` means `CONFIRM_TIMEOUT_S`). The second
+    clamp is what lets a rollback-test image cap a value a plain stager stored.
+    `confirm_timeout_clamp(double)` compares as a double before any cast: NaN, negatives and 0
+    give 30, anything above the maximum (inf too) gives the maximum, a fraction truncates.
+    `on_stage` warns (never with `%f`) only when it clamped (`confirm_timeout_s is outside
+    30-3600 s — using N s`) or the field is not a number. The R1 "parsed and IGNORED" comment
+    and the `this firmware uses %d s` line are gone.
+  - (3) **The boot arm is unchanged.** `ff_mqtt_arm_confirm_timer()` still arms
+    `CONFIRM_TIMEOUT_S` with nothing but esp_timer and otadata. It now also keeps the handle
+    (`s_confirm_timer`), the origin (`s_confirm_origin_us = esp_timer_get_time()`, taken
+    immediately before `esp_timer_start_once`) and the deadline in force
+    (`s_confirm_deadline_s`). Its log line `OTA boot: %d s from now …` still prints
+    `CONFIRM_TIMEOUT_S`, which is true at that moment.
+  - (4) **The re-arm.** Only in the `TXN_CONFIRMING` branch, after its log line. TXN_NONE with
+    PENDING_VERIFY (an image OTA'd before 0.4.0, no record) keeps 300 s; BOOTED_NEW gets no
+    timer. The body: no timer → log E and return (the boot arm's outcome stands); the same
+    deadline → `confirm deadline stays N s` and return, the timer untouched (so the default
+    300 s path and the rbtest 60 s path are timer-identical to R5-fw-2); otherwise
+    `remaining = deadline − (now − origin)`, clamped at 0 (an overdue deadline fires at once,
+    in the esp_timer task; the callback is never called directly); `esp_timer_stop()` — a
+    failure means the timer has fired or is firing, so the decision stands, log W, return;
+    store the new deadline (race-free: the timer is stopped); `ESP_ERROR_CHECK(
+    esp_timer_start_once(...))`; log W `transaction <id>: confirm deadline N s from image start
+    (M s left)`.
+  - (5) **`FF_ROLLBACK_TEST` caps the deadline at 60 s** (`CONFIRM_TIMEOUT_MAX_S 60` inside the
+    existing fault-injection block; 3600 in the `#else`; `CONFIRM_TIMEOUT_MIN_S 30` outside).
+    The server always sends 300, so a rollback-test image still rolls back at 60 s and the
+    quickstart's phase 2c and the runbooks are unchanged, while a shorter command gives its
+    own value. A `_Static_assert` keeps the default inside the clamp. This extends the one
+    documented fault-injection block; it is not a new test-only override.
+  - (6) **The callback reports the deadline in force.** `confirm_timeout_cb`'s two lines keep
+    their format strings byte for byte; only the argument changed, to `(int)s_confirm_deadline_s`
+    (`static volatile uint32_t`, an atomic aligned store). The `FF_ROLLBACK_TEST` hook line in
+    `on_connected` prints the same value (it runs after classify). Nothing from
+    `TIMER_FORBIDDEN` entered the timer-context functions.
+  - (7) **Save order.** erase → target → `confirm_s` → `cmd_id` → commit. `cmd_id` stays the
+    completion marker, so a complete record always carries the deadline, and a torn save
+    reads back as no record (a lost report, never a lost rollback; the image then keeps 300 s).
+  - (8) **Not paused while unsafe (D10).** Written into `rearm_confirm_deadline`'s comment: the
+    safe-window wait (R5-fw-5) must never stop, extend or re-arm this timer; only the reboot
+    waits.
+- **Rejected.** `esp_timer_restart()`: IDF 5.5 checks `timer_armed()` before it takes the list
+  lock, so it can re-insert a timer that has just been dispatched and run the callback twice
+  (the second run takes the backstop branch and reboots without the `rolling_back` report);
+  `esp_timer_stop()` checks under the lock. A re-arm in `agent_main.c`, `fleetforge_start.c` or
+  `Fleetforge.cpp` (CRITICAL files, and the R2-fw-4 parity tests pin the arm as a no-NVS first
+  statement). Arming an app-side deadline for BOOTED_NEW (it needs its own decision). An
+  uncapped rbtest image (the server's 300 would break phase 2c and the runbooks). Clamping in
+  `ff_ota.c` (the seam is `on_stage`; `ff_ota.c` never interprets the wire).
+- **Named gaps.** (a) An image that hangs BEFORE `ff_mqtt_run()` (net bring-up, enrollment, the
+  `-hangtest` fault image) keeps the boot arm's 300 s, because only `classify_txn()` reads the
+  record: a shorter command waits 300 s there, and a longer one rolls back at 300 s, earlier
+  than asked, which is the safe direction. The agent-qemu runbook's *Hang before the session*
+  row stays at 300 s and is still correct. (b) BOOTED_NEW still has no deadline. (c) The
+  simulator keeps its own `--confirm-timeout`; only its stale comment changed (teaching it the
+  command is left to R5-be-2/R5-test-1).
+- **Proposed spec addendum (paste-ready, for the owner; `spec/` is not edited).** One sentence
+  after Patch A4's *The confirm deadline* paragraph: "Until the device has read its transaction
+  record, which happens once its network is up, it uses 300 s."
+- **Tests.** `tests/test_agent_txn.py` (+11, the `R5-fw-3` section): the header key, field and
+  3-arg prototype; the save order erase < target < confirm < cmd_id < commit; the confirm read
+  after the torn check and outside it, reset to 0 on error; `ff_ota.c` passes
+  `cmd->confirm_timeout_s` and holds no `cJSON`/`CONFIRM_TIMEOUT`; the MIN/MAX defines, the 60
+  cap only inside `#if FF_ROLLBACK_TEST`, 3600 in its `#else`, `_Static_assert`, 300 still the
+  default; the clamp compares before it casts; `on_stage` sets the default before the clamp and
+  both before `ff_ota_start`, no `this firmware uses`, no `%f`; the arm keeps the handle,
+  deadline and origin (before the start), still 300 s; the re-arm short-circuits, then stops,
+  stores, starts, uses the origin, never `esp_timer_restart` anywhere, and calls no
+  callback/NVS/txn/mqtt/enqueue; exactly one re-arm call, in the `TXN_CONFIRMING` branch after
+  the kind and before its `return;`, through the clamp, absent from every timer-context
+  function and `on_stage`; the callback's two lines and the hook line print
+  `s_confirm_deadline_s`. **Mutation checks**, each red and then reverted: (i) the record used
+  raw, without the load-time clamp (`test_only_a_confirming_transaction_rearms`); (ii) stop+start
+  swapped for `esp_timer_restart` (`test_the_rearm_stops_then_starts_and_never_restarts`); (iii)
+  the remaining time from `esp_timer_get_time()` alone, without the origin (same test); (iv) the
+  confirm key written after `cmd_id` (`test_the_deadline_is_saved_before_the_completion_marker`).
+- **T1.** `just test`: 2021 passed; ruff, format and mypy clean. `just agent-build-all`: four
+  `BUNDLE OK`, 0 warnings. `APP_SIZE_BUDGET_BYTES` raised to the measured byte: esp32
+  1,037,360 (+1,184), esp32s3 1,017,344 (+1,200), esp32c3 1,078,080 (+1,328), esp32c6
+  1,127,648 (+1,328); mostly the new log strings. `just lib-quickstart --build-only`:
+  `== PASS (832 s)` (Arduino A esp32 1,184,336 B / esp32s3 1,177,616 B, own project, build B,
+  basic_idf esp32 1,111,984 B / esp32s3 1,117,184 B; 0 library warnings).
+- **T2 (local dev stack on 8088; api recreated with 10.0.2.2 origins, restored afterwards).**
+  Board A = `agent/dist/esp32` from `agent-build-all` (agent 0.5.0); R = the same source with
+  `FF_ROLLBACK_TEST=1` in `/tmp/ff-fw3-R` (`agent 0.5.0-rbtest`, 1,037,488 B, 0 warnings).
+  - (a) The acceptance, a 30 s command. R uploaded as `0.5.0-rbtest-fw3-1792133121` (201); the
+    hand-built stage `fw3-30s-1792133121` (`apply: on_command`, `confirm_timeout_s: 30`) published
+    as `ff-commander`. A: `I (108238) ff-txn: transaction fw3-30s-1792133121 recorded (target
+    slot at 0x00200000, confirm 30 s)` → `I (108258) … ota_1 is staged and bootable`. After the
+    power cycle, R: `W (2899) OTA boot: 60 s from now …` → `W (12609) transaction …: confirming
+    on ota_1` → `W (12619) transaction …: confirm deadline 30 s from image start (20 s left)` →
+    `E (12849) FF_ROLLBACK_TEST: … roll back in 30 s` → `E (33039) no working session 30 s after
+    an OTA boot — …` → `rolling_back` queued → `SW_CPU_RESET`. No `no working session 60 s`, no
+    CONFIRMED. The deadline fired 30.14 s after the boot arm. otadata: ota_1 **`INVALID`**
+    (our timer), ota_0 VALID. A on ota_0: `Loaded app from partition at offset 0x20000`,
+    `transaction fw3-30s-1792133121: rolled_back (returned to ota_0; ota_1 did not confirm)`,
+    then the record cleared.
+  - The lower clamp, `confirm_timeout_s: 5` (`fw3-5s-1792133356`): A logs `confirm_timeout_s is
+    outside 30-3600 s — using 30 s` and `recorded (… confirm 30 s)`; R arms at 3305, re-arms
+    `30 s from image start (19 s left)` at 13425 and fires `no working session 30 s` at 33495
+    (30.19 s after the arm); ota_1 `INVALID`; `rolled_back (returned to ota_0; …)`.
+  - **About the plan's T window (29500-33000 ms).** The log timestamp counts from power-on, and
+    QEMU spends 2.4-2.6 s in the bootloader before `app_main`, where the deadline starts (the
+    boot arm is its first statement). The fires at 33039 and 33495 ms are 30.14 s and 30.19 s
+    after the arm, so the deadline is exact; the window should have read "30 s after the
+    `OTA boot:` line, ±0.5 s".
+  - (b) Regression, `just lib-quickstart`: `== PASS (2303 s)`. 2a `capabilities ['ota',
+    'selftest']`, agent 0.5.0. 2b B `confirmed`, detail `selftest passed`. 2c R logs `OTA boot:
+    60 s` and `E (70434) no working session 60 s after an OTA boot`, ends `rolled_back`, detail
+    `returned to ota_1; ota_0 did not confirm` (the server sent 300: the cap holds). 2d F's
+    detail is exactly `selftest failed: i2c sensor 0x48 did not ans; returned to ota_1`. 2e T
+    logs `E (310806) no self-test result 300 s after an OTA boot`, detail `selftest timed out;
+    returned to ota_1` (the default path, no re-arm).
+  - (c) `just agent-qemu-smoke esp32`: `HARNESS OK`.
+  - Gotcha: in both runs QEMU survived R's `esp_restart()` and booted ota_0 on its own
+    (`rst:0xc (SW_CPU_RESET)`, then `Loaded app … 0x20000`), so no stop/start was needed for the
+    rollback; the otadata was read after a stop.
 
 ## Reuse note
 

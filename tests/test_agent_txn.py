@@ -242,3 +242,147 @@ def test_only_the_session_annotates_the_record() -> None:
     for path in agent_sources():
         if path.name not in ("ff_mqtt.c", "ff_txn.c", "ff_txn.h"):
             assert "ff_txn_set_detail" not in _code(path), path.name
+
+
+# ── R5-fw-3: the stage's confirm deadline crosses the reboot ──────────────────────────
+
+
+def _rollback_test_blocks() -> list[str]:
+    return re.findall(r"#if FF_ROLLBACK_TEST\n(.*?)#endif", FF_MQTT_C.read_text(), re.S)
+
+
+def test_the_record_carries_an_optional_confirm_deadline() -> None:
+    header = _code(FF_TXN_H)
+    assert '#define FF_TXN_KEY_CONFIRM "confirm_s"' in header
+    assert "uint32_t confirm_timeout_s;" in header
+    assert (
+        "esp_err_t ff_txn_save(const char *cmd_id, uint32_t target_addr, "
+        "uint32_t confirm_timeout_s);"
+    ) in header
+
+
+def test_the_deadline_is_saved_before_the_completion_marker() -> None:
+    """cmd_id is written last: a complete record always carries the deadline its stage asked
+    for, and a torn save still reads back as no record."""
+    save = _function_body(_code(FF_TXN_C), "ff_txn_save")
+    erase = save.index("nvs_erase_all(handle)")
+    target = save.index("nvs_set_u32(handle, FF_TXN_KEY_TARGET")
+    confirm = save.index("nvs_set_u32(handle, FF_TXN_KEY_CONFIRM, confirm_timeout_s)")
+    cmd_id = save.index("nvs_set_str(handle, FF_TXN_KEY_CMD_ID")
+    commit = save.index("nvs_commit(handle)")
+    assert erase < target < confirm < cmd_id < commit
+
+
+def test_a_missing_deadline_never_makes_a_record_torn() -> None:
+    """Every record an agent before R5-fw-3 wrote has no confirm key: it is still complete."""
+    body = _function_body(_code(FF_TXN_C), "ff_txn_load")
+    torn = re.search(r"\} else if \((id_err != ESP_OK[^{]*)\) \{", body)
+    assert torn is not None
+    assert "CONFIRM" not in torn.group(1) and "confirm" not in torn.group(1)
+    read = body.index("nvs_get_u32(handle, FF_TXN_KEY_CONFIRM, &out->confirm_timeout_s)")
+    assert torn.start() < read, "the deadline is read only after the record is judged complete"
+    assert "out->confirm_timeout_s = 0;" in body[read:]
+
+
+def test_ff_ota_records_the_deadline_without_interpreting_it() -> None:
+    ota = _code(FF_OTA_C)
+    assert "ff_txn_save(cmd->cmd_id, target->address, cmd->confirm_timeout_s)" in ota
+    assert "cJSON" not in ota, "the command seam stays in ff_mqtt.c"
+    assert "CONFIRM_TIMEOUT" not in ota
+    assert "uint32_t confirm_timeout_s;" in _code(COMPONENT_SRC / "ff_ota.h")
+
+
+def test_the_clamp_limits_are_spelled_once() -> None:
+    code = _code(FF_MQTT_C)
+    assert re.search(r"^#define CONFIRM_TIMEOUT_S 300$", code, re.M)
+    assert re.search(r"^#define CONFIRM_TIMEOUT_MIN_S 30$", code, re.M)
+    assert re.search(r"^#define CONFIRM_TIMEOUT_MAX_S 3600$", code, re.M)
+    assert "_Static_assert(" in code
+    blocks = _rollback_test_blocks()
+    rbtest = [b for b in blocks if "#define CONFIRM_TIMEOUT_S 60" in b]
+    assert len(rbtest) == 1
+    # The rollback-test image caps a command's deadline at its own 60 s (the server sends
+    # 300), and the plain build's 3600 sits in the #else branch, not in the test branch.
+    head, _, plain = rbtest[0].partition("#else")
+    assert "#define CONFIRM_TIMEOUT_MAX_S 60" in head
+    assert "#define CONFIRM_TIMEOUT_MAX_S 3600" not in head
+    assert "#define CONFIRM_TIMEOUT_MAX_S 3600" in plain
+    assert "CONFIRM_TIMEOUT_MIN_S" not in rbtest[0]
+
+
+def test_the_clamp_compares_before_it_casts() -> None:
+    body = _function_body(_code(FF_MQTT_C), "confirm_timeout_clamp")
+    low = body.index("!(requested_s >= CONFIRM_TIMEOUT_MIN_S)")
+    high = body.index("requested_s > CONFIRM_TIMEOUT_MAX_S")
+    cast = body.index("(uint32_t)requested_s")
+    assert low < high < cast
+
+
+def test_the_command_seam_resolves_the_deadline() -> None:
+    body = _function_body(_code(FF_MQTT_C), "on_stage")
+    default = body.index("cmd.confirm_timeout_s = CONFIRM_TIMEOUT_S;")
+    clamped = body.index("confirm_timeout_clamp(confirm->valuedouble)")
+    assert default < clamped < body.index("ff_ota_start(&cmd)")
+    assert "this firmware uses" not in body
+    assert "%f" not in _code(FF_MQTT_C), "newlib-nano printf may lack float support"
+
+
+def test_the_boot_arm_keeps_the_timer_and_its_origin() -> None:
+    body = _function_body(_code(FF_MQTT_C), ARM)
+    assert "s_confirm_timer" in body
+    assert "s_confirm_deadline_s = CONFIRM_TIMEOUT_S;" in body
+    origin = body.index("s_confirm_origin_us = esp_timer_get_time();")
+    assert origin < body.index("esp_timer_start_once(")
+    assert "(uint64_t)CONFIRM_TIMEOUT_S * 1000000ULL" in body, "the boot arm is still 300 s"
+
+
+REARM = "rearm_confirm_deadline"
+
+
+def test_the_rearm_stops_then_starts_and_never_restarts() -> None:
+    """esp_timer_restart() checks `armed` outside the list lock in IDF 5.5 and can run the
+    callback twice; esp_timer_stop() decides under it."""
+    code = _code(FF_MQTT_C)
+    assert "static volatile uint32_t s_confirm_deadline_s = CONFIRM_TIMEOUT_S;" in code
+    assert "esp_timer_restart" not in code
+    body = _function_body(code, REARM)
+    short = body.index("deadline_s == s_confirm_deadline_s")
+    stop = body.index("esp_timer_stop(s_confirm_timer)")
+    store = body.index("s_confirm_deadline_s = deadline_s;")
+    start = body.index("esp_timer_start_once(s_confirm_timer")
+    assert short < stop < store < start
+    assert "s_confirm_origin_us" in body[:stop], "counted from image start, not from now"
+    assert "s_confirm_armed" in body[:short]
+    for forbidden in (
+        "confirm_timeout_cb(",
+        "nvs_",
+        "ff_txn_",
+        "esp_mqtt_client_",
+        "enqueue_status",
+    ):
+        assert forbidden not in body, forbidden
+
+
+def test_only_a_confirming_transaction_rearms() -> None:
+    code = _code(FF_MQTT_C)
+    classify = _function_body(code, "classify_txn")
+    assert classify.count(f"{REARM}(") == 1
+    branch_start = classify.index("state == ESP_OTA_IMG_PENDING_VERIFY")
+    branch = classify[branch_start : classify.index("return;", branch_start)]
+    assert "s_txn.kind = TXN_CONFIRMING;" in branch
+    assert branch.index("s_txn.kind = TXN_CONFIRMING;") < branch.index(f"{REARM}(")
+    call = branch[branch.index(f"{REARM}(") :]
+    assert "confirm_timeout_clamp((double)rec.confirm_timeout_s)" in call
+    assert "rec.confirm_timeout_s == 0" in call
+    # Defined once, called once: nowhere else, and never from timer context.
+    assert code.count(f"{REARM}(") == 2
+    for name in ("confirm_timeout_cb", "rollback_now_cb", ARM, "on_stage"):
+        assert REARM not in _function_body(code, name), name
+
+
+def test_the_timeout_reports_the_deadline_in_force() -> None:
+    body = _function_body(_code(FF_MQTT_C), "confirm_timeout_cb")
+    assert body.count("(int)s_confirm_deadline_s") == 2
+    assert "CONFIRM_TIMEOUT_S" not in body
+    hook = [b for b in _rollback_test_blocks() if "ignoring the announce ack" in b]
+    assert len(hook) == 1 and "(int)s_confirm_deadline_s" in hook[0]

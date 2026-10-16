@@ -204,16 +204,24 @@ FORBIDDEN_OPTIONS = [
 # runner, its task and keep_reason are linked into the stock agent although it never
 # registers a self-test; plus the hold, selftest_done(), the detail helpers, the decision
 # latch in confirm_timeout_cb(), ff_txn_set_detail() and the detail read in ff_txn_load().
+#
+# R5-fw-3: +1.2-1.3 KB each. Raised 2026-10-16 for **all four targets**, all rebuilt, to the
+# exact measured byte: esp32 1,036,176 -> 1,037,360 (+1,184 B), esp32s3 1,016,144 ->
+# 1,017,344 (+1,200 B), esp32c3 1,076,752 -> 1,078,080 (+1,328 B), esp32c6 1,126,320 ->
+# 1,127,648 (+1,328 B). The added code is confirm_timeout_clamp(), rearm_confirm_deadline()
+# (esp_timer_stop + esp_timer_start_once and its four log lines), the stage-side resolve and
+# its two warnings in on_stage(), and the `confirm_s` u32 write in ff_txn_save() and read in
+# ff_txn_load(); most of the bytes are the new log strings.
 APP_SIZE_BUDGET_BYTES = {
-    "esp32": 1_036_176,
+    "esp32": 1_037_360,
     # Raised from 973_136 for the OTA-capable agent (R1-fw-1/R1-fw-2), which cost every
     # target ~18 KB. Only esp32 was raised at the time: this gate reads whatever is in
     # `agent/dist/`, so a target nobody had built locally is not checked and does not
     # fail. The other two were still carrying 0.2.0-era numbers until R2b-fw-1 raised
     # them — that was a gap in the gate, not slack here.
-    "esp32s3": 1_016_144,
-    "esp32c3": 1_076_752,
-    "esp32c6": 1_126_320,
+    "esp32s3": 1_017_344,
+    "esp32c3": 1_078_080,
+    "esp32c6": 1_127_648,
 }
 
 # An app may occupy at most this much of an OTA slot. Not a style rule: R2 downloads the

@@ -267,6 +267,53 @@ that adds only the `ff-qemu` labels, and set `FF_PUBLIC_BASE_URL=http://10.0.2.2
 FF_S3_PUBLIC_ENDPOINT_URL=http://10.0.2.2:9000` on the command. Put both back afterwards
 with the original `-f` set.
 
+#### A per-command confirm deadline (R5-fw-3)
+
+The agent honours a stage's `confirm_timeout_s` (clamped 30-3600 s, counted from the new
+image's start). The boot arm still starts at 300 s (60 s in a `-rbtest` image), because it
+runs before NVS; once the image has read its transaction record it re-arms for the
+remaining time. The server always sends 300, and a `-rbtest` image caps any command at 60 s
+([rollback-test.md](rollback-test.md)), so a shorter deadline needs a hand-built stage,
+published as the **commander** (the only role that may publish to `dn/#`; a denied publish
+is silent). The api must hand out `10.0.2.2` origins (see above).
+
+```bash
+just agent-build esp32                                   # board A, into agent/dist/esp32
+DOCKER_BUILDKIT=1 docker build --target export --output type=local,dest=/tmp/ff-fw3-R \
+    --build-arg IDF_IMAGE="$(just --evaluate idf_image)" --build-arg IDF_TARGET=esp32 \
+    --build-arg SOURCE_COMMIT=$(git rev-parse HEAD) --build-arg FF_ROLLBACK_TEST=1 agent
+python3 agent/tools/verify_bundle.py /tmp/ff-fw3-R       # agent 0.5.0-rbtest
+# TOKEN / FFE as in Setup, then agent-cfg with --api-base http://10.0.2.2:8088
+just agent-qemu esp32 --fresh > /tmp/fw3-A.log 2>&1 &    # wait for: announce acknowledged
+
+EPOCH=$(date +%s); V=0.5.0-rbtest-fw3-$EPOCH             # a unique label: no 409
+curl -sS -X POST "http://localhost:8088/v1/artifact?target=esp32&version=$V&partition_layout=ab-4m-v1" \
+    -H "Authorization: Bearer $TOKEN" -H 'content-type: application/octet-stream' \
+    --data-binary @/tmp/ff-fw3-R/app.bin                 # 201
+SHA=$(sha256sum /tmp/ff-fw3-R/app.bin | cut -d' ' -f1); SIZE=$(stat -c%s /tmp/ff-fw3-R/app.bin)
+URL=$(just artifact-url $SHA --base-url http://10.0.2.2:8088)
+CMD=fw3-30s-$EPOCH
+MSG=$(printf '{"id":"%s","type":"stage","artifact":{"url":"%s","sha256":"%s","size":%s,"version":"%s"},"apply":"on_command","confirm_timeout_s":30}' \
+      "$CMD" "$URL" "$SHA" "$SIZE" "$V")
+set -a; . ./.env; set +a
+just mqtt-pub 'ff/v1/d/000000000000/dn/cmd' "$MSG" 0 "$MQTT_COMMAND_USERNAME" "$MQTT_COMMAND_PASSWORD"
+# A: ff-txn: transaction fw3-30s-… recorded (target slot at 0x…, confirm 30 s)
+#    update fw3-30s-…: ota_1 is staged and bootable
+sleep 1; just agent-qemu-stop esp32; just agent-qemu esp32 > /tmp/fw3-R.log 2>&1 &
+```
+
+R must log, in this order: `OTA boot: 60 s from now …` (the boot arm, unchanged),
+`transaction fw3-30s-…: confirming on ota_1`, `transaction fw3-30s-…: confirm deadline 30 s
+from image start (N s left)`, `FF_ROLLBACK_TEST: … roll back in 30 s`, and
+`E (T) ff-mqtt: no working session 30 s after an OTA boot` with T between 29500 and 33000 ms.
+Never `no working session 60 s`, never `CONFIRMED`. Then `sleep 10; just agent-qemu-stop
+esp32; just agent-qemu-otadata esp32`: ota_1 is **`INVALID`** (our timer), not `ABORTED`.
+Boot again: `Loaded app from partition at offset 0x20000` and `transaction fw3-30s-…:
+rolled_back (returned to ota_0; ota_1 did not confirm)`. A command below 30 (say `5`) is
+clamped at the stage (`confirm_timeout_s is outside 30-3600 s — using 30 s`) and behaves the
+same. An image that hangs BEFORE its session (the `-hangtest` row below) never reads the
+record and keeps the boot arm's 300 s, by design.
+
 
 ### Driving a failure: boot loop, power cut, torn otadata, hang (R2-test-1)
 
@@ -316,7 +363,7 @@ panic in the app that follows cannot confound it.
 | Power cut mid-download | Stop the board when `update <cmd>: 30%` appears. | Cold boot: same slot, `ota state valid`, no `transaction` line. The first 4096 bytes of the target slot are the new `app.bin`, the full prefix is not. Rows end at `downloading`. A repeat POST gets `reused: true` with the same cmd_id, and runs through to `confirmed`. |
 | Power cut during the read-back | Stop the board the moment `verifying` for the cmd reaches `up/status` (there is no serial line at read-back start). | No `matches what is on flash` line (if there is one you were late; repeat). Same cold boot as above. Rows end at `verifying`. |
 | Torn otadata | Stage any normal version with `on_command`, stop, `cp .qemu/flash-esp32.bin /tmp/ff-staged.bin`. Tear `newest` erased, start. Restore, tear `newest` partial, start. Restore untouched, start (the control). | Torn: the previous slot boots `valid` and logs `stale transaction record for <cmd> — discarded`; one `rst:` banner. Control: the new slot boots `pending_verify` and confirms. |
-| Hang before the session | Deploy a `-hangtest` artifact built from agent ≥ 0.4.3 with `on_command`. At `staged`: stop, start, then hands off for **≥ 330 s**. | R2-fw-4: `ff-mqtt: OTA boot: 300 s …` is logged **before** `ota state pending_verify`, then `FF_FAULT_TEST=hang` every 30 s. At ≈ 300 s of log time: `no working session 300 s after an OTA boot`. `Loaded app` names the old slot after the reset (or, after an `esp_timer_impl_init` panic, after a stop/start). otadecode: the hang slot is **`INVALID`** (our timer), not `ABORTED` (a reset). Rows `requested, staging, downloading, verifying, staged, rolled_back`, no `confirming`, no `rolling_back`. A `-hangtest` built before 0.4.3 (the dev catalog's `0.4.22-hangtest`) is the negative control: it sits in `PENDING_VERIFY` until a stop/start. |
+| Hang before the session | Deploy a `-hangtest` artifact built from agent ≥ 0.4.3 with `on_command`. At `staged`: stop, start, then hands off for **≥ 330 s**. | R2-fw-4: `ff-mqtt: OTA boot: 300 s …` is logged **before** `ota state pending_verify`, then `FF_FAULT_TEST=hang` every 30 s. At ≈ 300 s of log time: `no working session 300 s after an OTA boot`. `Loaded app` names the old slot after the reset (or, after an `esp_timer_impl_init` panic, after a stop/start). otadecode: the hang slot is **`INVALID`** (our timer), not `ABORTED` (a reset). Rows `requested, staging, downloading, verifying, staged, rolled_back`, no `confirming`, no `rolling_back`. A `-hangtest` built before 0.4.3 (the dev catalog's `0.4.22-hangtest`) is the negative control: it sits in `PENDING_VERIFY` until a stop/start. Since R5-fw-3 this stays at 300 s whatever the stage's `confirm_timeout_s`, by design: the record that carries it is read only once the session starts (named gap a, `docs/features/self-test.md` → *R5-fw-3 as built*). |
 
 **`otadata` moves at the start of every stage.** IDF's `esp_ota_begin()` erases the
 **inactive** otadata sector when it names a slot other than the running one

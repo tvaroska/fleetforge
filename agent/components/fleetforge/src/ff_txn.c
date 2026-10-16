@@ -52,7 +52,7 @@ static esp_err_t erase_locked(nvs_handle_t handle)
     return err;
 }
 
-esp_err_t ff_txn_save(const char *cmd_id, uint32_t target_addr)
+esp_err_t ff_txn_save(const char *cmd_id, uint32_t target_addr, uint32_t confirm_timeout_s)
 {
     if (cmd_id == NULL || cmd_id[0] == '\0' || strlen(cmd_id) >= FF_TXN_MAX_CMD_ID) {
         return ESP_ERR_INVALID_ARG;
@@ -70,12 +70,16 @@ esp_err_t ff_txn_save(const char *cmd_id, uint32_t target_addr)
         return err;
     }
 
-    /* Erase first, then the two keys: NVS writes each key as it is set, so this order is
-     * what makes every torn state read back as "no record" rather than as a mismatched
-     * pair. */
+    /* Erase first, then the keys, cmd_id LAST: NVS writes each key as it is set, so this
+     * order is what makes every torn state read back as "no record" rather than as a
+     * mismatched pair. cmd_id is the completion marker: R5-fw-3's confirm deadline is written
+     * before it, so a complete record always carries the deadline its stage asked for. */
     err = nvs_erase_all(handle);
     if (err == ESP_OK) {
         err = nvs_set_u32(handle, FF_TXN_KEY_TARGET, target_addr);
+    }
+    if (err == ESP_OK) {
+        err = nvs_set_u32(handle, FF_TXN_KEY_CONFIRM, confirm_timeout_s);
     }
     if (err == ESP_OK) {
         err = nvs_set_str(handle, FF_TXN_KEY_CMD_ID, cmd_id);
@@ -91,8 +95,9 @@ esp_err_t ff_txn_save(const char *cmd_id, uint32_t target_addr)
                  esp_err_to_name(err));
         return err;
     }
-    ESP_LOGI(TAG, "transaction %s recorded (target slot at 0x%08" PRIx32 ")", cmd_id,
-             target_addr);
+    ESP_LOGI(TAG, "transaction %s recorded (target slot at 0x%08" PRIx32 ", confirm %" PRIu32
+                  " s)",
+             cmd_id, target_addr, confirm_timeout_s);
     return ESP_OK;
 }
 
@@ -143,12 +148,23 @@ esp_err_t ff_txn_load(ff_txn_t *out)
          * optional and never makes a record torn (an agent before R5 never wrote it). */
         size_t detail_len = sizeof(out->detail);
         esp_err_t detail_err = nvs_get_str(handle, FF_TXN_KEY_DETAIL, out->detail, &detail_len);
+        /* R5-fw-3. Optional the same way: a record without it (an agent before R5-fw-3) is
+         * complete, and 0 tells the reader to use its default deadline. */
+        esp_err_t confirm_err = nvs_get_u32(handle, FF_TXN_KEY_CONFIRM, &out->confirm_timeout_s);
         nvs_close(handle);
         if (detail_err != ESP_OK) {
             out->detail[0] = '\0';
             if (detail_err != ESP_ERR_NVS_NOT_FOUND) {
                 ESP_LOGW(TAG, "cannot read the detail of transaction %s (%s) — reported without it",
                          out->cmd_id, esp_err_to_name(detail_err));
+            }
+        }
+        if (confirm_err != ESP_OK) {
+            out->confirm_timeout_s = 0;
+            if (confirm_err != ESP_ERR_NVS_NOT_FOUND) {
+                ESP_LOGW(TAG, "cannot read the confirm deadline of transaction %s (%s) — the "
+                              "default applies",
+                         out->cmd_id, esp_err_to_name(confirm_err));
             }
         }
     }
