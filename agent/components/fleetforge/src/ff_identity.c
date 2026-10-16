@@ -54,6 +54,9 @@ static bool s_have_partition_sha256;
  * built in the mqtt task after that start, so the client start orders the write before
  * every read and no lock is needed. */
 static bool s_rollback_capable;
+/* R5-fw-2. Set by ff_identity_note_selftest() from ff_mqtt_run() — main task, before
+ * esp_mqtt_client_start(); same threading argument as s_rollback_capable. */
+static bool s_selftest_registered;
 
 /* S0-fw-6, spec/device-protocol.md -> up/announce `reset_reason`: why the chip last reset,
  * read once in ff_identity_init() (every boot path calls it: agent_main.c,
@@ -366,6 +369,11 @@ void ff_identity_note_rollback_capable(void)
              stored ? "stored" : "NOT stored; announced for this boot only");
 }
 
+void ff_identity_note_selftest(bool registered)
+{
+    s_selftest_registered = registered;
+}
+
 const char *ff_device_id(void)
 {
     return s_device_id;
@@ -547,6 +555,13 @@ static cJSON *announce_object(const ff_cfg_t *cfg)
      * anywhere near the cause. */
     cJSON *capabilities = cJSON_CreateArray();
     cJSON_AddItemToArray(capabilities, cJSON_CreateString("ota"));
+    /* R5-fw-2 (R5-spec-1 D9): `selftest` only when this image registered one. Same rule as
+     * `ota`, a claim about what the board does: a server reads it as "an update of this
+     * firmware confirms only after its self-test passes", which ff_mqtt.c's hold makes true.
+     * The stock agent registers none and stays `["ota"]`. */
+    if (s_selftest_registered) {
+        cJSON_AddItemToArray(capabilities, cJSON_CreateString("selftest"));
+    }
     cJSON_AddItemToObject(root, "capabilities", capabilities);
     /* S0-fw-6: after `capabilities`, before `lib_marker`, as the spec prints it. */
     cJSON_AddStringToObject(root, "reset_reason", s_reset_reason);

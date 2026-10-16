@@ -70,6 +70,14 @@ extern "C" {
  * benches what a rollback-less bootloader leaves behind (DECISIONS 2026-10-04 A3). */
 void ff_identity_note_rollback_capable(void);
 
+/* R5-fw-2, R5-spec-1 D9. `selftest` in `capabilities` is a CLAIM about this image: a custom
+ * self-test is registered in the running image, so an OTA'd copy of it confirms only after
+ * that self-test passes. Called once, by ff_mqtt_run(), with ff_selftest_freeze()'s answer —
+ * main task, before esp_mqtt_client_start(), the same ordering as
+ * ff_identity_note_rollback_capable(). The enroll body is built before it and stays `["ota"]`;
+ * the first announce updates the server's row. */
+void ff_identity_note_selftest(bool registered);
+
 /* The 12-hex-digit device id. Valid after ff_identity_init(); "" before. */
 const char *ff_device_id(void);
 

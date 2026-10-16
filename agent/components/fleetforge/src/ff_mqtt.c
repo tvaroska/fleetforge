@@ -111,6 +111,20 @@ typedef enum {
  * never truncate against s_txn.detail[64]. */
 #define DETAIL_BOOTED_NEW "the bootloader never armed rollback for this image"
 
+/* R5-fw-2, R5-spec-1 D11: the self-test `detail` grammar. `selftest passed` on `confirmed`;
+ * `selftest failed: <reason>; returned to <slot>` and `selftest timed out; returned to
+ * <slot>` on `rolled_back`. The image under test stores the HEAD (everything before `; `)
+ * in ff_txn while it still runs; the image the board returns to appends the tail. The whole
+ * detail is at most DETAIL_MAX bytes (s_txn.detail[64] minus the terminator), and only the
+ * reason is ever shortened. */
+#define DETAIL_SELFTEST_PASSED "selftest passed"
+#define DETAIL_SELFTEST_TIMED_OUT "selftest timed out"
+#define DETAIL_SELFTEST_FAILED "selftest failed: "
+#define DETAIL_SELFTEST_PREFIX "selftest "
+#define DETAIL_RETURNED_TO "; returned to "
+#define DETAIL_NO_REASON "no reason given"
+#define DETAIL_MAX 63
+
 static struct {
     txn_kind_t kind;
     char cmd_id[FF_TXN_MAX_CMD_ID];
@@ -135,6 +149,9 @@ static int enqueue_status(const char *cmd_id, const char *state, int pct, const 
  * examples do — would silently disable auto-rollback for the whole fleet, since a bad
  * image would confirm itself before it had done anything. Hence: confirm only after the
  * board has demonstrably worked (broker connected AND the retained announce acknowledged).
+ * R5-fw-2: an image that registered a custom self-test is held one step further — the ack
+ * starts the self-test instead of confirming, and only its pass confirms, inside the same
+ * deadline; a fail rolls back at once, with the reason stored for the image it returns to.
  *
  * Do not try to prove these by forcing the partition state; R2 owns the live test.
  *
@@ -209,6 +226,60 @@ static esp_timer_handle_t s_rollback_timer;
  * and `rolled_back` for one transaction. The decision made at the timeout stands. */
 static volatile bool s_rollback_decided;
 
+/* R5-fw-2. Whether this image registered a custom self-test: ff_selftest_freeze()'s answer,
+ * written ONCE in ff_mqtt_run() before the first connect, so it is already true by the time
+ * the announce ack can set s_ctx.session_confirmed. Set at the ack instead, there would be a
+ * window where session_confirmed is true, this is still false, confirm_timeout_cb() returns,
+ * and the image runs unconfirmed with no deadline. Outside s_ctx, which ff_mqtt_run() memsets.
+ * (Not named ff_selftest_*: that prefix is the self-test API, and none of it belongs in the
+ * timer context that reads this.) */
+static volatile bool s_selftest_registered;
+
+/* R5-fw-2. Two parties can decide a held image's fate and they race: the self-test result
+ * (selftest_done(), in the ff_selftest task, possibly on the other core) and the confirm
+ * deadline (confirm_timeout_cb(), in the esp_timer task). Each CLAIMS its decision under this
+ * lock — s_confirm_claimed for a pass, s_rollback_decided for a fail or the deadline — and
+ * the first claim wins. Only the flags are touched under it: mark-valid, mark-invalid and
+ * every NVS write happen after the claim, outside the lock, because a flash write must never
+ * run inside a portMUX critical section. */
+static portMUX_TYPE s_decide_lock = portMUX_INITIALIZER_UNLOCKED;
+static bool s_confirm_claimed;
+
+/* R5-fw-2. `selftest failed: <reason>`, with the reason (already printable ASCII without `;`,
+ * ff_selftest.c) shortened so that the returned-to image's `<head>; returned to <slot>` fits
+ * DETAIL_MAX. Both A/B layouts have labels of one length (ota_0/ota_1), so the running label
+ * stands in for the one the board will return to: 27 bytes of reason. */
+static void selftest_failed_head(char *out, size_t len, const char *reason)
+{
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    const size_t label_len =
+        running != NULL ? strnlen(running->label, sizeof(running->label)) : strlen("ota_0");
+    const size_t fixed = strlen(DETAIL_SELFTEST_FAILED) + strlen(DETAIL_RETURNED_TO) + label_len;
+    const int budget = fixed < DETAIL_MAX ? (int)(DETAIL_MAX - fixed) : 0;
+    if (reason == NULL || reason[0] == '\0') {
+        reason = DETAIL_NO_REASON;
+    }
+    snprintf(out, len, DETAIL_SELFTEST_FAILED "%.*s", budget, reason);
+}
+
+/* R5-fw-2. The returned-to image's `<head>; returned to <label>`. A head stored by this agent
+ * already fits; as a defence against any other, the head is shortened so the whole stays
+ * within DETAIL_MAX, never below the `selftest failed: ` prefix. */
+static void compose_returned_detail(char *out, size_t len, const char *head, const char *label)
+{
+    const size_t tail_len = strlen(DETAIL_RETURNED_TO) + strlen(label);
+    size_t head_len = strlen(head);
+    if (head_len + tail_len > DETAIL_MAX) {
+        const size_t prefix_len =
+            strncmp(head, DETAIL_SELFTEST_FAILED, strlen(DETAIL_SELFTEST_FAILED)) == 0
+                ? strlen(DETAIL_SELFTEST_FAILED)
+                : head_len;
+        const size_t room = tail_len < DETAIL_MAX ? DETAIL_MAX - tail_len : 0;
+        head_len = room > prefix_len ? room : prefix_len;
+    }
+    snprintf(out, len, "%.*s" DETAIL_RETURNED_TO "%s", (int)head_len, head, label);
+}
+
 static void rollback_now_cb(void *arg)
 {
     (void)arg;
@@ -241,14 +312,50 @@ static void rollback_report_task(void *arg)
 static void confirm_timeout_cb(void *arg)
 {
     (void)arg;
-    if (s_ctx.session_confirmed || !pending_verify()) {
+    if (!pending_verify()) {
         return;
     }
-    ESP_LOGE(TAG, "no working session %d s after an OTA boot — marking this image invalid "
-                  "and rolling back to the previous slot",
-             CONFIRM_TIMEOUT_S);
+    /* R5-fw-2: a working session confirms on its own only when no self-test is registered.
+     * With one, the ack started the self-test and the image is still unconfirmed: the
+     * deadline still applies to it. */
+    if (s_ctx.session_confirmed && !s_selftest_registered) {
+        return;
+    }
 
-    s_rollback_decided = true;
+    /* R5-fw-2: claim the rollback (see s_decide_lock). Without a self-test nothing else ever
+     * claims, and this is the plain `s_rollback_decided = true` it always was. */
+    bool confirm_claimed;
+    bool already_decided;
+    portENTER_CRITICAL(&s_decide_lock);
+    confirm_claimed = s_confirm_claimed;
+    already_decided = s_rollback_decided;
+    if (!confirm_claimed && !already_decided) {
+        s_rollback_decided = true;
+    }
+    portEXIT_CRITICAL(&s_decide_lock);
+    if (confirm_claimed) {
+        /* The self-test passed first; its confirm is being written right now. */
+        ESP_LOGW(TAG, "the confirm deadline passed as a passing self-test confirms this image "
+                      "— not rolling back");
+        return;
+    }
+    if (already_decided) {
+        /* The backstop: the self-test failed and claimed the rollback, but its task (priority
+         * 1) has not got as far as the reboot by the deadline. Nothing to report here. */
+        ESP_LOGE(TAG, "the failed self-test's rollback has not happened by the confirm "
+                      "deadline — rolling back now");
+        esp_ota_mark_app_invalid_rollback_and_reboot(); /* does not return */
+        return;
+    }
+    if (s_ctx.session_confirmed) {
+        ESP_LOGE(TAG, "no self-test result %d s after an OTA boot — marking this image invalid "
+                      "and rolling back to the previous slot",
+                 CONFIRM_TIMEOUT_S);
+    } else {
+        ESP_LOGE(TAG, "no working session %d s after an OTA boot — marking this image invalid "
+                      "and rolling back to the previous slot",
+                 CONFIRM_TIMEOUT_S);
+    }
 
     /* The invariant: past the guard above, every path leaves either the rollback timer
      * running or the rollback already called. Nothing here blocks, and nothing here calls
@@ -266,6 +373,108 @@ static void confirm_timeout_cb(void *arg)
         return; /* rollback_now_cb() fires in ROLLBACK_REPORT_GRACE_MS */
     }
     esp_ota_mark_app_invalid_rollback_and_reboot(); /* does not return */
+}
+
+/* R5-fw-2. The self-test's answer, from the ff_selftest task (priority 1, never the esp-mqtt
+ * task or esp_timer), once per boot, for a boot the announce ack held (mqtt_event_handler).
+ * Task context: it may block on the client lock, allocate and write NVS, as
+ * rollback_report_task() does.
+ *
+ * Accepted race, documented: on a pass s_txn.kind / terminal_msg_id are written here while the
+ * mqtt task may read them. They are int-sized aligned stores; the worst case is a missed
+ * ff_txn_clear_if() (the PUBACK lands before terminal_msg_id is assigned) or a `confirmed`
+ * repeated by a reconnect — both say the same outcome again, which the server deduplicates
+ * (R2-be-1). The result is deliberately NOT handed to the mqtt task with
+ * esp_mqtt_dispatch_custom_event(): with the default one-slot event queue it is drained only
+ * when another mqtt event is dispatched, so it would stall while disconnected. */
+static void selftest_done(bool passed, const char *reason)
+{
+    /* Claim first (s_decide_lock). A deadline that already claimed the rollback stands. */
+    bool too_late;
+    portENTER_CRITICAL(&s_decide_lock);
+    too_late = s_rollback_decided;
+    if (!too_late) {
+        if (passed) {
+            s_confirm_claimed = true;
+        } else {
+            s_rollback_decided = true;
+        }
+    }
+    portEXIT_CRITICAL(&s_decide_lock);
+    if (too_late) {
+        ESP_LOGW(TAG, "the self-test answered after the confirm deadline — the rollback already "
+                      "decided stands; NOT confirming");
+        return;
+    }
+
+    const txn_kind_t kind = s_txn.kind;
+    if (passed) {
+        ESP_LOGW(TAG, "the custom self-test passed inside the confirm deadline — confirming "
+                      "this OTA image");
+        if (kind == TXN_BOOTED_NEW) {
+            /* DECISIONS R5-fw-2 (5): the never-armed image keeps DETAIL_BOOTED_NEW,
+             * already in s_txn.detail — the one sign this board cannot roll back by time. */
+            if (accept_unverified_image()) {
+                s_txn.kind = TXN_ALREADY_CONFIRMED;
+                s_txn.terminal_msg_id =
+                    enqueue_status(s_txn.cmd_id, FF_STATUS_CONFIRMED, 100, s_txn.detail);
+            }
+            return;
+        }
+        /* TXN_CONFIRMING reports; TXN_NONE (an image OTA'd by an agent before 0.4.0, no
+         * record) is confirmed and reports nothing, as on the ack path. */
+        const bool marked = confirm_this_image();
+        if (marked && kind == TXN_CONFIRMING) {
+            /* Detail before kind: a reconnect in between repeats the same words. */
+            strlcpy(s_txn.detail, DETAIL_SELFTEST_PASSED, sizeof(s_txn.detail));
+            s_txn.kind = TXN_ALREADY_CONFIRMED;
+            s_txn.terminal_msg_id =
+                enqueue_status(s_txn.cmd_id, FF_STATUS_CONFIRMED, 100, s_txn.detail);
+        }
+        return;
+    }
+
+    /* A fail. The reason goes to ff_txn NOW, at decision time and before any wait (D11), over
+     * the `selftest timed out` the ack pre-stored, so the image the board returns to can say
+     * why. TXN_BOOTED_NEW rolls itself back too (decision 9): IDF 5.5 never boots an INVALID
+     * entry, armed bootloader or not, and a firmware that says it is broken must not keep
+     * running. */
+    const bool owed = kind == TXN_CONFIRMING || kind == TXN_BOOTED_NEW;
+    if (owed) {
+        char head[FF_TXN_MAX_DETAIL];
+        selftest_failed_head(head, sizeof(head), reason);
+        (void)ff_txn_set_detail(s_txn.cmd_id, head);
+    }
+    ESP_LOGE(TAG, "the custom self-test failed — marking this image invalid and rolling back to "
+                  "the previous slot");
+
+    if (owed && s_rollback_timer == NULL) {
+        /* TXN_BOOTED_NEW: no confirm timer was armed, so nothing created this. Task context,
+         * so allocating here is fine. */
+        const esp_timer_create_args_t rollback_args = {
+            .callback = rollback_now_cb,
+            .name = "ff_rollback",
+        };
+        if (esp_timer_create(&rollback_args, &s_rollback_timer) != ESP_OK) {
+            s_rollback_timer = NULL;
+        }
+    }
+    /* The same invariant as confirm_timeout_cb(): from here the grace timer is running or the
+     * rollback has been called. With nothing to report on, it is immediate. */
+    if (owed && s_rollback_timer != NULL &&
+        esp_timer_start_once(s_rollback_timer, (uint64_t)ROLLBACK_REPORT_GRACE_MS * 1000ULL) ==
+            ESP_OK) {
+        if (s_ctx.connected) {
+            (void)enqueue_status(s_txn.cmd_id, FF_STATUS_ROLLING_BACK, FF_STATUS_PCT_NONE, NULL);
+        } else {
+            ESP_LOGW(TAG, "no broker session: %s for %s is not reported", FF_STATUS_ROLLING_BACK,
+                     s_txn.cmd_id);
+        }
+        return; /* rollback_now_cb() fires in ROLLBACK_REPORT_GRACE_MS */
+    }
+    esp_ota_mark_app_invalid_rollback_and_reboot(); /* does not return on success */
+    ESP_LOGE(TAG, "esp_ota_mark_app_invalid_rollback_and_reboot returned — there is no other "
+                  "bootable slot to go back to");
 }
 
 /* A second call would create a second one-shot confirm timer and leak its handle. */
@@ -367,8 +576,14 @@ static void classify_txn(void)
             }
             if (state == ESP_OTA_IMG_VALID) {
                 /* We confirmed, then reset before the `confirmed` PUBACK. Say it again; the
-                 * server deduplicates. */
+                 * server deduplicates. R5-fw-2: a stored self-test head means this image was
+                 * held, and under the hold VALID at the target is reachable only through a
+                 * self-test pass — so the repeat says the same words as the first time. */
                 s_txn.kind = TXN_ALREADY_CONFIRMED;
+                if (strncmp(rec.detail, DETAIL_SELFTEST_PREFIX, strlen(DETAIL_SELFTEST_PREFIX)) ==
+                    0) {
+                    strlcpy(s_txn.detail, DETAIL_SELFTEST_PASSED, sizeof(s_txn.detail));
+                }
                 ESP_LOGW(TAG, "transaction %s: already confirmed on %s", s_txn.cmd_id,
                          running->label);
                 return;
@@ -396,8 +611,16 @@ static void classify_txn(void)
         const esp_partition_t *invalid = esp_ota_get_last_invalid_partition();
         if (invalid != NULL && invalid->address == rec.target_addr) {
             s_txn.kind = TXN_ROLLED_BACK;
-            snprintf(s_txn.detail, sizeof(s_txn.detail), "returned to %s; %s did not confirm",
-                     running->label, invalid->label);
+            if (strncmp(rec.detail, DETAIL_SELFTEST_PREFIX, strlen(DETAIL_SELFTEST_PREFIX)) ==
+                0) {
+                /* R5-fw-2: the image under test stored why it is gone (its self-test failed,
+                 * or no result came before the deadline or a reset). */
+                compose_returned_detail(s_txn.detail, sizeof(s_txn.detail), rec.detail,
+                                        running->label);
+            } else {
+                snprintf(s_txn.detail, sizeof(s_txn.detail), "returned to %s; %s did not confirm",
+                         running->label, invalid->label);
+            }
             ESP_LOGW(TAG, "transaction %s: rolled_back (%s)", s_txn.cmd_id, s_txn.detail);
             return;
         }
@@ -421,8 +644,9 @@ static void report_txn_on_connect(void)
         }
         break;
     case TXN_ALREADY_CONFIRMED:
-        /* `detail` is empty on every path but a NEW-at-target confirm (R2b-fw-2), which a
-         * reconnect before the PUBACK must repeat word for word. */
+        /* `detail` is empty on every path but a NEW-at-target confirm (R2b-fw-2) and a
+         * self-test pass (R5-fw-2), which a reconnect before the PUBACK must repeat word for
+         * word. */
         if (s_txn.terminal_msg_id <= 0) {
             s_txn.terminal_msg_id =
                 enqueue_status(s_txn.cmd_id, FF_STATUS_CONFIRMED, 100,
@@ -852,6 +1076,26 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base, int32_t event_i
             if (s_rollback_decided) {
                 ESP_LOGW(TAG, "the announce ack arrived after the confirm timeout — the "
                               "rollback already decided stands; NOT confirming");
+            } else if (s_selftest_registered &&
+                       (pending_verify() || s_txn.kind == TXN_BOOTED_NEW)) {
+                /* R5-fw-2: the hold. This image registered a custom self-test, so reaching
+                 * the fleet is no longer enough: the ack starts the self-test in its own task
+                 * and only its pass confirms (selftest_done), inside the same deadline. The
+                 * outcome head is pre-stored STRICTLY BEFORE the run — selftest_done may run at
+                 * once on the other core, and its `failed` head must not be overwritten — so a
+                 * deadline (or a reset) with the self-test still pending reports `selftest
+                 * timed out` and the esp_timer path never writes NVS. TXN_BOOTED_NEW has no
+                 * deadline and no pre-store. */
+                if (s_txn.kind == TXN_CONFIRMING) {
+                    (void)ff_txn_set_detail(s_txn.cmd_id, DETAIL_SELFTEST_TIMED_OUT);
+                }
+                esp_err_t err = ff_selftest_run(selftest_done);
+                if (err != ESP_OK) {
+                    /* Fail-safe: no confirm without a pass. In pending_verify the deadline
+                     * rolls this image back with the pre-stored `selftest timed out`. */
+                    ESP_LOGE(TAG, "cannot start the custom self-test (%s) — NOT confirming",
+                             esp_err_to_name(err));
+                }
             } else if (confirm_this_image() && s_txn.kind == TXN_CONFIRMING) {
                 /* Reported only on a successful mark-valid. If marking failed nothing is
                  * said: the bootloader rolls back at the next reset and the image we
@@ -961,8 +1205,12 @@ esp_err_t ff_mqtt_run(const ff_cfg_t *cfg, const ff_cred_t *cred)
                                                    mqtt_event_handler, &s_ctx));
 
     /* R5-fw-1: the firmware's self-test registration is fixed from here, before the first
-     * connect builds an announce. R5-fw-2 runs it after the announce ack on an OTA boot. */
-    (void)ff_selftest_freeze();
+     * connect builds an announce. R5-fw-2: the answer gates the confirm (the hold in
+     * mqtt_event_handler, the deadline guard in confirm_timeout_cb) and becomes the `selftest`
+     * capability — set here, before the first connect and before the ack can set
+     * session_confirmed, never at the ack. */
+    s_selftest_registered = ff_selftest_freeze();
+    ff_identity_note_selftest(s_selftest_registered);
 
     /* What the last reboot left to report. The confirm timer is NOT armed here: it was
      * armed first thing in app_main (R2-fw-4, ff_mqtt_arm_confirm_timer), so it may fire

@@ -1,8 +1,8 @@
 /*
  * ff_selftest — the registration, the freeze and the runner of the firmware's self-test
  * (R5-fw-1). See include/ff_selftest.h for the maker API and ff_selftest_internal.h for the
- * hooks ff_mqtt.c calls. Until R5-fw-2 nothing calls ff_selftest_run(): the registration is
- * recorded and frozen, the runner is built and unwired.
+ * hooks ff_mqtt.c calls. Since R5-fw-2 ff_mqtt.c calls ff_selftest_run() from the announce-ack
+ * branch of a boot that needs confirming, and holds the confirm on the answer.
  *
  * Four properties, each one a way to get this silently wrong:
  *
@@ -18,8 +18,8 @@
  *    loop, and R4-fw-3 forwards log lines: a report that logged could recurse through that
  *    forwarder.
  * 4. FROZEN AT SESSION START (ff_selftest_freeze, from ff_mqtt_run before the first connect),
- *    so what the session announces (R5-fw-2) and what it runs are the same thing. A later
- *    registration is a deterministic refusal, not a race with the session.
+ *    so what the session announces (`selftest`, R5-fw-2) and what it runs are the same thing.
+ *    A later registration is a deterministic refusal, not a race with the session.
  *
  * Why a static binary semaphore wakes the runner and not a task notification: a report may
  * race the task's exit, and xTaskNotifyGive on a deleted task's handle is a use-after-free.
@@ -45,7 +45,7 @@ static const char *TAG = "ff-selftest";
 /* Below ff_hb/ff_tel (4) and esp-mqtt (5): a CPU-bound synchronous test must not starve the
  * session that keeps the broker connection. */
 #define FF_SELFTEST_PRIO 1
-/* The size of ff_txn's detail[64]; R5-fw-2 shortens the reason to fit its grammar. */
+/* The size of ff_txn's detail[64]; ff_mqtt.c shortens the reason to fit its grammar (R5-fw-2). */
 #define FF_SELFTEST_REASON_BUF 64
 /* How far a report's reason is scanned: a pointer to an unterminated string cannot run
  * away. */

@@ -686,7 +686,112 @@ class TestRollbackRun:
 
     def test_phase_board_runs_the_rollback_after_the_ota(self) -> None:
         source = inspect.getsource(quickstart.phase_board)
-        calls = ("phase_enroll(", "phase_ota(", "phase_rollback(", "check_no_credentials(")
-        positions = [source.index(call) for call in calls]
+        calls = (
+            "phase_enroll(",
+            "phase_ota(",
+            "phase_rollback(",
+            "phase_selftest_rollback(",  # F: the self-test fails
+            '"fail"',
+            "phase_selftest_rollback(",  # T: the self-test never answers
+            '"timeout"',
+            "stop_qemu(",
+            "check_no_credentials(",
+        )
+        positions = []
+        start = 0
+        for call in calls:
+            start = source.index(call, start)
+            positions.append(start)
+            start += len(call)
         assert positions == sorted(positions)
         assert "rollback_version(epoch)" in source and 'f"1.1.0-qs{epoch}"' in source
+        assert "selftest_fail_version(epoch)" in source
+        assert "selftest_timeout_version(epoch)" in source
+
+
+# R5-fw-2: the self-test builds and their verdict.
+class TestSelftestRun:
+    def test_the_failed_detail_of_build_f_is_exactly_63_bytes(self) -> None:
+        detail = quickstart.selftest_failed_detail(quickstart.SELFTEST_FAIL_REASON, "ota_1")
+        assert detail == "selftest failed: i2c sensor 0x48 did not ans; returned to ota_1"
+        assert len(detail.encode()) == 63
+
+    def test_semicolons_and_non_ascii_are_dropped(self) -> None:
+        detail = quickstart.selftest_failed_detail("bad;\u00e9x\ty\x7f", "ota_0")
+        assert detail == "selftest failed: badxy; returned to ota_0"
+
+    def test_an_empty_reason_is_named(self) -> None:
+        assert (
+            quickstart.selftest_failed_detail("", "ota_0")
+            == "selftest failed: no reason given; returned to ota_0"
+        )
+        assert (
+            quickstart.selftest_failed_detail(";\u00e9", "ota_1")
+            == "selftest failed: no reason given; returned to ota_1"
+        )
+
+    def test_a_short_reason_is_left_intact(self) -> None:
+        assert (
+            quickstart.selftest_failed_detail("no sensor on i2c", "ota_1")
+            == "selftest failed: no sensor on i2c; returned to ota_1"
+        )
+
+    def test_the_twin_matches_the_firmware_budget(self) -> None:
+        """ff_mqtt.c's DETAIL_MAX and grammar, ff_selftest.c's 64-byte reason buffer."""
+        mqtt = _code(COMPONENT_DIR / "src" / "ff_mqtt.c")
+        assert "#define DETAIL_MAX 63" in mqtt
+        assert '#define DETAIL_SELFTEST_FAILED "selftest failed: "' in mqtt
+        assert '#define DETAIL_RETURNED_TO "; returned to "' in mqtt
+        assert '#define DETAIL_NO_REASON "no reason given"' in mqtt
+        selftest = _code(COMPONENT_DIR / "src" / "ff_selftest.c")
+        assert "#define FF_SELFTEST_REASON_BUF 64" in selftest
+        assert quickstart.DETAIL_MAX == 63 and quickstart.SELFTEST_REASON_MAX == 63
+        assert quickstart.CONFIRM_TIMEOUT_S == 300
+        assert re.search(r"^#define CONFIRM_TIMEOUT_S 300$", mqtt, re.M)
+
+    def test_each_replacement_hits_the_committed_sketch_once(self) -> None:
+        """Otherwise build F or T silently tests nothing."""
+        sketch = EXAMPLE_INO.read_text()
+        for needle in (
+            quickstart.SELFTEST_STUB,
+            quickstart.SELFTEST_LOOP_ANSWER,
+            '"SOS"',
+            f'"{quickstart.VERSION_A}"',
+        ):
+            assert sketch.count(needle) == 1, needle
+        failing = sketch.replace(quickstart.SELFTEST_STUB, quickstart.SELFTEST_FAIL_STUB)
+        assert f'Fleetforge.selfTestDone(false, "{quickstart.SELFTEST_FAIL_REASON}");' in failing
+        silent = sketch.replace(quickstart.SELFTEST_LOOP_ANSWER, quickstart.SELFTEST_LOOP_SILENCED)
+        assert "Fleetforge.selfTestDone(true)" not in _code_of_ino(silent)
+
+    def test_the_versions_are_run_unique_and_marked(self) -> None:
+        for make, marker in (
+            (quickstart.selftest_fail_version, "-stfail"),
+            (quickstart.selftest_timeout_version, "-sttimeout"),
+        ):
+            version = make(1760000000)
+            assert version.endswith(marker) and "-qs1760000000" in version
+            assert len(version) <= 31  # Fleetforge.begin's limit
+            assert re.fullmatch(r"[A-Za-z0-9._+-]{1,64}", version)
+            assert make(1760000001) != version
+        assert quickstart.selftest_fail_version(1) != quickstart.selftest_timeout_version(1)
+        assert quickstart.selftest_fail_version(1) != quickstart.rollback_version(1)
+
+    def test_the_messages_differ_from_a_and_b(self) -> None:
+        messages = {
+            quickstart.SELFTEST_FAIL_MESSAGE,
+            quickstart.SELFTEST_TIMEOUT_MESSAGE,
+            quickstart.ROLLBACK_MESSAGE,
+            "SOS",
+            "HELLO",
+        }
+        assert len(messages) == 5
+
+    def test_the_run_line_is_the_runner_log(self) -> None:
+        selftest = (COMPONENT_DIR / "src" / "ff_selftest.c").read_text()
+        assert f'"{quickstart.SELFTEST_RUN_LINE}"' in selftest
+
+
+def _code_of_ino(text: str) -> str:
+    """The sketch without its // comments (good enough for Basic.ino's one-line comments)."""
+    return "\n".join(line.split("//", 1)[0] for line in text.splitlines())

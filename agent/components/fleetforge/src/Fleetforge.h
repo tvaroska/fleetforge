@@ -81,7 +81,7 @@ class FleetforgeClass {
   // own task (not loop()'s), after an image an OTA just wrote has reached the fleet, and
   // keeps the update only if the sketch answers selfTestDone(true) before the confirm
   // deadline; otherwise the board returns to the previous image. A serially flashed board
-  // never calls it. Until R5-fw-2: registered, not yet run.
+  // never calls it.
   // Returns false for nullptr, for a second registration, or once the library's session
   // has started (so do not register after slow initialisation).
   bool onSelfTest(void (*test)());

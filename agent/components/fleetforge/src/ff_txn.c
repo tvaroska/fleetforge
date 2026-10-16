@@ -118,12 +118,13 @@ esp_err_t ff_txn_load(ff_txn_t *out)
     size_t len = sizeof(out->cmd_id);
     esp_err_t id_err = nvs_get_str(handle, FF_TXN_KEY_CMD_ID, out->cmd_id, &len);
     esp_err_t addr_err = nvs_get_u32(handle, FF_TXN_KEY_TARGET, &out->target_addr);
-    nvs_close(handle);
 
     esp_err_t rc = ESP_OK;
     if (id_err == ESP_ERR_NVS_NOT_FOUND && addr_err == ESP_ERR_NVS_NOT_FOUND) {
+        nvs_close(handle);
         rc = ESP_ERR_NVS_NOT_FOUND; /* the namespace exists but holds nothing */
     } else if (id_err != ESP_OK || addr_err != ESP_OK || out->cmd_id[0] == '\0') {
+        nvs_close(handle);
         /* A torn save, or a value this firmware cannot hold. There is no transaction we
          * could honestly report against, so it is discarded rather than guessed at. */
         ESP_LOGW(TAG, "incomplete transaction record (cmd_id: %s, target: %s) — discarded",
@@ -137,6 +138,19 @@ esp_err_t ff_txn_load(ff_txn_t *out)
             ESP_LOGE(TAG, "cannot discard it: %s", esp_err_to_name(erase_err));
         }
         rc = ESP_ERR_NVS_NOT_FOUND;
+    } else {
+        /* R5-fw-2. Only now, with the record already judged complete: the detail is
+         * optional and never makes a record torn (an agent before R5 never wrote it). */
+        size_t detail_len = sizeof(out->detail);
+        esp_err_t detail_err = nvs_get_str(handle, FF_TXN_KEY_DETAIL, out->detail, &detail_len);
+        nvs_close(handle);
+        if (detail_err != ESP_OK) {
+            out->detail[0] = '\0';
+            if (detail_err != ESP_ERR_NVS_NOT_FOUND) {
+                ESP_LOGW(TAG, "cannot read the detail of transaction %s (%s) — reported without it",
+                         out->cmd_id, esp_err_to_name(detail_err));
+            }
+        }
     }
     unlock();
 
@@ -190,6 +204,59 @@ esp_err_t ff_txn_clear_if(const char *cmd_id)
         } else {
             ESP_LOGE(TAG, "cannot clear the record for %s: %s (the next boot reports it "
                           "again, which the server deduplicates)",
+                     cmd_id, esp_err_to_name(rc));
+        }
+    }
+    nvs_close(handle);
+    unlock();
+    return rc;
+}
+
+esp_err_t ff_txn_set_detail(const char *cmd_id, const char *detail)
+{
+    if (cmd_id == NULL || detail == NULL || strlen(detail) >= FF_TXN_MAX_DETAIL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!lock()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(FF_TXN_NAMESPACE, NVS_READWRITE, &handle);
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        unlock();
+        return ESP_ERR_NVS_NOT_FOUND; /* never written: no record to annotate */
+    }
+    if (err != ESP_OK) {
+        unlock();
+        ESP_LOGE(TAG, "cannot open nvs namespace '%s': %s", FF_TXN_NAMESPACE,
+                 esp_err_to_name(err));
+        return err;
+    }
+
+    char stored[FF_TXN_MAX_CMD_ID] = {0};
+    size_t len = sizeof(stored);
+    err = nvs_get_str(handle, FF_TXN_KEY_CMD_ID, stored, &len);
+    esp_err_t rc;
+    if (err == ESP_ERR_NVS_NOT_FOUND) {
+        rc = ESP_ERR_NVS_NOT_FOUND;
+    } else if (err != ESP_OK) {
+        ESP_LOGE(TAG, "cannot read the transaction record: %s", esp_err_to_name(err));
+        rc = err;
+    } else if (strcmp(stored, cmd_id) != 0) {
+        /* Another transaction owns the record now; its outcome is not this one's. */
+        ESP_LOGW(TAG, "transaction %s is superseded by %s — detail not stored", cmd_id, stored);
+        rc = ESP_ERR_INVALID_STATE;
+    } else {
+        rc = nvs_set_str(handle, FF_TXN_KEY_DETAIL, detail);
+        if (rc == ESP_OK) {
+            rc = nvs_commit(handle);
+        }
+        if (rc == ESP_OK) {
+            ESP_LOGI(TAG, "transaction %s: detail stored", cmd_id);
+        } else {
+            ESP_LOGE(TAG, "cannot store the detail of %s: %s (the board it returns to reports "
+                          "it without the reason)",
                      cmd_id, esp_err_to_name(rc));
         }
     }

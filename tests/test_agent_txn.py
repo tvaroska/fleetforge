@@ -195,3 +195,50 @@ def test_the_arm_is_idempotent() -> None:
     body = _function_body(_code(FF_MQTT_C), ARM)
     assert "s_confirm_armed" in body
     assert body.index("s_confirm_armed") < body.index("esp_timer_create")
+
+
+# ── R5-fw-2: the self-test head beside the record ─────────────────────────────────────
+
+
+def test_the_detail_is_stored_only_for_the_recorded_cmd_id() -> None:
+    """The ff_txn_clear_if rule: an older transaction's outcome never annotates a newer one,
+    and nothing is erased to do it."""
+    txn = _code(FF_TXN_C)
+    header = _code(FF_TXN_H)
+    assert "esp_err_t ff_txn_set_detail(const char *cmd_id, const char *detail);" in header
+    assert '#define FF_TXN_KEY_DETAIL "detail"' in header
+    assert "#define FF_TXN_MAX_DETAIL 64" in header
+    assert "char detail[FF_TXN_MAX_DETAIL];" in header
+    body = _function_body(txn, "ff_txn_set_detail")
+    assert "strlen(detail) >= FF_TXN_MAX_DETAIL" in body
+    assert "strcmp(stored, cmd_id) != 0" in body
+    assert body.index("strcmp(stored, cmd_id)") < body.index(
+        "nvs_set_str(handle, FF_TXN_KEY_DETAIL, detail)"
+    )
+    assert "return ESP_ERR_NVS_NOT_FOUND;" in body
+    assert "rc = ESP_ERR_INVALID_STATE;" in body
+    assert "nvs_commit(handle)" in body
+    assert "nvs_erase" not in body
+
+
+def test_a_missing_detail_never_makes_a_record_torn() -> None:
+    """Every record an agent before R5 wrote has no detail key: it must still be reported."""
+    body = _function_body(_code(FF_TXN_C), "ff_txn_load")
+    torn = re.search(r"\} else if \((id_err != ESP_OK[^{]*)\) \{", body)
+    assert torn is not None
+    assert "detail" not in torn.group(1)
+    read = body.index("nvs_get_str(handle, FF_TXN_KEY_DETAIL, out->detail, &detail_len)")
+    assert torn.start() < read, "the detail is read only after the record is judged complete"
+    assert "out->detail[0] = '\\0';" in body[read:]
+    # ff_txn_save keeps erasing first: a stale detail never survives into a new stage.
+    save = _function_body(_code(FF_TXN_C), "ff_txn_save")
+    assert save.index("nvs_erase_all(handle)") < save.index("nvs_set_u32(")
+    assert "FF_TXN_KEY_DETAIL" not in save
+
+
+def test_only_the_session_annotates_the_record() -> None:
+    assert "ff_txn_set_detail(" in _code(FF_MQTT_C)
+    assert "ff_txn_set_detail" not in _code(FF_OTA_C)
+    for path in agent_sources():
+        if path.name not in ("ff_mqtt.c", "ff_txn.c", "ff_txn.h"):
+            assert "ff_txn_set_detail" not in _code(path), path.name

@@ -196,16 +196,24 @@ FORBIDDEN_OPTIONS = [
 # esp32c3 1,072,464 -> 1,072,864, esp32c6 1,122,032 -> 1,122,432. The added code is
 # ff_selftest_freeze() and its two log lines, linked through ff_mqtt_run(); the stock agent
 # never registers a self-test, so the rest of ff_selftest.c is garbage-collected.
+#
+# R5-fw-2: +3.4-3.9 KB each. Raised 2026-10-15 for **all four targets**, all rebuilt, to the
+# exact measured byte: esp32 1,032,688 -> 1,036,176 (+3,488 B), esp32s3 1,012,704 ->
+# 1,016,144 (+3,440 B), esp32c3 1,072,864 -> 1,076,752 (+3,888 B), esp32c6 1,122,432 ->
+# 1,126,320 (+3,888 B). The announce-ack branch now references ff_selftest_run(), so the
+# runner, its task and keep_reason are linked into the stock agent although it never
+# registers a self-test; plus the hold, selftest_done(), the detail helpers, the decision
+# latch in confirm_timeout_cb(), ff_txn_set_detail() and the detail read in ff_txn_load().
 APP_SIZE_BUDGET_BYTES = {
-    "esp32": 1_032_688,
+    "esp32": 1_036_176,
     # Raised from 973_136 for the OTA-capable agent (R1-fw-1/R1-fw-2), which cost every
     # target ~18 KB. Only esp32 was raised at the time: this gate reads whatever is in
     # `agent/dist/`, so a target nobody had built locally is not checked and does not
     # fail. The other two were still carrying 0.2.0-era numbers until R2b-fw-1 raised
     # them — that was a gap in the gate, not slack here.
-    "esp32s3": 1_012_704,
-    "esp32c3": 1_072_864,
-    "esp32c6": 1_122_432,
+    "esp32s3": 1_016_144,
+    "esp32c3": 1_076_752,
+    "esp32c6": 1_126_320,
 }
 
 # An app may occupy at most this much of an OTA slot. Not a style rule: R2 downloads the

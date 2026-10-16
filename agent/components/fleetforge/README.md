@@ -51,9 +51,10 @@ because a registration after the library's session has started is refused. The f
 wins, and an answer when nothing is waiting is a harmless no-op, so `loop()` may answer on
 every pass. A fail's reason is printable ASCII, and the fleet sees at most 27 characters of
 it. Both examples keep an update only if their loop still runs: the test answers "pending",
-and the loop answers a pass after every whole blinked message. Until R5-fw-2 the library
-records the registration but does not run it yet: an OTA'd image still confirms on reaching
-the fleet.
+and the loop answers a pass after every whole blinked message. An image that registers a
+self-test announces the `selftest` capability. The deploy then ends `confirmed` with the detail
+`selftest passed`, or `rolled_back` with `selftest failed: <reason>; returned to <slot>` or
+`selftest timed out; returned to <slot>`.
 
 ## Quickstart: pick your toolchain
 

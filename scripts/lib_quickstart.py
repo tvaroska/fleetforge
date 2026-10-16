@@ -32,8 +32,9 @@ the library or the example, the app under the 1966080-byte slot. The IDF builds 
 decode the built partition table (== `agent/partitions.csv`, layout ab-4m-v1), read the
 resolved sdkconfig (rollback on, no eFuse burns) and the app descriptor (version 1.0.0).
 
-Phase 2 - the board steps, in QEMU (`phase_enroll`, `phase_ota`, `phase_rollback`). Only three things in the
-README need a board or a network clone, and all are substituted:
+Phase 2 - the board steps, in QEMU (`phase_enroll`, `phase_ota`, `phase_rollback`,
+`phase_selftest_rollback` twice). Only three things in the README need a board or a network
+clone, and all are substituted:
 
 * "git clone ... && cd fleetforge" -> the clean tree copy of Phase 0 (this run's `repo/`);
 
@@ -69,6 +70,19 @@ survive that `esp_restart()`, so a second power cycle stands in for the reset a 
 does by itself; the board returns to B's slot and reports `rolled_back`. The run fails at
 once if R is ever reported `confirmed` (any API poll, R's console, or the final row on R's
 version): that would mean the confirm gate is broken.
+
+Phase 2d/2e - the self-test (`phase_selftest_rollback`, R5-fw-2). The committed sketch
+registers a self-test that loop() answers, so A announces `selftest` and B confirms only after
+`custom self-test passed` (detail `selftest passed`). Build F replaces the empty selfTest() with
+one that answers `selfTestDone(false, "i2c sensor 0x48 did not answer; tried 3 times")`
+(`"SOS"` -> `"FAIL"`, `1.3.0-qs<epoch>-stfail`); build T deletes loop()'s answer, so its
+self-test never answers (`"WAIT"`, `1.4.0-qs<epoch>-sttimeout`). Both are plain builds (no
+FF_ROLLBACK_TEST): their announce IS acknowledged and the hold is what must stop them. F
+rolls itself back at once, T at the 300 s confirm deadline; each needs the power cycle R
+needs, and each must come back on B with the row `rolled_back` and the exact detail
+`selftest failed: i2c sensor 0x48 did not ans; returned to <B's slot>` (the reason shortened
+to the 63-byte budget, `;` dropped) or `selftest timed out; returned to <B's slot>`. Neither
+may ever log or report `confirmed`. With them the board phase takes about 45 minutes.
 """
 
 from __future__ import annotations
@@ -140,6 +154,23 @@ ROLLBACK_TEST_FLAGS = "-DFF_ROLLBACK_TEST=1"
 ROLLBACK_HOOK_NEEDLE = b"FF_ROLLBACK_TEST: ignoring the announce ack"
 ROLLBACK_MESSAGE = "BAD"
 STAGED_LINE = r"update {cmd}: (ota_\d) is staged and bootable"
+
+# R5-fw-2: the self-test builds. Each replacement must hit Basic.ino exactly once
+# (_replace_once), or the build tests nothing.
+SELFTEST_FAIL_REASON = "i2c sensor 0x48 did not answer; tried 3 times"
+SELFTEST_STUB = "static void selfTest() {}"
+SELFTEST_FAIL_STUB = (
+    f'static void selfTest() {{ Fleetforge.selfTestDone(false, "{SELFTEST_FAIL_REASON}"); }}'
+)
+SELFTEST_LOOP_ANSWER = "  Fleetforge.selfTestDone(true);"
+SELFTEST_LOOP_SILENCED = "  // build T: loop() never answers the self-test;"
+SELFTEST_FAIL_MESSAGE = "FAIL"
+SELFTEST_TIMEOUT_MESSAGE = "WAIT"
+SELFTEST_RUN_LINE = "running the custom self-test"
+# ff_selftest.c's buffer (63 bytes of reason) and the agent's detail[64] (63 bytes of detail).
+SELFTEST_REASON_MAX = 63
+DETAIL_MAX = 63
+CONFIRM_TIMEOUT_S = 300  # ff_mqtt.c, a plain build (60 only under FF_ROLLBACK_TEST)
 
 
 class QuickstartError(Exception):
@@ -667,6 +698,31 @@ def rollback_version(epoch: int) -> str:
     return f"1.2.0-qs{epoch}-rbtest"
 
 
+def selftest_fail_version(epoch: int) -> str:
+    """Build F's version: run-unique and marked (the self-test answers fail)."""
+    return f"1.3.0-qs{epoch}-stfail"
+
+
+def selftest_timeout_version(epoch: int) -> str:
+    """Build T's version: run-unique and marked (the self-test never answers)."""
+    return f"1.4.0-qs{epoch}-sttimeout"
+
+
+def selftest_failed_detail(reason: str, slot: str) -> str:
+    """The `rolled_back` detail the agent reports for a failed self-test (R5-spec-1 D11).
+
+    A twin of ff_selftest.c's keep_reason (printable ASCII 0x20..0x7e without `;`, at most
+    63 bytes) and ff_mqtt.c's selftest_failed_head / compose_returned_detail: only the
+    reason is shortened, so that the whole detail fits 63 bytes; an empty reason becomes
+    `no reason given`.
+    """
+    kept = "".join(c for c in reason if " " <= c <= "~" and c != ";")[:SELFTEST_REASON_MAX]
+    if not kept:
+        kept = "no reason given"
+    budget = DETAIL_MAX - len("selftest failed: ") - len("; returned to ") - len(slot)
+    return f"selftest failed: {kept[: max(budget, 0)]}; returned to {slot}"
+
+
 def has_rollback_hook(app: bytes) -> bool:
     """Whether an app image was compiled with FF_ROLLBACK_TEST (its log string is in it)."""
     return ROLLBACK_HOOK_NEEDLE in app
@@ -678,8 +734,11 @@ def _replace_once(text: str, old: str, new: str) -> str:
     return text.replace(old, new)
 
 
-def build_bundles(run: Run, version_b: str, version_r: str) -> tuple[Path, Path, Path]:
-    """Bundles A (as committed), B (the README edit) and R (FF_ROLLBACK_TEST, must roll back)."""
+def build_bundles(
+    run: Run, version_b: str, version_r: str, version_f: str, version_t: str
+) -> tuple[Path, Path, Path, Path, Path]:
+    """Bundles A (as committed), B (the README edit), R (FF_ROLLBACK_TEST, must roll back),
+    F (the self-test fails) and T (the self-test never answers)."""
     bundle = run.tree / "lib-qemu" / ".pio" / "bundle" / "esp32-qemu"
     # A stray PLATFORMIO_BUILD_FLAGS in the operator's shell must not reach A or B.
     plain_env = {k: v for k, v in os.environ.items() if k != "PLATFORMIO_BUILD_FLAGS"}
@@ -723,10 +782,36 @@ def build_bundles(run: Run, version_b: str, version_r: str) -> tuple[Path, Path,
     bundle_r = run.work / "bundleR"
     shutil.copytree(bundle, bundle_r)
 
+    run.say(
+        f'  then  F: selfTest() answers selfTestDone(false, "{SELFTEST_FAIL_REASON}"), '
+        f'"SOS" -> "{SELFTEST_FAIL_MESSAGE}", "1.0.0" -> "{version_f}" (plain build): the '
+        "self-test fails"
+    )
+    failing = _replace_once(original, SELFTEST_STUB, SELFTEST_FAIL_STUB)
+    failing = _replace_once(failing, '"SOS"', f'"{SELFTEST_FAIL_MESSAGE}"')
+    sketch.write_text(_replace_once(failing, f'"{VERSION_A}"', f'"{version_f}"'))
+    just(run, "lib-bundle", "esp32-qemu", log_name="lib-bundle-F.log", env=plain_env)
+    bundle_f = run.work / "bundleF"
+    shutil.copytree(bundle, bundle_f)
+
+    run.say(
+        f'  then  T: loop() never calls selfTestDone(true), "SOS" -> '
+        f'"{SELFTEST_TIMEOUT_MESSAGE}", "1.0.0" -> "{version_t}" (plain build): the self-test '
+        "never answers"
+    )
+    silent = _replace_once(original, SELFTEST_LOOP_ANSWER, SELFTEST_LOOP_SILENCED)
+    silent = _replace_once(silent, '"SOS"', f'"{SELFTEST_TIMEOUT_MESSAGE}"')
+    sketch.write_text(_replace_once(silent, f'"{VERSION_A}"', f'"{version_t}"'))
+    just(run, "lib-bundle", "esp32-qemu", log_name="lib-bundle-T.log", env=plain_env)
+    bundle_t = run.work / "bundleT"
+    shutil.copytree(bundle, bundle_t)
+
     sketch.write_text(original)
     shutil.rmtree(bundle)
     shutil.copytree(bundle_a, bundle)  # `lib-qemu --fresh` flashes from this directory
-    app_a, app_b, app_r = ((b / "app.bin").read_bytes() for b in (bundle_a, bundle_b, bundle_r))
+    app_a, app_b, app_r, app_f, app_t = (
+        (b / "app.bin").read_bytes() for b in (bundle_a, bundle_b, bundle_r, bundle_f, bundle_t)
+    )
     if app_a == app_b:
         raise QuickstartError("QEMU bundle B's app.bin is identical to A's")
     run.passed("QEMU bundles", f"A {len(app_a)} B, B {len(app_b)} B, B != A")
@@ -742,7 +827,19 @@ def build_bundles(run: Run, version_b: str, version_r: str) -> tuple[Path, Path,
         raise QuickstartError("QEMU bundle R's app.bin is identical to A's or B's")
     run.passed("QEMU bundle R differs from A and B", "yes")
     check_app(run, "QEMU bundle R", len(app_r))
-    return bundle_a, bundle_b, bundle_r
+    for name, app in (("F", app_f), ("T", app_t)):
+        if has_rollback_hook(app):
+            raise QuickstartError(f"bundle {name} carries the FF_ROLLBACK_TEST hook")
+    apps = [app_a, app_b, app_r, app_f, app_t]
+    if len(set(apps)) != len(apps):
+        raise QuickstartError("two of the QEMU bundles A, B, R, F, T have the same app.bin")
+    run.passed(
+        "QEMU bundles F and T",
+        f"F {len(app_f)} B, T {len(app_t)} B; no rollback hook; all five app.bin differ",
+    )
+    check_app(run, "QEMU bundle F", len(app_f))
+    check_app(run, "QEMU bundle T", len(app_t))
+    return bundle_a, bundle_b, bundle_r, bundle_f, bundle_t
 
 
 def start_qemu(run: Run, fresh: bool, log_name: str) -> Path:
@@ -890,12 +987,14 @@ def phase_enroll(run: Run, port_guest: str) -> Path:
     run.token_burned = True
     row = wait_for_device(
         run,
-        f"online at {VERSION_A} with layout {ARDUINO_LAYOUT} and capability ota",
+        f"online at {VERSION_A} with layout {ARDUINO_LAYOUT} and capabilities ota, selftest",
         lambda r: (
             r.get("online") is True
             and r.get("fw_version") == VERSION_A
             and r.get("partition_layout") == ARDUINO_LAYOUT
             and "ota" in (r.get("capabilities") or [])
+            # R5-fw-2: the committed sketch registers a self-test, and the announce says so.
+            and "selftest" in (r.get("capabilities") or [])
         ),
         timeout=60,
         log=log,
@@ -959,12 +1058,19 @@ def phase_ota(run: Run, bundle_b: Path, version_b: str, log_a: Path) -> tuple[st
     stop_qemu(run)
 
     log_b = start_qemu(run, fresh=False, log_name="qemu-B.log")
+    # R5-fw-2: the ack starts B's self-test, and only its pass confirms.
     wait_for_lines(
         run,
         log_b,
-        (r"CONFIRMED", re.escape(f"morse: HELLO (firmware {version_b})")),
+        (
+            r"announce acknowledged by the broker",
+            re.escape(SELFTEST_RUN_LINE),
+            r"custom self-test passed",
+            r"CONFIRMED",
+        ),
         timeout=180,
     )
+    wait_for_lines(run, log_b, (re.escape(f"morse: HELLO (firmware {version_b})"),), timeout=180)
     row = wait_for_device(
         run,
         f"confirmed at {version_b}",
@@ -978,10 +1084,17 @@ def phase_ota(run: Run, bundle_b: Path, version_b: str, log_a: Path) -> tuple[st
         log=log_b,
     )
     deploy = row["deploy"]
+    if deploy.get("detail") != "selftest passed":
+        raise QuickstartError(
+            f"B's confirmed deploy has detail {deploy.get('detail')!r}, wanted 'selftest passed'"
+        )
+    if "selftest" not in (row.get("capabilities") or []):
+        raise QuickstartError(f"B does not announce selftest: {row.get('capabilities')}")
     run.passed(
         f"GET /v1/devices {DEVICE_ID} after the update",
         f"fw_version {row['fw_version']}, deploy {deploy['state']} (is_terminal "
-        f"{deploy['is_terminal']}), {time.monotonic() - started:.0f} s after the deploy",
+        f"{deploy['is_terminal']}), detail {deploy['detail']!r}, capabilities "
+        f"{row['capabilities']}, {time.monotonic() - started:.0f} s after the deploy",
     )
     return slot_b, log_b
 
@@ -1056,8 +1169,10 @@ def check_rollback_row(
 
 def phase_rollback(
     run: Run, bundle_r: Path, version_b: str, version_r: str, slot_b: str, log_b: Path
-) -> None:
+) -> Path:
     """R3-test-1: deploy a build that cannot confirm; it must roll back to B, unaided.
+
+    Returns the console log of the board back on B (the next phase stages from it).
 
     The board's decision is its own: the confirm timer marks R invalid and reboots. QEMU
     cannot survive that `esp_restart()` (runbook: *The emulator cannot survive
@@ -1118,7 +1233,8 @@ def phase_rollback(
     stop_qemu(run)
 
     log_r = start_qemu(run, fresh=False, log_name="qemu-R.log")
-    never_confirmed = (r"CONFIRMED", r"transaction \S+: confirmed")
+    # R never acks, so the self-test never runs: a timeout before the ack keeps the R2 wording.
+    never_confirmed = (r"CONFIRMED", r"transaction \S+: confirmed", re.escape(SELFTEST_RUN_LINE))
     wait_for_lines(
         run,
         log_r,
@@ -1215,6 +1331,174 @@ def phase_rollback(
         f"GET /v1/devices {DEVICE_ID} after the broken build",
         f"{summary}; {time.monotonic() - started:.0f} s after the deploy",
     )
+    return log_r2
+
+
+def phase_selftest_rollback(
+    run: Run,
+    bundle: Path,
+    versions: tuple[str, str],
+    message: str,
+    mode: str,
+    slot_b: str,
+    log_prev: Path,
+) -> Path:
+    """R5-fw-2: deploy a build whose self-test fails (`mode="fail"`) or never answers
+    (`"timeout"`). Its announce IS acknowledged, so only the hold stands between it and a
+    confirm; it must roll back to B with the self-test detail on the wire.
+
+    `versions` is (B's version, this build's version). Returns the log of the board back on B.
+    """
+    version_b, version = versions
+    label = "2d" if mode == "fail" else "2e"
+    what = "fails" if mode == "fail" else "never answers"
+    run.say(f"\n== Phase {label}: deploy a build whose self-test {what}: it must roll back ==")
+    status, body, _ = http(
+        run,
+        "POST",
+        f"/v1/artifact?target=esp32&version={version}&partition_layout={ARDUINO_LAYOUT}",
+        (bundle / "app.bin").read_bytes(),
+        content_type="application/octet-stream",
+    )
+    if status not in (200, 201):
+        raise QuickstartError(f"upload of {version} answered {status}: {body}")
+    run.passed(f"POST /v1/artifact ({version} app.bin)", f"{status}, version {version}")
+    status, body, _ = http(
+        run, "POST", f"/v1/devices/{DEVICE_ID}/deploy", {"version": version, "apply": "on_command"}
+    )
+    if status != 202 or not isinstance(body, dict):
+        raise QuickstartError(f"deploy of {version} answered {status}: {body}")
+    cmd_id = str(body["cmd_id"])
+    run.passed(f"POST /v1/devices/…/deploy {version} apply=on_command", f"202, cmd_id {cmd_id}")
+
+    def breach(row: dict[str, Any] | None) -> str | None:
+        return confirmed_breach(row, cmd_id, version)
+
+    started = time.monotonic()
+    staged_line = STAGED_LINE.format(cmd=re.escape(cmd_id))
+    wait_for_lines(run, log_prev, (staged_line,), timeout=240)
+    slot = re.search(staged_line, log_prev.read_text(errors="replace"))
+    if slot is None:
+        raise QuickstartError(f"no `{staged_line}` in {log_prev.name}")
+    slot_new = slot.group(1)
+    if slot_new == slot_b:
+        raise QuickstartError(f"{version} was staged into {slot_new}, the slot B is running from")
+    wait_for_device(
+        run,
+        f"staged ({version})",
+        lambda r: _deploy_of(r).get("cmd_id") == cmd_id and _deploy_of(r).get("state") == "staged",
+        timeout=60,
+        log=log_prev,
+        forbid=breach,
+    )
+    run.passed(f"deploy state ({version})", f"staged into {slot_new} (B runs from {slot_b})")
+    time.sleep(1)
+    run.say("  power-cycle: just agent-qemu-stop esp32; just lib-qemu")
+    stop_qemu(run)
+
+    log = start_qemu(run, fresh=False, log_name=f"qemu-{mode}.log")
+    never_confirmed = (
+        r"CONFIRMED",
+        r"transaction \S+: confirmed",
+        r"custom self-test passed",
+    )
+    common = (
+        rf"transaction {re.escape(cmd_id)}: confirming on {slot_new}",
+        r"announce acknowledged by the broker",
+        re.escape(SELFTEST_RUN_LINE),
+    )
+    if mode == "fail":
+        kept = "".join(c for c in SELFTEST_FAIL_REASON if c != ";")
+        decided: tuple[str, ...] = (
+            re.escape(f"custom self-test failed: {kept}"),
+            # ASCII prefix only: the line continues with an em dash.
+            r"the custom self-test failed ",
+        )
+        timeout = 180.0
+        head = selftest_failed_detail(SELFTEST_FAIL_REASON, slot_b)
+    else:
+        decided = (rf"no self-test result {CONFIRM_TIMEOUT_S} s after an OTA boot",)
+        timeout = CONFIRM_TIMEOUT_S + 120.0
+        head = f"selftest timed out; returned to {slot_b}"
+    # Each from the top of the log: the sketch's loop() and the library's task interleave.
+    for first in (
+        rf"OTA boot: {CONFIRM_TIMEOUT_S} s from now",
+        re.escape(f"morse: {message} (firmware {version})"),
+    ):
+        wait_for_lines(run, log, (first,), timeout=180, forbidden=never_confirmed)
+    position = wait_for_lines(
+        run, log, (*common, *decided), timeout=timeout, forbidden=never_confirmed
+    )
+
+    # The image marked itself invalid and reboots (in QEMU: the esp_restart panic).
+    reset = r"rst:|Guru Meditation|abort\(\)"
+    deadline = time.monotonic() + 15
+    seen = None
+    while time.monotonic() < deadline and seen is None:
+        seen = re.search(reset, log.read_text(errors="replace")[position:])
+        if seen is None:
+            time.sleep(0.5)
+    run.say(
+        "  note  after the decision: "
+        + (repr(seen.group(0)) if seen else "no reset line within 15 s")
+        + " (QEMU cannot survive esp_restart; the power cycle stands in for the reset)"
+    )
+    if re.search(r"CONFIRMED|transaction \S+: confirmed", log.read_text(errors="replace")):
+        raise QuickstartError(
+            f"{log.name}: {version} logged confirmed — the self-test hold is broken (P0, "
+            "CRITICAL path)"
+        )
+    run.say("  power-cycle: just agent-qemu-stop esp32; just lib-qemu")
+    stop_qemu(run)
+
+    log_back = start_qemu(run, fresh=False, log_name=f"qemu-{mode}-back.log")
+    rolled_line = rf"transaction {re.escape(cmd_id)}: rolled_back \({re.escape(head)}\)"
+    wait_for_lines(
+        run,
+        log_back,
+        (rolled_line, re.escape(f"morse: HELLO (firmware {version_b})")),
+        timeout=180,
+        # B is VALID: a boot that needs no confirm never runs the self-test.
+        forbidden=(re.escape(SELFTEST_RUN_LINE),),
+    )
+    text = log_back.read_text(errors="replace")
+    loaded = re.findall(r"Loaded app from partition at offset (0x[0-9a-fA-F]+)", text)
+    if loaded:
+        rows = parse_rows((run.tree / ARDUINO_DIR / "partitions.csv").read_text())
+        offset_b = next(offset for name, _, _, offset, _ in rows if name == slot_b)
+        if int(loaded[-1], 16) != offset_b:
+            raise QuickstartError(
+                f"after the rollback the bootloader loaded {loaded[-1]}, not {slot_b} "
+                f"({offset_b:#x})"
+            )
+        run.passed("bootloader after the rollback", f"loaded {loaded[-1]} = {slot_b}")
+    else:
+        run.say("  note  the bootloader does not log `Loaded app from partition` (not checked)")
+
+    row = wait_for_device(
+        run,
+        f"rolled_back ({version})",
+        lambda r: (
+            _deploy_of(r).get("cmd_id") == cmd_id
+            and _deploy_of(r).get("state") == "rolled_back"
+            and _deploy_of(r).get("is_terminal") is True
+        ),
+        timeout=120,
+        log=log_back,
+        forbid=breach,
+    )
+    summary = check_rollback_row(row, cmd_id, version_b, version, head)
+    detail = str(_deploy_of(row).get("detail"))
+    if detail != head:
+        raise QuickstartError(f"{version}'s detail is {detail!r}, wanted exactly {head!r}")
+    if len(detail.encode()) > DETAIL_MAX:
+        raise QuickstartError(f"{version}'s detail is {len(detail.encode())} bytes, over 63")
+    run.passed(
+        f"GET /v1/devices {DEVICE_ID} after {version}",
+        f"{summary}; detail exactly {detail!r} ({len(detail.encode())} bytes); "
+        f"{time.monotonic() - started:.0f} s after the deploy",
+    )
+    return log_back
 
 
 def check_no_credentials(run: Run) -> None:
@@ -1243,12 +1527,22 @@ def phase_board(run: Run) -> None:
     epoch = int(time.time())
     version_b = f"1.1.0-qs{epoch}"
     version_r = rollback_version(epoch)
-    _, bundle_b, bundle_r = build_bundles(run, version_b, version_r)
+    version_f = selftest_fail_version(epoch)
+    version_t = selftest_timeout_version(epoch)
+    _, bundle_b, bundle_r, bundle_f, bundle_t = build_bundles(
+        run, version_b, version_r, version_f, version_t
+    )
     login_and_mint(run, password)
     del password
     log_a = phase_enroll(run, run.guest_base)
     slot_b, log_b = phase_ota(run, bundle_b, version_b, log_a)
-    phase_rollback(run, bundle_r, version_b, version_r, slot_b, log_b)
+    log_back = phase_rollback(run, bundle_r, version_b, version_r, slot_b, log_b)
+    log_back = phase_selftest_rollback(
+        run, bundle_f, (version_b, version_f), SELFTEST_FAIL_MESSAGE, "fail", slot_b, log_back
+    )
+    phase_selftest_rollback(
+        run, bundle_t, (version_b, version_t), SELFTEST_TIMEOUT_MESSAGE, "timeout", slot_b, log_back
+    )
     stop_qemu(run)
     check_no_credentials(run)
     try:

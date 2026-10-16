@@ -525,6 +525,149 @@ Answered (R5-spec-1): it stays awake from `staging` until `confirmed` or `rolled
   QEMU-only probe flag to run the self-test on a serial flash: test-only code in the component.
   (9) Raising `ONE_SCREEN`.
 
+### R5-fw-2 as built
+
+- **What was built.** The hold, unreleased (no version bump; the release waits for the owner's
+  Patch A). `ff_mqtt.c` (CRITICAL): on the announce ack of a boot that needs confirming
+  (`pending_verify()` or `TXN_BOOTED_NEW`), an image whose `ff_selftest_freeze()` returned
+  true does not confirm. The ack starts `ff_selftest_run(selftest_done)`, and only
+  `selftest_done(passed=true)` confirms. One new `else if` sits between the late-ack guard
+  `if (s_rollback_decided)` and the R2-be-1 confirm line, which is unchanged. With no self-test
+  registered, every line of the ack path is as before, so the stock agent behaves as before.
+  `ff_txn` gains an optional third key, `detail`, and `ff_txn_set_detail(cmd_id, detail)`
+  (cmd_id-checked like `ff_txn_clear_if`; never erases). `ff_identity` announces `selftest`
+  in `capabilities` when one is registered (D9). Stale "Until R5-fw-2" text was removed from
+  `ff_selftest.h`, `Fleetforge.h`, `ff_selftest.c` and the library README.
+- **The decision latch.** Two parties can decide, and they race: the self-test result
+  (`ff_selftest` task, priority 1, maybe on the other core) and the confirm deadline
+  (`confirm_timeout_cb`, esp_timer). Each claims under `s_decide_lock` (a portMUX):
+  `s_confirm_claimed` for a pass, `s_rollback_decided` for a fail or the deadline. The first
+  claim wins. Mark-valid, mark-invalid and NVS writes happen after the claim, outside the lock.
+  A late answer logs `the self-test answered after the confirm deadline — the rollback already
+  decided stands; NOT confirming`. A deadline that finds the confirm claimed returns. A
+  deadline that finds a failed self-test's rollback already claimed is the **backstop**: it
+  calls `esp_ota_mark_app_invalid_rollback_and_reboot()` at once, which covers a starved
+  priority-1 task.
+- **The deadline guard.** It was `if (s_ctx.session_confirmed || !pending_verify()) return;`.
+  It is now `if (!pending_verify()) return;` plus
+  `if (s_ctx.session_confirmed && !s_selftest_registered) return;`. `s_selftest_registered`
+  is set from the freeze in `ff_mqtt_run()`, before the first connect, never at the ack.
+  Setting it at the ack would open a window where the image runs unconfirmed with no deadline.
+  The log keeps `no working session %d s after an OTA boot — …` byte for byte when there is no
+  session, and says `no self-test result %d s after an OTA boot — …` when a self-test is pending.
+- **Where the reason lives.** The image under test stores a HEAD in `ff_txn`, and the image the
+  board returns to appends `; returned to <its running label>`. At the ack (`TXN_CONFIRMING`
+  only) `selftest timed out` is pre-stored STRICTLY BEFORE `ff_selftest_run()`, so the esp_timer
+  path never writes NVS. A deadline, watchdog or power cut with the self-test pending reports
+  `selftest timed out`, which is intended: no result arrived. On a fail, `selftest_done` stores
+  `selftest failed: <reason>` after its claim and before the grace timer or reboot (D11:
+  decision time). Only the reason is shortened: budget `63 - 17 - 14 - strlen(label)` = 27 for
+  `ota_N`, and an empty reason becomes `no reason given`. `classify_txn` composes
+  `<head>; returned to <slot>` for `TXN_ROLLED_BACK` when `rec.detail` starts with
+  `selftest `. Otherwise it keeps `returned to X; Y did not confirm`, which is also what a
+  timeout before the ack gives. For `TXN_ALREADY_CONFIRMED` with a stored head it repeats
+  `selftest passed` (a reset between mark-valid and the PUBACK). `ff_txn_load` reads the detail
+  only after the record is judged complete, so a missing detail never makes a record torn.
+- **A pass.** For `TXN_CONFIRMING`: `confirm_this_image()`, then detail `selftest passed`, then
+  `TXN_ALREADY_CONFIRMED`, then `confirmed` is queued (a reconnect repeats it). For
+  `TXN_NONE` + PENDING_VERIFY (an image OTA'd before 0.4.0): confirm, no report.
+- **A fail.** Claim, store the head, log `the custom self-test failed — marking this image
+  invalid and rolling back to the previous slot`. Then the 2 s grace timer (created on demand
+  when NULL) plus a direct `rolling_back` when connected. With no timer, or no transaction,
+  `esp_ota_mark_app_invalid_rollback_and_reboot()` is called at once.
+- **DECIDED: `TXN_BOOTED_NEW` plus a self-test.** The self-test runs. On a fail, the app side
+  calls `esp_ota_mark_app_invalid_rollback_and_reboot()`, not `failed`: IDF 5.5's
+  `bootloader_common_ota_select_valid()` never boots an INVALID/ABORTED entry, armed or not,
+  and `esp_ota_current_ota_is_workable(false)` checks `esp_ota_check_rollback_is_possible()`.
+  The image it returns to reports `rolled_back` with the self-test detail, so **the self-test
+  detail wins on a fail**. On a pass, `confirmed` keeps `the bootloader never armed rollback
+  for this image`, so **DETAIL_BOOTED_NEW wins on a pass**: it is the one explicit sign that
+  this board cannot roll back by time, and a pass is implied by `confirmed` from a board that
+  announces `selftest`. This deviates from Patch A's sentence "`confirmed` then carries
+  `detail` `selftest passed`".
+  **Proposed addendum (paste-ready, for the owner, Patch A4's *Custom self-test* paragraph):**
+  "An image the bootloader never put in pending-verify keeps its `confirmed` detail
+  `the bootloader never armed rollback for this image` when its self-test passes, and rolls
+  itself back when it fails."
+- **The capability.** `ff_identity_note_selftest(registered)` (private, a HAZARD in
+  `test_ota_component.py`) is called right after the freeze. `announce_object()` appends
+  `"selftest"` after `"ota"`. The enroll body is built before the freeze and stays `["ota"]`;
+  the first announce updates the row.
+- **Accepted races.** On a pass, `s_txn.kind`/`terminal_msg_id` are written from the self-test
+  task while the mqtt task may read them. These are aligned int stores. The worst case is a
+  missed `ff_txn_clear_if` or a doubled `confirmed` on a reconnect, and both say the same
+  outcome again (the server deduplicates). The result is not routed through
+  `esp_mqtt_dispatch_custom_event()`, which is drained only when another mqtt event is
+  dispatched (queue size 1), so it would stall while disconnected.
+- **Named gaps.** (1) BOOTED_NEW has no confirm deadline (R2b-fw-2). A never-armed image whose
+  self-test never answers stays unconfirmed and unreported until it does. R5-fw-3 may arm an
+  app-side deadline. (2) A crash or reset mid-self-test reports `selftest timed out`. (3) A
+  board returning to a pre-R5 agent loses the reason (R5-spec-1). (4) A pass whose mark-valid
+  fails leaves PENDING_VERIFY with the confirm claimed: the bootloader rolls back at the next
+  reset and reports `selftest timed out` (the pre-store). That is the same as today's ack-path
+  mark-valid failure.
+- **Tests.** `tests/test_selftest.py::TestTheHold` (13): one run, in the PUBLISHED slice,
+  between the late-ack guard and the pinned confirm; the pre-store before the run; a failed
+  start keeps the hold; the guard and both log lines; the timer claims under the lock, with no
+  mqtt/NVS/self-test/txn calls in the timer, `rollback_now_cb` or `rollback_report_task`; the
+  done callback claims before any confirm, a late answer returns first, and it repeats no
+  pinned literal; a pass sets `selftest passed` before the kind and the enqueue; a fail stores
+  the head before the grace timer and the reboot; `ff_txn_set_detail` is called only by the
+  session; the grammar constants and the 63/27 budget; the head helper cuts only the reason;
+  classify composes only under the prefix; the capability only behind its flag.
+  `test_one_freeze_before_the_first_connect` now pins
+  `s_selftest_registered = ff_selftest_freeze();` then `ff_identity_note_selftest(` before
+  `ff_txn_init`/`classify_txn`/`esp_mqtt_client_start`. `tests/test_agent_txn.py` (+3): the
+  detail is stored only for the recorded cmd_id (strcmp, commit, no erase); a missing detail
+  is never torn; only the session annotates. `tests/test_worked_example.py::TestSelftestRun`
+  (9): the 63-byte F detail, `;`/non-ASCII dropped, the empty reason, a short reason intact,
+  the twin matches the firmware's constants, each replacement hits `Basic.ino` once, the
+  versions are run-unique and marked. **Mutation checks**, each red and then reverted: the
+  pre-store moved after `ff_selftest_run(` (`test_the_timed_out_head_is_stored_before_the_run`);
+  `!s_selftest_registered` dropped from the guard (`test_the_deadline_still_applies_to_a_held_image`);
+  the claim and lock dropped from `selftest_done` (`test_the_done_callback_claims_before_it_confirms`);
+  the classify ROLLED_BACK branch ignoring `rec.detail` (`test_classify_composes_only_under_the_prefix`).
+- **T1.** `just test`: 2010 passed; ruff, format and mypy clean. `just agent-build-all`: four
+  `BUNDLE OK`, 0 warnings. `APP_SIZE_BUDGET_BYTES` was raised to the measured byte: esp32
+  1,036,176 (+3,488), esp32s3 1,016,144 (+3,440), esp32c3 1,076,752 (+3,888), esp32c6
+  1,126,320 (+3,888). The ack branch now links the runner into the stock agent.
+  `just lib-quickstart --build-only`: `== PASS (583 s)` (Arduino A esp32 1,183,136 B /
+  esp32s3 1,176,432 B, build B, own project, basic_idf esp32 1,110,736 B / esp32s3
+  1,115,952 B; 0 library warnings).
+- **T2 (local dev stack on 8088; api recreated with 10.0.2.2 origins, restored afterwards).**
+  `just lib-quickstart --keep`: `== PASS (2308 s)`. The kept tree was deleted afterwards
+  because it held a live credential.
+  - 2a: `capabilities ['ota', 'selftest']` at 1.0.0.
+  - 2b: B `1.1.0-qs1792123592`: `I (12311) announce acknowledged` → `I (12600) ff-selftest:
+    running the custom self-test` → `I (20181) custom self-test passed` → `W (20463) … is now
+    CONFIRMED`. The row: `deploy confirmed (is_terminal True), detail 'selftest passed'`.
+  - 2c: R `-rbtest` is unchanged: `no working session 60 s after an OTA boot`,
+    `rolled_back (returned to ota_1; ota_0 did not confirm)`, no run line in R's log.
+  - 2d (the acceptance): F `1.3.0-qs1792123592-stfail` acks at 27773. `I (28589) ff-txn:
+    … detail stored` (the pre-store) comes before `I (28609) running the custom self-test`, then
+    `W (28616) custom self-test failed: i2c sensor 0x48 did not answer tried 3 times`,
+    `I (29356) ff-txn: … detail stored` (the fail head), `E (29407) the custom self-test failed
+    — marking this image invalid…`, the queued `state=rolling_back`, and then
+    `rst:0xc (SW_CPU_RESET)`. No CONFIRMED. After the power cycle, B logs `W (26657)
+    transaction 096a2fd2…: rolled_back (selftest failed: i2c sensor 0x48 did not ans; returned
+    to ota_1)` and `morse: HELLO (firmware 1.1.0-qs1792123592)`, with no run line. The row:
+    `rolled_back (is_terminal True), fw_version 1.1.0-qs1792123592`, detail exactly
+    `selftest failed: i2c sensor 0x48 did not ans; returned to ota_1` (63 bytes), steps
+    `… confirming, rolling_back, rolled_back`, never confirmed. 117 s after the deploy.
+  - 2e: T `1.4.0-qs1792123592-sttimeout`: the pre-store at 16737, the run at 16745, `E (310100)
+    no self-test result 300 s after an OTA boot — …`, then `SW_CPU_RESET`. The row:
+    `rolled_back`, detail exactly `selftest timed out; returned to ota_1` (37 bytes), never
+    confirmed.
+  - Token 0 occurrences and mqtt_password 0 in 29 files; LWT seen.
+  - The stock agent: `just agent-qemu-smoke esp32` gives `HARNESS OK`. `just agent-qemu esp32
+    --fresh` (fresh token) logs `no custom self-test registered: …` (line 100) before
+    `connecting to` (101) and the ack (108). `GET /v1/devices`: `000000000000`,
+    `capabilities: ['ota']`.
+- **Not provable here.** BOOTED_NEW (QEMU's bootloader always arms rollback), the late-answer
+  race, and the backstop. These are covered by the source pins only. The Arduino bootloader
+  does not log `Loaded app from partition`, so "back on B" rests on B's firmware string in
+  the morse line and the row's `fw_version`, as in phase 2c.
+
 ## Reuse note
 
 The self-test entrypoint defined here moves by the simulation gate

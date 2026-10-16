@@ -774,7 +774,7 @@ What differs from `agent-qemu esp32`:
   component. To check a built image without booting it, scan it for the magic
   (`docs/features/ota-library.md` → *R3-fw-6*).
 
-## The worked example, end to end (R3-fw-4, R3-test-1)
+## The worked example, end to end (R3-fw-4, R3-test-1, R5-fw-2)
 
 `just lib-quickstart` plays the worked example's README quickstart:
 `agent/components/fleetforge/examples/Basic/README.md` (Arduino) and
@@ -792,7 +792,7 @@ just lib-quickstart --build-only --skip-idf --fresh-pio-core
 # the api must hand the board 10.0.2.2 origins for the OTA half (see above). On this box:
 FF_PUBLIC_BASE_URL=http://10.0.2.2:8088 FF_S3_PUBLIC_ENDPOINT_URL=http://10.0.2.2:9000 \
   docker compose -f docker-compose.yml -f docker-compose.override.yml up -d --no-deps api
-just lib-quickstart                # ~25-30 min: builds, enroll → heartbeat → OTA → confirm → broken build → rollback
+just lib-quickstart                # ~45 min: builds, enroll → heartbeat → OTA → self-test → confirm → broken build → rollback → failing self-test → rollback → silent self-test → rollback
 docker compose -f docker-compose.yml -f docker-compose.override.yml up -d --no-deps api  # restore
 ```
 
@@ -825,13 +825,16 @@ What it does:
    `just lib-qemu --fresh` stands in for the USB flash. Wait for `ff-enroll: enroll 200`,
    `announce acknowledged by the broker` and `morse: SOS (firmware 1.0.0)`, then
    `GET /v1/devices`: online, `fw_version 1.0.0`, `ab-4m-arduino-v1`, `capabilities
-   ["ota"]`.
+   ["ota", "selftest"]` (the committed sketch registers a self-test; R5-fw-2).
 4. **The OTA.** Upload bundle B's `app.bin` (`partition_layout=ab-4m-arduino-v1`). Deploy
    with **`apply: "on_command"`**: QEMU cannot survive the self-reboot (*The emulator cannot
    survive `esp_restart()`*), and a real board takes the dashboard default `auto`. Wait for
    `is staged and bootable` and deploy state `staged`, then power-cycle (`agent-qemu-stop`,
-   `lib-qemu`). Wait for `CONFIRMED` and `morse: HELLO (firmware 1.1.0-qs…)`, then the API:
-   `fw_version` == B, deploy `confirmed`, `is_terminal: true`.
+   `lib-qemu`). Wait for, in order, `announce acknowledged by the broker`, `running the
+   custom self-test`, `custom self-test passed` and `CONFIRMED` (R5-fw-2: the ack starts the
+   self-test and only its pass confirms; B's loop() answers after its first whole message),
+   then `morse: HELLO (firmware 1.1.0-qs…)` and the API: `fw_version` == B, deploy
+   `confirmed`, `is_terminal: true`, detail `selftest passed`, `selftest` in `capabilities`.
 5. **The broken build (R3-test-1).** Bundle R is the committed sketch with `"SOS"` →
    `"BAD"` and `"1.0.0"` → `1.2.0-qs<epoch>-rbtest`, built with
    `PLATFORMIO_BUILD_FLAGS=-DFF_ROLLBACK_TEST=1` (fault injection, never a README step; A
@@ -850,7 +853,27 @@ What it does:
    `rolled_back` in the steps. **Any `confirmed` fails the run at once**: in an API poll
    (state or steps), on R's console, or as R's version on the final row. `rolling_back` is
    reported, not required (best effort). R's bundle takes ~30 s: the changed flags rebuild
-   the project and the library, not the framework.
+   the project and the library, not the framework. R never acks, so its console must never
+   show `running the custom self-test`: a timeout before the ack keeps the R2 wording.
+5a. **The failing self-test (R5-fw-2, phase 2d).** Bundle F is a plain build (no
+   FF_ROLLBACK_TEST) of the committed sketch with `static void selfTest() {}` → one that
+   answers `Fleetforge.selfTestDone(false, "i2c sensor 0x48 did not answer; tried 3
+   times")`, `"SOS"` → `"FAIL"`, `"1.0.0"` → `1.3.0-qs<epoch>-stfail`. Its announce IS
+   acknowledged; only the hold stops it. Staged from B's console, power-cycled. F's console:
+   `confirming on ota_0`, `announce acknowledged`, `running the custom self-test`,
+   `custom self-test failed: i2c sensor 0x48 did not answer tried 3 times` (`;` dropped),
+   `the custom self-test failed — marking this image invalid…`, then the reset (QEMU: the
+   panic) after the 2 s grace. After the power cycle B logs `transaction <cmd>: rolled_back
+   (selftest failed: i2c sensor 0x48 did not ans; returned to ota_1)` and `morse: HELLO`, never
+   `running the custom self-test` (B is VALID), the bootloader offset is B's slot, and the
+   API shows deploy `rolled_back`, terminal, `fw_version` == B, and that detail **exactly**
+   (63 bytes: the reason shortened to 27, the D11 budget).
+5b. **The silent self-test (phase 2e).** Bundle T deletes loop()'s `selfTestDone(true)`
+   (`"WAIT"`, `1.4.0-qs<epoch>-sttimeout`). It acks, starts the self-test, and 300 s after
+   its boot logs `no self-test result 300 s after an OTA boot`; after the power cycle the API
+   shows `rolled_back` with detail exactly `selftest timed out; returned to ota_1`. The ~7 min
+   wait is the plain build's 300 s deadline (R5-fw-3 makes it per-command). **Any
+   `confirmed`** for F or T fails the run at once, as for R.
 6. **Credentials.** The token must occur 0 times, and no `"mqtt_password":"` value at all,
    in every QEMU log, every build log and the script's own output. Then unplug, and report
    the LWT.

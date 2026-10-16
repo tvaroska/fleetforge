@@ -62,6 +62,7 @@ MAKER_HEADERS = ("ff_selftest.h", "ff_telemetry.h")
 HAZARDS = (
     "ff_mqtt_publish_status",  # publish `confirmed` for an image that never confirmed
     "ff_identity_note_rollback_capable",  # CLAIM rollback_capable (measured, never claimed)
+    "ff_identity_note_selftest",  # CLAIM the selftest capability (R5-fw-2)
     "ff_store_save_rollback_capable",
     "ff_identity_announce_json",  # the announce is the component's, not the firmware's
     "ff_ota_start",  # the A/B apply path runs only from the session

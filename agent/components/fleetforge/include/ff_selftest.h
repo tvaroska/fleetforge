@@ -24,7 +24,6 @@
  * fleet (a boot loop, a broken network stack). A self-test also catches "boots but the
  * application is broken": the sensor driver hangs, the control loop never starts. An image
  * may register ONE self-test.
- * Until R5-fw-2 the agent records the registration but does not yet run it.
  *
  * When it runs: at most once per boot, and only on a boot that needs confirming (an image an
  * OTA just wrote). It runs after the board has reached the fleet (its retained announce is

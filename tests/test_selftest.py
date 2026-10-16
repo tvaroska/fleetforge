@@ -1,9 +1,9 @@
-"""The self-test entrypoint (R5-fw-1): the maker API, the runner, the freeze, the examples.
+"""The self-test (R5-fw-1 entrypoint, R5-fw-2 hold): maker API, runner, freeze, hold, examples.
 
-Built ahead of R5-fw-2, unreleased: the firmware registers a self-test and the session
-freezes the registration before its first connect, but nothing runs it yet (fw-2 calls
-`ff_selftest_run()` from the announce-ack branch and holds the confirm on it). What is held
-here, on every `just test`:
+The firmware registers a self-test, the session freezes the registration before its first
+connect, and on a boot that needs confirming the announce ack starts the self-test instead
+of confirming: only its pass confirms, a fail rolls back with the reason stored in `ff_txn`,
+and the confirm deadline still applies (R5-fw-2). What is held here, on every `just test`:
 
 * the public header: two functions, a three-value enum whose numbers are ABI, the
   function-pointer typedef, `extern "C"`, and no private hook in any public header;
@@ -13,7 +13,13 @@ here, on every `just test`:
   blocks; a static semaphore, not a task notification, wakes the runner; the reason is
   printable ASCII without `;`; anything but PASS fails;
 * the session wiring in the CRITICAL `ff_mqtt.c`: one freeze, in `ff_mqtt_run`, before the
-  first connect, and nothing in the confirm timer, the rollback callback or the arming;
+  first connect, and nothing of the self-test API in the confirm timer, the rollback callback
+  or the arming;
+* the hold (`TestTheHold`): one run, from the announce-ack branch, after the late-ack guard
+  and before the plain confirm, with the `timed out` head pre-stored first; the deadline's
+  guard and its claim under the decision lock; the done callback's claim before any
+  confirm, its stored reason before any reboot; the detail grammar and its 63-byte budget;
+  the classification that composes the returned-to detail; the `selftest` capability;
 * the Arduino members and both examples (register second, answer from the loop).
 
 Comments are stripped before any grep (`_code`), the idiom of the other agent tripwires.
@@ -33,6 +39,7 @@ from tests.agent_src import (
     FF_SELFTEST_H,
     FF_SELFTEST_INTERNAL_H,
     IDF_EXAMPLE_MAIN_C,
+    agent_sources,
 )
 from tests.test_agent_txn import _function_body
 from tests.test_arduino_library import _ff_calls
@@ -216,17 +223,18 @@ class TestTheRunner:
 
 class TestTheSessionWiring:
     def test_one_freeze_before_the_first_connect(self) -> None:
+        """The gate flag and the capability are set from the freeze, before the first
+        connect: never at the ack (DECISIONS R5-fw-2, the no-deadline window)."""
         code = _code(FF_MQTT_C)
         assert code.count("ff_selftest_freeze(") == 1
         run = _function_body(code, "ff_mqtt_run")
-        assert "(void)ff_selftest_freeze();" in run
+        assert "s_selftest_registered = ff_selftest_freeze();" in run
         freeze = run.index("ff_selftest_freeze(")
-        assert freeze < run.index("ff_txn_init(")
-        assert freeze < run.index("esp_mqtt_client_start(")
-
-    def test_nothing_runs_it_yet(self) -> None:
-        """R5-fw-2 wires the runner, together with the hold and the capability."""
-        assert "ff_selftest_run(" not in _code(FF_MQTT_C)
+        note = run.index("ff_identity_note_selftest(s_selftest_registered);")
+        assert freeze < note
+        for later in ("ff_txn_init(", "classify_txn(", "esp_mqtt_client_start("):
+            assert note < run.index(later), later
+        assert code.count("s_selftest_registered =") == 1, "written once, in ff_mqtt_run"
 
     def test_never_from_timer_context(self) -> None:
         """Durable: fw-2 may call ff_selftest_run from mqtt_event_handler, never from
@@ -238,6 +246,215 @@ class TestTheSessionWiring:
 
     def test_the_stock_agent_never_registers(self) -> None:
         assert "ff_selftest" not in _code(AGENT_MAIN_C)
+
+
+FF_IDENTITY_C = COMPONENT_SRC / "ff_identity.c"
+FF_IDENTITY_INTERNAL_H = COMPONENT_SRC / "ff_identity_internal.h"
+# Pinned elsewhere (tests/test_agent_txn.py, tests/test_agent_board_measurements.py) by
+# their FIRST occurrence: the done callback must not repeat them.
+PINNED_CONFIRM = "else if (confirm_this_image() && s_txn.kind == TXN_CONFIRMING)"
+PINNED_BOOTED_NEW = "s_txn.kind == TXN_BOOTED_NEW && accept_unverified_image()"
+PINNED_LATE_ACK = "if (s_rollback_decided)"
+# The esp_timer side of the confirm/rollback pair never writes flash, never takes the
+# client lock and never touches the self-test API (the pre-store makes `timed out` free).
+TIMER_FORBIDDEN = (
+    "esp_mqtt_client_",
+    "enqueue_status",
+    "ff_mqtt_publish_status",
+    "ESP_ERROR_CHECK",
+    "ff_selftest_",
+    "nvs_",
+    "ff_store_",
+    "ff_txn_",
+)
+
+
+def _published() -> str:
+    match = re.search(r"case MQTT_EVENT_PUBLISHED:(.*?)\bcase\b", _code(FF_MQTT_C), re.S)
+    assert match is not None
+    return match.group(1)
+
+
+def _done() -> str:
+    return _function_body(_code(FF_MQTT_C), "selftest_done")
+
+
+def _mqtt_define(name: str) -> str:
+    match = re.search(rf"^#define {name} (.+)$", _code(FF_MQTT_C), re.M)
+    assert match is not None, name
+    return match.group(1).strip()
+
+
+class TestTheHold:
+    """R5-fw-2: the announce ack of a boot that needs confirming starts the self-test, and
+    only its pass confirms (CRITICAL.md: the device-side confirm timer / rollback path)."""
+
+    def test_one_run_from_the_ack_branch_between_the_guards(self) -> None:
+        code = _code(FF_MQTT_C)
+        assert code.count("ff_selftest_run(") == 1
+        published = _published()
+        run = published.index("ff_selftest_run(selftest_done)")
+        assert published.index(PINNED_LATE_ACK) < run < published.index(PINNED_CONFIRM)
+        hold = published[published.index(PINNED_LATE_ACK) : run]
+        assert (
+            "else if (s_selftest_registered && (pending_verify() || s_txn.kind == TXN_BOOTED_NEW))"
+        ) in re.sub(r"\s+", " ", hold)
+
+    def test_the_timed_out_head_is_stored_before_the_run(self) -> None:
+        """The done callback may run at once on the other core: its `failed` head must land
+        after this one, never under it."""
+        published = _published()
+        store = published.index("ff_txn_set_detail(s_txn.cmd_id, DETAIL_SELFTEST_TIMED_OUT)")
+        assert store < published.index("ff_selftest_run(")
+        guard = published.rindex("if (s_txn.kind == TXN_CONFIRMING)", 0, store)
+        assert published.index(PINNED_LATE_ACK) < guard
+
+    def test_a_runner_that_cannot_start_keeps_the_hold(self) -> None:
+        """Fail-safe: no confirm without a pass; the deadline decides."""
+        published = _published()
+        run = published.index("ff_selftest_run(")
+        tail = published[run : published.index(PINNED_CONFIRM)]
+        assert "if (err != ESP_OK)" in tail
+        for forbidden in ("confirm_this_image(", "accept_unverified_image(", "enqueue_status("):
+            assert forbidden not in tail, forbidden
+
+    def test_the_deadline_still_applies_to_a_held_image(self) -> None:
+        body = _function_body(_code(FF_MQTT_C), "confirm_timeout_cb")
+        assert "if (!pending_verify())" in body
+        assert "if (s_ctx.session_confirmed && !s_selftest_registered)" in body
+        assert "s_ctx.session_confirmed || !pending_verify()" not in body
+        # Today's line, byte for byte (the quickstart's R phase greps it), and the new one.
+        source = FF_MQTT_C.read_text()
+        assert (
+            '"no working session %d s after an OTA boot — marking this image invalid "\n'
+            '                      "and rolling back to the previous slot"'
+        ) in source
+        assert '"no self-test result %d s after an OTA boot — marking this image invalid "' in (
+            source
+        )
+
+    def test_the_deadline_claims_under_the_decision_lock(self) -> None:
+        code = _code(FF_MQTT_C)
+        assert "static portMUX_TYPE s_decide_lock = portMUX_INITIALIZER_UNLOCKED;" in code
+        assert "static bool s_confirm_claimed;" in code
+        assert "static volatile bool s_selftest_registered;" in code
+        body = _function_body(code, "confirm_timeout_cb")
+        enter = body.index("portENTER_CRITICAL(&s_decide_lock)")
+        claim = body.index("s_rollback_decided = true;")
+        leave = body.index("portEXIT_CRITICAL(&s_decide_lock)")
+        assert enter < claim < leave < body.index("esp_timer_start_once(")
+        assert enter < body.index("s_confirm_claimed") < leave
+        # The backstop and the plain rollback both stay outside the lock.
+        assert body.count("esp_ota_mark_app_invalid_rollback_and_reboot()") == 2
+        assert leave < body.index("esp_ota_mark_app_invalid_rollback_and_reboot()")
+        for name in ("confirm_timeout_cb", "rollback_now_cb", "rollback_report_task"):
+            fn = _function_body(code, name)
+            for forbidden in TIMER_FORBIDDEN:
+                if name == "rollback_report_task" and forbidden == "enqueue_status":
+                    continue  # its own task, the R2-be-1 report
+                assert forbidden not in fn, (name, forbidden)
+
+    def test_the_done_callback_claims_before_it_confirms(self) -> None:
+        body = _done()
+        enter = body.index("portENTER_CRITICAL(&s_decide_lock)")
+        leave = body.index("portEXIT_CRITICAL(&s_decide_lock)")
+        assert enter < body.index("too_late = s_rollback_decided;") < leave
+        assert enter < body.index("s_confirm_claimed = true;") < leave
+        assert enter < body.index("s_rollback_decided = true;") < leave
+        late = body.index("return;")
+        assert leave < late
+        assert "NOT confirming" in body[leave:late]
+        for after in (
+            "confirm_this_image(",
+            "accept_unverified_image(",
+            "ff_txn_set_detail(",
+            "esp_timer_start_once(",
+            "esp_ota_mark_app_invalid_rollback_and_reboot(",
+            "enqueue_status(",
+        ):
+            assert late < body.index(after), after
+        for pinned in (PINNED_CONFIRM, PINNED_BOOTED_NEW, PINNED_LATE_ACK):
+            assert pinned not in body, pinned
+
+    def test_a_pass_confirms_with_its_detail(self) -> None:
+        body = _done()
+        passed = body.index("if (passed) {", body.index("return;"))
+        booted_new = body.index("if (kind == TXN_BOOTED_NEW)", passed)
+        assert booted_new < body.index("accept_unverified_image()")
+        detail = body.index("strlcpy(s_txn.detail, DETAIL_SELFTEST_PASSED, sizeof(s_txn.detail));")
+        assert body.index("const bool marked = confirm_this_image();") < detail
+        assert "if (marked && kind == TXN_CONFIRMING)" in body
+        assert detail < body.index("s_txn.kind = TXN_ALREADY_CONFIRMED;", detail)
+        assert detail < body.index("FF_STATUS_CONFIRMED, 100, s_txn.detail", detail)
+
+    def test_a_fail_stores_its_reason_before_any_rollback(self) -> None:
+        """D11: at decision time, before any wait (the grace timer, a safe window)."""
+        body = _done()
+        head = body.index("selftest_failed_head(head, sizeof(head), reason);")
+        store = body.index("ff_txn_set_detail(s_txn.cmd_id, head);")
+        assert head < store
+        assert store < body.index("esp_timer_start_once(")
+        assert store < body.index("esp_ota_mark_app_invalid_rollback_and_reboot(")
+        assert "kind == TXN_CONFIRMING || kind == TXN_BOOTED_NEW" in body
+        assert "esp_timer_create(&rollback_args, &s_rollback_timer)" in body
+        assert "FF_STATUS_ROLLING_BACK" in body and "s_ctx.connected" in body
+
+    def test_only_the_session_stores_a_detail(self) -> None:
+        assert _code(FF_MQTT_C).count("ff_txn_set_detail(") == 2
+        for path in agent_sources():
+            if path.name not in ("ff_mqtt.c", "ff_txn.c", "ff_txn.h"):
+                assert "ff_txn_set_detail" not in _code(path), path.name
+
+    def test_the_detail_grammar(self) -> None:
+        assert _mqtt_define("DETAIL_SELFTEST_PASSED") == '"selftest passed"'
+        assert _mqtt_define("DETAIL_SELFTEST_TIMED_OUT") == '"selftest timed out"'
+        assert _mqtt_define("DETAIL_SELFTEST_FAILED") == '"selftest failed: "'
+        assert _mqtt_define("DETAIL_SELFTEST_PREFIX") == '"selftest "'
+        assert _mqtt_define("DETAIL_RETURNED_TO") == '"; returned to "'
+        assert _mqtt_define("DETAIL_NO_REASON") == '"no reason given"'
+        assert _mqtt_define("DETAIL_MAX") == "63"
+        # 27 bytes of reason with an ota_N label: the number the maker header promises.
+        assert 63 - len("selftest failed: ") - len("; returned to ") - len("ota_0") == 27
+        assert len("selftest timed out; returned to ota_0") <= 63
+
+    def test_the_head_shortens_the_reason_only(self) -> None:
+        body = _function_body(_code(FF_MQTT_C), "selftest_failed_head")
+        assert "strlen(DETAIL_SELFTEST_FAILED) + strlen(DETAIL_RETURNED_TO) + label_len" in body
+        assert "DETAIL_MAX - fixed" in body
+        assert 'snprintf(out, len, DETAIL_SELFTEST_FAILED "%.*s", budget, reason);' in body
+        empty = body.index("reason[0] == '\\0'")
+        assert empty < body.index("reason = DETAIL_NO_REASON;") < body.index("snprintf(")
+        compose = _function_body(_code(FF_MQTT_C), "compose_returned_detail")
+        assert '"%.*s" DETAIL_RETURNED_TO "%s"' in compose
+        assert "strlen(DETAIL_SELFTEST_FAILED)" in compose, "never cut below the prefix"
+
+    def test_classify_composes_only_under_the_prefix(self) -> None:
+        body = _function_body(_code(FF_MQTT_C), "classify_txn")
+        prefix = "strncmp(rec.detail, DETAIL_SELFTEST_PREFIX, strlen(DETAIL_SELFTEST_PREFIX))"
+        assert body.count(prefix) == 2
+        valid = body.index("state == ESP_OTA_IMG_VALID")
+        assert valid < body.index(prefix) < body.index("DETAIL_SELFTEST_PASSED")
+        rolled = body.index("s_txn.kind = TXN_ROLLED_BACK;")
+        assert rolled < body.index(prefix, rolled)
+        assert body.index(prefix, rolled) < body.index(
+            "compose_returned_detail(s_txn.detail, sizeof(s_txn.detail), rec.detail,"
+        )
+        assert '"returned to %s; %s did not confirm"' in body
+
+    def test_the_capability_is_claimed_only_when_registered(self) -> None:
+        identity = _code(FF_IDENTITY_C)
+        assert identity.count('cJSON_CreateString("selftest")') == 1
+        guarded = re.search(
+            r"if \(s_selftest_registered\) \{\s*cJSON_AddItemToArray\(capabilities, "
+            r'cJSON_CreateString\("selftest"\)\);\s*\}',
+            identity,
+        )
+        assert guarded is not None
+        assert identity.index('cJSON_CreateString("ota")') < guarded.start()
+        note = _function_body(identity, "ff_identity_note_selftest")
+        assert "s_selftest_registered = registered;" in note
+        assert "void ff_identity_note_selftest(bool registered);" in _code(FF_IDENTITY_INTERNAL_H)
+        assert _code(FF_MQTT_C).count("ff_identity_note_selftest(") == 1
 
 
 class TestTheArduinoWrapper:
