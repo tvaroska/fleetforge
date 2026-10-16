@@ -319,9 +319,27 @@ record and keeps the boot arm's 300 s, by design.
 
 The agent carries out `apply`, `cancel`, `rollback` and `reboot` and announces them
 (`capabilities` `["ota","apply","cancel","rollback","reboot"]`). Each verb has its own `id`;
-`apply` and `cancel` also name the stage's `cmd_id`. No server endpoint sends them yet
-(R5-be-2), so every one is hand-built JSON published as the **commander**, and the answer is
-read off the wire. The api must hand out `10.0.2.2` origins for the stages (see above).
+`apply` and `cancel` also name the stage's `cmd_id`. Since R5-be-2 the server sends them
+(admin-only, 202, no body; the board's first answer lands on `GET /v1/devices` →
+`last_command` and on `GET /v1/devices/<id>/commands/<command_id>`). The api must hand out
+`10.0.2.2` origins for the stages (see above).
+
+```bash
+BASE=http://localhost:${FF_HTTP_PORT:-8080}; H="Authorization: Bearer $TOKEN"
+curl -sS -X POST "$BASE/v1/devices/$ID/deploys/$CMD_ID/apply" -H "$H"    # an on_command stage
+curl -sS -X POST "$BASE/v1/devices/$ID/deploys/$CMD_ID/cancel" -H "$H"
+curl -sS -X POST "$BASE/v1/devices/$ID/rollback" -H "$H"
+curl -sS -X POST "$BASE/v1/devices/$ID/reboot" -H "$H"
+#  => {"command_id":"…","device_id":"…","type":"reboot","cmd_id":null,"device_online":true}
+curl -sS "$BASE/v1/devices/$ID/commands/<command_id>" -H "$H" | jq '{result,detail,answered_at}'
+```
+
+The server refuses only what it alone knows: a verb the board does not announce (409), an
+`apply`/`cancel` naming a transaction it never recorded for that board (404) or one that has
+already ended (409), and `apply` on an `apply: auto` stage (409). Everything else is the
+board's answer on `up/ack`. The fallback, for an id or shape the API will not send (a
+mismatched `cmd_id`, `identify`), is hand-built JSON published as the **commander**, with the
+answer read off the wire (the server records no answer for an id it did not send):
 
 ```bash
 set -a; . ./.env; set +a

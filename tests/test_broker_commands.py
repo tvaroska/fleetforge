@@ -29,12 +29,14 @@ from fleetforge.broker import (
     command_topic,
     new_command_id,
     stage_payload,
+    verb_payload,
 )
 from fleetforge.broker.commands import (
     APPLY_AUTO,
     APPLY_MODES,
     APPLY_ON_COMMAND,
     COMMAND_STAGE,
+    VERB_COMMANDS,
     encode_command,
 )
 from fleetforge.broker.publisher import QOS, RETAIN, MqttCommandPublisher, mqtt_command_client
@@ -94,6 +96,34 @@ def test_both_apply_modes_survive_the_round_trip(apply: str) -> None:
 
 def test_apply_modes_are_the_two_the_spec_names() -> None:
     assert APPLY_MODES == (APPLY_AUTO, APPLY_ON_COMMAND) == ("auto", "on_command")
+
+
+# R5-be-2: the four verbs, key for key as R5-spec-1 Patch A2 prints them.
+@pytest.mark.parametrize("verb", ["apply", "cancel"])
+def test_apply_and_cancel_name_their_transaction(verb: str) -> None:
+    payload = verb_payload(command_id="c1", type=verb, cmd_id="s1")
+    assert list(payload) == ["id", "type", "cmd_id"]
+    assert payload == {"id": "c1", "type": verb, "cmd_id": "s1"}
+
+
+@pytest.mark.parametrize("verb", ["rollback", "reboot"])
+def test_rollback_and_reboot_carry_no_cmd_id_key_at_all(verb: str) -> None:
+    payload = verb_payload(command_id="c1", type=verb)
+    assert list(payload) == ["id", "type"]
+    assert encode_command(payload) == f'{{"id":"c1","type":"{verb}"}}'.encode()
+
+
+def test_the_verbs_are_the_four_patch_a2_names() -> None:
+    assert VERB_COMMANDS == ("apply", "cancel", "rollback", "reboot")
+
+
+@pytest.mark.parametrize(
+    ("verb", "cmd_id"),
+    [("apply", None), ("cancel", ""), ("rollback", "s1"), ("reboot", "s1"), ("identify", None)],
+)
+def test_a_wrong_verb_shape_is_never_built(verb: str, cmd_id: str | None) -> None:
+    with pytest.raises(ValueError):
+        verb_payload(command_id="c1", type=verb, cmd_id=cmd_id)
 
 
 def test_command_topic_is_the_devices_own_downlink() -> None:

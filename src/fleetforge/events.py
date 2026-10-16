@@ -73,6 +73,13 @@ class EventType(StrEnum):
     # device-controlled text, and the consumer re-reads like every other type.
     DEVICE_PROGRESS = "device.progress"
 
+    # A live `up/ack` that recorded a board's first answer to a verb the server sent
+    # (R5-be-2). The frame carries `command_id`; the answer itself is NOT in the envelope
+    # (its detail is device-controlled text), and the consumer re-reads like every other
+    # type (`GET /v1/devices` → `last_command`). An ack that recorded nothing (a duplicate,
+    # an unknown id) is a plain `device.seen`.
+    DEVICE_COMMAND = "device.command"
+
     # `PATCH /v1/devices/{id}` (R2b-be-1) changed an operator-set fact: name or group.
     # The new values are NOT in the envelope: the name is operator text, and the
     # consumer re-reads like every other type.
@@ -122,6 +129,10 @@ class DeviceEvent(BaseModel):
     # `selftest_outcome.selftest_outcome` (grammar plus state rule). `null` otherwise.
     # `reason` / `returned_to` are device-controlled text. Additive, so `v` stays 1.
     selftest: SelfTestOutcome | None = None
+    # R5-be-2: on `device.command` only, the id of the command whose first answer was just
+    # recorded (server-minted, never board text). `null` on every other type. Additive,
+    # so `v` stays 1.
+    command_id: str | None = None
 
 
 NOTIFY_SQL = text("SELECT pg_notify(:channel, :payload)")

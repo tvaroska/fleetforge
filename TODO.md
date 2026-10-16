@@ -580,7 +580,7 @@ Per R5-spec-1: firmware tasks may build ahead of the owner's spec Patch A, unrel
 
 - [x] **R5-be-1**: Deploys honour the self-test result (P0, 1d) _(done 2026-10-16; the server parses the D11 grammar on read (never stored), only on its own state, onto `deploy.selftest` and the terminal `device.deploy` frame; KPIs unchanged; the simulator learns a self-test; see docs/features/self-test.md)_
       Per R5-spec-1: parse `^selftest (passed|failed: [^;]*|timed out)(; returned to \S+)?$` from `detail`; an unknown detail means "not a self-test outcome".
-- [ ] **R5-be-2**: REST endpoints for `apply`, `reboot`, `rollback` and `cancel` (P1, 1d)
+- [x] **R5-be-2**: REST endpoints for `apply`, `reboot`, `rollback` and `cancel` (P1, 1d) _(done 2026-10-16; reviewed; new `api/routers/commands.py` + `device_commands` table (migration 0010), first `up/ack` answer wins, `cancelled` terminal and out of the KPIs, `on_command` needs the `apply` capability, the simulator learns the verbs; see docs/features/self-test.md)_
       Under `deploys.py` / `devices.py`, behind the admin credential, validated against the device's announced capabilities.
       Per R5-spec-1: `cancelled` in `TERMINAL_DEPLOY_STATES`, outside both KPIs; ingest `up/ack` (new `UpChannel`, never a deploy row; keep the first answer per `id`, allow for none); gate verbs and `apply: "on_command"` on the announced capabilities; verbs carry their own `id`, plus `cmd_id` for apply/cancel; REST rollback rows stay out of the deploy KPIs; the simulator learns the verbs.
 - [ ] **R5-fe-1**: Dashboard shows the self-test result, the rollback `detail` and Apply/Reboot controls (P1, 1d)

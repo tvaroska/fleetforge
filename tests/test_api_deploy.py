@@ -284,7 +284,8 @@ class TestTheCommandOnTheWire:
         store: MemoryObjectStore,
         publisher: FakeCommandPublisher,
     ) -> None:
-        await add_device(db)
+        # R5-be-2: the board must announce the `apply` verb, or `on_command` is refused.
+        await add_device(db, capabilities=["ota", "apply"])
         await add_artifact(db)
         token = await login_admin(admin_app)
 
@@ -292,6 +293,67 @@ class TestTheCommandOnTheWire:
 
         assert response.status_code == 202, response.text
         assert publisher.last["apply"] == "on_command"
+
+    async def test_on_command_to_a_board_without_apply_is_409_and_sends_nothing(
+        self,
+        admin_app: FastAPI,
+        db: AsyncSession,
+        store: MemoryObjectStore,
+        publisher: FakeCommandPublisher,
+    ) -> None:
+        """R5-be-2 / R5-spec-1 D9: a pre-R5 agent ignores `apply`, so the stage would wait
+        at `staged` until the board restarts. Refused before anything is minted or written."""
+        await add_device(db, capabilities=["ota"])
+        await add_artifact(db)
+        token = await login_admin(admin_app)
+
+        response = await deploy(admin_app, token, apply="on_command")
+
+        assert response.status_code == 409, response.text
+        assert response.json()["detail"] == (
+            "this board's agent cannot be told to apply (it announces: ota), so an on_command "
+            "deploy would wait at staged until the board restarts. Deploy with apply: auto, or "
+            "update the agent first."
+        )
+        assert publisher.published == []
+        assert await events(db) == []
+
+    async def test_auto_to_a_board_without_apply_is_unaffected(
+        self,
+        admin_app: FastAPI,
+        db: AsyncSession,
+        store: MemoryObjectStore,
+        publisher: FakeCommandPublisher,
+    ) -> None:
+        await add_device(db, capabilities=["ota"])
+        await add_artifact(db)
+        token = await login_admin(admin_app)
+
+        response = await deploy(admin_app, token, apply="auto")
+
+        assert response.status_code == 202, response.text
+        assert publisher.last["apply"] == "auto"
+
+    async def test_the_precheck_lists_no_apply_capability(
+        self,
+        admin_app: FastAPI,
+        db: AsyncSession,
+        store: MemoryObjectStore,
+        publisher: FakeCommandPublisher,
+    ) -> None:
+        await add_device(db, capabilities=["ota"])
+        await add_artifact(db)
+        token = await login_admin(admin_app)
+
+        on_command = await precheck(admin_app, token, apply="on_command")
+        auto = await precheck(admin_app, token, apply="auto")
+
+        assert on_command.status_code == 200, on_command.text
+        assert on_command.json()["deployable"] is False
+        assert [f["code"] for f in on_command.json()["refusals"]] == ["no_apply_capability"]
+        assert auto.json()["deployable"] is True
+        assert auto.json()["refusals"] == []
+        assert publisher.published == []
 
     async def test_an_unknown_apply_mode_is_422(
         self,
@@ -597,6 +659,38 @@ class TestARetryIsTheSameTransaction:
         second = await deploy(admin_app, token)
         assert second.json()["reused"] is False
         assert second.json()["cmd_id"] != first.json()["cmd_id"]
+
+    async def test_a_cancelled_transaction_is_not_reused(
+        self,
+        admin_app: FastAPI,
+        db: AsyncSession,
+        store: MemoryObjectStore,
+        publisher: FakeCommandPublisher,
+    ) -> None:
+        """R5-be-2 closes R5-fw-4 gap (c): `cancelled` is terminal, so re-deploying the
+        cancelled version mints a new `cmd_id` and writes a new `requested` row — the board
+        would otherwise drop the re-sent id as a duplicate, or re-run a cancelled stage."""
+        await add_device(db, capabilities=["ota", "apply", "cancel"])
+        await add_artifact(db)
+        token = await login_admin(admin_app)
+        first = await deploy(admin_app, token, apply="on_command")
+
+        db.add(
+            DeployEvent(
+                device_id=DEVICE_ID,
+                cmd_id=first.json()["cmd_id"],
+                state=DeployState.CANCELLED.value,
+                is_terminal=DeployState.CANCELLED in TERMINAL_DEPLOY_STATES,
+            )
+        )
+        await db.commit()
+
+        second = await deploy(admin_app, token, apply="on_command")
+        assert second.status_code == 202, second.text
+        assert second.json()["reused"] is False
+        assert second.json()["cmd_id"] != first.json()["cmd_id"]
+        requested = [e for e in await events(db) if e["state"] == "requested"]
+        assert [e["cmd_id"] for e in requested] == [first.json()["cmd_id"], second.json()["cmd_id"]]
 
     async def test_the_window_is_the_signed_url_lifetime(
         self,
@@ -1490,7 +1584,15 @@ class TestNoSchedulerLivesHere:
         return ast.unparse(tree)
 
     @pytest.mark.parametrize(
-        "module", ["deploys.py", "api/routers/deploys.py", "deploy_precheck.py"]
+        "module",
+        [
+            "deploys.py",
+            "api/routers/deploys.py",
+            "deploy_precheck.py",
+            # R5-be-2: the verbs never wait for an answer, retry, sweep or expire.
+            "api/routers/commands.py",
+            "device_commands.py",
+        ],
     )
     @pytest.mark.parametrize(
         "forbidden", ["asyncio.sleep", "create_task", "BackgroundTasks", "timedelta"]

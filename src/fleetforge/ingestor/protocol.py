@@ -63,6 +63,8 @@ class UpChannel(StrEnum):
     STATUS = "status"
     TELEMETRY = "telemetry"
     LOG = "log"
+    # R5-be-2 (R5-spec-1 Patch A5): a board's answer to a verb. QoS 1, never retained.
+    ACK = "ack"
 
 
 @dataclass(frozen=True, slots=True)
@@ -469,6 +471,36 @@ class LogPayload(_TolerantPayload):
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             return None
         return value
+
+
+# `up/ack` (R5-be-2, R5-spec-1 Patch A5). The agent's answers are well under 256 B (every
+# `detail` is at most 63 B); one over this is dropped whole, liveness kept.
+ACK_MAX_BYTES = 1024
+
+
+class AckPayload(_TolerantPayload):
+    """`up/ack` — `{"id","type","result","cmd_id","detail"}`, a board's answer to a verb.
+
+    Never a transaction state and never a `deploy_events` row: the ingestor keeps the
+    first answer on the `device_commands` row of the command it answers
+    (`device_commands.record_answer`), or nothing at all for an id the server never sent.
+    Every field is optional and strictly `str | None` except `detail`, which coerces to
+    text like `StatusPayload.detail`; what makes an answer usable is decided by the writer.
+    """
+
+    id: str | None = None
+    type: str | None = None
+    result: str | None = None
+    cmd_id: str | None = None
+    detail: str | None = None
+
+    @field_validator("detail", mode="before")
+    @classmethod
+    def _detail_as_text(cls, value: object) -> str | None:
+        """Anything the board sent, rendered as text. The writer sanitises and truncates."""
+        if value is None or isinstance(value, str):
+            return value
+        return str(value)
 
 
 def decode[T: _TolerantPayload](model: type[T], topic: str, payload: bytes) -> T | None:

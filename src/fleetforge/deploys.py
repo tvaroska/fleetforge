@@ -67,6 +67,16 @@ progress feed — live progress is the SSE stream's job. For the same reason the
 unique index: a repeated state is legal data, so this is a writer rule and not a
 database invariant.
 
+**Which transactions count in the KPIs (R5-be-2)** is one pure rule here,
+`counts_in_deploy_kpis`, so R6 computes and nobody re-derives: a transaction counts only
+if the server opened it with a `requested` row (that row carries the intended version;
+without it delivery success is uncomputable) and it did not end `cancelled` (an operator's
+choice, neither a save nor a loss). A `rollback` verb's own transaction — rows under the
+command's `id`, recorded by `record_observed_status` with NULL versions like any other
+`cmd_id` with no `requested` row — is therefore kept and counted in neither KPI. A rollback
+sent while a stage is `confirming` ends THAT stage's transaction, which keeps counting as a
+`rolled_back`. No verb ever writes a row here (`device_commands.py` owns the verbs).
+
 **Nothing secret goes in `detail`.** The signed URL is a bearer credential: it is never
 persisted here, never logged and never echoed in an API response. Device-reported
 detail is control-stripped, truncated and URL-redacted before it is stored, because it
@@ -133,6 +143,97 @@ _OPEN_TRANSACTION_SQL = text(
      LIMIT 1
     """
 )
+
+
+KPI_EXCLUDED_TERMINAL_STATES = frozenset({DeployState.CANCELLED})
+"""Terminal states that end a transaction without counting in either deploy KPI."""
+
+
+def counts_in_deploy_kpis(*, terminal_state: str, has_requested_row: bool) -> bool:
+    """A transaction counts in delivery success and fleet safety only if the server
+    sent its `stage` (it has a `requested` row, which is what carries the intended
+    version) and it did not end `cancelled` (an operator's choice, neither a save nor a
+    loss).
+
+    The rule R6's KPI queries implement; the module docstring says why a `rollback`
+    verb's own transaction is out (no `requested` row) and a rollback during `confirming`
+    is in (it ends the stage's transaction).
+    """
+    return has_requested_row and terminal_state not in KPI_EXCLUDED_TERMINAL_STATES
+
+
+# One deploy transaction as the verb routes need it (R5-be-2): the `requested` row's
+# `apply` mode, the newest state, and whether any row of it is terminal. `ended` is a SQL
+# alias on purpose: the server-authored-terminal tripwire in `tests/test_api_deploy.py`
+# scans this file for Python spellings of the flag. `apply` is NULL for a row written
+# before `detail.apply` existed. NULL when no `requested` row exists for the pair.
+_TRANSACTION_SQL = text(
+    """
+    SELECT requested.detail ->> 'apply' AS apply,
+           (SELECT e.state
+              FROM deploy_events AS e
+             WHERE e.device_id = requested.device_id AND e.cmd_id = requested.cmd_id
+             ORDER BY e.at DESC, e.id DESC
+             LIMIT 1) AS newest_state,
+           (SELECT e.state
+              FROM deploy_events AS e
+             WHERE e.device_id = requested.device_id AND e.cmd_id = requested.cmd_id
+               AND e.is_terminal
+             ORDER BY e.at ASC, e.id ASC
+             LIMIT 1) AS ended_state
+      FROM deploy_events AS requested
+     WHERE requested.device_id = :device_id
+       AND requested.cmd_id = :cmd_id
+       AND requested.state = :requested_state
+     ORDER BY requested.at DESC, requested.id DESC
+     LIMIT 1
+    """
+)
+
+
+@dataclass(frozen=True, slots=True)
+class DeployTransaction:
+    """One `(device_id, cmd_id)` transaction the server opened, as a verb route sees it.
+
+    `apply` is the `requested` row's `detail.apply` (`auto` / `on_command`, or None for a
+    row older than the key). `ended_state` is the first terminal state recorded for it, or
+    None while it is open; `ended` says the same as a bool.
+    """
+
+    cmd_id: str
+    apply: str | None
+    newest_state: str
+    ended_state: str | None
+
+    @property
+    def ended(self) -> bool:
+        return self.ended_state is not None
+
+
+async def deploy_transaction(
+    session: AsyncSession, *, device_id: str, cmd_id: str
+) -> DeployTransaction | None:
+    """The transaction `cmd_id` of `device_id` if the server recorded its `requested`
+    row, else None. Matching on the device too: a board's `cmd_id` never names another
+    board's transaction. Read-only."""
+    row = (
+        await session.execute(
+            _TRANSACTION_SQL,
+            {
+                "device_id": device_id,
+                "cmd_id": cmd_id,
+                "requested_state": DeployState.REQUESTED.value,
+            },
+        )
+    ).first()
+    if row is None:
+        return None
+    return DeployTransaction(
+        cmd_id=cmd_id,
+        apply=row.apply if isinstance(row.apply, str) else None,
+        newest_state=row.newest_state,
+        ended_state=row.ended_state,
+    )
 
 
 @dataclass(frozen=True, slots=True)

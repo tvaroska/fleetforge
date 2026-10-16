@@ -23,6 +23,7 @@ from fleetforge.broker.commands import (
     command_topic,
     new_command_id,
     stage_payload,
+    verb_payload,
 )
 from fleetforge.broker.provisioner import (
     DEVICE_ROLE,
@@ -44,4 +45,5 @@ __all__ = [
     "generate_broker_password",
     "new_command_id",
     "stage_payload",
+    "verb_payload",
 ]

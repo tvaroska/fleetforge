@@ -61,6 +61,8 @@ from fleetforge.partition_profiles import LayoutCatalog
 logger = logging.getLogger(__name__)
 
 OTA_CAPABILITY = "ota"
+# R5-spec-1 D9: a board that announces `apply` implements the `apply` verb (R5-fw-4).
+APPLY_CAPABILITY = "apply"
 
 # Stable codes: clients branch on these, never on the message.
 NO_ARTIFACT_FOR_TARGET = "no_artifact_for_target"
@@ -75,6 +77,7 @@ SLEEPY = "sleepy"
 MERGED_BINARY = "merged_binary"  # refused at upload, not by refusals()
 ROLLBACK_INCAPABLE = "rollback_incapable"
 NO_LIBRARY_MARKER = "no_library_marker"
+NO_APPLY_CAPABILITY = "no_apply_capability"
 
 # The warnings `/deploy` enforces unless `override` names them, in the order they are
 # raised. `api/schemas.py`'s `OverrideCode` literal is kept equal to this by
@@ -296,6 +299,29 @@ def refusals(
             )
         )
     return found
+
+
+def apply_refusals(device: Device, apply: str) -> list[Finding]:
+    """The refusal of an `apply: "on_command"` deploy to a board that cannot be told to
+    apply (R5-be-2; R5-spec-1 D9). Pure.
+
+    A board that does not announce `apply` ignores the verb (an agent that predates R5), so
+    an `on_command` stage would wait at `staged` until the board next restarts, which then
+    boots the image anyway (the boot pointer moved at `staged`). `auto` is never refused
+    here. Separate from `refusals()` so that function's signature and its many callers stay
+    as they are; `/deploy` and `/deploy/precheck` both append this list to it.
+    """
+    if apply != "on_command" or APPLY_CAPABILITY in device.capabilities:
+        return []
+    return [
+        Finding(
+            NO_APPLY_CAPABILITY,
+            "this board's agent cannot be told to apply (it announces: "
+            f"{', '.join(device.capabilities) or 'nothing'}), so an on_command deploy would "
+            "wait at staged until the board restarts. Deploy with apply: auto, or update the "
+            "agent first.",
+        )
+    ]
 
 
 def warnings(device: Device, *, online: bool, artifact: ResolvedArtifact | None) -> list[Finding]:

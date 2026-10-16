@@ -1246,6 +1246,85 @@ Answered (R5-spec-1): it stays awake from `staging` until `confirmed` or `rolled
   transaction, equal to the API; `selftest` null on every other frame; no URL on the stream;
   no token in the logs.
 
+### R5-be-2 as built
+
+- **What was built.** The server half of the four verbs. `POST /v1/devices/{id}/deploys/{cmd_id}/apply`,
+  `…/deploys/{cmd_id}/cancel`, `POST /v1/devices/{id}/rollback`, `POST /v1/devices/{id}/reboot`
+  (admin-only, no body, 202 `CommandAccepted`) and `GET /v1/devices/{id}/commands/{command_id}`
+  (`CommandRecord`), in a new router `api/routers/commands.py`. New table `device_commands`
+  (migration 0010, `DeviceCommand`), written and read only by the new `device_commands.py`: one
+  row per verb, before the publish, plus the board's first `up/ack`. `broker/commands.py`:
+  `COMMAND_APPLY/CANCEL/ROLLBACK/REBOOT`, `VERB_COMMANDS`, `verb_payload()` (Patch A2 shapes).
+  `DeployState.CANCELLED`, terminal. `deploys.py`: `counts_in_deploy_kpis()` /
+  `KPI_EXCLUDED_TERMINAL_STATES` and `deploy_transaction()`. `deploy_precheck.apply_refusals()`
+  (`no_apply_capability`) on `/deploy` and `/deploy/precheck`. Ingestor: `UpChannel.ACK`,
+  `AckPayload`, `ACK_MAX_BYTES` 1024, `_store_ack`, `EventType.DEVICE_COMMAND` and
+  `DeviceEvent.command_id`. `GET /v1/devices` (and PATCH): `DeviceSummary.last_command`
+  (`CommandSummary`), directly before `deploy`. The simulator carries out and answers the verbs.
+  No spec, firmware, frontend, ACL, dynsec or env change.
+- **Decisions** (details in `DECISIONS.md` -> R5-be-2).
+  - (1) **The server gates only what it alone knows**, in order: device (404), the verb in
+    `capabilities` (409, D9), for apply/cancel a plausible `cmd_id` (400), a transaction the server
+    recorded for this board (404), not ended (409 naming the terminal state), and for apply one sent
+    `on_command` (409). Whether anything is staged, in flight or confirmed is the board's answer.
+  - (2) **Record, commit, publish.** A refused publish sets `publish_failed` and answers 503.
+    **No verb ever writes `deploy_events`**, not `requested`, not `failed`.
+  - (3) **First answer wins**, matched on `(id, device_id, type)` and `answered_at IS NULL`; an
+    ack for an id the server never sent creates no row (INFO with the id's length). `result` is
+    an open vocabulary (printable, at most 16 characters); `detail` is stored through
+    `sanitise_device_text` and never logged.
+  - (4) **`cancelled` is terminal**, so a re-deploy of a cancelled version mints a new `cmd_id`
+    (closes R5-fw-4 gap (c)).
+  - (5) **KPI rule** (`counts_in_deploy_kpis`): a transaction counts only with a `requested` row
+    and not ended `cancelled`. A rollback of a confirmed image is its own transaction under the
+    command's id, recorded from the board's `up/status` with NULL versions and no `requested`
+    row, so it counts nowhere (closes gap (d)). A rollback during `confirming` ends the stage's
+    transaction, which keeps counting as a `rolled_back`.
+  - (6) **`apply: "on_command"` needs the `apply` capability** (`no_apply_capability`, 409 on
+    `/deploy`, a refusal in the pre-check).
+  - (7) **The simulator learns the verbs** only when it announces them; a board with none ignores
+    them silently (a pre-R5 agent). `_release` is the one walk for `auto` and the `apply` verb
+    (D3); `returnable` models the confirmed other slot; `--safe-window hold` answers `deferred`.
+    An `auto` stage parked by `hold` is now held as `staged` (cancellable, and a second stage is
+    refused, as on metal).
+- **Deviations from the plan.** The verbs live in a new `api/routers/commands.py`, not in
+  `deploys.py`/`devices.py`, which keep their deploy-scoped tripwires. `DeployTransaction` has
+  `ended_state` (the first terminal state, for the 409 sentence) with `ended` as a property. The
+  ack's `type` must match in the `UPDATE` itself. `--capabilities` takes several values per flag
+  (`action="extend"`), as the acceptance criteria spell it; repeated flags still work.
+- **Named gaps.** (a) `CommandSummary` does not surface the answer's `cmd_id` (stored as
+  `answer_cmd_id`): R5-fe-1 may want it to show which transaction a refusal names. (b) An ack
+  that arrives before the API's commit cannot happen in practice (record, commit, publish), but
+  an ack for a row whose publish was marked failed after the board received it (a lost PUBACK)
+  is not recorded. (c) The simulator's download is inline, so a `cancel` only ever meets a
+  staged image; it does not read `confirm_timeout_s` (R5-test-1).
+- **Tests.** New `tests/test_api_commands.py`; `test_ingestor` (ack recording, first answer,
+  other board, unknown id, type mismatch, retained, oversized, malformed, open vocabulary,
+  sanitised and unlogged detail, publish-failed, no deploy row; `cancelled` terminal; the
+  rollback-own-transaction and the KPI table); `test_simulator` (every verb, hold, legacy,
+  `not implemented`, vocabulary tripwires, detail sizes, `selftest_outcome` None for the command
+  head); `test_broker_commands` (`verb_payload`); `test_deploy_precheck` (`apply_refusals`);
+  `test_api_deploy` (on_command gate, precheck, cancelled not reused, the no-timer tripwire
+  extended to the two new modules); `test_schema` (table, defaults, cascade); `test_invariants`
+  (single writer); `test_events_stream` and `test_api_devices` (pinned key sets, on purpose).
+- **T1.** `just test`: 2301 passed; ruff, format and mypy clean. Six mutation checks red, then
+  reverted (DECISIONS).
+- **T2.** Dev stack on 8088, api and ingestor restarted (0009 -> 0010 applied), boards
+  `r5be2-1792165060-v` (R5 verbs), `-old` (`ota` only) and `-h` (R5 verbs, `--safe-window hold`),
+  labels `1.x.0-r5be2-1792165060`. Legacy: 409 on reboot, 409 `no_apply_capability`, pre-check
+  `deployable: false`, nothing published. Apply: `staged` → 202 → ack `accepted` 0.6 s later,
+  `confirmed` on B in 2.6 s, one `device.command` frame with the command id. Apply again: 409
+  `already ended (confirmed)`. Cancel: `cancelled`, `is_terminal: true`; re-deploy minted a new
+  `cmd_id`. Rollback: ack `cmd_id` = its own id, `rolling_back`, `rolled_back` `rolled back by
+  command; returned to ota_0`, back on A, `sent_by`/`selftest` null, 0 `requested` rows, NULL
+  version, `counts_in_deploy_kpis` False; again → `no confirmed image to return to`. Reboot:
+  `accepted`, next announce `reset_reason: sw`, no status. Hold: reboot `refused` `an update is
+  in progress` (the stage's `cmd_id`), apply `deferred` + `awaiting_safe_window`, unchanged after
+  65 s, cancel `accepted` → `cancelled`. A hand-published late `refused` for the first command
+  changed nothing; an unknown id created no row. Only the rollback's two rows sit under any
+  command id in `deploy_events`. No token or signed URL on the SSE stream; `late` never in the
+  api or ingestor logs.
+
 ## Reuse note
 
 The self-test entrypoint defined here moves by the simulation gate

@@ -287,6 +287,28 @@ docker compose exec -T api python -m fleetforge.simulator run --token "$(newtoke
   --heartbeat-interval 5 --duration 20 --state-dir /tmp/sim
 ```
 
+### Sending a verb (R5-be-2)
+
+A sim that announces the R5 verbs carries them out and answers on `up/ack`; one that does not
+(`--capabilities ota` alone) models a pre-R5 agent, and the API refuses to send it a verb
+(409) or an `apply: "on_command"` deploy (409 `no_apply_capability`).
+
+```bash
+just sim --token "$(newtoken)" --name verbs --heartbeat-interval 5 \
+  --capabilities ota apply cancel rollback reboot          # add --safe-window hold to see `deferred`
+ID=$(PYTHONPATH=src uv run python -c 'from fleetforge.simulator.device import derive_device_id as d; print(d("verbs"))')
+CMD=$(curl -sS -X POST "$BASE/v1/devices/$ID/deploy" -H "Authorization: Bearer $TOKEN" \
+      -H 'content-type: application/json' -d '{"version":"1.5.0","apply":"on_command"}' | jq -r .cmd_id)
+# … once GET /v1/devices shows deploy.state == "staged":
+curl -sS -X POST "$BASE/v1/devices/$ID/deploys/$CMD/apply" -H "Authorization: Bearer $TOKEN"
+curl -sS "$BASE/v1/devices" -H "Authorization: Bearer $TOKEN" | jq '.devices[]|select(.device_id=="'$ID'")|.last_command'
+```
+
+`last_command.result` is `null` until the board answers, and stays `null` for a board that
+never will; the server never waits, retries or expires a command. A `rollback` of a confirmed
+image is its own transaction under the command's id (`deploy.cmd_id == command_id`, no
+`sent_by`), out of the deploy KPIs.
+
 Every expected failure prints one `SIMULATOR FAILED: <Type>: <message>` line and
 exits non-zero — a rejected token, a used token, an unreachable broker, a `sleepy`
 board with no `--wake-interval` (refused *before* the token is presented, so nothing

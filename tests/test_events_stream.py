@@ -562,7 +562,21 @@ def test_the_envelope_keys_are_pinned() -> None:
         "is_terminal",
         "detail",
         "selftest",
+        "command_id",
     }
+    assert json.loads(an_event().model_dump_json())["command_id"] is None
+
+
+async def test_a_command_frame_carries_the_command_id_and_is_forwarded_verbatim() -> None:
+    """R5-be-2: `device.command` names the command whose first answer was recorded."""
+    payload = an_event(type=EventType.DEVICE_COMMAND, command_id="c0ffee").model_dump_json()
+    hub = EventHub(queue_size=4, max_subscribers=4)
+    with hub.subscribe() as subscription:
+        a_listener(hub)._on_notify(None, 1, "ff_events", payload)
+        forwarded = subscription.queue.get_nowait()
+    assert forwarded == payload
+    body = json.loads(forwarded)
+    assert (body["type"], body["command_id"], body["cmd_id"]) == ("device.command", "c0ffee", None)
 
 
 async def test_a_deploy_frame_carries_the_transaction_and_is_forwarded_verbatim() -> None:

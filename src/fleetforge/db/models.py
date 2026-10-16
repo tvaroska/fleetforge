@@ -1,12 +1,12 @@
 """The fleetforge registry schema — R0-db-1, plus `device_progress` (S0-fw-1), the
 content-addressed artifact tables (S0-infra-4), the version labels over them
-(R1-be-1), the partition profiles (R3-be-2) and the stored device health, faults, logs
-and telemetry (R4-be-1).
+(R1-be-1), the partition profiles (R3-be-2), the stored device health, faults, logs
+and telemetry (R4-be-1) and the verbs the server sent with their answers (R5-be-2).
 
-Fourteen tables: `device_groups`, `devices`, `enrollment_tokens`, `admin_tokens`,
+Fifteen tables: `device_groups`, `devices`, `enrollment_tokens`, `admin_tokens`,
 `deploy_events`, `device_progress`, `artifacts`, `artifact_versions`, `builds`,
 `partition_profiles`, `device_faults`, `device_logs`, `device_telemetry`,
-`device_metrics`. Two of them (`enrollment_tokens`, `admin_tokens`) are CRITICAL.md
+`device_metrics`, `device_commands`. Two of them (`enrollment_tokens`, `admin_tokens`) are CRITICAL.md
 paths; read their docstrings before changing anything.
 
 Three conventions that hold across the whole file, each with a reason that is not
@@ -124,6 +124,33 @@ class DeployState(StrEnum):
     ROLLING_BACK = "rolling_back"
     ROLLED_BACK = "rolled_back"
     FAILED = "failed"
+    # R5-spec-1 D4 / Patch A3: device-authored, the end of a transaction the `cancel` verb
+    # stopped before its reboot. Terminal, and outside both deploy KPIs
+    # (`deploys.counts_in_deploy_kpis`): an operator's choice is neither a save nor a loss.
+    CANCELLED = "cancelled"
+
+
+class CommandType(StrEnum):
+    """The verbs the server sends besides `stage` (R5-spec-1 Patch A2), one per
+    `device_commands` row. **Advisory** — the column is TEXT with no CHECK (convention 1).
+    Server-authored, so in practice only these four values are ever written.
+    """
+
+    APPLY = "apply"
+    CANCEL = "cancel"
+    ROLLBACK = "rollback"
+    REBOOT = "reboot"
+
+
+class AckResult(StrEnum):
+    """`up/ack.result` (R5-spec-1 Patch A5). **Advisory** and open: the ingestor stores any
+    short printable string as sent (`device_commands.ACK_RESULT_MAX_CHARS`), so a newer
+    agent's fourth value is recorded rather than lost.
+    """
+
+    ACCEPTED = "accepted"
+    DEFERRED = "deferred"
+    REFUSED = "refused"
 
 
 class ProgressStage(StrEnum):
@@ -175,7 +202,7 @@ class ArtifactKind(StrEnum):
 
 
 TERMINAL_DEPLOY_STATES = frozenset(
-    {DeployState.CONFIRMED, DeployState.ROLLED_BACK, DeployState.FAILED}
+    {DeployState.CONFIRMED, DeployState.ROLLED_BACK, DeployState.FAILED, DeployState.CANCELLED}
 )
 """States that end a deploy transaction. The writer sets `deploy_events.is_terminal`
 from this set — see `DeployEvent` for why the flag is stored rather than derived."""
@@ -458,6 +485,13 @@ class DeployEvent(Base):
     * **fleet safety** — terminal state is `confirmed` **or** `rolled_back`; a
       `rolled_back` is a *save*, only `failed` (or no terminal event at all) is a
       loss. Target 100%.
+
+    **Which transactions count** (R5-be-2, one rule: `deploys.counts_in_deploy_kpis`):
+    only those the server opened with a `requested` row (it carries the intended version),
+    and not those that ended `cancelled` (an operator's choice, neither a save nor a loss).
+    So a `rollback` verb's own transaction (rows under the command's `id`, no `requested`
+    row, NULL versions) is recorded here and counted in neither KPI, while a rollback sent
+    during a stage's `confirming` ends THAT transaction as a `rolled_back` and counts.
 
     `is_terminal` is redundant with `state`, on purpose: it keeps the terminal-state
     vocabulary in Python (`TERMINAL_DEPLOY_STATES`) instead of the database, so a
@@ -925,3 +959,60 @@ class DeviceMetric(Base):
     name: Mapped[str] = mapped_column(Text, primary_key=True)
     value: Mapped[float] = mapped_column(Double, nullable=False)
     sample_at: Mapped[dt.datetime] = mapped_column(TimestampTZ, nullable=False)
+
+
+class DeviceCommand(Base):
+    """One verb the server published to a board — `apply`, `cancel`, `rollback` or
+    `reboot` — and the board's first answer to it. R5-be-2.
+
+    `fleetforge.device_commands` is the table's single writer and reader (the
+    `deploys.py` posture; `tests/test_invariants.py` holds the tripwire).
+
+    * **Never KPI history.** A verb is not a transaction state, and no `deploy_events` row
+      is written for it, not even `requested` or `failed`. What a verb does to a
+      transaction arrives on `up/status` under the transaction's `cmd_id`, like any state.
+      `ON DELETE CASCADE`: an operational record about a board (the `device_logs`
+      precedent; devices are only soft-deleted anyway).
+    * **The server writes the row before it publishes** (record, commit, publish), so the
+      row exists when the answer arrives. A refused publish sets `publish_failed`; such a
+      row never takes an answer and is never anyone's `last_command`.
+    * **First answer wins.** `answered_at`, `result`, `answer_cmd_id` and `answer_detail`
+      are the board's FIRST `up/ack` for this `id` (Patch A5); a QoS-1 duplicate or a later
+      answer changes nothing. NULL means "no answer yet", and possibly never: an agent that
+      predates R5 ignores a verb silently, and an ack queued while disconnected dies with a
+      reboot (R5-fw-4 gap (e)).
+    * **A device can never create a row.** An ack for an `id` the server did not send is
+      logged and dropped, and an ack only matches a row of the board that sent it.
+    * `answer_detail` is device-controlled text, stored sanitised
+      (`deploys.sanitise_device_text`) and never written into a server log.
+
+    No retention sweep: verbs are rare and the fleet is <= 25 boards.
+    """
+
+    __tablename__ = "device_commands"
+    __table_args__ = (
+        Index("ix_device_commands_device_id_sent_at", "device_id", text("sent_at DESC")),
+    )
+
+    # The command's own `id` (`broker.new_command_id()`, 32 hex characters).
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    device_id: Mapped[str] = mapped_column(
+        Text, ForeignKey("devices.device_id", ondelete="CASCADE"), nullable=False
+    )
+    # `CommandType`, advisory.
+    type: Mapped[str] = mapped_column(Text, nullable=False)
+    # The transaction an `apply` / `cancel` names; NULL for `rollback` / `reboot`.
+    cmd_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sent_at: Mapped[dt.datetime] = mapped_column(
+        TimestampTZ, nullable=False, server_default=text("now()")
+    )
+    # `{"subject", "token_id", "credential"}`, the R2b-be-4 sender snapshot.
+    sent_by: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    publish_failed: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    # The board's first `up/ack`, all NULL until it arrives.
+    answered_at: Mapped[dt.datetime | None] = mapped_column(TimestampTZ, nullable=True)
+    result: Mapped[str | None] = mapped_column(Text, nullable=True)
+    answer_cmd_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    answer_detail: Mapped[str | None] = mapped_column(Text, nullable=True)

@@ -73,9 +73,12 @@ STATUS = "status"
 # R4-fw-2: QoS 0 and not retained (`telemetry.py`), and off unless --telemetry-every is given,
 # so the QoS-1 matrix of every other publish is untouched by default.
 TELEMETRY = "telemetry"
-# `dn/cmd`, the only downlink channel in R1. Retyped here rather than imported from
+# `dn/cmd`, the only downlink channel. Retyped here rather than imported from
 # `broker/commands.py` for the reason `POWER_CLASSES` is retyped — see below.
 COMMAND = "cmd"
+# R5-spec-1 Patch A5: a verb's answer. QoS 1 and **never retained** (an answer is an
+# event, not state), so it goes through `_paced_publish(..., retain=False)`.
+ACK = "ack"
 
 # `artifact.sha256` as the firmware accepts it (`agent/components/fleetforge/src/ff_mqtt.c::on_stage`,
 # `is_lowercase_sha256`): exactly 64 lowercase hex characters, never normalised. Local on
@@ -100,12 +103,15 @@ STATE_CONFIRMING = "confirming"
 STATE_CONFIRMED = "confirmed"
 STATE_ROLLING_BACK = "rolling_back"
 STATE_ROLLED_BACK = "rolled_back"
+# R5-spec-1 D4 / Patch A3: the end of a transaction the `cancel` verb stopped.
+STATE_CANCELLED = "cancelled"
 
 # R5-fw-2 / R5-spec-1 D11, retyped from `ff_mqtt.c` (`DETAIL_SELFTEST_*`): the simulator
 # imports nothing from the server, so `tests/test_simulator.py` asserts that the server's
 # parser (`selftest_outcome`) reads every detail composed from these.
-# The simulator does NOT gate the rollback on a safe window (D12) and does NOT read
-# `confirm_timeout_s` from the stage command (R5-be-2 / R5-test-1).
+# The simulator does NOT gate the confirm-timer or self-test rollback on a safe window
+# (D12) and does NOT read `confirm_timeout_s` from the stage command (R5-test-1). Its
+# `--safe-window hold` gates the apply and the three reboot-causing verbs only.
 CAPABILITY_SELFTEST = "selftest"
 SELFTEST_PASSED = "selftest passed"
 SELFTEST_TIMED_OUT = "selftest timed out"
@@ -115,6 +121,47 @@ RETURNED_TO = "; returned to "
 # firmware's `DETAIL_MAX`.
 SELFTEST_FAIL_REASON = "simulated self-test failure"
 SLOT_LABELS = ("ota_0", "ota_1")
+
+# The R5 verbs (R5-spec-1 Patch A2; R5-fw-4/5 built them in `ff_mqtt.c`), retyped: each is
+# both the command `type` and the capability a board announces when it implements it (D9).
+# A board executes a verb only if it announces it; a board that announces none of them
+# models a pre-R5 agent, which ignores a verb and sends no answer. `tests/test_simulator.py`
+# asserts these agree with `broker/commands.py`.
+COMMAND_APPLY = "apply"
+COMMAND_CANCEL = "cancel"
+COMMAND_ROLLBACK = "rollback"
+COMMAND_REBOOT = "reboot"
+VERB_COMMANDS = (COMMAND_APPLY, COMMAND_CANCEL, COMMAND_ROLLBACK, COMMAND_REBOOT)
+# `up/ack.result` (Patch A5), retyped from `db/models.py::AckResult` (tripwire).
+ACK_ACCEPTED = "accepted"
+ACK_DEFERRED = "deferred"
+ACK_REFUSED = "refused"
+# The answers' `detail`, verbatim from `ff_mqtt.c` (*R5-fw-4 as built*, the vocabulary
+# table): text for a server to show, never a contract. Each is at most 63 bytes.
+ACK_NOTHING_STAGED = "nothing staged for this cmd_id"
+ACK_NO_IMAGE = "no confirmed image to return to"
+ACK_CANCEL_FIRST = "cancel first"
+ACK_NOT_IMPLEMENTED = "not implemented"
+ACK_NOTHING_TO_CANCEL = "nothing to cancel for this cmd_id"
+ACK_UPDATE_IN_PROGRESS = "an update is in progress"
+ACK_NOT_CONFIRMED = "the running image is not confirmed yet"
+ACK_CMD_ID_MISSING = "cmd_id missing"
+ACK_DETAILS = (
+    ACK_NOTHING_STAGED,
+    ACK_NO_IMAGE,
+    ACK_CANCEL_FIRST,
+    ACK_NOT_IMPLEMENTED,
+    ACK_NOTHING_TO_CANCEL,
+    ACK_UPDATE_IN_PROGRESS,
+    ACK_NOT_CONFIRMED,
+    ACK_CMD_ID_MISSING,
+)
+# R5-fw-5: the `awaiting_safe_window` details of a deferred verb.
+DETAIL_APPLY_WAITS = "apply waits for a safe window"
+DETAIL_ROLLBACK_WAITS = "rollback waits for a safe window"
+# R5-fw-4: the head a commanded rollback stores; the returned-to image completes it with
+# `; returned to <slot>`. Not a self-test outcome (the server's parser returns None).
+ROLLED_BACK_BY_COMMAND = "rolled back by command"
 
 # The walk a healthy `apply: "auto"` deploy makes up to the reboot. `awaiting_safe_window`
 # is NOT in it: a board that judges the window safe immediately goes straight from
@@ -132,8 +179,8 @@ STAGE_WALK = (
 CONFIRM_WALK = (STATE_CONFIRMING, STATE_CONFIRMED)
 ROLLBACK_WALK = (STATE_CONFIRMING, STATE_ROLLING_BACK, STATE_ROLLED_BACK)
 
-# `spec/device-protocol.md` → *`dn/cmd` — commands*: the type this simulator executes,
-# and the two `apply` modes.
+# `spec/device-protocol.md` → *`dn/cmd` — commands*: `stage` (always executed) and the
+# two `apply` modes. The R5 verbs above are executed only when announced.
 COMMAND_STAGE = "stage"
 APPLY_AUTO = "auto"
 APPLY_ON_COMMAND = "on_command"
@@ -157,7 +204,7 @@ CONFIRM_MODES = (CONFIRM_AUTO, CONFIRM_NEVER)
 # `spec/prd.md` → *Requirements & targets → Timing*: "confirm timeout 300 s". The real
 # agent honours the command's `confirm_timeout_s` since R5-fw-3 (clamped 30-3600 s,
 # counted from image start). This simulator keeps its own `--confirm-timeout`, which the
-# tests use to shorten the wait; teaching it the command is left to R5-be-2/R5-test-1.
+# tests use to shorten the wait; teaching it the command is left to R5-test-1.
 DEFAULT_CONFIRM_TIMEOUT_S = 300.0
 
 # Artifact downloads are chunked so a 1.9 MB image does not arrive as one read, the same
@@ -563,11 +610,25 @@ class StageRunner:
       `; returned to <slot>`.
     * `slot` — the OTA slot label the running image is in. An apply flips it, a rollback
       flips it back; only the self-test details name it (R5-be-1).
-    * `staged` — the `cmd_id` of an `apply: "on_command"` stage, whose image the boot
-      pointer now names. While it is set, a further `stage` is refused (R2-fw-2), as the
-      firmware refuses to write a slot the boot pointer names. **Nothing in the simulator
-      clears it**: a real board clears it by rebooting, and this one has no power cycle and
-      no `apply` command.
+    * `staged` — the `cmd_id` of a stage that stopped before its reboot: an
+      `apply: "on_command"` one, or an `auto` one parked by `--safe-window hold`. Its image
+      is what the boot pointer now names, so while it is set a further `stage` is refused
+      (R2-fw-2), as the firmware refuses to write a slot the boot pointer names. The
+      `apply` verb clears it (and releases the image), the `cancel` verb clears it (and
+      reports `cancelled`). `staged_version` is that image's version.
+    * `apply_deferred` — the `cmd_id` whose release waits for a safe window
+      (`--safe-window hold`); a repeat `apply` is an accepted no-op, a `cancel` still works.
+    * `rollback_deferred` / `reboot_deferred` — a reboot-causing verb answered `deferred`
+      under `--safe-window hold`, which never acts; a repeat is `accepted`.
+    * `returnable` — the confirmed image in the other slot, and that slot: what the
+      `rollback` verb returns a confirmed board to. Set when a transaction confirms;
+      cleared by any rollback. None on a fresh board, which models a USB flash whose other
+      slot never held a confirmed image (`no confirmed image to return to`).
+
+    **The verbs** (R5-spec-1 Patch A2) mirror `ff_mqtt.c` as *R5-fw-4/5 as built* describe
+    it, and run only when the board announces them (D9). Each is answered once on `up/ack`
+    (`_ack`), always before any status it causes. The simulator's download is inline, so
+    a `cancel` can only ever meet a `staged` image.
     """
 
     identity: DeviceIdentity
@@ -588,6 +649,11 @@ class StageRunner:
     rolled_back_head: str | None = field(default=None, init=False)
     slot: str = field(default=SLOT_LABELS[0], init=False)
     staged: str | None = field(default=None, init=False)
+    staged_version: str | None = field(default=None, init=False)
+    apply_deferred: str | None = field(default=None, init=False)
+    rollback_deferred: str | None = field(default=None, init=False)
+    reboot_deferred: bool = field(default=False, init=False)
+    returnable: tuple[DeviceIdentity, str] | None = field(default=None, init=False)
     # When the confirm timer of the current boot fires (monotonic). Armed once per boot,
     # like the firmware's esp_timer: a reconnect resumes it rather than restarting it.
     _confirm_deadline: float | None = field(default=None, init=False, repr=False)
@@ -633,6 +699,11 @@ class StageRunner:
         """A custom self-test is registered when the board announces the capability."""
         return CAPABILITY_SELFTEST in self.identity.capabilities
 
+    @property
+    def _answers_commands(self) -> bool:
+        """An agent that implements any verb answers every id'd command on `up/ack`."""
+        return any(verb in self.identity.capabilities for verb in VERB_COMMANDS)
+
     def _fails_selftest(self, version: str) -> bool:
         """An image whose version carries `selftest_fail_marker` fails its self-test."""
         return self.selftest_fail_marker is not None and self.selftest_fail_marker in version
@@ -669,13 +740,249 @@ class StageRunner:
         # escape — this line exists to be read by a human.
         step(f"payload  {json.dumps(redacted_command(body), sort_keys=True, ensure_ascii=False)}")
 
-        if kind != COMMAND_STAGE:
-            step(f"command  type={kind} is not implemented by this simulator — ignored")
-            return
         if not isinstance(command_id, str) or not command_id:
-            step("command  a stage with no id cannot be deduplicated — ignored")
+            step(f"command  a {kind} with no id cannot be deduplicated — ignored")
             return
-        await self._stage(client, command_id, body, step)
+        if kind == COMMAND_STAGE:
+            await self._stage(client, command_id, body, step)
+            return
+        if isinstance(kind, str) and kind in VERB_COMMANDS and kind in self.identity.capabilities:
+            await self._verb(client, command_id, kind, body, step)
+            return
+        if not self._answers_commands:
+            # A pre-R5 agent: it ignores the verb and sends nothing (D9).
+            step(f"command  type={kind} is not implemented by this board's agent — ignored")
+            return
+        await self._ack(
+            client,
+            command_id,
+            kind if isinstance(kind, str) else None,
+            ACK_REFUSED,
+            None,
+            ACK_NOT_IMPLEMENTED,
+            step,
+        )
+
+    async def _verb(
+        self,
+        client: aiomqtt.Client,
+        command_id: str,
+        kind: str,
+        body: dict[str, object],
+        step: Step,
+    ) -> None:
+        """Dispatch an announced R5 verb. `apply` / `cancel` need the `cmd_id` they name."""
+        if kind in (COMMAND_APPLY, COMMAND_CANCEL):
+            cmd_id = body.get("cmd_id")
+            if not isinstance(cmd_id, str) or not cmd_id:
+                await self._ack(
+                    client, command_id, kind, ACK_REFUSED, None, ACK_CMD_ID_MISSING, step
+                )
+                return
+            if kind == COMMAND_APPLY:
+                await self._apply(client, command_id, cmd_id, step)
+            else:
+                await self._cancel(client, command_id, cmd_id, step)
+        elif kind == COMMAND_ROLLBACK:
+            await self._rollback_command(client, command_id, step)
+        else:
+            await self._reboot_command(client, command_id, step)
+
+    async def _apply(
+        self, client: aiomqtt.Client, command_id: str, cmd_id: str, step: Step
+    ) -> None:
+        """`ff_mqtt.c::on_apply`: release the staged image (D3), or say why not."""
+        if self.staged == cmd_id:
+            if self.apply_deferred == cmd_id:
+                # A repeat while the release waits: changes nothing (R5-fw-5 (3)).
+                await self._ack(client, command_id, COMMAND_APPLY, ACK_ACCEPTED, cmd_id, None, step)
+                return
+            if self.safe_window == SAFE_WINDOW_HOLD:
+                await self._ack(client, command_id, COMMAND_APPLY, ACK_DEFERRED, cmd_id, None, step)
+                await self._status(
+                    client,
+                    cmd_id,
+                    STATE_AWAITING_SAFE_WINDOW,
+                    step,
+                    pct=100,
+                    detail=DETAIL_APPLY_WAITS,
+                )
+                self.apply_deferred = cmd_id
+                step("apply    --safe-window hold: the release waits, indefinitely")
+                return
+            await self._ack(client, command_id, COMMAND_APPLY, ACK_ACCEPTED, cmd_id, None, step)
+            version = self.staged_version
+            self._clear_staged()
+            await self._release(client, cmd_id, version, step)
+            return
+        if self.pending is not None and self.pending.cmd_id == cmd_id:
+            # Already past `staged` (it rebooted into it): an accepted no-op (D3).
+            await self._ack(client, command_id, COMMAND_APPLY, ACK_ACCEPTED, cmd_id, None, step)
+            return
+        await self._ack(
+            client, command_id, COMMAND_APPLY, ACK_REFUSED, None, ACK_NOTHING_STAGED, step
+        )
+
+    async def _cancel(
+        self, client: aiomqtt.Client, command_id: str, cmd_id: str, step: Step
+    ) -> None:
+        """`ff_mqtt.c::on_cancel` for a staged image (D4): put the boot pointer back, report
+        `cancelled`. The download is inline here, so nothing else is ever cancellable."""
+        if self.staged != cmd_id:
+            await self._ack(
+                client, command_id, COMMAND_CANCEL, ACK_REFUSED, None, ACK_NOTHING_TO_CANCEL, step
+            )
+            return
+        await self._ack(client, command_id, COMMAND_CANCEL, ACK_ACCEPTED, cmd_id, None, step)
+        await self._status(client, cmd_id, STATE_CANCELLED, step)
+        self._clear_staged()
+        step(f"cancel   {cmd_id} cancelled — the staged image will not boot")
+
+    async def _rollback_command(self, client: aiomqtt.Client, command_id: str, step: Step) -> None:
+        """`ff_mqtt.c::on_rollback` (D5): end an unconfirmed image's transaction, or roll a
+        confirmed image back as a transaction of its own under the command's id."""
+        if self.staged is not None:
+            await self._ack(
+                client,
+                command_id,
+                COMMAND_ROLLBACK,
+                ACK_REFUSED,
+                self.staged,
+                ACK_CANCEL_FIRST,
+                step,
+            )
+            return
+        if self.rollback_deferred is not None:
+            await self._ack(
+                client,
+                command_id,
+                COMMAND_ROLLBACK,
+                ACK_ACCEPTED,
+                self.rollback_deferred,
+                None,
+                step,
+            )
+            return
+        pending = self.pending
+        if pending is not None and not self.reboot.is_set():
+            # The image waits for its confirm (a `--confirm never` or broken image): the
+            # rollback ends the stage's transaction, which the next session reports.
+            if await self._deferred_rollback(client, command_id, pending.cmd_id, step):
+                return
+            await self._ack(
+                client, command_id, COMMAND_ROLLBACK, ACK_ACCEPTED, pending.cmd_id, None, step
+            )
+            await self._rollback(client, pending, ROLLED_BACK_BY_COMMAND, step)
+            return
+        if self.returnable is None:
+            await self._ack(
+                client, command_id, COMMAND_ROLLBACK, ACK_REFUSED, None, ACK_NO_IMAGE, step
+            )
+            return
+        # A confirmed image: its own transaction, under the command's id (D5). No
+        # `requested` row exists for it on the server, so it stays out of the KPIs.
+        if await self._deferred_rollback(client, command_id, command_id, step):
+            return
+        await self._ack(client, command_id, COMMAND_ROLLBACK, ACK_ACCEPTED, command_id, None, step)
+        try:
+            await self._status(client, command_id, STATE_ROLLING_BACK, step)
+        except aiomqtt.MqttError as exc:
+            step(f"rollback {STATE_ROLLING_BACK} not delivered ({exc}); rolling back anyway")
+        identity, slot = self.returnable
+        self.identity = replace(identity, reset_reason=RESET_REASON_SW)
+        self.slot = slot
+        self.rolled_back = command_id
+        self.rolled_back_head = ROLLED_BACK_BY_COMMAND
+        self.returnable = None
+        self._confirm_deadline = None
+        step(f"rollback returning to {identity.fw_version} in {slot}")
+        self.reboot.set()
+
+    async def _deferred_rollback(
+        self, client: aiomqtt.Client, command_id: str, transaction: str, step: Step
+    ) -> bool:
+        """Under `--safe-window hold` a rollback is `deferred` and never acts (R5-fw-5)."""
+        if self.safe_window != SAFE_WINDOW_HOLD:
+            return False
+        await self._ack(client, command_id, COMMAND_ROLLBACK, ACK_DEFERRED, transaction, None, step)
+        await self._status(
+            client, transaction, STATE_AWAITING_SAFE_WINDOW, step, detail=DETAIL_ROLLBACK_WAITS
+        )
+        self.rollback_deferred = transaction
+        step("rollback --safe-window hold: the rollback waits, indefinitely")
+        return True
+
+    async def _reboot_command(self, client: aiomqtt.Client, command_id: str, step: Step) -> None:
+        """`ff_mqtt.c::on_reboot` (D6): restart on the running image; no transaction, no
+        status — the next announce's `reset_reason: sw` is the evidence."""
+        if self.staged is not None:
+            await self._ack(
+                client,
+                command_id,
+                COMMAND_REBOOT,
+                ACK_REFUSED,
+                self.staged,
+                ACK_UPDATE_IN_PROGRESS,
+                step,
+            )
+            return
+        if self.pending is not None and not self.reboot.is_set():
+            await self._ack(
+                client,
+                command_id,
+                COMMAND_REBOOT,
+                ACK_REFUSED,
+                self.pending.cmd_id,
+                ACK_NOT_CONFIRMED,
+                step,
+            )
+            return
+        if self.reboot_deferred:
+            await self._ack(client, command_id, COMMAND_REBOOT, ACK_ACCEPTED, None, None, step)
+            return
+        if self.safe_window == SAFE_WINDOW_HOLD:
+            await self._ack(client, command_id, COMMAND_REBOOT, ACK_DEFERRED, None, None, step)
+            self.reboot_deferred = True
+            step("reboot   --safe-window hold: the reboot waits, indefinitely")
+            return
+        await self._ack(client, command_id, COMMAND_REBOOT, ACK_ACCEPTED, None, None, step)
+        self.identity = replace(self.identity, reset_reason=RESET_REASON_SW)
+        step(f"reboot   restarting on {self.identity.fw_version} for command {command_id}")
+        self.reboot.set()
+
+    def _clear_staged(self) -> None:
+        self.staged = None
+        self.staged_version = None
+        self.apply_deferred = None
+
+    async def _ack(
+        self,
+        client: aiomqtt.Client,
+        command_id: str,
+        kind: str | None,
+        result: str,
+        cmd_id: str | None,
+        detail: str | None,
+        step: Step,
+    ) -> None:
+        """One `up/ack`, QoS 1 and **never retained**, keys in Patch A5's order with
+        explicit nulls (`ff_mqtt.c::enqueue_ack`)."""
+        payload: dict[str, object] = {
+            "id": command_id,
+            "type": kind,
+            "result": result,
+            "cmd_id": cmd_id,
+            "detail": detail,
+        }
+        await _paced_publish(
+            client,
+            self.link,
+            up_topic(self.identity.device_id, ACK),
+            encode(payload),
+            retain=False,
+            step=step,
+        )
+        step(f"ack      {kind} {result}" + (f" ({detail})" if detail else ""))
 
     async def _stage(
         self, client: aiomqtt.Client, cmd_id: str, body: dict[str, object], step: Step
@@ -764,21 +1071,34 @@ class StageRunner:
 
         await self._status(client, cmd_id, STATE_STAGED, step)
 
+        staged_version = version if isinstance(version, str) and version else None
         if body.get("apply") == APPLY_ON_COMMAND:
             # `spec/device-protocol.md`: the device stages and waits for an explicit
-            # `apply`. R1 ships no such command, so this board sits here until R2, and a
-            # further `stage` is refused meanwhile (`staged`).
+            # `apply` (the verb, R5-be-2) — or a `cancel`. A further `stage` is refused
+            # meanwhile (`staged`).
             self.staged = cmd_id
-            step("stage    apply=on_command — staying staged until an apply arrives (R2)")
+            self.staged_version = staged_version
+            step("stage    apply=on_command — staying staged until an apply arrives")
             return
 
         if self.safe_window == SAFE_WINDOW_HOLD:
             # Parked, permanently and on purpose. Nothing server-side may end this:
-            # a vehicle in motion reports honestly for as long as it is moving.
+            # a vehicle in motion reports honestly for as long as it is moving. The
+            # image is staged all the same (a `cancel` can still end it, R5-fw-5 (5)).
             await self._status(client, cmd_id, STATE_AWAITING_SAFE_WINDOW, step)
+            self.staged = cmd_id
+            self.staged_version = staged_version
+            self.apply_deferred = cmd_id
             step("stage    --safe-window hold: parked in awaiting_safe_window, indefinitely")
             return
 
+        await self._release(client, cmd_id, staged_version, step)
+
+    async def _release(
+        self, client: aiomqtt.Client, cmd_id: str, version: str | None, step: Step
+    ) -> None:
+        """`applying → rebooting`, then the reboot: one walk for `apply: auto` and for the
+        `apply` verb, so a commanded release is exactly an automatic one (D3)."""
         await self._status(client, cmd_id, STATE_APPLYING, step)
         await self._status(client, cmd_id, STATE_REBOOTING, step)
         # The transaction crosses the reboot (the firmware writes it to NVS at `staged`;
@@ -792,7 +1112,7 @@ class StageRunner:
         self._confirm_deadline = None
         # The apply reboot is `esp_restart()`, so the next boot reads ESP_RST_SW (S0-fw-6).
         self.identity = replace(self.identity, reset_reason=RESET_REASON_SW)
-        if isinstance(version, str) and version:
+        if version:
             # The board comes back running the new image: later announces and heartbeats
             # say so, which is what makes "delivery success" checkable end to end.
             self.identity = replace(self.identity, fw_version=version)
@@ -862,6 +1182,9 @@ class StageRunner:
                 detail=SELFTEST_PASSED if registered else None,
             )
             step(f"confirm  {self.identity.fw_version} confirmed at the announce ack")
+            # The image it came from was confirmed in the other slot: a `rollback` verb
+            # may now return to it (R5-fw-4 `other_slot_is_returnable`).
+            self.returnable = (pending.previous_identity, pending.previous_slot)
             self.pending = None
             self._confirm_deadline = None
             return None
@@ -900,10 +1223,12 @@ class StageRunner:
     async def _rollback(
         self, client: aiomqtt.Client, pending: PendingConfirm, head: str | None, step: Step
     ) -> None:
-        """The one rollback both the confirm timer and a failed self-test end in.
+        """The one rollback the confirm timer, a failed self-test and a `rollback` verb
+        during the confirm end in.
 
         `rolling_back` is attempted BEFORE the reboot is triggered (see `_confirm_timeout`);
         `head` is the stored detail head the next session completes with the slot label.
+        The slot it leaves is marked invalid, so nothing is returnable afterwards.
         """
         try:
             await self._status(client, pending.cmd_id, STATE_ROLLING_BACK, step)
@@ -915,6 +1240,7 @@ class StageRunner:
         self.rolled_back = pending.cmd_id
         self.rolled_back_head = head
         self.pending = None
+        self.returnable = None
         self._confirm_deadline = None
         self.reboot.set()
 
@@ -1017,8 +1343,10 @@ async def _command_loop(client: aiomqtt.Client, stage: StageRunner, step: Step) 
     R0 logged commands and executed nothing; since R1-be-2 a `stage` is really carried
     out — downloaded, verified against its sha256 and "applied" — so the acceptance
     criterion ("the device fetched the bytes") is observable rather than asserted.
-    Commands of any other type are still logged and ignored: `apply`, `cancel`,
-    `rollback`, `identify`, `reboot` and `set_cfg` are later releases.
+    Since R5-be-2 the four verbs (`apply`, `cancel`, `rollback`, `reboot`) are carried
+    out and answered on `up/ack` by a board that announces them; such a board answers
+    `identify` and `set_cfg` `refused` / `not implemented`, and a board that announces
+    none of them ignores every non-stage command, as a pre-R5 agent does.
     """
     async for message in client.messages:
         await stage.handle(client, message, step)

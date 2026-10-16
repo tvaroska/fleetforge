@@ -12,7 +12,9 @@ from fleetforge.db.models import Device
 from fleetforge.deploy_precheck import (
     GATING_CODES,
     LAYOUT_SOURCES,
+    NO_APPLY_CAPABILITY,
     ResolvedArtifact,
+    apply_refusals,
     merged_binary,
     refusals,
     unmet_gates,
@@ -113,6 +115,28 @@ class TestRefusals:
     def test_an_r0_board_is_not_refused_for_being_old(self) -> None:
         d = device(partition_layout=None, ota_slot_size=None)
         assert refusals(d, artifact(size=10**9), version="1.5.0", catalog=BUILTIN) == []
+
+
+class TestApplyRefusals:
+    """R5-be-2 / R5-spec-1 D9: `apply: "on_command"` only to a board announcing `apply`."""
+
+    def test_on_command_without_the_apply_capability_is_refused(self) -> None:
+        found = apply_refusals(device(capabilities=["ota", "reboot"]), "on_command")
+        assert codes(found) == [NO_APPLY_CAPABILITY]
+        assert found[0].needs_override is False
+        assert "it announces: ota, reboot" in found[0].message
+        assert "Deploy with apply: auto, or update the agent first." in found[0].message
+
+    def test_a_board_announcing_nothing_says_so(self) -> None:
+        found = apply_refusals(device(capabilities=[]), "on_command")
+        assert "it announces: nothing" in found[0].message
+
+    def test_on_command_with_the_apply_capability_is_clean(self) -> None:
+        assert apply_refusals(device(capabilities=["ota", "apply"]), "on_command") == []
+
+    @pytest.mark.parametrize("caps", [[], ["ota"], ["ota", "apply"]])
+    def test_auto_is_never_refused_here(self, caps: list[str]) -> None:
+        assert apply_refusals(device(capabilities=caps), "auto") == []
 
 
 class TestWarnings:

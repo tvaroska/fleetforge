@@ -21,6 +21,7 @@ EXPECTED_TABLES = {
     "artifacts",
     "builds",
     "deploy_events",
+    "device_commands",
     "device_faults",
     "device_groups",
     "device_logs",
@@ -154,6 +155,37 @@ async def test_the_device_health_columns_are_nullable_with_no_default(
     ).all()
     assert len(rows) == 7
     assert {(row[1], row[2]) for row in rows} == {("YES", None)}
+
+
+async def test_device_commands_publish_failed_defaults_false_and_answers_are_nullable(
+    session: AsyncSession,
+) -> None:
+    """R5-be-2, migration 0010: a sent verb has no answer yet, and may never get one."""
+    await session.execute(
+        text(
+            "INSERT INTO devices (device_id, platform_type, link_type, power_class) "
+            "VALUES ('a4cf12b3de9e', 'esp32', 'wifi', 'always_on')"
+        )
+    )
+    await session.execute(
+        text(
+            "INSERT INTO device_commands (id, device_id, type) "
+            "VALUES ('c0ffee', 'a4cf12b3de9e', 'reboot')"
+        )
+    )
+    row = (
+        await session.execute(
+            text(
+                "SELECT publish_failed, sent_at IS NOT NULL, cmd_id, sent_by, answered_at, "
+                "result, answer_cmd_id, answer_detail FROM device_commands WHERE id = 'c0ffee'"
+            )
+        )
+    ).one()
+    assert tuple(row) == (False, True, None, None, None, None, None, None)
+    # Operational data about a board, never KPI history: it goes with the device.
+    await session.execute(text("DELETE FROM devices WHERE device_id = 'a4cf12b3de9e'"))
+    remaining = await session.scalar(text("SELECT count(*) FROM device_commands"))
+    assert remaining == 0
 
 
 async def test_artifacts_has_a_nullable_boolean_library_marker_verdict(

@@ -59,6 +59,10 @@ module owns `deploy_events` for reads as well as writes — and it is bounded by
 `LIST_LIMIT` as the list above, because it is handed exactly the ids already read.
 Since R2b-fe-9 it also carries the current transaction's steps and the confirm window,
 for the dashboard's update timeline.
+
+`last_command` (R5-be-2) rides here on the same argument: the newest verb the server sent
+the board and its first answer (`device_commands.latest_commands`, bounded by the same
+ids). The verbs themselves are `api/routers/commands.py`.
 """
 
 import datetime as dt
@@ -81,6 +85,7 @@ from fleetforge.api.deps import (
 )
 from fleetforge.api.schemas import (
     ArrivalSummary,
+    CommandSummary,
     DeploySelfTest,
     DeploySender,
     DeployStep,
@@ -99,6 +104,7 @@ from fleetforge.api.schemas import (
 from fleetforge.clock import now_utc
 from fleetforge.db.models import Device, DeviceGroup
 from fleetforge.deploys import DeploySnapshot, latest_deploys
+from fleetforge.device_commands import CommandSnapshot, latest_commands
 from fleetforge.device_logs import read_tail
 from fleetforge.events import DeviceEvent, EventType, emit
 from fleetforge.faults import fault_counts
@@ -213,8 +219,33 @@ def _deploy_summary(
     )
 
 
+def command_summary(snapshot: CommandSnapshot | None) -> CommandSummary | None:
+    """A board's newest command and its first answer, or `None` (R5-be-2). Field by field."""
+    if snapshot is None:
+        return None
+    return CommandSummary(
+        command_id=snapshot.command_id,
+        type=snapshot.type,
+        cmd_id=snapshot.cmd_id,
+        sent_at=snapshot.sent_at,
+        sent_by=(
+            DeploySender(subject=snapshot.sent_by.subject, credential=snapshot.sent_by.credential)
+            if snapshot.sent_by is not None
+            else None
+        ),
+        result=snapshot.result,
+        detail=snapshot.detail,
+        answered_at=snapshot.answered_at,
+    )
+
+
 def _device_summary(
-    row: Device, *, online: bool, deploy: DeploySummary | None, extras: _HealthExtras
+    row: Device,
+    *,
+    online: bool,
+    deploy: DeploySummary | None,
+    extras: _HealthExtras,
+    last_command: CommandSummary | None = None,
 ) -> DeviceSummary:
     """One row as the fleet view sees it. Field by field, `from_attributes` stays off."""
     return DeviceSummary(
@@ -244,6 +275,7 @@ def _device_summary(
         fault_resets=extras.fault_resets(row.device_id),
         health=_health_snapshot(row),
         metrics=extras.metrics.get(row.device_id, []),
+        last_command=last_command,
         deploy=deploy,
     )
 
@@ -274,6 +306,8 @@ async def list_devices(
         # Handed the ids this response already read, so there is no second unbounded
         # scan and the deploy read inherits `LIST_LIMIT` for free.
         deploys = await latest_deploys(session, device_ids=[row.device_id for row in rows])
+        # R5-be-2: the newest verb per board, bounded by the same ids.
+        commands = await latest_commands(session, device_ids=[row.device_id for row in rows])
         extras = await _health_extras(
             session,
             device_ids=[row.device_id for row in rows],
@@ -300,6 +334,7 @@ async def list_devices(
                     deploys.get(row.device_id), confirm_timeout_s=settings.confirm_timeout_s
                 ),
                 extras=extras,
+                last_command=command_summary(commands.get(row.device_id)),
             )
             for row in rows
         ],
@@ -392,6 +427,7 @@ async def update_device(
                 ) from None
 
         deploys = await latest_deploys(session, device_ids=[device_id])
+        commands = await latest_commands(session, device_ids=[device_id])
         extras = await _health_extras(
             session, device_ids=[device_id], now=now, window_s=settings.fault_window_s
         )
@@ -402,6 +438,7 @@ async def update_device(
                 deploys.get(device_id), confirm_timeout_s=settings.confirm_timeout_s
             ),
             extras=extras,
+            last_command=command_summary(commands.get(device_id)),
         )
 
     logger.info(

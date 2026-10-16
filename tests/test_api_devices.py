@@ -215,6 +215,7 @@ async def test_the_summary_carries_the_fleet_view_and_no_presence_ingredients(
         "fault_resets",
         "health",
         "metrics",
+        "last_command",
         "deploy",
     }
     assert row["fw_version"] == "1.4.2"
@@ -1380,6 +1381,7 @@ async def test_the_health_fields_ride_on_the_list_before_deploy(
         "fault_resets",
         "health",
         "metrics",
+        "last_command",
         "deploy",
     ], "frontend/src/api.ts mirrors this order; deploy stays last"
 

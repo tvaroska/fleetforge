@@ -63,6 +63,7 @@ from fleetforge.api.routers import (
     artifact_download,
     artifacts,
     auth,
+    commands,
     deploys,
     devices,
     enroll,
@@ -269,6 +270,8 @@ def create_app() -> FastAPI:
     # opt-out, which is how a public endpoint gets created by accident.
     app.include_router(artifact_download.router)
     app.include_router(deploys.router)
+    # R5-be-2: the apply / cancel / rollback / reboot verbs, admin-only like `deploys`.
+    app.include_router(commands.router)
 
     @app.get("/v1/healthz", tags=["health"])
     async def healthz() -> dict[str, str]:

@@ -47,6 +47,11 @@ message's `last_seen` or event (`_savepoint`):
   device in the same SAVEPOINT (R4-be-1, `fleetforge.device_logs`). Log text is never
   written into this process's log: counts only.
 
+And one UPDATE of the same shape (R5-be-2): a live `up/ack` records the board's first
+answer on the `device_commands` row of the verb it answers (`device_commands.record_answer`,
+first answer wins, matched on the sending board). An ack never creates a row, never writes
+`deploy_events` (it is not a transaction state), and its `detail` is never logged.
+
 `store.py` still never INSERTs: its rule is about `devices`, the enrollment boundary.
 
 This module does not commit — the caller owns the transaction, which is what lets the
@@ -61,15 +66,17 @@ from contextlib import asynccontextmanager
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from fleetforge import device_logs, faults, partition_profiles, telemetry_store
+from fleetforge import device_commands, device_logs, faults, partition_profiles, telemetry_store
 from fleetforge.clock import device_time
 from fleetforge.db.models import DeployEvent, Device
 from fleetforge.deploys import record_observed_status, snapshot_detail
 from fleetforge.events import DeviceEvent, EventType, emit
 from fleetforge.ingestor import store
 from fleetforge.ingestor.protocol import (
+    ACK_MAX_BYTES,
     LOG_MAX_BYTES,
     TELEMETRY_MAX_BYTES,
+    AckPayload,
     AnnouncePayload,
     HeartbeatPayload,
     LogPayload,
@@ -216,10 +223,12 @@ async def handle_up_message(
         )
 
     else:
-        # `up/telemetry` and `up/log` are decoded and stored below (R4-fw-2, R4-be-1); an
-        # unknown channel from a future agent lands here too. All of them prove the board
-        # is alive, and `last_seen` moves before any decode, so an undecodable payload
-        # still counts. **No `deploy_events` row is written for them.**
+        # `up/telemetry`, `up/log` (R4-fw-2, R4-be-1) and `up/ack` (R5-be-2) are decoded
+        # and stored below; an unknown channel from a future agent lands here too. All of
+        # them prove the board is alive, and `last_seen` moves before any decode, so an
+        # undecodable payload still counts. A retained one is dropped before the device
+        # lookup: an ack is never accepted from a replay. **No `deploy_events` row is
+        # written for any of them.**
         if retained:
             logger.debug("ignoring retained replay on %s", topic)
             return None
@@ -234,6 +243,14 @@ async def handle_up_message(
         await _store_telemetry(session, device_id, topic, payload, received_at)
     elif parsed.channel == UpChannel.LOG:
         await _store_log(session, device_id, topic, payload, received_at)
+
+    answered: str | None = None
+    if parsed.channel == UpChannel.ACK:
+        # Live only and registered only, like the two above. The event is upgraded only
+        # when an answer was recorded: a duplicate or an unknown id is not news.
+        answered = await _store_ack(session, device_id, topic, payload, received_at)
+        if answered is not None:
+            event_type = EventType.DEVICE_COMMAND
 
     written: DeployEvent | None = None
     if status is not None and status.cmd_id and status.state:
@@ -283,6 +300,8 @@ async def handle_up_message(
             if written is not None and written.is_terminal
             else None
         ),
+        # R5-be-2: the server-minted id of the command whose answer was just recorded.
+        command_id=answered,
     )
     await emit(session, event)
     return event
@@ -378,6 +397,43 @@ async def _store_log(
         await device_logs.record_log_batch(
             session, device_id=device_id, payload=batch, received_at=received_at
         )
+
+
+async def _store_ack(
+    session: AsyncSession, device_id: str, topic: str, payload: bytes, received_at: dt.datetime
+) -> str | None:
+    """Decode an `up/ack` and keep it as the first answer to the command it names; return
+    that command's id when an answer was recorded, else None. Never raises, never logs the
+    `detail` (device-controlled text), never writes `deploy_events`."""
+    if len(payload) > ACK_MAX_BYTES:
+        logger.warning(
+            "device %s: ack payload of %d bytes dropped (over %d)",
+            device_id,
+            len(payload),
+            ACK_MAX_BYTES,
+        )
+        return None
+    ack = decode(AckPayload, topic, payload)
+    if ack is None:
+        return None
+    # The `_savepoint` shape, spelled out because the result decides the event type: a
+    # failure (an un-migrated schema included) must not upgrade it to `device.command`.
+    try:
+        async with session.begin_nested():
+            recorded = await device_commands.record_answer(
+                session,
+                device_id=device_id,
+                command_id=ack.id,
+                type=ack.type,
+                result=ack.result,
+                cmd_id=ack.cmd_id,
+                detail=ack.detail,
+                at=received_at,
+            )
+    except SQLAlchemyError:
+        logger.warning("device %s: ack storage failed; liveness kept", device_id, exc_info=True)
+        return None
+    return recorded.command_id if recorded is not None else None
 
 
 def _online_snapshot(

@@ -357,6 +357,9 @@ class DeviceSummary(BaseModel):
     health: "HealthSnapshot | None" = None
     # The latest value of each metric (`up/telemetry`), newest 32 by update, sorted by name.
     metrics: list["MetricValue"] = Field(default_factory=list)
+    # R5-be-2: the newest verb the server published to this board and its first answer,
+    # or `None` for a board never commanded. Defaulted and placed directly before `deploy`.
+    last_command: "CommandSummary | None" = None
     # The newest deploy transaction's current state, or `None` for a board that has
     # never been deployed to. Rides on this response for the same reason `arrivals`
     # does — see `DeploySummary` and `routers/devices.py`.
@@ -530,6 +533,64 @@ class DeploySummary(BaseModel):
     confirm_timeout_s: int
     sent_by: DeploySender | None = None
     selftest: DeploySelfTest | None = None
+
+
+class CommandSummary(BaseModel):
+    """The newest verb sent to a board and its first answer (R5-be-2), on `GET /v1/devices`.
+
+    `type` is `apply` / `cancel` / `rollback` / `reboot`; `cmd_id` is the transaction an
+    `apply` / `cancel` named, null for the other two. `sent_by` is who sent it (the token
+    id is stored, never sent).
+
+    **`result: null` means "no answer yet" — and possibly never.** An agent that predates
+    R5 ignores a verb and never answers; an answer queued while the board was disconnected
+    dies with a reboot (R5-fw-4 gap (e)). The server never waits for one and never expires
+    a command. Otherwise `result` is the device's word — `accepted`, `deferred`, `refused`,
+    or a newer agent's value, rendered as text — with `answered_at` its receipt time.
+    `detail` is device-controlled text (stored sanitised: no control characters, URLs as
+    `<url>`, at most 200 characters), the reason for a refusal or a wait; render it as text,
+    never parse it. What the verb did to a transaction shows on `deploy`, not here.
+    """
+
+    command_id: str
+    type: str
+    cmd_id: str | None
+    sent_at: dt.datetime
+    sent_by: DeploySender | None
+    result: str | None
+    detail: str | None
+    answered_at: dt.datetime | None
+
+
+class CommandRecord(CommandSummary):
+    """`GET /v1/devices/{device_id}/commands/{command_id}` (R5-be-2): one command, publish
+    failures included, for scripts and CI. `publish_failed: true` means the broker refused
+    the publish, so the board never saw it and no answer will come."""
+
+    device_id: str
+    publish_failed: bool
+
+
+class CommandAccepted(BaseModel):
+    """What the four verb routes return with 202 (R5-be-2).
+
+    202, not 201: the verb was recorded and handed to the broker, and under MQTT 3.1.1 that
+    is the most the server can claim (`broker/commands.py`). The board's answer arrives
+    later on `up/ack` (`GET /v1/devices` → `last_command`, the `device.command` SSE frame, or
+    `GET …/commands/{command_id}`), and an old agent may never answer.
+
+    `cmd_id` is the transaction named (apply / cancel), null for rollback / reboot. A
+    rollback of a confirmed image becomes its own transaction under `command_id` (its
+    states arrive on `deploy` with `deploy.cmd_id == command_id`). `device_online` is
+    reported and **never** blocking: the QoS-1 command waits in the board's persistent
+    session. No URL anywhere: a verb carries none.
+    """
+
+    command_id: str
+    device_id: str
+    type: str
+    cmd_id: str | None
+    device_online: bool
 
 
 class ArrivalSummary(BaseModel):
@@ -726,9 +787,10 @@ class DeployRequest(BaseModel):
 
     version: str = Field(min_length=1, max_length=64, description="the label, e.g. 1.5.0")
     # `spec/device-protocol.md`: `auto` lets the device apply as soon as *it* judges the
-    # window safe; `on_command` stages and waits. R1 ships no `apply` command, so an
-    # `on_command` deploy parks the board in `staged` until R2 — accepted on purpose,
-    # because the wire field exists and refusing it would be inventing a restriction.
+    # window safe; `on_command` stages and waits for the `apply` verb
+    # (`POST /v1/devices/{id}/deploys/{cmd_id}/apply`, R5-be-2). Since R5-be-2 an
+    # `on_command` deploy to a board that does not announce `apply` is refused
+    # (`no_apply_capability`): it would wait at `staged` until the board restarts.
     apply: Literal["auto", "on_command"] = "auto"
     override: list[OverrideCode] = Field(
         default_factory=list,

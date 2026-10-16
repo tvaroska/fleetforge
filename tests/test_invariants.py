@@ -318,3 +318,42 @@ def test_the_writer_module_exists_and_is_the_one_named() -> None:
     """Non-vacuity: the rule above is worthless if the writer moved and nothing noticed."""
     source = (SRC_DIR / "deploys.py").read_text(encoding="utf-8")
     assert "DeployEvent(" in source
+
+
+# ---------------------------------------------------------------------------
+# `device_commands` has exactly one writer (R5-be-2)
+# ---------------------------------------------------------------------------
+
+DEVICE_COMMAND_WRITERS = {"device_commands.py", "db/models.py"}
+
+
+def test_only_device_commands_py_writes_device_commands() -> None:
+    """The first answer wins, a device never creates a row, and an ack only matches its own
+    board's command: three rules that live in one writer. A second module building rows or
+    updating them would have its own idea of all three."""
+    offenders = []
+    for path in SRC_DIR.rglob("*.py"):
+        relative = path.relative_to(SRC_DIR).as_posix()
+        if relative in DEVICE_COMMAND_WRITERS:
+            continue
+        source = path.read_text(encoding="utf-8")
+        code = "\n".join(
+            line.split("#", 1)[0]
+            for line in source.splitlines()
+            if not line.lstrip().startswith("#")
+        )
+        upper = code.upper()
+        if (
+            "DeviceCommand(" in code
+            or "INSERT INTO DEVICE_COMMANDS" in upper
+            or "UPDATE DEVICE_COMMANDS" in upper
+        ):
+            offenders.append(relative)
+    assert offenders == [], f"these modules write device_commands directly: {offenders}"
+
+
+def test_the_device_commands_writer_exists_and_is_the_one_named() -> None:
+    """Non-vacuity: the rule above is worthless if the writer moved and nothing noticed."""
+    source = (SRC_DIR / "device_commands.py").read_text(encoding="utf-8")
+    assert "DeviceCommand(" in source
+    assert "UPDATE device_commands" in source

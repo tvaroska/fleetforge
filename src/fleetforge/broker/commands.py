@@ -42,13 +42,22 @@ TOPIC_ROOT = "ff/v1/d"
 COMMAND_CHANNEL = "cmd"
 
 # `spec/device-protocol.md` → *`dn/cmd` — commands*: the command vocabulary is
-# `stage · apply · cancel · rollback · identify · reboot · set_cfg`. R1-be-2 ships
-# exactly one of them.
+# `stage · apply · cancel · rollback · identify · reboot · set_cfg`. The server sends
+# five of them: `stage` (R1-be-2) and the four verbs below (R5-be-2, R5-spec-1 Patch A2).
+# `identify` and `set_cfg` are not sent by anything.
 COMMAND_STAGE = "stage"
+COMMAND_APPLY = "apply"
+COMMAND_CANCEL = "cancel"
+COMMAND_ROLLBACK = "rollback"
+COMMAND_REBOOT = "reboot"
+VERB_COMMANDS = (COMMAND_APPLY, COMMAND_CANCEL, COMMAND_ROLLBACK, COMMAND_REBOOT)
+# The two verbs that name a transaction (`cmd_id`, the stage's `id`), Patch A2 / D1.
+_VERBS_WITH_CMD_ID = (COMMAND_APPLY, COMMAND_CANCEL)
 
 # `spec/device-protocol.md`: "the device applies as soon as *it* judges the window
-# safe" vs "the device stages and waits for an explicit `apply`". The `apply` command
-# itself is R2 — a board given `on_command` sits in `staged` until then, by design.
+# safe" vs "the device stages and waits for an explicit `apply`". The `apply` verb is
+# R5-be-2's, and `/deploy` refuses `on_command` to a board that does not announce it
+# (`deploy_precheck.apply_refusals`): such a board would sit at `staged` until it restarts.
 APPLY_AUTO = "auto"
 APPLY_ON_COMMAND = "on_command"
 APPLY_MODES = (APPLY_AUTO, APPLY_ON_COMMAND)
@@ -120,6 +129,28 @@ def stage_payload(
         "apply": apply,
         "confirm_timeout_s": confirm_timeout_s,
     }
+
+
+def verb_payload(*, command_id: str, type: str, cmd_id: str | None = None) -> dict[str, Any]:
+    """An `apply` / `cancel` / `rollback` / `reboot` body, exactly R5-spec-1 Patch A2.
+
+    `{"id","type","cmd_id"}` for `apply` and `cancel` (the transaction they act on), and
+    `{"id","type"}` for `rollback` and `reboot` — no `cmd_id` key at all, not a null: the
+    patch prints them that way and the agent answers a `cmd_id`-less apply/cancel with
+    `cmd_id missing`. Keys in that order. Nothing secret: a verb carries no URL.
+
+    Raises `ValueError` for an unknown type, an `apply`/`cancel` without `cmd_id`, or a
+    `rollback`/`reboot` given one: a wrong shape is a server bug, never sent.
+    """
+    if type not in VERB_COMMANDS:
+        raise ValueError(f"not a verb this server sends: {type!r}")
+    if type in _VERBS_WITH_CMD_ID:
+        if not cmd_id:
+            raise ValueError(f"{type} names a transaction: cmd_id is required")
+        return {"id": command_id, "type": type, "cmd_id": cmd_id}
+    if cmd_id is not None:
+        raise ValueError(f"{type} names no transaction: cmd_id must be None")
+    return {"id": command_id, "type": type}
 
 
 def encode_command(payload: dict[str, Any]) -> bytes:

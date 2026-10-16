@@ -21,9 +21,10 @@ import pytest
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
+from fleetforge import device_commands
 from fleetforge.db.base import asyncpg_dsn
-from fleetforge.db.models import DeployEvent, Device
-from fleetforge.deploys import DeploySender, record_requested
+from fleetforge.db.models import DeployEvent, Device, DeviceCommand
+from fleetforge.deploys import DeploySender, counts_in_deploy_kpis, record_requested
 from fleetforge.events import EVENTS_CHANNEL, DeviceEvent, EventType
 from fleetforge.ingestor.handlers import handle_up_message
 from fleetforge.selftest_outcome import SelfTestOutcome
@@ -1297,3 +1298,319 @@ def test_reset_reason_is_stored_on_every_announce_not_only_when_present() -> Non
     assert "reset_reason" not in ANNOUNCE_FIELDS
     assert "last_reset_reason" not in ANNOUNCE_FIELDS
     assert "last_reset_reason" in Device.__table__.columns
+
+
+# --- up/ack → device_commands (R5-be-2) ---------------------------------------
+
+COMMAND_ID = "c0ffee00c0ffee00c0ffee00c0ffee00"
+OTHER_ID = "a4cf12b3de91"
+
+
+async def seed_command(
+    session: AsyncSession,
+    *,
+    command_id: str = COMMAND_ID,
+    device_id: str = DEVICE_ID,
+    type: str = "apply",
+    cmd_id: str | None = CMD_ID,
+) -> None:
+    """What `POST …/apply` writes before it publishes, through the shipped writer."""
+    await device_commands.record_sent(
+        session,
+        command_id=command_id,
+        device_id=device_id,
+        type=type,
+        cmd_id=cmd_id,
+        sent_by=DeploySender(subject="admin", token_id="t", credential=None),
+    )
+
+
+def ack(**overrides: object) -> dict[str, object]:
+    body: dict[str, object] = {
+        "id": COMMAND_ID,
+        "type": "apply",
+        "result": "accepted",
+        "cmd_id": CMD_ID,
+        "detail": None,
+    }
+    body.update(overrides)
+    return body
+
+
+async def command_row(session: AsyncSession, command_id: str = COMMAND_ID) -> DeviceCommand:
+    row = await session.scalar(select(DeviceCommand).where(DeviceCommand.id == command_id))
+    assert row is not None
+    await session.refresh(row)
+    return row
+
+
+async def deploy_row_count(session: AsyncSession) -> int:
+    return int(await session.scalar(select(func.count()).select_from(DeployEvent)) or 0)
+
+
+async def test_a_live_ack_records_the_answer_and_emits_device_command(
+    session: AsyncSession,
+) -> None:
+    await seed_device(session)
+    await seed_command(session)
+
+    event = await publish(session, "ack", ack())
+
+    assert event is not None
+    assert event.type is EventType.DEVICE_COMMAND
+    assert event.command_id == COMMAND_ID
+    assert event.cmd_id is None  # the deploy fields stay null on a command frame
+    row = await command_row(session)
+    assert (row.result, row.answer_cmd_id, row.answer_detail, row.answered_at) == (
+        "accepted",
+        CMD_ID,
+        None,
+        NOW,
+    )
+    assert (await reload(session)).last_seen == NOW
+    assert await deploy_row_count(session) == 0
+
+
+async def test_the_first_answer_wins(session: AsyncSession) -> None:
+    """A QoS-1 duplicate, or a second answer, changes nothing and is not news."""
+    await seed_device(session)
+    await seed_command(session)
+    await publish(session, "ack", ack())
+
+    later = NOW + dt.timedelta(seconds=5)
+    event = await publish(session, "ack", ack(result="refused", detail="late"), at=later)
+
+    assert event is not None
+    assert event.type is EventType.DEVICE_SEEN
+    assert event.command_id is None
+    row = await command_row(session)
+    assert (row.result, row.answer_detail, row.answered_at) == ("accepted", None, NOW)
+    assert (await reload(session)).last_seen == later
+
+
+async def test_a_board_cannot_answer_another_boards_command(session: AsyncSession) -> None:
+    await seed_device(session)
+    await seed_device(session, OTHER_ID)
+    await seed_command(session)
+
+    event = await publish(session, "ack", ack(), device_id=OTHER_ID)
+
+    assert event is not None
+    assert event.type is EventType.DEVICE_SEEN
+    assert (await command_row(session)).result is None
+
+
+async def test_an_unknown_id_creates_no_row_and_logs_only_its_length(
+    session: AsyncSession,
+) -> None:
+    await seed_device(session)
+
+    with capture_logs() as records:
+        event = await publish(session, "ack", ack(id="bogus-id-from-a-hand-built-command"))
+
+    assert event is not None
+    assert event.type is EventType.DEVICE_SEEN
+    assert await session.scalar(select(func.count()).select_from(DeviceCommand)) == 0
+    lines = [r.getMessage() for r in records if "did not send" in r.getMessage()]
+    assert lines == [
+        f"device {DEVICE_ID} answered (accepted) a command id this server did not send it "
+        "(34 chars); no row created"
+    ]
+    assert not any("bogus" in r.getMessage() for r in records)
+
+
+async def test_a_type_mismatch_is_not_recorded(session: AsyncSession) -> None:
+    await seed_device(session)
+    await seed_command(session, type="reboot", cmd_id=None)
+
+    with capture_logs() as records:
+        event = await publish(session, "ack", ack(type="apply"))
+
+    assert event is not None
+    assert event.type is EventType.DEVICE_SEEN
+    assert (await command_row(session)).result is None
+    assert any(r.levelno == logging.WARNING and "another type" in r.getMessage() for r in records)
+
+
+async def test_a_retained_ack_is_ignored_and_proves_nothing(session: AsyncSession) -> None:
+    await seed_device(session)
+    await seed_command(session)
+
+    event = await publish(session, "ack", ack(), retained=True)
+
+    assert event is None
+    assert (await command_row(session)).result is None
+    assert (await reload(session)).last_seen is None
+
+
+async def test_an_oversized_ack_is_dropped_but_proves_liveness(session: AsyncSession) -> None:
+    await seed_device(session)
+    await seed_command(session)
+
+    event = await publish(session, "ack", ack(detail="x" * 2000))
+
+    assert event is not None
+    assert event.type is EventType.DEVICE_SEEN
+    assert (await command_row(session)).result is None
+    assert (await reload(session)).last_seen == NOW
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [b"not json", b"[]", b'{"id": 42}', b'{"id": "c", "result": ["x"]}'],
+)
+async def test_a_malformed_ack_is_dropped_quietly(session: AsyncSession, raw: bytes) -> None:
+    await seed_device(session)
+    await seed_command(session)
+
+    event = await publish(session, "ack", raw=raw)
+
+    assert event is not None
+    assert event.type is EventType.DEVICE_SEEN
+    assert (await command_row(session)).result is None
+
+
+@pytest.mark.parametrize("result", ["", "   ", "x" * 17, "bad\nline", None])
+async def test_an_unusable_result_is_not_an_answer(
+    session: AsyncSession, result: str | None
+) -> None:
+    await seed_device(session)
+    await seed_command(session)
+
+    await publish(session, "ack", ack(result=result))
+
+    assert (await command_row(session)).result is None
+
+
+async def test_an_open_result_vocabulary_is_stored_as_sent(session: AsyncSession) -> None:
+    """`AckResult` is advisory: a newer agent's value is recorded, not lost."""
+    await seed_device(session)
+    await seed_command(session)
+
+    await publish(session, "ack", ack(result="postponed"))
+
+    assert (await command_row(session)).result == "postponed"
+
+
+async def test_the_detail_is_stored_sanitised_and_never_logged(session: AsyncSession) -> None:
+    await seed_device(session)
+    await seed_command(session)
+    secret = "https://downloads.test/v1/artifact/x/bin?exp=1&sig=abc"
+
+    with capture_logs() as records:
+        await publish(session, "ack", ack(result="refused", detail=f"nope\x1b[31m {secret} tail"))
+
+    assert (await command_row(session)).answer_detail == "nope[31m <url> tail"
+    assert records, "the capture is not vacuous"
+    assert not any("nope" in r.getMessage() or "sig=" in r.getMessage() for r in records)
+
+
+async def test_an_overlong_answer_cmd_id_is_stored_as_null(session: AsyncSession) -> None:
+    await seed_device(session)
+    await seed_command(session)
+
+    await publish(session, "ack", ack(cmd_id="c" * 65))
+
+    row = await command_row(session)
+    assert (row.result, row.answer_cmd_id) == ("accepted", None)
+
+
+async def test_a_publish_failed_command_takes_no_answer(session: AsyncSession) -> None:
+    await seed_device(session)
+    await seed_command(session)
+    await device_commands.mark_publish_failed(session, command_id=COMMAND_ID)
+
+    event = await publish(session, "ack", ack())
+
+    assert event is not None
+    assert event.type is EventType.DEVICE_SEEN
+    assert (await command_row(session)).result is None
+
+
+async def test_an_ack_from_an_unregistered_device_writes_nothing(session: AsyncSession) -> None:
+    event = await publish(session, "ack", ack())
+    assert event is None
+    assert await session.scalar(select(func.count()).select_from(DeviceCommand)) == 0
+
+
+async def test_no_ack_ever_writes_a_deploy_row(session: AsyncSession) -> None:
+    """The ack is not a transaction state: not for an accepted apply, not for a refusal."""
+    await seed_device(session)
+    await seed_intent(session)
+    await seed_command(session)
+    await seed_command(session, command_id="r" * 32, type="rollback", cmd_id=None)
+    before = await deploy_row_count(session)
+
+    await publish(session, "ack", ack())
+    await publish(
+        session,
+        "ack",
+        ack(id="r" * 32, type="rollback", result="refused", cmd_id=None, detail="cancel first"),
+    )
+    await publish(session, "ack", ack(id="unknown"))
+
+    assert await deploy_row_count(session) == before == 1
+
+
+# --- cancelled and the KPI rule (R5-be-2) ----------------------------------------
+
+
+async def test_cancelled_is_recorded_as_terminal(session: AsyncSession) -> None:
+    await seed_device(session)
+    await seed_intent(session)
+
+    event = await publish(session, "status", {"cmd_id": CMD_ID, "state": "cancelled"})
+
+    assert event is not None
+    assert event.type is EventType.DEVICE_DEPLOY
+    assert event.is_terminal is True
+    row = (await deploy_rows(session))[-1]
+    assert (row.state, row.is_terminal, row.artifact_version) == ("cancelled", True, "1.5.0")
+    assert counts_in_deploy_kpis(terminal_state=row.state, has_requested_row=True) is False
+
+
+async def test_a_rollback_commands_own_transaction_is_recorded_and_out_of_the_kpis(
+    session: AsyncSession,
+) -> None:
+    """D5: a rollback of a confirmed image reports under the command's own id. No
+    `requested` row exists, so the versions are NULL and the transaction counts nowhere."""
+    await seed_device(session)
+    await seed_command(session, type="rollback", cmd_id=None)
+
+    await publish(session, "status", {"cmd_id": COMMAND_ID, "state": "rolling_back"})
+    event = await publish(
+        session,
+        "status",
+        {
+            "cmd_id": COMMAND_ID,
+            "state": "rolled_back",
+            "detail": "rolled back by command; returned to ota_0",
+        },
+    )
+
+    rows = await deploy_rows(session, COMMAND_ID)
+    assert [(r.state, r.is_terminal) for r in rows] == [
+        ("rolling_back", False),
+        ("rolled_back", True),
+    ]
+    assert rows[-1].artifact_version is None
+    assert event is not None
+    assert event.selftest is None  # a command rollback is not a self-test outcome
+    assert counts_in_deploy_kpis(terminal_state="rolled_back", has_requested_row=False) is False
+
+
+@pytest.mark.parametrize(
+    ("state", "has_requested", "counts"),
+    [
+        ("confirmed", True, True),
+        ("rolled_back", True, True),
+        ("failed", True, True),
+        ("cancelled", True, False),
+        ("confirmed", False, False),
+        ("rolled_back", False, False),
+        ("failed", False, False),
+        ("cancelled", False, False),
+    ],
+)
+def test_counts_in_deploy_kpis(state: str, has_requested: bool, counts: bool) -> None:
+    assert counts_in_deploy_kpis(terminal_state=state, has_requested_row=has_requested) is counts

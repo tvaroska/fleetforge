@@ -102,6 +102,7 @@ from fleetforge.deploy_precheck import (
     NO_ARTIFACT_FOR_TARGET,
     Finding,
     ResolvedArtifact,
+    apply_refusals,
     refusals,
     unmet_gates,
     warnings,
@@ -230,7 +231,12 @@ async def deploy_device(
         device, found_artifact = await _resolve(session, device_id, body.version)
         catalog = await load_layout_catalog(session)
         artifact = _accept(
-            device, found_artifact, version=body.version, override=body.override, catalog=catalog
+            device,
+            found_artifact,
+            version=body.version,
+            apply=body.apply,
+            override=body.override,
+            catalog=catalog,
         )
 
         # The reuse window is the minted URL's lifetime: past it the first URL has
@@ -355,15 +361,21 @@ def _accept(
     artifact: ResolvedArtifact | None,
     *,
     version: str,
+    apply: str,
     override: Collection[str],
     catalog: LayoutCatalog,
 ) -> ResolvedArtifact:
     """Return the artifact, or raise the first refusal: 404 for no artifact, else 409.
 
+    The refusals include `apply_refusals` (R5-be-2): an `on_command` deploy to a board
+    that does not announce the `apply` verb is a 409, before anything is minted or written.
     Then the gate: the first gating warning `override` does not name is a 409 with its
     own sentence. Refusals come first, so `override` can never clear one.
     """
-    found: list[Finding] = refusals(device, artifact, version=version, catalog=catalog)
+    found: list[Finding] = [
+        *refusals(device, artifact, version=version, catalog=catalog),
+        *apply_refusals(device, apply),
+    ]
     if found:
         raise HTTPException(
             status_code=(
@@ -405,7 +417,10 @@ async def precheck_deploy(
         device, artifact = await _resolve(session, device_id, body.version)
         catalog = await load_layout_catalog(session)
         online = is_online(device, now=now_utc(), tolerance=settings.presence_tolerance)
-        found = refusals(device, artifact, version=body.version, catalog=catalog)
+        found = [
+            *refusals(device, artifact, version=body.version, catalog=catalog),
+            *apply_refusals(device, body.apply),
+        ]
         warned = warnings(device, online=online, artifact=artifact)
         response = DeployPrecheck(
             device_id=device_id,

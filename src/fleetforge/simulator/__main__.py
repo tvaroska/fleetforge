@@ -468,14 +468,27 @@ def _shared(parser: argparse.ArgumentParser) -> None:
         help="seconds (spec/prd.md -> Timing). Use 5 for a demo; the default is the spec number",
     )
     parser.add_argument("--awake-s", type=float, default=DEFAULT_AWAKE_S)
-    parser.add_argument("--capabilities", action="append", default=[])
+    parser.add_argument(
+        "--capabilities",
+        action="extend",
+        nargs="+",
+        default=[],
+        help=(
+            "what this board announces; repeat the flag or list several. `ota` carries out "
+            "stage; `apply`, `cancel`, `rollback` and `reboot` are the R5 verbs, each "
+            "executed and answered on up/ack only when announced (a board with none of them "
+            "models a pre-R5 agent and ignores verbs silently); `selftest` registers a "
+            "self-test"
+        ),
+    )
     parser.add_argument(
         "--safe-window",
         default=SAFE_WINDOW_AUTO,
         choices=sorted(SAFE_WINDOW_MODES),
         help=(
             "what this board does with a staged image: `auto` applies immediately, "
-            "`hold` parks in awaiting_safe_window indefinitely (a vehicle in motion). "
+            "`hold` parks in awaiting_safe_window indefinitely (a vehicle in motion), and "
+            "answers apply, rollback and reboot `deferred` without ever acting. "
             "Nothing server-side ends a hold — that is the point of the flag"
         ),
     )
