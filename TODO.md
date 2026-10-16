@@ -539,42 +539,55 @@ Order: spec-1 → fw-1 → fw-2 → fw-3 → fw-4 → fw-5 → be-1 → be-2 →
 
 ### Spec (proposals)
 
-- [ ] **R5-spec-1**: Propose the R5 wire and API semantics (P0, 1d)
+- [x] **R5-spec-1**: Propose the R5 wire and API semantics (P0, 1d) _(done 2026-10-15; reviewed; proposal only: Patches A, C, D owner (spec: commit), no Patch B; up/ack topic, cancelled state, capabilities vocabulary, 30-3600 s confirm clamp, latched rollback under the safe window, sleepy stays awake through its confirm; dry-run green, order-independent with the pending up/log, up/telemetry and R4-spec-1 patches; see DECISIONS.md and docs/features/self-test.md)_
       The self-test hold and its structured `detail` (<= 64 B, `selftest failed: <reason>; returned to ota_x`); `confirm_timeout_s` honoured; the `apply`/`reboot`/`rollback`/`cancel` verbs and their acks; the safe-window predicate as the gate on **both** `apply` (`awaiting_safe_window`) and a confirm-timeout rollback reboot; `safe_mode` and `power_class: sleepy` helpers. Proposal only, paste-ready patches, spec-reading tests dry-run.
       Added: 2026-10-15
 
 ### Firmware
 
+Per R5-spec-1: firmware tasks may build ahead of the owner's spec Patch A, unreleased (the R4-fw-2 precedent); the next agent/library release waits for Patch A.
+
 - [ ] **R5-fw-1**: Self-test entrypoint contract (P0, 1d)
       `ff_selftest_fn` / `Fleetforge.onSelfTest(fn)`, additive-only public surface. Acceptance (compile, QEMU): the Basic and basic_idf examples register one.
+      Per R5-spec-1: names and semantics in docs/features/self-test.md → *R5 wire and API proposal* → *API* (`ff_selftest_fn` returning `FF_SELFTEST_PASS`/`FAIL`/`PENDING`, `ff_set_selftest(fn, ctx)`, `ff_selftest_report(passed, reason)`, `Fleetforge.onSelfTest(fn)`/`selfTestDone(passed, reason)`). A maker-API header (`MAKER_HEADERS` in `tests/test_ota_component.py`). Register before `fleetforge_start()`/`begin()`. Run the test in its own task, never in the mqtt event handler or the esp_timer task.
       Added: 2026-10-15
 - [ ] **R5-fw-2**: Hold slot confirmation until the self-test passes; fail rolls back with a reason (P0, 1.5d)
       `esp_ota_mark_app_valid_cancel_rollback()` waits for the callback within `confirm_timeout_s`; the failure string is kept in `ff_txn` NVS and reported in `up/status.detail`. Acceptance (QEMU): a build whose self-test fails comes back on the old slot with the reason on the wire.
+      Per R5-spec-1: `detail` grammar `selftest passed` / `selftest failed: <reason>; returned to <slot>` / `selftest timed out; returned to <slot>`, the whole detail <= 63 B (shorten `<reason>` only; printable ASCII, `;` removed); store the reason in `ff_txn` at decision time, before any safe-window deferral; `confirmed` carries `selftest passed`; a timeout before the announce ack keeps today's wording. **Decide `TXN_BOOTED_NEW` plus a failing self-test** (app-side `esp_ota_mark_app_invalid_rollback_and_reboot()` or `failed`, and which detail wins).
       Added: 2026-10-15
 - [ ] **R5-fw-3**: Honour `dn/cmd.confirm_timeout_s` (P1, 0.5d)
       Persist it in `ff_txn` NVS and arm the confirm timer with it on the OTA boot; 300 s when omitted. Acceptance (QEMU): a `30` s command rolls a hung image back at about 30 s.
+      Per R5-spec-1: clamp to 30-3600 s (absent = 300 s), counted from the new image's start; keep the first-statement arm with 300 s (it runs before NVS, R2-fw-4 parity tests); once `classify_txn()` reads the record, re-arm for the remaining time. Not paused while unsafe.
       Added: 2026-10-15
 - [ ] **R5-fw-4**: Implement `apply`, `reboot`, `rollback` and `cancel` (P0, 2d)
       Release a `staged` `apply: "on_command"` slot; the other verbs per R5-spec-1. Acceptance (QEMU): each verb drives the documented state change and ack; `apply` on nothing staged is refused with a reason.
+      Per R5-spec-1: verbs per D1-D9 (own `id`; `cmd_id` on apply/cancel; refusal reasons `nothing staged for this cmd_id`, `no confirmed image to return to`, `cancel first`); answers on a new `up/ack` topic (`topic_ack` beside the others, QoS 1, no retain), never `up/status`; `FF_STATUS_CANCELLED` (update `test_the_walk_the_agent_performs_is_declared`); rollback only to a VALID/USB-flashed slot (check `esp_ota_get_state_partition(other)`; IDF does not refuse a NEW slot); persist the last reboot-causing command id; never reboot inside command delivery (esp-mqtt PUBACKs after the handler); after `cancel` the old image re-confirms once (the boot pointer is written NEW).
       Added: 2026-10-15
 - [ ] **R5-fw-5**: Safe-window predicate gates apply and the rollback reboot (P0, 1.5d)
       `ff_set_safe_window_cb` / `Fleetforge.onSafeWindow(fn)`. While it says unsafe, `apply` reports `awaiting_safe_window` and a confirm-timeout rollback reboot is deferred. Decide and test what a board does when unsafe lasts longer than the confirm window. Acceptance (QEMU): unsafe defers both; safe releases them.
+      Per R5-spec-1: latched decision (D12, the `s_rollback_decided` idiom), only the reboot waits, no deadline on the wait; poll every <= 1 s from a task, not from `confirm_timeout_cb` (esp_timer); details `apply waits for a safe window` / `rollback waits for a safe window`; unregistered means safe; also gates the `rollback` and `reboot` verbs (D7).
       Added: 2026-10-15
 - [ ] **R5-fw-6**: Rapid-crash safe mode (P2, 1d)
       Three `panic`/watchdog resets within 60 s on an already-confirmed slot hold the board in an OTA-only recovery loop, without running the sketch. Acceptance (QEMU).
+      Per R5-spec-1: the `safe_mode` announce key (prose only, the example is untouched); the counter covers `panic`/`int_wdt`/`task_wdt`/`wdt`, not `brownout`; leaves on a successful update, a `reboot` command or a power cycle.
       Added: 2026-10-15
 - [ ] **R5-fw-7**: Sleepy lifecycle helpers (P2, 1d)
       `Fleetforge.isConnected()`, `Fleetforge.isReadyForSleep()` and the `power_class: "sleepy"` configuration in `Fleetforge.h`.
+      Per R5-spec-1: stay-awake rule (D14: no sleep from `staging` to `rebooting`, nor on an unconfirmed image); `isReadyForSleep()` false while D14 forbids sleep, a self-test or deferred reboot is pending, or the QoS 1 outbox is not empty; a code-set power class (`Fleetforge.setPowerClass()`) overrides `ff_cfg` and is announced (contestable; flagged).
       Added: 2026-10-15
 
 ### Backend and dashboard
 
 - [ ] **R5-be-1**: Deploys honour the self-test result (P0, 1d)
+      Per R5-spec-1: parse `^selftest (passed|failed: [^;]*|timed out)(; returned to \S+)?$` from `detail`; an unknown detail means "not a self-test outcome".
 - [ ] **R5-be-2**: REST endpoints for `apply`, `reboot`, `rollback` and `cancel` (P1, 1d)
       Under `deploys.py` / `devices.py`, behind the admin credential, validated against the device's announced capabilities.
+      Per R5-spec-1: `cancelled` in `TERMINAL_DEPLOY_STATES`, outside both KPIs; ingest `up/ack` (new `UpChannel`, never a deploy row; keep the first answer per `id`, allow for none); gate verbs and `apply: "on_command"` on the announced capabilities; verbs carry their own `id`, plus `cmd_id` for apply/cancel; REST rollback rows stay out of the deploy KPIs; the simulator learns the verbs.
 - [ ] **R5-fe-1**: Dashboard shows the self-test result, the rollback `detail` and Apply/Reboot controls (P1, 1d)
+      Per R5-spec-1: show `awaiting_safe_window` with its detail (apply vs rollback), the self-test outcome from the detail grammar, and `cancelled`.
 
 ### Test
 
 - [ ] **R5-test-1**: Failing self-test rolls back; `apply` waits for the safe window (P0, 1d)
       QEMU and simulator, no bench. Depends on R5-fw-2, R5-fw-4, R5-fw-5, R5-be-1.
+      Per R5-spec-1: drive the verbs through the simulator once R5-be-2 teaches it, and through QEMU.
