@@ -499,7 +499,7 @@ Order: spec-1 (any time) · fw-1 → be-1 → fe-1 → test-1 · be-2 · fw-3 �
 - [ ] **R4-fw-3**: Forward firmware log lines on `up/log` (P0, 1.5d) — **needs the owner to apply `S0-fw-5` Patches A+B first**
       `ff_logf(level, fmt, ...)` and `Fleetforge.logf()`, explicit opt-in (customer privacy, cellular caps); batches under 2048 B, at most one publish per 5 s, `text` <= 200 B, `dropped` count. An optional compile-time `esp_log` sink, level-filtered and guarded against `ff-mqtt`/`mqtt_client`/`mbedtls` recursion, for debug and test builds only. Basic and basic_idf forward their `morse:` line. Acceptance (QEMU and simulator): the morse line arrives in the server's log table with an `age_ms`-derived time; a flood produces `dropped`, not a stalled heartbeat.
       Added: 2026-10-15
-- [ ] **R4-fw-4**: Crash-surviving log tail (P2, 1d)
+- [ ] **R4-fw-4**: Crash-surviving log tail (P2, 1d) — **needs R4-fw-3 first (itself gated on the owner's S0-fw-5 Patches A+B); plan: .claude/plans/R4-fw-4-crash-surviving-log-tail.md**
       Keep the last few lines in a magic-and-CRC-guarded `RTC_NOINIT_ATTR` buffer so lines written just before a `panic` or `task_wdt` flush on the recovery boot. A named gap in the up/log proposal. Acceptance (QEMU): an injected `abort()` three lines after a log call delivers those lines after reboot. The `FF_FAULT_TEST` images and the runbook's QEMU soft-reset limit apply; say plainly which part was proven.
       Added: 2026-10-15
 
