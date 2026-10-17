@@ -240,6 +240,27 @@ log-e2e *args:
 commands-e2e *args:
     cd frontend && PLAYWRIGHT_MODULE="${PLAYWRIGHT_MODULE:-$(npm root -g)/playwright/index.mjs}" node scripts/commands-e2e.mjs {{args}}
 
+# ── Self-test rollback and the safe window, simulated (R5-test-1) ────────────
+#
+# No browser, no QEMU: two simulated boards through the real api, broker, ingestor and DB.
+# V (ota apply cancel rollback reboot selftest, fails the self-test of a `-stfail` image) and
+# W (the same with --safe-window file:<out>/W.safe: safe while the file exists, so the script
+# opens the window by creating it). Scenarios: selftest-passed, selftest-failed, apply-now,
+# apply-waits (deferred, 15 s parked, then confirmed within 20 s of the window opening, steps
+# in order, the answer still deferred), cancel-waiting, auto-waits, traps. Prints PASS/FAIL per
+# scenario and `N/7 pass`. Evidence: /tmp/ff-r5-test-1/ (run.json, the simulator logs). Leaves
+# two simulated boards and seven labels per run in the dev DB; deletes nothing.
+# `E2E_BREAK=<scenario id> just selftest-window-e2e` flips one expectation: the run must then
+# FAIL. Exit 0 all pass, 1 a scenario failed, 2 setup failed. The admin password comes from
+# $FF_ADMIN_PASSWORD or the repo-root .env, never argv. Plain python3: the script is stdlib-only.
+#
+#     just selftest-window-e2e
+#     just selftest-window-e2e http://localhost:8088 /tmp/somewhere-else
+#
+# Play the failing self-test and the safe-window apply with simulated boards (exit 0 = all seven pass).
+selftest-window-e2e *args:
+    python3 -u scripts/selftest_window_e2e.py {{ args }}
+
 # ── Simulated boards (R0-test-1) ─────────────────────────────────────────────
 #
 # A fake ESP32 that enrolls, connects, announces, holds presence and heartbeats,
@@ -959,7 +980,9 @@ lib-qemu fresh="":
 # copy of the tree. Arduino esp32/esp32s3 + build B, ESP-IDF esp32/esp32s3 in the pinned
 # image; then (unless --build-only) the board steps in QEMU against `just up`: enroll,
 # heartbeat, deploy build B, confirm, report the version, then a `-rbtest` build that must
-# roll back (R3-test-1). The api must hand out 10.0.2.2
+# roll back (R3-test-1), the self-test fail/timeout builds (2d/2e, R5-fw-2) and phase 2f: the
+# real `apply` verb into an unsafe window must wait for it (R5-test-1; --only-safe-window, dev
+# only, runs 2a, 2b, 2f). About 55 minutes for the board half. The api must hand out 10.0.2.2
 # origins for that half; the script says how if it does not. Plain python3, no venv: the
 # script is stdlib-only. docs/runbooks/agent-qemu.md -> *The worked example, end to end*.
 #

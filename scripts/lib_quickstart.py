@@ -33,7 +33,7 @@ decode the built partition table (== `agent/partitions.csv`, layout ab-4m-v1), r
 resolved sdkconfig (rollback on, no eFuse burns) and the app descriptor (version 1.0.0).
 
 Phase 2 - the board steps, in QEMU (`phase_enroll`, `phase_ota`, `phase_rollback`,
-`phase_selftest_rollback` twice). Only three things in the README need a board or a network
+`phase_selftest_rollback` twice, `phase_apply_waits`). Only three things in the README need a board or a network
 clone, and all are substituted:
 
 * "git clone ... && cd fleetforge" -> the clean tree copy of Phase 0 (this run's `repo/`);
@@ -82,7 +82,25 @@ rolls itself back at once, T at the 300 s confirm deadline; each needs the power
 needs, and each must come back on B with the row `rolled_back` and the exact detail
 `selftest failed: i2c sensor 0x48 did not ans; returned to <B's slot>` (the reason shortened
 to the 63-byte budget, `;` dropped) or `selftest timed out; returned to <B's slot>`. Neither
-may ever log or report `confirmed`. With them the board phase takes about 45 minutes.
+may ever log or report `confirmed`. Since R5-test-1 every phase also checks the server's
+parse of the detail, `deploy.selftest` (`expected_selftest`): passed for B, null for R's legacy
+wording, failed with the 27-byte reason for F, timed_out for T, each naming B's slot.
+
+Phase 2f - apply into an unsafe window (`phase_apply_waits`, R5-test-1). Build W replaces the
+committed `safeNow()` (reboot only between messages) with a clock that prints its flips,
+`window: unsafe|safe at millis N` (unsafe 60 s of every 80 s), and makes loop() ask it first so
+the flips are seen; `"SOS"` -> `"WIN"`, `1.5.0-qs<epoch>-window`. W is installed like B
+(`on_command` + power cycle) and confirms; then B is staged again `on_command` and the real
+`apply` verb is sent just after a fresh `window: unsafe` line. The board must answer
+`deferred`, log that the staged update and the reboot wait, report `awaiting_safe_window` /
+`apply waits for a safe window` until `window: safe`, and only then queue `applying` and
+`rebooting` (at least 20 s after the verb). The emulator cannot survive the `esp_restart()`
+that follows (its soft reset would panic with B PENDING_VERIFY and the bootloader would abort
+B), so the script kills the container inside the agent's 1.5 s drain and boots it again; B
+confirms with the steps staged < awaiting_safe_window < applying < rebooting < confirming <
+confirmed, and the command's answer stays `deferred`. A soft reset that wins the race fails
+the run as a harness race (rerun). `--only-safe-window` (dev only) builds A, B and W and runs
+2a, 2b and 2f. With all of them the board phase takes about 55 minutes.
 """
 
 from __future__ import annotations
@@ -171,6 +189,38 @@ SELFTEST_RUN_LINE = "running the custom self-test"
 SELFTEST_REASON_MAX = 63
 DETAIL_MAX = 63
 CONFIRM_TIMEOUT_S = 300  # ff_mqtt.c, a plain build (60 only under FF_ROLLBACK_TEST)
+# Phase 2f (R5-test-1): build W's safe-window rule is a clock that says when it flips.
+SAFE_WINDOW_STUB = "static bool safeNow() { return betweenMessages; }"
+SAFE_WINDOW_CLOCK = """static bool safeNow() {  // build W: a clock, not the message gap: unsafe 60 s of every 80 s
+  static volatile int said = -1;
+  const int safe = millis() % 80000UL >= 60000UL;
+  if (safe != said) {
+    said = safe;
+    printf("window: %s at millis %lu\\n", safe ? "safe" : "unsafe", (unsigned long)millis());
+  }
+  return safe;
+}"""
+LOOP_HEAD = "void loop() {\n"
+LOOP_HEAD_SAYS = "void loop() {\n  (void)safeNow();  // build W: say when the window flips\n"
+WINDOW_MESSAGE = "WIN"
+WINDOW_PERIOD_MS = 80000
+WINDOW_UNSAFE_MS = 60000
+# ff_mqtt.c: the drain between `state=rebooting` and `esp_restart()` (a twin, pinned by a test).
+COMMAND_REBOOT_DRAIN_MS = 1500
+# ff_mqtt.c's log lines and FF_DETAIL_APPLY_WAITS (ff_mqtt_internal.h), twins pinned by tests.
+APPLY_WAITS_LINE = "apply {id}: the staged update {cmd} waits for a safe window"
+REBOOT_WAITS_LINE = "command {id}: the reboot waits for a safe window"
+RELEASING_LINE = "releasing the staged update"
+REBOOTING_FOR_LINE = "rebooting for command {id}"
+DETAIL_APPLY_WAITS = "apply waits for a safe window"
+WINDOW_STEP_ORDER = (
+    "staged",
+    "awaiting_safe_window",
+    "applying",
+    "rebooting",
+    "confirming",
+    "confirmed",
+)
 
 
 class QuickstartError(Exception):
@@ -723,6 +773,92 @@ def selftest_failed_detail(reason: str, slot: str) -> str:
     return f"selftest failed: {kept[: max(budget, 0)]}; returned to {slot}"
 
 
+def window_version(epoch: int) -> str:
+    """Build W's version: run-unique and marked (its safe-window rule is a clock)."""
+    return f"1.5.0-qs{epoch}-window"
+
+
+def expected_selftest(mode: str, slot: str) -> dict[str, Any] | None:
+    """The server's `deploy.selftest` (R5-be-1) for the real agent's detail, by phase.
+
+    `passed` (B confirms), `fail` (build F at `slot`), `timeout` (build T at `slot`), and
+    `legacy` (build R: a timeout before the ack keeps the R2 wording, not a self-test outcome).
+    """
+    if mode == "passed":
+        return {"outcome": "passed", "reason": None, "returned_to": None}
+    if mode == "fail":
+        detail = selftest_failed_detail(SELFTEST_FAIL_REASON, slot)
+        reason = detail[len("selftest failed: ") : detail.rindex("; returned to ")]
+        return {"outcome": "failed", "reason": reason, "returned_to": slot}
+    if mode == "timeout":
+        return {"outcome": "timed_out", "reason": None, "returned_to": slot}
+    if mode == "legacy":
+        return None
+    raise ValueError(f"no expected self-test for mode {mode!r}")
+
+
+def check_selftest(run: Run, what: str, row: dict[str, Any] | None, expected: Any) -> None:
+    """`deploy.selftest` is exactly `expected`, or the run fails; a passed check either way."""
+    actual = _deploy_of(row).get("selftest")
+    if actual != expected:
+        raise QuickstartError(
+            f"{what}: deploy.selftest is {json.dumps(actual)}, wanted {json.dumps(expected)}"
+        )
+    run.passed(f"deploy.selftest ({what})", json.dumps(actual))
+
+
+def steps_in_order(steps: Sequence[str], names: Sequence[str]) -> bool:
+    """Every name is in `steps`, and their first occurrences are strictly in this order."""
+    if any(name not in steps for name in names):
+        return False
+    firsts = [steps.index(name) for name in names]
+    return all(a < b for a, b in zip(firsts, firsts[1:], strict=False))
+
+
+def check_window_log(text: str, cmd_id: str, command_id: str) -> str:
+    """Build W's console from the `apply` on: the reboot waited for the window. A summary.
+
+    In order: both deferral lines, then `window: safe at millis N` (N inside the safe stretch),
+    then the queued `state=applying` and `state=rebooting`. Never `releasing the staged update`
+    (the accepted path), and no `state=applying` before the safe line.
+    """
+    problems = []
+    applying = re.search(rf"cmd_id={re.escape(cmd_id)} state=applying", text)
+    rebooting = re.search(rf"cmd_id={re.escape(cmd_id)} state=rebooting", text)
+    deferral = text.find(APPLY_WAITS_LINE.format(id=command_id, cmd=cmd_id))
+    reboot_waits = text.find(REBOOT_WAITS_LINE.format(id=command_id))
+    if RELEASING_LINE in text:
+        problems.append(f"`{RELEASING_LINE}`: the apply was accepted, not deferred")
+    if deferral < 0:
+        problems.append("no `the staged update ... waits for a safe window` line")
+    if reboot_waits < 0:
+        problems.append("no `the reboot waits for a safe window` line")
+    safe = None
+    for match in re.finditer(r"window: safe at millis (\d+)", text):
+        if deferral >= 0 and match.start() > deferral:
+            safe = match
+            break
+    if safe is None:
+        problems.append("no `window: safe at millis N` after the deferral")
+    elif int(safe.group(1)) % WINDOW_PERIOD_MS < WINDOW_UNSAFE_MS:
+        problems.append(f"the safe line's millis {safe.group(1)} is inside the unsafe stretch")
+    if applying is None or rebooting is None:
+        problems.append("no queued `state=applying` / `state=rebooting` for the stage")
+    elif safe is not None and applying.start() < safe.start():
+        problems.append("`state=applying` before the window opened")
+    elif applying is not None and rebooting is not None and rebooting.start() < applying.start():
+        problems.append("`state=rebooting` before `state=applying`")
+    if applying is not None and deferral >= 0 and applying.start() < deferral:
+        problems.append("`state=applying` before the deferral")
+    if problems:
+        raise QuickstartError("build W's console: " + "; ".join(problems))
+    assert safe is not None  # noqa: S101 - no problem means a safe line was found
+    return (
+        f"deferred, the reboot waited, then `window: safe at millis {safe.group(1)}` "
+        f"({int(safe.group(1)) % WINDOW_PERIOD_MS} ms into the period), then applying, rebooting"
+    )
+
+
 def has_rollback_hook(app: bytes) -> bool:
     """Whether an app image was compiled with FF_ROLLBACK_TEST (its log string is in it)."""
     return ROLLBACK_HOOK_NEEDLE in app
@@ -734,11 +870,37 @@ def _replace_once(text: str, old: str, new: str) -> str:
     return text.replace(old, new)
 
 
+@dataclass
+class Bundles:
+    """The QEMU bundles. R, F and T are None under `--only-safe-window` (dev only)."""
+
+    a: Path
+    b: Path
+    w: Path
+    r: Path | None = None
+    f: Path | None = None
+    t: Path | None = None
+
+
+def _need(bundle: Path | None, name: str) -> Path:
+    if bundle is None:
+        raise QuickstartError(f"bundle {name} was not built (--only-safe-window)")
+    return bundle
+
+
 def build_bundles(
-    run: Run, version_b: str, version_r: str, version_f: str, version_t: str
-) -> tuple[Path, Path, Path, Path, Path]:
+    run: Run,
+    version_b: str,
+    version_r: str,
+    version_f: str,
+    version_t: str,
+    version_w: str,
+    *,
+    only_safe_window: bool = False,
+) -> Bundles:
     """Bundles A (as committed), B (the README edit), R (FF_ROLLBACK_TEST, must roll back),
-    F (the self-test fails) and T (the self-test never answers)."""
+    F (the self-test fails), T (the self-test never answers) and W (the safe-window rule is
+    a clock: unsafe 60 s of every 80 s, phase 2f). `only_safe_window` builds A, B and W."""
     bundle = run.tree / "lib-qemu" / ".pio" / "bundle" / "esp32-qemu"
     # A stray PLATFORMIO_BUILD_FLAGS in the operator's shell must not reach A or B.
     plain_env = {k: v for k, v in os.environ.items() if k != "PLATFORMIO_BUILD_FLAGS"}
@@ -765,6 +927,32 @@ def build_bundles(
     shutil.copytree(bundle, bundle_b)
 
     sketch.write_text(original)
+    run.say(
+        f"  then  W: safeNow() is a clock that prints its flips (unsafe 60 s of every 80 s), "
+        f'loop() asks it first, "SOS" -> "{WINDOW_MESSAGE}", "1.0.0" -> "{version_w}" (plain '
+        "build): the reboot of an apply must wait for the window"
+    )
+    windowed = _replace_once(original, SAFE_WINDOW_STUB, SAFE_WINDOW_CLOCK)
+    windowed = _replace_once(windowed, LOOP_HEAD, LOOP_HEAD_SAYS)
+    windowed = _replace_once(windowed, '"SOS"', f'"{WINDOW_MESSAGE}"')
+    sketch.write_text(_replace_once(windowed, f'"{VERSION_A}"', f'"{version_w}"'))
+    just(run, "lib-bundle", "esp32-qemu", log_name="lib-bundle-W.log", env=plain_env)
+    bundle_w = run.work / "bundleW"
+    shutil.copytree(bundle, bundle_w)
+    sketch.write_text(original)
+
+    if only_safe_window:
+        shutil.rmtree(bundle)
+        shutil.copytree(bundle_a, bundle)  # `lib-qemu --fresh` flashes from this directory
+        app_a, app_b, app_w = ((b / "app.bin").read_bytes() for b in (bundle_a, bundle_b, bundle_w))
+        if len({app_a, app_b, app_w}) != 3:
+            raise QuickstartError("two of the QEMU bundles A, B, W have the same app.bin")
+        if has_rollback_hook(app_w):
+            raise QuickstartError("bundle W carries the FF_ROLLBACK_TEST hook")
+        run.passed("QEMU bundles (--only-safe-window)", f"A, B, W {len(app_w)} B; all differ")
+        check_app(run, "QEMU bundle W", len(app_w))
+        return Bundles(a=bundle_a, b=bundle_b, w=bundle_w)
+
     run.say(
         f'  then  R: "SOS" -> "{ROLLBACK_MESSAGE}", "1.0.0" -> "{version_r}" in Basic.ino, '
         f"built with PLATFORMIO_BUILD_FLAGS={ROLLBACK_TEST_FLAGS} (fault injection, not a "
@@ -809,8 +997,9 @@ def build_bundles(
     sketch.write_text(original)
     shutil.rmtree(bundle)
     shutil.copytree(bundle_a, bundle)  # `lib-qemu --fresh` flashes from this directory
-    app_a, app_b, app_r, app_f, app_t = (
-        (b / "app.bin").read_bytes() for b in (bundle_a, bundle_b, bundle_r, bundle_f, bundle_t)
+    app_a, app_b, app_r, app_f, app_t, app_w = (
+        (b / "app.bin").read_bytes()
+        for b in (bundle_a, bundle_b, bundle_r, bundle_f, bundle_t, bundle_w)
     )
     if app_a == app_b:
         raise QuickstartError("QEMU bundle B's app.bin is identical to A's")
@@ -827,19 +1016,21 @@ def build_bundles(
         raise QuickstartError("QEMU bundle R's app.bin is identical to A's or B's")
     run.passed("QEMU bundle R differs from A and B", "yes")
     check_app(run, "QEMU bundle R", len(app_r))
-    for name, app in (("F", app_f), ("T", app_t)):
+    for name, app in (("F", app_f), ("T", app_t), ("W", app_w)):
         if has_rollback_hook(app):
             raise QuickstartError(f"bundle {name} carries the FF_ROLLBACK_TEST hook")
-    apps = [app_a, app_b, app_r, app_f, app_t]
+    apps = [app_a, app_b, app_r, app_f, app_t, app_w]
     if len(set(apps)) != len(apps):
-        raise QuickstartError("two of the QEMU bundles A, B, R, F, T have the same app.bin")
+        raise QuickstartError("two of the QEMU bundles A, B, R, F, T, W have the same app.bin")
     run.passed(
-        "QEMU bundles F and T",
-        f"F {len(app_f)} B, T {len(app_t)} B; no rollback hook; all five app.bin differ",
+        "QEMU bundles F, T and W",
+        f"F {len(app_f)} B, T {len(app_t)} B, W {len(app_w)} B; no rollback hook; all six "
+        "app.bin differ",
     )
     check_app(run, "QEMU bundle F", len(app_f))
     check_app(run, "QEMU bundle T", len(app_t))
-    return bundle_a, bundle_b, bundle_r, bundle_f, bundle_t
+    check_app(run, "QEMU bundle W", len(app_w))
+    return Bundles(a=bundle_a, b=bundle_b, w=bundle_w, r=bundle_r, f=bundle_f, t=bundle_t)
 
 
 def start_qemu(run: Run, fresh: bool, log_name: str) -> Path:
@@ -875,11 +1066,13 @@ def wait_for_lines(
     *,
     forbidden: Sequence[str] = (),
     start: int = 0,
+    poll: float = 0.5,
 ) -> int:
     """Each pattern (a regex), in order, in the growing log; the emulator must stay up.
 
     A `forbidden` regex matching anywhere in the log fails at once. Searching starts at
-    offset `start`; the offset just past the last match is returned.
+    offset `start`; the offset just past the last match is returned. `poll` is the re-read
+    period (phase 2f races the agent's 1.5 s reboot drain with 0.1).
     """
     deadline = time.monotonic() + timeout
     position = start
@@ -907,7 +1100,7 @@ def wait_for_lines(
             raise QuickstartError(f"the emulator exited before `{pending[0]}`:\n{tail(log)}")
         if time.monotonic() > deadline:
             raise QuickstartError(f"no `{pending[0]}` within {timeout:.0f} s:\n{tail(log)}")
-        time.sleep(0.5)
+        time.sleep(poll)
     return position
 
 
@@ -1093,6 +1286,7 @@ def phase_ota(run: Run, bundle_b: Path, version_b: str, log_a: Path) -> tuple[st
         )
     if "selftest" not in (row.get("capabilities") or []):
         raise QuickstartError(f"B does not announce selftest: {row.get('capabilities')}")
+    check_selftest(run, "B confirmed", row, expected_selftest("passed", slot_b))
     run.passed(
         f"GET /v1/devices {DEVICE_ID} after the update",
         f"fw_version {row['fw_version']}, deploy {deploy['state']} (is_terminal "
@@ -1330,6 +1524,8 @@ def phase_rollback(
     summary = check_rollback_row(
         row, cmd_id, version_b, version_r, f"returned to {slot_b}; {slot_r} did not confirm"
     )
+    # A timeout before the ack keeps the R2 wording: not a self-test outcome (R5-be-1).
+    check_selftest(run, "R rolled back", row, expected_selftest("legacy", slot_b))
     run.passed(
         f"GET /v1/devices {DEVICE_ID} after the broken build",
         f"{summary}; {time.monotonic() - started:.0f} s after the deploy",
@@ -1496,10 +1692,296 @@ def phase_selftest_rollback(
         raise QuickstartError(f"{version}'s detail is {detail!r}, wanted exactly {head!r}")
     if len(detail.encode()) > DETAIL_MAX:
         raise QuickstartError(f"{version}'s detail is {len(detail.encode())} bytes, over 63")
+    check_selftest(run, f"{version} rolled back", row, expected_selftest(mode, slot_b))
     run.passed(
         f"GET /v1/devices {DEVICE_ID} after {version}",
         f"{summary}; detail exactly {detail!r} ({len(detail.encode())} bytes); "
         f"{time.monotonic() - started:.0f} s after the deploy",
+    )
+    return log_back
+
+
+def _upload_and_stage(
+    run: Run, version: str, bundle: Path | None, log: Path, slot_not: str | None
+) -> tuple[str, str, int]:
+    """Upload `bundle` (None: the label exists already), deploy `version` `on_command`, and
+    wait for the stage line in `log` and the server's `staged`. (cmd_id, slot, log offset)."""
+    if bundle is not None:
+        status, body, _ = http(
+            run,
+            "POST",
+            f"/v1/artifact?target=esp32&version={version}&partition_layout={ARDUINO_LAYOUT}",
+            (bundle / "app.bin").read_bytes(),
+            content_type="application/octet-stream",
+        )
+        if status not in (200, 201):
+            raise QuickstartError(f"upload of {version} answered {status}: {body}")
+        run.passed(f"POST /v1/artifact ({version} app.bin)", f"{status}, version {version}")
+    status, body, _ = http(
+        run, "POST", f"/v1/devices/{DEVICE_ID}/deploy", {"version": version, "apply": "on_command"}
+    )
+    if status != 202 or not isinstance(body, dict):
+        raise QuickstartError(f"deploy of {version} answered {status}: {body}")
+    cmd_id = str(body["cmd_id"])
+    run.passed(
+        f"POST /v1/devices/…/deploy {version} apply=on_command",
+        f"202, cmd_id {cmd_id}, reused {body.get('reused')}",
+    )
+    if body.get("reused") is not False:
+        raise QuickstartError(f"the deploy of {version} reused an intent: {body}")
+    staged_line = STAGED_LINE.format(cmd=re.escape(cmd_id))
+    offset = wait_for_lines(run, log, (staged_line,), timeout=240)
+    slot = re.search(staged_line, log.read_text(errors="replace"))
+    if slot is None:
+        raise QuickstartError(f"no `{staged_line}` in {log.name}")
+    if slot_not is not None and slot.group(1) == slot_not:
+        raise QuickstartError(f"{version} was staged into {slot.group(1)}, the running slot")
+    wait_for_device(
+        run,
+        f"staged ({version})",
+        lambda r: _deploy_of(r).get("cmd_id") == cmd_id and _deploy_of(r).get("state") == "staged",
+        timeout=60,
+        log=log,
+    )
+    run.passed(f"deploy state ({version})", f"staged into {slot.group(1)}")
+    return cmd_id, slot.group(1), offset
+
+
+def _command_result(run: Run, command_id: str) -> str | None:
+    status, body, _ = http(run, "GET", f"/v1/devices/{DEVICE_ID}/commands/{command_id}")
+    if status != 200 or not isinstance(body, dict):
+        raise QuickstartError(f"GET …/commands/{command_id} answered {status}")
+    result = body.get("result")
+    return None if result is None else str(result)
+
+
+def _kill_emulator(run: Run) -> None:
+    """`docker kill` at once (no `just`, no grace period), then reap `just lib-qemu`."""
+    subprocess.run(["docker", "kill", QEMU_CONTAINER], capture_output=True, check=False)
+    if run.qemu is not None:
+        try:
+            run.qemu.wait(timeout=60)
+        except subprocess.TimeoutExpired:
+            run.qemu.kill()
+        run.qemu = None
+
+
+def phase_apply_waits(
+    run: Run, bundle_w: Path, version_w: str, version_b: str, slot_b: str, log_prev: Path
+) -> Path:
+    """R5-test-1: the real `apply` verb sent into an unsafe window; the reboot must wait.
+
+    Build W's safe-window rule is a clock (unsafe 60 s of every 80 s) that prints each flip.
+    W is installed first (`on_command` + power cycle, like B); then B is staged again and the
+    `apply` verb is sent just after a fresh `window: unsafe` line: the board must answer
+    `deferred`, report `awaiting_safe_window`, and only at `window: safe` walk `applying`,
+    `rebooting`. QEMU cannot survive the `esp_restart()` that follows (runbook: *The emulator
+    cannot survive esp_restart()*): the soft reset panics while B is PENDING_VERIFY and the
+    bootloader would abort B. So the emulator is killed inside the agent's 1.5 s drain and
+    started again; the boot pointer was written at `staged`, so it boots B, as the apply would
+    have. Returns the console log of the board back on B.
+    """
+    run.say("\n== Phase 2f: apply into an unsafe window: the reboot must wait ==")
+    cmd_w, slot_w, _ = _upload_and_stage(run, version_w, bundle_w, log_prev, slot_b)
+    time.sleep(1)
+    run.say("  power-cycle: just agent-qemu-stop esp32; just lib-qemu")
+    stop_qemu(run)
+    log_w = start_qemu(run, fresh=False, log_name="qemu-W.log")
+    wait_for_lines(
+        run,
+        log_w,
+        (
+            r"announce acknowledged by the broker",
+            re.escape(SELFTEST_RUN_LINE),
+            r"custom self-test passed",
+            r"CONFIRMED",
+        ),
+        timeout=180,
+    )
+    wait_for_lines(
+        run, log_w, (re.escape(f"morse: {WINDOW_MESSAGE} (firmware {version_w})"),), timeout=180
+    )
+    row = wait_for_device(
+        run,
+        f"confirmed at {version_w}",
+        lambda r: (
+            r.get("fw_version") == version_w
+            and _deploy_of(r).get("cmd_id") == cmd_w
+            and _deploy_of(r).get("state") == "confirmed"
+        ),
+        timeout=60,
+        log=log_w,
+    )
+    if _deploy_of(row).get("detail") != "selftest passed":
+        raise QuickstartError(f"W's confirmed deploy has detail {_deploy_of(row).get('detail')!r}")
+    capabilities = row.get("capabilities") or []
+    if "apply" not in capabilities or "safe_window" not in capabilities:
+        raise QuickstartError(f"W does not announce apply and safe_window: {capabilities}")
+    run.passed(
+        f"GET /v1/devices {DEVICE_ID} on W",
+        f"fw_version {version_w} in {slot_w}, confirmed, detail 'selftest passed', capabilities "
+        f"{capabilities}",
+    )
+
+    # B again: its artifact exists (2b); a confirmed transaction is terminal, so a new cmd_id.
+    cmd, slot, offset = _upload_and_stage(run, version_b, None, log_w, slot_w)
+    if slot != slot_b:
+        raise QuickstartError(f"B was staged into {slot}, not its own slot {slot_b}")
+    # Into a fresh unsafe stretch: the flip is printed at most one message late (~6 s), so at
+    # least ~50 s of it remain when the verb is sent.
+    offset = wait_for_lines(run, log_w, (r"window: unsafe at millis \d+",), 120, start=offset)
+    status, body, _ = http(run, "POST", f"/v1/devices/{DEVICE_ID}/deploys/{cmd}/apply")
+    t_apply = time.monotonic()
+    if status != 202 or not isinstance(body, dict):
+        raise QuickstartError(f"POST …/deploys/{cmd}/apply answered {status}: {body}")
+    command_id = str(body["command_id"])
+    run.passed("POST /v1/devices/…/deploys/…/apply", f"202, command_id {command_id}")
+    early = (rf"cmd_id={re.escape(cmd)} state=applying", re.escape(RELEASING_LINE))
+    wait_for_lines(
+        run,
+        log_w,
+        (
+            re.escape(APPLY_WAITS_LINE.format(id=command_id, cmd=cmd)),
+            re.escape(REBOOT_WAITS_LINE.format(id=command_id)),
+        ),
+        timeout=60,
+        start=offset,
+        forbidden=early,
+    )
+    result = None
+    deadline = time.monotonic() + 30
+    while result is None and time.monotonic() < deadline:
+        result = _command_result(run, command_id)
+        if result is None:
+            time.sleep(0.5)
+    if result != "deferred":
+        raise QuickstartError(f"the apply was answered {result!r}, wanted 'deferred'")
+    row = wait_for_device(
+        run,
+        "awaiting_safe_window",
+        lambda r: (
+            _deploy_of(r).get("cmd_id") == cmd
+            and _deploy_of(r).get("state") == "awaiting_safe_window"
+        ),
+        timeout=30,
+        log=log_w,
+    )
+    deploy = _deploy_of(row)
+    if deploy.get("detail") != DETAIL_APPLY_WAITS or deploy.get("is_terminal") is not False:
+        raise QuickstartError(f"the waiting deploy is {json.dumps(deploy)[:400]}")
+    if row.get("fw_version") != version_w:
+        raise QuickstartError(f"fw_version {row.get('fw_version')} while waiting, wanted W")
+    run.passed(
+        "apply into the unsafe window",
+        f"answered {result}; deploy awaiting_safe_window, detail {deploy.get('detail')!r}, "
+        f"is_terminal False, fw_version {version_w}",
+    )
+    samples = 0
+    text = log_w.read_text(errors="replace")
+    while not re.search(r"window: safe at millis \d+", text[offset:]):
+        sample = device(run)
+        sampled = _deploy_of(sample)
+        if sampled.get("cmd_id") != cmd or sampled.get("state") != "awaiting_safe_window":
+            raise QuickstartError(
+                f"before the window opened the deploy moved to {sampled.get('state')}"
+            )
+        samples += 1
+        if time.monotonic() - t_apply > 120:
+            raise QuickstartError("no `window: safe` within 120 s of the apply")
+        time.sleep(1)
+        text = log_w.read_text(errors="replace")
+    run.passed("deploy while the window was unsafe", f"awaiting_safe_window in {samples} samples")
+
+    wait_for_lines(
+        run,
+        log_w,
+        (r"window: safe at millis \d+", rf"cmd_id={re.escape(cmd)} state=applying"),
+        timeout=60,
+        start=offset,
+        poll=0.1,
+    )
+    waited = time.monotonic() - t_apply
+    wait_for_lines(
+        run, log_w, (rf"cmd_id={re.escape(cmd)} state=rebooting",), 10, start=offset, poll=0.1
+    )
+    # The kill race: the agent drains COMMAND_REBOOT_DRAIN_MS, then esp_restart(). Give the two
+    # statuses a moment to reach the broker (or see them land), then kill the emulator.
+    land_by = time.monotonic() + 0.4
+    while time.monotonic() < land_by:
+        if "rebooting" in _step_states(_deploy_of(device(run))):
+            break
+        time.sleep(0.1)
+    _kill_emulator(run)
+    run.say(f"  kill  docker kill {QEMU_CONTAINER} inside the {COMMAND_REBOOT_DRAIN_MS} ms drain")
+    if waited < 20:
+        raise QuickstartError(
+            f"`state=applying` only {waited:.1f} s after the apply: it never waited"
+        )
+    text = log_w.read_text(errors="replace")[offset:]
+    summary = check_window_log(text, cmd, command_id)
+    run.passed("build W's console after the apply", f"{summary}; applying {waited:.0f} s after it")
+    rebooting_for = text.find(REBOOTING_FOR_LINE.format(id=command_id))
+    if rebooting_for >= 0:
+        run.say(f"  note  `{REBOOTING_FOR_LINE.format(id=command_id)}` was logged before the kill")
+        if re.search(r"rst:", text[rebooting_for:]):
+            raise QuickstartError(
+                "the emulator soft-reset before the kill — a harness race against the "
+                "esp_restart limit, not an agent defect; rerun"
+            )
+
+    log_back = start_qemu(run, fresh=False, log_name="qemu-W-B.log")
+    wait_for_lines(
+        run,
+        log_back,
+        (
+            rf"transaction {re.escape(cmd)}: confirming on {slot_b}",
+            r"announce acknowledged by the broker",
+            r"custom self-test passed",
+            r"CONFIRMED",
+        ),
+        timeout=180,
+    )
+    wait_for_lines(run, log_back, (re.escape(f"morse: HELLO (firmware {version_b})"),), timeout=180)
+    loaded = re.findall(
+        r"Loaded app from partition at offset (0x[0-9a-fA-F]+)",
+        log_back.read_text(errors="replace"),
+    )
+    if loaded:
+        rows = parse_rows((run.tree / ARDUINO_DIR / "partitions.csv").read_text())
+        offset_b = next(o for name, _, _, o, _ in rows if name == slot_b)
+        if int(loaded[-1], 16) != offset_b:
+            raise QuickstartError(
+                f"after the apply the bootloader loaded {loaded[-1]}, not {slot_b}"
+            )
+        run.passed("bootloader after the apply", f"loaded {loaded[-1]} = {slot_b}")
+    else:
+        run.say("  note  the bootloader does not log `Loaded app from partition` (not checked)")
+    row = wait_for_device(
+        run,
+        f"confirmed at {version_b} (2f)",
+        lambda r: (
+            r.get("fw_version") == version_b
+            and _deploy_of(r).get("cmd_id") == cmd
+            and _deploy_of(r).get("state") == "confirmed"
+            and _deploy_of(r).get("is_terminal") is True
+        ),
+        timeout=60,
+        log=log_back,
+    )
+    deploy = _deploy_of(row)
+    if deploy.get("detail") != "selftest passed":
+        raise QuickstartError(f"B's confirmed deploy has detail {deploy.get('detail')!r}")
+    check_selftest(run, "B confirmed after the wait", row, expected_selftest("passed", slot_b))
+    steps = _step_states(deploy)
+    if not steps_in_order(steps, WINDOW_STEP_ORDER):
+        raise QuickstartError(f"the deploy's steps are not {WINDOW_STEP_ORDER} in order: {steps}")
+    final = _command_result(run, command_id)
+    if final != "deferred":
+        raise QuickstartError(f"the apply's result became {final!r}: the first answer must win")
+    run.passed(
+        f"GET /v1/devices {DEVICE_ID} after the window",
+        f"deploy {cmd} confirmed (is_terminal True), detail 'selftest passed', fw_version "
+        f"{version_b}, steps {steps}, command result still {final}",
     )
     return log_back
 
@@ -1521,7 +2003,7 @@ def check_no_credentials(run: Run) -> None:
     )
 
 
-def phase_board(run: Run) -> None:
+def phase_board(run: Run, only_safe_window: bool = False) -> None:
     password = preflight(run)
     run.say("\n== Phase 2: the board steps, in QEMU against the dev stack ==")
     run.passed(
@@ -1532,20 +2014,42 @@ def phase_board(run: Run) -> None:
     version_r = rollback_version(epoch)
     version_f = selftest_fail_version(epoch)
     version_t = selftest_timeout_version(epoch)
-    _, bundle_b, bundle_r, bundle_f, bundle_t = build_bundles(
-        run, version_b, version_r, version_f, version_t
+    version_w = window_version(epoch)
+    bundles = build_bundles(
+        run,
+        version_b,
+        version_r,
+        version_f,
+        version_t,
+        version_w,
+        only_safe_window=only_safe_window,
     )
     login_and_mint(run, password)
     del password
     log_a = phase_enroll(run, run.guest_base)
-    slot_b, log_b = phase_ota(run, bundle_b, version_b, log_a)
-    log_back = phase_rollback(run, bundle_r, version_b, version_r, slot_b, log_b)
-    log_back = phase_selftest_rollback(
-        run, bundle_f, (version_b, version_f), SELFTEST_FAIL_MESSAGE, "fail", slot_b, log_back
-    )
-    phase_selftest_rollback(
-        run, bundle_t, (version_b, version_t), SELFTEST_TIMEOUT_MESSAGE, "timeout", slot_b, log_back
-    )
+    slot_b, log_b = phase_ota(run, bundles.b, version_b, log_a)
+    log_back = log_b
+    if not only_safe_window:
+        log_back = phase_rollback(run, _need(bundles.r, "R"), version_b, version_r, slot_b, log_b)
+        log_back = phase_selftest_rollback(
+            run,
+            _need(bundles.f, "F"),
+            (version_b, version_f),
+            SELFTEST_FAIL_MESSAGE,
+            "fail",
+            slot_b,
+            log_back,
+        )
+        log_back = phase_selftest_rollback(
+            run,
+            _need(bundles.t, "T"),
+            (version_b, version_t),
+            SELFTEST_TIMEOUT_MESSAGE,
+            "timeout",
+            slot_b,
+            log_back,
+        )
+    phase_apply_waits(run, bundles.w, version_w, version_b, slot_b, log_back)
     stop_qemu(run)
     check_no_credentials(run)
     try:
@@ -1575,6 +2079,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument(
         "--skip-idf", action="store_true", help="skip the ESP-IDF builds (dev only)"
+    )
+    parser.add_argument(
+        "--only-safe-window",
+        action="store_true",
+        help="build A, B and W only and run 2a, 2b, 2f (dev only; the acceptance run is the full one)",
     )
     parser.add_argument(
         "--fresh-pio-core",
@@ -1613,7 +2122,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         phase_builds(run, args.skip_idf)
         if not args.build_only:
-            phase_board(run)
+            phase_board(run, only_safe_window=args.only_safe_window)
         code = 0
     except SetupError as error:
         run.say(f"\nSETUP FAILED: {error}")

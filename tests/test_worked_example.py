@@ -28,10 +28,12 @@ import sys
 import time
 from pathlib import Path
 from types import ModuleType
+from typing import Any
 
 import pytest
 
 from fleetforge.firmware.manifest import BUILTIN_LAYOUTS, EXPECTED_PARTITION_LAYOUT
+from fleetforge.selftest_outcome import selftest_outcome
 from tests.agent_src import (
     AGENT_DIR,
     AGENT_MAIN_C,
@@ -694,6 +696,7 @@ class TestRollbackRun:
             '"fail"',
             "phase_selftest_rollback(",  # T: the self-test never answers
             '"timeout"',
+            "phase_apply_waits(",  # W: apply into an unsafe window (R5-test-1)
             "stop_qemu(",
             "check_no_credentials(",
         )
@@ -707,6 +710,7 @@ class TestRollbackRun:
         assert "rollback_version(epoch)" in source and 'f"1.1.0-qs{epoch}"' in source
         assert "selftest_fail_version(epoch)" in source
         assert "selftest_timeout_version(epoch)" in source
+        assert "window_version(epoch)" in source
 
 
 # R5-fw-2: the self-test builds and their verdict.
@@ -795,3 +799,163 @@ class TestSelftestRun:
 def _code_of_ino(text: str) -> str:
     """The sketch without its // comments (good enough for Basic.ino's one-line comments)."""
     return "\n".join(line.split("//", 1)[0] for line in text.splitlines())
+
+
+# R5-test-1: deploy.selftest on every phase, and phase 2f (apply into an unsafe window).
+CMD_W = "c-window"
+APPLY_ID = "x-apply"
+
+
+def _window_log(*, safe_millis: int = 140123, order: str = "good", releasing: bool = False) -> str:
+    """Build W's console from the apply on, as `ff_mqtt.c` and the W sketch print it."""
+    deferral = (
+        f"W (90000) ff-mqtt: apply {APPLY_ID}: the staged update {CMD_W} waits for a safe window"
+    )
+    waits = f"W (91500) ff-mqtt: command {APPLY_ID}: the reboot waits for a safe window"
+    safe = f"window: safe at millis {safe_millis}"
+    applying = (
+        f"I (120000) ff-mqtt: publish ff/v1/d/000000000000/up/status (qos 1, retain, queued, "
+        f"msg_id 0) cmd_id={CMD_W} state=applying pct=100"
+    )
+    rebooting = applying.replace("state=applying", "state=rebooting")
+    lines = {
+        "good": [deferral, waits, safe, applying, rebooting],
+        "early": [deferral, waits, applying, safe, rebooting],
+        "no-deferral": [waits, safe, applying, rebooting],
+        "no-reboot-wait": [deferral, safe, applying, rebooting],
+    }[order]
+    if releasing:
+        lines.insert(0, f"W (1) ff-mqtt: apply {APPLY_ID}: releasing the staged update {CMD_W}")
+    return "\n".join(["window: unsafe at millis 80011", "morse: WIN", *lines, ""])
+
+
+class TestSafeWindowRun:
+    def test_each_w_replacement_hits_the_committed_sketch_once(self) -> None:
+        sketch = EXAMPLE_INO.read_text()
+        for needle in (quickstart.SAFE_WINDOW_STUB, quickstart.LOOP_HEAD):
+            assert sketch.count(needle) == 1, needle
+        windowed = sketch.replace(quickstart.SAFE_WINDOW_STUB, quickstart.SAFE_WINDOW_CLOCK)
+        windowed = windowed.replace(quickstart.LOOP_HEAD, quickstart.LOOP_HEAD_SAYS)
+        assert "betweenMessages; }" not in windowed
+        assert "(void)safeNow();" in windowed
+        assert 'printf("window: %s at millis %lu\\n"' in windowed
+        # The committed comment stays after the closing brace, which compiles.
+        assert "}  // reboot only between messages" in windowed
+
+    def test_the_window_version_is_run_unique_and_short(self) -> None:
+        version = quickstart.window_version(1760000000)
+        assert version.endswith("-window") and "-qs1760000000" in version
+        assert len(version) <= 31
+        assert quickstart.window_version(1760000001) != version
+        assert version not in {
+            quickstart.rollback_version(1760000000),
+            quickstart.selftest_fail_version(1760000000),
+            quickstart.selftest_timeout_version(1760000000),
+        }
+        assert quickstart.WINDOW_MESSAGE not in {
+            quickstart.SELFTEST_FAIL_MESSAGE,
+            quickstart.SELFTEST_TIMEOUT_MESSAGE,
+            quickstart.ROLLBACK_MESSAGE,
+            "SOS",
+            "HELLO",
+        }
+
+    @pytest.mark.parametrize("slot", ["ota_0", "ota_1"])
+    def test_expected_selftest(self, slot: str) -> None:
+        assert quickstart.expected_selftest("passed", slot) == {
+            "outcome": "passed",
+            "reason": None,
+            "returned_to": None,
+        }
+        failed = quickstart.expected_selftest("fail", slot)
+        assert failed == {
+            "outcome": "failed",
+            "reason": "i2c sensor 0x48 did not ans",
+            "returned_to": slot,
+        }
+        assert failed is not None and len(failed["reason"]) == 27
+        assert quickstart.expected_selftest("timeout", slot) == {
+            "outcome": "timed_out",
+            "reason": None,
+            "returned_to": slot,
+        }
+        assert quickstart.expected_selftest("legacy", slot) is None
+        with pytest.raises(ValueError):
+            quickstart.expected_selftest("other", slot)
+
+    def test_expected_selftest_is_what_the_server_parses(self) -> None:
+        detail = quickstart.selftest_failed_detail(quickstart.SELFTEST_FAIL_REASON, "ota_1")
+        parsed = selftest_outcome("rolled_back", detail)
+        assert parsed is not None
+        expected = quickstart.expected_selftest("fail", "ota_1")
+        assert expected is not None
+        assert (parsed.outcome, parsed.reason, parsed.returned_to) == (
+            expected["outcome"],
+            expected["reason"],
+            expected["returned_to"],
+        )
+
+    def test_check_window_log_accepts_the_good_order(self) -> None:
+        summary = quickstart.check_window_log(_window_log(), CMD_W, APPLY_ID)
+        assert "window: safe at millis 140123" in summary
+
+    @pytest.mark.parametrize(
+        ("kwargs", "match"),
+        [
+            ({"order": "early"}, "before the window opened"),
+            ({"order": "no-deferral"}, "waits for a safe window"),
+            ({"order": "no-reboot-wait"}, "the reboot waits"),
+            ({"releasing": True}, "releasing the staged update"),
+            ({"safe_millis": 130000}, "inside the unsafe stretch"),
+        ],
+    )
+    def test_check_window_log_refuses(self, kwargs: dict[str, Any], match: str) -> None:
+        with pytest.raises(quickstart.QuickstartError, match=match):
+            quickstart.check_window_log(_window_log(**kwargs), CMD_W, APPLY_ID)
+
+    def test_steps_in_order(self) -> None:
+        good = ["requested", "staging", "staged", "awaiting_safe_window", "applying"]
+        good += ["rebooting", "confirming", "confirmed"]
+        assert quickstart.steps_in_order(good, quickstart.WINDOW_STEP_ORDER)
+        assert not quickstart.steps_in_order(
+            [s for s in good if s != "applying"], quickstart.WINDOW_STEP_ORDER
+        )
+        swapped = [*good[:3], "applying", "awaiting_safe_window", *good[5:]]
+        assert not quickstart.steps_in_order(swapped, quickstart.WINDOW_STEP_ORDER)
+
+    def test_wait_for_lines_honours_poll(self, tmp_path: Path) -> None:
+        run = quickstart.Run(
+            tree=tmp_path, work=tmp_path, logs=tmp_path, base="", guest_base="", mqtt_uri=""
+        )
+        log = tmp_path / "late.log"
+        log.write_text("start\n")
+        sleeps: list[float] = []
+
+        def fake_sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+            log.write_text("start\nlate\n")
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(quickstart.time, "sleep", fake_sleep)
+            quickstart.wait_for_lines(run, log, ["late"], 5, poll=0.1)
+        assert sleeps == [0.1]
+
+    def test_the_twins_match_the_firmware(self) -> None:
+        mqtt = (COMPONENT_DIR / "src" / "ff_mqtt.c").read_text()
+        assert re.search(
+            rf"^#define COMMAND_REBOOT_DRAIN_MS {quickstart.COMMAND_REBOOT_DRAIN_MS}$", mqtt, re.M
+        )
+        assert '"apply %s: the staged update %s waits for a safe window"' in mqtt
+        assert '"command %s: the reboot waits for a safe window"' in mqtt
+        assert '"rebooting for command %s"' in mqtt
+        assert '"apply %s: releasing the staged update %s' in mqtt
+        assert "cmd_id=%s state=%s" in mqtt
+        internal = (COMPONENT_DIR / "src" / "ff_mqtt_internal.h").read_text()
+        assert f'#define FF_DETAIL_APPLY_WAITS "{quickstart.DETAIL_APPLY_WAITS}"' in internal
+        assert quickstart.APPLY_WAITS_LINE.format(id="%s", cmd="%s") in mqtt
+        assert quickstart.REBOOT_WAITS_LINE.format(id="%s") in mqtt
+        assert quickstart.REBOOTING_FOR_LINE.format(id="%s") in mqtt
+
+    def test_only_safe_window_is_a_dev_flag(self) -> None:
+        source = inspect.getsource(quickstart.main)
+        assert "--only-safe-window" in source and "dev only" in source

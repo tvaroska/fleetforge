@@ -55,6 +55,7 @@ import urllib.parse
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 
 import aiomqtt
 
@@ -110,8 +111,9 @@ STATE_CANCELLED = "cancelled"
 # imports nothing from the server, so `tests/test_simulator.py` asserts that the server's
 # parser (`selftest_outcome`) reads every detail composed from these.
 # The simulator does NOT gate the confirm-timer or self-test rollback on a safe window
-# (D12) and does NOT read `confirm_timeout_s` from the stage command (R5-test-1). Its
-# `--safe-window hold` gates the apply and the three reboot-causing verbs only.
+# (D12) and does NOT read `confirm_timeout_s` from the stage command: both are not
+# modelled (a named gap, R5-test-1). Its `--safe-window` gates the apply and the three
+# reboot-causing verbs only.
 CAPABILITY_SELFTEST = "selftest"
 SELFTEST_PASSED = "selftest passed"
 SELFTEST_TIMED_OUT = "selftest timed out"
@@ -191,6 +193,13 @@ APPLY_ON_COMMAND = "on_command"
 SAFE_WINDOW_AUTO = "auto"
 SAFE_WINDOW_HOLD = "hold"
 SAFE_WINDOW_MODES = (SAFE_WINDOW_AUTO, SAFE_WINDOW_HOLD)
+# R5-test-1: `file:<path>` is a rule with both branches — the moment is safe iff <path>
+# exists — so a harness opens the window by creating the file (no timer to race). Asked
+# where the firmware asks its rule, and polled while something waits, every
+# `SAFE_WINDOW_POLL_S`: the twin of `FF_SAFE_WINDOW_POLL_MS 250`
+# (`ff_safe_window_internal.h`, a tripwire in `tests/test_simulator.py`).
+SAFE_WINDOW_FILE_PREFIX = "file:"
+SAFE_WINDOW_POLL_S = 0.25
 
 # `--confirm`: what the image this board reboots into does. `auto` confirms at the
 # announce PUBACK, like a healthy agent. `never` joins the fleet and never confirms — an
@@ -204,7 +213,7 @@ CONFIRM_MODES = (CONFIRM_AUTO, CONFIRM_NEVER)
 # `spec/prd.md` → *Requirements & targets → Timing*: "confirm timeout 300 s". The real
 # agent honours the command's `confirm_timeout_s` since R5-fw-3 (clamped 30-3600 s,
 # counted from image start). This simulator keeps its own `--confirm-timeout`, which the
-# tests use to shorten the wait; teaching it the command is left to R5-test-1.
+# tests use to shorten the wait; it does not read the command's (not modelled, a named gap).
 DEFAULT_CONFIRM_TIMEOUT_S = 300.0
 
 # Artifact downloads are chunked so a 1.9 MB image does not arrive as one read, the same
@@ -568,6 +577,18 @@ def _fetch(url: str) -> bytes:
     return b"".join(chunks)
 
 
+def check_safe_window(mode: str) -> None:
+    """Refuse a `--safe-window` that is not `auto`, `hold` or `file:` + a non-empty PATH."""
+    if mode in SAFE_WINDOW_MODES:
+        return
+    if mode.startswith(SAFE_WINDOW_FILE_PREFIX) and mode[len(SAFE_WINDOW_FILE_PREFIX) :]:
+        return
+    raise SimulatorError(
+        f"--safe-window must be {SAFE_WINDOW_AUTO!r}, {SAFE_WINDOW_HOLD!r} or "
+        f"'{SAFE_WINDOW_FILE_PREFIX}PATH' (safe while PATH exists), not {mode!r}"
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class PendingConfirm:
     """The NVS analogue: the transaction that crossed the apply reboot (`agent/components/fleetforge/src/ff_txn.h`).
@@ -611,15 +632,21 @@ class StageRunner:
     * `slot` — the OTA slot label the running image is in. An apply flips it, a rollback
       flips it back; only the self-test details name it (R5-be-1).
     * `staged` — the `cmd_id` of a stage that stopped before its reboot: an
-      `apply: "on_command"` one, or an `auto` one parked by `--safe-window hold`. Its image
+      `apply: "on_command"` one, or an `auto` one parked by an unsafe window. Its image
       is what the boot pointer now names, so while it is set a further `stage` is refused
       (R2-fw-2), as the firmware refuses to write a slot the boot pointer names. The
       `apply` verb clears it (and releases the image), the `cancel` verb clears it (and
       reports `cancelled`). `staged_version` is that image's version.
-    * `apply_deferred` — the `cmd_id` whose release waits for a safe window
-      (`--safe-window hold`); a repeat `apply` is an accepted no-op, a `cancel` still works.
-    * `rollback_deferred` / `reboot_deferred` — a reboot-causing verb answered `deferred`
-      under `--safe-window hold`, which never acts; a repeat is `accepted`.
+    * `apply_deferred` — the `cmd_id` whose release waits for a safe window; a repeat
+      `apply` is an accepted no-op, a `cancel` still works (and clears it).
+    * `rollback_deferred` / `reboot_deferred` — a reboot-causing verb answered `deferred`;
+      a repeat is `accepted`.
+
+    **The window** (`safe_window`): `auto` is always safe, `hold` never (so nothing it
+    defers ever acts), and `file:<path>` is safe while <path> exists. `_unsafe_now()` is
+    asked once per verb after every refusal (R5-fw-5 (3)), as the firmware asks its rule;
+    only `file:` ever opens, and `release_if_safe` (polled by `_safe_window_loop`) then
+    carries out what waited, as `ff_mqtt.c::command_reboot_task` does.
     * `returnable` — the confirmed image in the other slot, and that slot: what the
       `rollback` verb returns a confirmed board to. Set when a transaction confirms;
       cleared by any rollback. None on a fresh board, which models a USB flash whose other
@@ -659,10 +686,7 @@ class StageRunner:
     _confirm_deadline: float | None = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
-        if self.safe_window not in SAFE_WINDOW_MODES:
-            raise SimulatorError(
-                f"--safe-window must be one of {list(SAFE_WINDOW_MODES)}, not {self.safe_window!r}"
-            )
+        check_safe_window(self.safe_window)
         if self.confirm not in CONFIRM_MODES:
             raise SimulatorError(
                 f"--confirm must be one of {list(CONFIRM_MODES)}, not {self.confirm!r}"
@@ -693,6 +717,34 @@ class StageRunner:
         the old, confirmed one, so it stays true until the session ends.
         """
         return self.pending is None or self.reboot.is_set()
+
+    @property
+    def _safe_window_path(self) -> str | None:
+        """The PATH of a `file:PATH` window, or None (an empty PATH is no path)."""
+        if self.safe_window.startswith(SAFE_WINDOW_FILE_PREFIX):
+            return self.safe_window[len(SAFE_WINDOW_FILE_PREFIX) :] or None
+        return None
+
+    @property
+    def window_can_open(self) -> bool:
+        """Only a `file:` window ever opens after saying unsafe; `run_session` polls it."""
+        return self._safe_window_path is not None
+
+    def _unsafe_now(self) -> bool:
+        """The board's rule, asked now: `hold` is never safe, `file:` is safe while the
+        file exists, `auto` always is. Never cached: each verb asks it once."""
+        if self.safe_window == SAFE_WINDOW_HOLD:
+            return True
+        path = self._safe_window_path
+        if path is not None:
+            return not Path(path).exists()
+        return False
+
+    def _waits(self, what: str) -> str:
+        """The transcript line of a deferral."""
+        if self.safe_window == SAFE_WINDOW_HOLD:
+            return f"--safe-window hold: the {what} waits, indefinitely"
+        return f"--safe-window {self.safe_window}: the {what} waits until the window opens"
 
     @property
     def _selftest_registered(self) -> bool:
@@ -797,7 +849,7 @@ class StageRunner:
                 # A repeat while the release waits: changes nothing (R5-fw-5 (3)).
                 await self._ack(client, command_id, COMMAND_APPLY, ACK_ACCEPTED, cmd_id, None, step)
                 return
-            if self.safe_window == SAFE_WINDOW_HOLD:
+            if self._unsafe_now():
                 await self._ack(client, command_id, COMMAND_APPLY, ACK_DEFERRED, cmd_id, None, step)
                 await self._status(
                     client,
@@ -808,7 +860,7 @@ class StageRunner:
                     detail=DETAIL_APPLY_WAITS,
                 )
                 self.apply_deferred = cmd_id
-                step("apply    --safe-window hold: the release waits, indefinitely")
+                step(f"apply    {self._waits('release')}")
                 return
             await self._ack(client, command_id, COMMAND_APPLY, ACK_ACCEPTED, cmd_id, None, step)
             version = self.staged_version
@@ -872,7 +924,7 @@ class StageRunner:
             await self._ack(
                 client, command_id, COMMAND_ROLLBACK, ACK_ACCEPTED, pending.cmd_id, None, step
             )
-            await self._rollback(client, pending, ROLLED_BACK_BY_COMMAND, step)
+            await self._carry_out_rollback(client, pending.cmd_id, step)
             return
         if self.returnable is None:
             await self._ack(
@@ -884,14 +936,33 @@ class StageRunner:
         if await self._deferred_rollback(client, command_id, command_id, step):
             return
         await self._ack(client, command_id, COMMAND_ROLLBACK, ACK_ACCEPTED, command_id, None, step)
+        await self._carry_out_rollback(client, command_id, step)
+
+    async def _carry_out_rollback(
+        self, client: aiomqtt.Client, transaction: str, step: Step
+    ) -> None:
+        """The rollback an accepted verb, or a deferred one the window released, does.
+
+        `transaction` is the unconfirmed image's `cmd_id` (the stage's transaction ends) or
+        the command's own id (a confirmed image rolls back as a transaction of its own).
+        """
+        pending = self.pending
+        if pending is not None and pending.cmd_id == transaction and not self.reboot.is_set():
+            await self._rollback(client, pending, ROLLED_BACK_BY_COMMAND, step)
+            return
+        if self.returnable is None:
+            # Only reachable through a release: the confirm timer rolled the image back
+            # while the verb waited, so there is nothing left to return to.
+            step(f"rollback {transaction}: nothing to return to any more — not carried out")
+            return
         try:
-            await self._status(client, command_id, STATE_ROLLING_BACK, step)
+            await self._status(client, transaction, STATE_ROLLING_BACK, step)
         except aiomqtt.MqttError as exc:
             step(f"rollback {STATE_ROLLING_BACK} not delivered ({exc}); rolling back anyway")
         identity, slot = self.returnable
         self.identity = replace(identity, reset_reason=RESET_REASON_SW)
         self.slot = slot
-        self.rolled_back = command_id
+        self.rolled_back = transaction
         self.rolled_back_head = ROLLED_BACK_BY_COMMAND
         self.returnable = None
         self._confirm_deadline = None
@@ -901,15 +972,15 @@ class StageRunner:
     async def _deferred_rollback(
         self, client: aiomqtt.Client, command_id: str, transaction: str, step: Step
     ) -> bool:
-        """Under `--safe-window hold` a rollback is `deferred` and never acts (R5-fw-5)."""
-        if self.safe_window != SAFE_WINDOW_HOLD:
+        """Under an unsafe window a rollback is answered `deferred` and waits (R5-fw-5)."""
+        if not self._unsafe_now():
             return False
         await self._ack(client, command_id, COMMAND_ROLLBACK, ACK_DEFERRED, transaction, None, step)
         await self._status(
             client, transaction, STATE_AWAITING_SAFE_WINDOW, step, detail=DETAIL_ROLLBACK_WAITS
         )
         self.rollback_deferred = transaction
-        step("rollback --safe-window hold: the rollback waits, indefinitely")
+        step(f"rollback {self._waits('rollback')}")
         return True
 
     async def _reboot_command(self, client: aiomqtt.Client, command_id: str, step: Step) -> None:
@@ -940,14 +1011,50 @@ class StageRunner:
         if self.reboot_deferred:
             await self._ack(client, command_id, COMMAND_REBOOT, ACK_ACCEPTED, None, None, step)
             return
-        if self.safe_window == SAFE_WINDOW_HOLD:
+        if self._unsafe_now():
             await self._ack(client, command_id, COMMAND_REBOOT, ACK_DEFERRED, None, None, step)
             self.reboot_deferred = True
-            step("reboot   --safe-window hold: the reboot waits, indefinitely")
+            step(f"reboot   {self._waits('reboot')}")
             return
         await self._ack(client, command_id, COMMAND_REBOOT, ACK_ACCEPTED, None, None, step)
         self.identity = replace(self.identity, reset_reason=RESET_REASON_SW)
         step(f"reboot   restarting on {self.identity.fw_version} for command {command_id}")
+        self.reboot.set()
+
+    async def release_if_safe(self, client: aiomqtt.Client, step: Step) -> None:
+        """Carry out what waits for the window, once the rule says safe.
+
+        `ff_mqtt.c::command_reboot_task` / `ff_ota.c`'s wait for `apply: auto`: a released
+        apply walks `applying → rebooting` exactly as an accepted one (D3), a released
+        rollback does what an accepted one does, a released reboot restarts. A no-op while
+        nothing waits, while the rule still says unsafe, or once a reboot is under way.
+        `hold` never says safe, so under it nothing ever acts.
+        """
+        if self.reboot.is_set():
+            return
+        if self.apply_deferred is None and self.rollback_deferred is None:
+            if not self.reboot_deferred:
+                return
+        if self._unsafe_now():
+            return
+        if self.apply_deferred is not None:
+            cmd_id = self.apply_deferred
+            version = self.staged_version
+            # Cleared before the first publish: a `cancel` that arrives from here on finds
+            # nothing staged, as on metal once the reboot task committed.
+            self._clear_staged()
+            step(f"window   the safe window opened: releasing the staged update {cmd_id}")
+            await self._release(client, cmd_id, version, step)
+            return
+        if self.rollback_deferred is not None:
+            transaction = self.rollback_deferred
+            self.rollback_deferred = None
+            step(f"window   the safe window opened: carrying out the rollback {transaction}")
+            await self._carry_out_rollback(client, transaction, step)
+            return
+        self.reboot_deferred = False
+        self.identity = replace(self.identity, reset_reason=RESET_REASON_SW)
+        step(f"window   the safe window opened: restarting on {self.identity.fw_version}")
         self.reboot.set()
 
     def _clear_staged(self) -> None:
@@ -1081,15 +1188,19 @@ class StageRunner:
             step("stage    apply=on_command — staying staged until an apply arrives")
             return
 
-        if self.safe_window == SAFE_WINDOW_HOLD:
-            # Parked, permanently and on purpose. Nothing server-side may end this:
-            # a vehicle in motion reports honestly for as long as it is moving. The
-            # image is staged all the same (a `cancel` can still end it, R5-fw-5 (5)).
+        if self._unsafe_now():
+            # Parked. Nothing server-side may end this: a vehicle in motion reports
+            # honestly for as long as it is moving (under `hold`, permanently and on
+            # purpose; a `file:` window releases it when it opens). The image is staged
+            # all the same (a `cancel` can still end it, R5-fw-5 (5)).
             await self._status(client, cmd_id, STATE_AWAITING_SAFE_WINDOW, step)
             self.staged = cmd_id
             self.staged_version = staged_version
             self.apply_deferred = cmd_id
-            step("stage    --safe-window hold: parked in awaiting_safe_window, indefinitely")
+            if self.safe_window == SAFE_WINDOW_HOLD:
+                step("stage    --safe-window hold: parked in awaiting_safe_window, indefinitely")
+            else:
+                step(f"stage    {self._waits('apply')}: parked in awaiting_safe_window")
             return
 
         await self._release(client, cmd_id, staged_version, step)
@@ -1337,6 +1448,17 @@ async def _stop_sampler(task: asyncio.Task[None] | None) -> None:
             await task
 
 
+async def _safe_window_loop(client: aiomqtt.Client, stage: StageRunner, step: Step) -> None:
+    """Ask a `file:` window every `SAFE_WINDOW_POLL_S` and release what waits on it.
+
+    A worker, so it never returns normally (a returning worker means "the broker closed
+    the stream"); the state lives on `StageRunner`, so a reconnect resumes the wait.
+    """
+    while True:
+        await stage.release_if_safe(client, step)
+        await asyncio.sleep(SAFE_WINDOW_POLL_S)
+
+
 async def _command_loop(client: aiomqtt.Client, stage: StageRunner, step: Step) -> None:
     """Drain `dn/#` and hand every message to the stage runner.
 
@@ -1455,6 +1577,8 @@ async def run_session(
         ]
         if telemetry is not None:
             workers.append(asyncio.create_task(_telemetry_loop(client, device, telemetry, step)))
+        if stage.window_can_open:
+            workers.append(asyncio.create_task(_safe_window_loop(client, stage, step)))
         # Two ways to be asked to leave, and they are not the same event: `stop` is the
         # operator, `stage.reboot` is the board restarting into the image it just applied
         # (or rolling back from it). The confirm timer is a sentinel too, NOT a worker: it

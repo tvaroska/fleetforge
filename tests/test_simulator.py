@@ -22,6 +22,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import stat
 import time
 from collections.abc import AsyncIterator
@@ -42,6 +43,7 @@ from fleetforge.ingestor.protocol import (
 )
 from fleetforge.selftest_outcome import SelfTestOutcome, parse_selftest_detail, selftest_outcome
 from fleetforge.simulator import __main__ as cli
+from fleetforge.simulator import device as sim_device
 from fleetforge.simulator.device import (
     ACK,
     ACK_ACCEPTED,
@@ -68,7 +70,9 @@ from fleetforge.simulator.device import (
     ROLLBACK_WALK,
     ROLLED_BACK_BY_COMMAND,
     SAFE_WINDOW_AUTO,
+    SAFE_WINDOW_FILE_PREFIX,
     SAFE_WINDOW_HOLD,
+    SAFE_WINDOW_POLL_S,
     SELFTEST_FAIL_REASON,
     SELFTEST_FAILED,
     SELFTEST_PASSED,
@@ -108,6 +112,7 @@ from fleetforge.simulator.device import (
 )
 from fleetforge.simulator.errors import SimulatorError
 from fleetforge.simulator.state import Credential, describe, forget, load, save, state_path
+from tests.agent_src import COMPONENT_SRC
 from tests.conftest import capture_logs
 
 SIMULATOR_DIR = Path(__file__).resolve().parent.parent / "src" / "fleetforge" / "simulator"
@@ -1525,10 +1530,20 @@ def test_an_unknown_safe_window_mode_is_refused_before_any_io() -> None:
         )
 
 
-def test_the_cli_offers_both_safe_window_modes() -> None:
+def test_the_cli_offers_both_safe_window_modes_and_a_file_window() -> None:
     args = cli.build_parser().parse_args(["run", "--safe-window", "hold"])
     assert args.safe_window == SAFE_WINDOW_HOLD
     assert cli.build_parser().parse_args(["run"]).safe_window == SAFE_WINDOW_AUTO
+    assert (
+        cli.build_parser().parse_args(["fleet", "--safe-window", "file:/x"]).safe_window
+        == "file:/x"
+    )
+
+
+@pytest.mark.parametrize("mode", ["whenever", "file:", "File:/x"])
+def test_the_cli_refuses_a_bad_safe_window_before_any_token_is_spent(mode: str) -> None:
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["fleet", "--safe-window", mode])
 
 
 # ---------------------------------------------------------------------------
@@ -2348,3 +2363,269 @@ async def test_a_held_auto_stage_is_cancellable_and_blocks_a_second_stage(
     assert [s["state"] for s in for_cmd(fake, "cmd-stage-2")][-1] == STATE_FAILED
     assert acks(fake)[0]["result"] == "accepted"
     assert [s["state"] for s in for_cmd(fake, "cmd-stage-1")][-1] == STATE_CANCELLED
+
+
+# ---------------------------------------------------------------------------
+# R5-test-1: a safe window that can open (`--safe-window file:PATH`)
+# ---------------------------------------------------------------------------
+
+
+def file_window(tmp_path: Path) -> tuple[str, Path]:
+    """A `file:` window on a path that does not exist yet (the moment is unsafe)."""
+    flag = tmp_path / "W.safe"
+    return f"{SAFE_WINDOW_FILE_PREFIX}{flag}", flag
+
+
+async def release(stage: StageRunner) -> tuple[FakeClient, list[str]]:
+    """Ask the window once, as `_safe_window_loop` does every poll."""
+    fake = FakeClient()
+    lines, step = transcript()
+    await stage.release_if_safe(fake, step)  # type: ignore[arg-type]
+    return fake, lines
+
+
+def test_the_poll_is_the_firmwares() -> None:
+    header = (COMPONENT_SRC / "ff_safe_window_internal.h").read_text()
+    poll_ms = re.search(r"#define FF_SAFE_WINDOW_POLL_MS (\d+)", header)
+    assert poll_ms is not None
+    assert SAFE_WINDOW_POLL_S == int(poll_ms.group(1)) / 1000
+
+
+def test_an_empty_file_window_is_refused_before_any_io() -> None:
+    with pytest.raises(SimulatorError, match="file:PATH"):
+        r5_board(safe_window=SAFE_WINDOW_FILE_PREFIX)
+
+
+async def test_a_closed_file_window_defers_apply_until_the_file_appears(
+    downloads: list[str], tmp_path: Path
+) -> None:
+    mode, flag = file_window(tmp_path)
+    stage = r5_board(safe_window=mode)
+    fake, _ = await session_with(stage, staged_msg(), verb("apply", "x1", "cmd-stage-1"))
+
+    assert acks(fake) == [
+        {"id": "x1", "type": "apply", "result": "deferred", "cmd_id": "cmd-stage-1", "detail": None}
+    ]
+    assert statuses(fake)[-1] == {
+        "cmd_id": "cmd-stage-1",
+        "state": "awaiting_safe_window",
+        "pct": 100,
+        "detail": "apply waits for a safe window",
+    }
+    # Still closed: asking again changes nothing.
+    idle, _ = await release(stage)
+    assert idle.published == []
+    assert stage.apply_deferred == "cmd-stage-1"
+    assert not stage.reboot.is_set()
+
+    flag.touch()
+    opened, lines = await release(stage)
+    assert [s["state"] for s in statuses(opened)] == [STATE_APPLYING, STATE_REBOOTING]
+    assert acks(opened) == []  # the first answer stays the answer
+    assert stage.reboot.is_set()
+    assert stage.pending is not None and stage.pending.cmd_id == "cmd-stage-1"
+    assert (stage.staged, stage.apply_deferred) == (None, None)
+    assert any("the safe window opened" in line for line in lines)
+
+    stage.reboot.clear()
+    after, _ = await session_with(stage)
+    assert channel_payloads(after, SIM_ID, ANNOUNCE)[0]["fw_version"] == "1.5.0"
+    assert [s["state"] for s in statuses(after)] == list(CONFIRM_WALK)
+
+
+async def test_an_open_file_window_accepts_apply_at_once(
+    downloads: list[str], tmp_path: Path
+) -> None:
+    mode, flag = file_window(tmp_path)
+    flag.touch()
+    stage = r5_board(safe_window=mode)
+    fake, _ = await session_with(
+        stage, staged_msg(), verb("apply", "x1", "cmd-stage-1"), awake_s=None
+    )
+
+    assert acks(fake)[0]["result"] == "accepted"
+    assert STATE_AWAITING_SAFE_WINDOW not in [s["state"] for s in statuses(fake)]
+    assert [s["state"] for s in statuses(fake)] == list(STAGE_WALK)
+    assert stage.reboot.is_set()
+
+
+async def test_the_session_releases_the_apply_when_the_window_opens(
+    downloads: list[str], tmp_path: Path
+) -> None:
+    """The worker polls the window inside a live session: the reboot ends it."""
+    mode, flag = file_window(tmp_path)
+    stage = r5_board(safe_window=mode)
+
+    async def open_later() -> None:
+        await asyncio.sleep(0.3)
+        flag.touch()
+
+    opener = asyncio.create_task(open_later())
+    fake, _ = await session_with(
+        stage, staged_msg(), verb("apply", "x1", "cmd-stage-1"), awake_s=None
+    )
+    await opener
+
+    assert stage.reboot.is_set()
+    states = [s["state"] for s in statuses(fake)]
+    assert states[-4:] == [
+        STATE_STAGED,
+        STATE_AWAITING_SAFE_WINDOW,
+        STATE_APPLYING,
+        STATE_REBOOTING,
+    ]
+
+
+async def test_a_parked_auto_stage_is_released_when_the_window_opens(
+    downloads: list[str], tmp_path: Path
+) -> None:
+    mode, flag = file_window(tmp_path)
+    stage = r5_board(safe_window=mode)
+    fake, _ = await session_with(stage, FakeMessage(f"ff/v1/d/{SIM_ID}/dn/cmd", stage_command()))
+
+    assert statuses(fake)[-1] == {
+        "cmd_id": "cmd-stage-1",
+        "state": "awaiting_safe_window",
+        "pct": None,
+        "detail": None,
+    }
+    assert stage.apply_deferred == "cmd-stage-1"
+    flag.touch()
+    opened, _ = await release(stage)
+    assert [s["state"] for s in statuses(opened)] == [STATE_APPLYING, STATE_REBOOTING]
+    assert stage.identity.fw_version == "1.5.0"
+
+
+async def test_a_cancelled_deferred_apply_is_never_released(
+    downloads: list[str], tmp_path: Path
+) -> None:
+    mode, flag = file_window(tmp_path)
+    stage = r5_board(safe_window=mode)
+    fake, _ = await session_with(
+        stage,
+        staged_msg(),
+        verb("apply", "x1", "cmd-stage-1"),
+        verb("cancel", "x2", "cmd-stage-1"),
+    )
+    assert [(a["type"], a["result"]) for a in acks(fake)] == [
+        ("apply", "deferred"),
+        ("cancel", "accepted"),
+    ]
+
+    flag.touch()
+    opened, _ = await release(stage)
+    assert opened.published == []
+    assert not stage.reboot.is_set()
+    assert stage.pending is None
+    assert stage.identity.fw_version == "1.4.2"
+
+
+async def test_a_deferred_rollback_of_a_confirming_image_is_released(
+    downloads: list[str], tmp_path: Path
+) -> None:
+    mode, flag = file_window(tmp_path)
+    flag.touch()
+    stage = await applied_stage(
+        capabilities=R5_CAPABILITIES, confirm=CONFIRM_NEVER, safe_window=mode
+    )
+    flag.unlink()
+
+    second, _ = await session_with(stage, verb("rollback", "x7"))
+    assert acks(second) == [
+        {
+            "id": "x7",
+            "type": "rollback",
+            "result": "deferred",
+            "cmd_id": "cmd-stage-1",
+            "detail": None,
+        }
+    ]
+    assert statuses(second)[-1]["detail"] == "rollback waits for a safe window"
+    assert not stage.reboot.is_set()
+
+    flag.touch()
+    opened, _ = await release(stage)
+    assert statuses(opened) == [
+        {"cmd_id": "cmd-stage-1", "state": "rolling_back", "pct": None, "detail": None}
+    ]
+    assert stage.reboot.is_set()
+    assert stage.rollback_deferred is None
+    stage.reboot.clear()
+    third, _ = await session_with(stage)
+    assert statuses(third) == [
+        {
+            "cmd_id": "cmd-stage-1",
+            "state": "rolled_back",
+            "pct": None,
+            "detail": "rolled back by command; returned to ota_0",
+        }
+    ]
+
+
+async def test_a_deferred_rollback_of_a_confirmed_image_is_released(
+    downloads: list[str], tmp_path: Path
+) -> None:
+    mode, flag = file_window(tmp_path)
+    flag.touch()
+    stage = await confirmed_r5_board(downloads, safe_window=mode)
+    flag.unlink()
+
+    fake, _ = await session_with(stage, verb("rollback", "x4"), verb("rollback", "x4b"))
+    assert [(a["id"], a["result"], a["cmd_id"]) for a in acks(fake)] == [
+        ("x4", "deferred", "x4"),
+        ("x4b", "accepted", "x4"),
+    ]
+    assert not stage.reboot.is_set()
+
+    flag.touch()
+    opened, _ = await release(stage)
+    assert statuses(opened) == [
+        {"cmd_id": "x4", "state": "rolling_back", "pct": None, "detail": None}
+    ]
+    assert stage.reboot.is_set()
+    stage.reboot.clear()
+    after, _ = await session_with(stage)
+    assert statuses(after)[0]["detail"] == "rolled back by command; returned to ota_0"
+    announce = channel_payloads(after, SIM_ID, ANNOUNCE)[0]
+    assert (announce["fw_version"], announce["reset_reason"]) == ("1.4.2", "sw")
+
+
+async def test_a_deferred_reboot_is_released(tmp_path: Path) -> None:
+    mode, flag = file_window(tmp_path)
+    stage = r5_board(safe_window=mode)
+    fake, _ = await session_with(stage, verb("reboot", "x6"))
+    assert acks(fake)[0]["result"] == "deferred"
+    assert stage.reboot_deferred
+    assert stage.identity.reset_reason == "poweron"
+
+    flag.touch()
+    opened, _ = await release(stage)
+    assert opened.published == []  # a reboot has no transaction and no status
+    assert stage.reboot.is_set()
+    assert not stage.reboot_deferred
+    assert stage.identity.reset_reason == "sw"
+
+
+async def test_hold_never_releases_even_when_asked(downloads: list[str]) -> None:
+    stage = r5_board(safe_window=SAFE_WINDOW_HOLD)
+    await session_with(stage, staged_msg(), verb("apply", "x1", "cmd-stage-1"))
+    assert stage.apply_deferred == "cmd-stage-1"
+
+    opened, _ = await release(stage)
+    assert opened.published == []
+    assert not stage.reboot.is_set()
+    assert not stage.window_can_open
+
+
+async def test_the_window_worker_keeps_running_while_nothing_waits(tmp_path: Path) -> None:
+    """A returning worker would read as "the broker closed the stream"."""
+    mode, flag = file_window(tmp_path)
+    flag.touch()
+    stage = r5_board(safe_window=mode)
+    assert stage.window_can_open
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(
+            sim_device._safe_window_loop(FakeClient(), stage, lambda _m: None),  # type: ignore[arg-type]
+            timeout=3 * SAFE_WINDOW_POLL_S,
+        )
+    assert not stage.reboot.is_set()

@@ -61,10 +61,10 @@ from fleetforge.simulator.device import (
     LINK_PROFILES,
     POWER_CLASSES,
     SAFE_WINDOW_AUTO,
-    SAFE_WINDOW_MODES,
     DeviceIdentity,
     LinkProfile,
     Step,
+    check_safe_window,
     derive_device_id,
     mqtt_client_factory,
     run_always_on,
@@ -401,6 +401,15 @@ def _reset_reason(text: str) -> str:
     return text
 
 
+def _safe_window(text: str) -> str:
+    """An argparse `type`: `auto`, `hold` or `file:PATH`, refused before any token is spent."""
+    try:
+        check_safe_window(text)
+    except SimulatorError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from exc
+    return text
+
+
 def _shared(parser: argparse.ArgumentParser) -> None:
     """Flags both subcommands take. Environment defaults, CLI overrides."""
     parser.add_argument("--api-base", default=_default_api_base(), help="origin serving /v1")
@@ -484,12 +493,15 @@ def _shared(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--safe-window",
         default=SAFE_WINDOW_AUTO,
-        choices=sorted(SAFE_WINDOW_MODES),
+        type=_safe_window,
+        metavar="{auto,hold,file:PATH}",
         help=(
             "what this board does with a staged image: `auto` applies immediately, "
             "`hold` parks in awaiting_safe_window indefinitely (a vehicle in motion), and "
             "answers apply, rollback and reboot `deferred` without ever acting. "
-            "Nothing server-side ends a hold — that is the point of the flag"
+            "Nothing server-side ends a hold — that is the point of the flag. "
+            "`file:PATH` is safe while PATH exists: unsafe it defers like hold, and a "
+            "harness opens the window by creating the file (what waited is then carried out)"
         ),
     )
     parser.add_argument(

@@ -293,9 +293,15 @@ A sim that announces the R5 verbs carries them out and answers on `up/ack`; one 
 (`--capabilities ota` alone) models a pre-R5 agent, and the API refuses to send it a verb
 (409) or an `apply: "on_command"` deploy (409 `no_apply_capability`).
 
+`--safe-window` picks the board's rule: `auto` (always safe), `hold` (never: apply, rollback
+and reboot are answered `deferred` and never act, an `apply: auto` stage parks for good), or
+`file:PATH` (R5-test-1: safe while PATH exists; unsafe it defers like `hold`, and creating the
+file releases what waited, polled every 250 ms like the firmware). `just selftest-window-e2e`
+drives exactly that through the real stack (7 scenarios, no browser).
+
 ```bash
 just sim --token "$(newtoken)" --name verbs --heartbeat-interval 5 \
-  --capabilities ota apply cancel rollback reboot          # add --safe-window hold to see `deferred`
+  --capabilities ota apply cancel rollback reboot          # add --safe-window hold (or file:/tmp/open) to see `deferred`
 ID=$(PYTHONPATH=src uv run python -c 'from fleetforge.simulator.device import derive_device_id as d; print(d("verbs"))')
 CMD=$(curl -sS -X POST "$BASE/v1/devices/$ID/deploy" -H "Authorization: Bearer $TOKEN" \
       -H 'content-type: application/json' -d '{"version":"1.5.0","apply":"on_command"}' | jq -r .cmd_id)

@@ -395,8 +395,10 @@ The stock agent registers no safe-window rule (`no safe-window rule registered: 
 reboots as soon as it must`), so every reboot above is immediate. A firmware that registers one
 (`ff_set_safe_window_cb()` / `Fleetforge.onSafeWindow()`; the Basic example reboots only in the
 gap between two messages) announces `safe_window` and logs `a safe-window rule is registered:
-every reboot this agent makes waits for it` before `connecting to`. To drive the wait, build
-sketch variants whose rule is a clock (never commit them): copy `Basic.ino` aside, replace the
+every reboot this agent makes waits for it` before `connecting to`. Variant W with the `apply`
+verb is automated by `just lib-quickstart`'s phase 2f (R5-test-1; above); the simulator twin is
+`just selftest-window-e2e` (`--safe-window file:PATH`). To drive the other waits, build sketch
+variants whose rule is a clock (never commit them): copy `Basic.ino` aside, replace the
 one-line `static bool safeNow() { … }` and the version/message, `just lib-bundle esp32-qemu`,
 copy `lib-qemu/.pio/bundle/esp32-qemu` to a scratch dir, and put `Basic.ino` back.
 
@@ -1040,7 +1042,7 @@ What differs from `agent-qemu esp32`:
   component. To check a built image without booting it, scan it for the magic
   (`docs/features/ota-library.md` → *R3-fw-6*).
 
-## The worked example, end to end (R3-fw-4, R3-test-1, R5-fw-2)
+## The worked example, end to end (R3-fw-4, R3-test-1, R5-fw-2, R5-test-1)
 
 `just lib-quickstart` plays the worked example's README quickstart:
 `agent/components/fleetforge/examples/Basic/README.md` (Arduino) and
@@ -1058,7 +1060,8 @@ just lib-quickstart --build-only --skip-idf --fresh-pio-core
 # the api must hand the board 10.0.2.2 origins for the OTA half (see above). On this box:
 FF_PUBLIC_BASE_URL=http://10.0.2.2:8088 FF_S3_PUBLIC_ENDPOINT_URL=http://10.0.2.2:9000 \
   docker compose -f docker-compose.yml -f docker-compose.override.yml up -d --no-deps api
-just lib-quickstart                # ~45 min: builds, enroll → heartbeat → OTA → self-test → confirm → broken build → rollback → failing self-test → rollback → silent self-test → rollback
+just lib-quickstart                # ~55 min: builds, enroll → heartbeat → OTA → self-test → confirm → broken build → rollback → failing self-test → rollback → silent self-test → rollback → apply into an unsafe window → waits → confirm
+just lib-quickstart --only-safe-window   # dev only: builds A, B, W; runs 2a, 2b, 2f
 docker compose -f docker-compose.yml -f docker-compose.override.yml up -d --no-deps api  # restore
 ```
 
@@ -1141,6 +1144,34 @@ What it does:
    shows `rolled_back` with detail exactly `selftest timed out; returned to ota_1`. The ~7 min
    wait is the plain build's 300 s deadline (R5-fw-3 makes it per-command). **Any
    `confirmed`** for F or T fails the run at once, as for R.
+   Since R5-test-1 every phase also checks the server's parse of the detail,
+   `deploy.selftest`: B `{"outcome":"passed","reason":null,"returned_to":null}`, R `null`
+   (legacy wording), F `{"outcome":"failed","reason":"i2c sensor 0x48 did not
+   ans","returned_to":<B's slot>}`, T `{"outcome":"timed_out","reason":null,"returned_to":<B's
+   slot>}`.
+5c. **Apply into an unsafe window (R5-test-1, phase 2f).** Bundle W is a plain build of the
+   committed sketch whose one-line `safeNow()` becomes a clock that prints each flip
+   (`window: unsafe|safe at millis N`, unsafe 60 s of every 80 s: the W of *The safe window
+   (R5-fw-5)* below), with `(void)safeNow();` first in loop() so the flips show even when no
+   reboot waits, `"SOS"` → `"WIN"`, `1.5.0-qs<epoch>-window`. W is installed like B and must
+   confirm and announce `apply` and `safe_window`. Then B is deployed again `on_command` (a
+   new `cmd_id`, staged into B's own slot) and, right after a **fresh** `window: unsafe` line,
+   the script sends `POST …/deploys/<cmd>/apply`. Required: `apply <id>: the staged update
+   <cmd> waits for a safe window`, `command <id>: the reboot waits for a safe window`, the
+   answer `deferred`, deploy `awaiting_safe_window` / `apply waits for a safe window` (not
+   terminal, fw still W) on every sample until `window: safe`, then the queued
+   `cmd_id=<cmd> state=applying` and `state=rebooting`, at least 20 s after the verb, the safe
+   line's `millis % 80000 ≥ 60000`, never `releasing the staged update`. **The kill race:**
+   the agent then drains 1.5 s and calls `esp_restart()`, whose soft reset panics while B is
+   PENDING_VERIFY and would make the bootloader abort B. So on `state=rebooting` the script
+   gives the statuses ≤ 0.4 s to land and `docker kill`s the container (not `just`, it is
+   slower), then boots it again: the boot pointer was written at `staged`, so B boots as the
+   apply would have, and `confirming on <B's slot>`, `custom self-test passed`, `CONFIRMED`,
+   `morse: HELLO`. The API: deploy `confirmed` with `selftest passed`, the steps staged <
+   awaiting_safe_window < applying < rebooting < confirming < confirmed, and the command's
+   result still `deferred` (the first answer wins). If `rebooting for command <id>` is
+   followed by `rst:`, the soft reset won the race: the run fails as a harness race, not an
+   agent defect; rerun (`--only-safe-window` to iterate).
 6. **Credentials.** The token must occur 0 times, and no `"mqtt_password":"` value at all,
    in every QEMU log, every build log and the script's own output. Then unplug, and report
    the LWT.

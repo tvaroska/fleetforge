@@ -588,6 +588,6 @@ Per R5-spec-1: firmware tasks may build ahead of the owner's spec Patch A, unrel
 
 ### Test
 
-- [ ] **R5-test-1**: Failing self-test rolls back; `apply` waits for the safe window (P0, 1d)
+- [x] **R5-test-1**: Failing self-test rolls back; `apply` waits for the safe window (P0, 1d) _(done 2026-10-16; simulator `--safe-window file:PATH` (a window that opens) + `just selftest-window-e2e` 7/7 through the real stack; lib-quickstart phase 2f sends the real `apply` verb into an unsafe window (deferred, waits, confirms after the kill-in-the-drain) and every QEMU phase checks `deploy.selftest`; full `just lib-quickstart` PASS; simulator D12 / `confirm_timeout_s` follow-up proposed; see DECISIONS.md and docs/features/self-test.md)_
       QEMU and simulator, no bench. Depends on R5-fw-2, R5-fw-4, R5-fw-5, R5-be-1.
       Per R5-spec-1: drive the verbs through the simulator once R5-be-2 teaches it, and through QEMU.

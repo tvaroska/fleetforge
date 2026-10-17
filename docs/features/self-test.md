@@ -1705,6 +1705,83 @@ Answered (R5-spec-1): it stays awake from `staging` until `confirmed` or `rolled
   in progress` (class `bad`); L: 0 buttons, no hold box, direct POST 409 "…does not implement
   reboot (it announces: ota)…". traps: clean. Breaks: each `E2E_BREAK=<id>` run exits 1 with exactly that scenario FAIL and 8/9 pass (all nine ids). Regressions: `just update-e2e` 7/7, `just health-e2e` 4/4. Evidence `/tmp/ff-r5-fe-1/`.
 
+### R5-test-1 as built
+
+- **What was built.** No firmware, spec, API or migration change. *Simulator*
+  (`simulator/device.py`, `__main__.py`): `--safe-window file:PATH`, safe while PATH exists
+  (`SAFE_WINDOW_FILE_PREFIX`, `check_safe_window()` also as the CLI's argparse `type`, so a bad
+  mode is refused before a token is spent). `_unsafe_now()` replaces the four `hold` decisions
+  (apply verb, rollback verb, reboot verb, `apply: auto` stage). `release_if_safe()` carries out
+  a waiting apply (`applying`, `rebooting`, reboot), rollback (the accepted verb's own path,
+  factored into `_carry_out_rollback()`) or reboot (`reset_reason: sw`) once the rule says safe;
+  `_safe_window_loop` polls it every `SAFE_WINDOW_POLL_S` = 0.25 s (the firmware's
+  `FF_SAFE_WINDOW_POLL_MS`) and runs only in `file:` sessions. *Harness*
+  `scripts/selftest_window_e2e.py` + `just selftest-window-e2e`: two simulated boards (V: the R5
+  verbs, `selftest`, `--selftest-fail-marker=-stfail`; W: the same with `file:<out>/W.safe`)
+  through the real api, broker, ingestor and DB; scenarios selftest-passed, selftest-failed,
+  apply-now, apply-waits, cancel-waiting, auto-waits, traps; `E2E_BREAK`; evidence
+  `/tmp/ff-r5-test-1/run.json` and the sim logs. *QEMU* (`scripts/lib_quickstart.py`):
+  `expected_selftest()` asserted on 2b (passed), 2c (`null`, legacy wording), 2d (failed,
+  `i2c sensor 0x48 did not ans`, B's slot), 2e (timed_out, B's slot); build W (the committed
+  sketch with a clock `safeNow()` that prints `window: unsafe|safe at millis N`, unsafe 60 s of
+  every 80 s, asked first in loop(), `"WIN"`, `1.5.0-qs<epoch>-window`) and phase 2f
+  `phase_apply_waits`: W installed and confirmed, B staged again `on_command`, the `apply` verb
+  sent right after a fresh `window: unsafe`, `deferred` + `awaiting_safe_window` until `window:
+  safe`, then `applying`/`rebooting`, the emulator killed inside the 1.5 s drain, B confirms with
+  the ordered steps and the answer still `deferred`. Pure verdict `check_window_log()`;
+  `wait_for_lines(poll=)`; dev-only `--only-safe-window` (A, B, W; 2a, 2b, 2f).
+- **Decisions** (details in `DECISIONS.md` -> R5-test-1): a file, not a timer, opens the
+  simulator's window; `auto`/`hold` unchanged byte for byte; a release clears the stage before
+  publishing and never releases a cancelled apply. 2f sends the verb into a fresh unsafe stretch
+  and reads the sketch's own `window:` lines, never QEMU tick stamps. The kill race against
+  `esp_restart()` is the harness's: a soft reset that wins fails the run as "rerun", not as an
+  agent defect.
+- **Not done / named gaps.** The simulator does not gate the confirm-timer / self-test rollback
+  on the window (D12) and does not read the stage's `confirm_timeout_s` (proposed follow-up, not
+  filed: "Simulator: D12 latched rollback waits for the window, and `confirm_timeout_s` from the
+  stage"). QEMU cannot show the soft reset itself. A deferred rollback/reboot released by the
+  window is proven by the simulator's unit tests and R5-fw-5's hand T2, not by a harness.
+- **Tests.** `tests/test_simulator.py` (+15: closed/open file window, release in a live session,
+  parked auto stage, cancelled apply never released, deferred rollback of a confirming and of a
+  confirmed image, deferred reboot, `hold` never releases, the worker never returns, poll parity,
+  empty `file:` refused, CLI); new `tests/test_selftest_window_e2e.py` (12: device-id parity, the
+  uploaded bytes' label and marker, retyped words, break ids, checkers, justfile line,
+  stdlib-only); `tests/test_worked_example.py` (+15: phase order, W replacements hit the sketch
+  once, `window_version`, `expected_selftest` incl. the server's parse, `check_window_log`
+  accept/refuse, `steps_in_order`, `poll`, firmware twins: the 1500 ms drain, the deferral and
+  reboot log strings, `FF_DETAIL_APPLY_WAITS`).
+- **T1.** `just test`: ruff, format, mypy `src/ scripts/`, 2412 passed. Mutation checks, each red
+  then reverted: `_clear_staged` keeps `apply_deferred` (the cancelled-apply test red);
+  `_unsafe_now()` ignores the file (7 red); `check_window_log` without the order check (1 red).
+- **T2.** Dev stack on 8088. `just selftest-window-e2e`: 7/7, exit 0 (run `6ad2bcbf`). V
+  selftest-passed `confirmed`, detail `selftest passed`, `selftest` passed; V `-stfail`
+  (`71f9b286…`) `rolled_back`, terminal, detail exactly `selftest failed: simulated self-test
+  failure; returned to ota_1`, `selftest` `{failed, "simulated self-test failure", ota_1}`, never
+  confirmed, fw back on the good label. W apply-now `accepted`, no `awaiting_safe_window`. W
+  apply-waits (`5e97c531…`, command `94eabbf6…`) answered `deferred`, `awaiting_safe_window` /
+  `apply waits for a safe window` on 15 samples 1 s apart with fw unchanged, `confirmed` 2.6 s
+  after the file appeared, steps `… staged, awaiting_safe_window, applying, rebooting, confirming,
+  confirmed`, result still `deferred`. cancel-waiting: `deferred`, cancel `accepted`, still
+  `cancelled` 8 s after the window opened, fw unchanged. auto-waits: detail null, 10 s parked,
+  then `confirmed`. traps clean. Each `E2E_BREAK=<id>` (all seven): exit 1, exactly that FAIL,
+  6/7. Regressions: `just commands-e2e` 9/9, `just update-e2e` 7/7. QEMU (api recreated with the
+  10.0.2.2 origins, restored afterwards): `just lib-quickstart --skip-idf --only-safe-window`
+  PASS (1385 s; 2f: unsafe at millis 82671, the verb answered `deferred`, 49 samples at
+  `awaiting_safe_window`, `window: safe at millis 140170`, `applying` 58 s after the verb, killed
+  in the drain, B confirmed with the ordered steps, result still `deferred`). The full
+  `just lib-quickstart`: `== PASS (2612 s)`, first try, no kill-race loss. `deploy.selftest`: 2b
+  `{passed, null, null}`; 2c `null`; 2d `{"outcome":"failed","reason":"i2c sensor 0x48 did not
+  ans","returned_to":"ota_1"}`; 2e `{"outcome":"timed_out","reason":null,"returned_to":"ota_1"}`.
+  2f: W `1.5.0-qs1792198505-window` confirmed in ota_0 announcing `apply` and `safe_window`; B
+  restaged (`7403ae00…`, `reused: false`) into ota_1; `window: unsafe at millis 82201`, apply
+  (command `84568aec…`) answered `deferred`, both deferral lines, `awaiting_safe_window` / `apply
+  waits for a safe window`, not terminal, fw W, 49 samples; `window: safe at millis 140064`
+  (60064 ms into the period) before `state=applying`, `applying` 58 s after the verb; killed in
+  the drain; B `confirming on ota_1`, `custom self-test passed`, `CONFIRMED`, deploy `confirmed`
+  with `selftest passed`, steps `… staged, awaiting_safe_window, applying, rebooting,
+  confirming, confirmed`, the command's result still `deferred`. The api was put back without
+  the two variables (`docker inspect`: no 10.0.2.2).
+
 ## Reuse note
 
 The self-test entrypoint defined here moves by the simulation gate
