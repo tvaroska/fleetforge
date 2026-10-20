@@ -357,3 +357,64 @@ Invite flow: `POST /v1/users` with `send_invite_email` -> `accounts:signUp` (unv
 **Hidden device ids.** `check_project_access` checks visibility (pin, then membership) before scope and role, and takes an optional `not_found`. The device routes (reboot, rollback, apply, cancel, `commands/{id}`, deploy, precheck, `PATCH`, logs, telemetry) pass their own `404 "no such device: {id}"`, so a device in a project the caller cannot see answers exactly like one that was never enrolled. Revoking another project's enrollment token answers `404 "unknown token"`. Inside a visible project, too little role or scope is still `403`. Callers that pass no `not_found` behave exactly as before.
 
 Known limits: on `?project=` routes an unknown slug is `404` and a slug the caller cannot see is `403`, so project-slug existence is still distinguishable. The dashboard still shows the profile add/adopt controls to non-superadmins, who get the `403` banner.
+
+## Owner proposals (S0-rel-1)
+
+P1 changed who can log in and what a credential can reach, but the protected docs still describe one admin and no RBAC. These are paste-ready patches for the owner (agents do not edit `spec/` or `CRITICAL.md` during `/implement`, and `design/` follows the spec). Each quotes the current text, then the proposed text. The decision behind the release is in `DECISIONS.md` (2026-10-19, S0-rel-1).
+
+### Patch A — `spec/prd.md` (owner, `spec:` commit)
+
+Leave *Requirements & targets* untouched.
+
+- **L15, *Deployment model*.** Current:
+  > **v1 ships as a single hosted instance on a public domain** (TLS via Let's Encrypt), **single-tenant** — one instance manages one fleet, behind admin auth.
+
+  Proposed:
+  > **v1 ships as a single hosted instance on a public domain** (TLS via Let's Encrypt). One instance holds one or more **projects** (separate fleets), each behind authenticated, invite-only access. Projects are a boundary inside one operator's instance, not tenancy.
+
+- **L17.** Current: "…but there is no signup, no marketing surface and one admin." Proposed: "…but there is no public signup and no marketing surface: users exist only when a superadmin invites them, and each holds a role per project."
+
+- **L117, *Security & data posture*.** Current:
+  > - **One admin account**, password-authenticated, credential stored hashed. No multi-user, no RBAC, no MFA in v1.
+
+  Proposed:
+  > - **Invite-only users.** A user signs in with a local password (stored hashed) or, when the instance configures it, a Firebase email/password identity whose email address is verified; an unverified address is refused. Each user holds a role per project (`viewer`, `operator`, `owner`); a superadmin spans every project. Machine credentials are scoped `ffa_` tokens (`read`, `deploy`, `enroll`, `write:artifacts` or `admin`), optionally pinned to one project, revocable. The bootstrap superadmin is the operator's environment password. No public signup and no MFA in v1.
+
+- **L128, *Explicitly out of scope*.** Current: "· multi-tenant/orgs & public signup ·". Proposed: "· multi-tenant/orgs & public signup *(projects are an intra-instance boundary for one operator's fleets, not tenancy)* ·".
+
+### Patch B — `CRITICAL.md`, the "Admin auth" row (owner)
+
+Current:
+> | Admin auth (token table, login, cookie flags) | Single admin credential on a public-facing API. Bypass = full fleet control. |
+
+Proposed:
+> | Admin auth and access control (token table, login, cookie flags, `src/fleetforge/auth/firebase.py`, `src/fleetforge/api/routers/auth.py`, `src/fleetforge/api/routers/users.py`, `src/fleetforge/api/routers/projects.py`, `src/fleetforge/api/deps.py` → `check_project_access`, `visible_project_ids`) | Users, per-project roles and a superadmin; local passwords, Firebase ID tokens (verified email, `iss`, revocation) and scoped, optionally project-pinned `ffa_` tokens, all on a public-facing API. Bypass = full fleet control; a visibility slip = one project reading or deploying to another's boards. |
+
+All five paths exist at HEAD (checked with `ls` on 2026-10-19).
+
+### Patch C — `design/architecture.md` → *API surface & authentication* (L70-116)
+
+- **L80-82.** Current heading "### v1 admin auth — one credential type, two transports" and "Tokens are rows: `id, name, hash, subject, scopes, created, last_used, expires_at, revoked_at`." Proposed heading "### Admin auth — one credential type, two transports" and: "Tokens are rows: `id, name, hash, subject, scopes, user_id, project_id, created, last_used, expires_at, revoked_at`. `user_id` names the human the token acts for (`NULL` for the env admin and for machine tokens); `project_id` pins it to one project (`NULL` = unpinned)."
+- **L91-93.** Current "JWT buys stateless verification we do not need at one admin and a handful of clients". Proposed "…we do not need at a handful of users and clients".
+- **L98-100, *Bootstrap*.** Keep the paragraph and add: "That login (`username` `admin`, verified against `ADMIN_PASSWORD_HASH`) issues a userless, unpinned `admin` session, which is the superadmin; it needs no `users` row. Named users live in `users` (local `password_hash`, or a Firebase identity bound by `firebase_uid` on first login; invite-only, see `docs/features/projects-and-users.md`). Firebase is optional: `FIREBASE_PROJECT_ID`, `FIREBASE_WEB_API_KEY`, `FIREBASE_SUPERADMIN_EMAILS`."
+- **L102-110, *The extension points*.** Replace the section with:
+  > ### Users, projects and scopes
+  >
+  > - **`projects`** own devices, groups, enrollment tokens and version labels (`artifact_versions` is keyed `(project_id, target, version)`); blobs stay global and content-addressed. A seeded `default` project (`00000000-0000-4000-8000-000000000001`) is what an omitted `?project=` resolves to.
+  > - **`users`** and **`project_members`** (`role` in `viewer`, `operator`, `owner`); `users.is_superadmin` spans every project. `deps.check_project_access` checks visibility (pin, then membership) before scope and role, and a device in a project the caller cannot see answers like an unknown one.
+  > - **`scopes`**: `admin`, `read`, `deploy`, `enroll`, `write:artifacts`. A project-pinned token never mints tokens.
+  > - **`subject`** is the acting username (`admin` for the env admin).
+  > - **Versioned path** (`/v1/…`) so a breaking API revision can run alongside the old one, exactly as the device protocol does.
+  >
+  > Detail: `docs/features/projects-and-users.md`.
+- **L112-116, *Explicitly not in v1*.** Current "OAuth/OIDC · multi-user · RBAC · JWT · refresh tokens · MFA." Proposed "Generic OAuth/OIDC providers · public signup · JWT sessions · refresh tokens · MFA. Firebase ID tokens are verified on the way in and exchanged for an opaque session; they are not the session." Keep the closing sentences.
+
+### Patch D — `design/production.md` (L16-18)
+
+Current:
+> *This does not weaken the single-tenant hosted model:* it is still a real public domain with a real Let us Encrypt certificate. This is what the devices and Web Serial need. It is "not public" in the product sense (no signup, one admin) which SPEC already states.
+
+Proposed:
+> *This does not weaken the hosted model:* it is still a real public domain with a real Let us Encrypt certificate. This is what the devices and Web Serial need. It is "not public" in the product sense (no public signup; invite-only users, a superadmin bootstrapped from `ADMIN_PASSWORD_HASH`), which SPEC already states. Firebase sign-in is optional prod env: `FIREBASE_PROJECT_ID`, `FIREBASE_WEB_API_KEY` and `FIREBASE_SUPERADMIN_EMAILS` are unset on prod today, so only the env admin and local-password users can log in there.
+
+`grep -n -i "single-tenant\|one admin\|ADMIN_PASSWORD_HASH" design/production.md` finds no other stale line.

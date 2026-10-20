@@ -6,6 +6,25 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-19 — P1 ships by dropping and recreating prod's fleetforge database, not by a backfill migration; agent blobs survive the artifact cleanup (S0-rel-1)
+
+- **Cause.** d822f1b (P1) rewrote `alembic/versions/0001_initial_schema.py` (`projects` with the seeded `default` row, `users`, `project_members`, `project_id NOT NULL` on devices, groups and enrollment tokens) and `0004_artifact_versions.py` (PK `(project_id, target, version)`) in place. Prod runs v0.6.0, whose head is `0008`, so `alembic upgrade head` would apply only `0009` and `0010`, stamp `0010`, and never run the P1 DDL; every project-scoped query would then fail.
+- **Decision (owner, 2026-10-19).** Drop and recreate the `fleetforge` database inside the shared prod `postgres` container (`DROP DATABASE fleetforge WITH (FORCE)`, `CREATE DATABASE fleetforge OWNER fleetforge`) and nothing else: the role, the volume and the other databases stay. Delete the dynsec device clients (usernames `^[0-9a-f]{12}$`) over `$CONTROL` against the running broker. Delete the user-artifact blobs. Deploy v0.7.0; the api migrates `0001` → `0010` on the empty database. The superadmin is the existing env admin login (`ADMIN_PASSWORD_HASH`, a userless unpinned `admin` session; no `users` row). Re-enrol the test boards.
+- **Deviation from the literal TODO wording.** The TODO says "clear the fleetforge MinIO/GCS artifact prefix". `gs://btvaroska/fleetforge/` is not wiped: agent bundles (the flasher's firmware) and user artifacts share `blobs/sha256/<hex>` (`design/artifacts.md`, `firmware/index.py`), and an agent `app.bin` was uploaded as a user artifact during R1-test-1. A prefix wipe would delete the flasher's agent and break the re-enrolment this refresh needs. Instead only the `artifacts.sha256` (and `builds.outputs`) digests captured from prod's database before the drop are candidates, minus everything reachable from `agent/index.json`: each entry's `manifest_sha256`, each `superseded[].manifest_sha256`, and every `parts[].sha256` of those manifests. `agent/` is never touched. This is the design rule "never deleted while referenced".
+- **Why.** Prod holds only test boards. A backfill migration would exist only to preserve data nobody wants. Recreating matches P1's own D3 ("Drop & Recreate DB") in `docs/features/projects-and-users.md`.
+- **Rejected.**
+  - A backfill `0011`: it duplicates the DDL that `0001`/`0004` already describe.
+  - Hand-stamping `alembic_version`, or `downgrade base` then `upgrade`: the new `0001`'s downgrade drops tables that never existed on prod, so it fails halfway.
+  - Wiping `gs://btvaroska/fleetforge/`: it deletes the flasher's agent.
+  - Restarting or recreating mosquitto or its volume to clear the clients: ops-log F-2026-09-23-002.
+- **Gotchas for the next schema-rewriting release.** Remove the fleetforge containers with `docker compose rm -sf fleetforge-api fleetforge-ingestor`, not stop: `docker rollout` on a stopped service runs `compose up --no-recreate` and can revive the old container on the old image. The scoped deploy recreates the ingestor before the api migrates (R2b-be-5), so restart the ingestor once the api is healthy. Nested `ssh '…'` around `sh -c '…'` eats SQL string literals; feed SQL on stdin.
+- **Owner questions carried.**
+  - The S0-sec-1 named assumption (a completed password reset marks the Firebase email verified) stays unchecked: Firebase is not configured on prod, and P1 adds no required setting.
+  - Whether to configure `FIREBASE_PROJECT_ID`, `FIREBASE_WEB_API_KEY` and `FIREBASE_SUPERADMIN_EMAILS` on prod, which is a prod env change.
+- **Procedure:** `docs/runbooks/prod-db-refresh.md` (the prune script was validated on dev MinIO). **Proposals:** `docs/features/projects-and-users.md` → *Owner proposals (S0-rel-1)*, patches A-D for `spec/prd.md`, `CRITICAL.md`, `design/architecture.md` and `design/production.md`.
+
+---
+
 ## 2026-10-19 — S0-bug-7: member add is PUT /members/{username} with {"role"}; the dashboard client was wrong; remove/revoke/disable ask first
 
 - **Cause.** `api.ts::upsertProjectMember` sent `POST /v1/projects/{slug}/members` with `{username, role}`. The backend has only `PUT /members/{username}` (and `GET /members`), so FastAPI answered 405 and the drawer could not add anyone.
