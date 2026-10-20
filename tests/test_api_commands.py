@@ -151,6 +151,26 @@ class TestEachVerbOnTheWire:
         assert rows[0]["sent_by"]["token_id"]
         assert await events(db) == []
 
+    @pytest.mark.parametrize("verb", ["rollback", "reboot"])
+    async def test_a_repeated_verb_is_a_new_command_even_unanswered(
+        self, admin_app: FastAPI, db: AsyncSession, publisher: FakeCommandPublisher, verb: str
+    ) -> None:
+        """The board drops a command id it already rebooted for (NVS reboot id): never reuse one."""
+        await add_device(db, capabilities=ALL_VERBS)
+        token = await login_admin(admin_app)
+
+        first = await post(admin_app, f"/{verb}", token)
+        second = await post(admin_app, f"/{verb}", token)
+
+        assert first.status_code == 202, first.text
+        assert second.status_code == 202, second.text
+        ids = [first.json()["command_id"], second.json()["command_id"]]
+        assert ids[0] != ids[1]
+        rows = await command_rows(db)
+        assert sorted(r["id"] for r in rows) == sorted(ids)
+        assert all(r["publish_failed"] is False and r["result"] is None for r in rows)
+        assert [payload["id"] for _, payload in publisher.published] == ids
+
     @pytest.mark.parametrize("verb", ["apply", "cancel"])
     async def test_apply_and_cancel_name_the_transaction(
         self,

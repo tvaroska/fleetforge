@@ -85,7 +85,7 @@ the retired bingo app), single-tenant, **not a public product until V3**.
 
 Bricking risks, broker auth and security issues get filed here as they surface.
 
-- [ ] **S0-bug-5**: The api cannot boot at HEAD: `latest_unanswered_command` does not exist (P0, 1h)
+- [x] **S0-bug-5**: The api cannot boot at HEAD: `latest_unanswered_command` does not exist (P0, 1h) _(done 2026-10-19; dropped the never-defined reuse branch, every verb POST mints a new command id; see DECISIONS.md)_
       Found 2026-10-19 (review of d822f1b, P1 multi-project): `api/routers/commands.py:70-72` imports `latest_unanswered_command` from `fleetforge.device_commands`; no commit ever defined it. The dev `fleetforge-api` crash-loops with the ImportError right after `alembic upgrade head`, mypy reports it, and `tests/conftest.py` fails to import, so pytest cannot run. Implement it (or drop the import and its caller) per what `commands.py` needs. Acceptance: `just up` brings `fleetforge-api` healthy; `uv run mypy` clean; pytest collects.
       Added: 2026-10-19
 - [ ] **S0-bug-6**: P1 broke 11 tests that were never run (P0, 0.5d; after S0-bug-5)

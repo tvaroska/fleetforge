@@ -6,6 +6,13 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-19 — S0-bug-5: the verbs mint a fresh command id on every POST; P1's never-defined "reuse the latest unanswered command" is dropped
+
+- **Cause.** P1 (d822f1b) imported `latest_unanswered_command` into `api/routers/commands.py` and added a reuse branch in `_send()`; the function never existed, so the api could not boot and pytest could not collect.
+- **Decision.** Drop the import and the branch; `_send()` is the R5-be-2 body again (one new id and one row per POST, record, commit, publish). P1's `check_project_access` calls are untouched. Reaffirms R5-be-2 (2); supersedes nothing.
+- **Why.** The firmware keeps the id of the last command it rebooted for in NVS and silently drops a repeat. A reboot's ack can die with the reboot, leaving its row unanswered for ever, so reuse would make every later Reboot/Rollback a no-op for that board. Deploy-intent reuse (`routers/deploys.py`) is a different, bounded mechanism and is unchanged.
+- **Test.** `test_a_repeated_verb_is_a_new_command_even_unanswered` (rollback, reboot).
+
 ## 2026-10-16 — A failing self-test rolls back and `apply` waits for the safe window, proven end to end: the simulator gains `--safe-window file:PATH` (a window that opens), `just selftest-window-e2e` drives both through the real stack, and `lib-quickstart` phase 2f sends the real `apply` verb into an unsafe window; every QEMU phase checks `deploy.selftest` (R5-test-1)
 
 - **Built** (no spec, firmware, migration, API, ACL or env change). Simulator: `--safe-window file:PATH`, `StageRunner._unsafe_now()` / `release_if_safe()` / `_carry_out_rollback()`, a `_safe_window_loop` worker in `file:` sessions only, `check_safe_window()` (also the CLI's argparse `type`). New `scripts/selftest_window_e2e.py` + `just selftest-window-e2e` (stdlib only, 7 scenarios, `E2E_BREAK`). `scripts/lib_quickstart.py`: `expected_selftest()` asserted on 2b/2c/2d/2e, build W and phase 2f `phase_apply_waits`, `check_window_log()`, `wait_for_lines(poll=)`, the dev-only `--only-safe-window`. Details: `docs/features/self-test.md` -> *R5-test-1 as built*.

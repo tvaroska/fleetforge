@@ -67,12 +67,7 @@ from fleetforge.clock import now_utc
 from fleetforge.config import Settings
 from fleetforge.db.models import CommandType, Device, ProjectRole
 from fleetforge.deploys import deploy_transaction
-from fleetforge.device_commands import (
-    get_command,
-    latest_unanswered_command,
-    mark_publish_failed,
-    record_sent,
-)
+from fleetforge.device_commands import get_command, mark_publish_failed, record_sent
 from fleetforge.presence import is_online
 
 logger = logging.getLogger(__name__)
@@ -170,31 +165,25 @@ async def _send(
     if cmd_id is not None:
         await _require_transaction(session, device_id, cmd_id, verb.value)
 
-    existing = await latest_unanswered_command(
-        session, device_id=device_id, type=verb.value, cmd_id=cmd_id
-    )
-    reused = existing is not None
-    command_id = existing.command_id if existing is not None else new_command_id()
+    command_id = new_command_id()
     payload = verb_payload(command_id=command_id, type=verb.value, cmd_id=cmd_id)
-    if not reused:
-        await record_sent(
-            session,
-            command_id=command_id,
-            device_id=device_id,
-            type=verb.value,
-            cmd_id=cmd_id,
-            sent_by=await _sender(session, admin),
-        )
-        # Committed BEFORE the publish: record, then act. The answer finds the row.
-        await session.commit()
+    await record_sent(
+        session,
+        command_id=command_id,
+        device_id=device_id,
+        type=verb.value,
+        cmd_id=cmd_id,
+        sent_by=await _sender(session, admin),
+    )
+    # Committed BEFORE the publish: record, then act. The answer finds the row.
+    await session.commit()
 
     try:
         await publisher.publish(device_id, payload)
     except CommandPublishError:
         logger.exception("%s command %s to %s could not be published", verb, command_id, device_id)
-        if not reused:
-            await mark_publish_failed(session, command_id=command_id)
-            await session.commit()
+        await mark_publish_failed(session, command_id=command_id)
+        await session.commit()
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=PUBLISH_FAILED
         ) from None
