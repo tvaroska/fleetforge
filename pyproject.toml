@@ -95,3 +95,5 @@ ignore = ["E501"]
 # scripts/arduino_ide_check.py runs the pinned arduino-cli, nm and df with fixed argv, in a
 # scratch toolchain whose default is the runbook's fixed /tmp/ff-arduino-ide (R3-fw-8).
 "scripts/arduino_ide_check.py" = ["S603", "S607", "S108"]
+# src/fleetforge/cli.py invokes git with fixed argv and talks to the Fleetforge API over urllib.
+"src/fleetforge/cli.py" = ["S603", "S607", "S310"]

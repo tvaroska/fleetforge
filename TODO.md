@@ -518,10 +518,10 @@ Order: spec-1 (any time) · fw-1 → be-1 → fe-1 → test-1 · be-2 · fw-3 �
 - [x] **R4-fw-2**: User-defined telemetry channel with relative sample age (P1, 1.5d) _(done 2026-10-15; proposal: Patch A owner (spec: commit) before release; built unreleased; reviewed; see DECISIONS.md and docs/features/health-telemetry.md)_
       `up/telemetry` batches `{"samples":[{"age_ms","name","value"}]}`; the server computes `sample_ts = received_at - age_ms` (`docs/SWARM.md` 5.1), so no wall clock on the board. A RAM ring buffer flushes on reconnect. Public API (`ff_telemetry()` / `Fleetforge.metric()`) is additive-only from release, so settle the names in a proposal first. CRITICAL (library public surface). Acceptance (simulator and QEMU): samples taken while disconnected arrive with their original spacing after reconnect.
       Added: 2026-10-15
-- [ ] **R4-fw-3**: Forward firmware log lines on `up/log` (P0, 1.5d) — **needs the owner to apply `S0-fw-5` Patches A+B first**
+- [ ] **R4-fw-3**: Forward firmware log lines on `up/log` (P0, 1.5d) — **spec `S0-fw-5` Patches A+B applied 2026-10-20**
       `ff_logf(level, fmt, ...)` and `Fleetforge.logf()`, explicit opt-in (customer privacy, cellular caps); batches under 2048 B, at most one publish per 5 s, `text` <= 200 B, `dropped` count. An optional compile-time `esp_log` sink, level-filtered and guarded against `ff-mqtt`/`mqtt_client`/`mbedtls` recursion, for debug and test builds only. Basic and basic_idf forward their `morse:` line. Acceptance (QEMU and simulator): the morse line arrives in the server's log table with an `age_ms`-derived time; a flood produces `dropped`, not a stalled heartbeat.
       Added: 2026-10-15
-- [ ] **R4-fw-4**: Crash-surviving log tail (P2, 1d) — **needs R4-fw-3 first (itself gated on the owner's S0-fw-5 Patches A+B); plan: .claude/plans/R4-fw-4-crash-surviving-log-tail.md**
+- [ ] **R4-fw-4**: Crash-surviving log tail (P2, 1d) — **needs R4-fw-3 first; plan: .claude/plans/R4-fw-4-crash-surviving-log-tail.md**
       Keep the last few lines in a magic-and-CRC-guarded `RTC_NOINIT_ATTR` buffer so lines written just before a `panic` or `task_wdt` flush on the recovery boot. A named gap in the up/log proposal. Acceptance (QEMU): an injected `abort()` three lines after a log call delivers those lines after reboot. The `FF_FAULT_TEST` images and the runbook's QEMU soft-reset limit apply; say plainly which part was proven.
       Added: 2026-10-15
 
@@ -613,3 +613,48 @@ Per R5-spec-1: firmware tasks may build ahead of the owner's spec Patch A, unrel
 - [x] **R5-test-1**: Failing self-test rolls back; `apply` waits for the safe window (P0, 1d) _(done 2026-10-16; simulator `--safe-window file:PATH` (a window that opens) + `just selftest-window-e2e` 7/7 through the real stack; lib-quickstart phase 2f sends the real `apply` verb into an unsafe window (deferred, waits, confirms after the kill-in-the-drain) and every QEMU phase checks `deploy.selftest`; full `just lib-quickstart` PASS; simulator D12 / `confirm_timeout_s` follow-up proposed; see DECISIONS.md and docs/features/self-test.md)_
       QEMU and simulator, no bench. Depends on R5-fw-2, R5-fw-4, R5-fw-5, R5-be-1.
       Per R5-spec-1: drive the verbs through the simulator once R5-be-2 teaches it, and through QEMU.
+
+---
+
+## E-Ink & Developer Experience (CUJ-2): Git CI/CD, Rotating Secrets, OTel Logs, and Improv BLE Wi-Fi
+
+Opened 2026-10-20. Targets the high-priority e-ink project workflow (`spec/cujs.md` → *CUJ-2*).
+
+### Pillar 1 — Git-Driven CI/CD & Fast Dev Loop (`CI-CD-1`, unifying `R7` + `R8` + `R11`)
+
+- [x] **CI-CD-be-1**: Provenance on `artifact_versions` & Project Continuous Deployment settings (P0, 1.5d) _(done 2026-10-20; migration 0011, `matches_project_tracking`, `deploy_version_to_project_devices`, auto-deploy on `POST /v1/artifact`, ref-switch deploy/webhook on `PATCH /v1/projects/{slug}`, `POST /v1/projects/{slug}/deploy`, and retained `dn/cfg` publish on `PATCH /v1/devices/{id}`)_
+      Extend `projects` with CD configuration (`repo_url`, `track_mode` `off|branch|tag|commit`, `track_ref`, `auto_deploy_target` `off|dev|all`, `ci_webhook_url`, encrypted `ci_webhook_token`) and `devices` with `is_dev` + `stay_awake` (published as retained `dn/cfg {"proto":1,"secrets_rev":N,"stay_awake":bool}`). Extend `artifact_versions` with Git provenance (`repo_url`, `branch`, `commit_sha`, `tag`, `build_url`, `test_passed`) accepted on `POST /v1/artifact` and exposed on `GET /v1/artifacts`. When an uploaded artifact with `test_passed=true` matches the project's active tracking rule, automatically trigger OTA `stage` across the project's target devices (`dev` or `all`). When the operator updates `track_mode`/`track_ref` in Project Settings, immediately deploy any matching existing artifact or dispatch a build to `ci_webhook_url`. Include a project-wide `POST /v1/projects/{slug}/deploy` endpoint for deploying a build across 2+ project boards.
+      Added: 2026-10-20
+- [x] **CI-CD-fe-1**: Project CD Settings UI, Provenance badges, Dev-board Awake toggle & Project-wide Deploy (P0, 1d) _(done 2026-10-20; `ContinuousDeploymentCard` in `Dashboard.tsx`, provenance pills and `Deploy dev` / `Deploy all` buttons on `UploadedBuilds`, `dev` and `stay awake` toggle pills on `FleetView.tsx`)_
+      Add the Continuous Deployment configuration panel and "Deploy to Project Fleet" action in the dashboard (`BUILDS` / `ACCESS` tabs), display commit/branch/tag provenance badges on `UploadedBuilds` and `FleetView`, and add per-device `dev` / `stay_awake` toggles so bench e-ink boards stay awake during active coding.
+      Added: 2026-10-20
+- [x] **CI-CD-cli-1**: Turnkey CLI push (`python -m fleetforge.cli push`) & GitHub Actions / Cloud Build templates (P0, 0.5d) _(done 2026-10-20; `src/fleetforge/cli.py` `fleetforge push` / `fleetforge track` + `docs/examples/github-actions-fleetforge.yml`)_
+      CLI helper and `.github/workflows/fleetforge-ci.yml` template that compile, run tests, and upload `.bin` + Git provenance using a project-scoped `ffa_...` token.
+      Added: 2026-10-20
+
+### Pillar 2 — Rotating Secrets Without Reflashing (`SEC-1`)
+
+- [ ] **SEC-be-1**: Project/device encrypted secrets store, `dn/cfg.secrets_rev` publisher & `GET /v1/device-secrets` (P0, 1d)
+      Encrypted secrets table (`project_secrets`), operator CRUD (`GET/PUT/DELETE /v1/projects/{slug}/secrets/{key}`), monotonic `projects.secrets_rev` bumped and published to `ff/v1/d/{id}/dn/cfg` on change, `devices.secrets_rev` recorded from `up/announce`, and device-authenticated `GET /v1/device-secrets` (`Authorization: Basic base64(device_id:mqtt_password)`).
+      Added: 2026-10-20
+- [ ] **SEC-fw-1**: `dn/cfg` handler (`stay_awake` + `secrets_rev`), HTTPS pull & NVS `ff_sec` (`Fleetforge.getSecret`) (P0, 1.5d)
+      Subscribe and parse `dn/cfg`; honour `stay_awake` in `ff_is_ready_for_sleep()`; when `secrets_rev > local_rev`, hold sleep, fetch `GET /v1/device-secrets` over TLS, persist key-value pairs and `local_rev` in NVS `ff_sec`, re-announce `secrets_rev`, and expose `ff_get_secret()` / `Fleetforge.getSecret(key, buf, len)` + `onSecretUpdated`.
+      Added: 2026-10-20
+- [ ] **SEC-fe-1**: Project Secrets management UI & per-board `secrets_rev` sync indicator (P1, 0.5d)
+      Operator UI in `ACCESS` tab to add/rotate/delete project secrets and view which boards have synced the latest `secrets_rev`.
+      Added: 2026-10-20
+
+### Pillar 3 — Board to OpenTelemetry-Compatible Logs (`R4-fw-3/4` + `OTEL-1`)
+
+- [ ] **OTEL-fw-1**: Complete `R4-fw-3` (`ff_logf` / `Fleetforge.logf`), `R4-fw-4` (crash ring), and `ff_log_drained()` sleep gate (P0, 1.5d)
+      Implement `ff_log.h` / `ff_log.c` and wire `ff_log_drained()` into `ff_is_ready_for_sleep()` so sleepy e-ink wakes flush all logs before deep sleep.
+      Added: 2026-10-20
+- [ ] **OTEL-be-1**: `fleetforge-ingestor` OTLP/HTTP LogRecord & Metric exporter (P0, 1d)
+      Export incoming `up/log` batches and `up/telemetry` samples as OpenTelemetry `LogRecord`s and `Gauge`s over OTLP/HTTP JSON (`OTEL_EXPORTER_OTLP_ENDPOINT` + per-project override) with `service.name=<project_slug>`, `service.version=<fw_version>`, `device.id=<device_id>`.
+      Added: 2026-10-20
+
+### Pillar 4 — Improv Wi-Fi over BLE Without Reflashing (`WIFI-BLE-1`)
+
+- [ ] **WIFI-BLE-fw-1**: NVS `ff_net` network overlay & bounded Improv BLE GATT service (P1, 2d)
+      Layer writable NVS `ff_net` (up to 4 SSIDs) ahead of `ff_cfg` in `ff_net_wifi.c`, and advertise the standard Improv Wi-Fi BLE service (`00467768-6228-2272-4663-277478268000`) for a bounded 120 s window when all known networks fail to associate on boot/wake.
+      Added: 2026-10-20

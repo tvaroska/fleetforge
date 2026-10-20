@@ -64,8 +64,10 @@ from sqlalchemy import text
 
 from fleetforge.api.deps import (
     AdminDep,
+    CommandPublisherDep,
     ObjectStoreDep,
     SessionMakerDep,
+    SettingsDep,
     bearer_scheme,
     cookie_scheme,
     resolve_project_for_request,
@@ -117,6 +119,7 @@ STORE_UNAVAILABLE = "the artifact store cannot be reached; try again shortly"
 _LIST_SQL = text(
     """
     SELECT v.target, v.version, v.sha256, v.created_at,
+           v.repo_url, v.branch, v.commit_sha, v.tag, v.build_url, v.test_passed,
            a.size_bytes, a.partition_layout, a.kind
       FROM artifact_versions AS v
       JOIN artifacts AS a ON a.sha256 = v.sha256
@@ -145,10 +148,29 @@ _ARTIFACT_UPSERT_SQL = text(
 
 _LABEL_INSERT_SQL = text(
     """
-    INSERT INTO artifact_versions (project_id, target, version, sha256)
-    VALUES (:project_id, :target, :version, :sha256)
+    INSERT INTO artifact_versions (
+        project_id, target, version, sha256,
+        repo_url, branch, commit_sha, tag, build_url, test_passed
+    )
+    VALUES (
+        :project_id, :target, :version, :sha256,
+        :repo_url, :branch, :commit_sha, :tag, :build_url, :test_passed
+    )
     ON CONFLICT (project_id, target, version) DO NOTHING
     RETURNING sha256
+    """
+)
+
+_LABEL_PROVENANCE_UPDATE_SQL = text(
+    """
+    UPDATE artifact_versions
+       SET repo_url = COALESCE(:repo_url, repo_url),
+           branch = COALESCE(:branch, branch),
+           commit_sha = COALESCE(:commit_sha, commit_sha),
+           tag = COALESCE(:tag, tag),
+           build_url = COALESCE(:build_url, build_url),
+           test_passed = COALESCE(:test_passed, test_passed)
+     WHERE project_id = :project_id AND target = :target AND version = :version
     """
 )
 
@@ -243,6 +265,8 @@ async def upload_artifact(
     admin: AdminDep,
     store: ObjectStoreDep,
     sessionmaker: SessionMakerDep,
+    settings: SettingsDep,
+    publisher: CommandPublisherDep,
     target: Annotated[SafeSegment, Query(description="Chip target, e.g. esp32s3")],
     version: Annotated[str, Query(description="The version label, e.g. 1.5.0")],
     partition_layout: Annotated[
@@ -251,6 +275,30 @@ async def upload_artifact(
     project: Annotated[
         str | None,
         Query(pattern=PROJECT_SLUG_PATTERN, description="Project slug (defaults to token/default)"),
+    ] = None,
+    repo_url: Annotated[
+        str | None,
+        Query(max_length=512, description="Optional Git repository URL"),
+    ] = None,
+    branch: Annotated[
+        str | None,
+        Query(max_length=128, description="Optional Git branch name"),
+    ] = None,
+    commit_sha: Annotated[
+        str | None,
+        Query(max_length=64, description="Optional Git commit SHA"),
+    ] = None,
+    tag: Annotated[
+        str | None,
+        Query(max_length=128, description="Optional Git tag"),
+    ] = None,
+    build_url: Annotated[
+        str | None,
+        Query(max_length=512, description="Optional CI build URL"),
+    ] = None,
+    test_passed: Annotated[
+        bool | None,
+        Query(description="Optional CI test / QEMU verification outcome"),
     ] = None,
 ) -> ArtifactUploaded:
     """Store an opaque firmware blob and label it `(target, version)`.
@@ -350,7 +398,18 @@ async def upload_artifact(
         )
         labelled = await session.scalar(
             _LABEL_INSERT_SQL,
-            {"project_id": project_id, "target": target, "version": version, "sha256": digest},
+            {
+                "project_id": project_id,
+                "target": target,
+                "version": version,
+                "sha256": digest,
+                "repo_url": repo_url,
+                "branch": branch,
+                "commit_sha": commit_sha,
+                "tag": tag,
+                "build_url": build_url,
+                "test_passed": test_passed,
+            },
         )
         if labelled is None:
             # The label was taken between the pre-check and here, or by the pre-check's
@@ -362,7 +421,50 @@ async def upload_artifact(
             if current != digest:
                 await session.rollback()
                 raise _version_conflict(target, version, current)
+            await session.execute(
+                _LABEL_PROVENANCE_UPDATE_SQL,
+                {
+                    "project_id": project_id,
+                    "target": target,
+                    "version": version,
+                    "repo_url": repo_url,
+                    "branch": branch,
+                    "commit_sha": commit_sha,
+                    "tag": tag,
+                    "build_url": build_url,
+                    "test_passed": test_passed,
+                },
+            )
         await session.commit()
+
+        auto_deployed: list[str] | None = None
+        from fleetforge.api.routers.deploys import (
+            deploy_version_to_project_devices,
+            matches_project_tracking,
+        )
+
+        if matches_project_tracking(
+            target_project,
+            repo_url=repo_url,
+            branch=branch,
+            commit_sha=commit_sha,
+            tag=tag,
+            test_passed=test_passed,
+        ):
+            deployed_list, _ = await deploy_version_to_project_devices(
+                session,
+                project_id=project_id,
+                version=version,
+                target_filter=target_project.auto_deploy_target,
+                apply="auto",
+                override=(),
+                admin=admin,
+                settings=settings,
+                publisher=publisher,
+                target_chip=target,
+                best_effort_broker=True,
+            )
+            auto_deployed = [d.device_id for d in deployed_list]
 
     created = labelled is not None
     if not created:
@@ -392,6 +494,13 @@ async def upload_artifact(
         partition_layout=partition_layout,
         created=created,
         has_lib_marker=has_lib_marker,
+        repo_url=repo_url,
+        branch=branch,
+        commit_sha=commit_sha,
+        tag=tag,
+        build_url=build_url,
+        test_passed=test_passed,
+        auto_deployed_devices=auto_deployed,
     )
 
 
@@ -437,6 +546,12 @@ async def list_artifacts(
                 partition_layout=row.partition_layout,
                 kind=row.kind,
                 created_at=row.created_at,
+                repo_url=row.repo_url,
+                branch=row.branch,
+                commit_sha=row.commit_sha,
+                tag=row.tag,
+                build_url=row.build_url,
+                test_passed=row.test_passed,
             )
             for row in rows
         ]

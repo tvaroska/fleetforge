@@ -221,6 +221,9 @@ async def test_the_summary_carries_the_fleet_view_and_no_presence_ingredients(
         "health",
         "metrics",
         "last_command",
+        "is_dev",
+        "stay_awake",
+        "secrets_rev",
         "deploy",
     }
     assert row["fw_version"] == "1.4.2"

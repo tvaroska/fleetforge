@@ -53,6 +53,7 @@ ANNOUNCE_FIELDS = (
     "partition_layout",
     "ota_slot_size",
     "capabilities",
+    "secrets_rev",
 )
 
 

@@ -78,6 +78,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from fleetforge.api.deps import (
     AdminDep,
+    CommandPublisherDep,
     SessionMakerDep,
     SettingsDep,
     bearer_scheme,
@@ -104,6 +105,7 @@ from fleetforge.api.schemas import (
     TelemetryPoint,
     TelemetrySeries,
 )
+from fleetforge.broker import CommandPublishError, cfg_payload
 from fleetforge.clock import now_utc
 from fleetforge.db.models import Device, DeviceGroup, Project, ProjectRole
 from fleetforge.deploys import DeploySnapshot, latest_deploys
@@ -279,6 +281,9 @@ def _device_summary(
         health=_health_snapshot(row),
         metrics=extras.metrics.get(row.device_id, []),
         last_command=last_command,
+        is_dev=row.is_dev,
+        stay_awake=row.stay_awake,
+        secrets_rev=row.secrets_rev,
         deploy=deploy,
     )
 
@@ -387,6 +392,7 @@ async def update_device(
     admin: AdminDep,
     settings: SettingsDep,
     sessionmaker: SessionMakerDep,
+    publisher: CommandPublisherDep,
 ) -> DeviceSummary:
     """Merge-patch `name` / `group_id`; returns the updated row as the list shows it.
 
@@ -451,6 +457,10 @@ async def update_device(
             group = await session.get(DeviceGroup, body.group_id)
             if group is None or group.project_id != target_project_id:
                 raise HTTPException(status.HTTP_404_NOT_FOUND, f"no such group: {body.group_id}")
+        if "is_dev" in fields and body.is_dev is None:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "is_dev cannot be null")
+        if "stay_awake" in fields and body.stay_awake is None:
+            raise HTTPException(status.HTTP_400_BAD_REQUEST, "stay_awake cannot be null")
 
         changed: set[str] = set()
         if "name" in fields and device.name != body.name:
@@ -459,6 +469,16 @@ async def update_device(
         if "group_id" in fields and device.group_id != body.group_id:
             device.group_id = body.group_id
             changed.add("group_id")
+        if "is_dev" in fields and body.is_dev is not None and device.is_dev != body.is_dev:
+            device.is_dev = body.is_dev
+            changed.add("is_dev")
+        if (
+            "stay_awake" in fields
+            and body.stay_awake is not None
+            and device.stay_awake != body.stay_awake
+        ):
+            device.stay_awake = body.stay_awake
+            changed.add("stay_awake")
         if "project" in fields and device.project_id != target_project_id:
             device.project_id = target_project_id
             changed.add("project")
@@ -487,6 +507,21 @@ async def update_device(
                 raise HTTPException(
                     status.HTTP_404_NOT_FOUND, f"no such group: {body.group_id}"
                 ) from None
+
+            if "stay_awake" in changed:
+                proj = await session.get(Project, device.project_id)
+                secrets_rev = proj.secrets_rev if proj is not None else 0
+                try:
+                    await publisher.publish_cfg(
+                        device_id,
+                        cfg_payload(secrets_rev=secrets_rev, stay_awake=device.stay_awake),
+                    )
+                except CommandPublishError:
+                    logger.warning(
+                        "dn/cfg publish skipped or failed for %s (stay_awake=%s)",
+                        device_id,
+                        device.stay_awake,
+                    )
 
         deploys = await latest_deploys(session, device_ids=[device_id])
         commands = await latest_commands(session, device_ids=[device_id])

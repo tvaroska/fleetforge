@@ -54,8 +54,9 @@ bake hierarchy into the namespace and break the moment a drone is reassigned. Se
 | `up/presence` | 1 | **yes** | `{"online":true}`; the LWT publishes `{"online":false}` |
 | `up/hb` | 1 | no | heartbeat |
 | `up/status` | 1 | **yes** | current update-transaction state |
-| `up/telemetry` | 0 | no | user-defined metrics (R4) |
-| `up/log` | 0 | no | optional diagnostics |
+| `up/ack` | 1 | no | the answer to a command other than `stage` (R5) |
+| `up/telemetry` | 0 | no | user-defined metrics, batched samples (R4) |
+| `up/log` | 0 | no | firmware log lines, batched (R4) |
 
 ### Server → device (`dn/`)
 
@@ -91,6 +92,17 @@ an empty retained payload to each of its retained topics, or the registry resurr
 Both surface identically through the public API. The server records `last_seen` from **its
 own receipt time**, never the device's timestamp — see *Clock* below.
 
+**Planned absence (reserved).** A device about to go quiet on purpose, for example a drone
+leaving its dock, may first publish its own retained presence:
+`{"online":false,"reason":"sortie","expected_back_s":1200}`. `reason` is an open vocabulary
+the server shows as-is. `expected_back_s` is how many seconds after receipt it expects to be
+back (receipt time, see *Clock*). The device then closes its session with a clean MQTT
+`DISCONNECT`: an unclean drop fires the LWT, whose bare `{"online":false}` replaces the
+retained lease. No v1 agent sends either field, and a v1 server treats the message as plain
+`online:false`. Both are additive under *Evolution rules*, rule 2, and `proto` stays `1`.
+Telling "away" from "overdue" is a later server's job. A parent publishing for its child is
+V3 (*Hierarchy*).
+
 ## Messages
 
 ### `up/announce` — identity
@@ -120,6 +132,20 @@ own receipt time**, never the device's timestamp — see *Clock* below.
 [flows.md](flows.md) promises ("reject on chip / partition-size mismatch") — without them that check
 has no data source. `partition_layout` also lets the server detect and quarantine boards
 flashed with a superseded layout.
+
+`capabilities` lists what the device can be asked to do. `ota` means it carries out
+`stage`. From R5, `apply`, `cancel`, `rollback` and `reboot` name the commands it
+implements, `selftest` means the running image has registered a custom self-test, and
+`safe_window` means it has registered a safe-window rule. The server stores a capability it
+does not know as-is. A device lists only what is true of the image it runs.
+
+`safe_mode` is `true` while the device holds itself in recovery after repeated crashes:
+three `panic`, `int_wdt`, `task_wdt` or `wdt` resets within 60 s on a confirmed image. In
+safe mode only the agent runs. It connects, announces and sends heartbeats, carries out
+`stage`, `apply`, `rollback` and `reboot`, and never runs the firmware's own code. The device
+leaves safe mode after a successful update, on a `reboot` command, or at a power cycle. The
+field is absent otherwise, and the server treats absent and `false` alike. Both fields are
+additive under *Evolution rules*, rule 2, and `proto` stays `1`.
 
 `flash_chip_size`, `partition_table_sha256` and `rollback_capable` are measurements, where
 `partition_layout` is a name. `flash_chip_size` is the physical flash chip size in bytes, not
@@ -164,6 +190,22 @@ and `proto` stays `1`. It is absent from agents that predate it, and the server 
 absent and `null` alike. The server never refuses or warns on a device for it and
 logs a value it does not know as-is. The enroll body carries it like every other
 announce field.
+
+`link_type` names the link this broker session runs over. The agent sends `wifi` or
+`ethernet`. It is an open vocabulary: the server stores a value it does not know as-is.
+`dock` is reserved for a wired bus between a device and the carrier or gateway it docks on
+(V3). A link that is not Wi-Fi reports `ssid` and `known_networks` as `null`, as
+`ethernet` does.
+
+`sub_versions` is reserved for a device that updates processors besides its own: an object
+mapping a component name to the version string that component runs, one level deep, for
+example `{"fc_fw": "4.5.1", "vision_model": "0.2.0"}`. It never repeats `fw_version`. No v1
+agent sends it. Absent means none reported. It is additive under *Evolution rules*, rule 2,
+and `proto` stays `1`; the server ignores it until a release defines what it stores.
+
+`secrets_rev` is the non-negative integer revision of the project/device secrets bundle the
+board currently holds in NVS (`ff_sec`). It is absent when the board has not yet pulled a
+secrets bundle. It is additive under *Evolution rules*, rule 2, and `proto` stays `1`.
 
 #### Partition layouts
 
@@ -216,7 +258,9 @@ by subtype through the partition table, never by a hardcoded offset.
   point and never falls back to anything else. With no link it cannot tell the server,
   which sees an offline board and nothing more.
 - Passphrases are never logged, announced or sent. In v1 the agent never writes the list;
-  only the flasher does.
+  only the flasher does. An agent built with Improv Wi-Fi over BLE support (`WIFI-BLE-1`)
+  reads a writable NVS overlay (`ff_net`, up to 4 networks) ahead of `ff_cfg`, and opens a
+  bounded 120 s Improv BLE provisioning window when all known networks fail to associate.
 
 ### `up/hb` — heartbeat
 
@@ -224,8 +268,81 @@ by subtype through the partition table, never by a hardcoded offset.
 {"fw_version":"1.4.2","uptime_s":81234,"rssi":-61,"free_heap":142000,"min_free_heap":98000,"boot_ok":true}
 ```
 
+`min_free_heap` is the lowest free heap since this boot, in bytes
+(`esp_get_minimum_free_heap_size()`), beside the current `free_heap`. A value that keeps
+falling across heartbeats is the leak a board shows before it resets. It is additive under
+*Evolution rules*, rule 2, and `proto` stays `1`. It is absent from agents that predate it,
+and the server treats absent and `null` alike.
+
 Interval from `dn/cfg`; defaults in [prd.md](prd.md) → *Requirements & targets → Timing*.
 A sleepy device sends one per wake.
+
+### `up/log` — firmware log lines
+
+```json
+{"dropped":0,"lines":[{"age_ms":5120,"level":"I","text":"morse: HELLO (firmware 1.0.1)"},{"age_ms":0,"level":"W","text":"sensor: no reply"}]}
+```
+
+Log lines the firmware chose to send, batched, oldest first. A device sends nothing here
+unless its firmware asks the agent to: which lines go out is the device's choice, never
+the server's.
+
+- `lines`: one entry per line, oldest first, at least one.
+  - `text`: one line of UTF-8, no line break, at most 200 bytes (the device truncates).
+  - `level`: the ESP-IDF letter, `E`, `W`, `I`, `D` or `V`. An open vocabulary; absent
+    means `I`.
+  - `age_ms`: milliseconds on the device's monotonic clock from the line being logged to
+    this payload being built. The server stamps the line `receipt time − age_ms` (see
+    *Clock*); it is never a wall-clock time. Absent means `0`.
+- `dropped`: lines the device discarded since its last `up/log` publish, because its
+  buffer filled while offline or it hit its own rate limit. Absent means `0`. A QoS 0
+  publish lost in flight is not counted, because the device cannot know about it.
+
+A device keeps one payload under **2048 bytes** and publishes at most one every **5 s**
+while lines are flowing. It buffers in RAM while disconnected and flushes on reconnect,
+so a reboot loses lines not yet sent. QoS 0, because a log line is not worth a retransmit
+or a persistent-session slot. A log line never carries a passphrase, credential, enrolment
+token or signed URL.
+
+The server treats `text` as untrusted: it strips control characters, redacts URLs and
+bounds the length. It drops a payload over 8192 bytes, or one it cannot decode, whole and
+without refusing the device. It keeps lines as [prd.md](prd.md) → *Retention* says. Like
+every live `up/` message, an `up/log` moves `last_seen`. The fields are additive under
+*Evolution rules*, rule 2, and `proto` stays `1`.
+
+### `up/telemetry` — user-defined metrics
+
+```json
+{"dropped":0,"samples":[{"age_ms":13600,"name":"morse_loops","value":41},{"age_ms":6800,"name":"morse_loops","value":42},{"age_ms":0,"name":"battery_v","value":3.71}]}
+```
+
+Numbers the firmware chose to report, batched, oldest first. A device sends nothing here
+unless its firmware records a sample (`ff_telemetry()` in ESP-IDF, `Fleetforge.metric()` on
+Arduino): which metrics exist is the device's choice, never the server's.
+
+- `samples`: one entry per sample, oldest first, at least one.
+  - `name`: 1 to 31 characters of `a-z`, `0-9` and `_`, starting with a letter (a valid
+    Prometheus metric name). Names starting `ff_` are reserved for the agent's own metrics.
+  - `value`: a finite JSON number.
+  - `age_ms`: milliseconds on the device's monotonic clock from the sample being taken to
+    this payload being built. The server stamps the sample `receipt time − age_ms` (see
+    *Clock*); it is never a wall-clock time, so a board needs no clock to report one. Absent
+    means `0`; a negative value is read as `0`.
+- `dropped`: samples the device discarded since its last `up/telemetry` publish, because its
+  buffer filled while offline or samples came faster than it may publish. Absent means `0`.
+  A QoS 0 publish lost in flight is not counted, because the device cannot know about it.
+
+A device keeps one payload under **2048 bytes**. While connected it publishes at most one every
+**5 s**; right after a connect it drains what it buffered in consecutive payloads. It buffers in
+RAM while disconnected, keeping the newest samples, so samples taken offline arrive after the
+reconnect with their original spacing, and a reboot loses samples not yet sent. QoS 0, because
+a sample is not worth a retransmit or a persistent-session slot.
+
+The server skips a sample it cannot read (a name outside the rule, a value that is not a finite
+number) without losing the rest of the payload, and drops a payload over 8192 bytes, or one it
+cannot decode, whole and without refusing the device. It keeps samples as [prd.md](prd.md) →
+*Retention* says. Like every live `up/` message, an `up/telemetry` moves `last_seen`. The fields
+are additive under *Evolution rules*, rule 2, and `proto` stays `1`.
 
 ### `dn/cmd` — commands
 
@@ -258,6 +375,58 @@ Types: `stage` · `apply` · `cancel` · `rollback` · `identify` · `reboot` ·
 - **`artifact.sig` is optional until R6** (artifact signing). A server without a signer
   omits it, and a device that receives one it cannot verify ignores it. From R6 it is
   required on boards that announce signature verification.
+- **`artifact.type` is absent in v1, and absent means `"app"`**: the device's own
+  application image, written to its inactive OTA slot. `mcu_fw` (a co-processor's
+  firmware), `model_weights` and `fpga_bitstream` are reserved for artifacts a device hands
+  to another processor or store it manages. A device that predates the field ignores it and
+  would treat any artifact as an app, so a server sends a type other than `app` only to a
+  device whose `capabilities` names a handler for it. It is unrelated to the command's own
+  `type`.
+
+**`apply`, `cancel`, `rollback` and `reboot` (R5).** Each carries its own `id`, like every
+command, and the device deduplicates on it. `apply` and `cancel` also carry `cmd_id`, the
+`id` of the `stage` whose transaction they act on. The device refuses one that names any
+other transaction, so a late `apply` never releases an image nobody chose.
+
+```
+{"id": "018f3b...", "type": "apply", "cmd_id": "018f3a..."}
+{"id": "018f3c...", "type": "cancel", "cmd_id": "018f3a..."}
+{"id": "018f3d...", "type": "rollback"}
+{"id": "018f3e...", "type": "reboot"}
+```
+
+- `apply` releases a transaction that stopped at `staged` under `apply: "on_command"`. It
+  then continues exactly as `apply: "auto"` does. An `apply` for a transaction already past
+  `staged` changes nothing. One with nothing staged under that `cmd_id` is refused.
+- `cancel` ends a transaction before its reboot: in `staging`, `downloading`, `verifying`,
+  `staged`, or `awaiting_safe_window` before `applying`. The device stops the transfer and
+  points its boot slot back at the image it is running, and the transaction ends
+  `cancelled`. From `applying` on, and against a rollback the device has decided, it is
+  refused.
+- `rollback` returns the board to its other slot. While a transaction is `confirming` or
+  waits to roll back, it ends that transaction. Otherwise the rollback is a transaction of
+  its own under the command's `id`: `rolling_back`, then `rolled_back` from the image the
+  board returned to. The device returns only to an image that booted and was confirmed in
+  that slot, or was flashed there over USB. It never returns to one that failed
+  verification, was rolled back or never booted. Without such an image, and while an update
+  is between `staging` and `rebooting`, it refuses.
+- `reboot` restarts the device on the image it runs. It opens no transaction. The next
+  announce's `reset_reason`, `sw`, shows it happened. It is refused while a transaction is
+  between `staging` and `confirmed`: once an image is staged, a reboot boots it, and a reset
+  while `confirming` rolls the image back.
+- **Every reboot waits for the device's safe window**: an apply, a rollback and a reboot,
+  commanded or the device's own (*`up/status`*). The server requests, and it never forces.
+- **A command that reboots the device is never repeated by its own redelivery.** The device
+  acts on it only after it has acknowledged the command to the broker, never while that
+  command is still being delivered. It also remembers, across the reboot, the `id` of the
+  last command it rebooted for. Otherwise a persistent session would redeliver an
+  unacknowledged `reboot` after every boot.
+- The device answers each of these on `up/ack`. Their effect on a transaction appears on
+  `up/status` under the transaction's `cmd_id`.
+- A device lists the ones it implements in `capabilities` (*`up/announce`*). A server sends
+  these commands, and `apply: "on_command"`, only to a device that lists them. An agent that
+  predates them ignores the command and sends no answer, and an `on_command` stage then
+  waits at `staged` until the board next restarts.
 
 ### `up/status` — the update transaction
 
@@ -271,6 +440,7 @@ idle → staging → downloading → verifying → staged
      → confirming → confirmed
                   ↘ rolling_back → rolled_back
      ↘ failed
+     ↘ cancelled
 ```
 
 **`cmd_id` is required on every state that belongs to a transaction.** A status without
@@ -289,6 +459,65 @@ principle 5). A vehicle in motion or an airborne drone sits here indefinitely, r
 honestly, until it judges the moment safe. A rollback reboot obeys the same rule.
 It is only for devices that *have* a window. An always-on agent staging under
 `apply: "on_command"` stops at `staged` and waits for the `apply` command.
+
+**The confirm deadline.** The image that boots into a transaction has `confirm_timeout_s`
+seconds from the moment it starts to confirm. It must reach the broker, have its retained
+announce acknowledged, and pass its custom self-test if it has one. The device keeps the
+value from the `stage` with the transaction, uses 300 s when it is absent ([prd.md](prd.md)
+→ *Timing*), and holds it within 30-3600 s. Agents that predate R5 always use 300 s.
+
+**Custom self-test.** An image may register one self-test. The device runs it after the
+announce is acknowledged and confirms only if it passes before the deadline. `confirmed`
+then carries `detail` `selftest passed`. If it fails, the board rolls back (after the safe
+window, below), and the image it returns to reports `rolled_back` with `detail`
+`selftest failed: <reason>; returned to <slot>`. If no result came before the deadline,
+that `detail` is `selftest timed out; returned to <slot>`. `<slot>` is the partition label,
+for example `ota_0`. The whole `detail` is at most 63 bytes: the device shortens `<reason>`,
+never the rest, and sends it as printable ASCII without `;`. An image without a custom
+self-test confirms on the acknowledged announce, as before. A board that returns to an agent
+that predates R5 reports `rolled_back` in that agent's words, without the reason.
+
+**The safe window gates the rollback too.** If the deadline passes, or the self-test fails,
+while the device judges the moment unsafe, the device decides to roll back and keeps that
+decision, and only the reboot waits. The transaction reports `awaiting_safe_window` with
+`detail` `rollback waits for a safe window`, and the board keeps running the unconfirmed
+image until the moment is safe. An announce acknowledged or a self-test passed after that
+decision does not confirm the image. A reset in the meantime still returns the board to the
+previous image, because the bootloader never boots an unconfirmed image twice. Like the wait
+before an apply, this wait has no deadline. A device without a safe-window rule is always
+safe.
+
+**`cancelled`** ends a transaction that the `cancel` command stopped before its reboot. The
+board keeps the image it ran, and the staged image will not boot.
+
+**A sleepy device stays awake through its confirm.** A deep-sleep wake is a reset, and the
+bootloader rolls back an image that is still unconfirmed at a reset. A sleepy device
+therefore does not sleep while a transaction is between `staging` and `rebooting`, nor while
+the image it runs is unconfirmed. The first wake after an apply lasts until `confirmed` or
+`rolled_back`, at most `confirm_timeout_s`. That is why `confirm_timeout_s` does not depend
+on `power_class`.
+
+### `up/ack` — command answers
+
+```json
+{"id":"018f3b...","type":"apply","result":"accepted","cmd_id":"018f3a...","detail":null}
+```
+
+The device sends one answer per `apply`, `cancel`, `rollback` or `reboot` it receives. It is
+QoS 1 and never retained, because an answer is an event, not state. `id` and `type` echo the
+command. `result` is one of three values:
+
+- `accepted`: the device is acting on the command now.
+- `deferred`: the device accepted it and will act at its next safe moment. A `reboot` that
+  waits shows the wait only here.
+- `refused`: nothing changed, and `detail` says why.
+
+`cmd_id` names the transaction the command acts on, or is `null` when there is none.
+`detail` is at most 63 bytes of printable text and never a URL. A device that sends
+`up/ack` answers `refused` with `detail` `not implemented` to any other command type it does
+not carry out, except `stage`, which answers on `up/status`. An answer is never a
+transaction state, so the server does not record it as one. It keeps the first answer for an
+`id`, and it allows for an agent that never answers.
 
 ## Enrolment happens over HTTPS, not MQTT
 
@@ -392,14 +621,27 @@ The R0 agent cannot be changed remotely, so the server must tolerate old agents 
 ## Scope of `dn/cfg` — a boundary, not an oversight
 
 `dn/cfg` tunes **the agent**: heartbeat interval, presence expectations, confirm timeout,
-retry backoff. It is not an application configuration channel. Pushing user application
-settings through it would quietly turn Fleetforge into a config-management product — see
-[prd.md](prd.md) → *Explicitly out of scope*. Adding an application-config channel
-later is additive; letting `dn/cfg` sprawl into one is not reversible.
+retry backoff, development sleep-hold (`stay_awake`), and the revision pointer for rotating
+credentials (`secrets_rev`). It is not a general application configuration channel — see
+[prd.md](prd.md) → *Explicitly out of scope*.
+
+```json
+{"proto":1,"secrets_rev":4,"stay_awake":false}
+```
+
+- **`stay_awake` (boolean, default `false`):** When `true`, `ff_is_ready_for_sleep()` returns
+  `false` so a sleepy development board stays connected on the bench for rapid OTA iteration
+  instead of entering deep sleep between refreshes.
+- **`secrets_rev` (integer, default `0`):** Monotonic revision of the project/device secrets
+  bundle. When a board observes `secrets_rev > local_rev` (stored in NVS `ff_sec`), it holds
+  `ff_is_ready_for_sleep()`, fetches `GET /v1/device-secrets` over HTTPS authenticated with
+  its per-device broker credential (`Authorization: Basic base64(device_id:mqtt_password)`),
+  persists the key-value bundle and `secrets_rev` in NVS `ff_sec`, and reports the new
+  `secrets_rev` on `up/announce`. Secret values never cross MQTT or sit in Mosquitto's
+  retained store.
 
 ## Open items for R0
 
-- Whether `up/log` ships in R0 or waits for R4.
 - Mosquitto dynamic-security vs. an HTTP auth hook, once the credential-provisioning
   volume is known. Dynsec is the recommended start.
 

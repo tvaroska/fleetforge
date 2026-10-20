@@ -8,14 +8,16 @@ import datetime as dt
 import re
 import unicodedata
 import uuid
-from typing import Literal, Self
+from typing import Any, Literal, Self
 
 from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    SerializerFunctionWrapHandler,
     ValidationInfo,
     field_validator,
+    model_serializer,
     model_validator,
 )
 
@@ -146,6 +148,10 @@ class AdminTokenList(BaseModel):
     tokens: list[AdminTokenSummary]
 
 
+TrackMode = Literal["off", "branch", "tag", "commit"]
+AutoDeployTarget = Literal["off", "dev", "all"]
+
+
 class ProjectCreate(BaseModel):
     """`POST /v1/projects`: create a new project."""
 
@@ -154,15 +160,27 @@ class ProjectCreate(BaseModel):
     slug: str = Field(pattern=PROJECT_SLUG_PATTERN)
     name: str = Field(min_length=1, max_length=64)
     description: str | None = Field(default=None, max_length=256)
+    repo_url: str | None = Field(default=None, max_length=512)
+    track_mode: TrackMode = "off"
+    track_ref: str | None = Field(default=None, max_length=128)
+    auto_deploy_target: AutoDeployTarget = "off"
+    ci_webhook_url: str | None = Field(default=None, max_length=512)
+    ci_webhook_header: str | None = Field(default=None, max_length=512)
 
 
 class ProjectUpdate(BaseModel):
-    """`PATCH /v1/projects/{slug}`: update display name or description."""
+    """`PATCH /v1/projects/{slug}`: update display name, description, or CD settings."""
 
     model_config = ConfigDict(extra="forbid")
 
     name: str | None = Field(default=None, min_length=1, max_length=64)
     description: str | None = Field(default=None, max_length=256)
+    repo_url: str | None = Field(default=None, max_length=512)
+    track_mode: TrackMode | None = None
+    track_ref: str | None = Field(default=None, max_length=128)
+    auto_deploy_target: AutoDeployTarget | None = None
+    ci_webhook_url: str | None = Field(default=None, max_length=512)
+    ci_webhook_header: str | None = Field(default=None, max_length=512)
 
 
 class ProjectSummary(BaseModel):
@@ -171,6 +189,15 @@ class ProjectSummary(BaseModel):
     name: str
     description: str | None
     role: str = "owner"
+    repo_url: str | None = None
+    track_mode: str = "off"
+    track_ref: str | None = None
+    auto_deploy_target: str = "off"
+    ci_webhook_url: str | None = None
+    has_ci_webhook_header: bool = False
+    secrets_rev: int = 0
+    auto_deployed_devices: list[str] | None = None
+    ci_webhook_triggered: bool | None = None
     created_at: dt.datetime
     updated_at: dt.datetime
 
@@ -491,6 +518,8 @@ class DeviceUpdate(BaseModel):
     name: str | None = None
     group_id: uuid.UUID | None = None  # the "group/tag" of spec/flows.md
     project: str | None = Field(default=None, pattern=PROJECT_SLUG_PATTERN)
+    is_dev: bool | None = None
+    stay_awake: bool | None = None
 
     @field_validator("name")
     @classmethod
@@ -568,6 +597,11 @@ class DeviceSummary(BaseModel):
     # R5-be-2: the newest verb the server published to this board and its first answer,
     # or `None` for a board never commanded. Defaulted and placed directly before `deploy`.
     last_command: "CommandSummary | None" = None
+    # CI-CD-be-1 / CUJ-2: dev target flag (`auto_deploy_target='dev'`), sleepy-board
+    # `stay_awake` flag (`dn/cfg`), and last announced `secrets_rev`.
+    is_dev: bool = False
+    stay_awake: bool = False
+    secrets_rev: int | None = None
     # The newest deploy transaction's current state, or `None` for a board that has
     # never been deployed to. Rides on this response for the same reason `arrivals`
     # does — see `DeploySummary` and `routers/devices.py`.
@@ -900,6 +934,19 @@ class ProgressReport(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+_CI_OPTIONAL_FIELDS = frozenset(
+    {
+        "repo_url",
+        "branch",
+        "commit_sha",
+        "tag",
+        "build_url",
+        "test_passed",
+        "auto_deployed_devices",
+    }
+)
+
+
 class ArtifactUploaded(BaseModel):
     """What `POST /v1/artifact` returns — the digest is the artifact's identity.
 
@@ -927,6 +974,18 @@ class ArtifactUploaded(BaseModel):
     partition_layout: str
     created: bool
     has_lib_marker: bool
+    repo_url: str | None = None
+    branch: str | None = None
+    commit_sha: str | None = None
+    tag: str | None = None
+    build_url: str | None = None
+    test_passed: bool | None = None
+    auto_deployed_devices: list[str] | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_ci_fields(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        data = handler(self)
+        return {k: v for k, v in data.items() if k not in _CI_OPTIONAL_FIELDS or v is not None}
 
 
 class ArtifactSummary(BaseModel):
@@ -955,6 +1014,17 @@ class ArtifactSummary(BaseModel):
     partition_layout: str | None
     kind: str
     created_at: dt.datetime
+    repo_url: str | None = None
+    branch: str | None = None
+    commit_sha: str | None = None
+    tag: str | None = None
+    build_url: str | None = None
+    test_passed: bool | None = None
+
+    @model_serializer(mode="wrap")
+    def _omit_unset_ci_fields(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
+        data = handler(self)
+        return {k: v for k, v in data.items() if k not in _CI_OPTIONAL_FIELDS or v is not None}
 
 
 class ArtifactList(BaseModel):
@@ -1037,6 +1107,27 @@ class DeployAccepted(BaseModel):
     apply: str
     reused: bool
     device_online: bool
+
+
+class ProjectDeployRequest(BaseModel):
+    """`POST /v1/projects/{slug}/deploy`: deploy one version across compatible project boards."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: str = Field(min_length=1, max_length=64, description="the label, e.g. 1.5.0")
+    target_filter: Literal["all", "dev"] = "all"
+    apply: Literal["auto", "on_command"] = "auto"
+    override: list[OverrideCode] = Field(default_factory=list, max_length=8)
+
+
+class ProjectDeployAccepted(BaseModel):
+    """What `POST /v1/projects/{slug}/deploy` returns with 202."""
+
+    project: str
+    version: str
+    target_filter: str
+    deployed: list[DeployAccepted]
+    skipped: dict[str, str] = Field(default_factory=dict)
 
 
 class PrecheckFinding(BaseModel):

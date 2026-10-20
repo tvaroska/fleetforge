@@ -40,6 +40,7 @@ logger = logging.getLogger(__name__)
 # (it may not import server modules); `tests/test_simulator.py` holds the tripwire.
 TOPIC_ROOT = "ff/v1/d"
 COMMAND_CHANNEL = "cmd"
+CFG_CHANNEL = "cfg"
 
 # `spec/device-protocol.md` → *`dn/cmd` — commands*: the command vocabulary is
 # `stage · apply · cancel · rollback · identify · reboot · set_cfg`. The server sends
@@ -85,6 +86,20 @@ def command_topic(device_id: str) -> str:
     board is not allowed to read (`broker/provisioner.py`).
     """
     return f"{TOPIC_ROOT}/{device_id}/dn/{COMMAND_CHANNEL}"
+
+
+def cfg_topic(device_id: str) -> str:
+    """`ff/v1/d/{device_id}/dn/cfg` — retained device configuration topic (CUJ-2)."""
+    return f"{TOPIC_ROOT}/{device_id}/dn/{CFG_CHANNEL}"
+
+
+def cfg_payload(*, secrets_rev: int = 0, stay_awake: bool = False) -> dict[str, Any]:
+    """The retained `dn/cfg` body (`spec/device-protocol.md` → *`dn/cfg`*)."""
+    return {
+        "proto": 1,
+        "secrets_rev": secrets_rev,
+        "stay_awake": stay_awake,
+    }
 
 
 def stage_payload(
@@ -174,6 +189,10 @@ class CommandPublisher(Protocol):
         """
         ...
 
+    async def publish_cfg(self, device_id: str, payload: dict[str, Any]) -> None:
+        """Publish `payload` to `ff/v1/d/{device_id}/dn/cfg`, QoS 1, **retained**."""
+        ...
+
 
 class NullCommandPublisher:
     """Publishes nothing and says so — by **raising**.
@@ -199,4 +218,14 @@ class NullCommandPublisher:
         )
         raise CommandPublishError(
             "no broker command credential is configured; the command was not published"
+        )
+
+    async def publish_cfg(self, device_id: str, payload: dict[str, Any]) -> None:
+        """Log one WARNING and raise when no broker credential is configured."""
+        logger.warning(
+            "dn/cfg for %s not published: MQTT_COMMAND_USERNAME/_PASSWORD are unset.",
+            device_id,
+        )
+        raise CommandPublishError(
+            "no broker command credential is configured; dn/cfg was not published"
         )

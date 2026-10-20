@@ -235,6 +235,18 @@ class Project(Base):
     slug: Mapped[str] = mapped_column(Text, nullable=False)
     name: Mapped[str] = mapped_column(Text, nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # CI-CD-be-1: Git-driven continuous deployment settings for the project.
+    # Vocabulary (`track_mode` in off/branch/tag/commit, `auto_deploy_target` in off/dev/all)
+    # is enforced at the API edge (convention 1).
+    repo_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    track_mode: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'off'"))
+    track_ref: Mapped[str | None] = mapped_column(Text, nullable=True)
+    auto_deploy_target: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'off'")
+    )
+    ci_webhook_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    ci_webhook_header: Mapped[str | None] = mapped_column(Text, nullable=True)
+    secrets_rev: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     created_at: Mapped[dt.datetime] = mapped_column(
         TimestampTZ, nullable=False, server_default=text("now()")
     )
@@ -439,6 +451,12 @@ class Device(Base):
     min_free_heap: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     # False only while the running image is PENDING_VERIFY (R4-fw-1).
     boot_ok: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # CI-CD-be-1 / CUJ-2: operator-controlled dev-target flag (`auto_deploy_target='dev'`)
+    # and sleepy-board development mode (`stay_awake` published on retained `dn/cfg`), plus
+    # the board's last announced `secrets_rev` from `up/announce` (NULL = not reported).
+    is_dev: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    stay_awake: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    secrets_rev: Mapped[int | None] = mapped_column(Integer, nullable=True)
     group_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid,
         ForeignKey("device_groups.id", ondelete="SET NULL"),
@@ -828,6 +846,15 @@ class ArtifactVersion(Base):
     sha256: Mapped[str] = mapped_column(
         Text, ForeignKey("artifacts.sha256", ondelete="RESTRICT"), nullable=False
     )
+    # CI-CD-be-1: Git and CI provenance attached to this version label at upload time.
+    # Stored on `artifact_versions` (not `artifacts`) because two branches or tags can
+    # produce byte-identical firmware with the same digest.
+    repo_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    branch: Mapped[str | None] = mapped_column(Text, nullable=True)
+    commit_sha: Mapped[str | None] = mapped_column(Text, nullable=True)
+    tag: Mapped[str | None] = mapped_column(Text, nullable=True)
+    build_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    test_passed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     # Server receipt time — convention 3 above. Also the prune order.
     created_at: Mapped[dt.datetime] = mapped_column(
         TimestampTZ, nullable=False, server_default=text("now()")

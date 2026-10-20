@@ -1,0 +1,57 @@
+# Example GitHub Actions Workflow: Build, Test & Auto-Deploy E-Ink Firmware to Fleetforge
+#
+# Copy this file to `.github/workflows/fleetforge-cd.yml` in your e-ink firmware repository.
+# Required repository secrets:
+#   FLEETFORGE_URL   — e.g. https://fleetforge.example.com
+#   FLEETFORGE_TOKEN — project-scoped token (`ffa_...`) with `write:artifacts` and `deploy` scopes
+
+name: Build, Test & Push to Fleetforge
+
+on:
+  push:
+    branches: ["**"]
+    tags: ["v*"]
+  repository_dispatch:
+    types: [fleetforge-build]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref (branch, tag, or commit) to build and push"
+        required: false
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout firmware repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.event.client_payload.track_ref || github.ref }}
+
+      - name: Compile firmware & run unit/QEMU verification
+        id: build
+        run: |
+          # Replace with your ESP-IDF (`idf.py build`) or Arduino (`arduino-cli compile`) step:
+          idf.py set-target esp32c6
+          idf.py build
+
+      - name: Push compiled .bin + Git provenance to Fleetforge
+        env:
+          FLEETFORGE_URL: ${{ secrets.FLEETFORGE_URL }}
+          FLEETFORGE_TOKEN: ${{ secrets.FLEETFORGE_TOKEN }}
+        run: |
+          SHORT_SHA="${GITHUB_SHA::7}"
+          VERSION="0.1.0-${SHORT_SHA}"
+          BRANCH="${GITHUB_REF_NAME}"
+          TAG=""
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF_NAME}"
+            VERSION="${TAG#v}"
+          fi
+          BUILD_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+          curl --fail-with-body -X POST \
+            "${FLEETFORGE_URL}/v1/artifact?project=eink-frame&target=esp32c6&version=${VERSION}&partition_layout=ab-4m-v1&repo_url=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}&branch=${BRANCH}&commit_sha=${GITHUB_SHA}&tag=${TAG}&build_url=${BUILD_URL}&test_passed=true" \
+            -H "Authorization: Bearer ${FLEETFORGE_TOKEN}" \
+            -H "Content-Type: application/octet-stream" \
+            --data-binary @build/app.bin

@@ -168,3 +168,56 @@ describe('api.applyDeploy / cancelDeploy / rebootDevice (R5-fe-1)', () => {
     expect(err.message).toBe(sentence)
   })
 })
+
+describe('api.updateProject and api.deployProject (CI-CD-fe-1)', () => {
+  it('PATCHes project continuous deployment settings to the relative project path', async () => {
+    const updated = {
+      id: '00000000-0000-4000-8000-000000000001',
+      slug: 'eink-frame',
+      name: 'E-Ink Frame',
+      description: null,
+      role: 'owner',
+      track_mode: 'branch',
+      track_ref: 'main',
+      auto_deploy_target: 'dev',
+      created_at: '2026-10-20T12:00:00Z',
+    }
+    const spy = respond(200, JSON.stringify(updated))
+
+    await expect(
+      api.updateProject('eink-frame', {
+        track_mode: 'branch',
+        track_ref: 'main',
+        auto_deploy_target: 'dev',
+      }),
+    ).resolves.toEqual(updated)
+
+    const [url, init] = spy.mock.calls[0]
+    expect(url).toBe('/v1/projects/eink-frame')
+    expect(init?.method).toBe('PATCH')
+    expect(init?.body).toBe(
+      '{"track_mode":"branch","track_ref":"main","auto_deploy_target":"dev"}',
+    )
+    expect(init?.credentials).toBe('same-origin')
+  })
+
+  it('POSTs project-wide deploy to the relative project deploy path', async () => {
+    const deployed = {
+      project: 'eink-frame',
+      version: '1.5.0',
+      target_filter: 'dev',
+      deployed: [],
+      skipped: {},
+    }
+    const spy = respond(202, JSON.stringify(deployed))
+
+    await expect(
+      api.deployProject('eink-frame', { version: '1.5.0', target_filter: 'dev', apply: 'auto' }),
+    ).resolves.toEqual(deployed)
+
+    const [url, init] = spy.mock.calls[0]
+    expect(url).toBe('/v1/projects/eink-frame/deploy')
+    expect(init?.method).toBe('POST')
+    expect(init?.body).toBe('{"version":"1.5.0","target_filter":"dev","apply":"auto"}')
+  })
+})

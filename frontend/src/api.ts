@@ -35,13 +35,45 @@ export type Me = {
   projects?: UserProjectSummary[]
 }
 
+export type TrackMode = 'off' | 'branch' | 'tag' | 'commit'
+export type AutoDeployTarget = 'off' | 'dev' | 'all'
+
 export type ProjectSummary = {
   id: string
   slug: string
   name: string
   description: string | null
   role: string | null
+  repo_url?: string | null
+  track_mode?: TrackMode
+  track_ref?: string | null
+  auto_deploy_target?: AutoDeployTarget
+  ci_webhook_url?: string | null
+  has_ci_webhook_header?: boolean
+  secrets_rev?: number
+  auto_deployed_devices?: string[] | null
+  ci_webhook_triggered?: boolean | null
   created_at: string
+  updated_at?: string
+}
+
+export type ProjectUpdate = {
+  name?: string
+  description?: string | null
+  repo_url?: string | null
+  track_mode?: TrackMode
+  track_ref?: string | null
+  auto_deploy_target?: AutoDeployTarget
+  ci_webhook_url?: string | null
+  ci_webhook_header?: string | null
+}
+
+export type ProjectDeployAccepted = {
+  project: string
+  version: string
+  target_filter: 'all' | 'dev'
+  deployed: DeployAccepted[]
+  skipped: Record<string, string>
 }
 
 export type ProjectMemberSummary = {
@@ -189,6 +221,9 @@ export type DeviceSummary = {
   // every fixture written before R5-fe-1, must keep working. Absent and null both mean "no
   // verb has been sent to this board". Sits directly before `deploy`, as on the server.
   last_command?: CommandSummary | null
+  is_dev?: boolean
+  stay_awake?: boolean
+  secrets_rev?: number | null
   deploy: DeploySummary | null
 }
 
@@ -232,6 +267,8 @@ export type DeviceUpdate = {
   name?: string | null
   group_id?: string | null
   project?: string
+  is_dev?: boolean
+  stay_awake?: boolean
 }
 
 // Mirrors `DeploySummary` in api/schemas.py. The newest deploy transaction's current
@@ -376,6 +413,12 @@ export type ArtifactSummary = {
   partition_layout: string | null
   kind: string
   created_at: string
+  repo_url?: string | null
+  branch?: string | null
+  commit_sha?: string | null
+  tag?: string | null
+  build_url?: string | null
+  test_passed?: boolean | null
 }
 
 export type ArtifactList = { artifacts: ArtifactSummary[] }
@@ -389,6 +432,14 @@ export type ArtifactUploaded = {
   version: string
   partition_layout: string
   created: boolean
+  has_lib_marker?: boolean
+  repo_url?: string | null
+  branch?: string | null
+  commit_sha?: string | null
+  tag?: string | null
+  build_url?: string | null
+  test_passed?: boolean | null
+  auto_deployed_devices?: string[] | null
 }
 
 // Mirrors `DeployAccepted` in api/schemas.py — the 202 body of a deploy POST.
@@ -751,6 +802,26 @@ export const api = {
 
   createProject: (body: { slug: string; name: string; description?: string | null }) =>
     request<ProjectSummary>('/v1/projects', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  updateProject: (slug: string, patch: ProjectUpdate) =>
+    request<ProjectSummary>(`/v1/projects/${encodeURIComponent(slug)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    }),
+
+  deployProject: (
+    slug: string,
+    body: {
+      version: string
+      target_filter?: 'all' | 'dev'
+      apply?: 'auto' | 'on_command'
+      override?: readonly string[]
+    },
+  ) =>
+    request<ProjectDeployAccepted>(`/v1/projects/${encodeURIComponent(slug)}/deploy`, {
       method: 'POST',
       body: JSON.stringify(body),
     }),

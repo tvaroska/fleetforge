@@ -34,7 +34,12 @@ from typing import Any
 
 import aiomqtt
 
-from fleetforge.broker.commands import CommandPublishError, command_topic, encode_command
+from fleetforge.broker.commands import (
+    CommandPublishError,
+    cfg_topic,
+    command_topic,
+    encode_command,
+)
 from fleetforge.config import Settings
 
 logger = logging.getLogger(__name__)
@@ -42,6 +47,7 @@ logger = logging.getLogger(__name__)
 # `spec/device-protocol.md` → *Topic namespace*: `dn/cmd` is QoS 1, retain **never**.
 QOS = 1
 RETAIN = False
+CFG_RETAIN = True
 
 ClientFactory = Callable[[], AbstractAsyncContextManager[aiomqtt.Client]]
 
@@ -105,4 +111,25 @@ class MqttCommandPublisher:
             topic,
             QOS,
             RETAIN,
+        )
+
+    async def publish_cfg(self, device_id: str, payload: dict[str, Any]) -> None:
+        """Publish retained device config to `ff/v1/d/{device_id}/dn/cfg`, QoS 1, retained."""
+        topic = cfg_topic(device_id)
+        try:
+            async with asyncio.timeout(self._timeout_s), self._client_factory() as client:
+                await client.publish(topic, encode_command(payload), qos=QOS, retain=CFG_RETAIN)
+        except TimeoutError as exc:
+            raise CommandPublishError(
+                f"the broker did not accept dn/cfg for {device_id} within {self._timeout_s}s"
+            ) from exc
+        except (aiomqtt.MqttError, OSError) as exc:
+            raise CommandPublishError(
+                f"broker transport failure publishing dn/cfg to {device_id}: {type(exc).__name__}"
+            ) from exc
+        logger.info(
+            "published dn/cfg to %s (qos %d, retain %s)",
+            topic,
+            QOS,
+            CFG_RETAIN,
         )

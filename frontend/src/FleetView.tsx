@@ -25,7 +25,7 @@
 // reset is a boxed bold word, not a tint: the theme is monochrome and state is never
 // carried by colour alone.
 
-import { type ArrivalSummary, type ArtifactSummary, type DeviceSummary } from './api'
+import { ApiError, api, type ArrivalSummary, type ArtifactSummary, type DeviceSummary } from './api'
 import { DeployCell } from './DeployCell'
 import { useArtifacts, type Artifacts } from './deploy'
 import { STAGE_LABELS, useFleet, type Fleet, type EventSourceFactory } from './fleet'
@@ -205,6 +205,17 @@ function DeviceRow({
 
   const identity = device.name ?? <code>{device.device_id}</code>
 
+  async function toggleFlag(patch: { is_dev?: boolean; stay_awake?: boolean }) {
+    try {
+      await api.updateDevice(device.device_id, patch)
+      onDeployed()
+    } catch (err) {
+      if (err instanceof ApiError && err.isUnauthorized) {
+        onSessionExpired()
+      }
+    }
+  }
+
   return (
     <tr
       data-testid="device-row"
@@ -236,6 +247,35 @@ function DeviceRow({
             <br />
             <code className="muted">{device.device_id}</code>
           </>
+        )}
+        {onSelect !== undefined && (
+          <div className="device-flags" data-testid="device-flags">
+            <button
+              type="button"
+              className={`flag-pill${device.is_dev ? ' active' : ''}`}
+              aria-pressed={Boolean(device.is_dev)}
+              data-testid="toggle-dev"
+              title="Mark as a development target board for continuous deployment (auto_deploy_target='dev')"
+              onClick={() => void toggleFlag({ is_dev: !device.is_dev })}
+            >
+              {device.is_dev ? '★ dev' : 'dev'}
+            </button>
+            {device.power_class === 'sleepy' && (
+              <>
+                {' '}
+                <button
+                  type="button"
+                  className={`flag-pill${device.stay_awake ? ' active' : ''}`}
+                  aria-pressed={Boolean(device.stay_awake)}
+                  data-testid="toggle-stay-awake"
+                  title="Keep this sleepy board awake on MQTT via retained dn/cfg during active iteration"
+                  onClick={() => void toggleFlag({ stay_awake: !device.stay_awake })}
+                >
+                  {device.stay_awake ? '⚡ stay awake' : 'stay awake'}
+                </button>
+              </>
+            )}
+          </div>
         )}
       </td>
       <td>{device.platform_type}</td>

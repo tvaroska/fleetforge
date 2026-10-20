@@ -45,7 +45,8 @@ carries an advisory `kind`; the wire command has no counterpart. Adding an optio
 is additive, so it can wait for a platform that needs it. What cannot wait is the
 sentence "absent means `app`", so the meaning of absence is fixed before anyone assigns
 another. FPGA bitstreams and PX4 payloads reach the device through a companion CPU
-(`docs/PLATFORMS.md`), so the type may never need to cross the wire.
+(`docs/PLATFORMS.md`), so the type may never need to cross the wire. Answered (R4-spec-1): `device-protocol.md` → `dn/cmd` says absence means `app` and
+reserves `mcu_fw`, `model_weights` and `fpga_bitstream`.
 
 **Does `ff_cfg` need room for an optional CA root?** `ff_cfg` carries up to 4080 payload
 bytes and its reader ignores unknown keys (`agent/main/ff_cfg.c`), so an optional `ca`
@@ -62,13 +63,15 @@ on more boards.
 trust-boundary validators; widening them now buys V1 nothing. Proposed prose: the server
 treats `device_id` as opaque, the platform defines its derivation, and a non-ESP32
 platform with a different id takes a new tree or a `proto` bump (evolution rule 1). Only
-the server-side regex needs to widen later; no device recall is involved.
+the server-side regex needs to widen later; no device recall is involved. The 2026-10-15 focus group proposes `^[a-z0-9_-]{1,32}$`; that shape admits the broker's
+service usernames, so any widening needs a reserved-name rule first (R4-spec-1, not built).
 
 **Confirm semantics for sleepy / airborne devices — narrower than reported.** The confirm
 timer is device-armed after the reboot, which only happens inside the safe window, so an
 airborne drone does not roll back for being in the air. The real question is whether a
 sleepy node confirms within its first wake; `confirm_timeout_s` is already per-command.
-Needs a statement in `device-protocol.md`, not new fields.
+Needs a statement in `device-protocol.md`, not new fields. Answered (R5-spec-1): `device-protocol.md` → `up/status` says a sleepy device stays awake
+through its confirm, and that the safe window gates the rollback reboot as well as the apply.
 
 **Attestation before the first OTA.** `rollback_capable` is measured by an OTA, so a
 board's first OTA runs unprotected if its bootloader lacks rollback, and nothing on the
@@ -79,12 +82,11 @@ equals the bundle file's, since esptool rewrites the image header's flash parame
 write time. The same digest would invalidate a stale persisted `rollback_capable` after
 an Arduino IDE upload.
 
-**Field Wi-Fi change.** Partly answered (R2b-spec-1). A board flashed with a list of
-known networks moves between them with no re-flash ([device-protocol.md](device-protocol.md)
-→ *Known networks*, `flows.md` Flow 3). A network not on the list still needs a re-flash,
-and whether that holds once boards are sealed in boxes (CUJ-1) is open; see the *repeat
-path* question above. The writable store (NVS or `ff_cfg`), and `dn/cmd` `set_cfg` versus
-Improv as the way in, move to R2b-spec-3. Not decided.
+**Field Wi-Fi change.** Answered (`WIFI-BLE-1`): a board flashed with up to 4 known
+networks in `ff_cfg` roams between them automatically ([device-protocol.md](device-protocol.md)
+→ *Known networks*, `flows.md` Flow 3), and when no known network is in range on boot/wake
+it opens a bounded 120 s Improv Wi-Fi over BLE provisioning window that writes newly
+provisioned networks into the NVS `ff_net` overlay ahead of `ff_cfg` without reflashing.
 
 **An OTA image that does not contain the agent.** The confirm timer lives in the agent
 (`ff_mqtt.c::confirm_timeout_cb`), so an image without it arms no timer. The bootloader
@@ -100,4 +102,4 @@ path disarms, so a silent image resets and rolls back. It needs a custom bootloa
 one-time USB flash, so not OTA-able), applies only where we own the bootloader (not
 Arduino's), and it is unverified whether IDF's startup disables that watchdog before the
 app runs. Neither covers an image that has the agent and confirms but whose own logic is
-wrong; that is the R5 custom self-test.
+wrong; that is the R5 custom self-test. Its semantics: `device-protocol.md` → `up/status` → *Custom self-test* (R5-spec-1).

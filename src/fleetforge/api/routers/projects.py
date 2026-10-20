@@ -6,6 +6,7 @@ Isolates boards, groups, enrollment tokens, and version labels per project
 
 import logging
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException, Path, status
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -13,16 +14,24 @@ from sqlalchemy.exc import IntegrityError
 from fleetforge.api.deps import (
     FORBIDDEN,
     AdminDep,
+    CommandPublisherDep,
     SessionMakerDep,
+    SettingsDep,
     bearer_scheme,
     cookie_scheme,
     now_utc,
     resolve_project_for_request,
 )
+from fleetforge.api.routers.deploys import (
+    deploy_version_to_project_devices,
+    matches_project_tracking,
+)
 from fleetforge.api.schemas import (
     PROJECT_SLUG_PATTERN,
     USERNAME_PATTERN,
     ProjectCreate,
+    ProjectDeployAccepted,
+    ProjectDeployRequest,
     ProjectList,
     ProjectMemberList,
     ProjectMemberSummary,
@@ -30,7 +39,7 @@ from fleetforge.api.schemas import (
     ProjectSummary,
     ProjectUpdate,
 )
-from fleetforge.db.models import Project, ProjectMember, ProjectRole, User
+from fleetforge.db.models import ArtifactVersion, Project, ProjectMember, ProjectRole, User
 
 logger = logging.getLogger(__name__)
 
@@ -41,13 +50,28 @@ router = APIRouter(
 )
 
 
-def _project_summary(proj: Project, role: str = ProjectRole.OWNER.value) -> ProjectSummary:
+def _project_summary(
+    proj: Project,
+    role: str = ProjectRole.OWNER.value,
+    *,
+    auto_deployed_devices: list[str] | None = None,
+    ci_webhook_triggered: bool | None = None,
+) -> ProjectSummary:
     return ProjectSummary(
         id=proj.id,
         slug=proj.slug,
         name=proj.name,
         description=proj.description,
         role=role,
+        repo_url=proj.repo_url,
+        track_mode=proj.track_mode,
+        track_ref=proj.track_ref,
+        auto_deploy_target=proj.auto_deploy_target,
+        ci_webhook_url=proj.ci_webhook_url,
+        has_ci_webhook_header=bool(proj.ci_webhook_header),
+        secrets_rev=proj.secrets_rev,
+        auto_deployed_devices=auto_deployed_devices,
+        ci_webhook_triggered=ci_webhook_triggered,
         created_at=proj.created_at,
         updated_at=proj.updated_at,
     )
@@ -109,6 +133,12 @@ async def create_project(
         slug=body.slug,
         name=body.name,
         description=body.description,
+        repo_url=body.repo_url,
+        track_mode=body.track_mode,
+        track_ref=body.track_ref,
+        auto_deploy_target=body.auto_deploy_target,
+        ci_webhook_url=body.ci_webhook_url,
+        ci_webhook_header=body.ci_webhook_header,
         created_at=now,
         updated_at=now,
     )
@@ -137,31 +167,173 @@ async def create_project(
     return _project_summary(proj, role=ProjectRole.OWNER.value)
 
 
+async def _trigger_ci_webhook(proj: Project) -> bool:
+    """Best-effort webhook POST to trigger an external CI build when switching refs."""
+    if not proj.ci_webhook_url:
+        return False
+    headers: dict[str, str] = {"Content-Type": "application/json"}
+    if proj.ci_webhook_header:
+        headers["Authorization"] = proj.ci_webhook_header
+    payload = {
+        "project": proj.slug,
+        "repo_url": proj.repo_url,
+        "track_mode": proj.track_mode,
+        "track_ref": proj.track_ref,
+        "auto_deploy_target": proj.auto_deploy_target,
+    }
+    try:
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.post(proj.ci_webhook_url, json=payload, headers=headers)
+            return 200 <= resp.status_code < 300
+    except httpx.HTTPError:
+        logger.warning("CI webhook dispatch failed for project %s", proj.slug, exc_info=True)
+        return False
+
+
 @router.patch(
     "/{slug}",
     response_model=ProjectSummary,
-    summary="Update a project's display name or description",
+    summary="Update a project's display name, description, or continuous deployment settings",
 )
 async def update_project(
     slug: str = Path(pattern=PROJECT_SLUG_PATTERN),
     *,
     body: ProjectUpdate,
     admin: AdminDep,
+    settings: SettingsDep,
     sessionmaker: SessionMakerDep,
+    publisher: CommandPublisherDep,
 ) -> ProjectSummary:
-    """Update `name` or `description` on `slug` (requires project `owner` or superadmin)."""
+    """Update metadata or CD settings on `slug` (requires project `owner` or superadmin)."""
     if "admin" not in admin.scopes:
         raise FORBIDDEN
 
+    fields = body.model_fields_set
+    cd_changed = bool(fields & {"repo_url", "track_mode", "track_ref", "auto_deploy_target"})
+
     async with sessionmaker() as session:
         proj = await resolve_project_for_request(session, admin, slug, min_role=ProjectRole.OWNER)
-        if "name" in body.model_fields_set and body.name is not None:
+        if "name" in fields and body.name is not None:
             proj.name = body.name
-        if "description" in body.model_fields_set:
+        if "description" in fields:
             proj.description = body.description
+        if "repo_url" in fields:
+            proj.repo_url = body.repo_url
+        if "track_mode" in fields and body.track_mode is not None:
+            proj.track_mode = body.track_mode
+        if "track_ref" in fields:
+            proj.track_ref = body.track_ref
+        if "auto_deploy_target" in fields and body.auto_deploy_target is not None:
+            proj.auto_deploy_target = body.auto_deploy_target
+        if "ci_webhook_url" in fields:
+            proj.ci_webhook_url = body.ci_webhook_url
+        if "ci_webhook_header" in fields:
+            proj.ci_webhook_header = body.ci_webhook_header
         proj.updated_at = now_utc()
         await session.commit()
-        return _project_summary(proj, role=ProjectRole.OWNER.value)
+
+        auto_deployed: list[str] | None = None
+        webhook_triggered: bool | None = None
+        if (
+            cd_changed
+            and proj.track_mode != "off"
+            and proj.auto_deploy_target in ("dev", "all")
+            and proj.track_ref
+        ):
+            versions = (
+                await session.scalars(
+                    select(ArtifactVersion)
+                    .where(ArtifactVersion.project_id == proj.id)
+                    .order_by(ArtifactVersion.created_at.desc())
+                )
+            ).all()
+            matched_by_target: dict[str, str] = {}
+            for ver in versions:
+                if ver.target in matched_by_target:
+                    continue
+                if matches_project_tracking(
+                    proj,
+                    repo_url=ver.repo_url,
+                    branch=ver.branch,
+                    commit_sha=ver.commit_sha,
+                    tag=ver.tag,
+                    test_passed=ver.test_passed,
+                ):
+                    matched_by_target[ver.target] = ver.version
+
+            if matched_by_target:
+                deployed_ids: list[str] = []
+                for target_chip, ver_str in matched_by_target.items():
+                    deployed_list, _ = await deploy_version_to_project_devices(
+                        session,
+                        project_id=proj.id,
+                        version=ver_str,
+                        target_filter=proj.auto_deploy_target,
+                        apply="auto",
+                        override=(),
+                        admin=admin,
+                        settings=settings,
+                        publisher=publisher,
+                        target_chip=target_chip,
+                        best_effort_broker=True,
+                    )
+                    deployed_ids.extend(d.device_id for d in deployed_list)
+                auto_deployed = deployed_ids
+            elif proj.ci_webhook_url:
+                webhook_triggered = await _trigger_ci_webhook(proj)
+
+        return _project_summary(
+            proj,
+            role=ProjectRole.OWNER.value,
+            auto_deployed_devices=auto_deployed,
+            ci_webhook_triggered=webhook_triggered,
+        )
+
+
+@router.post(
+    "/{slug}/deploy",
+    response_model=ProjectDeployAccepted,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Stage a firmware version across all or dev compatible devices in a project",
+)
+async def deploy_project(
+    slug: str = Path(pattern=PROJECT_SLUG_PATTERN),
+    *,
+    body: ProjectDeployRequest,
+    admin: AdminDep,
+    settings: SettingsDep,
+    sessionmaker: SessionMakerDep,
+    publisher: CommandPublisherDep,
+) -> ProjectDeployAccepted:
+    """Stage `body.version` onto all (or `dev`-only) compatible boards in `slug`."""
+    async with sessionmaker() as session:
+        proj = await resolve_project_for_request(
+            session,
+            admin,
+            slug,
+            min_role=ProjectRole.OPERATOR,
+            required_scope="deploy",
+        )
+        deployed, skipped = await deploy_version_to_project_devices(
+            session,
+            project_id=proj.id,
+            version=body.version,
+            target_filter=body.target_filter,
+            apply=body.apply,
+            override=body.override,
+            admin=admin,
+            settings=settings,
+            publisher=publisher,
+            best_effort_broker=False,
+        )
+
+    return ProjectDeployAccepted(
+        project=slug,
+        version=body.version,
+        target_filter=body.target_filter,
+        deployed=deployed,
+        skipped=skipped,
+    )
 
 
 @router.get(

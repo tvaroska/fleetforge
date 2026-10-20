@@ -134,3 +134,66 @@ plays them and T3 does not grade them.
   - The steps Alex performed are the steps the documentation says to perform.
   - The worked example is readable in one screen and does not assume ESP-IDF knowledge.
   - Nothing in the run required knowledge only available from the Fleetforge source.
+
+---
+
+## CUJ-2: A sleepy e-ink project iterates from Git, streams OTel logs, rotates secrets, and switches Wi-Fi without a cable
+
+**Persona:** Alex / Boris, building an e-ink display project (`epaper`) — starts on 1 bench
+board with frequent code changes, then deploys to 2+ frames on walls across multiple Wi-Fi
+networks.
+
+**Description:** The e-ink frame wakes periodically to fetch data from a backend using an
+API key, renders a screen, emits logs/metrics, and goes back to deep sleep. During active
+development the operator wants `git push` (or switching a tracked branch/tag/commit in
+project settings) to compile, test, and OTA-deploy to the board automatically without manual
+web uploads. In the field, the frame must roam across known Wi-Fi networks or accept a new
+Wi-Fi network over BLE without reflashing, forward its logs to an OpenTelemetry collector,
+and pick up rotated backend API keys without reflashing.
+
+**Steps:**
+
+1. The operator creates the `epaper` project, sets the Continuous Deployment rule (`repo_url`,
+   tracked `branch`/`tag`/`commit`, and `auto_deploy_target: dev` or `all`), and marks the
+   bench board `stay_awake: true` so it does not sleep between code pushes.
+2. They push a commit to the tracked branch (or switch the tracked ref in Project Settings).
+   CI compiles the sketch, runs tests, and uploads the `.bin` with Git provenance
+   (`branch`, `commit_sha`, `tag`, `build_url`, `test_passed=true`). Fleetforge matches the
+   project's tracking rule and automatically deploys the build to the targeted board(s).
+3. As the fleet grows to 2+ e-ink boards, switching `auto_deploy_target` to `all` (or
+   clicking "Deploy to Project Fleet") rolls the verified commit out across every board in
+   the project.
+4. The sketch logs diagnostics via `Fleetforge.logf()` and metrics via `Fleetforge.metric()`
+   before calling `Fleetforge.isReadyForSleep()`. The board drains its log and telemetry
+   batches before sleeping, and `fleetforge-ingestor` exports them over OTLP/HTTP to the
+   configured OpenTelemetry collector with `service.name="epaper"` and `device.id`.
+5. The operator rotates `backend_api_key` in the project's Secrets settings. Fleetforge
+   bumps `secrets_rev` on `dn/cfg`. On its next wake, each e-ink board sees
+   `secrets_rev > local_rev`, pulls `GET /v1/device-secrets` over HTTPS using its per-device
+   broker credential, stores the new key in NVS (`ff_sec`), and returns it from
+   `Fleetforge.getSecret("backend_api_key", ...)` without reflashing.
+6. When an e-ink frame is carried to a location whose Wi-Fi is not in `ff_cfg`, it opens a
+   bounded 120 s Improv Wi-Fi over BLE window on wake, receives the new SSID + passphrase
+   from Chrome or a phone, stores it in the NVS `ff_net` overlay, and reconnects without a
+   USB cable or reflash.
+
+**Success Criteria:**
+
+- Code iteration requires zero manual `.bin` drag-and-drop: a push to the tracked branch/tag
+  (or changing the tracked ref in Project Settings) lands on the target board(s)
+  automatically once tests pass, and every running board links to its exact Git commit SHA.
+- A sleepy e-ink board never loses logs or metrics emitted during a wake (`isReadyForSleep()`
+  holds sleep until `up/log`, `up/telemetry`, and any active `secrets_rev` sync or OTA stage
+  finish), and logs arrive at the OTLP/HTTP collector as valid OpenTelemetry `LogRecord`s.
+- Secret values (`backend_api_key`) never appear in MQTT payloads, logs, or firmware binaries;
+  they are pulled over HTTPS (`GET /v1/device-secrets`), cached in NVS across deep sleep,
+  and reflected on the dashboard via `secrets_rev` in `up/announce`.
+- Adding a new Wi-Fi network in the field requires neither USB reflashing nor server-stored
+  Wi-Fi passphrases.
+
+**Supported By:**
+
+- `spec/flows.md` → Flow 2 (V2) & Flow 3
+- `spec/device-protocol.md` → `up/log`, `up/telemetry`, `dn/cfg` (`stay_awake`, `secrets_rev`),
+  and *Known networks* (`ff_net` NVS overlay + Improv BLE)
+- Pillars: `CI-CD-1` (`R7`+`R8`+`R11`), `SEC-1`, `R4-fw-3/4` + `OTEL-1`, `WIFI-BLE-1`

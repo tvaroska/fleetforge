@@ -69,12 +69,14 @@ subject, the token id and a snapshot of the token's label. The sender is whoever
 the transaction; a reuse writes no row, so the original sender stands.
 """
 
+import fnmatch
 import logging
+import uuid
 from collections.abc import Collection
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from fleetforge.api.deps import (
@@ -95,10 +97,16 @@ from fleetforge.api.schemas import (
     PrecheckFinding,
 )
 from fleetforge.artifact_urls import mint_artifact_url
-from fleetforge.broker import CommandPublisher, CommandPublishError, new_command_id, stage_payload
+from fleetforge.broker import (
+    CommandPublisher,
+    CommandPublishError,
+    NullCommandPublisher,
+    new_command_id,
+    stage_payload,
+)
 from fleetforge.clock import now_utc
 from fleetforge.config import Settings
-from fleetforge.db.models import AdminToken, Device, ProjectRole
+from fleetforge.db.models import AdminToken, Device, Project, ProjectRole
 from fleetforge.deploy_precheck import (
     NO_ARTIFACT_FOR_TARGET,
     Finding,
@@ -519,3 +527,182 @@ async def _publish(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="the broker could not accept the deploy command; try again shortly",
         ) from None
+
+
+def _normalize_repo_url(url: str | None) -> str:
+    if not url:
+        return ""
+    stripped = url.strip().rstrip("/")
+    if stripped.endswith(".git"):
+        stripped = stripped[:-4]
+    return stripped.lower()
+
+
+def matches_project_tracking(
+    project: Project,
+    *,
+    repo_url: str | None,
+    branch: str | None,
+    commit_sha: str | None,
+    tag: str | None,
+    test_passed: bool | None,
+) -> bool:
+    """Return True if an artifact upload's Git provenance matches `project`'s active CD rule."""
+    if project.track_mode == "off" or project.auto_deploy_target not in ("dev", "all"):
+        return False
+    ref = (project.track_ref or "").strip()
+    if not ref:
+        return False
+    if test_passed is False:
+        return False
+    if (
+        project.repo_url
+        and repo_url
+        and _normalize_repo_url(project.repo_url) != _normalize_repo_url(repo_url)
+    ):
+        return False
+    if project.track_mode == "branch":
+        return branch is not None and branch == ref
+    if project.track_mode == "tag":
+        return tag is not None and fnmatch.fnmatchcase(tag, ref)
+    if project.track_mode == "commit":
+        return commit_sha is not None and (commit_sha == ref or commit_sha.startswith(ref))
+    return False
+
+
+async def deploy_version_to_project_devices(
+    session: AsyncSession,
+    *,
+    project_id: uuid.UUID,
+    version: str,
+    target_filter: str,
+    apply: str,
+    override: Collection[str],
+    admin: AuthContext,
+    settings: Settings,
+    publisher: CommandPublisher,
+    target_chip: str | None = None,
+    best_effort_broker: bool = False,
+) -> tuple[list[DeployAccepted], dict[str, str]]:
+    """Stage `version` onto compatible live boards in `project_id`.
+
+    Used by both `POST /v1/projects/{slug}/deploy` (`best_effort_broker=False`) and automatic
+    CD triggers on `POST /v1/artifact` / `PATCH /v1/projects/{slug}` (`best_effort_broker=True`).
+    """
+    _require_valid_version(version)
+    if best_effort_broker and (
+        isinstance(publisher, NullCommandPublisher)
+        or not settings.artifact_url_secret
+        or not settings.public_base_url
+    ):
+        return [], {}
+
+    stmt = (
+        select(Device)
+        .where(Device.project_id == project_id, Device.decommissioned_at.is_(None))
+        .order_by(Device.device_id)
+    )
+    if target_filter == "dev":
+        stmt = stmt.where(Device.is_dev.is_(True))
+    if target_chip is not None:
+        stmt = stmt.where(Device.platform_type == target_chip)
+
+    devices = list((await session.scalars(stmt)).all())
+    if not devices:
+        return [], {}
+
+    catalog = await load_layout_catalog(session)
+    sent_by = await _sender(session, admin)
+    deployed: list[DeployAccepted] = []
+    skipped: dict[str, str] = {}
+
+    for device in devices:
+        _, found_artifact = await _resolve(session, device.device_id, version)
+        found_refusals: list[Finding] = [
+            *refusals(device, found_artifact, version=version, catalog=catalog),
+            *apply_refusals(device, apply),
+        ]
+        if found_refusals:
+            skipped[device.device_id] = found_refusals[0].message
+            continue
+        gated = unmet_gates(device, override, artifact=found_artifact)
+        if gated:
+            skipped[device.device_id] = gated[0].message
+            continue
+        if found_artifact is None:
+            skipped[device.device_id] = "no such artifact"
+            continue
+
+        open_transaction = await latest_open_transaction(
+            session, device_id=device.device_id, window_s=settings.signed_url_ttl_s
+        )
+        reused = open_transaction is not None and open_transaction.sha256 == found_artifact.sha256
+        cmd_id = open_transaction.cmd_id if reused and open_transaction else new_command_id()
+        url = _artifact_url(found_artifact.sha256, settings)
+
+        if not reused:
+            await record_requested(
+                session,
+                device_id=device.device_id,
+                cmd_id=cmd_id,
+                artifact_version=version,
+                from_version=device.fw_version,
+                sha256=found_artifact.sha256,
+                size_bytes=found_artifact.size_bytes,
+                target=device.platform_type,
+                apply=apply,
+                sent_by=sent_by,
+            )
+            await session.commit()
+
+        payload = stage_payload(
+            cmd_id=cmd_id,
+            url=url,
+            sha256=found_artifact.sha256,
+            size=found_artifact.size_bytes,
+            version=version,
+            apply=apply,
+            confirm_timeout_s=settings.confirm_timeout_s,
+        )
+        if best_effort_broker:
+            try:
+                await publisher.publish(device.device_id, payload)
+            except CommandPublishError:
+                logger.exception(
+                    "auto-deploy %s for %s could not be published", cmd_id, device.device_id
+                )
+                await record_publish_failure(
+                    session,
+                    device_id=device.device_id,
+                    cmd_id=cmd_id,
+                    artifact_version=version,
+                    from_version=device.fw_version,
+                )
+                await session.commit()
+                skipped[device.device_id] = "broker publish failed"
+                continue
+        else:
+            await _publish(
+                publisher,
+                session,
+                payload,
+                device=device,
+                cmd_id=cmd_id,
+                version=version,
+            )
+
+        online = is_online(device, now=now_utc(), tolerance=settings.presence_tolerance)
+        deployed.append(
+            DeployAccepted(
+                cmd_id=cmd_id,
+                device_id=device.device_id,
+                version=version,
+                sha256=found_artifact.sha256,
+                size_bytes=found_artifact.size_bytes,
+                apply=apply,
+                reused=reused,
+                device_online=online,
+            )
+        )
+
+    return deployed, skipped

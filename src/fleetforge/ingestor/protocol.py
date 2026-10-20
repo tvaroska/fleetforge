@@ -153,6 +153,7 @@ class AnnouncePayload(_TolerantPayload):
     rollback_capable: bool | None = None
     capabilities: list[str] | None = None
     reset_reason: str | None = None
+    secrets_rev: int | None = None
 
     @field_validator("ssid", mode="before")
     @classmethod
@@ -189,6 +190,12 @@ class AnnouncePayload(_TolerantPayload):
     def _usable_reset_reason(cls, value: object, info: ValidationInfo) -> str | None:
         """A short string, or `None` — never a `ValidationError` (S0-fw-6)."""
         return normalize_reset_reason(value, device_id=_logged_device_id(info))
+
+    @field_validator("secrets_rev", mode="before")
+    @classmethod
+    def _usable_secrets_rev(cls, value: object) -> int | None:
+        """A non-negative integer, or `None` — never a `ValidationError` (CUJ-2)."""
+        return _bounded_int(value, 0, 2**31 - 1)
 
 
 class PresencePayload(_TolerantPayload):

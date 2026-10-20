@@ -141,7 +141,7 @@ What the operator sees is **one flow with one result**, under the same status st
 - **Crash reason after a rollback is best effort.** An installed board has no USB cable. After the bootloader rolls back, the surviving slot reports `rolled_back` and, where it can, the failed boot's reset reason and last milestone. Whether the reset reason and a breadcrumb survive a rollback, and a brownout or power loss, is not established: [ota-deploy.md](../docs/features/ota-deploy.md) → *Operator-flow additions*.
 - **The deployment is an API resource.** The result card, an audit record (who, what, when) and a CI client read the same thing. This is the audit trail Marcus needs; rings and provenance build on it later.
 - **The timeline reports only what the agent reports.** No progress bar: `downloading` is published once, so a bar would sit still and read as a hang.
-- **Open, recorded not decided:** how a sleepy battery node avoids a false rollback from the confirm timer (beyond surfacing its sleepy wake window at pre-check).
+- **Open, recorded not decided:** how a sleepy battery node avoids a false rollback from the confirm timer (beyond surfacing its sleepy wake window at pre-check). Answered (R5-spec-1): it stays awake from `staging` until `confirmed` or `rolled_back` ([device-protocol.md](device-protocol.md) → `up/status`).
 
 **Decisions (transaction):**
 - **Artifact source = user's own toolchain (v1).** They build the `.bin` (idf.py / PlatformIO / Arduino); the server never builds in v1. *V2 adds a server-side compiler as one more producer — see [build-pipeline.md](../docs/features/build-pipeline.md).* Artifacts are opaque + versioned.
@@ -149,18 +149,22 @@ What the operator sees is **one flow with one result**, under the same status st
 - **Targeting = device or group/tag** (v1). Staged/canary rollout is post-v1.
 
 ## Flow 2 (V2) — Deploy from version control
-VCS integration and the server-side compiler are **automated artifact producers** feeding the same pipeline; steps 2–7 above are unchanged.
+VCS integration and external CI runners are **automated artifact producers** feeding the same pipeline; steps 2–7 above are unchanged.
 
 ```
-1. git tag / release in the user's repo
-2. CI builds the .bin and PUSHes it to Fleetforge's upload API,
-   with PROVENANCE: repo + commit SHA + tag + build URL     [push model]
-   (or Fleetforge builds it itself from the repo ref — R10)
-3. Fleetforge registers it as a deployable version
-4. Per-group DEPLOY POLICY decides:
-     • manual   → appears as deployable, human clicks deploy
-     • auto     → deploys to that group on a matching tag
-   → then the normal capability-check / sim / pull / confirm / rollback runs
+1. Project CD Settings configure repo_url, track_mode (branch | tag | commit),
+   track_ref (e.g. main, v*, or commit SHA), and auto_deploy_target (off | dev | all).
+2. git push / tag in the user's repo (or switching track_ref in Project CD Settings,
+   which dispatches a CI build if the ref is not already uploaded)
+3. CI compiles the .bin, runs tests + QEMU boot verification, and PUSHes it to
+   POST /v1/artifact?project=<slug> with PROVENANCE: repo_url + branch + commit_sha +
+   tag + build_url + test_passed
+4. Fleetforge registers the artifact version with commit provenance and checks the
+   project's CD rule:
+     • off / non-matching ref → appears as deployable in BUILDS, human clicks deploy
+     • matching ref + test_passed → automatically triggers OTA deploy to the project's
+       targeted board(s) (dev board held awake via dn/cfg stay_awake, or all 2+ boards)
+   → then the normal capability-check / pull / confirm / rollback runs
 ```
 
 **Decisions:**

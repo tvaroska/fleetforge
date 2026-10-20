@@ -15,8 +15,15 @@
 // The device log (R4-fe-2) follows the strip's board and is re-read when THAT board's
 // `last_seen` changes (an `up/log` batch moves it): no new stream, no frame body read.
 
-import { useState } from 'react'
-import { type ArtifactSummary, type Me } from './api'
+import { useState, type FormEvent } from 'react'
+import {
+  ApiError,
+  api,
+  type ArtifactSummary,
+  type AutoDeployTarget,
+  type Me,
+  type TrackMode,
+} from './api'
 import { buildInfo, type BuildInfo } from './buildInfo'
 import { useArtifacts, type Artifacts } from './deploy'
 import { DeviceLog } from './DeviceLog'
@@ -36,16 +43,222 @@ import { UploadBuild } from './UploadBuild'
 
 export type DashboardTab = 'fleet' | 'builds' | 'onboard' | 'access'
 
+function ContinuousDeploymentCard({
+  projectSlug,
+  onDeployed,
+  onSessionExpired,
+}: {
+  projectSlug: string
+  onDeployed: () => void
+  onSessionExpired: () => void
+}) {
+  const [repoUrl, setRepoUrl] = useState('')
+  const [trackMode, setTrackMode] = useState<TrackMode>('off')
+  const [trackRef, setTrackRef] = useState('')
+  const [autoTarget, setAutoTarget] = useState<AutoDeployTarget>('dev')
+  const [webhookUrl, setWebhookUrl] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [statusMsg, setStatusMsg] = useState<string | null>(null)
+  const [errorMsg, setErrorMsg] = useState<string | null>(null)
+
+  async function save(e: FormEvent) {
+    e.preventDefault()
+    setBusy(true)
+    setStatusMsg(null)
+    setErrorMsg(null)
+    try {
+      const updated = await api.updateProject(projectSlug, {
+        repo_url: repoUrl.trim() || null,
+        track_mode: trackMode,
+        track_ref: trackMode === 'off' ? null : trackRef.trim() || null,
+        auto_deploy_target: trackMode === 'off' ? 'off' : autoTarget,
+        ci_webhook_url: webhookUrl.trim() || null,
+      })
+      const deployedCount = updated.auto_deployed_devices?.length ?? 0
+      if (deployedCount > 0) {
+        onDeployed()
+        setStatusMsg(
+          `Saved CD settings and staged matching build to ${deployedCount} board(s): ${updated.auto_deployed_devices!.join(', ')}.`,
+        )
+      } else if (updated.ci_webhook_triggered) {
+        setStatusMsg(
+          `Saved CD settings and dispatched CI build webhook for ${updated.track_mode} ${updated.track_ref ?? ''}.`,
+        )
+      } else {
+        setStatusMsg(
+          updated.track_mode === 'off'
+            ? 'Continuous deployment turned off.'
+            : `Tracking ${updated.track_mode} "${updated.track_ref ?? ''}" → auto-deploy to ${updated.auto_deploy_target} boards on upload.`,
+        )
+      }
+    } catch (err) {
+      if (err instanceof ApiError && err.isUnauthorized) {
+        onSessionExpired()
+        return
+      }
+      setErrorMsg(err instanceof Error ? err.message : 'Could not update CD settings')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <section
+      className="console-card"
+      aria-labelledby="cd-settings-heading"
+      data-testid="continuous-deployment"
+    >
+      <h2 id="cd-settings-heading">Continuous deployment (Git / CI)</h2>
+      <p className="muted">
+        Track a Git branch, tag pattern (e.g. <code>v*</code>), or commit for{' '}
+        <code>{projectSlug}</code>. When CI uploads a passing build matching this rule (or when you
+        switch the tracked ref to an already-uploaded build), Fleetforge automatically stages it to
+        your <code>dev</code> boards or the entire project fleet.
+      </p>
+      <form className="compact-form" onSubmit={(e) => void save(e)}>
+        <div className="form-grid form-grid-3">
+          <label>
+            Track mode{' '}
+            <select
+              aria-label="Track mode"
+              value={trackMode}
+              onChange={(e) => setTrackMode(e.target.value as TrackMode)}
+              disabled={busy}
+            >
+              <option value="off">off (manual deploy)</option>
+              <option value="branch">branch (e.g. main)</option>
+              <option value="tag">tag glob (e.g. v*)</option>
+              <option value="commit">commit SHA</option>
+            </select>
+          </label>
+          <label>
+            Tracked ref{' '}
+            <input
+              type="text"
+              aria-label="Tracked ref"
+              placeholder={
+                trackMode === 'tag'
+                  ? 'v*'
+                  : trackMode === 'commit'
+                    ? 'a1b2c3d'
+                    : 'main'
+              }
+              value={trackRef}
+              onChange={(e) => setTrackRef(e.target.value)}
+              disabled={busy || trackMode === 'off'}
+            />
+          </label>
+          <label>
+            Auto-deploy target{' '}
+            <select
+              aria-label="Auto-deploy target"
+              value={autoTarget}
+              onChange={(e) => setAutoTarget(e.target.value as AutoDeployTarget)}
+              disabled={busy || trackMode === 'off'}
+            >
+              <option value="dev">dev boards only</option>
+              <option value="all">all project boards</option>
+              <option value="off">off</option>
+            </select>
+          </label>
+        </div>
+        <div className="form-grid form-grid-2">
+          <label>
+            Git repository URL (optional){' '}
+            <input
+              type="text"
+              aria-label="Git repository URL"
+              placeholder="https://github.com/org/eink-firmware"
+              value={repoUrl}
+              onChange={(e) => setRepoUrl(e.target.value)}
+              disabled={busy}
+            />
+          </label>
+          <label>
+            CI build webhook URL (optional){' '}
+            <input
+              type="text"
+              aria-label="CI build webhook URL"
+              placeholder="https://api.github.com/repos/org/eink-firmware/dispatches"
+              value={webhookUrl}
+              onChange={(e) => setWebhookUrl(e.target.value)}
+              disabled={busy}
+            />
+          </label>
+        </div>
+        <p>
+          <button
+            type="submit"
+            disabled={busy || (trackMode !== 'off' && trackRef.trim() === '')}
+          >
+            {busy ? 'Saving…' : 'Save & sync tracking'}
+          </button>
+        </p>
+      </form>
+      {statusMsg !== null && (
+        <p className="ok" data-testid="cd-status">
+          {statusMsg}
+        </p>
+      )}
+      {errorMsg !== null && (
+        <p className="bad" role="alert" data-testid="cd-error">
+          {errorMsg}
+        </p>
+      )}
+    </section>
+  )
+}
+
 function UploadedBuilds({
   artifacts,
+  projectSlug,
   onGoToFleet,
+  onDeployed,
+  onSessionExpired,
 }: {
   artifacts: Artifacts
+  projectSlug: string
   onGoToFleet: () => void
+  onDeployed: () => void
+  onSessionExpired: () => void
 }) {
+  const [deployingKey, setDeployingKey] = useState<string | null>(null)
+  const [bulkStatus, setBulkStatus] = useState<string | null>(null)
+  const [bulkError, setBulkError] = useState<string | null>(null)
+
   const rows: ArtifactSummary[] = []
   for (const list of artifacts.byTarget.values()) {
     rows.push(...list)
+  }
+
+  async function bulkDeploy(version: string, targetFilter: 'dev' | 'all') {
+    const key = `${version}:${targetFilter}`
+    setDeployingKey(key)
+    setBulkStatus(null)
+    setBulkError(null)
+    try {
+      const res = await api.deployProject(projectSlug, {
+        version,
+        target_filter: targetFilter,
+        apply: 'auto',
+      })
+      onDeployed()
+      const count = res.deployed.length
+      const skippedCount = Object.keys(res.skipped).length
+      setBulkStatus(
+        `Staged ${version} to ${count} ${targetFilter} board(s)` +
+          (skippedCount > 0 ? ` (${skippedCount} skipped)` : '') +
+          '.',
+      )
+    } catch (err) {
+      if (err instanceof ApiError && err.isUnauthorized) {
+        onSessionExpired()
+        return
+      }
+      setBulkError(err instanceof Error ? err.message : 'Project deploy failed')
+    } finally {
+      setDeployingKey(null)
+    }
   }
 
   return (
@@ -64,8 +277,19 @@ function UploadedBuilds({
       </div>
       <p className="muted">
         Firmware images stored for this project. Every compatible board offers these versions in
-        its Deploy column on the Fleet tab.
+        its Deploy column on the Fleet tab, or you can stage a version across all dev/project
+        boards here.
       </p>
+      {bulkStatus !== null && (
+        <p className="ok" data-testid="bulk-deploy-status">
+          {bulkStatus}
+        </p>
+      )}
+      {bulkError !== null && (
+        <p className="bad" role="alert" data-testid="bulk-deploy-error">
+          {bulkError}
+        </p>
+      )}
       {!artifacts.loaded && artifacts.error === null ? (
         <p aria-busy="true">Loading…</p>
       ) : rows.length === 0 ? (
@@ -83,6 +307,7 @@ function UploadedBuilds({
               <th scope="col">Size</th>
               <th scope="col">SHA-256</th>
               <th scope="col">Uploaded</th>
+              <th scope="col">Fleet deploy</th>
             </tr>
           </thead>
           <tbody>
@@ -98,6 +323,15 @@ function UploadedBuilds({
                 </td>
                 <td>
                   <strong>{a.version}</strong>
+                  {(a.branch || a.tag || a.commit_sha || a.test_passed != null) && (
+                    <div className="muted" data-testid="build-provenance">
+                      {a.branch && <code>{a.branch} </code>}
+                      {a.tag && <code>tag:{a.tag} </code>}
+                      {a.commit_sha && <code>@{a.commit_sha.slice(0, 7)} </code>}
+                      {a.test_passed === true && <span className="ok">✓ tests</span>}
+                      {a.test_passed === false && <span className="bad">✗ tests</span>}
+                    </div>
+                  )}
                 </td>
                 <td>
                   <code>{a.partition_layout ?? 'ab-4m-v1'}</code>
@@ -107,6 +341,24 @@ function UploadedBuilds({
                   <code title={a.sha256}>{shortSha(a.sha256)}</code>
                 </td>
                 <td>{formatWhen(a.created_at)}</td>
+                <td>
+                  <button
+                    type="button"
+                    disabled={deployingKey !== null}
+                    onClick={() => void bulkDeploy(a.version, 'dev')}
+                    title="Stage this version onto all dev boards in this project"
+                  >
+                    Deploy dev
+                  </button>{' '}
+                  <button
+                    type="button"
+                    disabled={deployingKey !== null}
+                    onClick={() => void bulkDeploy(a.version, 'all')}
+                    title="Stage this version onto all compatible boards in this project"
+                  >
+                    Deploy all
+                  </button>
+                </td>
               </tr>
             ))}
           </tbody>
@@ -276,6 +528,11 @@ export function Dashboard({
           <span aria-hidden="true">→</span>
           <span>3. Select version &amp; Deploy in Fleet</span>
         </div>
+        <ContinuousDeploymentCard
+          projectSlug={activeProject}
+          onDeployed={fleet.refresh}
+          onSessionExpired={expire}
+        />
         <UploadBuild
           devices={fleet.devices}
           profiles={profiles.profiles}
@@ -284,7 +541,13 @@ export function Dashboard({
           project={projectParam}
           onGoToFleet={() => setActiveTab('fleet')}
         />
-        <UploadedBuilds artifacts={artifacts} onGoToFleet={() => setActiveTab('fleet')} />
+        <UploadedBuilds
+          artifacts={artifacts}
+          projectSlug={activeProject}
+          onGoToFleet={() => setActiveTab('fleet')}
+          onDeployed={fleet.refresh}
+          onSessionExpired={expire}
+        />
         <PartitionProfiles
           profiles={profiles}
           devices={fleet.devices}

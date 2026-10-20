@@ -95,8 +95,8 @@ Every deployment passes gates; each catches what the previous can't (**defense i
 | Data | Kept |
 |---|---|
 | `deploy_events` (KPI source) | **forever** — the metric history is the product's evidence |
-| Telemetry samples | **30 days** |
-| Device logs (`up/log`) | **7 days** |
+| Telemetry samples | **30 days**, and at most the newest **500 000** samples per device |
+| Device logs (`up/log`) | **7 days**, and at most the newest **5 000 lines** per device |
 | Revoked/expired tokens | **90 days**, then purged |
 
 ### Success criteria
@@ -123,9 +123,9 @@ What the operator is promised, in v1 terms. Mechanism in [design/architecture.md
 
 ## Explicitly out of scope (v1)
 
-**Product boundary — Fleetforge manages *firmware versions*, not devices.** It does not provide remote shell, general device configuration management, application-level provisioning, or a data pipeline for telemetry. The `cfg` channel exists to tune the agent (intervals, thresholds) and deliberately stops there: pushing application settings through it would make Fleetforge a config-management product with a firmware feature, which is the opposite of the intent.
+**Product boundary — Fleetforge manages *firmware versions, device observability, and rotating device secrets*, not general application state.** It does not provide remote shell or general-purpose application configuration management. The `dn/cfg` channel tunes the agent (intervals, thresholds, `stay_awake` dev hold) and carries the monotonic `secrets_rev` pointer so boards can pull rotated API keys over HTTPS (`GET /v1/device-secrets`) without reflashing, while `fleetforge-ingestor` exports device logs (`up/log`) and metrics (`up/telemetry`) over OTLP/HTTP.
 
-Also out: develop/build/debug pillar *(server-side compile arrives in V2)* · **advisory simulation gate** *(V2)* · **groups & bulk deploy** *(V3 — five heterogeneous boards have nothing to bulk-deploy)* · staged/canary rollouts · Raspberry Pi & FPGA implementations · turnkey self-hosting · multi-tenant/orgs & public signup · rich observability & alerting · non-Chromium browser onboarding.
+Also out: on-server interactive debugging · staged/canary rollouts *(beyond project dev/all targets)* · Raspberry Pi & FPGA implementations · turnkey self-hosting · public self-signup · non-Chromium browser USB onboarding.
 
 ## Roadmap (beyond v1)
 - **V2 — source to artifact:** VCS ingestion with provenance, server-side compilation, the advisory simulation gate, deploy policy.
