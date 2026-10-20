@@ -6,6 +6,19 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-19 — S0-bug-6: P1's 11 broken tests were wrong, not the code; an arrival belongs to its token's project and an orphan is dropped on purpose
+
+- **Cause.** P1 shipped with its tests never run. 4 failures in `tests/test_projects_and_users.py` and 7 arrival tests in `tests/test_api_devices.py`. The TODO blamed the progress join for all of them; only the 7 arrival cases were.
+- **Decision (per case; the backend matches `docs/features/projects-and-users.md` in each, the test changed).**
+  - Member add: the backend has only `PUT /v1/projects/{slug}/members/{username}` with `{"role": ...}`; tests no longer POST. **S0-bug-7** owns the shape and `frontend/src/api.ts:759` (which POSTs); if it picks POST it updates these 3 test call sites.
+  - Stage payload digest is `publisher.last["artifact"]["sha256"]`.
+  - Minting a project-pinned token needs `owner`; the RBAC test now asserts the operator is refused (403), then promotes bob to owner. Setup calls there now assert their status.
+  - Firebase fixture id_tokens are 16+ chars (`FirebaseLogin.id_token` keeps `min_length=16`).
+  - Arrivals: the fixture wrote random token ids. `add_progress` now inserts a real token; `_wipe_fleet` clears tokens and non-default projects.
+- **Why.** A board still arriving has no `devices` row, so the enrollment token it reported under is its only link to a project. `LATEST_PROJECT_SQL`'s inner join drops a row whose token has no row, explicitly (comment + test). Production cannot write one: `POST /v1/device-progress` loads the token first and tokens are revoked, never deleted. `latest_progress` now requires `project_id` and the unscoped `LATEST_SQL` is deleted (it would be a cross-project leak). A comment on `DeviceProgress.token_id` says any future token purge must keep tokens `progress_window_s` past `expires_at`/`revoked_at`.
+- **Known limit.** A board enrolled into A and moved to B within `progress_window_s` (900 s) can show in A's arrivals for up to 15 min, since A's list does not hold the device. Cosmetic and bounded; possible follow-up.
+- **Tests.** `test_an_arrival_is_listed_only_under_its_tokens_project`, `test_an_arrival_whose_token_row_is_gone_is_dropped`; each fails under its mutation (LEFT JOIN keeping orphans; hard-coded default project).
+
 ## 2026-10-19 — S0-bug-5: the verbs mint a fresh command id on every POST; P1's never-defined "reuse the latest unanswered command" is dropped
 
 - **Cause.** P1 (d822f1b) imported `latest_unanswered_command` into `api/routers/commands.py` and added a reuse branch in `_send()`; the function never existed, so the api could not boot and pytest could not collect.

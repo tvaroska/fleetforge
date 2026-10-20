@@ -35,6 +35,8 @@ from fleetforge.db.models import (
     DeviceMetric,
     DeviceProgress,
     DeviceTelemetry,
+    EnrollmentToken,
+    Project,
 )
 from fleetforge.deploys import MAX_DEPLOY_STEPS
 from fleetforge.events import EVENTS_CHANNEL, EventType
@@ -52,6 +54,9 @@ DEVICE_ID = "a4cf12b3de91"
 
 async def _wipe_fleet(session: AsyncSession) -> None:
     await session.execute(delete(DeviceProgress))
+    await session.execute(delete(EnrollmentToken))
+    # Tokens cascade from their project, so this clears the non-default projects' too.
+    await session.execute(delete(Project).where(Project.slug != "default"))
     # Before the devices: the FK is `ON DELETE RESTRICT`, which is the point.
     await session.execute(delete(DeployEvent))
     await session.execute(delete(Device))
@@ -290,11 +295,26 @@ async def add_progress(
     *,
     age_s: float = 0.0,
     detail: str | None = None,
+    token_id: uuid.UUID | None = None,
 ) -> None:
+    """Record one stage report under a real enrollment token.
+
+    An arrival belongs to the project of the token it was reported under
+    (`progress.LATEST_PROJECT_SQL`), so the fixture needs a token row. By default it is
+    a fresh one in the default project; pass `token_id` to report under another.
+    """
+    if token_id is None:
+        token = EnrollmentToken(
+            secret_hash="$argon2id$v=19$m=19456,t=2,p=1$seeded",
+            expires_at=now_utc() + dt.timedelta(hours=24),
+        )
+        session.add(token)
+        await session.flush()
+        token_id = token.id
     session.add(
         DeviceProgress(
             device_id=device_id,
-            token_id=uuid.uuid4(),
+            token_id=token_id,
             stage=stage,
             detail=detail,
             at=now_utc() - dt.timedelta(seconds=age_s),
@@ -350,6 +370,49 @@ async def test_a_board_whose_stage_has_gone_quiet_reads_stalled(
 
     stalled = {row["device_id"]: row["stalled"] for row in body["arrivals"]}
     assert stalled == {"a4cf12b3de12": True, "a4cf12b3de13": False}
+
+
+async def test_an_arrival_is_listed_only_under_its_tokens_project(
+    admin_app: FastAPI, fleet: AsyncSession
+) -> None:
+    """A board still arriving has no device row; its token is its only link to a project."""
+    project = Project(slug="arrivals-b", name="Arrivals B")
+    fleet.add(project)
+    await fleet.flush()
+    token = EnrollmentToken(
+        secret_hash="$argon2id$v=19$m=19456,t=2,p=1$seeded",
+        expires_at=now_utc() + dt.timedelta(hours=24),
+        project_id=project.id,
+    )
+    fleet.add(token)
+    await fleet.flush()
+    await add_progress(fleet, "a4cf12b3de30", "enrolling", token_id=token.id)
+    headers = {"Authorization": f"Bearer {await login_admin(admin_app)}"}
+
+    async with client_for(admin_app) as client:
+        default = await client.get("/v1/devices", headers=headers)
+        other = await client.get("/v1/devices?project=arrivals-b", headers=headers)
+
+    assert default.status_code == 200, default.text
+    assert other.status_code == 200, other.text
+    assert default.json()["arrivals"] == []
+    assert [row["device_id"] for row in other.json()["arrivals"]] == ["a4cf12b3de30"]
+
+
+async def test_an_arrival_whose_token_row_is_gone_is_dropped(
+    admin_app: FastAPI, fleet: AsyncSession
+) -> None:
+    """The explicit drop: no token row means no project, so no project lists it.
+
+    Production cannot write such a row (`/v1/device-progress` loads the token first and
+    tokens are revoked, never deleted); `progress.LATEST_PROJECT_SQL` documents the
+    inner join as the deliberate answer for one that appears anyway.
+    """
+    await add_progress(fleet, "a4cf12b3de31", "enrolling", token_id=uuid.uuid4())
+
+    body = await list_devices(admin_app, await login_admin(admin_app))
+
+    assert body["arrivals"] == []
 
 
 async def test_an_old_arrival_falls_out_of_the_window(

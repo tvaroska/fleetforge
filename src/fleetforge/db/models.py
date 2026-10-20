@@ -690,6 +690,10 @@ class DeviceProgress(Base):
     device_id: Mapped[str] = mapped_column(Text, nullable=False)
     # The enrollment token this was reported under. Not a FK either: the token row
     # may be deleted by a future retention sweep long before these rows age out.
+    # But the arrivals read joins on this column for the row's project (P1,
+    # `progress.LATEST_PROJECT_SQL`), so a token purge (the `expires_at` index's "R1
+    # purge") must keep a token at least `progress_window_s` past its
+    # `expires_at`/`revoked_at`, or its arrivals vanish from every project.
     token_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False)
     stage: Mapped[str] = mapped_column(Text, nullable=False)
     detail: Mapped[str | None] = mapped_column(Text, nullable=True)

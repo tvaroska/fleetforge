@@ -59,19 +59,17 @@ TRIM_SQL = text(
     """
 )
 
-# The newest row per device inside the window. `DISTINCT ON` is the reason this is
-# hand-written SQL: it reads straight down `ix_device_progress_device_id_at` instead
-# of sorting a window function's output, and at 25 devices the clarity is worth more
-# than the speed anyway.
-LATEST_SQL = text(
-    """
-    SELECT DISTINCT ON (device_id) device_id, at, stage, detail
-      FROM device_progress
-     WHERE at > now() - make_interval(secs => :window_s)
-     ORDER BY device_id, at DESC, id DESC
-    """
-)
-
+# The newest row per device inside the window, for one project. `DISTINCT ON` is the
+# reason this is hand-written SQL: it reads straight down
+# `ix_device_progress_device_id_at` instead of sorting a window function's output, and
+# at 25 devices the clarity is worth more than the speed anyway.
+#
+# A board still arriving has no `devices` row, so the enrollment token it reported under
+# is its only link to a project (the one it will enroll into). The INNER JOIN therefore
+# drops, on purpose, a row whose token has no row: it has no project to be shown in.
+# Production cannot write one today (`POST /v1/device-progress` loads the token first and
+# tokens are revoked, never deleted). Any future token purge must keep a token at least
+# `progress_window_s` past its `expires_at`/`revoked_at`.
 LATEST_PROJECT_SQL = text(
     """
     SELECT DISTINCT ON (dp.device_id) dp.device_id, dp.at, dp.stage, dp.detail
@@ -129,23 +127,21 @@ async def latest_progress(
     now: dt.datetime,
     window_s: int,
     stall_s: int,
-    project_id: uuid.UUID | None = None,
+    project_id: uuid.UUID,
 ) -> list[Arrival]:
     """The newest stage each board reported inside `window_s`, newest board first.
+
+    Scoped to `project_id`: an arrival belongs to the project of the enrollment token it
+    was reported under (see `LATEST_PROJECT_SQL`). There is deliberately no unscoped read.
 
     `stalled` means the board's newest stage is older than `stall_s` — it said
     something and then stopped, which is the signal the dashboard exists to show. It
     is not a judgement about whether the board is *broken*: a slow SNTP or a long
     enroll retry reads the same, and the operator reads the stage to tell them apart.
     """
-    if project_id is None:
-        rows = (await session.execute(LATEST_SQL, {"window_s": window_s})).all()
-    else:
-        rows = (
-            await session.execute(
-                LATEST_PROJECT_SQL, {"window_s": window_s, "project_id": project_id}
-            )
-        ).all()
+    rows = (
+        await session.execute(LATEST_PROJECT_SQL, {"window_s": window_s, "project_id": project_id})
+    ).all()
     cutoff = dt.timedelta(seconds=stall_s)
     arrivals = [
         Arrival(

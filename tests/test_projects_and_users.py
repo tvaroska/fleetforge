@@ -99,10 +99,10 @@ async def test_multi_user_login_and_disabled_user_rejection(
         alice_id = r.json()["id"]
 
         # Grant alice viewer on 'default'
-        r = await client.post(
-            "/v1/projects/default/members",
+        r = await client.put(
+            "/v1/projects/default/members/alice",
             headers=headers,
-            json={"username": "alice", "role": "viewer"},
+            json={"role": "viewer"},
         )
         assert r.status_code == 200, r.text
 
@@ -254,7 +254,7 @@ async def test_project_isolation_for_artifacts_enrollment_devices_and_deploys(
         )
         assert dep.status_code == 202, dep.text
         assert dep.json()["sha256"] == SHA_B
-        assert publisher.last["sha256"] == SHA_B
+        assert publisher.last["artifact"]["sha256"] == SHA_B
 
         # Transferring device from 'robotics' to 'default' via PATCH /v1/devices/{id}
         xfer = await client.patch(
@@ -281,26 +281,30 @@ async def test_rbac_roles_and_scoped_tokens(
     headers = {"Authorization": f"Bearer {admin_token}"}
 
     async with client_for(admin_app, base_url="https://testserver") as client:
-        await client.post(
+        r = await client.post(
             "/v1/projects",
             headers=headers,
             json={"slug": "alpha", "name": "Alpha"},
         )
-        await client.post(
+        assert r.status_code in (200, 201), r.text
+        r = await client.post(
             "/v1/projects",
             headers=headers,
             json={"slug": "beta", "name": "Beta"},
         )
-        await client.post(
+        assert r.status_code in (200, 201), r.text
+        r = await client.post(
             "/v1/users",
             headers=headers,
             json={"username": "bob", "password": "bob-password-123", "is_superadmin": False},
         )
-        await client.post(
-            "/v1/projects/alpha/members",
+        assert r.status_code in (200, 201), r.text
+        r = await client.put(
+            "/v1/projects/alpha/members/bob",
             headers=headers,
-            json={"username": "bob", "role": "viewer"},
+            json={"role": "viewer"},
         )
+        assert r.status_code == 200, r.text
 
         # Bob logs in
         r = await client.post(
@@ -324,11 +328,12 @@ async def test_rbac_roles_and_scoped_tokens(
         assert upload_viewer.status_code == 403
 
         # Promote Bob to operator on 'alpha' -> upload now succeeds
-        await client.post(
-            "/v1/projects/alpha/members",
+        r = await client.put(
+            "/v1/projects/alpha/members/bob",
             headers=headers,
-            json={"username": "bob", "role": "operator"},
+            json={"role": "operator"},
         )
+        assert r.status_code == 200, r.text
         upload_op = await client.post(
             "/v1/artifact?target=esp32&version=1.0.0&partition_layout=ab-4m-v1&project=alpha",
             headers={**bob_headers, "Content-Type": "application/octet-stream"},
@@ -336,7 +341,21 @@ async def test_rbac_roles_and_scoped_tokens(
         )
         assert upload_op.status_code == 201
 
-        # Bob mints a read-only token pinned to 'alpha'
+        # An operator cannot mint a project-pinned token: that needs owner.
+        refused = await client.post(
+            "/v1/auth/tokens",
+            headers=bob_headers,
+            json={"name": "alpha-reader", "project": "alpha", "scopes": ["read"]},
+        )
+        assert refused.status_code == 403, refused.text
+        r = await client.put(
+            "/v1/projects/alpha/members/bob",
+            headers=headers,
+            json={"role": "owner"},
+        )
+        assert r.status_code == 200, r.text
+
+        # Bob, now owner, mints a read-only token pinned to 'alpha'
         tok_res = await client.post(
             "/v1/auth/tokens",
             headers=bob_headers,
@@ -526,20 +545,20 @@ async def test_firebase_invite_only_auth_and_superadmin_bootstrap(
         email="carol@example.com",
         password="carol-firebase-password",
         uid="fb-uid-carol-001",
-        id_token="fb-jwt-carol",
+        id_token="fb-id-token-carol-0001",
         display_name="Carol Danvers",
     )
     fake_fb.register(
         email="stranger@example.com",
         password="stranger-password",
         uid="fb-uid-stranger-999",
-        id_token="fb-jwt-stranger",
+        id_token="fb-id-token-stranger-0001",
     )
     fake_fb.register(
         email="boris@tvaroska.sk",
         password="boris-firebase-password",
         uid="fb-uid-boris-001",
-        id_token="fb-jwt-boris",
+        id_token="fb-id-token-boris-0001",
         display_name="Boris Tvaroska",
     )
 
@@ -563,7 +582,7 @@ async def test_firebase_invite_only_auth_and_superadmin_bootstrap(
             # 1. Uninvited user is rejected with 403 even with valid Firebase credentials
             uninvited = await client.post(
                 "/v1/auth/firebase",
-                json={"id_token": "fb-jwt-stranger"},
+                json={"id_token": "fb-id-token-stranger-0001"},
             )
             assert uninvited.status_code == 403, uninvited.text
 
@@ -596,7 +615,7 @@ async def test_firebase_invite_only_auth_and_superadmin_bootstrap(
             # 4. Configured FIREBASE_SUPERADMIN_EMAILS auto-provisions as superadmin on first login
             sa_res = await client.post(
                 "/v1/auth/firebase",
-                json={"id_token": "fb-jwt-boris"},
+                json={"id_token": "fb-id-token-boris-0001"},
             )
             assert sa_res.status_code == 200, sa_res.text
             boris_headers = {"Authorization": f"Bearer {sa_res.cookies['ff_session']}"}
