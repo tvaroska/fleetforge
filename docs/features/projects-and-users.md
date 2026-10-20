@@ -321,3 +321,13 @@ Each phase is self-contained, testable with `just test`, and leaves the stack de
   - Add optional `username` input (defaulting to `admin`) to the login screen.
   - Add Project Switcher in the top bar when `me.projects.length > 1` or `me.is_superadmin`.
   - Add E2E Playwright verification (`frontend/scripts/projects-e2e.mjs`) proving two projects isolate their fleet lists, artifact dropdowns, and SSE streams.
+
+### Post-P1 fix: verb commands always mint a fresh command id (`S0-bug-5`)
+
+P1 imported a `latest_unanswered_command` helper into `api/routers/commands.py` and added a "reuse the newest unanswered command" branch in `_send()`. The helper was never defined, so the api could not boot and pytest could not collect (mypy reported the single missing attribute).
+
+The branch was dropped rather than implemented. `_send()` is back to the R5-be-2 body: one new command id and one row per POST, record, commit, then publish (a publish failure marks the row and returns 503). P1's `check_project_access` calls in `_send()` and `get_device_command` are untouched, as is `device_commands.py`.
+
+Why: the firmware stores the id of the last command it rebooted for in NVS and silently drops any later command with that id. The ack of a reboot-causing verb can die with the reboot, leaving its row unanswered forever, so reuse would make every later Reboot/Rollback for that board a silent no-op. Reuse also contradicts R5-be-2 ("each verb the server publishes is one row") and the no-expiry rule, so a time-bounded reuse is not an option. Deploy-intent reuse in `routers/deploys.py` is a separate, bounded mechanism and is unchanged.
+
+Seam and pinning test: `tests/test_api_commands.py::test_a_repeated_verb_is_a_new_command_even_unanswered` (rollback, reboot) posts the same verb twice with no answer and expects two 202s, distinct ids, two rows, two published payloads. Gotcha: `just test` runs `pytest -x`, and the known P1 failures tracked under S0-bug-6 (projects-and-users DB tests, device arrival tests) stop it early, so gate with a full run without `-x`.
