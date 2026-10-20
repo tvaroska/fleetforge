@@ -4,7 +4,9 @@ import datetime as dt
 import hashlib
 import uuid
 from collections.abc import AsyncIterator, Callable, Iterator
+from typing import Any
 
+import httpx
 import pytest
 from fastapi import FastAPI
 from sqlalchemy import delete, select, text
@@ -23,6 +25,7 @@ from fleetforge.auth.firebase import (
     FirebaseIdentity,
     FirebaseInvalidCredentials,
 )
+from fleetforge.auth.tokens import ADMIN_TOKEN_PREFIX, issue_token
 from fleetforge.config import get_settings
 from fleetforge.db.models import (
     DEFAULT_PROJECT_ID,
@@ -71,6 +74,8 @@ async def clean_tables(engine: AsyncEngine) -> AsyncIterator[None]:
     """Clean up rows created via the app's own sessionmaker after each test."""
     yield
     async with AsyncSession(engine, expire_on_commit=False) as session:
+        # Never the builtins: the deploy gate and upload ceiling elsewhere depend on them.
+        await session.execute(text("DELETE FROM partition_profiles WHERE origin <> 'builtin'"))
         await session.execute(delete(DeployEvent))
         await session.execute(delete(EnrollmentToken))
         await session.execute(delete(Device))
@@ -907,3 +912,390 @@ def test_auth_context_and_me_default_to_not_superadmin() -> None:
     assert ctx.is_superadmin is False
     me = MeResponse(token_id=uuid.uuid4(), subject="x", scopes=[], expires_at=None)
     assert me.is_superadmin is False
+
+
+# --- S0-sec-2: partition profiles, token minting, hidden device ids ----------------------
+
+AB_SHA = "1fa67e6bbd034e434d04e9d6f4f52bbe899361602cd498573eb3bde97d1559ed"  # ab-4m-v1
+DETECTED_SHA = hashlib.sha256(b"s0-sec-2 detected").hexdigest()
+USER_PROFILE_SHA = hashlib.sha256(b"s0-sec-2 user").hexdigest()
+ALPHA_DEVICE = "aaaaaaaaaaa1"
+BETA_DEVICE = "bbbbbbbbbbb1"
+UNKNOWN_DEVICE = "ccccccccccc1"
+
+
+def _bearer(token: str) -> dict[str, str]:
+    return {"Authorization": f"Bearer {token}"}
+
+
+async def _create_project(client: httpx.AsyncClient, headers: dict[str, str], slug: str) -> None:
+    r = await client.post("/v1/projects", headers=headers, json={"slug": slug, "name": slug})
+    assert r.status_code == 201, r.text
+
+
+async def _user_session(
+    client: httpx.AsyncClient,
+    headers: dict[str, str],
+    username: str,
+    memberships: dict[str, str],
+) -> dict[str, str]:
+    """Create `username` with `memberships` (slug -> role), log in, return its headers."""
+    password = f"{username}-password-123"
+    r = await client.post(
+        "/v1/users",
+        headers=headers,
+        json={"username": username, "password": password, "is_superadmin": False},
+    )
+    assert r.status_code == 201, r.text
+    for slug, role in memberships.items():
+        r = await client.put(
+            f"/v1/projects/{slug}/members/{username}", headers=headers, json={"role": role}
+        )
+        assert r.status_code == 200, r.text
+    r = await client.post("/v1/auth/login", json={"username": username, "password": password})
+    assert r.status_code == 200, r.text
+    return _bearer(r.cookies["ff_session"])
+
+
+async def _project_id(engine: AsyncEngine, slug: str) -> uuid.UUID:
+    async with AsyncSession(engine) as session:
+        found = await session.scalar(select(Project.id).where(Project.slug == slug))
+    assert found is not None
+    return found
+
+
+async def _userless_token(
+    engine: AsyncEngine, project_id: uuid.UUID | None, scopes: list[str], name: str
+) -> tuple[str, uuid.UUID]:
+    """A machine token with no user (CLI `issue-token`), optionally project-pinned."""
+    issued = issue_token(ADMIN_TOKEN_PREFIX)
+    async with AsyncSession(engine) as session:
+        session.add(
+            AdminToken(
+                id=issued.token_id,
+                name=name,
+                secret_hash=issued.secret_hash,
+                subject="cli",
+                scopes=scopes,
+                user_id=None,
+                project_id=project_id,
+            )
+        )
+        await session.commit()
+    return issued.token, issued.token_id
+
+
+async def _add_device(engine: AsyncEngine, device_id: str, project_id: uuid.UUID) -> None:
+    async with AsyncSession(engine) as session:
+        session.add(
+            Device(
+                device_id=device_id,
+                project_id=project_id,
+                platform_type="esp32",
+                link_type="wifi",
+                power_class="always_on",
+                partition_layout="ab-4m-v1",
+                partition_table_sha256=AB_SHA,
+                capabilities=["ota", "reboot", "rollback"],
+            )
+        )
+        await session.commit()
+
+
+async def _add_pending_profile(engine: AsyncEngine, detected_device_id: str) -> None:
+    async with AsyncSession(engine) as session:
+        await session.execute(
+            text(
+                "INSERT INTO partition_profiles (partition_table_sha256, origin, ota_slot_size, "
+                "flash_chip_size, detected_device_id) "
+                "VALUES (:sha, 'detected', 1835008, 4194304, :d)"
+            ),
+            {"sha": DETECTED_SHA, "d": detected_device_id},
+        )
+        await session.commit()
+
+
+async def _profile_row(engine: AsyncEngine, sha: str) -> tuple[object, ...] | None:
+    async with AsyncSession(engine) as session:
+        found = (
+            await session.execute(
+                text(
+                    "SELECT layout_id, origin, ota_slot_size, adopted_at IS NOT NULL, "
+                    "detected_device_id FROM partition_profiles "
+                    "WHERE partition_table_sha256 = :sha"
+                ),
+                {"sha": sha},
+            )
+        ).first()
+    return tuple(found) if found is not None else None
+
+
+async def _token_count(engine: AsyncEngine) -> int:
+    async with AsyncSession(engine) as session:
+        return len((await session.scalars(select(AdminToken.id))).all())
+
+
+async def test_a_viewer_or_read_token_cannot_write_partition_profiles(
+    admin_app: FastAPI, engine: AsyncEngine, clean_tables: None
+) -> None:
+    """S0-sec-2: profiles are global, so writing one is a superadmin action only."""
+    admin_headers = _bearer(await login_admin(admin_app))
+    await _add_pending_profile(engine, ALPHA_DEVICE)
+    pending_before = await _profile_row(engine, DETECTED_SHA)
+    assert pending_before == (None, "detected", 1835008, False, ALPHA_DEVICE)
+    create = {
+        "layout_id": "s0sec2-user",
+        "partition_table_sha256": USER_PROFILE_SHA,
+        "ota_slot_size": 1966080,
+    }
+
+    async with client_for(admin_app, base_url="https://testserver") as client:
+        callers = {
+            "viewer": await _user_session(client, admin_headers, "pviewer", {"default": "viewer"}),
+            "operator": await _user_session(
+                client, admin_headers, "poperator", {"default": "operator"}
+            ),
+            "owner": await _user_session(client, admin_headers, "powner", {"default": "owner"}),
+            "pinned read": _bearer(
+                (await _userless_token(engine, DEFAULT_PROJECT_ID, ["read"], "p-read"))[0]
+            ),
+            "pinned admin": _bearer(
+                (await _userless_token(engine, DEFAULT_PROJECT_ID, ["admin"], "p-admin"))[0]
+            ),
+        }
+        for who, headers in callers.items():
+            r = await client.post("/v1/partition-profiles", headers=headers, json=create)
+            assert r.status_code == 403, (who, r.text)
+            r = await client.patch(
+                f"/v1/partition-profiles/{DETECTED_SHA}",
+                headers=headers,
+                json={"layout_id": "s0sec2-adopted"},
+            )
+            assert r.status_code == 403, (who, r.text)
+            r = await client.delete(f"/v1/partition-profiles/{DETECTED_SHA}", headers=headers)
+            assert r.status_code == 403, (who, r.text)
+            # A malformed fingerprint is refused before it is looked at: no 404 oracle.
+            r = await client.patch(
+                "/v1/partition-profiles/not-a-sha", headers=headers, json={"layout_id": "x"}
+            )
+            assert r.status_code == 403, (who, r.text)
+            r = await client.delete("/v1/partition-profiles/not-a-sha", headers=headers)
+            assert r.status_code == 403, (who, r.text)
+            # Reading is still allowed.
+            r = await client.get("/v1/partition-profiles", headers=headers)
+            assert r.status_code == 200, (who, r.text)
+
+        assert await _profile_row(engine, DETECTED_SHA) == pending_before
+        assert await _profile_row(engine, USER_PROFILE_SHA) is None
+
+        # The superadmin still writes.
+        r = await client.post("/v1/partition-profiles", headers=admin_headers, json=create)
+        assert r.status_code == 201, r.text
+        r = await client.patch(
+            f"/v1/partition-profiles/{DETECTED_SHA}",
+            headers=admin_headers,
+            json={"layout_id": "s0sec2-adopted"},
+        )
+        assert r.status_code == 200, r.text
+        r = await client.delete(f"/v1/partition-profiles/{USER_PROFILE_SHA}", headers=admin_headers)
+        assert r.status_code == 204, r.text
+
+
+async def test_the_profile_list_shows_only_the_callers_projects_devices(
+    admin_app: FastAPI, engine: AsyncEngine, clean_tables: None
+) -> None:
+    """S0-sec-2: every profile is listed, but device ids only from the caller's projects."""
+    admin_headers = _bearer(await login_admin(admin_app))
+
+    async with client_for(admin_app, base_url="https://testserver") as client:
+        await _create_project(client, admin_headers, "alpha")
+        await _create_project(client, admin_headers, "beta")
+        alpha_id = await _project_id(engine, "alpha")
+        beta_id = await _project_id(engine, "beta")
+        await _add_device(engine, ALPHA_DEVICE, alpha_id)
+        await _add_device(engine, BETA_DEVICE, beta_id)
+        await _add_pending_profile(engine, BETA_DEVICE)
+
+        viewer = await _user_session(client, admin_headers, "lviewer", {"alpha": "viewer"})
+        loner = await _user_session(client, admin_headers, "lloner", {})
+        beta_reader = _bearer((await _userless_token(engine, beta_id, ["read"], "beta-read"))[0])
+
+        async def listing(headers: dict[str, str]) -> dict[str, dict[str, Any]]:
+            r = await client.get("/v1/partition-profiles", headers=headers)
+            assert r.status_code == 200, r.text
+            return {p["partition_table_sha256"]: p for p in r.json()["profiles"]}
+
+        everything = await listing(admin_headers)
+        assert {ALPHA_DEVICE, BETA_DEVICE} <= set(everything[AB_SHA]["device_ids"])
+        assert everything[DETECTED_SHA]["detected_device_id"] == BETA_DEVICE
+
+        alpha_view = await listing(viewer)
+        assert alpha_view.keys() == everything.keys(), "the profiles themselves are global"
+        assert alpha_view[AB_SHA]["device_ids"] == [ALPHA_DEVICE]
+        assert alpha_view[DETECTED_SHA]["detected_device_id"] is None
+
+        beta_view = await listing(beta_reader)
+        assert beta_view[AB_SHA]["device_ids"] == [BETA_DEVICE]
+        assert beta_view[DETECTED_SHA]["detected_device_id"] == BETA_DEVICE
+
+        lonely = await listing(loner)
+        assert lonely.keys() == everything.keys()
+        assert all(p["device_ids"] == [] for p in lonely.values())
+        assert lonely[DETECTED_SHA]["detected_device_id"] is None
+
+
+async def test_a_project_pinned_token_cannot_mint_tokens(
+    admin_app: FastAPI, engine: AsyncEngine, clean_tables: None
+) -> None:
+    """S0-sec-2: only an unpinned session mints, so no CI token outlives its revocation."""
+    admin_headers = _bearer(await login_admin(admin_app))
+
+    async with client_for(admin_app, base_url="https://testserver") as client:
+        await _create_project(client, admin_headers, "alpha")
+        alpha_id = await _project_id(engine, "alpha")
+        owner = await _user_session(client, admin_headers, "mowner", {"alpha": "owner"})
+
+        # The owner's session still mints, including a pinned admin token.
+        r = await client.post(
+            "/v1/auth/tokens",
+            headers=owner,
+            json={"name": "ci", "project": "alpha", "scopes": ["admin"]},
+        )
+        assert r.status_code == 201, r.text
+        user_pinned = _bearer(r.json()["token"])
+        userless_pinned = _bearer(
+            (await _userless_token(engine, alpha_id, ["admin"], "userless-alpha"))[0]
+        )
+
+        before = await _token_count(engine)
+        for who, headers in {"userless": userless_pinned, "user-owned": user_pinned}.items():
+            for body in (
+                {"name": "child", "project": "alpha", "scopes": ["admin"]},
+                {"name": "child", "scopes": ["read"]},
+            ):
+                r = await client.post("/v1/auth/tokens", headers=headers, json=body)
+                assert r.status_code == 403, (who, body, r.text)
+        assert await _token_count(engine) == before, "a refused mint wrote a row"
+
+
+async def test_a_userless_project_token_cannot_revoke_other_userless_tokens(
+    admin_app: FastAPI, engine: AsyncEngine, clean_tables: None
+) -> None:
+    """S0-sec-2: two userless tokens are not each other's (`None == None` was "own")."""
+    admin_headers = _bearer(await login_admin(admin_app))
+
+    async with client_for(admin_app, base_url="https://testserver") as client:
+        await _create_project(client, admin_headers, "alpha")
+        alpha_id = await _project_id(engine, "alpha")
+        target, target_id = await _userless_token(engine, None, ["admin"], "operator-cli")
+        sibling, sibling_id = await _userless_token(engine, alpha_id, ["read"], "alpha-sibling")
+        caller, caller_id = await _userless_token(engine, alpha_id, ["admin"], "alpha-ci")
+
+        r = await client.post(f"/v1/auth/tokens/{target_id}/revoke", headers=_bearer(caller))
+        assert r.status_code == 403, r.text
+        assert (await client.get("/v1/auth/me", headers=_bearer(target))).status_code == 200
+
+        # Same project, still not its own: only a user who owns alpha may revoke it.
+        r = await client.post(f"/v1/auth/tokens/{sibling_id}/revoke", headers=_bearer(caller))
+        assert r.status_code == 403, r.text
+        assert (await client.get("/v1/auth/me", headers=_bearer(sibling))).status_code == 200
+
+        # Itself, yes.
+        r = await client.post(f"/v1/auth/tokens/{caller_id}/revoke", headers=_bearer(caller))
+        assert r.status_code == 204, r.text
+        assert (await client.get("/v1/auth/me", headers=_bearer(caller))).status_code == 401
+
+
+async def test_a_device_in_another_project_is_indistinguishable_from_an_unknown_one(
+    admin_app: FastAPI,
+    engine: AsyncEngine,
+    store: MemoryObjectStore,
+    publisher: FakeCommandPublisher,
+    clean_tables: None,
+) -> None:
+    """S0-sec-2: visibility is checked before permission, and hidden looks like unknown."""
+    admin_headers = _bearer(await login_admin(admin_app))
+
+    async with client_for(admin_app, base_url="https://testserver") as client:
+        await _create_project(client, admin_headers, "alpha")
+        await _create_project(client, admin_headers, "beta")
+        alpha_id = await _project_id(engine, "alpha")
+        beta_id = await _project_id(engine, "beta")
+        await _add_device(engine, ALPHA_DEVICE, alpha_id)
+        await _add_device(engine, BETA_DEVICE, beta_id)
+
+        callers = {
+            "alpha viewer": await _user_session(
+                client, admin_headers, "dviewer", {"alpha": "viewer"}
+            ),
+            "alpha operator": await _user_session(
+                client, admin_headers, "doperator", {"alpha": "operator"}
+            ),
+            "alpha pinned read": _bearer(
+                (await _userless_token(engine, alpha_id, ["read"], "alpha-read"))[0]
+            ),
+        }
+
+        def requests(device_id: str) -> list[tuple[str, str, dict[str, object] | None]]:
+            deploy = {"version": "1.0.0", "apply": "auto"}
+            return [
+                ("POST", f"/v1/devices/{device_id}/reboot", None),
+                ("POST", f"/v1/devices/{device_id}/rollback", None),
+                ("GET", f"/v1/devices/{device_id}/commands/x", None),
+                ("POST", f"/v1/devices/{device_id}/deploy", deploy),
+                ("POST", f"/v1/devices/{device_id}/deploy/precheck", deploy),
+                ("PATCH", f"/v1/devices/{device_id}", {"name": "x"}),
+                ("GET", f"/v1/devices/{device_id}/logs", None),
+                ("GET", f"/v1/devices/{device_id}/telemetry?name=temp", None),
+            ]
+
+        for who, headers in callers.items():
+            for (method, hidden_path, body), (_, unknown_path, _) in zip(
+                requests(BETA_DEVICE), requests(UNKNOWN_DEVICE), strict=True
+            ):
+                hidden = await client.request(method, hidden_path, headers=headers, json=body)
+                unknown = await client.request(method, unknown_path, headers=headers, json=body)
+                assert unknown.status_code == 404, (who, unknown_path, unknown.text)
+                assert unknown.json() == {"detail": f"no such device: {UNKNOWN_DEVICE}"}
+                assert hidden.status_code == 404, (who, hidden_path, hidden.text)
+                assert hidden.json() == {"detail": f"no such device: {BETA_DEVICE}"}
+
+        # Inside the caller's own project, too little role is still a 403.
+        r = await client.post(f"/v1/devices/{ALPHA_DEVICE}/reboot", headers=callers["alpha viewer"])
+        assert r.status_code == 403, r.text
+        r = await client.patch(
+            f"/v1/devices/{ALPHA_DEVICE}", headers=callers["alpha pinned read"], json={"name": "x"}
+        )
+        assert r.status_code == 403, r.text
+        assert publisher.published == [], "nothing reached a board"
+
+
+async def test_an_enrollment_token_in_another_project_is_unknown(
+    admin_app: FastAPI, engine: AsyncEngine, clean_tables: None
+) -> None:
+    """S0-sec-2: revoking another project's enrollment token answers like a random id."""
+    admin_headers = _bearer(await login_admin(admin_app))
+
+    async with client_for(admin_app, base_url="https://testserver") as client:
+        await _create_project(client, admin_headers, "alpha")
+        await _create_project(client, admin_headers, "beta")
+        r = await client.post(
+            "/v1/enrollment-tokens?project=beta", headers=admin_headers, json={"group_id": None}
+        )
+        assert r.status_code == 201, r.text
+        beta_token_id = r.json()["id"]
+        operator = await _user_session(client, admin_headers, "eoperator", {"alpha": "operator"})
+
+        hidden = await client.post(
+            f"/v1/enrollment-tokens/{beta_token_id}/revoke", headers=operator
+        )
+        unknown = await client.post(
+            f"/v1/enrollment-tokens/{uuid.uuid4()}/revoke", headers=operator
+        )
+        assert unknown.status_code == 404, unknown.text
+        assert (hidden.status_code, hidden.json()) == (404, unknown.json())
+        assert hidden.json() == {"detail": "unknown token"}
+
+        async with AsyncSession(engine) as session:
+            row = await session.get(EnrollmentToken, uuid.UUID(beta_token_id))
+        assert row is not None and row.revoked_at is None

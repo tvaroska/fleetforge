@@ -66,6 +66,9 @@ FORBIDDEN = HTTPException(
     detail="insufficient permissions",
 )
 
+# The scopes that can read a project. `admin` is a superset and is checked separately.
+READ_SCOPES: frozenset[str] = frozenset({"read", "write:artifacts", "deploy", "enroll"})
+
 ROLE_RANK: dict[str, int] = {
     ProjectRole.VIEWER.value: 1,
     ProjectRole.OPERATOR.value: 2,
@@ -446,33 +449,80 @@ async def check_project_access(
     *,
     min_role: ProjectRole = ProjectRole.VIEWER,
     required_scope: str | None = None,
+    not_found: HTTPException | None = None,
 ) -> None:
-    """Verify `admin` may perform an action on `target_project_id`."""
-    if admin.project_id is not None and admin.project_id != target_project_id:
-        raise FORBIDDEN
+    """Verify `admin` may perform an action on `target_project_id`.
 
+    Three checks, in this order: **visibility** (the token's pin, then project
+    membership), **scope**, **role**. A project the caller cannot see raises
+    `not_found` when one is given, so a route that resolved an id (a device, an
+    enrollment token) into another project answers exactly as it does for an unknown
+    id: ids from other projects are indistinguishable from ids that never existed
+    (S0-sec-2). A visible project with too little scope or role is always `FORBIDDEN`.
+
+    With `not_found=None` every denial is `FORBIDDEN`, and the allow/deny outcome is
+    the conjunction of the same conditions as before the split; only their order moved.
+    """
+    hidden = not_found if not_found is not None else FORBIDDEN
+
+    # 1. Visibility: the pin, then membership.
+    if admin.project_id is not None and admin.project_id != target_project_id:
+        raise hidden
+
+    member: ProjectMember | None = None
+    user_is_superadmin = admin.is_superadmin
+    if not user_is_superadmin and admin.user_id is not None:
+        user = await session.get(User, admin.user_id)
+        user_is_superadmin = user is not None and user.is_superadmin
+        if not user_is_superadmin:
+            member = await session.get(ProjectMember, (target_project_id, admin.user_id))
+            if member is None:
+                raise hidden
+
+    # 2. Scope.
     if "admin" not in admin.scopes:
         if required_scope is not None:
             if required_scope == "read":
-                if not ({"read", "write:artifacts", "deploy", "enroll"} & set(admin.scopes)):
+                if not (READ_SCOPES & set(admin.scopes)):
                     raise FORBIDDEN
             elif required_scope not in admin.scopes:
                 raise FORBIDDEN
         elif min_role != ProjectRole.VIEWER:
             raise FORBIDDEN
-        elif not ({"read", "write:artifacts", "deploy", "enroll"} & set(admin.scopes)):
+        elif not (READ_SCOPES & set(admin.scopes)):
             raise FORBIDDEN
 
-    if admin.is_superadmin:
-        return
+    # 3. Role.
+    if member is not None and ROLE_RANK.get(member.role, 0) < ROLE_RANK[min_role.value]:
+        raise FORBIDDEN
 
+
+async def visible_project_ids(
+    session: AsyncSession, admin: AuthContext
+) -> frozenset[uuid.UUID] | None:
+    """The projects `admin` can see; `None` means every project.
+
+    Mirrors the visibility half of `check_project_access` (pin first, then a superadmin
+    user, then memberships), not `visible_projects_for`, which differs for a superadmin
+    user holding a non-`admin` unpinned token. Used where a route returns rows from
+    many projects at once and must filter instead of refusing.
+    """
+    if admin.project_id is not None:
+        return frozenset({admin.project_id})
+    if admin.is_superadmin:
+        return None
     if admin.user_id is not None:
         user = await session.get(User, admin.user_id)
         if user is not None and user.is_superadmin:
-            return
-        member = await session.get(ProjectMember, (target_project_id, admin.user_id))
-        if member is None or ROLE_RANK.get(member.role, 0) < ROLE_RANK[min_role.value]:
-            raise FORBIDDEN
+            return None
+        ids = await session.scalars(
+            select(ProjectMember.project_id).where(ProjectMember.user_id == admin.user_id)
+        )
+        return frozenset(ids)
+    # Unpinned, userless, not superadmin: a scoped machine token a superadmin minted
+    # (CLI `issue-token` without --project). `check_project_access` lets it into every
+    # project, and `visible_projects_for` lists all of them.
+    return None
 
 
 async def resolve_project_for_request(

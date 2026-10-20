@@ -549,12 +549,19 @@ async def create_admin_token(
     admin: AdminDep,
     sessionmaker: SessionMakerDep,
 ) -> AdminTokenIssued:
-    """Mint a new `ffa_...` API token.
+    """Mint a new `ffa_...` API token. Three rules:
 
-    A project-pinned token requires `owner` on that project; an unpinned token
-    requires `is_superadmin`. A scoped machine token cannot mint broader tokens.
+    - the caller must be unpinned: a project-pinned token never mints (S0-sec-2), so a
+      CI token cannot leave children behind that outlive its own revocation. Sessions
+      (password and Firebase login) are always unpinned, so the dashboard still mints;
+    - minting a token pinned to a project requires `owner` on that project;
+    - minting an unpinned token requires `is_superadmin`.
+
+    A scoped (non-`admin`) machine token cannot mint at all.
     """
     if "admin" not in admin.scopes:
+        raise FORBIDDEN
+    if admin.project_id is not None:
         raise FORBIDDEN
 
     now = now_utc()
@@ -681,7 +688,15 @@ async def revoke_admin_token(
     sessionmaker: SessionMakerDep,
     cache: CacheDep,
 ) -> None:
-    """Revoke a token immediately and evict it from the verification cache."""
+    """Revoke a token immediately and evict it from the verification cache.
+
+    A superadmin revokes anything. Anyone else (S0-sec-2):
+    - "own" is the calling token itself, or a token of the caller's *user*; two
+      userless tokens are never each other's (`None == None` used to say they were);
+    - a project-pinned caller may only touch tokens pinned to its own project;
+    - a token that is not its own must be project-pinned, and the caller must be a user
+      who is `owner` of that project.
+    """
     if "admin" not in admin.scopes:
         raise FORBIDDEN
 
@@ -692,7 +707,16 @@ async def revoke_admin_token(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="token not found",
             )
-        if not admin.is_superadmin and row.user_id != admin.user_id:
+        own = row.id == admin.token_id or (
+            admin.user_id is not None and row.user_id == admin.user_id
+        )
+        if (
+            not admin.is_superadmin
+            and admin.project_id is not None
+            and row.project_id != admin.project_id
+        ):
+            raise FORBIDDEN
+        if not admin.is_superadmin and not own:
             if row.project_id is None:
                 raise FORBIDDEN
             member = (

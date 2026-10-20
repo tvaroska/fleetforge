@@ -25,7 +25,8 @@ is a `partition_table_mismatch`, never a detection.
 
 import datetime as dt
 import logging
-from collections.abc import Mapping
+import uuid
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 
 from sqlalchemy import delete, func, insert, select, text, update
@@ -221,19 +222,46 @@ async def list_profiles(session: AsyncSession) -> list[PartitionProfile]:
     return ordered(list((await session.scalars(select(PartitionProfile))).all()))
 
 
-async def device_ids_by_fingerprint(session: AsyncSession) -> dict[str, list[str]]:
-    """Live boards per announced fingerprint, sorted, at most `DEVICE_IDS_LIMIT` each."""
-    rows = (
-        await session.execute(
-            select(Device.partition_table_sha256, Device.device_id).where(
-                Device.decommissioned_at.is_(None), Device.partition_table_sha256.is_not(None)
-            )
-        )
-    ).all()
+async def device_ids_by_fingerprint(
+    session: AsyncSession, project_ids: Collection[uuid.UUID] | None = None
+) -> dict[str, list[str]]:
+    """Live boards per announced fingerprint, sorted, at most `DEVICE_IDS_LIMIT` each.
+
+    `project_ids` restricts the boards to those projects (S0-sec-2: the profile list is
+    readable by every project's members, the device ids in it are not); `None` means
+    every project. Filtered in SQL, truncated after, so a large project elsewhere cannot
+    push the caller's own boards past the cap.
+    """
+    if project_ids is not None and not project_ids:
+        return {}
+    stmt = select(Device.partition_table_sha256, Device.device_id).where(
+        Device.decommissioned_at.is_(None), Device.partition_table_sha256.is_not(None)
+    )
+    if project_ids is not None:
+        stmt = stmt.where(Device.project_id.in_(list(project_ids)))
+    rows = (await session.execute(stmt)).all()
     grouped: dict[str, list[str]] = {}
     for sha, device_id in rows:
         grouped.setdefault(sha, []).append(device_id)
     return {sha: sorted(ids)[:DEVICE_IDS_LIMIT] for sha, ids in grouped.items()}
+
+
+async def visible_device_ids(
+    session: AsyncSession, device_ids: Collection[str], project_ids: Collection[uuid.UUID]
+) -> set[str]:
+    """The ids in `device_ids` that name a `devices` row in one of `project_ids`.
+
+    For masking `detected_device_id` (informational, no FK): a restricted caller sees it
+    only when the board is in one of its projects, decommissioned or not. One SELECT.
+    """
+    if not device_ids or not project_ids:
+        return set()
+    found = await session.scalars(
+        select(Device.device_id).where(
+            Device.device_id.in_(list(device_ids)), Device.project_id.in_(list(project_ids))
+        )
+    )
+    return set(found)
 
 
 async def get_profile(

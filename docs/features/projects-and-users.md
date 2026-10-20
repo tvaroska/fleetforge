@@ -148,7 +148,7 @@ erDiagram
 
 > **What stays global on purpose:**
 > - `artifacts` (`sha256` PK): content-addressed immutable bytes.
-> - `partition_profiles` (`partition_table_sha256` PK): physical flash-map measurements (`ab-4m-v1`, `ab-4m-arduino-v1`). Adopting a custom partition profile remains a project-owner / superadmin action.
+> - `partition_profiles` (`partition_table_sha256` PK): physical flash-map measurements (`ab-4m-v1`, `ab-4m-arduino-v1`). Adding, adopting or deleting a partition profile is a superadmin action only (S0-sec-2): the table has no project, so a write changes every project's deploy gate.
 > - `device_progress`, `deploy_events`, `device_faults`, `device_logs`, `device_telemetry`, `device_metrics`, `device_commands`: already keyed by `device_id` (which belongs to exactly one `project_id`), avoiding redundant `project_id` denormalization across high-volume time-series tables.
 
 ---
@@ -208,7 +208,7 @@ A token's effective permission on a target `project_id` is checked by a small de
 | `/v1/auth/firebase` | `POST` | Public (rate-limited) | Body: `{"id_token": "<firebase_jwt>"}`. Needs both `FIREBASE_PROJECT_ID` and `FIREBASE_WEB_API_KEY` (else `503`). Verifies the RS256 Firebase ID token (signature, `aud`, `iss`, `sub`, `auth_time`), checks revocation via `accounts:lookup` (disabled account or `auth_time < validSince` -> `401`), refuses an unverified email (`403`), enforces invite-only membership in `users` (or bootstrap `FIREBASE_SUPERADMIN_EMAILS`), binds `firebase_uid` (looked up by uid first, then email), and sets `ff_session` cookie. |
 | `/v1/auth/logout` | `POST` | Any token | Revokes presenting token, clears cookie. |
 | `/v1/auth/me` | `GET` | Any token | Returns `token_id`, `subject`, `scopes`, `expires_at`, plus `is_superadmin`, `project_id`, and `projects: [{slug, name, role}]`. |
-| `/v1/auth/tokens` | `POST` | User session / `owner` | Issues a named `ffa_...` token (optional `project` slug, `scopes`, `expires_in_days`). Plaintext returned **once**. |
+| `/v1/auth/tokens` | `POST` | User session / `owner` | Issues a named `ffa_...` token (optional `project` slug, `scopes`, `expires_in_days`). Plaintext returned **once**. From an unpinned session only; a project-pinned token cannot mint (S0-sec-2). |
 | `/v1/auth/tokens` | `GET` | User session / `owner` | Lists active/revoked tokens for the caller (or project). Never returns secret hashes. |
 | `/v1/auth/tokens/{id}/revoke` | `POST` | User session / `owner` | Conditional `UPDATE ... SET revoked_at = now()`, evicts from `token_cache`, returns `204`. |
 
@@ -347,3 +347,13 @@ Firebase email/password sign-up is callable by anyone holding the public web API
 Invite flow: `POST /v1/users` with `send_invite_email` -> `accounts:signUp` (unverified account, random password nobody knows; an existing account is left as it is) -> `PASSWORD_RESET` email -> the invitee sets a password, which verifies the mailbox -> login passes. The response's `email_delivery` tells the dashboard whether the email went out, and the drawer shows an error when it did not. An invitee created before this fix (no Firebase account) is reached with `PATCH /v1/users/{u}` `{"send_password_reset": true}`. The assumption that a completed reset marks the email verified, and its fallback, are in DECISIONS.md (2026-10-19, S0-sec-1).
 
 `AuthContext.is_superadmin` and `MeResponse.is_superadmin` default to `False` (fail closed); `require_admin` always sets the value explicitly.
+
+## Partition profiles, token minting and hidden device ids (S0-sec-2)
+
+**Partition profiles.** `POST`, `PATCH` and `DELETE /v1/partition-profiles` are superadmin only, checked first, so a non-superadmin gets `403` even for a malformed or unknown fingerprint. `GET` stays open to any read-capable token (`admin`, `read`, `write:artifacts`, `deploy`, `enroll`), because the upload form needs the profile names. Every profile is listed (they are global flash-map facts), but `device_ids` only names live boards in the caller's projects, and `detected_device_id` is `null` unless that board is in one of them. The visible set is `deps.visible_project_ids`: the pinned project for a pinned token, every project for a superadmin (or an unpinned userless machine token, which `check_project_access` already lets everywhere), otherwise the caller's memberships.
+
+**Token minting and revocation.** A project-pinned token never mints a token (`POST /v1/auth/tokens` is `403`), so a CI token cannot leave children behind that outlive its revocation. Sessions are always unpinned, so the dashboard is unaffected. On revoke, "own" means the calling token itself or a token of the caller's user; two userless tokens are no longer each other's. A pinned caller may only touch tokens pinned to its own project.
+
+**Hidden device ids.** `check_project_access` checks visibility (pin, then membership) before scope and role, and takes an optional `not_found`. The device routes (reboot, rollback, apply, cancel, `commands/{id}`, deploy, precheck, `PATCH`, logs, telemetry) pass their own `404 "no such device: {id}"`, so a device in a project the caller cannot see answers exactly like one that was never enrolled. Revoking another project's enrollment token answers `404 "unknown token"`. Inside a visible project, too little role or scope is still `403`. Callers that pass no `not_found` behave exactly as before.
+
+Known limits: on `?project=` routes an unknown slug is `404` and a slug the caller cannot see is `403`, so project-slug existence is still distinguishable. The dashboard still shows the profile add/adopt controls to non-superadmins, who get the `403` banner.

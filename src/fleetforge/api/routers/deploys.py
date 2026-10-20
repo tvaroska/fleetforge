@@ -236,6 +236,7 @@ async def deploy_device(
             device.project_id,
             min_role=ProjectRole.OPERATOR,
             required_scope="deploy",
+            not_found=_no_such_device(device_id),
         )
         catalog = await load_layout_catalog(session)
         artifact = _accept(
@@ -335,6 +336,13 @@ def _require_valid_version(version: str) -> None:
         )
 
 
+def _no_such_device(device_id: str) -> HTTPException:
+    """`_resolve`'s 404, also for a device in a project the caller cannot see (S0-sec-2)."""
+    return HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND, detail=f"no such device: {device_id}"
+    )
+
+
 async def _resolve(
     session: AsyncSession, device_id: str, version: str
 ) -> tuple[Device, ResolvedArtifact | None]:
@@ -344,9 +352,7 @@ async def _resolve(
         # One answer for both, deliberately: a decommissioned board is gone from
         # the fleet view and from the ingestor, and a deploy to it is the same
         # mistake as a deploy to a device id that was never enrolled.
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail=f"no such device: {device_id}"
-        )
+        raise _no_such_device(device_id)
 
     row = (
         await session.execute(
@@ -433,6 +439,7 @@ async def precheck_deploy(
             device.project_id,
             min_role=ProjectRole.VIEWER,
             required_scope="read",
+            not_found=_no_such_device(device_id),
         )
         catalog = await load_layout_catalog(session)
         online = is_online(device, now=now_utc(), tolerance=settings.presence_tolerance)

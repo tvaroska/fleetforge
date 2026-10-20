@@ -1,4 +1,10 @@
-"""`/v1/partition-profiles` — the flash maps this server supports. R3-be-2. Admin-only.
+"""`/v1/partition-profiles` — the flash maps this server supports. R3-be-2.
+
+**Who may do what (S0-sec-2).** Reads: any read-capable token; the profiles themselves are
+global flash-map facts and are listed in full, but the device ids in them (`device_ids`,
+`detected_device_id`) are filtered to the caller's projects. Writes: superadmin only. The
+table has no project, so one project's owner writing to it would change every project's
+deploy gate.
 
 `GET ""` lists every profile; `POST ""` adds an operator (`user`) profile by fingerprint,
 named and deployable at once; `PATCH "/{sha}"` adopts a pending `detected` profile by naming
@@ -15,7 +21,8 @@ announce, which makes DELETE the way to clear one left by a re-flashed board.
 
 Every `detail` is plain text lifted verbatim into the dashboard banner (`api.ts::detailOf`):
 no backticks, no SQL, no constraint names. A path fingerprint that is not 64 lowercase hex
-is a 404 and never reaches SQL. No event type of its own: profiles change on operator
+is a 404 (after the superadmin check, so nobody else learns which fingerprints exist) and
+never reaches SQL. No event type of its own: profiles change on operator
 action (this router) or on an announce, which already emits `device.announce`.
 """
 
@@ -27,7 +34,16 @@ from fastapi import APIRouter, Depends, HTTPException, Response, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from fleetforge.api.deps import AdminDep, SessionMakerDep, bearer_scheme, cookie_scheme
+from fleetforge.api.deps import (
+    FORBIDDEN,
+    READ_SCOPES,
+    AdminDep,
+    AuthContext,
+    SessionMakerDep,
+    bearer_scheme,
+    cookie_scheme,
+    visible_project_ids,
+)
 from fleetforge.api.schemas import (
     PartitionProfileAdopt,
     PartitionProfileCreate,
@@ -47,6 +63,7 @@ from fleetforge.partition_profiles import (
     insert_user_profile,
     list_profiles,
     owner_of_layout_id,
+    visible_device_ids,
 )
 
 logger = logging.getLogger(__name__)
@@ -72,7 +89,15 @@ def _no_such_profile(sha: str) -> HTTPException:
     return HTTPException(status.HTTP_404_NOT_FOUND, f"no partition profile for {named}")
 
 
-def _summary(profile: PartitionProfile, device_ids: list[str]) -> PartitionProfileSummary:
+def _require_superadmin(admin: AuthContext) -> None:
+    """Profile writes are superadmin only: the table is global (S0-sec-2)."""
+    if not admin.is_superadmin or "admin" not in admin.scopes:
+        raise FORBIDDEN
+
+
+def _summary(
+    profile: PartitionProfile, device_ids: list[str], detected_device_id: str | None
+) -> PartitionProfileSummary:
     return PartitionProfileSummary(
         partition_table_sha256=profile.partition_table_sha256,
         layout_id=profile.layout_id,
@@ -81,7 +106,7 @@ def _summary(profile: PartitionProfile, device_ids: list[str]) -> PartitionProfi
         deployable=profile.adopted_at is not None,
         ota_slot_size=profile.ota_slot_size,
         flash_chip_size=profile.flash_chip_size,
-        detected_device_id=profile.detected_device_id,
+        detected_device_id=detected_device_id,
         device_ids=device_ids,
         created_at=profile.created_at,
         adopted_at=profile.adopted_at,
@@ -89,8 +114,11 @@ def _summary(profile: PartitionProfile, device_ids: list[str]) -> PartitionProfi
 
 
 async def _summary_of(session: AsyncSession, profile: PartitionProfile) -> PartitionProfileSummary:
+    """Unfiltered: only a superadmin (who sees every project) reaches a write route."""
     devices = await device_ids_by_fingerprint(session)
-    return _summary(profile, devices.get(profile.partition_table_sha256, []))
+    return _summary(
+        profile, devices.get(profile.partition_table_sha256, []), profile.detected_device_id
+    )
 
 
 async def _taken(session: AsyncSession, layout_id: str) -> HTTPException | None:
@@ -120,12 +148,30 @@ def _fingerprint_known(profile: PartitionProfile) -> HTTPException:
 async def list_partition_profiles(
     admin: AdminDep, sessionmaker: SessionMakerDep
 ) -> PartitionProfileList:
-    """Builtins first, then adopted profiles by name, then pending ones oldest first."""
+    """Builtins first, then adopted profiles by name, then pending ones oldest first.
+
+    Every profile is listed; the device ids are only those in the caller's projects
+    (a `detected_device_id` elsewhere reads `null`).
+    """
+    if "admin" not in admin.scopes and not (READ_SCOPES & set(admin.scopes)):
+        raise FORBIDDEN
     async with sessionmaker() as session:
+        visible = await visible_project_ids(session, admin)
         profiles = await list_profiles(session)
-        devices = await device_ids_by_fingerprint(session)
+        devices = await device_ids_by_fingerprint(session, visible)
+        detected = {p.detected_device_id for p in profiles if p.detected_device_id is not None}
+        shown = (
+            detected if visible is None else await visible_device_ids(session, detected, visible)
+        )
     return PartitionProfileList(
-        profiles=[_summary(p, devices.get(p.partition_table_sha256, [])) for p in profiles]
+        profiles=[
+            _summary(
+                p,
+                devices.get(p.partition_table_sha256, []),
+                p.detected_device_id if p.detected_device_id in shown else None,
+            )
+            for p in profiles
+        ]
     )
 
 
@@ -140,6 +186,7 @@ async def create_partition_profile(
 ) -> PartitionProfileSummary:
     """201 with the new profile, deployable at once. 409 when the fingerprint or the name
     is already a profile (a pending detected fingerprint is adopted with PATCH instead)."""
+    _require_superadmin(admin)
     sha = body.partition_table_sha256
     async with sessionmaker() as session:
         existing = await get_profile(session, sha)
@@ -189,6 +236,7 @@ async def adopt_partition_profile(
     The slot the detecting board reported is a measurement and wins: a different
     `ota_slot_size` is a 409, a missing one when the board reported none is a 422.
     """
+    _require_superadmin(admin)
     if not _SHA256.match(sha):
         raise _no_such_profile(sha)
     async with sessionmaker() as session:
@@ -258,6 +306,7 @@ async def delete_partition_profile(
     A pending detected profile is always deletable. A board still announcing that map
     records it again at its next announce.
     """
+    _require_superadmin(admin)
     if not _SHA256.match(sha):
         raise _no_such_profile(sha)
     async with sessionmaker() as session:

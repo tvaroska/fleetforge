@@ -85,13 +85,18 @@ CMD_ID_PATTERN = re.compile(r"\A[A-Za-z0-9_-]{1,63}\Z")
 PUBLISH_FAILED = "the broker could not accept the command; try again shortly"
 
 
+def _no_such_device(device_id: str) -> HTTPException:
+    """The deploy route's 404, also for a device in a project the caller cannot see."""
+    return HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND, detail=f"no such device: {device_id}"
+    )
+
+
 async def _live_device(session: AsyncSession, device_id: str) -> Device:
     """The device, or the deploy route's 404 for an unknown or decommissioned one."""
     device = await session.get(Device, device_id)
     if device is None or device.decommissioned_at is not None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND, detail=f"no such device: {device_id}"
-        )
+        raise _no_such_device(device_id)
     return device
 
 
@@ -160,6 +165,7 @@ async def _send(
         device.project_id,
         min_role=ProjectRole.OPERATOR,
         required_scope="deploy",
+        not_found=_no_such_device(device_id),
     )
     _require_capability(device, verb.value)
     if cmd_id is not None:
@@ -341,6 +347,7 @@ async def get_device_command(
             device.project_id,
             min_role=ProjectRole.VIEWER,
             required_scope="read",
+            not_found=_no_such_device(device_id),
         )
         snapshot = await get_command(session, device_id=device_id, command_id=command_id)
     summary = command_summary(snapshot)

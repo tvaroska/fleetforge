@@ -396,15 +396,14 @@ async def update_device(
     now = now_utc()
     fields = body.model_fields_set
     async with sessionmaker() as session:
-        device = await session.get(Device, device_id)
-        if device is None or device.decommissioned_at is not None:
-            raise HTTPException(status.HTTP_404_NOT_FOUND, f"no such device: {device_id}")
+        device = await _live_device_or_404(session, device_id)
 
         await check_project_access(
             session,
             admin,
             device.project_id,
             min_role=ProjectRole.OPERATOR,
+            not_found=_no_such_device(device_id),
         )
 
         target_project_id = device.project_id
@@ -510,11 +509,17 @@ async def update_device(
     return summary
 
 
+def _no_such_device(device_id: str) -> HTTPException:
+    """The 404 for an unknown or decommissioned device, and for one in a project the
+    caller cannot see (S0-sec-2), so the two are indistinguishable."""
+    return HTTPException(status.HTTP_404_NOT_FOUND, f"no such device: {device_id}")
+
+
 async def _live_device_or_404(session: AsyncSession, device_id: str) -> Device:
     """The device, or the PATCH route's 404 for an unknown or decommissioned one."""
     device = await session.get(Device, device_id)
     if device is None or device.decommissioned_at is not None:
-        raise HTTPException(status.HTTP_404_NOT_FOUND, f"no such device: {device_id}")
+        raise _no_such_device(device_id)
     return device
 
 
@@ -539,6 +544,7 @@ async def device_log_tail(
             device.project_id,
             min_role=ProjectRole.VIEWER,
             required_scope="read",
+            not_found=_no_such_device(device_id),
         )
         lines = await read_tail(session, device_id=device_id, now=now, limit=limit)
     return DeviceLogTail(
@@ -579,6 +585,7 @@ async def device_telemetry_series(
             device.project_id,
             min_role=ProjectRole.VIEWER,
             required_scope="read",
+            not_found=_no_such_device(device_id),
         )
         points = await read_series(session, device_id=device_id, name=name, now=now, limit=limit)
     return TelemetrySeries(

@@ -229,6 +229,7 @@ async def revoke_enrollment_token(
             row.project_id,
             min_role=ProjectRole.OPERATOR,
             required_scope="enroll",
+            not_found=UNKNOWN_TOKEN,
         )
         revoked = (await session.execute(REVOKE_SQL, {"token_id": token_id})).scalar_one_or_none()
         await session.commit()
