@@ -54,8 +54,8 @@ Helpers, defined inside each remote heredoc that needs them:
 
 ```bash
 cd /opt/boris/prod
-pg() { docker compose exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -At "$@"' sh "$@"; }
-dsec() { docker compose exec -T mosquitto sh -c 'mosquitto_ctrl -h 127.0.0.1 -p 1883 -u "$MOSQUITTO_ADMIN_USERNAME" -P "$MOSQUITTO_ADMIN_PASSWORD" dynsec "$@"' sh "$@"; }
+pg() { docker compose exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -At "$@"' sh "$@" </dev/null; }
+dsec() { docker compose exec -T mosquitto sh -c 'mosquitto_ctrl -h 127.0.0.1 -p 1883 -u "$MOSQUITTO_ADMIN_USERNAME" -P "$MOSQUITTO_ADMIN_PASSWORD" dynsec "$@"' sh "$@" </dev/null; }
 ```
 
 ## 1. Release build (local)
@@ -83,11 +83,11 @@ for u in https://update.tvaroska.sk/ https://download.tvaroska.sk/ https://boris
   printf '%s %s\n' "$u" "$(curl -sS -o /dev/null -w '%{http_code}' "$u")"; done | tee /tmp/s0-rel-1/others-before.txt
 ssh prod bash -s <<'EOF' | tee /tmp/s0-rel-1/prod-before.txt
 cd /opt/boris/prod
-pg() { docker compose exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -At "$@"' sh "$@"; }
-dsec() { docker compose exec -T mosquitto sh -c 'mosquitto_ctrl -h 127.0.0.1 -p 1883 -u "$MOSQUITTO_ADMIN_USERNAME" -P "$MOSQUITTO_ADMIN_PASSWORD" dynsec "$@"' sh "$@"; }
+pg() { docker compose exec -T postgres sh -c 'psql -v ON_ERROR_STOP=1 -U "$POSTGRES_USER" -At "$@"' sh "$@" </dev/null; }
+dsec() { docker compose exec -T mosquitto sh -c 'mosquitto_ctrl -h 127.0.0.1 -p 1883 -u "$MOSQUITTO_ADMIN_USERNAME" -P "$MOSQUITTO_ADMIN_PASSWORD" dynsec "$@"' sh "$@" </dev/null; }
 echo "== databases";       pg -d postgres -c "SELECT datname FROM pg_database ORDER BY 1"
 echo "== alembic";         pg -d fleetforge -c "SELECT version_num FROM alembic_version"
-echo "== devices";         pg -d fleetforge -c "SELECT id, platform_type, agent_version, decommissioned_at FROM devices ORDER BY id"
+echo "== devices";         pg -d fleetforge -c "SELECT device_id, platform_type, agent_version FROM devices ORDER BY 1"
 echo "== builds";          pg -d fleetforge -c "SELECT count(*) FROM builds"
 echo "== dynsec clients";  dsec listClients
 EOF
