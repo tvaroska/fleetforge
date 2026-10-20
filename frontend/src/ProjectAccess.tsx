@@ -16,6 +16,20 @@ import {
 } from './api'
 import { formatWhen } from './format'
 
+// The user row is saved either way; the API reports whether the setup email went out.
+function emailDeliveryError(
+  delivery: UserSummary['email_delivery'],
+  failedMessage: string,
+): string | null {
+  if (delivery === 'failed') {
+    return failedMessage
+  }
+  if (delivery === 'not_configured') {
+    return 'Firebase is not configured on the server; no email was sent.'
+  }
+  return null
+}
+
 export function ProjectAccess({
   me,
   activeProject,
@@ -125,7 +139,7 @@ export function ProjectAccess({
     setBusy(true)
     setError(null)
     try {
-      await api.createUser({
+      const created = await api.createUser({
         username: inviteUsername.trim(),
         email: inviteEmail.trim() || null,
         display_name: inviteDisplayName.trim() || null,
@@ -139,6 +153,13 @@ export function ProjectAccess({
       setInvitePassword('')
       setInviteSuperadmin(false)
       await refreshDrawer()
+      const deliveryError = emailDeliveryError(
+        created.email_delivery,
+        'User saved, but the setup email could not be sent. Try "Send reset email" again.',
+      )
+      if (deliveryError !== null) {
+        setError(deliveryError)
+      }
     } catch (err) {
       handle(err)
     } finally {
@@ -159,7 +180,14 @@ export function ProjectAccess({
   async function handleSendPasswordReset(user: UserSummary) {
     setError(null)
     try {
-      await api.updateUser(user.username, { send_password_reset: true })
+      const updated = await api.updateUser(user.username, { send_password_reset: true })
+      const deliveryError = emailDeliveryError(
+        updated.email_delivery,
+        'The password reset email could not be sent.',
+      )
+      if (deliveryError !== null) {
+        setError(deliveryError)
+      }
     } catch (err) {
       handle(err)
     }

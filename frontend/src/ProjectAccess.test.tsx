@@ -128,4 +128,59 @@ describe('ProjectAccess', () => {
       expect(screen.getByTestId('issued-admin-token')).toHaveTextContent('ffa_test_token_secret'),
     )
   })
+
+  it.each([
+    ['failed', /setup email could not be sent/i],
+    ['not_configured', /Firebase is not configured on the server; no email was sent/i],
+  ])('reports an invite whose email_delivery is %s', async (delivery, message) => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input?: unknown, init?: RequestInit) => {
+      const url = String(input)
+      if (url === '/v1/projects') {
+        return json({ projects: [] })
+      }
+      if (url === '/v1/projects/default/members') {
+        return json({ members: [] })
+      }
+      if (url === '/v1/auth/tokens') {
+        return json({ tokens: [] })
+      }
+      if (url === '/v1/users' && init?.method === 'POST') {
+        return json(
+          {
+            id: 'u3',
+            username: 'erin',
+            email: 'erin@example.com',
+            firebase_uid: null,
+            has_local_password: false,
+            display_name: null,
+            is_superadmin: false,
+            disabled_at: null,
+            created_at: '2026-10-19T00:00:00Z',
+            email_delivery: delivery,
+          },
+          201,
+        )
+      }
+      if (url === '/v1/users') {
+        return json({ users: [] })
+      }
+      return json({})
+    })
+
+    render(
+      <ProjectAccess
+        me={me}
+        activeProject="default"
+        onSelectProject={vi.fn()}
+        onSessionExpired={vi.fn()}
+      />,
+    )
+
+    await userEvent.click(screen.getByRole('button', { name: /Project access & API tokens/i }))
+    await userEvent.type(await screen.findByLabelText('Invite username'), 'erin')
+    await userEvent.type(screen.getByLabelText('Invite email'), 'erin@example.com')
+    await userEvent.click(screen.getByRole('button', { name: /Invite user/i }))
+
+    expect(await screen.findByText(message)).toBeInTheDocument()
+  })
 })

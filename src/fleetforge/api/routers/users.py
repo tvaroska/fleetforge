@@ -27,14 +27,16 @@ from fleetforge.api.deps import (
 )
 from fleetforge.api.schemas import (
     USERNAME_PATTERN,
+    EmailDelivery,
     UserCreate,
     UserList,
     UserSummary,
     UserUpdate,
 )
 from fleetforge.auth.cache import VerifiedSecretCache
-from fleetforge.auth.firebase import FirebaseAuthError
+from fleetforge.auth.firebase import FirebaseAuthClient, FirebaseAuthError
 from fleetforge.auth.hashing import ARGON2_LIMITER, hash_secret
+from fleetforge.config import Settings
 from fleetforge.db.models import AdminToken, User
 
 logger = logging.getLogger(__name__)
@@ -65,6 +67,28 @@ def _user_summary(user: User) -> UserSummary:
         disabled_at=user.disabled_at,
         created_at=user.created_at,
     )
+
+
+async def _send_setup_email(
+    firebase: FirebaseAuthClient, settings: Settings, email: str
+) -> EmailDelivery:
+    """Make sure `email` has a Firebase account, then send it the password-setup email.
+
+    Firebase answers `EMAIL_NOT_FOUND` to a reset for an address with no account, so an
+    invite creates the account first (random password, never stored; the reset email
+    lets the real mailbox owner set theirs). An existing account, possibly one a
+    squatter registered, is left in place: the reset still goes to the real mailbox.
+    """
+    api_key = settings.firebase_web_api_key
+    if not api_key:
+        return "not_configured"
+    try:
+        await firebase.create_account(email, api_key=api_key)
+        await firebase.send_password_reset(email, api_key=api_key)
+    except FirebaseAuthError:
+        logger.warning("firebase setup email could not be sent for %s", email)
+        return "failed"
+    return "sent"
 
 
 async def _ahash_password(password: str) -> str:
@@ -123,20 +147,19 @@ async def create_user(
                 detail=f"user {body.username!r} or email {body.email!r} already exists",
             ) from exc
 
-    if body.send_invite_email and body.email and settings.firebase_web_api_key:
-        try:
-            await firebase.send_password_reset(body.email, api_key=settings.firebase_web_api_key)
-        except FirebaseAuthError:
-            logger.warning("firebase invite email could not be sent for %s", body.email)
+    delivery: EmailDelivery | None = None
+    if body.send_invite_email and body.email:
+        delivery = await _send_setup_email(firebase, settings, body.email)
 
     logger.info(
-        "user invited/created: %s (email=%s, id=%s) by %s",
+        "user invited/created: %s (email=%s, id=%s, email_delivery=%s) by %s",
         user.username,
         user.email,
         user.id,
+        delivery,
         admin.subject,
     )
-    return _user_summary(user)
+    return _user_summary(user).model_copy(update={"email_delivery": delivery})
 
 
 @router.patch(
@@ -203,10 +226,8 @@ async def update_user(
         if isinstance(tid, AdminToken.id.type.python_type):
             cache.forget(tid)
 
-    if body.send_password_reset and target_email and settings.firebase_web_api_key:
-        try:
-            await firebase.send_password_reset(target_email, api_key=settings.firebase_web_api_key)
-        except FirebaseAuthError:
-            logger.warning("firebase password reset email failed for %s", target_email)
+    if body.send_password_reset and target_email:
+        delivery = await _send_setup_email(firebase, settings, target_email)
+        summary = summary.model_copy(update={"email_delivery": delivery})
 
     return summary

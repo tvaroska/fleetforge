@@ -62,6 +62,8 @@ export type UserSummary = {
   is_superadmin: boolean
   disabled_at: string | null
   created_at: string
+  /** Outcome of the invite / password-reset email; null when none was requested. */
+  email_delivery?: 'sent' | 'failed' | 'not_configured' | null
 }
 
 export type AdminTokenSummary = {

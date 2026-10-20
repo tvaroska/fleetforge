@@ -3,17 +3,26 @@
 import datetime as dt
 import hashlib
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 
 import pytest
 from fastapi import FastAPI
-from sqlalchemy import delete, text
+from sqlalchemy import delete, select, text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
-from fleetforge.api.deps import get_command_publisher, get_firebase_auth, get_object_store
+from fleetforge.api.deps import (
+    AuthContext,
+    get_command_publisher,
+    get_firebase_auth,
+    get_object_store,
+)
 from fleetforge.api.eventstream import EventHub
-from fleetforge.api.schemas import UserCreate
-from fleetforge.auth.firebase import FirebaseIdentity, FirebaseInvalidCredentials
+from fleetforge.api.schemas import MeResponse, UserCreate
+from fleetforge.auth.firebase import (
+    FirebaseAuthError,
+    FirebaseIdentity,
+    FirebaseInvalidCredentials,
+)
 from fleetforge.config import get_settings
 from fleetforge.db.models import (
     DEFAULT_PROJECT_ID,
@@ -494,6 +503,9 @@ class FakeFirebaseAuthClient:
         self.accounts: dict[str, tuple[str, FirebaseIdentity]] = {}
         self.tokens: dict[str, FirebaseIdentity] = {}
         self.reset_emails_sent: list[str] = []
+        self.accounts_created: list[str] = []
+        self.fail_create = False
+        self.fail_reset = False
 
     def register(
         self,
@@ -503,17 +515,25 @@ class FakeFirebaseAuthClient:
         uid: str,
         id_token: str,
         display_name: str | None = None,
+        email_verified: bool = True,
     ) -> None:
         ident = FirebaseIdentity(
             uid=uid,
             email=email.lower(),
-            email_verified=True,
+            email_verified=email_verified,
             display_name=display_name,
         )
         self.accounts[email.lower()] = (password, ident)
         self.tokens[id_token] = ident
 
-    async def verify_id_token(self, token: str, project_id: str) -> FirebaseIdentity:
+    async def verify_id_token(
+        self,
+        token: str,
+        project_id: str,
+        *,
+        api_key: str | None = None,
+        check_revoked: bool = True,
+    ) -> FirebaseIdentity:
         if token not in self.tokens:
             raise FirebaseInvalidCredentials("bad token")
         return self.tokens[token]
@@ -531,8 +551,54 @@ class FakeFirebaseAuthClient:
             raise FirebaseInvalidCredentials("bad email or password")
         return entry[1]
 
+    async def create_account(self, email: str, *, api_key: str) -> bool:
+        if self.fail_create:
+            raise FirebaseAuthError("signUp failed")
+        key = email.lower()
+        self.accounts_created.append(key)
+        if key in self.accounts:
+            return False
+        placeholder = FirebaseIdentity(uid=f"fb-uid-{uuid.uuid4().hex}", email=key)
+        self.accounts[key] = (uuid.uuid4().hex, placeholder)
+        return True
+
     async def send_password_reset(self, email: str, *, api_key: str) -> None:
+        if self.fail_reset:
+            raise FirebaseAuthError("sendOobCode failed")
+        if email.lower() not in self.accounts:
+            # Mirrors Firebase: a reset for an address with no account is EMAIL_NOT_FOUND.
+            raise FirebaseInvalidCredentials("EMAIL_NOT_FOUND")
         self.reset_emails_sent.append(email.lower())
+
+
+FB_SETTINGS = {
+    "firebase_project_id": "sites-470716",
+    "firebase_web_api_key": "fake-web-api-key",
+}
+
+
+@pytest.fixture
+def fb_env(admin_app: FastAPI) -> Iterator[tuple[FakeFirebaseAuthClient, Callable[..., None]]]:
+    """Install a fake Firebase client and Firebase settings; yield (fake, reconfigure).
+
+    `reconfigure(**overrides)` swaps the settings override (e.g. to drop the API key).
+    Every override is restored afterwards: a leak breaks later tests.
+    """
+    fake_fb = FakeFirebaseAuthClient()
+    orig_settings_fn = admin_app.dependency_overrides[get_settings]
+    base_settings = orig_settings_fn()
+
+    def reconfigure(**overrides: object) -> None:
+        cfg = base_settings.model_copy(update={**FB_SETTINGS, **overrides})
+        admin_app.dependency_overrides[get_settings] = lambda: cfg
+
+    reconfigure()
+    admin_app.dependency_overrides[get_firebase_auth] = lambda: fake_fb
+    try:
+        yield fake_fb, reconfigure
+    finally:
+        admin_app.dependency_overrides[get_settings] = orig_settings_fn
+        admin_app.dependency_overrides.pop(get_firebase_auth, None)
 
 
 async def test_firebase_invite_only_auth_and_superadmin_bootstrap(
@@ -600,6 +666,7 @@ async def test_firebase_invite_only_auth_and_superadmin_bootstrap(
             assert invite.json()["email"] == "carol@example.com"
             assert invite.json()["has_local_password"] is False
             assert fake_fb.reset_emails_sent == ["carol@example.com"]
+            assert invite.json()["email_delivery"] == "sent"
 
             # 3. Carol signs in with email + password at POST /v1/auth/login -> binds firebase_uid
             login_res = await client.post(
@@ -625,3 +692,218 @@ async def test_firebase_invite_only_auth_and_superadmin_bootstrap(
     finally:
         admin_app.dependency_overrides[get_settings] = orig_settings_fn
         admin_app.dependency_overrides.pop(get_firebase_auth, None)
+
+
+FbEnv = tuple[FakeFirebaseAuthClient, Callable[..., None]]
+
+
+async def test_an_unverified_email_cannot_claim_an_invite(
+    admin_app: FastAPI,
+    clean_tables: None,
+    fb_env: FbEnv,
+    engine: AsyncEngine,
+) -> None:
+    """S0-sec-1: a self-registered, unverified Firebase identity cannot take an invite."""
+    fake_fb, _ = fb_env
+    admin_token = await login_admin(admin_app, TEST_PASSWORD)
+    headers = {"Authorization": f"Bearer {admin_token}"}
+
+    async with client_for(admin_app, base_url="https://testserver") as client:
+        invite = await client.post(
+            "/v1/users",
+            headers=headers,
+            json={"username": "dave", "email": "dave@example.com"},
+        )
+        assert invite.status_code == 201, invite.text
+        dave_id = uuid.UUID(invite.json()["id"])
+
+        # An attacker signs up dave@example.com with the public web API key.
+        fake_fb.register(
+            email="dave@example.com",
+            password="squatter-password",
+            uid="fb-uid-squatter-001",
+            id_token="fb-id-token-squatter-0001",
+            email_verified=False,
+        )
+
+        via_token = await client.post(
+            "/v1/auth/firebase", json={"id_token": "fb-id-token-squatter-0001"}
+        )
+        assert via_token.status_code == 403, via_token.text
+        assert "not been verified" in via_token.json()["detail"]
+
+        via_password = await client.post(
+            "/v1/auth/login",
+            json={"username": "dave@example.com", "password": "squatter-password"},
+        )
+        assert via_password.status_code == 403, via_password.text
+        assert "not been verified" in via_password.json()["detail"]
+        assert "ff_session" not in via_password.cookies
+
+        async with AsyncSession(engine) as session:
+            dave = await session.get(User, dave_id)
+            assert dave is not None
+            assert dave.firebase_uid is None
+            tokens = (
+                await session.scalars(select(AdminToken).where(AdminToken.user_id == dave_id))
+            ).all()
+            assert tokens == []
+
+        # The real owner completes the reset email: the account is now verified.
+        fake_fb.register(
+            email="dave@example.com",
+            password="dave-real-password",
+            uid="fb-uid-dave-001",
+            id_token="fb-id-token-dave-00001",
+            email_verified=True,
+        )
+        ok = await client.post(
+            "/v1/auth/login",
+            json={"username": "dave@example.com", "password": "dave-real-password"},
+        )
+        assert ok.status_code == 200, ok.text
+
+        async with AsyncSession(engine) as session:
+            dave = await session.get(User, dave_id)
+            assert dave is not None
+            assert dave.firebase_uid == "fb-uid-dave-001"
+
+
+async def test_an_unverified_bootstrap_superadmin_email_is_refused(
+    admin_app: FastAPI,
+    clean_tables: None,
+    fb_env: FbEnv,
+    engine: AsyncEngine,
+) -> None:
+    """S0-sec-1: an unverified FIREBASE_SUPERADMIN_EMAILS address never bootstraps a row."""
+    fake_fb, reconfigure = fb_env
+    reconfigure(firebase_superadmin_emails="boss@example.com")
+    fake_fb.register(
+        email="boss@example.com",
+        password="squatter-password",
+        uid="fb-uid-boss-squatter",
+        id_token="fb-id-token-boss-squat-01",
+        email_verified=False,
+    )
+
+    async with client_for(admin_app, base_url="https://testserver") as client:
+        via_token = await client.post(
+            "/v1/auth/firebase", json={"id_token": "fb-id-token-boss-squat-01"}
+        )
+        assert via_token.status_code == 403, via_token.text
+        assert "not been verified" in via_token.json()["detail"]
+
+        via_password = await client.post(
+            "/v1/auth/login",
+            json={"username": "boss@example.com", "password": "squatter-password"},
+        )
+        assert via_password.status_code == 403, via_password.text
+        assert "not been verified" in via_password.json()["detail"]
+
+    async with AsyncSession(engine) as session:
+        rows = (await session.scalars(select(User).where(User.email == "boss@example.com"))).all()
+        assert rows == []
+
+
+async def test_an_invite_to_a_new_address_creates_the_account_and_sends_the_email(
+    admin_app: FastAPI,
+    clean_tables: None,
+    fb_env: FbEnv,
+) -> None:
+    """S0-sec-1: an invite to an address with no Firebase account still delivers."""
+    fake_fb, _ = fb_env
+    admin_token = await login_admin(admin_app, TEST_PASSWORD)
+    headers = {"Authorization": f"Bearer {admin_token}"}
+
+    async with client_for(admin_app, base_url="https://testserver") as client:
+        r = await client.post(
+            "/v1/users",
+            headers=headers,
+            json={"username": "erin", "email": "erin@example.com", "send_invite_email": True},
+        )
+        assert r.status_code == 201, r.text
+        assert r.json()["email_delivery"] == "sent"
+    assert fake_fb.accounts_created == ["erin@example.com"]
+    assert fake_fb.reset_emails_sent == ["erin@example.com"]
+
+
+async def test_an_invite_reports_when_the_email_cannot_be_sent(
+    admin_app: FastAPI,
+    clean_tables: None,
+    fb_env: FbEnv,
+) -> None:
+    """S0-sec-1: the 201 body says whether the setup email went out."""
+    fake_fb, reconfigure = fb_env
+    admin_token = await login_admin(admin_app, TEST_PASSWORD)
+    headers = {"Authorization": f"Bearer {admin_token}"}
+
+    async with client_for(admin_app, base_url="https://testserver") as client:
+        fake_fb.fail_reset = True
+        failed = await client.post(
+            "/v1/users",
+            headers=headers,
+            json={"username": "fred", "email": "fred@example.com", "send_invite_email": True},
+        )
+        assert failed.status_code == 201, failed.text
+        assert failed.json()["email_delivery"] == "failed"
+        fake_fb.fail_reset = False
+
+        none_requested = await client.post(
+            "/v1/users",
+            headers=headers,
+            json={"username": "hank", "email": "hank@example.com", "send_invite_email": False},
+        )
+        assert none_requested.status_code == 201, none_requested.text
+        assert none_requested.json()["email_delivery"] is None
+
+        reconfigure(firebase_web_api_key=None)
+        unconfigured = await client.post(
+            "/v1/users",
+            headers=headers,
+            json={"username": "gina", "email": "gina@example.com", "send_invite_email": True},
+        )
+        assert unconfigured.status_code == 201, unconfigured.text
+        assert unconfigured.json()["email_delivery"] == "not_configured"
+    assert "hank@example.com" not in fake_fb.accounts_created
+    assert "gina@example.com" not in fake_fb.accounts_created
+
+
+async def test_a_password_reset_for_a_pre_fix_invitee_creates_the_account(
+    admin_app: FastAPI,
+    clean_tables: None,
+    fb_env: FbEnv,
+) -> None:
+    """S0-sec-1: an invitee from before the fix (no Firebase account) can still be reached."""
+    fake_fb, reconfigure = fb_env
+    admin_token = await login_admin(admin_app, TEST_PASSWORD)
+    headers = {"Authorization": f"Bearer {admin_token}"}
+
+    async with client_for(admin_app, base_url="https://testserver") as client:
+        reconfigure(firebase_web_api_key=None)
+        created = await client.post(
+            "/v1/users",
+            headers=headers,
+            json={"username": "ivan", "email": "ivan@example.com", "send_invite_email": True},
+        )
+        assert created.status_code == 201, created.text
+        assert created.json()["email_delivery"] == "not_configured"
+        assert fake_fb.accounts_created == []
+
+        reconfigure()
+        r = await client.patch(
+            "/v1/users/ivan",
+            headers=headers,
+            json={"send_password_reset": True},
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["email_delivery"] == "sent"
+    assert fake_fb.accounts_created == ["ivan@example.com"]
+    assert fake_fb.reset_emails_sent == ["ivan@example.com"]
+
+
+def test_auth_context_and_me_default_to_not_superadmin() -> None:
+    """S0-sec-1: the fail-open `is_superadmin=True` defaults are gone."""
+    ctx = AuthContext(token_id=uuid.uuid4(), subject="x", scopes=(), expires_at=None)
+    assert ctx.is_superadmin is False
+    me = MeResponse(token_id=uuid.uuid4(), subject="x", scopes=[], expires_at=None)
+    assert me.is_superadmin is False

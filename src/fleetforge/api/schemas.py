@@ -84,7 +84,7 @@ class MeResponse(BaseModel):
     subject: str
     scopes: list[str]
     expires_at: dt.datetime | None
-    is_superadmin: bool = True
+    is_superadmin: bool = False
     project_id: uuid.UUID | None = None
     projects: list[UserProjectSummary] = Field(default_factory=list)
 
@@ -236,6 +236,10 @@ class UserUpdate(BaseModel):
         return low
 
 
+# Outcome of the invite / password-reset email: `None` when none was requested.
+EmailDelivery = Literal["sent", "failed", "not_configured"]
+
+
 class UserSummary(BaseModel):
     id: uuid.UUID
     username: str
@@ -246,6 +250,7 @@ class UserSummary(BaseModel):
     is_superadmin: bool
     disabled_at: dt.datetime | None
     created_at: dt.datetime
+    email_delivery: EmailDelivery | None = None
 
 
 class UserList(BaseModel):

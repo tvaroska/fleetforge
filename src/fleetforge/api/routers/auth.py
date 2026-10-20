@@ -175,11 +175,26 @@ async def _resolve_invited_firebase_user(
     key: str,
     limiter: FixedWindowLimiter,
 ) -> User:
-    """Resolve an invited `User` row for `identity` (or bootstrap a configured superadmin email)."""
+    """Resolve an invited `User` row for `identity` (or bootstrap a configured superadmin email).
+
+    An unverified email is refused before anything else: Firebase self sign-up is open
+    to anyone with the public web API key, so an unverified identity proves nothing
+    about who owns the address (DECISIONS.md, 2026-10-19 S0-sec-1).
+    """
     email = identity.email.strip().lower()
-    user = await session.scalar(
-        select(User).where(or_(User.firebase_uid == identity.uid, User.email == email))
-    )
+    if not identity.email_verified:
+        limiter.record_failure(key)
+        logger.info("firebase login rejected for unverified email %s from %s", email, key)
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="this email address has not been verified",
+        )
+
+    # uid first, then email: one `uid OR email` query returns an arbitrary row when
+    # the two match different users.
+    user = await session.scalar(select(User).where(User.firebase_uid == identity.uid))
+    if user is None:
+        user = await session.scalar(select(User).where(User.email == email))
     if user is None:
         if email in superadmin_emails:
             base_username = _derive_username_from_email(email)
@@ -412,14 +427,20 @@ async def login_firebase(
             headers={"Retry-After": str(retry_after)},
         )
 
-    if not settings.firebase_project_id:
+    # The web API key is needed for the revocation lookup; without it, fail closed.
+    if not settings.firebase_project_id or not settings.firebase_web_api_key:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Firebase login is not configured",
         )
 
     try:
-        fb_identity = await firebase.verify_id_token(body.id_token, settings.firebase_project_id)
+        fb_identity = await firebase.verify_id_token(
+            body.id_token,
+            settings.firebase_project_id,
+            api_key=settings.firebase_web_api_key,
+            check_revoked=True,
+        )
     except FirebaseInvalidCredentials:
         limiter.record_failure(key)
         raise HTTPException(

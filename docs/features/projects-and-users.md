@@ -204,8 +204,8 @@ A token's effective permission on a target `project_id` is checked by a small de
 
 | Endpoint | Method | Auth | Description |
 |---|---|---|---|
-| `/v1/auth/login` | `POST` | Public (rate-limited) | Body: `{"username": "admin" \| "alice@example.com", "password": "..."}`. Verifies local `password_hash` or (when `FIREBASE_WEB_API_KEY` is configured) Firebase Email + Password (`accounts:signInWithPassword`) for invited users. Sets `ff_session` cookie. |
-| `/v1/auth/firebase` | `POST` | Public (rate-limited) | Body: `{"id_token": "<firebase_jwt>"}`. Verifies RS256 Firebase ID token against `FIREBASE_PROJECT_ID`, enforces invite-only membership in `users` (or bootstrap `FIREBASE_SUPERADMIN_EMAILS`), binds `firebase_uid`, and sets `ff_session` cookie. |
+| `/v1/auth/login` | `POST` | Public (rate-limited) | Body: `{"username": "admin" \| "alice@example.com", "password": "..."}`. Verifies local `password_hash` or (when `FIREBASE_WEB_API_KEY` is configured) Firebase Email + Password (`accounts:signInWithPassword`, then `accounts:lookup`) for invited users. A Firebase identity whose email is not verified gets `403` "this email address has not been verified". Sets `ff_session` cookie. |
+| `/v1/auth/firebase` | `POST` | Public (rate-limited) | Body: `{"id_token": "<firebase_jwt>"}`. Needs both `FIREBASE_PROJECT_ID` and `FIREBASE_WEB_API_KEY` (else `503`). Verifies the RS256 Firebase ID token (signature, `aud`, `iss`, `sub`, `auth_time`), checks revocation via `accounts:lookup` (disabled account or `auth_time < validSince` -> `401`), refuses an unverified email (`403`), enforces invite-only membership in `users` (or bootstrap `FIREBASE_SUPERADMIN_EMAILS`), binds `firebase_uid` (looked up by uid first, then email), and sets `ff_session` cookie. |
 | `/v1/auth/logout` | `POST` | Any token | Revokes presenting token, clears cookie. |
 | `/v1/auth/me` | `GET` | Any token | Returns `token_id`, `subject`, `scopes`, `expires_at`, plus `is_superadmin`, `project_id`, and `projects: [{slug, name, role}]`. |
 | `/v1/auth/tokens` | `POST` | User session / `owner` | Issues a named `ffa_...` token (optional `project` slug, `scopes`, `expires_in_days`). Plaintext returned **once**. |
@@ -224,8 +224,8 @@ A token's effective permission on a target `project_id` is checked by a small de
 | `/v1/projects/{slug}/members` | `GET` | Project `viewer`+ | Lists members (`username`, `display_name`, `role`). |
 | `/v1/projects/{slug}/members/{username}` | `PUT` | Project `owner` / Superadmin | Adds or updates a member's `role` (`owner`, `operator`, `viewer`). |
 | `/v1/projects/{slug}/members/{username}` | `DELETE` | Project `owner` / Superadmin | Removes member from project (refuses removing the last `owner`). |
-| `/v1/users` | `GET`, `POST` | Superadmin | Lists or creates human users (`username`, `display_name`, `password`, `is_superadmin`). |
-| `/v1/users/{username}` | `PATCH` | Superadmin (or self for password) | Rotates password, toggles `disabled_at` or `is_superadmin`. Revokes user's active tokens on disable. |
+| `/v1/users` | `GET`, `POST` | Superadmin | Lists or creates human users (`username`, `email`, `display_name`, `password`, `is_superadmin`, `send_invite_email`). With `send_invite_email`, creates the Firebase account server-side (`accounts:signUp`, random discarded password) and sends the `PASSWORD_RESET` setup email; the `201` body's `email_delivery` is `sent`, `failed`, `not_configured` (no `FIREBASE_WEB_API_KEY`) or `null` (none requested). |
+| `/v1/users/{username}` | `PATCH` | Superadmin (or self for password) | Rotates password, toggles `disabled_at` or `is_superadmin`. Revokes user's active tokens on disable. `send_password_reset` uses the same account-then-email path and reports `email_delivery`. |
 
 ### 3. Project Scoping on Existing Endpoints
 
@@ -339,3 +339,11 @@ A board that is still arriving has no `devices` row, so the enrollment token it 
 Known limit: a board enrolled into project A and transferred to B within the progress window can appear in A's arrivals for up to that window. This is cosmetic.
 
 Test conventions learned while fixing P1's broken tests: members are added with `PUT /v1/projects/{slug}/members/{username}` and body `{"role": ...}` only. The stage payload digest is nested at `["artifact"]["sha256"]`. Minting a project-pinned token requires `owner`. Firebase `id_token` keeps `min_length=16`, so fixtures use long tokens. Setup calls in tests assert their status so that one failure cannot hide behind another. The member-add shape is owned by S0-bug-7 and the frontend client.
+
+## Verified email required for Firebase login (S0-sec-1)
+
+Firebase email/password sign-up is callable by anyone holding the public web API key, and it cannot be switched off because the invite path itself uses `accounts:signUp` (no service account). So an unverified Firebase identity proves nothing about who owns the address, and `_resolve_invited_firebase_user` refuses it (`403` "this email address has not been verified") before any DB read, before the `FIREBASE_SUPERADMIN_EMAILS` bootstrap and before `firebase_uid` binding. `FirebaseIdentity.email_verified` defaults to `False`, and it is `True` only when both the token claim and the live `accounts:lookup` say so; the no-`project_id` sign-in path reads it from the lookup instead of assuming it.
+
+Invite flow: `POST /v1/users` with `send_invite_email` -> `accounts:signUp` (unverified account, random password nobody knows; an existing account is left as it is) -> `PASSWORD_RESET` email -> the invitee sets a password, which verifies the mailbox -> login passes. The response's `email_delivery` tells the dashboard whether the email went out, and the drawer shows an error when it did not. An invitee created before this fix (no Firebase account) is reached with `PATCH /v1/users/{u}` `{"send_password_reset": true}`. The assumption that a completed reset marks the email verified, and its fallback, are in DECISIONS.md (2026-10-19, S0-sec-1).
+
+`AuthContext.is_superadmin` and `MeResponse.is_superadmin` default to `False` (fail closed); `require_admin` always sets the value explicitly.

@@ -102,7 +102,7 @@ class AuthContext:
     expires_at: dt.datetime | None
     user_id: uuid.UUID | None = None
     project_id: uuid.UUID | None = None
-    is_superadmin: bool = True
+    is_superadmin: bool = False
 
 
 def client_key(request: Request) -> str:
