@@ -30,6 +30,11 @@ function emailDeliveryError(
   return null
 }
 
+type PendingConfirm =
+  | { kind: 'remove-member'; username: string }
+  | { kind: 'revoke-token'; id: string; name: string }
+  | { kind: 'disable-user'; username: string }
+
 export function ProjectAccess({
   me,
   activeProject,
@@ -59,6 +64,8 @@ export function ProjectAccess({
   const [issuedToken, setIssuedToken] = useState<AdminTokenIssued | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  // Destructive actions ask first; one pending question for the whole drawer.
+  const [pending, setPending] = useState<PendingConfirm | null>(null)
 
   // New project form (superadmin only)
   const [newSlug, setNewSlug] = useState('')
@@ -80,6 +87,11 @@ export function ProjectAccess({
   const [tokenName, setTokenName] = useState('')
   const [tokenScope, setTokenScope] = useState('deploy')
   const [tokenPinned, setTokenPinned] = useState(true)
+
+  // A stale question about another project's member must not survive a switch or a close.
+  useEffect(() => {
+    setPending(null)
+  }, [activeProject, open])
 
   const handle = useCallback(
     (err: unknown) => {
@@ -174,6 +186,8 @@ export function ProjectAccess({
       await refreshDrawer()
     } catch (err) {
       handle(err)
+    } finally {
+      setPending(null)
     }
   }
 
@@ -198,10 +212,7 @@ export function ProjectAccess({
     setBusy(true)
     setError(null)
     try {
-      await api.upsertProjectMember(activeProject, {
-        username: memberUsername.trim(),
-        role: memberRole,
-      })
+      await api.upsertProjectMember(activeProject, memberUsername.trim(), { role: memberRole })
       setMemberUsername('')
       await refreshDrawer()
     } catch (err) {
@@ -218,6 +229,8 @@ export function ProjectAccess({
       await refreshDrawer()
     } catch (err) {
       handle(err)
+    } finally {
+      setPending(null)
     }
   }
 
@@ -255,6 +268,8 @@ export function ProjectAccess({
       await refreshDrawer()
     } catch (err) {
       handle(err)
+    } finally {
+      setPending(null)
     }
   }
 
@@ -445,7 +460,13 @@ export function ProjectAccess({
                           )}{' '}
                           <button
                             type="button"
-                            onClick={() => void handleToggleUserDisabled(u)}
+                            aria-label={`${u.disabled_at ? 'Enable' : 'Disable'} ${u.username}`}
+                            disabled={busy}
+                            onClick={() =>
+                              u.disabled_at
+                                ? void handleToggleUserDisabled(u)
+                                : setPending({ kind: 'disable-user', username: u.username })
+                            }
                           >
                             {u.disabled_at ? 'Enable' : 'Disable'}
                           </button>
@@ -454,6 +475,28 @@ export function ProjectAccess({
                     ))}
                   </tbody>
                 </table>
+              )}
+              {pending?.kind === 'disable-user' && (
+                <p data-testid="confirm-disable-user">
+                  Disable {pending.username}? They are signed out at once.{' '}
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => {
+                      const target = users?.find((u) => u.username === pending.username)
+                      if (target) {
+                        void handleToggleUserDisabled(target)
+                      } else {
+                        setPending(null)
+                      }
+                    }}
+                  >
+                    Yes, disable {pending.username}
+                  </button>{' '}
+                  <button type="button" onClick={() => setPending(null)}>
+                    Keep
+                  </button>
+                </p>
               )}
             </>
           )}
@@ -481,7 +524,12 @@ export function ProjectAccess({
                     </td>
                     <td>{m.role}</td>
                     <td>
-                      <button type="button" onClick={() => void handleRemoveMember(m.username)}>
+                      <button
+                        type="button"
+                        aria-label={`Remove ${m.username}`}
+                        disabled={busy}
+                        onClick={() => setPending({ kind: 'remove-member', username: m.username })}
+                      >
                         Remove
                       </button>
                     </td>
@@ -489,6 +537,21 @@ export function ProjectAccess({
                 ))}
               </tbody>
             </table>
+          )}
+          {pending?.kind === 'remove-member' && (
+            <p data-testid="confirm-remove-member">
+              Remove {pending.username} from {activeProject}? They lose access to its boards.{' '}
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => void handleRemoveMember(pending.username)}
+              >
+                Yes, remove {pending.username}
+              </button>{' '}
+              <button type="button" onClick={() => setPending(null)}>
+                Keep
+              </button>
+            </p>
           )}
           <form onSubmit={(e) => void handleAddMember(e)}>
             <p>
@@ -599,7 +662,14 @@ export function ProjectAccess({
                     <td>{formatWhen(t.created_at)}</td>
                     <td>
                       {t.revoked_at === null ? (
-                        <button type="button" onClick={() => void handleRevokeToken(t.id)}>
+                        <button
+                          type="button"
+                          aria-label={`Revoke ${t.name}`}
+                          disabled={busy}
+                          onClick={() =>
+                            setPending({ kind: 'revoke-token', id: t.id, name: t.name })
+                          }
+                        >
                           Revoke
                         </button>
                       ) : (
@@ -610,6 +680,21 @@ export function ProjectAccess({
                 ))}
               </tbody>
             </table>
+          )}
+          {pending?.kind === 'revoke-token' && (
+            <p data-testid="confirm-revoke-token">
+              Revoke {pending.name}? Anything using it stops working at once.{' '}
+              <button
+                type="button"
+                disabled={busy}
+                onClick={() => void handleRevokeToken(pending.id)}
+              >
+                Revoke token
+              </button>{' '}
+              <button type="button" onClick={() => setPending(null)}>
+                Keep
+              </button>
+            </p>
           )}
         </div>
       )}

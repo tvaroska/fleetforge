@@ -6,6 +6,16 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-19 — S0-bug-7: member add is PUT /members/{username} with {"role"}; the dashboard client was wrong; remove/revoke/disable ask first
+
+- **Cause.** `api.ts::upsertProjectMember` sent `POST /v1/projects/{slug}/members` with `{username, role}`. The backend has only `PUT /members/{username}` (and `GET /members`), so FastAPI answered 405 and the drawer could not add anyone.
+- **Decision.** Keep the backend contract and fix the client: `PUT /v1/projects/{slug}/members/{username}`, both segments URL-encoded, body exactly `{"role"}` (`ProjectMemberUpsert` is `extra="forbid"`, so a `username` key would 422). No change to `routers/projects.py`. While there, Remove member, Revoke token and Disable user in `ProjectAccess.tsx` ask first with an inline confirm line (the `CommandControls` idiom, one `pending` state, cleared on Keep, completion, drawer close and project switch). Enable stays one click.
+- **Why.** PUT is the documented, idempotent contract, symmetric with `DELETE /members/{username}`, and the S0-bug-6 tests already use it.
+- **Rejected.** A POST alias (two shapes for one upsert). Switching the backend to POST (churns the documented contract and the test sites). `window.confirm` (no precedent here, jsdom lacks it).
+- **Tests.** `tests/test_projects_and_users.py::test_a_member_added_with_put_is_listed_and_post_is_not_a_route` (PUT 200 and listed, second PUT upserts, `username` in body 422, POST 405, unknown user 404). `frontend/src/ProjectAccess.test.tsx`: stateful-mock add test plus confirm tests for remove, revoke, disable and one-click enable. Mutation-checked (POST in `api.ts`, ungated Remove -> tests fail).
+
+---
+
 ## 2026-10-19 — S0-sec-2: partition-profile writes are superadmin only, the list is filtered, pinned tokens never mint, and other projects' device ids read as unknown
 
 - **Cause.** `routers/partition_profiles.py` depended only on `AdminDep`, so any viewer or `read`-scoped token could create, adopt or delete fleet-wide profiles, and the list returned `device_ids` (and `detected_device_id`) from every project. In `create_admin_token`, a userless project-pinned `admin` token passed the `owner` check, because `check_project_access` lets an `admin`-scoped token with no user through. It could mint children that survived its own revocation. `revoke_admin_token` compared `row.user_id != admin.user_id`, which is `False` when both are `None`, so a userless pinned token could revoke any userless token, including the operator's unpinned CLI tokens. Device routes loaded the device, answered `404` if missing, then checked access and answered `403`, which told a caller which ids exist in other projects.

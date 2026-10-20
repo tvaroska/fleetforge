@@ -754,14 +754,16 @@ export const api = {
       `/v1/projects/${encodeURIComponent(slug)}/members`,
     ),
 
+  // PUT upsert keyed by username; the body is `{role}` only (the server schema forbids extra keys).
   upsertProjectMember: (
     slug: string,
-    body: { username: string; role: 'owner' | 'operator' | 'viewer' },
+    username: string,
+    body: { role: 'owner' | 'operator' | 'viewer' },
   ) =>
-    request<ProjectMemberSummary>(`/v1/projects/${encodeURIComponent(slug)}/members`, {
-      method: 'POST',
-      body: JSON.stringify(body),
-    }),
+    request<ProjectMemberSummary>(
+      `/v1/projects/${encodeURIComponent(slug)}/members/${encodeURIComponent(username)}`,
+      { method: 'PUT', body: JSON.stringify({ role: body.role }) },
+    ),
 
   removeProjectMember: (slug: string, username: string) =>
     request<void>(

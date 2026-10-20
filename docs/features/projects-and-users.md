@@ -338,7 +338,7 @@ A board that is still arriving has no `devices` row, so the enrollment token it 
 
 Known limit: a board enrolled into project A and transferred to B within the progress window can appear in A's arrivals for up to that window. This is cosmetic.
 
-Test conventions learned while fixing P1's broken tests: members are added with `PUT /v1/projects/{slug}/members/{username}` and body `{"role": ...}` only. The stage payload digest is nested at `["artifact"]["sha256"]`. Minting a project-pinned token requires `owner`. Firebase `id_token` keeps `min_length=16`, so fixtures use long tokens. Setup calls in tests assert their status so that one failure cannot hide behind another. The member-add shape is owned by S0-bug-7 and the frontend client.
+Test conventions learned while fixing P1's broken tests: members are added with `PUT /v1/projects/{slug}/members/{username}` and body `{"role": ...}` only. The stage payload digest is nested at `["artifact"]["sha256"]`. Minting a project-pinned token requires `owner`. Firebase `id_token` keeps `min_length=16`, so fixtures use long tokens. Setup calls in tests assert their status so that one failure cannot hide behind another. S0-bug-7 kept `PUT /members/{username}` with `{"role"}` as the one member-add shape and aligned the dashboard client (it had POSTed `/members` with a `username` body, a 405). The drawer now also asks before Remove member, Revoke token and Disable user (inline confirm line, Keep cancels); Enable stays one click.
 
 ## Verified email required for Firebase login (S0-sec-1)
 

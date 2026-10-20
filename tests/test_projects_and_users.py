@@ -1299,3 +1299,52 @@ async def test_an_enrollment_token_in_another_project_is_unknown(
         async with AsyncSession(engine) as session:
             row = await session.get(EnrollmentToken, uuid.UUID(beta_token_id))
         assert row is not None and row.revoked_at is None
+
+
+async def test_a_member_added_with_put_is_listed_and_post_is_not_a_route(
+    admin_app: FastAPI, clean_tables: None
+) -> None:
+    """S0-bug-7: member add is `PUT /members/{username}` with `{"role"}`, never POST."""
+    admin_headers = _bearer(await login_admin(admin_app))
+
+    async with client_for(admin_app, base_url="https://testserver") as client:
+        r = await client.post(
+            "/v1/users",
+            headers=admin_headers,
+            json={"username": "carol", "password": "carol-password-123", "is_superadmin": False},
+        )
+        assert r.status_code == 201, r.text
+
+        url = "/v1/projects/default/members/carol"
+        r = await client.put(url, headers=admin_headers, json={"role": "operator"})
+        assert r.status_code == 200, r.text
+        assert (r.json()["username"], r.json()["role"]) == ("carol", "operator")
+
+        r = await client.get("/v1/projects/default/members", headers=admin_headers)
+        assert r.status_code == 200, r.text
+        assert [(m["username"], m["role"]) for m in r.json()["members"]] == [("carol", "operator")]
+
+        # A second PUT upserts the role; it does not add a row.
+        r = await client.put(url, headers=admin_headers, json={"role": "viewer"})
+        assert r.status_code == 200, r.text
+        r = await client.get("/v1/projects/default/members", headers=admin_headers)
+        assert [(m["username"], m["role"]) for m in r.json()["members"]] == [("carol", "viewer")]
+
+        # The username lives in the path; the schema forbids it in the body.
+        r = await client.put(
+            url, headers=admin_headers, json={"username": "carol", "role": "viewer"}
+        )
+        assert r.status_code == 422, r.text
+
+        # The dashboard's old shape is not a route.
+        r = await client.post(
+            "/v1/projects/default/members",
+            headers=admin_headers,
+            json={"username": "carol", "role": "viewer"},
+        )
+        assert r.status_code == 405, r.text
+
+        r = await client.put(
+            "/v1/projects/default/members/nobody", headers=admin_headers, json={"role": "viewer"}
+        )
+        assert r.status_code == 404, r.text
