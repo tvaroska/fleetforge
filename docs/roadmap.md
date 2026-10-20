@@ -73,6 +73,7 @@ airtime-aware scheduling, delta updates. Full treatment in
 | Simulation backend | [simulation.md](features/simulation.md) | R9 (V2) |
 | Build pipeline (server-side compile) | [build-pipeline.md](features/build-pipeline.md) | R10 (V2) |
 | Groups, gateway, hierarchy, delta | [groups-deploy.md](features/groups-deploy.md) | V3 (swarm) |
+| Projects, multi-user auth & scoped tokens | [projects-and-users.md](features/projects-and-users.md) | V2 / Multi-Project Scale (Option A) |
 
 ---
 

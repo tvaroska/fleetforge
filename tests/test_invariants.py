@@ -22,6 +22,7 @@ from fleetforge.db.models import (
     Device,
     DeviceGroup,
     EnrollmentToken,
+    User,
 )
 
 # BURN_SQL is imported, not copied: `fleetforge.auth.enrollment` ships the one
@@ -279,6 +280,9 @@ def test_secret_hash_is_not_plaintext_column() -> None:
         columns = {c.name for c in inspect(model).columns}
         assert "secret_hash" in columns
         assert not (columns & forbidden), f"{model.__tablename__} must not store a plaintext secret"
+    user_columns = {c.name for c in inspect(User).columns}
+    assert "password_hash" in user_columns
+    assert not (user_columns & forbidden), "users must not store a plaintext password"
 
 
 # ---------------------------------------------------------------------------

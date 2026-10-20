@@ -28,15 +28,32 @@ from fleetforge.announce_fields import (
 )
 from fleetforge.auth.enrollment import EnrollmentTokenStatus
 from fleetforge.auth.tokens import MAX_TOKEN_LENGTH
-from fleetforge.db.models import PowerClass
+from fleetforge.db.models import PowerClass, ProjectRole
 from fleetforge.identity import is_valid_device_id
 from fleetforge.partition_profiles import MAX_PROFILE_SLOT_SIZE
 
+USERNAME_PATTERN = r"^[a-z0-9][a-z0-9._-]{1,31}$"
+EMAIL_PATTERN = r"^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$"
+LOGIN_IDENTIFIER_PATTERN = (
+    r"^([a-z0-9][a-z0-9._-]{1,31}|[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})$"
+)
+PROJECT_SLUG_PATTERN = r"^[a-z0-9][a-z0-9-]{0,31}$"
+AllowedScope = Literal["admin", "read", "write:artifacts", "deploy", "enroll"]
+
 
 class LoginRequest(BaseModel):
-    """The admin password. Never logged, never echoed."""
+    """The operator username/email and password. Password is never logged, never echoed."""
 
+    username: str = Field(default="admin", pattern=LOGIN_IDENTIFIER_PATTERN)
     password: str = Field(min_length=1, max_length=1024)
+
+
+class FirebaseLoginRequest(BaseModel):
+    """Exchange a verified Firebase ID token for an HttpOnly `ff_session` cookie."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id_token: str = Field(min_length=16, max_length=8192)
 
 
 class LoginResponse(BaseModel):
@@ -50,6 +67,16 @@ class LoginResponse(BaseModel):
     expires_at: dt.datetime
 
 
+class UserProjectSummary(BaseModel):
+    """A project visible to the caller, as returned on `GET /v1/auth/me`."""
+
+    id: uuid.UUID
+    slug: str
+    name: str
+    description: str | None = None
+    role: str
+
+
 class MeResponse(BaseModel):
     """The identity behind the presented credential."""
 
@@ -57,6 +84,172 @@ class MeResponse(BaseModel):
     subject: str
     scopes: list[str]
     expires_at: dt.datetime | None
+    is_superadmin: bool = True
+    project_id: uuid.UUID | None = None
+    projects: list[UserProjectSummary] = Field(default_factory=list)
+
+
+def _default_scopes() -> list[AllowedScope]:
+    return ["admin"]
+
+
+class AdminTokenCreate(BaseModel):
+    """`POST /v1/auth/tokens`: mint a named `ffa_...` token (optionally pinned to a project)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=64)
+    project: str | None = Field(default=None, pattern=PROJECT_SLUG_PATTERN)
+    scopes: list[AllowedScope] = Field(default_factory=_default_scopes, min_length=1, max_length=8)
+    expires_in_days: int | None = Field(default=None, ge=1, le=3650)
+
+
+class AdminTokenIssued(BaseModel):
+    """The issuance response — the **only** place the plaintext `token` ever exists."""
+
+    id: uuid.UUID
+    token: str
+    name: str
+    subject: str
+    scopes: list[str]
+    project_id: uuid.UUID | None = None
+    project_slug: str | None = None
+    created_at: dt.datetime
+    expires_at: dt.datetime | None
+
+
+class AdminTokenSummary(BaseModel):
+    """One row of `GET /v1/auth/tokens` — never contains `token` or `secret_hash`."""
+
+    id: uuid.UUID
+    name: str
+    subject: str
+    scopes: list[str]
+    project_id: uuid.UUID | None = None
+    project_slug: str | None = None
+    created_at: dt.datetime
+    last_used_at: dt.datetime | None
+    expires_at: dt.datetime | None
+    revoked_at: dt.datetime | None
+
+
+class AdminTokenList(BaseModel):
+    tokens: list[AdminTokenSummary]
+
+
+class ProjectCreate(BaseModel):
+    """`POST /v1/projects`: create a new project."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    slug: str = Field(pattern=PROJECT_SLUG_PATTERN)
+    name: str = Field(min_length=1, max_length=64)
+    description: str | None = Field(default=None, max_length=256)
+
+
+class ProjectUpdate(BaseModel):
+    """`PATCH /v1/projects/{slug}`: update display name or description."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(default=None, min_length=1, max_length=64)
+    description: str | None = Field(default=None, max_length=256)
+
+
+class ProjectSummary(BaseModel):
+    id: uuid.UUID
+    slug: str
+    name: str
+    description: str | None
+    role: str = "owner"
+    created_at: dt.datetime
+    updated_at: dt.datetime
+
+
+class ProjectList(BaseModel):
+    projects: list[ProjectSummary]
+
+
+class ProjectMemberUpsert(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    role: ProjectRole
+
+
+class ProjectMemberSummary(BaseModel):
+    user_id: uuid.UUID
+    username: str
+    display_name: str | None
+    role: str
+    created_at: dt.datetime
+
+
+class ProjectMemberList(BaseModel):
+    members: list[ProjectMemberSummary]
+
+
+class UserCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    username: str = Field(pattern=USERNAME_PATTERN)
+    email: str | None = Field(default=None, max_length=254)
+    display_name: str | None = Field(default=None, max_length=64)
+    password: str | None = Field(default=None, min_length=1, max_length=1024)
+    is_superadmin: bool = False
+    send_invite_email: bool = False
+
+    @field_validator("email")
+    @classmethod
+    def _normalize_email(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        low = v.strip().lower()
+        if not re.match(EMAIL_PATTERN, low):
+            raise ValueError("email must be a valid email address")
+        return low
+
+    @model_validator(mode="after")
+    def _require_email_or_password(self) -> Self:
+        if self.email is None and self.password is None:
+            raise ValueError("either email (for Firebase invite) or password must be provided")
+        return self
+
+
+class UserUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    email: str | None = Field(default=None, max_length=254)
+    display_name: str | None = Field(default=None, max_length=64)
+    password: str | None = Field(default=None, min_length=1, max_length=1024)
+    is_superadmin: bool | None = None
+    disabled: bool | None = None
+    send_password_reset: bool = False
+
+    @field_validator("email")
+    @classmethod
+    def _normalize_email(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        low = v.strip().lower()
+        if not re.match(EMAIL_PATTERN, low):
+            raise ValueError("email must be a valid email address")
+        return low
+
+
+class UserSummary(BaseModel):
+    id: uuid.UUID
+    username: str
+    email: str | None = None
+    firebase_uid: str | None = None
+    has_local_password: bool = False
+    display_name: str | None
+    is_superadmin: bool
+    disabled_at: dt.datetime | None
+    created_at: dt.datetime
+
+
+class UserList(BaseModel):
+    users: list[UserSummary]
 
 
 # ---------------------------------------------------------------------------
@@ -283,6 +476,7 @@ class DeviceUpdate(BaseModel):
 
     name: str | None = None
     group_id: uuid.UUID | None = None  # the "group/tag" of spec/flows.md
+    project: str | None = Field(default=None, pattern=PROJECT_SLUG_PATTERN)
 
     @field_validator("name")
     @classmethod

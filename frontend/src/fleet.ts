@@ -132,11 +132,16 @@ export type Fleet = {
 export type UseFleetOptions = {
   onSessionExpired: () => void
   createEventSource?: EventSourceFactory
+  project?: string
 }
 
 const defaultFactory: EventSourceFactory = (url) => new EventSource(url)
 
-export function useFleet({ onSessionExpired, createEventSource }: UseFleetOptions): Fleet {
+export function useFleet({
+  onSessionExpired,
+  createEventSource,
+  project,
+}: UseFleetOptions): Fleet {
   const [devices, setDevices] = useState<DeviceSummary[] | null>(null)
   const [arrivals, setArrivals] = useState<ArrivalSummary[]>([])
   const [error, setError] = useState<string | null>(null)
@@ -197,7 +202,7 @@ export function useFleet({ onSessionExpired, createEventSource }: UseFleetOption
     const seq = ++state.seq
     state.inFlight = true
     try {
-      const result = await api.listDevices()
+      const result = await api.listDevices(project)
       // `GET /v1/devices` responses can land out of order under bursty heartbeats;
       // without this guard an older list overwrites a newer one and the table goes
       // backwards. Same reason the server stamps one `now` per response.
@@ -236,7 +241,7 @@ export function useFleet({ onSessionExpired, createEventSource }: UseFleetOption
         void refresh()
       }
     }
-  }, [])
+  }, [project])
 
   useEffect(() => {
     const state = stateRef.current
@@ -278,7 +283,11 @@ export function useFleet({ onSessionExpired, createEventSource }: UseFleetOption
 
     function connect() {
       if (!state.live) return
-      const es = factoryRef.current(EVENTS_URL)
+      const eventsUrl =
+        project && project !== 'default'
+          ? `${EVENTS_URL}?project=${encodeURIComponent(project)}`
+          : EVENTS_URL
+      const es = factoryRef.current(eventsUrl)
       source = es
 
       es.onopen = () => {
@@ -327,7 +336,7 @@ export function useFleet({ onSessionExpired, createEventSource }: UseFleetOption
         else es.close()
         void (async () => {
           try {
-            await api.listDevices()
+            await api.listDevices(project)
           } catch (err) {
             if (!state.live) return
             if (err instanceof ApiError && err.isUnauthorized) {
@@ -376,7 +385,7 @@ export function useFleet({ onSessionExpired, createEventSource }: UseFleetOption
       // and ~20 reloads later the dashboard silently stops updating with a 503 nobody sees.
       discard()
     }
-  }, [refresh])
+  }, [refresh, project])
 
   // `refresh` itself is `async`; the returned callback swallows the promise so a caller
   // cannot accidentally `await` the fleet's internal read.

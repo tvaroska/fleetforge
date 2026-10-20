@@ -49,7 +49,13 @@ function IssuedToken({ issued, onDismiss }: { issued: EnrollmentTokenIssued; onD
   )
 }
 
-export function EnrollBoard({ onSessionExpired }: { onSessionExpired: () => void }) {
+export function EnrollBoard({
+  onSessionExpired,
+  project,
+}: {
+  onSessionExpired: () => void
+  project?: string
+}) {
   const [tokens, setTokens] = useState<EnrollmentTokenSummary[] | null>(null)
   const [issued, setIssued] = useState<EnrollmentTokenIssued | null>(null)
   const [busy, setBusy] = useState(false)
@@ -69,11 +75,13 @@ export function EnrollBoard({ onSessionExpired }: { onSessionExpired: () => void
 
   const refresh = useCallback(async () => {
     try {
-      setTokens((await api.listEnrollmentTokens()).tokens)
+      setTokens(
+        (await (project ? api.listEnrollmentTokens(project) : api.listEnrollmentTokens())).tokens,
+      )
     } catch (err) {
       handle(err)
     }
-  }, [handle])
+  }, [handle, project])
 
   useEffect(() => {
     void refresh()
@@ -84,7 +92,9 @@ export function EnrollBoard({ onSessionExpired }: { onSessionExpired: () => void
     setError(null)
     try {
       // Ungrouped: R0 has no group CRUD, so there is nothing to scope to yet.
-      setIssued(await api.issueEnrollmentToken(null))
+      setIssued(
+        await (project ? api.issueEnrollmentToken(null, project) : api.issueEnrollmentToken(null)),
+      )
       await refresh()
     } catch (err) {
       handle(err)

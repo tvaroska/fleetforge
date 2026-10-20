@@ -84,6 +84,7 @@ from fleetforge.api.deps import (
     SessionMakerDep,
     SettingsDep,
     bearer_scheme,
+    check_project_access,
     cookie_scheme,
 )
 from fleetforge.api.routers.artifacts import VERSION_PATTERN
@@ -97,7 +98,7 @@ from fleetforge.artifact_urls import mint_artifact_url
 from fleetforge.broker import CommandPublisher, CommandPublishError, new_command_id, stage_payload
 from fleetforge.clock import now_utc
 from fleetforge.config import Settings
-from fleetforge.db.models import AdminToken, Device
+from fleetforge.db.models import AdminToken, Device, ProjectRole
 from fleetforge.deploy_precheck import (
     NO_ARTIFACT_FOR_TARGET,
     Finding,
@@ -132,7 +133,7 @@ _ARTIFACT_FOR_TARGET_SQL = text(
     SELECT a.sha256, a.size_bytes, a.partition_layout, a.has_lib_marker
       FROM artifact_versions AS v
       JOIN artifacts AS a ON a.sha256 = v.sha256
-     WHERE v.target = :target AND v.version = :version
+     WHERE v.project_id = :project_id AND v.target = :target AND v.version = :version
     """
 )
 
@@ -229,6 +230,13 @@ async def deploy_device(
 
     async with sessionmaker() as session:
         device, found_artifact = await _resolve(session, device_id, body.version)
+        await check_project_access(
+            session,
+            admin,
+            device.project_id,
+            min_role=ProjectRole.OPERATOR,
+            required_scope="deploy",
+        )
         catalog = await load_layout_catalog(session)
         artifact = _accept(
             device,
@@ -343,7 +351,11 @@ async def _resolve(
     row = (
         await session.execute(
             _ARTIFACT_FOR_TARGET_SQL,
-            {"target": device.platform_type, "version": version},
+            {
+                "project_id": device.project_id,
+                "target": device.platform_type,
+                "version": version,
+            },
         )
     ).first()
     if row is None:
@@ -415,6 +427,13 @@ async def precheck_deploy(
 
     async with sessionmaker() as session:
         device, artifact = await _resolve(session, device_id, body.version)
+        await check_project_access(
+            session,
+            admin,
+            device.project_id,
+            min_role=ProjectRole.VIEWER,
+            required_scope="read",
+        )
         catalog = await load_layout_catalog(session)
         online = is_online(device, now=now_utc(), tolerance=settings.presence_tolerance)
         found = [

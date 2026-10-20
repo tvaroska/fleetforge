@@ -27,6 +27,7 @@ reported presence yet (S0-bug-2), so a connecting board is never snapshotted off
 
 import datetime as dt
 import logging
+import uuid
 from enum import StrEnum
 
 from pydantic import BaseModel
@@ -101,6 +102,9 @@ class DeviceEvent(BaseModel):
     v: int = 1
     type: EventType
     device_id: str
+    # P1-be-4: optional project_id so EventHub can filter SSE streams per project while
+    # staying additive for legacy notifications without project_id.
+    project_id: uuid.UUID | None = None
     # Server receipt time, never a device `ts` (`spec/device-protocol.md` → *Clock*).
     at: dt.datetime
     # Derived by `fleetforge.presence.is_online` at write time. A snapshot, not a cache.

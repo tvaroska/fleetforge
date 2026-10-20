@@ -41,6 +41,7 @@ accident:
 import asyncio
 import contextlib
 import logging
+import uuid
 from collections.abc import AsyncIterator, Iterator
 from dataclasses import dataclass, field
 from typing import Any
@@ -71,6 +72,7 @@ class Subscription:
     """One attached SSE client. Identity-hashed: two clients are never "equal"."""
 
     queue: asyncio.Queue[str | None] = field(repr=False)
+    project_id: uuid.UUID | None = None
 
 
 class EventHub:
@@ -92,7 +94,7 @@ class EventHub:
         """How many streams are attached right now."""
         return len(self._subscribers)
 
-    def acquire(self) -> Subscription:
+    def acquire(self, *, project_id: uuid.UUID | None = None) -> Subscription:
         """Attach a subscriber, or raise `HubFull`.
 
         Called by the endpoint **before** it returns a `StreamingResponse`: acquiring
@@ -101,7 +103,10 @@ class EventHub:
         """
         if len(self._subscribers) >= self._max_subscribers:
             raise HubFull
-        subscription = Subscription(queue=asyncio.Queue(maxsize=self._queue_size))
+        subscription = Subscription(
+            queue=asyncio.Queue(maxsize=self._queue_size),
+            project_id=project_id,
+        )
         self._subscribers.add(subscription)
         return subscription
 
@@ -110,15 +115,15 @@ class EventHub:
         self._subscribers.discard(subscription)
 
     @contextlib.contextmanager
-    def subscribe(self) -> Iterator[Subscription]:
+    def subscribe(self, *, project_id: uuid.UUID | None = None) -> Iterator[Subscription]:
         """`acquire()`/`release()` as a context manager, for callers that are not the endpoint."""
-        subscription = self.acquire()
+        subscription = self.acquire(project_id=project_id)
         try:
             yield subscription
         finally:
             self.release(subscription)
 
-    def publish(self, payload: str) -> None:
+    def publish(self, payload: str, *, project_id: uuid.UUID | None = None) -> None:
         """Fan `payload` out to every attached client. **Never raises.**
 
         This runs inside asyncpg's notify callback, which is synchronous and whose
@@ -127,6 +132,12 @@ class EventHub:
         `QueueFull` handler, and `discard`.
         """
         for subscription in list(self._subscribers):
+            if (
+                project_id is not None
+                and subscription.project_id is not None
+                and subscription.project_id != project_id
+            ):
+                continue
             try:
                 subscription.queue.put_nowait(payload)
             except asyncio.QueueFull:
@@ -284,10 +295,10 @@ class PostgresEventListener:
             logger.warning("dropping an ff_events payload that cannot be framed safely")
             return
         try:
-            DeviceEvent.model_validate_json(payload)
+            event = DeviceEvent.model_validate_json(payload)
         except ValidationError:
             logger.warning("dropping an unparseable ff_events payload")
             return
         # Validated, then forwarded as-is: re-serializing would strip any field a
         # newer ingestor added, and additive evolution is the protocol's whole rule.
-        self._hub.publish(payload)
+        self._hub.publish(payload, project_id=event.project_id)

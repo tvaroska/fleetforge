@@ -27,6 +27,7 @@ import { FleetTable } from './FleetView'
 import { useFleet, type EventSourceFactory } from './fleet'
 import { type HealthState } from './health'
 import { PartitionProfiles } from './PartitionProfiles'
+import { ProjectAccess } from './ProjectAccess'
 import { useProfiles } from './profiles'
 import { StatusStrip } from './StatusStrip'
 import { describeBoard, describeVersions } from './statusStrip'
@@ -51,8 +52,12 @@ export function Dashboard({
   // Injected by the tests only: jsdom has no `navigator.serial`.
   createFlasher?: FlasherFactory
 }) {
-  const fleet = useFleet({ onSessionExpired: expire, createEventSource })
-  const artifacts = useArtifacts({ onSessionExpired: expire })
+  const [activeProject, setActiveProject] = useState<string>(
+    () => me.projects?.[0]?.slug ?? 'default',
+  )
+  const projectParam = activeProject !== 'default' ? activeProject : undefined
+  const fleet = useFleet({ onSessionExpired: expire, createEventSource, project: projectParam })
+  const artifacts = useArtifacts({ onSessionExpired: expire, project: projectParam })
   const profiles = useProfiles({ onSessionExpired: expire, hint: fleet.announceSeq })
   const [selected, setSelected] = useState<string | null>(null)
   const board = describeBoard(selected, fleet.devices, fleet.arrivals)
@@ -65,7 +70,12 @@ export function Dashboard({
 
   return (
     <>
-      <StatusStrip ui={ui} health={health} board={board} />
+      <StatusStrip
+        ui={ui}
+        health={health}
+        board={board}
+        project={me.projects ? activeProject : undefined}
+      />
       <header>
         <h1>Fleetforge</h1>
         <p className="muted">
@@ -75,6 +85,17 @@ export function Dashboard({
           </button>
         </p>
       </header>
+      {me.projects && (
+        <ProjectAccess
+          me={me}
+          activeProject={activeProject}
+          onSelectProject={(slug) => {
+            setSelected(null)
+            setActiveProject(slug)
+          }}
+          onSessionExpired={expire}
+        />
+      )}
       {/* The fleet first: R0's done-when is "watch it come online", and after the
           first board this is what the page is opened for. */}
       <FleetTable
@@ -105,6 +126,7 @@ export function Dashboard({
         profiles={profiles.profiles}
         onUploaded={artifacts.reload}
         onSessionExpired={expire}
+        project={projectParam}
       />
       {/* Flashing mints its own token, so it sits above the manual token screen:
           the common path is "plug a board in", not "copy a string somewhere". */}
@@ -114,8 +136,9 @@ export function Dashboard({
         fleet={fleet}
         versions={versions}
         createFlasher={createFlasher}
+        project={projectParam}
       />
-      <EnrollBoard onSessionExpired={expire} />
+      <EnrollBoard onSessionExpired={expire} project={projectParam} />
     </>
   )
 }

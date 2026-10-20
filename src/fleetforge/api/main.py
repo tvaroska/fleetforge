@@ -71,6 +71,8 @@ from fleetforge.api.routers import (
     events,
     partition_profiles,
     progress,
+    projects,
+    users,
 )
 from fleetforge.auth.cache import VerifiedSecretCache
 from fleetforge.auth.ratelimit import FixedWindowLimiter
@@ -255,6 +257,8 @@ def create_app() -> FastAPI:
         )
 
     app.include_router(auth.router)
+    app.include_router(projects.router)
+    app.include_router(users.router)
     app.include_router(enrollment.router)
     app.include_router(enroll.router)
     app.include_router(events.router)

@@ -19,13 +19,14 @@ manual `DELETE`.
 
 import datetime as dt
 import logging
+import uuid
 from typing import Any
 
-from sqlalchemy import func
+from sqlalchemy import case, func
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from fleetforge.db.models import Device
+from fleetforge.db.models import DEFAULT_PROJECT_ID, Device
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +65,7 @@ async def enroll_device(
     group_id: Any,
     identity: dict[str, Any],
     enrolled_at: dt.datetime,
+    project_id: uuid.UUID = DEFAULT_PROJECT_ID,
 ) -> Device:
     """Insert (or re-enroll) `device_id` and return the row. Does not commit.
 
@@ -90,6 +92,7 @@ async def enroll_device(
     """
     values: dict[str, Any] = {
         "device_id": device_id,
+        "project_id": project_id,
         "group_id": group_id,
         "enrolled_at": enrolled_at,
         **{field: identity.get(field) for field in IDENTITY_FIELDS},
@@ -105,7 +108,14 @@ async def enroll_device(
     updates: dict[str, Any] = {field: statement.excluded[field] for field in IDENTITY_FIELDS}
     updates.update(
         {
-            "group_id": func.coalesce(statement.excluded.group_id, Device.group_id),
+            "project_id": statement.excluded.project_id,
+            "group_id": case(
+                (
+                    Device.project_id == statement.excluded.project_id,
+                    func.coalesce(statement.excluded.group_id, Device.group_id),
+                ),
+                else_=statement.excluded.group_id,
+            ),
             "enrolled_at": statement.excluded.enrolled_at,
             "decommissioned_at": None,
             "broker_provisioned_at": None,

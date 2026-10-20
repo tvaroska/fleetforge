@@ -41,6 +41,7 @@ export function useSession() {
 }
 
 export function LoginForm({ onAuthenticated }: { onAuthenticated: () => void }) {
+  const [username, setUsername] = useState('admin')
   const [password, setPassword] = useState('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -50,7 +51,7 @@ export function LoginForm({ onAuthenticated }: { onAuthenticated: () => void }) 
     setBusy(true)
     setError(null)
     try {
-      await api.login(password)
+      await api.login(password, username.trim() || 'admin')
       // Drop the password from memory the moment it is spent.
       setPassword('')
       onAuthenticated()
@@ -71,6 +72,18 @@ export function LoginForm({ onAuthenticated }: { onAuthenticated: () => void }) 
     <main>
       <h1>Fleetforge</h1>
       <form onSubmit={submit}>
+        <label htmlFor="username">Email or username</label>
+        <input
+          id="username"
+          name="username"
+          type="text"
+          autoComplete="username"
+          placeholder="alice@example.com or admin"
+          value={username}
+          onChange={(event) => setUsername(event.target.value)}
+          disabled={busy}
+          required
+        />
         <label htmlFor="password">Admin password</label>
         <input
           id="password"

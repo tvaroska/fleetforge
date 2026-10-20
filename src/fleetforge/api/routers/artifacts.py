@@ -68,9 +68,15 @@ from fleetforge.api.deps import (
     SessionMakerDep,
     bearer_scheme,
     cookie_scheme,
+    resolve_project_for_request,
 )
-from fleetforge.api.schemas import ArtifactList, ArtifactSummary, ArtifactUploaded
-from fleetforge.db.models import ArtifactKind
+from fleetforge.api.schemas import (
+    PROJECT_SLUG_PATTERN,
+    ArtifactList,
+    ArtifactSummary,
+    ArtifactUploaded,
+)
+from fleetforge.db.models import ArtifactKind, ProjectRole
 from fleetforge.deploy_precheck import merged_binary
 from fleetforge.firmware.manifest import EXPECTED_PARTITION_LAYOUT, SafeSegment
 from fleetforge.lib_marker import find_marker
@@ -114,6 +120,7 @@ _LIST_SQL = text(
            a.size_bytes, a.partition_layout, a.kind
       FROM artifact_versions AS v
       JOIN artifacts AS a ON a.sha256 = v.sha256
+     WHERE v.project_id = :project_id
      ORDER BY v.target, v.created_at DESC, v.version
      LIMIT :limit
     """
@@ -138,15 +145,16 @@ _ARTIFACT_UPSERT_SQL = text(
 
 _LABEL_INSERT_SQL = text(
     """
-    INSERT INTO artifact_versions (target, version, sha256)
-    VALUES (:target, :version, :sha256)
-    ON CONFLICT (target, version) DO NOTHING
+    INSERT INTO artifact_versions (project_id, target, version, sha256)
+    VALUES (:project_id, :target, :version, :sha256)
+    ON CONFLICT (project_id, target, version) DO NOTHING
     RETURNING sha256
     """
 )
 
 _LABEL_SELECT_SQL = text(
-    "SELECT sha256 FROM artifact_versions WHERE target = :target AND version = :version"
+    "SELECT sha256 FROM artifact_versions "
+    "WHERE project_id = :project_id AND target = :target AND version = :version"
 )
 
 
@@ -240,6 +248,10 @@ async def upload_artifact(
     partition_layout: Annotated[
         SafeSegment, Query(description="Partition layout the image is built for")
     ] = EXPECTED_PARTITION_LAYOUT,
+    project: Annotated[
+        str | None,
+        Query(pattern=PROJECT_SLUG_PATTERN, description="Project slug (defaults to token/default)"),
+    ] = None,
 ) -> ArtifactUploaded:
     """Store an opaque firmware blob and label it `(target, version)`.
 
@@ -261,6 +273,14 @@ async def upload_artifact(
 
     # Before the body: the limit is what the Content-Length check needs.
     async with sessionmaker() as session:
+        target_project = await resolve_project_for_request(
+            session,
+            admin,
+            project_slug=project,
+            min_role=ProjectRole.OPERATOR,
+            required_scope="write:artifacts",
+        )
+        project_id = target_project.id
         catalog = await load_layout_catalog(session)
     limit = _slot_size(partition_layout, catalog)
     _declared_length(request, limit)
@@ -299,7 +319,10 @@ async def upload_artifact(
         # Cheap pre-check so the common conflict costs no upload. It is not the
         # guarantee — the primary key below is — but a 409 discovered after storing
         # 1.9 MB is a 409 that wasted the operator's time.
-        existing = await session.scalar(_LABEL_SELECT_SQL, {"target": target, "version": version})
+        existing = await session.scalar(
+            _LABEL_SELECT_SQL,
+            {"project_id": project_id, "target": target, "version": version},
+        )
         if existing is not None and existing != digest:
             raise _version_conflict(target, version, existing)
 
@@ -326,13 +349,15 @@ async def upload_artifact(
             },
         )
         labelled = await session.scalar(
-            _LABEL_INSERT_SQL, {"target": target, "version": version, "sha256": digest}
+            _LABEL_INSERT_SQL,
+            {"project_id": project_id, "target": target, "version": version, "sha256": digest},
         )
         if labelled is None:
             # The label was taken between the pre-check and here, or by the pre-check's
             # own row. Re-read to tell an idempotent repeat from a genuine conflict.
             current = await session.scalar(
-                _LABEL_SELECT_SQL, {"target": target, "version": version}
+                _LABEL_SELECT_SQL,
+                {"project_id": project_id, "target": target, "version": version},
             )
             if current != digest:
                 await session.rollback()
@@ -374,6 +399,10 @@ async def upload_artifact(
 async def list_artifacts(
     admin: AdminDep,
     sessionmaker: SessionMakerDep,
+    project: Annotated[
+        str | None,
+        Query(pattern=PROJECT_SLUG_PATTERN, description="Project slug (defaults to token/default)"),
+    ] = None,
 ) -> ArtifactList:
     """Every labelled artifact, grouped by target and newest first within a target.
 
@@ -387,7 +416,16 @@ async def list_artifacts(
     rather than by a row here. That is worth knowing rather than worth filtering on.
     """
     async with sessionmaker() as session:
-        rows = (await session.execute(_LIST_SQL, {"limit": LIST_LIMIT})).all()
+        target_project = await resolve_project_for_request(
+            session,
+            admin,
+            project_slug=project,
+            min_role=ProjectRole.VIEWER,
+            required_scope="read",
+        )
+        rows = (
+            await session.execute(_LIST_SQL, {"project_id": target_project.id, "limit": LIST_LIMIT})
+        ).all()
 
     return ArtifactList(
         artifacts=[

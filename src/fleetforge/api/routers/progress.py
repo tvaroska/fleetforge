@@ -157,6 +157,7 @@ async def report_progress(
             DeviceEvent(
                 type=EventType.DEVICE_PROGRESS,
                 device_id=device_id,
+                project_id=row.project_id,
                 at=now,
                 # Always false, and honestly so: a board reporting a boot stage is by
                 # definition not yet a fleet member with derived presence. The client

@@ -23,7 +23,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from fleetforge.auth.tokens import ENROLLMENT_TOKEN_PREFIX, aissue_token
-from fleetforge.db.models import EnrollmentToken
+from fleetforge.db.models import DEFAULT_PROJECT_ID, EnrollmentToken
 
 # The burn. One conditional UPDATE, and the only copy of it in the codebase.
 #
@@ -137,6 +137,7 @@ async def create_enrollment_token(
     *,
     group_id: uuid.UUID | None,
     expires_at: dt.datetime,
+    project_id: uuid.UUID = DEFAULT_PROJECT_ID,
 ) -> tuple[EnrollmentToken, str]:
     """Mint an `ffe_` token, add its row to `session`, and return both halves.
 
@@ -156,6 +157,7 @@ async def create_enrollment_token(
     row = EnrollmentToken(
         id=issued.token_id,
         secret_hash=issued.secret_hash,
+        project_id=project_id,
         group_id=group_id,
         expires_at=expires_at,
     )

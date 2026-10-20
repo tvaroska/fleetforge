@@ -67,6 +67,18 @@ from fleetforge.db.base import Base
 # `TIMESTAMPTZ`. Spelled once here so no column can accidentally be naive.
 TimestampTZ = TIMESTAMP(timezone=True)
 
+DEFAULT_PROJECT_ID = uuid.UUID("00000000-0000-4000-8000-000000000001")
+DEFAULT_PROJECT_SLUG = "default"
+_DEFAULT_PROJECT_UUID_SQL = text("'00000000-0000-4000-8000-000000000001'::uuid")
+
+
+class ProjectRole(StrEnum):
+    """Per-project RBAC roles (`docs/features/projects-and-users.md`). Enforced by a DB CHECK."""
+
+    OWNER = "owner"
+    OPERATOR = "operator"
+    VIEWER = "viewer"
+
 
 class PowerClass(StrEnum):
     """How a device is expected to be reachable. Enforced by a DB CHECK.
@@ -208,8 +220,88 @@ TERMINAL_DEPLOY_STATES = frozenset(
 from this set — see `DeployEvent` for why the flag is stored rather than derived."""
 
 
+class Project(Base):
+    """A logical fleet boundary — isolates boards, groups, enrollment tokens, and version labels."""
+
+    __tablename__ = "projects"
+    __table_args__ = (
+        CheckConstraint("slug ~ '^[a-z0-9][a-z0-9-]{0,31}$'", name="slug_format"),
+        UniqueConstraint("slug"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    slug: Mapped[str] = mapped_column(Text, nullable=False)
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        TimestampTZ, nullable=False, server_default=text("now()")
+    )
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        TimestampTZ, nullable=False, server_default=text("now()"), onupdate=text("now()")
+    )
+
+
+class User(Base):
+    """A human operator account (`docs/features/projects-and-users.md`)."""
+
+    __tablename__ = "users"
+    __table_args__ = (
+        CheckConstraint("username ~ '^[a-z0-9][a-z0-9._-]{1,31}$'", name="username_format"),
+        CheckConstraint(
+            "email IS NULL OR email ~ '^[a-z0-9._%+-]+@[a-z0-9.-]+\\.[a-z]{2,}$'",
+            name="email_format",
+        ),
+        CheckConstraint(
+            "firebase_uid IS NULL OR length(firebase_uid) BETWEEN 1 AND 128",
+            name="firebase_uid_nonempty",
+        ),
+        UniqueConstraint("username"),
+        UniqueConstraint("email"),
+        UniqueConstraint("firebase_uid"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    username: Mapped[str] = mapped_column(Text, nullable=False)
+    email: Mapped[str | None] = mapped_column(Text, nullable=True)
+    firebase_uid: Mapped[str | None] = mapped_column(Text, nullable=True)
+    display_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_superadmin: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    disabled_at: Mapped[dt.datetime | None] = mapped_column(TimestampTZ, nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        TimestampTZ, nullable=False, server_default=text("now()")
+    )
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        TimestampTZ, nullable=False, server_default=text("now()"), onupdate=text("now()")
+    )
+
+
+class ProjectMember(Base):
+    """Membership and role of a `User` in a `Project`."""
+
+    __tablename__ = "project_members"
+    __table_args__ = (CheckConstraint("role IN ('owner', 'operator', 'viewer')", name="role"),)
+
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True
+    )
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True
+    )
+    role: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        TimestampTZ, nullable=False, server_default=text("now()")
+    )
+
+
 class DeviceGroup(Base):
-    """A named set of devices.
+    """A named set of devices within a project.
 
     Groups exist in R0 only because enrollment tokens are group-scoped
     (`spec/prd.md` → *Security & data posture*); bulk deploy is V3. No rows are
@@ -220,10 +312,17 @@ class DeviceGroup(Base):
     """
 
     __tablename__ = "device_groups"
-    __table_args__ = (UniqueConstraint("name"),)
+    __table_args__ = (UniqueConstraint("project_id", "name"),)
 
     id: Mapped[uuid.UUID] = mapped_column(
         Uuid, primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=False,
+        server_default=_DEFAULT_PROJECT_UUID_SQL,
+        index=True,
     )
     name: Mapped[str] = mapped_column(Text, nullable=False)
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -282,6 +381,13 @@ class Device(Base):
     )
 
     device_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("projects.id", ondelete="RESTRICT"),
+        nullable=False,
+        server_default=_DEFAULT_PROJECT_UUID_SQL,
+        index=True,
+    )
     name: Mapped[str | None] = mapped_column(Text, nullable=True)
     platform_type: Mapped[str] = mapped_column(Text, nullable=False)
     proto: Mapped[int] = mapped_column(SmallInteger, nullable=False, server_default=text("1"))
@@ -410,6 +516,13 @@ class EnrollmentToken(Base):
     id: Mapped[uuid.UUID] = mapped_column(
         Uuid, primary_key=True, server_default=text("gen_random_uuid()")
     )
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=False,
+        server_default=_DEFAULT_PROJECT_UUID_SQL,
+        index=True,
+    )
     secret_hash: Mapped[str] = mapped_column(Text, nullable=False)
     group_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid, ForeignKey("device_groups.id", ondelete="SET NULL"), nullable=True
@@ -457,6 +570,12 @@ class AdminToken(Base):
     subject: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'admin'"))
     scopes: Mapped[list[str]] = mapped_column(
         ARRAY(Text), nullable=False, server_default=text("'{admin}'::text[]")
+    )
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True
+    )
+    project_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid, ForeignKey("projects.id", ondelete="CASCADE"), nullable=True, index=True
     )
     created_at: Mapped[dt.datetime] = mapped_column(
         TimestampTZ, nullable=False, server_default=text("now()")
@@ -681,12 +800,22 @@ class ArtifactVersion(Base):
         # Mirrors `artifacts.sha256_format`. The FK already guarantees the row exists;
         # this guarantees the value names a key `blobs.blob_key` will agree to build.
         CheckConstraint("sha256 ~ '^[0-9a-f]{64}$'", name="sha256_format"),
-        # "The 20 newest versions for this platform" — the R2 pruner's only query.
-        # Ascending: PostgreSQL scans a b-tree backwards at the same cost, so a DESC
-        # index would buy nothing and be one more thing for the migration to match.
-        Index("ix_artifact_versions_target_created_at", "target", "created_at"),
+        # "The 20 newest versions for this platform" — the R2 pruner's only query,
+        # scoped per project.
+        Index(
+            "ix_artifact_versions_project_target_created_at",
+            "project_id",
+            "target",
+            "created_at",
+        ),
     )
 
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("projects.id", ondelete="RESTRICT"),
+        primary_key=True,
+        server_default=_DEFAULT_PROJECT_UUID_SQL,
+    )
     # Chip target (`esp32`), `releases.md`'s "platform_type". NOT NULL here even though
     # `artifacts.target` is nullable: a label with no platform cannot answer "20 versions
     # per platform", and every upload knows its target.

@@ -202,7 +202,13 @@ export type Artifacts = {
  * becomes a string the cell renders, because a broken artifact list must not take the
  * fleet table down with it.
  */
-export function useArtifacts({ onSessionExpired }: { onSessionExpired: () => void }): Artifacts {
+export function useArtifacts({
+  onSessionExpired,
+  project,
+}: {
+  onSessionExpired: () => void
+  project?: string
+}): Artifacts {
   const [byTarget, setByTarget] = useState<Map<string, ArtifactSummary[]>>(() => new Map())
   const [loaded, setLoaded] = useState(false)
   const [error, setError] = useState<string | null>(null)
@@ -215,7 +221,7 @@ export function useArtifacts({ onSessionExpired }: { onSessionExpired: () => voi
 
   const load = useCallback(async () => {
     try {
-      const result = await api.listArtifacts()
+      const result = await api.listArtifacts(project)
       if (!liveRef.current) return
       const grouped = new Map<string, ArtifactSummary[]>()
       // `?? []` for the same reason `fleet.ts` guards `arrivals`: a dashboard served
@@ -241,7 +247,7 @@ export function useArtifacts({ onSessionExpired }: { onSessionExpired: () => voi
       // nothing to offer, so the cell explains itself instead of saying "Loading…".
       setLoaded(true)
     }
-  }, [])
+  }, [project])
 
   useEffect(() => {
     liveRef.current = true

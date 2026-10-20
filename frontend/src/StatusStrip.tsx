@@ -40,10 +40,12 @@ export function StatusStrip({
   ui,
   health,
   board,
+  project,
 }: {
   ui: BuildInfo
   health: HealthState
   board?: BoardLine
+  project?: string | null
 }) {
   const versions = describeVersions(ui, health)
   return (
@@ -52,6 +54,14 @@ export function StatusStrip({
         [ <span title={versions.uiTitle}>UI {versions.ui}</span> ·{' '}
         <span title={versions.apiTitle}>API {versions.api}</span> ]
       </span>
+      {project && (
+        <>
+          {' '}
+          <span data-testid="strip-project">
+            Project <code>{project}</code>
+          </span>
+        </>
+      )}
       {versions.differ && (
         <>
           {' '}

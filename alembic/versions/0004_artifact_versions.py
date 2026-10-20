@@ -46,6 +46,12 @@ def upgrade() -> None:
     """Upgrade schema."""
     op.create_table(
         "artifact_versions",
+        sa.Column(
+            "project_id",
+            sa.Uuid(),
+            server_default=sa.text("'00000000-0000-4000-8000-000000000001'::uuid"),
+            nullable=False,
+        ),
         # NOT NULL where `artifacts.target` is nullable: a label with no platform cannot
         # answer "20 versions per platform", and every upload knows its target.
         sa.Column("target", sa.Text(), nullable=False),
@@ -65,23 +71,31 @@ def upgrade() -> None:
             "sha256 ~ '^[0-9a-f]{64}$'", name=op.f("ck_artifact_versions_sha256_format")
         ),
         sa.ForeignKeyConstraint(
+            ["project_id"],
+            ["projects.id"],
+            name=op.f("fk_artifact_versions_project_id_projects"),
+            ondelete="RESTRICT",
+        ),
+        sa.ForeignKeyConstraint(
             ["sha256"],
             ["artifacts.sha256"],
             name=op.f("fk_artifact_versions_sha256_artifacts"),
             ondelete="RESTRICT",
         ),
-        sa.PrimaryKeyConstraint("target", "version", name=op.f("pk_artifact_versions")),
+        sa.PrimaryKeyConstraint(
+            "project_id", "target", "version", name=op.f("pk_artifact_versions")
+        ),
     )
-    # "The 20 newest versions for this platform" — the R2 pruner's only query.
+    # "The 20 newest versions for this platform" — the R2 pruner's only query, per project.
     op.create_index(
-        "ix_artifact_versions_target_created_at",
+        "ix_artifact_versions_project_target_created_at",
         "artifact_versions",
-        ["target", "created_at"],
+        ["project_id", "target", "created_at"],
         unique=False,
     )
 
 
 def downgrade() -> None:
     """Downgrade schema — exact reverse of upgrade()."""
-    op.drop_index("ix_artifact_versions_target_created_at", table_name="artifact_versions")
+    op.drop_index("ix_artifact_versions_project_target_created_at", table_name="artifact_versions")
     op.drop_table("artifact_versions")

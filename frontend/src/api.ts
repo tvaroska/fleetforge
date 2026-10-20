@@ -17,10 +17,75 @@ export type Health = {
   built_at?: string
 }
 
+export type UserProjectSummary = {
+  id: string
+  slug: string
+  name: string
+  description: string | null
+  role: string
+}
+
 export type Me = {
   token_id: string
   subject: string
   scopes: string[]
+  expires_at: string | null
+  is_superadmin?: boolean
+  project_id?: string | null
+  projects?: UserProjectSummary[]
+}
+
+export type ProjectSummary = {
+  id: string
+  slug: string
+  name: string
+  description: string | null
+  role: string | null
+  created_at: string
+}
+
+export type ProjectMemberSummary = {
+  user_id: string
+  username: string
+  display_name: string | null
+  role: 'owner' | 'operator' | 'viewer'
+  created_at: string
+}
+
+export type UserSummary = {
+  id: string
+  username: string
+  email: string | null
+  firebase_uid: string | null
+  has_local_password: boolean
+  display_name: string | null
+  is_superadmin: boolean
+  disabled_at: string | null
+  created_at: string
+}
+
+export type AdminTokenSummary = {
+  id: string
+  name: string
+  subject: string
+  scopes: string[]
+  project_id: string | null
+  project_slug: string | null
+  created_at: string
+  last_used_at: string | null
+  expires_at: string | null
+  revoked_at: string | null
+}
+
+export type AdminTokenIssued = {
+  id: string
+  token: string
+  name: string
+  subject: string
+  scopes: string[]
+  project_id: string | null
+  project_slug: string | null
+  created_at: string
   expires_at: string | null
 }
 
@@ -161,7 +226,11 @@ export type CommandAccepted = {
 // Mirrors `DeviceUpdate` in api/schemas.py (R2b-be-1). MERGE-PATCH: an absent key leaves the
 // field alone and an explicit `null` CLEARS it, so `group_id: null` ungroups a board. Send
 // only the keys you mean to change.
-export type DeviceUpdate = { name?: string | null; group_id?: string | null }
+export type DeviceUpdate = {
+  name?: string | null
+  group_id?: string | null
+  project?: string
+}
 
 // Mirrors `DeploySummary` in api/schemas.py. The newest deploy transaction's current
 // state, or `null` for a board that has never been deployed to.
@@ -498,17 +567,22 @@ export const api = {
 
   // The password goes in the body of a POST and nowhere else. The response
   // deliberately does not carry the token — it arrives as a Set-Cookie.
-  login: (password: string) =>
+  login: (password: string, username = 'admin') =>
     request<LoginResult>('/v1/auth/login', {
       method: 'POST',
-      body: JSON.stringify({ password }),
+      body: JSON.stringify(username === 'admin' ? { password } : { username, password }),
     }),
 
   logout: () => request<void>('/v1/auth/logout', { method: 'POST' }),
 
   // The fleet read model, and the ONLY source of device state in this app. A frame on
   // `/v1/events` is a hint that says "go re-read"; this is the re-read.
-  listDevices: () => request<DeviceList>('/v1/devices'),
+  listDevices: (project?: string) =>
+    request<DeviceList>(
+      project && project !== 'default'
+        ? `/v1/devices?project=${encodeURIComponent(project)}`
+        : '/v1/devices',
+    ),
 
   // R2b-fe-6. Set a board's operator-set facts; returns the updated row as the list shows
   // it. `PATCH` must be upper-case: fetch normalises GET/POST/PUT/DELETE/HEAD/OPTIONS but
@@ -524,15 +598,25 @@ export const api = {
   deviceLogs: (deviceId: string, limit: number) =>
     request<DeviceLogTail>(`/v1/devices/${encodeURIComponent(deviceId)}/logs?limit=${limit}`),
 
-  listEnrollmentTokens: () => request<{ tokens: EnrollmentTokenSummary[] }>('/v1/enrollment-tokens'),
+  listEnrollmentTokens: (project?: string) =>
+    request<{ tokens: EnrollmentTokenSummary[] }>(
+      project && project !== 'default'
+        ? `/v1/enrollment-tokens?project=${encodeURIComponent(project)}`
+        : '/v1/enrollment-tokens',
+    ),
 
   // R0 has no group CRUD, so every token is ungrouped. The parameter exists because
   // the API takes it, not because the UI can populate it yet.
-  issueEnrollmentToken: (groupId: string | null = null) =>
-    request<EnrollmentTokenIssued>('/v1/enrollment-tokens', {
-      method: 'POST',
-      body: JSON.stringify({ group_id: groupId }),
-    }),
+  issueEnrollmentToken: (groupId: string | null = null, project?: string) =>
+    request<EnrollmentTokenIssued>(
+      project && project !== 'default'
+        ? `/v1/enrollment-tokens?project=${encodeURIComponent(project)}`
+        : '/v1/enrollment-tokens',
+      {
+        method: 'POST',
+        body: JSON.stringify({ group_id: groupId }),
+      },
+    ),
 
   revokeEnrollmentToken: (id: string) =>
     request<void>(`/v1/enrollment-tokens/${encodeURIComponent(id)}/revoke`, { method: 'POST' }),
@@ -540,7 +624,12 @@ export const api = {
   // Everything that can be deployed, grouped by chip target server-side. Admin-only —
   // the same `/v1/artifact` path is ALSO a public download route, but only with a
   // signature and a `/{sha256}/bin` suffix (`api/routers/artifact_download.py`).
-  listArtifacts: () => request<ArtifactList>('/v1/artifact'),
+  listArtifacts: (project?: string) =>
+    request<ArtifactList>(
+      project && project !== 'default'
+        ? `/v1/artifact?project=${encodeURIComponent(project)}`
+        : '/v1/artifact',
+    ),
 
   // Upload one firmware image (R2b-fe-7). The body is the RAW file with
   // `application/octet-stream`, never multipart: the server has no form parser and would
@@ -550,13 +639,17 @@ export const api = {
   // `content-type` key is what overrides `request()`'s JSON default.
   uploadArtifact: (
     file: Blob,
-    meta: { target: string; version: string; partitionLayout: string },
+    meta: { target: string; version: string; partitionLayout: string; project?: string },
   ) => {
-    const query = new URLSearchParams({
+    const params: Record<string, string> = {
       target: meta.target,
       version: meta.version,
       partition_layout: meta.partitionLayout,
-    })
+    }
+    if (meta.project && meta.project !== 'default') {
+      params.project = meta.project
+    }
+    const query = new URLSearchParams(params)
     return request<ArtifactUploaded>(`/v1/artifact?${query}`, {
       method: 'POST',
       body: file,
@@ -644,4 +737,86 @@ export const api = {
     }
     return requestBytes(path)
   },
+
+  // P1-fe-1: Projects, project members, and scoped API tokens.
+  listProjects: () => request<{ projects: ProjectSummary[] }>('/v1/projects'),
+
+  createProject: (body: { slug: string; name: string; description?: string | null }) =>
+    request<ProjectSummary>('/v1/projects', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  listProjectMembers: (slug: string) =>
+    request<{ members: ProjectMemberSummary[] }>(
+      `/v1/projects/${encodeURIComponent(slug)}/members`,
+    ),
+
+  upsertProjectMember: (
+    slug: string,
+    body: { username: string; role: 'owner' | 'operator' | 'viewer' },
+  ) =>
+    request<ProjectMemberSummary>(`/v1/projects/${encodeURIComponent(slug)}/members`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  removeProjectMember: (slug: string, username: string) =>
+    request<void>(
+      `/v1/projects/${encodeURIComponent(slug)}/members/${encodeURIComponent(username)}`,
+      { method: 'DELETE' },
+    ),
+
+  listAdminTokens: () => request<{ tokens: AdminTokenSummary[] }>('/v1/auth/tokens'),
+
+  issueAdminToken: (body: {
+    name: string
+    project?: string | null
+    scopes?: string[]
+    expires_in_days?: number | null
+  }) =>
+    request<AdminTokenIssued>('/v1/auth/tokens', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  revokeAdminToken: (id: string) =>
+    request<void>(`/v1/auth/tokens/${encodeURIComponent(id)}/revoke`, { method: 'POST' }),
+
+  loginFirebase: (idToken: string) =>
+    request<LoginResult>('/v1/auth/firebase', {
+      method: 'POST',
+      body: JSON.stringify({ id_token: idToken }),
+    }),
+
+  listUsers: () => request<{ users: UserSummary[] }>('/v1/users'),
+
+  createUser: (body: {
+    username: string
+    email?: string | null
+    display_name?: string | null
+    password?: string | null
+    is_superadmin?: boolean
+    send_invite_email?: boolean
+  }) =>
+    request<UserSummary>('/v1/users', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  updateUser: (
+    username: string,
+    body: {
+      email?: string | null
+      display_name?: string | null
+      password?: string | null
+      is_superadmin?: boolean
+      disabled?: boolean
+      send_password_reset?: boolean
+    },
+  ) =>
+    request<UserSummary>(`/v1/users/${encodeURIComponent(username)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
 }

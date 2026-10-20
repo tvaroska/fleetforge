@@ -56,7 +56,7 @@ from fleetforge.auth.hashing import averify_secret, dummy_verify
 from fleetforge.auth.ratelimit import FixedWindowLimiter
 from fleetforge.auth.tokens import ENROLLMENT_TOKEN_PREFIX, parse_token
 from fleetforge.broker import BrokerProvisioningError, generate_broker_password
-from fleetforge.db.models import EnrollmentToken
+from fleetforge.db.models import Device, EnrollmentToken
 from fleetforge.events import DeviceEvent, EventType, emit
 from fleetforge.presence import is_online
 from fleetforge.registry import IDENTITY_FIELDS, enroll_device
@@ -82,6 +82,11 @@ TOKEN_UNUSABLE = HTTPException(
 
 UNKNOWN_PARENT = HTTPException(
     status_code=status.HTTP_400_BAD_REQUEST, detail="unknown parent device"
+)
+
+CROSS_PROJECT_ENROLL = HTTPException(
+    status_code=status.HTTP_409_CONFLICT,
+    detail="device is enrolled in another project; decommission or transfer it first",
 )
 
 # Stamped only once the broker really holds the credential (`ensure_client` → True).
@@ -161,14 +166,29 @@ async def enroll(
         group_id = row.group_id
         now = now_utc()
 
+        existing = await session.get(Device, device_id)
+        if (
+            existing is not None
+            and existing.decommissioned_at is None
+            and existing.project_id != row.project_id
+        ):
+            logger.info(
+                "enrollment refused for %s: already enrolled in project %s (token project %s)",
+                device_id,
+                existing.project_id,
+                row.project_id,
+            )
+            raise CROSS_PROJECT_ENROLL
+
         try:
             device = await enroll_device(
                 session,
                 device_id=device_id,
-                # The group comes from the TOKEN. A device never chooses its own.
+                # The group and project come from the TOKEN. A device never chooses its own.
                 group_id=group_id,
                 identity={field: getattr(body, field) for field in IDENTITY_FIELDS},
                 enrolled_at=now,
+                project_id=row.project_id,
             )
         except IntegrityError:
             # The only FK the body can violate is `parent_device_id`. Check-then-insert
@@ -223,6 +243,7 @@ async def enroll(
             DeviceEvent(
                 type=EventType.DEVICE_ENROLLED,
                 device_id=device_id,
+                project_id=device.project_id,
                 at=now,
                 # One rule, every reader — never a hardcoded False. On a fresh row it
                 # evaluates to False for both power classes, which is correct: the

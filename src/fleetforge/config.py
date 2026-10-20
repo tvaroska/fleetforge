@@ -57,6 +57,24 @@ class Settings(BaseSettings):
     # docker compose would otherwise interpolate `$argon2id`/`$v`/`$m` away.
     admin_password_hash: str | None = None
 
+    # --- Firebase Authentication (Invite-Only Email + Password) ---------------
+    # Optional Firebase project ID (e.g. `sites-470716`) and Web API key. When set,
+    # `/v1/auth/login` can verify invited users' email + password via Firebase Identity
+    # Toolkit (`accounts:signInWithPassword`), `/v1/auth/firebase` can exchange a
+    # client-obtained Firebase ID token for an `ff_session` cookie, and `/v1/users` can
+    # trigger a Firebase password-setup/reset email (`accounts:sendOobCode`).
+    # Strictly invite-only: only emails already present in `users` (with `disabled_at IS NULL`)
+    # or listed in `firebase_superadmin_emails` are accepted.
+    firebase_project_id: str | None = None
+    firebase_web_api_key: str | None = None
+    firebase_superadmin_emails: str | None = None
+
+    def firebase_superadmin_email_set(self) -> set[str]:
+        """Normalized lowercase set of bootstrap superadmin emails."""
+        if not self.firebase_superadmin_emails:
+            return set()
+        return {e.strip().lower() for e in self.firebase_superadmin_emails.split(",") if e.strip()}
+
     # How long a login cookie / session token lives. 7 days.
     session_ttl_hours: int = 168
 

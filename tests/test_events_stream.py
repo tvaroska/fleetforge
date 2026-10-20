@@ -553,6 +553,7 @@ def test_the_envelope_keys_are_pinned() -> None:
         "v",
         "type",
         "device_id",
+        "project_id",
         "at",
         "online",
         "fw_version",

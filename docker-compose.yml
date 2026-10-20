@@ -303,6 +303,10 @@ services:
       # away, leaving "=19=19456". Check with:
       #     docker compose config | grep -i ADMIN_PASSWORD_HASH
       ADMIN_PASSWORD_HASH: ${ADMIN_PASSWORD_HASH:?set ADMIN_PASSWORD_HASH in .env — see `just admin-password`}
+      # Optional Firebase Auth (invite-only email + password & ID token exchange).
+      FIREBASE_PROJECT_ID: ${FIREBASE_PROJECT_ID:-}
+      FIREBASE_WEB_API_KEY: ${FIREBASE_WEB_API_KEY:-}
+      FIREBASE_SUPERADMIN_EMAILS: ${FIREBASE_SUPERADMIN_EMAILS:-}
       # The dynamic-security ADMIN credential — broker-root. It is what
       # `POST /v1/enroll` uses to create each device's client over
       # $CONTROL/dynamic-security/v1 (broker/dynsec.py). Mandatory (`${VAR:?}`,

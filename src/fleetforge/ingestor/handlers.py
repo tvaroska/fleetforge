@@ -277,6 +277,7 @@ async def handle_up_message(
     event = DeviceEvent(
         type=event_type,
         device_id=device_id,
+        project_id=row.project_id,
         at=received_at,
         online=_online_snapshot(
             row,

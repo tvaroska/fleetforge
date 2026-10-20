@@ -28,18 +28,23 @@ next reverse proxy, which will not be that one.
 
 import logging
 from collections.abc import AsyncIterator
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 
 from fleetforge.api.deps import (
     AdminDep,
+    SessionMakerDep,
     SettingsDep,
     bearer_scheme,
     cookie_scheme,
     event_hub,
+    resolve_project_for_request,
 )
 from fleetforge.api.eventstream import HubFull, sse_frames
+from fleetforge.api.schemas import PROJECT_SLUG_PATTERN
+from fleetforge.db.models import ProjectRole
 
 logger = logging.getLogger(__name__)
 
@@ -65,7 +70,16 @@ TOO_MANY_STREAMS = HTTPException(
         503: {"description": "Too many concurrent event stream clients"},
     },
 )
-async def events(request: Request, admin: AdminDep, settings: SettingsDep) -> StreamingResponse:
+async def events(
+    request: Request,
+    admin: AdminDep,
+    settings: SettingsDep,
+    sessionmaker: SessionMakerDep,
+    project: Annotated[
+        str | None,
+        Query(pattern=PROJECT_SLUG_PATTERN, description="Project slug (defaults to token/default)"),
+    ] = None,
+) -> StreamingResponse:
     """Stream `ff_events` as SSE until the client goes away or the cap is reached.
 
     Frames are `: connected` + `retry: 2000` on connect, then one unnamed
@@ -76,12 +90,20 @@ async def events(request: Request, admin: AdminDep, settings: SettingsDep) -> St
     **Do not press "Try it out" in `/v1/docs`:** this never returns, so Swagger UI
     will sit spinning for `sse_max_stream_s`. Use `curl -N`.
     """
+    async with sessionmaker() as session:
+        target_project = await resolve_project_for_request(
+            session,
+            admin,
+            project_slug=project,
+            min_role=ProjectRole.VIEWER,
+            required_scope="read",
+        )
     hub = event_hub(request)
     try:
         # Acquired here rather than inside the generator: by the time the body runs,
         # the response has started and "too many clients" could only be a truncated
         # 200 instead of a clean 503.
-        subscription = hub.acquire()
+        subscription = hub.acquire(project_id=target_project.id)
     except HubFull:
         logger.warning("refusing an sse client: %d streams already open", hub.subscriber_count)
         raise TOO_MANY_STREAMS from None

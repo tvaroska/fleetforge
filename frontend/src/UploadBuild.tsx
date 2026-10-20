@@ -71,6 +71,7 @@ export function UploadBuild({
   profiles,
   onUploaded,
   onSessionExpired,
+  project,
 }: {
   devices: DeviceSummary[] | null
   // The page's one profile list (`null` or absent until it loads): the options are its
@@ -78,6 +79,7 @@ export function UploadBuild({
   profiles?: PartitionProfileSummary[] | null
   onUploaded: () => void
   onSessionExpired: () => void
+  project?: string
 }) {
   const [file, setFile] = useState<File | null>(null)
   const [info, setInfo] = useState<AppImageInfo | null>(null)
@@ -146,7 +148,12 @@ export function UploadBuild({
     setResult(null)
     setError(null)
     try {
-      const uploaded = await api.uploadArtifact(file, { target, version, partitionLayout: layout })
+      const uploaded = await api.uploadArtifact(file, {
+        target,
+        version,
+        partitionLayout: layout,
+        ...(project ? { project } : {}),
+      })
       onUploaded()
       setResult(uploaded)
       setChosenTarget(target)

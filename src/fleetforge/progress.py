@@ -72,6 +72,17 @@ LATEST_SQL = text(
     """
 )
 
+LATEST_PROJECT_SQL = text(
+    """
+    SELECT DISTINCT ON (dp.device_id) dp.device_id, dp.at, dp.stage, dp.detail
+      FROM device_progress AS dp
+      JOIN enrollment_tokens AS et ON et.id = dp.token_id
+     WHERE dp.at > now() - make_interval(secs => :window_s)
+       AND et.project_id = :project_id
+     ORDER BY dp.device_id, dp.at DESC, dp.id DESC
+    """
+)
+
 
 @dataclass(frozen=True, slots=True)
 class Arrival:
@@ -118,6 +129,7 @@ async def latest_progress(
     now: dt.datetime,
     window_s: int,
     stall_s: int,
+    project_id: uuid.UUID | None = None,
 ) -> list[Arrival]:
     """The newest stage each board reported inside `window_s`, newest board first.
 
@@ -126,7 +138,14 @@ async def latest_progress(
     is not a judgement about whether the board is *broken*: a slow SNTP or a long
     enroll retry reads the same, and the operator reads the stage to tell them apart.
     """
-    rows = (await session.execute(LATEST_SQL, {"window_s": window_s})).all()
+    if project_id is None:
+        rows = (await session.execute(LATEST_SQL, {"window_s": window_s})).all()
+    else:
+        rows = (
+            await session.execute(
+                LATEST_PROJECT_SQL, {"window_s": window_s, "project_id": project_id}
+            )
+        ).all()
     cutoff = dt.timedelta(seconds=stall_s)
     arrivals = [
         Arrival(

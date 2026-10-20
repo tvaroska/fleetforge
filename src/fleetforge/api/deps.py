@@ -19,12 +19,13 @@ from typing import Annotated
 
 from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import APIKeyCookie, HTTPBearer
-from sqlalchemy import text
+from sqlalchemy import select, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from fleetforge.api.eventstream import EventHub
 from fleetforge.auth.cache import VerifiedSecretCache
+from fleetforge.auth.firebase import FirebaseAuthClient, LiveFirebaseAuthClient
 from fleetforge.auth.hashing import averify_secret, dummy_verify
 from fleetforge.auth.ratelimit import FixedWindowLimiter
 from fleetforge.auth.tokens import ADMIN_TOKEN_PREFIX, parse_token
@@ -37,7 +38,14 @@ from fleetforge.broker import (
 from fleetforge.clock import now_utc
 from fleetforge.config import Settings, get_settings
 from fleetforge.db.base import get_sessionmaker
-from fleetforge.db.models import AdminToken
+from fleetforge.db.models import (
+    DEFAULT_PROJECT_SLUG,
+    AdminToken,
+    Project,
+    ProjectMember,
+    ProjectRole,
+    User,
+)
 from fleetforge.storage import ObjectStore, ObjectStoreConfigError
 
 logger = logging.getLogger(__name__)
@@ -52,6 +60,17 @@ UNAUTHORIZED = HTTPException(
     detail="invalid credentials",
     headers={"WWW-Authenticate": "Bearer"},
 )
+
+FORBIDDEN = HTTPException(
+    status_code=status.HTTP_403_FORBIDDEN,
+    detail="insufficient permissions",
+)
+
+ROLE_RANK: dict[str, int] = {
+    ProjectRole.VIEWER.value: 1,
+    ProjectRole.OPERATOR.value: 2,
+    ProjectRole.OWNER.value: 3,
+}
 
 SettingsDep = Annotated[Settings, Depends(get_settings)]
 SessionMakerDep = Annotated[async_sessionmaker[AsyncSession], Depends(get_sessionmaker)]
@@ -75,12 +94,15 @@ TOUCH_LAST_USED_SQL = text(
 
 @dataclass(frozen=True, slots=True)
 class AuthContext:
-    """Who the caller is. `subject`/`scopes` are reserved — always admin in v1."""
+    """Who the caller is."""
 
     token_id: uuid.UUID
     subject: str
     scopes: tuple[str, ...]
     expires_at: dt.datetime | None
+    user_id: uuid.UUID | None = None
+    project_id: uuid.UUID | None = None
+    is_superadmin: bool = True
 
 
 def client_key(request: Request) -> str:
@@ -380,11 +402,26 @@ async def require_admin(
             logger.info("auth rejected: token %s is expired", row.id)
             raise UNAUTHORIZED
 
+        is_superadmin = "admin" in row.scopes and row.project_id is None
+        if row.user_id is not None:
+            user = await session.get(User, row.user_id)
+            if user is None or user.disabled_at is not None:
+                logger.info(
+                    "auth rejected: user %s for token %s is missing or disabled",
+                    row.user_id,
+                    row.id,
+                )
+                raise UNAUTHORIZED
+            is_superadmin = user.is_superadmin and "admin" in row.scopes and row.project_id is None
+
         context = AuthContext(
             token_id=row.id,
             subject=row.subject,
             scopes=tuple(row.scopes),
             expires_at=row.expires_at,
+            user_id=row.user_id,
+            project_id=row.project_id,
+            is_superadmin=is_superadmin,
         )
         secret_hash = row.secret_hash
 
@@ -400,3 +437,91 @@ async def require_admin(
 
 
 AdminDep = Annotated[AuthContext, Depends(require_admin)]
+
+
+async def check_project_access(
+    session: AsyncSession,
+    admin: AuthContext,
+    target_project_id: uuid.UUID,
+    *,
+    min_role: ProjectRole = ProjectRole.VIEWER,
+    required_scope: str | None = None,
+) -> None:
+    """Verify `admin` may perform an action on `target_project_id`."""
+    if admin.project_id is not None and admin.project_id != target_project_id:
+        raise FORBIDDEN
+
+    if "admin" not in admin.scopes:
+        if required_scope is not None:
+            if required_scope == "read":
+                if not ({"read", "write:artifacts", "deploy", "enroll"} & set(admin.scopes)):
+                    raise FORBIDDEN
+            elif required_scope not in admin.scopes:
+                raise FORBIDDEN
+        elif min_role != ProjectRole.VIEWER:
+            raise FORBIDDEN
+        elif not ({"read", "write:artifacts", "deploy", "enroll"} & set(admin.scopes)):
+            raise FORBIDDEN
+
+    if admin.is_superadmin:
+        return
+
+    if admin.user_id is not None:
+        user = await session.get(User, admin.user_id)
+        if user is not None and user.is_superadmin:
+            return
+        member = await session.get(ProjectMember, (target_project_id, admin.user_id))
+        if member is None or ROLE_RANK.get(member.role, 0) < ROLE_RANK[min_role.value]:
+            raise FORBIDDEN
+
+
+async def resolve_project_for_request(
+    session: AsyncSession,
+    admin: AuthContext,
+    project_slug: str | None = None,
+    *,
+    min_role: ProjectRole = ProjectRole.VIEWER,
+    required_scope: str | None = None,
+) -> Project:
+    """Resolve `project_slug` (or token's pinned project / `'default'`) and enforce RBAC."""
+    if project_slug is not None:
+        project = await session.scalar(select(Project).where(Project.slug == project_slug))
+        if project is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"project {project_slug!r} not found",
+            )
+    elif admin.project_id is not None:
+        project = await session.get(Project, admin.project_id)
+        if project is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="project not found",
+            )
+    else:
+        project = await session.scalar(select(Project).where(Project.slug == DEFAULT_PROJECT_SLUG))
+        if project is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="default project not found",
+            )
+
+    await check_project_access(
+        session,
+        admin,
+        project.id,
+        min_role=min_role,
+        required_scope=required_scope,
+    )
+    return project
+
+
+_firebase_client: FirebaseAuthClient = LiveFirebaseAuthClient()
+
+
+def get_firebase_auth() -> FirebaseAuthClient:
+    """Return the Firebase Auth verifier/client (overridable in unit tests)."""
+    return _firebase_client
+
+
+FirebaseAuthDep = Annotated[FirebaseAuthClient, Depends(get_firebase_auth)]

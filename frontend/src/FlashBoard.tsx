@@ -146,6 +146,7 @@ export function FlashBoard({
   onBoardIdentified,
   fleet,
   versions,
+  project,
 }: {
   onSessionExpired: () => void
   // R2b-fe-1: tells the status strip which board this is, once detected and again once
@@ -161,6 +162,7 @@ export function FlashBoard({
   // Injected by the tests only: jsdom has no `navigator.serial` (see `flasher.ts`).
   createFlasher?: FlasherFactory
   createConsole?: ConsoleFactory
+  project?: string
 }) {
   const [form, setForm] = useState<FormState>(INITIAL_FORM)
   const [board, setBoard] = useState<string>(OTHER_BOARD_ID)
@@ -168,7 +170,7 @@ export function FlashBoard({
   const [manifestError, setManifestError] = useState<string | null>(null)
   /** S0-fe-7, and a footnote in a bundle rather than anything on this page. */
   const [serverVersion, setServerVersion] = useState<string | null>(null)
-  const state = useFlashBoard({ onSessionExpired, createFlasher })
+  const state = useFlashBoard({ onSessionExpired, createFlasher, project })
   const [portHelpOpen, setPortHelpOpen] = useState(false)
 
   const supported = webSerialSupported()

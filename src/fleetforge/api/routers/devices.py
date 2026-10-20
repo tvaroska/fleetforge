@@ -81,9 +81,12 @@ from fleetforge.api.deps import (
     SessionMakerDep,
     SettingsDep,
     bearer_scheme,
+    check_project_access,
     cookie_scheme,
+    resolve_project_for_request,
 )
 from fleetforge.api.schemas import (
+    PROJECT_SLUG_PATTERN,
     ArrivalSummary,
     CommandSummary,
     DeploySelfTest,
@@ -102,7 +105,7 @@ from fleetforge.api.schemas import (
     TelemetrySeries,
 )
 from fleetforge.clock import now_utc
-from fleetforge.db.models import Device, DeviceGroup
+from fleetforge.db.models import Device, DeviceGroup, Project, ProjectRole
 from fleetforge.deploys import DeploySnapshot, latest_deploys
 from fleetforge.device_commands import CommandSnapshot, latest_commands
 from fleetforge.device_logs import read_tail
@@ -285,14 +288,28 @@ async def list_devices(
     admin: AdminDep,
     settings: SettingsDep,
     sessionmaker: SessionMakerDep,
+    project: Annotated[
+        str | None,
+        Query(pattern=PROJECT_SLUG_PATTERN, description="Project slug (defaults to token/default)"),
+    ] = None,
 ) -> DeviceList:
     """The fleet, newest enrollment first, with `online` derived per row."""
     now = now_utc()
     async with sessionmaker() as session:
+        target_project = await resolve_project_for_request(
+            session,
+            admin,
+            project_slug=project,
+            min_role=ProjectRole.VIEWER,
+            required_scope="read",
+        )
         rows = (
             await session.scalars(
                 select(Device)
-                .where(Device.decommissioned_at.is_(None))
+                .where(
+                    Device.decommissioned_at.is_(None),
+                    Device.project_id == target_project.id,
+                )
                 .order_by(Device.enrolled_at.desc(), Device.device_id)
                 .limit(LIST_LIMIT)
             )
@@ -302,6 +319,7 @@ async def list_devices(
             now=now,
             window_s=settings.progress_window_s,
             stall_s=settings.progress_stall_s,
+            project_id=target_project.id,
         )
         # Handed the ids this response already read, so there is no second unbounded
         # scan and the deploy read inherits `LIST_LIMIT` for free.
@@ -382,11 +400,43 @@ async def update_device(
         if device is None or device.decommissioned_at is not None:
             raise HTTPException(status.HTTP_404_NOT_FOUND, f"no such device: {device_id}")
 
-        if "name" in fields and body.name is not None:
+        await check_project_access(
+            session,
+            admin,
+            device.project_id,
+            min_role=ProjectRole.OPERATOR,
+        )
+
+        target_project_id = device.project_id
+        if "project" in fields:
+            if body.project is None:
+                raise HTTPException(status.HTTP_400_BAD_REQUEST, "project cannot be null")
+            dest_project = await session.scalar(select(Project).where(Project.slug == body.project))
+            if dest_project is None:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, f"no such project: {body.project}")
+            await check_project_access(
+                session,
+                admin,
+                device.project_id,
+                min_role=ProjectRole.OWNER,
+            )
+            await check_project_access(
+                session,
+                admin,
+                dest_project.id,
+                min_role=ProjectRole.OWNER,
+            )
+            target_project_id = dest_project.id
+
+        effective_name = body.name if "name" in fields else device.name
+        if effective_name is not None and (
+            "name" in fields or target_project_id != device.project_id
+        ):
             other = await session.scalar(
                 select(Device.device_id)
                 .where(
-                    func.lower(Device.name) == body.name.lower(),
+                    func.lower(Device.name) == effective_name.lower(),
+                    Device.project_id == target_project_id,
                     Device.device_id != device_id,
                     Device.decommissioned_at.is_(None),
                 )
@@ -395,22 +445,35 @@ async def update_device(
             if other is not None:
                 raise HTTPException(
                     status.HTTP_409_CONFLICT,
-                    f"name already used by device {other}: {body.name}",
+                    f"name already used by device {other}: {effective_name}",
                 )
 
         if "group_id" in fields and body.group_id is not None:
-            if await session.get(DeviceGroup, body.group_id) is None:
+            group = await session.get(DeviceGroup, body.group_id)
+            if group is None or group.project_id != target_project_id:
                 raise HTTPException(status.HTTP_404_NOT_FOUND, f"no such group: {body.group_id}")
 
-        changed = {field for field in fields if getattr(device, field) != getattr(body, field)}
+        changed: set[str] = set()
+        if "name" in fields and device.name != body.name:
+            device.name = body.name
+            changed.add("name")
+        if "group_id" in fields and device.group_id != body.group_id:
+            device.group_id = body.group_id
+            changed.add("group_id")
+        if "project" in fields and device.project_id != target_project_id:
+            device.project_id = target_project_id
+            changed.add("project")
+            if "group_id" not in fields and device.group_id is not None:
+                device.group_id = None
+                changed.add("group_id")
+
         if changed:
-            for field in changed:
-                setattr(device, field, getattr(body, field))
             await emit(
                 session,
                 DeviceEvent(
                     type=EventType.DEVICE_UPDATED,
                     device_id=device_id,
+                    project_id=device.project_id,
                     at=now,
                     online=is_online(device, now=now, tolerance=settings.presence_tolerance),
                     fw_version=device.fw_version,
@@ -469,7 +532,14 @@ async def device_log_tail(
     """Stored lines inside the 7-day window. `text` is sanitised device text; never logged."""
     now = now_utc()
     async with sessionmaker() as session:
-        await _live_device_or_404(session, device_id)
+        device = await _live_device_or_404(session, device_id)
+        await check_project_access(
+            session,
+            admin,
+            device.project_id,
+            min_role=ProjectRole.VIEWER,
+            required_scope="read",
+        )
         lines = await read_tail(session, device_id=device_id, now=now, limit=limit)
     return DeviceLogTail(
         device_id=device_id,
@@ -502,7 +572,14 @@ async def device_telemetry_series(
     """Samples inside the 30-day window; `name` is the ingestor's metric-name rule."""
     now = now_utc()
     async with sessionmaker() as session:
-        await _live_device_or_404(session, device_id)
+        device = await _live_device_or_404(session, device_id)
+        await check_project_access(
+            session,
+            admin,
+            device.project_id,
+            min_role=ProjectRole.VIEWER,
+            required_scope="read",
+        )
         points = await read_series(session, device_id=device_id, name=name, now=now, limit=limit)
     return TelemetrySeries(
         device_id=device_id,

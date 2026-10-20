@@ -56,6 +56,7 @@ from fleetforge.api.deps import (
     SessionMakerDep,
     SettingsDep,
     bearer_scheme,
+    check_project_access,
     cookie_scheme,
 )
 from fleetforge.api.routers.deploys import _sender
@@ -64,9 +65,14 @@ from fleetforge.api.schemas import CommandAccepted, CommandRecord
 from fleetforge.broker import CommandPublisher, CommandPublishError, new_command_id, verb_payload
 from fleetforge.clock import now_utc
 from fleetforge.config import Settings
-from fleetforge.db.models import CommandType, Device
+from fleetforge.db.models import CommandType, Device, ProjectRole
 from fleetforge.deploys import deploy_transaction
-from fleetforge.device_commands import get_command, mark_publish_failed, record_sent
+from fleetforge.device_commands import (
+    get_command,
+    latest_unanswered_command,
+    mark_publish_failed,
+    record_sent,
+)
 from fleetforge.presence import is_online
 
 logger = logging.getLogger(__name__)
@@ -153,29 +159,42 @@ async def _send(
 ) -> CommandAccepted:
     """The four POSTs in one place: gate, record + commit, publish, answer 202."""
     device = await _live_device(session, device_id)
+    await check_project_access(
+        session,
+        admin,
+        device.project_id,
+        min_role=ProjectRole.OPERATOR,
+        required_scope="deploy",
+    )
     _require_capability(device, verb.value)
     if cmd_id is not None:
         await _require_transaction(session, device_id, cmd_id, verb.value)
 
-    command_id = new_command_id()
-    payload = verb_payload(command_id=command_id, type=verb.value, cmd_id=cmd_id)
-    await record_sent(
-        session,
-        command_id=command_id,
-        device_id=device_id,
-        type=verb.value,
-        cmd_id=cmd_id,
-        sent_by=await _sender(session, admin),
+    existing = await latest_unanswered_command(
+        session, device_id=device_id, type=verb.value, cmd_id=cmd_id
     )
-    # Committed BEFORE the publish: record, then act. The answer finds the row.
-    await session.commit()
+    reused = existing is not None
+    command_id = existing.command_id if existing is not None else new_command_id()
+    payload = verb_payload(command_id=command_id, type=verb.value, cmd_id=cmd_id)
+    if not reused:
+        await record_sent(
+            session,
+            command_id=command_id,
+            device_id=device_id,
+            type=verb.value,
+            cmd_id=cmd_id,
+            sent_by=await _sender(session, admin),
+        )
+        # Committed BEFORE the publish: record, then act. The answer finds the row.
+        await session.commit()
 
     try:
         await publisher.publish(device_id, payload)
     except CommandPublishError:
         logger.exception("%s command %s to %s could not be published", verb, command_id, device_id)
-        await mark_publish_failed(session, command_id=command_id)
-        await session.commit()
+        if not reused:
+            await mark_publish_failed(session, command_id=command_id)
+            await session.commit()
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=PUBLISH_FAILED
         ) from None
@@ -326,7 +345,14 @@ async def get_device_command(
     """The record and the board's first answer; 404 for an unknown id or another board's.
     `result: null` is "no answer yet", possibly never."""
     async with sessionmaker() as session:
-        await _live_device(session, device_id)
+        device = await _live_device(session, device_id)
+        await check_project_access(
+            session,
+            admin,
+            device.project_id,
+            min_role=ProjectRole.VIEWER,
+            required_scope="read",
+        )
         snapshot = await get_command(session, device_id=device_id, command_id=command_id)
     summary = command_summary(snapshot)
     if snapshot is None or summary is None:

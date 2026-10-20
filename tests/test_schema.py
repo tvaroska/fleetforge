@@ -31,6 +31,9 @@ EXPECTED_TABLES = {
     "devices",
     "enrollment_tokens",
     "partition_profiles",
+    "project_members",
+    "projects",
+    "users",
 }
 
 MIGRATION_TEST_DB = "fleetforge_migration_test"
@@ -332,3 +335,61 @@ async def test_many_pending_detected_profiles_coexist(session: AsyncSession) -> 
         text("SELECT count(*) FROM partition_profiles WHERE adopted_at IS NULL")
     )
     assert pending == 3
+
+
+async def test_default_project_is_seeded(session: AsyncSession) -> None:
+    """P1-db-1: the `'default'` project is seeded with `DEFAULT_PROJECT_ID`."""
+    row = (
+        await session.execute(
+            text("SELECT id::text, slug, name FROM projects WHERE slug = 'default'")
+        )
+    ).one()
+    assert tuple(row) == ("00000000-0000-4000-8000-000000000001", "default", "Default")
+
+
+async def test_projects_refuses_an_invalid_slug(session: AsyncSession) -> None:
+    with pytest.raises(IntegrityError, match="ck_projects_slug_format"):
+        await session.execute(text("INSERT INTO projects (slug, name) VALUES ('Bad_Slug', 'Bad')"))
+
+
+async def test_users_refuses_an_invalid_username(session: AsyncSession) -> None:
+    with pytest.raises(IntegrityError, match="ck_users_username_format"):
+        await session.execute(
+            text("INSERT INTO users (username, password_hash) VALUES ('-bad', 'hash')")
+        )
+
+
+async def test_project_members_refuses_an_invalid_role(session: AsyncSession) -> None:
+    uid = (
+        await session.execute(
+            text("INSERT INTO users (username, password_hash) VALUES ('alice', 'h') RETURNING id")
+        )
+    ).scalar_one()
+    with pytest.raises(IntegrityError, match="ck_project_members_role"):
+        await session.execute(
+            text(
+                "INSERT INTO project_members (project_id, user_id, role) "
+                "VALUES ('00000000-0000-4000-8000-000000000001'::uuid, :uid, 'guest')"
+            ),
+            {"uid": uid},
+        )
+
+
+async def test_device_groups_name_is_unique_per_project_not_globally(
+    session: AsyncSession,
+) -> None:
+    p2 = (
+        await session.execute(
+            text("INSERT INTO projects (slug, name) VALUES ('caelus', 'Caelus') RETURNING id")
+        )
+    ).scalar_one()
+    await session.execute(text("INSERT INTO device_groups (name) VALUES ('canary')"))
+    await session.execute(
+        text("INSERT INTO device_groups (project_id, name) VALUES (:p2, 'canary')"),
+        {"p2": p2},
+    )
+    with pytest.raises(IntegrityError, match="uq_device_groups_project_id_name"):
+        await session.execute(
+            text("INSERT INTO device_groups (project_id, name) VALUES (:p2, 'canary')"),
+            {"p2": p2},
+        )

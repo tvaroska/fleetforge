@@ -267,11 +267,13 @@ export type UseFlashBoardOptions = {
   onSessionExpired: () => void
   /** Injected by tests only: jsdom has no `navigator.serial` (see `flasher.ts`). */
   createFlasher?: FlasherFactory
+  project?: string
 }
 
 export function useFlashBoard({
   onSessionExpired,
   createFlasher,
+  project,
 }: UseFlashBoardOptions): FlashBoardState {
   const [phase, setPhase] = useState<Phase>('idle')
   const [step, setStep] = useState('')
@@ -446,7 +448,9 @@ export function useFlashBoard({
 
         // 4. Mint last. Single-use: every attempt that got this far will write it.
         setStep('Minting an enrollment token…')
-        const issued = await api.issueEnrollmentToken(null)
+        const issued = await (project
+          ? api.issueEnrollmentToken(null, project)
+          : api.issueEnrollmentToken(null))
         tokenId = issued.id
         minted = true
 
@@ -523,7 +527,7 @@ export function useFlashBoard({
         setBusy(false)
       }
     },
-    [handle],
+    [handle, project],
   )
 
   /**

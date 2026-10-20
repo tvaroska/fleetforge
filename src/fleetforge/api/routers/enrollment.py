@@ -24,8 +24,9 @@ enrollment provenance — a `DELETE` verb would invite someone to actually delet
 import datetime as dt
 import logging
 import uuid
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 
@@ -34,17 +35,20 @@ from fleetforge.api.deps import (
     SessionMakerDep,
     SettingsDep,
     bearer_scheme,
+    check_project_access,
     cookie_scheme,
     now_utc,
+    resolve_project_for_request,
 )
 from fleetforge.api.schemas import (
+    PROJECT_SLUG_PATTERN,
     EnrollmentTokenCreate,
     EnrollmentTokenIssued,
     EnrollmentTokenList,
     EnrollmentTokenSummary,
 )
 from fleetforge.auth.enrollment import REVOKE_SQL, create_enrollment_token, token_status
-from fleetforge.db.models import EnrollmentToken
+from fleetforge.db.models import EnrollmentToken, ProjectRole
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +58,9 @@ router = APIRouter(
     dependencies=[Depends(bearer_scheme), Depends(cookie_scheme)],
 )
 
-GROUP_EXISTS_SQL = text("SELECT 1 FROM device_groups WHERE id = :group_id")
+GROUP_EXISTS_SQL = text(
+    "SELECT 1 FROM device_groups WHERE id = :group_id AND project_id = :project_id"
+)
 
 # `spec/prd.md` → *Capacity* sizes v1 at ~25 devices, so the history is small and the
 # cap is a guard against an unbounded response rather than real paging. Pagination
@@ -76,6 +82,10 @@ async def issue_enrollment_token(
     admin: AdminDep,
     settings: SettingsDep,
     sessionmaker: SessionMakerDep,
+    project: Annotated[
+        str | None,
+        Query(pattern=PROJECT_SLUG_PATTERN, description="Project slug (defaults to token/default)"),
+    ] = None,
 ) -> EnrollmentTokenIssued:
     """Mint a single-use `ffe_` token valid for `enrollment_token_ttl_hours`.
 
@@ -90,15 +100,28 @@ async def issue_enrollment_token(
     expires_at = now_utc() + dt.timedelta(hours=settings.enrollment_token_ttl_hours)
 
     async with sessionmaker() as session:
+        target_project = await resolve_project_for_request(
+            session,
+            admin,
+            project_slug=project,
+            min_role=ProjectRole.OPERATOR,
+            required_scope="enroll",
+        )
         if body.group_id is not None:
-            exists = await session.scalar(GROUP_EXISTS_SQL, {"group_id": body.group_id})
+            exists = await session.scalar(
+                GROUP_EXISTS_SQL,
+                {"group_id": body.group_id, "project_id": target_project.id},
+            )
             if exists is None:
                 logger.info("enrollment token refused: unknown group %s", body.group_id)
                 raise UNKNOWN_GROUP
 
         try:
             row, plaintext = await create_enrollment_token(
-                session, group_id=body.group_id, expires_at=expires_at
+                session,
+                group_id=body.group_id,
+                expires_at=expires_at,
+                project_id=target_project.id,
             )
             await session.commit()
         except IntegrityError:
@@ -128,6 +151,10 @@ async def issue_enrollment_token(
 async def list_enrollment_tokens(
     admin: AdminDep,
     sessionmaker: SessionMakerDep,
+    project: Annotated[
+        str | None,
+        Query(pattern=PROJECT_SLUG_PATTERN, description="Project slug (defaults to token/default)"),
+    ] = None,
 ) -> EnrollmentTokenList:
     """The issuance history, with each row's derived status.
 
@@ -138,9 +165,17 @@ async def list_enrollment_tokens(
     """
     now = now_utc()
     async with sessionmaker() as session:
+        target_project = await resolve_project_for_request(
+            session,
+            admin,
+            project_slug=project,
+            min_role=ProjectRole.VIEWER,
+            required_scope="read",
+        )
         rows = (
             await session.scalars(
                 select(EnrollmentToken)
+                .where(EnrollmentToken.project_id == target_project.id)
                 .order_by(EnrollmentToken.created_at.desc(), EnrollmentToken.id.desc())
                 .limit(LIST_LIMIT)
             )
@@ -184,13 +219,21 @@ async def revoke_enrollment_token(
     already failed the `used_at IS NULL` clause. It is not an error.
     """
     async with sessionmaker() as session:
+        row = await session.get(EnrollmentToken, token_id)
+        if row is None:
+            logger.info("revoke refused: unknown enrollment token %s", token_id)
+            raise UNKNOWN_TOKEN
+        await check_project_access(
+            session,
+            admin,
+            row.project_id,
+            min_role=ProjectRole.OPERATOR,
+            required_scope="enroll",
+        )
         revoked = (await session.execute(REVOKE_SQL, {"token_id": token_id})).scalar_one_or_none()
         await session.commit()
 
         if revoked is None:
-            if await session.get(EnrollmentToken, token_id) is None:
-                logger.info("revoke refused: unknown enrollment token %s", token_id)
-                raise UNKNOWN_TOKEN
             logger.info("enrollment token %s was already revoked", token_id)
             return
 
