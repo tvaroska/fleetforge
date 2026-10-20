@@ -575,6 +575,12 @@ export const api = {
       body: JSON.stringify(username === 'admin' ? { password } : { username, password }),
     }),
 
+  resetPassword: (oobCode: string, newPassword: string) =>
+    request<LoginResult>('/v1/auth/reset-password', {
+      method: 'POST',
+      body: JSON.stringify({ oob_code: oobCode, new_password: newPassword }),
+    }),
+
   logout: () => request<void>('/v1/auth/logout', { method: 'POST' }),
 
   // The fleet read model, and the ONLY source of device state in this app. A frame on

@@ -3,7 +3,7 @@
 // Plaintext `ffa_...` API tokens follow the exact same rule as `EnrollBoard.tsx`:
 // shown once in component state after POST, never stored in localStorage or URLs.
 
-import { useCallback, useEffect, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from 'react'
 import {
   ApiError,
   api,
@@ -40,13 +40,21 @@ export function ProjectAccess({
   activeProject,
   onSelectProject,
   onSessionExpired,
+  open: controlledOpen,
+  onToggleOpen,
+  tabs,
 }: {
   me: Me
   activeProject: string
   onSelectProject: (slug: string) => void
   onSessionExpired: () => void
+  open?: boolean
+  onToggleOpen?: () => void
+  tabs?: ReactNode
 }) {
-  const [open, setOpen] = useState(false)
+  const [uncontrolledOpen, setUncontrolledOpen] = useState(false)
+  const open = controlledOpen ?? uncontrolledOpen
+  const toggleOpen = onToggleOpen ?? (() => setUncontrolledOpen((v) => !v))
   const [projects, setProjects] = useState<ProjectSummary[]>(
     () =>
       me.projects?.map((p) => ({
@@ -277,198 +285,81 @@ export function ProjectAccess({
     projects.length > 0
       ? projects
       : [{ id: 'default', slug: activeProject, name: activeProject, description: null, role: 'owner', created_at: '' }]
+  const activeOption = options.find((p) => p.slug === activeProject) ?? options[0]
 
   return (
     <section aria-label="Project and access" data-testid="project-access">
-      <p>
-        <label>
-          Project{' '}
-          <select
-            aria-label="Project"
-            value={activeProject}
-            onChange={(e) => onSelectProject(e.target.value)}
-          >
-            {options.map((p) => (
-              <option key={p.slug} value={p.slug}>
-                {p.name} ({p.slug})
-              </option>
-            ))}
-          </select>
-        </label>{' '}
-        <button type="button" onClick={() => setOpen((v) => !v)}>
+      <div className="project-bar">
+        <div className="project-bar-left">
+          <label className="project-picker-label">
+            <span className="project-tag">PROJECT</span>{' '}
+            <select
+              aria-label="Project"
+              value={activeProject}
+              onChange={(e) => onSelectProject(e.target.value)}
+            >
+              {options.map((p) => (
+                <option key={p.slug} value={p.slug}>
+                  {p.name} ({p.slug})
+                </option>
+              ))}
+            </select>
+          </label>
+          {activeOption?.role && (
+            <span className="badge muted" title="Your role in this project">
+              role: {activeOption.role}
+            </span>
+          )}
+        </div>
+        <button type="button" onClick={toggleOpen}>
           {open ? 'Hide access & tokens' : 'Project access & API tokens'}
         </button>
-      </p>
+      </div>
+
+      {tabs}
 
       {open && (
-        <div className="issued" data-testid="project-drawer">
+        <div className="project-drawer" data-testid="project-drawer">
           {error !== null && (
             <p className="bad" role="alert">
               {error}
             </p>
           )}
 
-          {me.is_superadmin && (
-            <>
-              <form onSubmit={(e) => void handleCreateProject(e)}>
-                <h3>Create project</h3>
-                <p>
-                  <label>
-                    Slug{' '}
-                    <input
-                      type="text"
-                      aria-label="New project slug"
-                      value={newSlug}
-                      onChange={(e) => setNewSlug(e.target.value)}
-                      placeholder="home-lab"
-                      disabled={busy}
-                      required
-                    />
-                  </label>{' '}
-                  <label>
-                    Name{' '}
-                    <input
-                      type="text"
-                      aria-label="New project name"
-                      value={newName}
-                      onChange={(e) => setNewName(e.target.value)}
-                      placeholder="Home Lab"
-                      disabled={busy}
-                      required
-                    />
-                  </label>{' '}
-                  <button type="submit" disabled={busy || !newSlug.trim() || !newName.trim()}>
-                    Create project
-                  </button>
-                </p>
-              </form>
+          <div className="access-grid">
+            <div className="console-card">
+              <h2>Project access · {activeProject}</h2>
 
-              <h3>Invited users (Firebase &amp; local)</h3>
-              <form onSubmit={(e) => void handleInviteUser(e)}>
-                <p>
-                  <label>
-                    Username{' '}
-                    <input
-                      type="text"
-                      aria-label="Invite username"
-                      value={inviteUsername}
-                      onChange={(e) => setInviteUsername(e.target.value)}
-                      placeholder="alice"
-                      disabled={busy}
-                      required
-                    />
-                  </label>{' '}
-                  <label>
-                    Email (Firebase invite){' '}
-                    <input
-                      type="email"
-                      aria-label="Invite email"
-                      value={inviteEmail}
-                      onChange={(e) => setInviteEmail(e.target.value)}
-                      placeholder="alice@example.com"
-                      disabled={busy}
-                    />
-                  </label>{' '}
-                  <label>
-                    Display name{' '}
-                    <input
-                      type="text"
-                      aria-label="Invite display name"
-                      value={inviteDisplayName}
-                      onChange={(e) => setInviteDisplayName(e.target.value)}
-                      placeholder="Alice Smith"
-                      disabled={busy}
-                    />
-                  </label>{' '}
-                  <label>
-                    Local password (optional if email set){' '}
-                    <input
-                      type="password"
-                      aria-label="Invite local password"
-                      value={invitePassword}
-                      onChange={(e) => setInvitePassword(e.target.value)}
-                      disabled={busy}
-                    />
-                  </label>{' '}
-                  <label>
-                    <input
-                      type="checkbox"
-                      checked={inviteSendEmail}
-                      onChange={(e) => setInviteSendEmail(e.target.checked)}
-                      disabled={busy || inviteEmail.trim() === ''}
-                    />{' '}
-                    Send Firebase password-setup email
-                  </label>{' '}
-                  <label>
-                    <input
-                      type="checkbox"
-                      checked={inviteSuperadmin}
-                      onChange={(e) => setInviteSuperadmin(e.target.checked)}
-                      disabled={busy}
-                    />{' '}
-                    Superadmin
-                  </label>{' '}
-                  <button
-                    type="submit"
-                    disabled={
-                      busy ||
-                      !inviteUsername.trim() ||
-                      (inviteEmail.trim() === '' && invitePassword === '')
-                    }
-                  >
-                    Invite user
-                  </button>
-                </p>
-              </form>
-
-              {users !== null && users.length > 0 && (
+              <h3>Members of {activeProject}</h3>
+              {members === null ? (
+                <p aria-busy="true">Loading members…</p>
+              ) : members.length === 0 ? (
+                <p className="muted">No explicit project members (superadmins have owner access).</p>
+              ) : (
                 <table>
                   <thead>
                     <tr>
                       <th scope="col">User</th>
-                      <th scope="col">Email</th>
-                      <th scope="col">Auth</th>
-                      <th scope="col">Status</th>
+                      <th scope="col">Role</th>
                       <th scope="col" />
                     </tr>
                   </thead>
                   <tbody>
-                    {users.map((u) => (
-                      <tr key={u.id}>
+                    {members.map((m) => (
+                      <tr key={m.username}>
                         <td>
-                          <code>{u.username}</code>
-                          {u.display_name ? ` (${u.display_name})` : ''}
-                          {u.is_superadmin ? ' · superadmin' : ''}
+                          <code>{m.username}</code>
+                          {m.display_name ? ` (${m.display_name})` : ''}
                         </td>
-                        <td>{u.email ?? '—'}</td>
+                        <td>{m.role}</td>
                         <td>
-                          {u.firebase_uid
-                            ? 'firebase linked'
-                            : u.email
-                              ? 'firebase invited'
-                              : 'local'}
-                        </td>
-                        <td>{u.disabled_at ? 'disabled' : 'active'}</td>
-                        <td>
-                          {u.email && (
-                            <button
-                              type="button"
-                              onClick={() => void handleSendPasswordReset(u)}
-                            >
-                              Send reset email
-                            </button>
-                          )}{' '}
                           <button
                             type="button"
-                            aria-label={`${u.disabled_at ? 'Enable' : 'Disable'} ${u.username}`}
+                            aria-label={`Remove ${m.username}`}
                             disabled={busy}
-                            onClick={() =>
-                              u.disabled_at
-                                ? void handleToggleUserDisabled(u)
-                                : setPending({ kind: 'disable-user', username: u.username })
-                            }
+                            onClick={() => setPending({ kind: 'remove-member', username: m.username })}
                           >
-                            {u.disabled_at ? 'Enable' : 'Disable'}
+                            Remove
                           </button>
                         </td>
                       </tr>
@@ -476,226 +367,373 @@ export function ProjectAccess({
                   </tbody>
                 </table>
               )}
-              {pending?.kind === 'disable-user' && (
-                <p data-testid="confirm-disable-user">
-                  Disable {pending.username}? They are signed out at once.{' '}
+              {pending?.kind === 'remove-member' && (
+                <p data-testid="confirm-remove-member">
+                  Remove {pending.username} from {activeProject}? They lose access to its boards.{' '}
                   <button
                     type="button"
                     disabled={busy}
-                    onClick={() => {
-                      const target = users?.find((u) => u.username === pending.username)
-                      if (target) {
-                        void handleToggleUserDisabled(target)
-                      } else {
-                        setPending(null)
-                      }
-                    }}
+                    onClick={() => void handleRemoveMember(pending.username)}
                   >
-                    Yes, disable {pending.username}
+                    Yes, remove {pending.username}
                   </button>{' '}
                   <button type="button" onClick={() => setPending(null)}>
                     Keep
                   </button>
                 </p>
               )}
-            </>
-          )}
+              <form className="compact-form" onSubmit={(e) => void handleAddMember(e)}>
+                <div className="form-grid">
+                  <label>
+                    Username
+                    <input
+                      type="text"
+                      aria-label="Member username"
+                      value={memberUsername}
+                      onChange={(e) => setMemberUsername(e.target.value)}
+                      placeholder="username"
+                      disabled={busy}
+                      required
+                    />
+                  </label>
+                  <label>
+                    Role
+                    <select
+                      aria-label="Member role"
+                      value={memberRole}
+                      onChange={(e) =>
+                        setMemberRole(e.target.value as 'owner' | 'operator' | 'viewer')
+                      }
+                      disabled={busy}
+                    >
+                      <option value="owner">owner</option>
+                      <option value="operator">operator</option>
+                      <option value="viewer">viewer</option>
+                    </select>
+                  </label>
+                </div>
+                <p>
+                  <button type="submit" disabled={busy || !memberUsername.trim()}>
+                    Save member
+                  </button>
+                </p>
+              </form>
 
-          <h3>Members of {activeProject}</h3>
-          {members === null ? (
-            <p aria-busy="true">Loading members…</p>
-          ) : members.length === 0 ? (
-            <p className="muted">No explicit project members (superadmins have owner access).</p>
-          ) : (
-            <table>
-              <thead>
-                <tr>
-                  <th scope="col">User</th>
-                  <th scope="col">Role</th>
-                  <th scope="col" />
-                </tr>
-              </thead>
-              <tbody>
-                {members.map((m) => (
-                  <tr key={m.username}>
-                    <td>
-                      <code>{m.username}</code>
-                      {m.display_name ? ` (${m.display_name})` : ''}
-                    </td>
-                    <td>{m.role}</td>
-                    <td>
-                      <button
-                        type="button"
-                        aria-label={`Remove ${m.username}`}
-                        disabled={busy}
-                        onClick={() => setPending({ kind: 'remove-member', username: m.username })}
-                      >
-                        Remove
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-          {pending?.kind === 'remove-member' && (
-            <p data-testid="confirm-remove-member">
-              Remove {pending.username} from {activeProject}? They lose access to its boards.{' '}
-              <button
-                type="button"
-                disabled={busy}
-                onClick={() => void handleRemoveMember(pending.username)}
-              >
-                Yes, remove {pending.username}
-              </button>{' '}
-              <button type="button" onClick={() => setPending(null)}>
-                Keep
-              </button>
-            </p>
-          )}
-          <form onSubmit={(e) => void handleAddMember(e)}>
-            <p>
-              <label>
-                Username{' '}
-                <input
-                  type="text"
-                  aria-label="Member username"
-                  value={memberUsername}
-                  onChange={(e) => setMemberUsername(e.target.value)}
-                  disabled={busy}
-                  required
-                />
-              </label>{' '}
-              <label>
-                Role{' '}
-                <select
-                  aria-label="Member role"
-                  value={memberRole}
-                  onChange={(e) =>
-                    setMemberRole(e.target.value as 'owner' | 'operator' | 'viewer')
-                  }
-                  disabled={busy}
-                >
-                  <option value="owner">owner</option>
-                  <option value="operator">operator</option>
-                  <option value="viewer">viewer</option>
-                </select>
-              </label>{' '}
-              <button type="submit" disabled={busy || !memberUsername.trim()}>
-                Save member
-              </button>
-            </p>
-          </form>
+              <h3>API tokens (CLI / CI)</h3>
+              <form className="compact-form" onSubmit={(e) => void handleIssueToken(e)}>
+                <div className="form-grid">
+                  <label>
+                    Token label
+                    <input
+                      type="text"
+                      aria-label="Token label"
+                      value={tokenName}
+                      onChange={(e) => setTokenName(e.target.value)}
+                      placeholder="github-actions"
+                      disabled={busy}
+                      required
+                    />
+                  </label>
+                  <label>
+                    Preset
+                    <select
+                      aria-label="Token preset"
+                      value={tokenScope}
+                      onChange={(e) => setTokenScope(e.target.value)}
+                      disabled={busy}
+                    >
+                      <option value="deploy">CI deploy (read + write:artifacts + deploy)</option>
+                      <option value="read">Read-only (read)</option>
+                      <option value="admin">Full access (admin)</option>
+                    </select>
+                  </label>
+                </div>
+                <p>
+                  <label className="choice">
+                    <input
+                      type="checkbox"
+                      checked={tokenPinned}
+                      onChange={(e) => setTokenPinned(e.target.checked)}
+                      disabled={busy}
+                    />{' '}
+                    Pin to <code>{activeProject}</code>
+                  </label>
+                </p>
+                <p>
+                  <button type="submit" disabled={busy || !tokenName.trim()}>
+                    Issue API token
+                  </button>
+                </p>
+              </form>
 
-          <h3>API tokens (CLI / CI)</h3>
-          <form onSubmit={(e) => void handleIssueToken(e)}>
-            <p>
-              <label>
-                Token label{' '}
-                <input
-                  type="text"
-                  aria-label="Token label"
-                  value={tokenName}
-                  onChange={(e) => setTokenName(e.target.value)}
-                  placeholder="github-actions"
-                  disabled={busy}
-                  required
-                />
-              </label>{' '}
-              <label>
-                Preset{' '}
-                <select
-                  aria-label="Token preset"
-                  value={tokenScope}
-                  onChange={(e) => setTokenScope(e.target.value)}
-                  disabled={busy}
-                >
-                  <option value="deploy">CI deploy (read + write:artifacts + deploy)</option>
-                  <option value="read">Read-only (read)</option>
-                  <option value="admin">Full access (admin)</option>
-                </select>
-              </label>{' '}
-              <label>
-                <input
-                  type="checkbox"
-                  checked={tokenPinned}
-                  onChange={(e) => setTokenPinned(e.target.checked)}
-                  disabled={busy}
-                />{' '}
-                Pin to <code>{activeProject}</code>
-              </label>{' '}
-              <button type="submit" disabled={busy || !tokenName.trim()}>
-                Issue API token
-              </button>
-            </p>
-          </form>
+              {issuedToken !== null && (
+                <div className="issued" role="alert">
+                  <p className="warn">Copy this API token now — it is shown once:</p>
+                  <code data-testid="issued-admin-token">{issuedToken.token}</code>{' '}
+                  <button type="button" onClick={() => setIssuedToken(null)}>
+                    Done
+                  </button>
+                </div>
+              )}
 
-          {issuedToken !== null && (
-            <div className="issued" role="alert">
-              <p className="warn">Copy this API token now — it is shown once:</p>
-              <code data-testid="issued-admin-token">{issuedToken.token}</code>{' '}
-              <button type="button" onClick={() => setIssuedToken(null)}>
-                Done
-              </button>
+              {tokens !== null && tokens.length > 0 && (
+                <table>
+                  <thead>
+                    <tr>
+                      <th scope="col">Label</th>
+                      <th scope="col">Project</th>
+                      <th scope="col">Scopes</th>
+                      <th scope="col">Created</th>
+                      <th scope="col" />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {tokens.map((t) => (
+                      <tr key={t.id}>
+                        <td>{t.name}</td>
+                        <td>{t.project_slug ?? 'all'}</td>
+                        <td>
+                          <code>{t.scopes.join(', ')}</code>
+                        </td>
+                        <td>{formatWhen(t.created_at)}</td>
+                        <td>
+                          {t.revoked_at === null ? (
+                            <button
+                              type="button"
+                              aria-label={`Revoke ${t.name}`}
+                              disabled={busy}
+                              onClick={() =>
+                                setPending({ kind: 'revoke-token', id: t.id, name: t.name })
+                              }
+                            >
+                              Revoke
+                            </button>
+                          ) : (
+                            <span className="muted">revoked</span>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+              {pending?.kind === 'revoke-token' && (
+                <p data-testid="confirm-revoke-token">
+                  Revoke {pending.name}? Anything using it stops working at once.{' '}
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => void handleRevokeToken(pending.id)}
+                  >
+                    Revoke token
+                  </button>{' '}
+                  <button type="button" onClick={() => setPending(null)}>
+                    Keep
+                  </button>
+                </p>
+              )}
             </div>
-          )}
 
-          {tokens !== null && tokens.length > 0 && (
-            <table>
-              <thead>
-                <tr>
-                  <th scope="col">Label</th>
-                  <th scope="col">Project</th>
-                  <th scope="col">Scopes</th>
-                  <th scope="col">Created</th>
-                  <th scope="col" />
-                </tr>
-              </thead>
-              <tbody>
-                {tokens.map((t) => (
-                  <tr key={t.id}>
-                    <td>{t.name}</td>
-                    <td>{t.project_slug ?? 'all'}</td>
-                    <td>
-                      <code>{t.scopes.join(', ')}</code>
-                    </td>
-                    <td>{formatWhen(t.created_at)}</td>
-                    <td>
-                      {t.revoked_at === null ? (
-                        <button
-                          type="button"
-                          aria-label={`Revoke ${t.name}`}
-                          disabled={busy}
-                          onClick={() =>
-                            setPending({ kind: 'revoke-token', id: t.id, name: t.name })
-                          }
-                        >
-                          Revoke
-                        </button>
-                      ) : (
-                        <span className="muted">revoked</span>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          )}
-          {pending?.kind === 'revoke-token' && (
-            <p data-testid="confirm-revoke-token">
-              Revoke {pending.name}? Anything using it stops working at once.{' '}
-              <button
-                type="button"
-                disabled={busy}
-                onClick={() => void handleRevokeToken(pending.id)}
-              >
-                Revoke token
-              </button>{' '}
-              <button type="button" onClick={() => setPending(null)}>
-                Keep
-              </button>
-            </p>
-          )}
+            {me.is_superadmin && (
+              <div className="console-card">
+                <h2>Instance admin</h2>
+                <form className="compact-form" onSubmit={(e) => void handleCreateProject(e)}>
+                  <h3>Create project</h3>
+                  <div className="form-grid">
+                    <label>
+                      Slug
+                      <input
+                        type="text"
+                        aria-label="New project slug"
+                        value={newSlug}
+                        onChange={(e) => setNewSlug(e.target.value)}
+                        placeholder="home-lab"
+                        disabled={busy}
+                        required
+                      />
+                    </label>
+                    <label>
+                      Name
+                      <input
+                        type="text"
+                        aria-label="New project name"
+                        value={newName}
+                        onChange={(e) => setNewName(e.target.value)}
+                        placeholder="Home Lab"
+                        disabled={busy}
+                        required
+                      />
+                    </label>
+                  </div>
+                  <p>
+                    <button type="submit" disabled={busy || !newSlug.trim() || !newName.trim()}>
+                      Create project
+                    </button>
+                  </p>
+                </form>
+
+                <h3>Invited users (Firebase &amp; local)</h3>
+                <form className="compact-form" onSubmit={(e) => void handleInviteUser(e)}>
+                  <div className="form-grid">
+                    <label>
+                      Username
+                      <input
+                        type="text"
+                        aria-label="Invite username"
+                        value={inviteUsername}
+                        onChange={(e) => setInviteUsername(e.target.value)}
+                        placeholder="alice"
+                        disabled={busy}
+                        required
+                      />
+                    </label>
+                    <label>
+                      Email (Firebase invite)
+                      <input
+                        type="email"
+                        aria-label="Invite email"
+                        value={inviteEmail}
+                        onChange={(e) => setInviteEmail(e.target.value)}
+                        placeholder="alice@example.com"
+                        disabled={busy}
+                      />
+                    </label>
+                    <label>
+                      Display name
+                      <input
+                        type="text"
+                        aria-label="Invite display name"
+                        value={inviteDisplayName}
+                        onChange={(e) => setInviteDisplayName(e.target.value)}
+                        placeholder="Alice Smith"
+                        disabled={busy}
+                      />
+                    </label>
+                    <label>
+                      Local password (optional if email set)
+                      <input
+                        type="password"
+                        aria-label="Invite local password"
+                        value={invitePassword}
+                        onChange={(e) => setInvitePassword(e.target.value)}
+                        disabled={busy}
+                      />
+                    </label>
+                  </div>
+                  <p>
+                    <label className="choice">
+                      <input
+                        type="checkbox"
+                        checked={inviteSendEmail}
+                        onChange={(e) => setInviteSendEmail(e.target.checked)}
+                        disabled={busy || inviteEmail.trim() === ''}
+                      />{' '}
+                      Send Firebase password-setup email
+                    </label>
+                    <label className="choice">
+                      <input
+                        type="checkbox"
+                        checked={inviteSuperadmin}
+                        onChange={(e) => setInviteSuperadmin(e.target.checked)}
+                        disabled={busy}
+                      />{' '}
+                      Superadmin
+                    </label>
+                  </p>
+                  <p>
+                    <button
+                      type="submit"
+                      disabled={
+                        busy ||
+                        !inviteUsername.trim() ||
+                        (inviteEmail.trim() === '' && invitePassword === '')
+                      }
+                    >
+                      Invite user
+                    </button>
+                  </p>
+                </form>
+
+                {users !== null && users.length > 0 && (
+                  <table>
+                    <thead>
+                      <tr>
+                        <th scope="col">User</th>
+                        <th scope="col">Email</th>
+                        <th scope="col">Auth</th>
+                        <th scope="col">Status</th>
+                        <th scope="col" />
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {users.map((u) => (
+                        <tr key={u.id}>
+                          <td>
+                            <code>{u.username}</code>
+                            {u.display_name ? ` (${u.display_name})` : ''}
+                            {u.is_superadmin ? ' · superadmin' : ''}
+                          </td>
+                          <td>{u.email ?? '—'}</td>
+                          <td>
+                            {u.firebase_uid
+                              ? 'firebase linked'
+                              : u.email
+                                ? 'firebase invited'
+                                : 'local'}
+                          </td>
+                          <td>{u.disabled_at ? 'disabled' : 'active'}</td>
+                          <td>
+                            {u.email && (
+                              <button
+                                type="button"
+                                onClick={() => void handleSendPasswordReset(u)}
+                              >
+                                Send reset email
+                              </button>
+                            )}{' '}
+                            <button
+                              type="button"
+                              aria-label={`${u.disabled_at ? 'Enable' : 'Disable'} ${u.username}`}
+                              disabled={busy}
+                              onClick={() =>
+                                u.disabled_at
+                                  ? void handleToggleUserDisabled(u)
+                                  : setPending({ kind: 'disable-user', username: u.username })
+                              }
+                            >
+                              {u.disabled_at ? 'Enable' : 'Disable'}
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                )}
+                {pending?.kind === 'disable-user' && (
+                  <p data-testid="confirm-disable-user">
+                    Disable {pending.username}? They are signed out at once.{' '}
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => {
+                        const target = users?.find((u) => u.username === pending.username)
+                        if (target) {
+                          void handleToggleUserDisabled(target)
+                        } else {
+                          setPending(null)
+                        }
+                      }}
+                    >
+                      Yes, disable {pending.username}
+                    </button>{' '}
+                    <button type="button" onClick={() => setPending(null)}>
+                      Keep
+                    </button>
+                  </p>
+                )}
+              </div>
+            )}
+          </div>
         </div>
       )}
     </section>

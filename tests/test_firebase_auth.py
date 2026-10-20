@@ -482,6 +482,9 @@ def test_email_exists_maps_to_firebase_email_exists(monkeypatch: pytest.MonkeyPa
         "TOKEN_EXPIRED",
         "EMAIL_NOT_FOUND",
         "INVALID_LOGIN_CREDENTIALS",
+        "EXPIRED_OOB_CODE",
+        "INVALID_OOB_CODE",
+        "WEAK_PASSWORD",
     ],
 )
 def test_invalid_codes_map_to_invalid_credentials(
@@ -490,6 +493,73 @@ def test_invalid_codes_map_to_invalid_credentials(
     _patch_urlopen(monkeypatch, _http_error(400, message))
     with pytest.raises(FirebaseInvalidCredentials):
         fb._post_identity_toolkit("accounts:lookup", API_KEY, {"idToken": TOKEN})
+
+
+async def test_send_password_reset_includes_continue_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    toolkit = FakeToolkit({"accounts:sendOobCode": {"email": "boris@tvaroska.com"}})
+    monkeypatch.setattr(fb, "_post_identity_toolkit", toolkit)
+    client = LiveFirebaseAuthClient()
+    await client.send_password_reset(
+        "Boris@Tvaroska.com",
+        api_key=API_KEY,
+        continue_url="https://bingo.tvaroska.sk",
+    )
+    assert toolkit.calls == [
+        (
+            "accounts:sendOobCode",
+            {
+                "requestType": "PASSWORD_RESET",
+                "email": "boris@tvaroska.com",
+                "continueUrl": "https://bingo.tvaroska.sk",
+            },
+        )
+    ]
+
+
+async def test_reset_password_consumes_oob_code_and_signs_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        fb, "_verify_token_sync", lambda t, p: _verified_identity(email="boris@tvaroska.com")
+    )
+    toolkit = FakeToolkit(
+        {
+            "accounts:resetPassword": {
+                "email": "Boris@Tvaroska.com",
+                "requestType": "PASSWORD_RESET",
+            },
+            "accounts:signInWithPassword": {
+                "idToken": TOKEN,
+                "localId": "fb-uid-001",
+                "email": "boris@tvaroska.com",
+            },
+            "accounts:lookup": {
+                "users": [
+                    {
+                        "localId": "fb-uid-001",
+                        "email": "boris@tvaroska.com",
+                        "emailVerified": True,
+                    }
+                ]
+            },
+        }
+    )
+    monkeypatch.setattr(fb, "_post_identity_toolkit", toolkit)
+    ident = await LiveFirebaseAuthClient().reset_password(
+        "oob-secret-12345",
+        "new-strong-password-123",
+        api_key=API_KEY,
+        project_id=PROJECT,
+    )
+    assert ident.email == "boris@tvaroska.com"
+    assert ident.email_verified is True
+    assert toolkit.calls[0] == (
+        "accounts:resetPassword",
+        {"oobCode": "oob-secret-12345", "newPassword": "new-strong-password-123"},
+    )
+    assert toolkit.calls[1][0] == "accounts:signInWithPassword"
 
 
 @pytest.mark.parametrize("message", ["OPERATION_NOT_ALLOWED", "ADMIN_ONLY_OPERATION", ""])

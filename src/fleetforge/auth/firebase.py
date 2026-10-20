@@ -57,6 +57,9 @@ _INVALID_CREDENTIAL_CODES = (
     "INVALID_ID_TOKEN",
     "USER_NOT_FOUND",
     "TOKEN_EXPIRED",
+    "EXPIRED_OOB_CODE",
+    "INVALID_OOB_CODE",
+    "WEAK_PASSWORD",
 )
 
 
@@ -124,8 +127,21 @@ class FirebaseAuthClient(Protocol):
         """
         ...
 
-    async def send_password_reset(self, email: str, *, api_key: str) -> None:
+    async def send_password_reset(
+        self, email: str, *, api_key: str, continue_url: str | None = None
+    ) -> None:
         """Trigger Firebase's `PASSWORD_RESET` email for an invited user."""
+        ...
+
+    async def reset_password(
+        self,
+        oob_code: str,
+        new_password: str,
+        *,
+        api_key: str,
+        project_id: str | None = None,
+    ) -> FirebaseIdentity:
+        """Consume a `PASSWORD_RESET` `oobCode`, set `new_password`, and sign in."""
         ...
 
 
@@ -312,13 +328,45 @@ class LiveFirebaseAuthClient:
             return False
         return True
 
-    async def send_password_reset(self, email: str, *, api_key: str) -> None:
+    async def send_password_reset(
+        self, email: str, *, api_key: str, continue_url: str | None = None
+    ) -> None:
+        payload: dict[str, Any] = {
+            "requestType": "PASSWORD_RESET",
+            "email": email.strip().lower(),
+        }
+        if continue_url:
+            payload["continueUrl"] = continue_url
         await asyncio.to_thread(
             _post_identity_toolkit,
             "accounts:sendOobCode",
             api_key,
+            payload,
+        )
+
+    async def reset_password(
+        self,
+        oob_code: str,
+        new_password: str,
+        *,
+        api_key: str,
+        project_id: str | None = None,
+    ) -> FirebaseIdentity:
+        data = await asyncio.to_thread(
+            _post_identity_toolkit,
+            "accounts:resetPassword",
+            api_key,
             {
-                "requestType": "PASSWORD_RESET",
-                "email": email.strip().lower(),
+                "oobCode": oob_code.strip(),
+                "newPassword": new_password,
             },
+        )
+        req_type = data.get("requestType")
+        if req_type is not None and req_type != "PASSWORD_RESET":
+            raise FirebaseInvalidCredentials("invalid password reset code")
+        email = str(data.get("email") or "").strip().lower()
+        if not email:
+            raise FirebaseInvalidCredentials("password reset response did not include an email")
+        return await self.sign_in_with_password(
+            email, new_password, api_key=api_key, project_id=project_id
         )

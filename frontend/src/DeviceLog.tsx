@@ -142,7 +142,12 @@ export function DeviceLog({
   }
 
   return (
-    <section aria-labelledby="device-log-heading" data-testid="device-log" data-device-id={deviceId}>
+    <section
+      className="console-card"
+      aria-labelledby="device-log-heading"
+      data-testid="device-log"
+      data-device-id={deviceId}
+    >
       <h2 id="device-log-heading">Device log</h2>
       {body}
     </section>

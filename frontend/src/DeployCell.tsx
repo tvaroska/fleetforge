@@ -168,6 +168,8 @@ export type DeployCellProps = {
   now: number
   /** `describeVersions(ui, health)` for the result card's UI / API row; absent → no row. */
   versions?: VersionLine | null
+  /** Optional shortcut to switch straight to the Builds tab when no artifact exists yet. */
+  onGoToBuilds?: () => void
 }
 
 export function DeployCell({
@@ -178,6 +180,7 @@ export function DeployCell({
   onSessionExpired,
   now,
   versions = null,
+  onGoToBuilds,
 }: DeployCellProps) {
   const [chosen, setChosen] = useState<string | null>(null)
   const [phase, setPhase] = useState<'idle' | 'checking' | 'sending'>('idle')
@@ -322,6 +325,14 @@ export function DeployCell({
         // (S0-fe-4). The operator's next action is an upload for THIS target.
         <span className="muted">
           No {device.platform_type} image has been uploaded yet. Upload one under “Upload a build”.
+          {onGoToBuilds && (
+            <>
+              {' '}
+              <button type="button" onClick={onGoToBuilds}>
+                Upload build &gt;
+              </button>
+            </>
+          )}
         </span>
       ) : (
         <span className="muted">Loading…</span>

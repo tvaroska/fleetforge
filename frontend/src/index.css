@@ -34,6 +34,8 @@
   --ff-mono: ui-monospace, 'DejaVu Sans Mono', Menlo, Consolas, monospace;
 
   font-family: var(--ff-mono);
+  font-variant-ligatures: none;
+  font-feature-settings: 'liga' 0, 'clig' 0;
   background: var(--ff-bg);
   color: var(--ff-fg);
 }
@@ -44,10 +46,10 @@ body {
 }
 
 main {
-  /* Six columns of fleet table do not fit in 40rem. */
-  max-width: 56rem;
+  /* Eight columns of fleet table and 2-column access cards need room to breathe. */
+  max-width: 68rem;
   margin: 0 auto;
-  padding: 4rem 1.5rem;
+  padding: 2rem 1.5rem 4rem;
 }
 
 /* Press Start 2P has no descender room and a large em box, so it needs a smaller
@@ -217,6 +219,7 @@ input[type='checkbox'] {
 }
 
 input[type='text'],
+input[type='email'],
 input[type='password'],
 input[type='number'],
 input[type='url'],
@@ -231,11 +234,21 @@ select {
 }
 
 /* The login form is a bare `label` + `input` + `button` with no wrapper and no `{' '}`
-   between them, and JSX drops whitespace-only lines — so without these two rules the
-   three controls render flush against each other. `.choice` is excluded: those labels
+   between them, and JSX drops whitespace-only lines — so without these rules the
+   controls render flush against each other. `.choice` is excluded: those labels
    are the hit target for a radio and are already `display: block`. */
 label:not(.choice) {
   margin-right: 0.6rem;
+}
+
+label:not(.choice):has(> input, > select) {
+  display: inline-block;
+  margin-right: 0.75rem;
+  margin-bottom: 0.4rem;
+}
+
+input + label {
+  margin-left: 0.6rem;
 }
 
 input + button {
@@ -453,3 +466,291 @@ textarea.log {
   text-decoration: underline dotted; text-underline-offset: 3px; }
 .pick-board:hover:not(:disabled) { background: none; }
 .pick-board:active:not(:disabled) { transform: none; }
+
+/* ── 8-bit Console Chrome & 4-Tab Layout ──────────────────────────────────────
+   Preserves the one-hue ramp (`--ff-bg` .. `--ff-hi`), two-font rule (`--ff-display`
+   for short chrome, `--ff-mono` for data), 2px hard borders, and zero radius. */
+
+.console-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding-bottom: 0.75rem;
+  margin-bottom: 1rem;
+  border-bottom: 2px solid var(--ff-line);
+}
+
+.console-topbar h1 {
+  margin: 0;
+}
+
+.topbar-user {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin: 0;
+}
+
+.project-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  background: var(--ff-panel);
+  border: 2px solid var(--ff-line);
+  padding: 0.6rem 0.9rem;
+  margin-bottom: 1rem;
+}
+
+.project-bar-left {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+}
+
+.project-picker-label {
+  display: inline-flex !important;
+  align-items: center;
+  gap: 0.5rem;
+  margin: 0 !important;
+}
+
+.project-tag {
+  font-family: var(--ff-display);
+  font-size: 0.55rem;
+  color: var(--ff-dim);
+  letter-spacing: 0.04em;
+}
+
+.console-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0 0 1.5rem;
+  padding-bottom: 0.75rem;
+  border-bottom: 2px solid var(--ff-line-hi);
+}
+
+.tab-btn {
+  font-family: var(--ff-display);
+  font-size: 0.6rem;
+  line-height: 1.6;
+  padding: 0.6rem 1rem;
+  color: var(--ff-dim);
+  background: var(--ff-bg);
+  border: 2px solid var(--ff-line);
+  box-shadow: 3px 3px 0 var(--ff-line);
+}
+
+.tab-btn:hover:not(:disabled) {
+  color: var(--ff-hi);
+  border-color: var(--ff-line-hi);
+  background: var(--ff-panel);
+}
+
+.tab-btn.active {
+  color: var(--ff-bg);
+  background: var(--ff-hi);
+  border-color: var(--ff-hi);
+  box-shadow: 3px 3px 0 var(--ff-line-hi);
+}
+
+.tab-btn.active:hover:not(:disabled) {
+  color: var(--ff-bg);
+  background: var(--ff-hi);
+}
+
+.tab-panel:not(.active) {
+  display: none;
+}
+
+.console-card {
+  background: var(--ff-panel);
+  border: 2px solid var(--ff-line);
+  padding: 1.25rem 1.5rem;
+  margin: 0 0 1.5rem;
+  box-shadow: 4px 4px 0 #1c1c1c;
+}
+
+.console-card > h2:first-child,
+.section-header h2 {
+  margin-top: 0;
+}
+
+.section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-bottom: 0.75rem;
+  padding-bottom: 0.6rem;
+  border-bottom: 2px solid var(--ff-line);
+}
+
+.section-header h2 {
+  margin: 0;
+}
+
+.section-title-group {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.stream-pill {
+  margin: 0;
+  border: 1px solid var(--ff-line);
+  padding: 0.15rem 0.5rem;
+  background: var(--ff-bg);
+  font-size: 0.8rem;
+}
+
+.section-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+}
+
+.empty-onboarding {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr));
+  gap: 1rem;
+  margin-top: 1rem;
+}
+
+.onboarding-card {
+  background: var(--ff-bg);
+  border: 2px solid var(--ff-line);
+  padding: 1rem 1.25rem;
+  box-shadow: 3px 3px 0 var(--ff-line);
+}
+
+.onboarding-card h3 {
+  margin-top: 0;
+}
+
+.cuj-flow-strip {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  background: var(--ff-panel);
+  border: 2px solid var(--ff-line-hi);
+  padding: 0.65rem 1rem;
+  margin-bottom: 1.25rem;
+  font-size: 0.85rem;
+}
+
+.stepper-rail {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: 0.5rem;
+  list-style: none;
+  padding: 0;
+  margin: 1rem 0 1.25rem;
+}
+
+.stepper-rail li {
+  font-family: var(--ff-display);
+  font-size: 0.52rem;
+  line-height: 1.6;
+  padding: 0.5rem 0.65rem;
+  background: var(--ff-bg);
+  border: 2px solid var(--ff-line);
+  color: var(--ff-dim);
+}
+
+.stepper-rail li.active {
+  color: var(--ff-hi);
+  border-color: var(--ff-hi);
+  box-shadow: 2px 2px 0 var(--ff-line-hi);
+}
+
+.stepper-rail li.done {
+  color: var(--ff-fg);
+  border-color: var(--ff-line-hi);
+}
+
+.access-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(26rem, 1fr));
+  gap: 1.5rem;
+  align-items: start;
+}
+
+@media (min-width: 62rem) {
+  .access-grid {
+    grid-template-columns: 10fr 13fr;
+  }
+}
+
+.access-grid .console-card {
+  padding: 1.15rem 1.25rem;
+  min-width: 0;
+  overflow-x: auto;
+}
+
+.access-grid table {
+  font-size: 0.85rem;
+}
+
+.access-grid th,
+.access-grid td {
+  padding-right: 0.45rem;
+}
+
+.access-grid td button {
+  padding: 0.35rem 0.5rem;
+  font-size: 0.48rem;
+  margin-bottom: 0.25rem;
+}
+
+.project-drawer {
+  margin-bottom: 1.5rem;
+}
+
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(12rem, 1fr));
+  gap: 0.75rem;
+  margin: 0.5rem 0;
+}
+
+.form-grid-3 {
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+}
+
+.compact-form label:not(.choice) {
+  display: flex !important;
+  flex-direction: column;
+  gap: 0.3rem;
+  margin: 0 !important;
+  font-size: 0.85rem;
+  color: var(--ff-dim);
+}
+
+.compact-form label:not(.choice) input,
+.compact-form label:not(.choice) select {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.upload-success-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  border: 2px solid var(--ff-line-hi);
+  background: var(--ff-bg);
+  padding: 0.5rem 0.9rem;
+  margin-top: 0.75rem;
+}
+
+.upload-success-row p {
+  margin: 0;
+}

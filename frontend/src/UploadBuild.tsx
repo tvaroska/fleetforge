@@ -72,6 +72,7 @@ export function UploadBuild({
   onUploaded,
   onSessionExpired,
   project,
+  onGoToFleet,
 }: {
   devices: DeviceSummary[] | null
   // The page's one profile list (`null` or absent until it loads): the options are its
@@ -80,6 +81,7 @@ export function UploadBuild({
   onUploaded: () => void
   onSessionExpired: () => void
   project?: string
+  onGoToFleet?: () => void
 }) {
   const [file, setFile] = useState<File | null>(null)
   const [info, setInfo] = useState<AppImageInfo | null>(null)
@@ -177,14 +179,14 @@ export function UploadBuild({
   const noBoardOfThisChip = result !== null && !fleet.some((d) => d.platform_type === result.target)
 
   return (
-    <section aria-labelledby="upload-heading">
+    <section className="console-card" aria-labelledby="upload-heading">
       <h2 id="upload-heading">Upload a build</h2>
       <p className="muted">
         The app <code>.bin</code> your IDE built — not a merged/full-flash image. It is listed
         under the chip target and version you give it, and offered in the Deploy column of every
         board with that chip.
       </p>
-      <form onSubmit={(event) => void submit(event)}>
+      <form className="compact-form" onSubmit={(event) => void submit(event)}>
         <p>
           <label>
             Build (.bin){' '}
@@ -212,7 +214,7 @@ export function UploadBuild({
                 : '. Not recognised as an ESP-IDF app image; the version and target were not read from it.')}
           </p>
         )}
-        <p>
+        <div className="form-grid form-grid-3">
           <label>
             Chip target{' '}
             <select
@@ -232,8 +234,6 @@ export function UploadBuild({
               ))}
             </select>
           </label>
-        </p>
-        <p>
           <label>
             Version{' '}
             <input
@@ -244,12 +244,7 @@ export function UploadBuild({
               size={24}
               disabled={busy}
             />
-          </label>{' '}
-          <span className="muted">
-            The label the Deploy column shows. A label cannot be re-pointed at other bytes later.
-          </span>
-        </p>
-        <p>
+          </label>
           <label>
             Partition layout{' '}
             <select
@@ -265,6 +260,10 @@ export function UploadBuild({
               ))}
             </select>
           </label>
+        </div>
+        <p className="muted">
+          The version label is what the Deploy column shows. A label cannot be re-pointed at other
+          bytes later.
         </p>
         {mismatch && (
           <p className="bad" role="alert" data-testid="upload-target-mismatch">
@@ -282,14 +281,21 @@ export function UploadBuild({
         </p>
       </form>
       {result !== null && (
-        <p className="ok" data-testid="upload-result">
-          {result.created
-            ? `Uploaded ${result.target} ${result.version} (${result.size_bytes} bytes). It is in the Deploy list of every ${result.target} board.` +
-              (noBoardOfThisChip
-                ? ` No ${result.target} board is in the fleet yet, so no Deploy list shows it until one enrolls.`
-                : '')
-            : `Already uploaded: these exact bytes are ${result.target} ${result.version}. Nothing changed.`}
-        </p>
+        <div className="upload-success-row">
+          <p className="ok" data-testid="upload-result">
+            {result.created
+              ? `Uploaded ${result.target} ${result.version} (${result.size_bytes} bytes). It is in the Deploy list of every ${result.target} board.` +
+                (noBoardOfThisChip
+                  ? ` No ${result.target} board is in the fleet yet, so no Deploy list shows it until one enrolls.`
+                  : '')
+              : `Already uploaded: these exact bytes are ${result.target} ${result.version}. Nothing changed.`}
+          </p>
+          {onGoToFleet && (
+            <button type="button" onClick={onGoToFleet}>
+              Go to Fleet to deploy &gt;
+            </button>
+          )}
+        </div>
       )}
       {error !== null && (
         <p className="bad" role="alert" data-testid="upload-error">

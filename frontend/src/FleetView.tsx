@@ -184,6 +184,7 @@ function DeviceRow({
   selected,
   onSelect,
   versions = null,
+  onGoToBuilds,
 }: {
   device: DeviceSummary
   now: number
@@ -194,6 +195,7 @@ function DeviceRow({
   selected: boolean
   onSelect?: (deviceId: string) => void
   versions?: VersionLine | null
+  onGoToBuilds?: () => void
 }) {
   // Why a sleepy board went offline is its wake interval, so put it where the pointer is.
   const power =
@@ -255,6 +257,7 @@ function DeviceRow({
         onSessionExpired={onSessionExpired}
         now={now}
         versions={versions}
+        onGoToBuilds={onGoToBuilds}
       />
     </tr>
   )
@@ -315,6 +318,8 @@ export function FleetTable({
   selectedDeviceId = null,
   onSelect,
   versions = null,
+  onGoToOnboard,
+  onGoToBuilds,
 }: {
   fleet: Fleet
   artifacts: Artifacts
@@ -323,24 +328,43 @@ export function FleetTable({
   onSelect?: (deviceId: string) => void
   // The update result card's UI / API row (R2b-fe-10); the standalone `FleetView` has none.
   versions?: VersionLine | null
+  onGoToOnboard?: () => void
+  onGoToBuilds?: () => void
 }) {
   const { devices, arrivals, error, stream, now, refresh } = fleet
 
   return (
-    <section aria-labelledby="fleet-heading">
-      <h2 id="fleet-heading">Fleet</h2>
-
-      <p className="muted" data-testid="stream-status">
-        {stream === 'live' ? (
-          <span className="ok">Live</span>
-        ) : stream === 'connecting' ? (
-          'Connecting…'
-        ) : stream === 'reconnecting' ? (
-          'Reconnecting…'
-        ) : (
-          'Not receiving updates'
+    <section className="console-card" aria-labelledby="fleet-heading">
+      <div className="section-header">
+        <div className="section-title-group">
+          <h2 id="fleet-heading">Fleet</h2>
+          <p className="muted stream-pill" data-testid="stream-status">
+            {stream === 'live' ? (
+              <span className="ok">Live</span>
+            ) : stream === 'connecting' ? (
+              'Connecting…'
+            ) : stream === 'reconnecting' ? (
+              'Reconnecting…'
+            ) : (
+              'Not receiving updates'
+            )}
+          </p>
+        </div>
+        {(onGoToOnboard || onGoToBuilds) && (
+          <div className="section-actions">
+            {onGoToOnboard && (
+              <button type="button" onClick={onGoToOnboard}>
+                + Flash / Add board
+              </button>
+            )}
+            {onGoToBuilds && (
+              <button type="button" onClick={onGoToBuilds}>
+                + Upload build
+              </button>
+            )}
+          </div>
         )}
-      </p>
+      </div>
 
       {error !== null && (
         <p className="bad" role="alert">
@@ -376,11 +400,41 @@ export function FleetTable({
       {devices === null ? (
         <p aria-busy="true">Loading…</p>
       ) : devices.length === 0 ? (
-        <p className="muted">
-          {arrivals.length > 0
-            ? 'No boards have finished enrolling yet.'
-            : 'No boards yet. Generate an enrollment token below and flash a board.'}
-        </p>
+        <div className="empty-fleet">
+          <p className="muted">
+            {arrivals.length > 0
+              ? 'No boards have finished enrolling yet.'
+              : 'No boards yet. Generate an enrollment token below and flash a board.'}
+          </p>
+          {(onGoToOnboard || onGoToBuilds) && arrivals.length === 0 && (
+            <div className="empty-onboarding" data-testid="empty-onboarding">
+              <div className="onboarding-card">
+                <h3>1 · Add your first board</h3>
+                <p className="muted">
+                  Plug an ESP32 into USB to detect its chip, bake in Wi-Fi credentials, and write
+                  the Fleetforge agent directly from Chrome/Edge — or mint a CLI token.
+                </p>
+                {onGoToOnboard && (
+                  <button type="button" onClick={onGoToOnboard}>
+                    Flash or enroll a board &gt;
+                  </button>
+                )}
+              </div>
+              <div className="onboarding-card">
+                <h3>2 · Upload firmware for OTA</h3>
+                <p className="muted">
+                  Upload your compiled ESP-IDF app <code>.bin</code> under Builds &amp; Profiles so
+                  every matching board offers one-click OTA updates in the Deploy column.
+                </p>
+                {onGoToBuilds && (
+                  <button type="button" onClick={onGoToBuilds}>
+                    Upload firmware .bin &gt;
+                  </button>
+                )}
+              </div>
+            </div>
+          )}
+        </div>
       ) : (
         <table>
           <thead>
@@ -410,6 +464,7 @@ export function FleetTable({
                 selected={device.device_id === selectedDeviceId}
                 onSelect={onSelect}
                 versions={versions}
+                onGoToBuilds={onGoToBuilds}
               />
             ))}
           </tbody>

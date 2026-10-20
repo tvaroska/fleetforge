@@ -84,7 +84,9 @@ async def _send_setup_email(
         return "not_configured"
     try:
         await firebase.create_account(email, api_key=api_key)
-        await firebase.send_password_reset(email, api_key=api_key)
+        await firebase.send_password_reset(
+            email, api_key=api_key, continue_url=settings.public_base_url
+        )
     except FirebaseAuthError:
         logger.warning("firebase setup email could not be sent for %s", email)
         return "failed"

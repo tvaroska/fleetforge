@@ -118,7 +118,7 @@ function validationMessage(input: FlashConfigInput): string | null {
 
 function Unavailable({ reason }: { reason: 'no-web-serial' | 'insecure' }) {
   return (
-    <section aria-labelledby="flash-heading">
+    <section className="console-card" aria-labelledby="flash-heading">
       <h2 id="flash-heading">Flash a board</h2>
       <p className="muted">
         {reason === 'no-web-serial' ? (
@@ -147,6 +147,7 @@ export function FlashBoard({
   fleet,
   versions,
   project,
+  onGoToFleet,
 }: {
   onSessionExpired: () => void
   // R2b-fe-1: tells the status strip which board this is, once detected and again once
@@ -163,6 +164,7 @@ export function FlashBoard({
   createFlasher?: FlasherFactory
   createConsole?: ConsoleFactory
   project?: string
+  onGoToFleet?: () => void
 }) {
   const [form, setForm] = useState<FormState>(INITIAL_FORM)
   const [board, setBoard] = useState<string>(OTHER_BOARD_ID)
@@ -418,14 +420,37 @@ export function FlashBoard({
     ],
   }
 
+  const step1Done = chip !== null
+  const step2Done = chip !== null && configError === null
+  const step3Done = state.phase === 'done'
+
   return (
-    <section aria-labelledby="flash-heading">
+    <section className="console-card" aria-labelledby="flash-heading">
       <h2 id="flash-heading">Flash a board</h2>
       <p className="muted">
         Connect an ESP32 over USB, confirm what it is, and write the agent plus this board&apos;s
         own configuration. A single-use enrollment token is minted for it automatically — you do not
         need to generate one below.
       </p>
+
+      <ol className="stepper-rail" data-testid="flash-stepper" aria-label="Flash steps">
+        <li className={step1Done ? 'done' : 'active'}>
+          <span aria-hidden="true">{step1Done ? '✓ ' : '▶ '}</span>1. DETECT USB
+        </li>
+        <li className={step2Done ? 'done' : step1Done ? 'active' : ''}>
+          <span aria-hidden="true">{step2Done ? '✓ ' : step1Done ? '▶ ' : '· '}</span>2. CONFIGURE
+          WI-FI
+        </li>
+        <li className={step3Done ? 'done' : state.phase === 'flashing' ? 'active' : ''}>
+          <span aria-hidden="true">
+            {step3Done ? '✓ ' : state.phase === 'flashing' ? '▶ ' : '· '}
+          </span>
+          3. WRITE FLASH
+        </li>
+        <li className={step3Done ? 'active' : ''}>
+          <span aria-hidden="true">{step3Done ? '▶ ' : '· '}</span>4. VERIFY BOOT
+        </li>
+      </ol>
 
       {manifestError !== null && (
         <p className="bad" role="alert">
@@ -778,6 +803,14 @@ export function FlashBoard({
             <button type="button" onClick={state.reset}>
               Flash another board
             </button>
+            {onGoToFleet && (
+              <>
+                {' '}
+                <button type="button" onClick={onGoToFleet}>
+                  View board in Fleet &gt;
+                </button>
+              </>
+            )}
           </p>
         </section>
       )}

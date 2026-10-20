@@ -83,4 +83,37 @@ describe('SessionGate', () => {
     // Still a login form (there is nothing else to show), but the reason is stated.
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/unreachable/i))
   })
+
+  it('renders the password setup form when ?mode=resetPassword&oobCode= is present and signs in', async () => {
+    window.history.replaceState(null, '', '/?mode=resetPassword&oobCode=oob-test-12345')
+    const fetchMock = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValueOnce(jsonResponse({ detail: 'nope' }, 401)) // initial /me
+      .mockResolvedValueOnce(jsonResponse({ expires_at: '2099-01-01T00:00:00Z' })) // reset-password
+      .mockResolvedValue(jsonResponse({ ...ME, subject: 'boris' })) // /me after reset
+
+    try {
+      render(<SessionGate>{({ me }) => <p>signed in as {me.subject}</p>}</SessionGate>)
+
+      expect(await screen.findByTestId('password-reset-form')).toBeInTheDocument()
+      await userEvent.type(screen.getByLabelText(/^new password$/i), 'super-secret-88')
+      await userEvent.type(screen.getByLabelText(/^confirm password$/i), 'super-secret-88')
+      await userEvent.click(screen.getByRole('button', { name: /set password & sign in/i }))
+
+      expect(await screen.findByText(/signed in as boris/)).toBeInTheDocument()
+      expect(window.location.search).toBe('')
+
+      const resetCall = fetchMock.mock.calls.find(
+        ([url]) => String(url) === '/v1/auth/reset-password',
+      )
+      expect(resetCall).toBeDefined()
+      expect((resetCall?.[1] as RequestInit).method).toBe('POST')
+      expect(JSON.parse(String((resetCall?.[1] as RequestInit).body))).toEqual({
+        oob_code: 'oob-test-12345',
+        new_password: 'super-secret-88',
+      })
+    } finally {
+      window.history.replaceState(null, '', '/')
+    }
+  })
 })

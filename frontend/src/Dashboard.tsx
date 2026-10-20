@@ -16,22 +16,105 @@
 // `last_seen` changes (an `up/log` batch moves it): no new stream, no frame body read.
 
 import { useState } from 'react'
-import { type Me } from './api'
+import { type ArtifactSummary, type Me } from './api'
 import { buildInfo, type BuildInfo } from './buildInfo'
-import { useArtifacts } from './deploy'
+import { useArtifacts, type Artifacts } from './deploy'
 import { DeviceLog } from './DeviceLog'
 import { EnrollBoard } from './EnrollBoard'
 import { type FlasherFactory } from './flasher'
 import { FlashBoard } from './FlashBoard'
 import { FleetTable } from './FleetView'
 import { useFleet, type EventSourceFactory } from './fleet'
+import { formatWhen } from './format'
 import { type HealthState } from './health'
 import { PartitionProfiles } from './PartitionProfiles'
 import { ProjectAccess } from './ProjectAccess'
-import { useProfiles } from './profiles'
+import { pendingProfiles, shortSha, useProfiles } from './profiles'
 import { StatusStrip } from './StatusStrip'
 import { describeBoard, describeVersions } from './statusStrip'
 import { UploadBuild } from './UploadBuild'
+
+export type DashboardTab = 'fleet' | 'builds' | 'onboard' | 'access'
+
+function UploadedBuilds({
+  artifacts,
+  onGoToFleet,
+}: {
+  artifacts: Artifacts
+  onGoToFleet: () => void
+}) {
+  const rows: ArtifactSummary[] = []
+  for (const list of artifacts.byTarget.values()) {
+    rows.push(...list)
+  }
+
+  return (
+    <section
+      className="console-card"
+      aria-labelledby="uploaded-builds-heading"
+      data-testid="uploaded-builds"
+    >
+      <div className="section-header">
+        <h2 id="uploaded-builds-heading">Uploaded builds</h2>
+        {rows.length > 0 && (
+          <button type="button" onClick={onGoToFleet}>
+            Deploy in Fleet &gt;
+          </button>
+        )}
+      </div>
+      <p className="muted">
+        Firmware images stored for this project. Every compatible board offers these versions in
+        its Deploy column on the Fleet tab.
+      </p>
+      {!artifacts.loaded && artifacts.error === null ? (
+        <p aria-busy="true">Loading…</p>
+      ) : rows.length === 0 ? (
+        <p className="muted">
+          No firmware builds uploaded yet. Upload an ESP-IDF app <code>.bin</code> above to enable
+          OTA updates.
+        </p>
+      ) : (
+        <table>
+          <thead>
+            <tr>
+              <th scope="col">Target</th>
+              <th scope="col">Version</th>
+              <th scope="col">Layout</th>
+              <th scope="col">Size</th>
+              <th scope="col">SHA-256</th>
+              <th scope="col">Uploaded</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((a) => (
+              <tr
+                key={`${a.target}:${a.version}`}
+                data-testid="uploaded-build-row"
+                data-target={a.target}
+                data-version={a.version}
+              >
+                <td>
+                  <code>{a.target}</code>
+                </td>
+                <td>
+                  <strong>{a.version}</strong>
+                </td>
+                <td>
+                  <code>{a.partition_layout ?? 'ab-4m-v1'}</code>
+                </td>
+                <td>{a.size_bytes.toLocaleString('en-US')} bytes</td>
+                <td>
+                  <code title={a.sha256}>{shortSha(a.sha256)}</code>
+                </td>
+                <td>{formatWhen(a.created_at)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+    </section>
+  )
+}
 
 export function Dashboard({
   me,
@@ -55,6 +138,7 @@ export function Dashboard({
   const [activeProject, setActiveProject] = useState<string>(
     () => me.projects?.[0]?.slug ?? 'default',
   )
+  const [activeTab, setActiveTab] = useState<DashboardTab>('fleet')
   const projectParam = activeProject !== 'default' ? activeProject : undefined
   const fleet = useFleet({ onSessionExpired: expire, createEventSource, project: projectParam })
   const artifacts = useArtifacts({ onSessionExpired: expire, project: projectParam })
@@ -68,6 +152,56 @@ export function Dashboard({
   // One read for the flasher's result card and the table's update result cards (R2b-fe-10).
   const versions = describeVersions(ui, health)
 
+  const deviceCount = fleet.devices?.length ?? 0
+  let artifactCount = 0
+  for (const list of artifacts.byTarget.values()) {
+    artifactCount += list.length
+  }
+  const unnamedProfiles = pendingProfiles(profiles.profiles ?? []).length
+
+  const tabNav = (
+    <nav className="console-tabs" aria-label="Console sections" data-testid="console-tabs">
+      <button
+        type="button"
+        className={`tab-btn${activeTab === 'fleet' ? ' active' : ''}`}
+        aria-pressed={activeTab === 'fleet'}
+        data-testid="tab-fleet"
+        onClick={() => setActiveTab('fleet')}
+      >
+        1. FLEET ({deviceCount})
+      </button>
+      <button
+        type="button"
+        className={`tab-btn${activeTab === 'builds' ? ' active' : ''}`}
+        aria-pressed={activeTab === 'builds'}
+        data-testid="tab-builds"
+        onClick={() => setActiveTab('builds')}
+      >
+        2. BUILDS ({artifactCount}){unnamedProfiles > 0 ? ` · ! ${unnamedProfiles} MAP` : ''}
+      </button>
+      <button
+        type="button"
+        className={`tab-btn${activeTab === 'onboard' ? ' active' : ''}`}
+        aria-pressed={activeTab === 'onboard'}
+        data-testid="tab-onboard"
+        onClick={() => setActiveTab('onboard')}
+      >
+        3. ADD BOARD
+      </button>
+      {me.projects && (
+        <button
+          type="button"
+          className={`tab-btn${activeTab === 'access' ? ' active' : ''}`}
+          aria-pressed={activeTab === 'access'}
+          data-testid="tab-access"
+          onClick={() => setActiveTab('access')}
+        >
+          4. ACCESS
+        </button>
+      )}
+    </nav>
+  )
+
   return (
     <>
       <StatusStrip
@@ -76,16 +210,16 @@ export function Dashboard({
         board={board}
         project={me.projects ? activeProject : undefined}
       />
-      <header>
+      <header className="console-topbar">
         <h1>Fleetforge</h1>
-        <p className="muted">
-          {me.subject}{' '}
+        <p className="muted topbar-user">
+          <span>{me.subject}</span>{' '}
           <button type="button" onClick={() => void signOut()}>
             Sign out
           </button>
         </p>
       </header>
-      {me.projects && (
+      {me.projects ? (
         <ProjectAccess
           me={me}
           activeProject={activeProject}
@@ -94,51 +228,87 @@ export function Dashboard({
             setActiveProject(slug)
           }}
           onSessionExpired={expire}
+          open={activeTab === 'access'}
+          onToggleOpen={() => setActiveTab((curr) => (curr === 'access' ? 'fleet' : 'access'))}
+          tabs={tabNav}
         />
+      ) : (
+        tabNav
       )}
-      {/* The fleet first: R0's done-when is "watch it come online", and after the
+
+      {/* Panel 1: FLEET — R0's done-when is "watch it come online", and after the
           first board this is what the page is opened for. */}
-      <FleetTable
-        fleet={fleet}
-        artifacts={artifacts}
-        onSessionExpired={expire}
-        selectedDeviceId={effective}
-        onSelect={setSelected}
-        versions={versions}
-      />
-      <DeviceLog
-        deviceId={effective}
-        device={logDevice}
-        hasBoards={(fleet.devices?.length ?? 0) > 0}
-        onSessionExpired={expire}
-      />
-      {/* Naming a detected flash map comes before uploading a build for it. */}
-      <PartitionProfiles
-        profiles={profiles}
-        devices={fleet.devices}
-        now={fleet.now}
-        onSessionExpired={expire}
-      />
-      {/* Flow 2 step 1 sits next to the table whose Deploy column it feeds; a finished
-          upload re-reads the one artifact list, so the new version shows with no reload. */}
-      <UploadBuild
-        devices={fleet.devices}
-        profiles={profiles.profiles}
-        onUploaded={artifacts.reload}
-        onSessionExpired={expire}
-        project={projectParam}
-      />
-      {/* Flashing mints its own token, so it sits above the manual token screen:
-          the common path is "plug a board in", not "copy a string somewhere". */}
-      <FlashBoard
-        onSessionExpired={expire}
-        onBoardIdentified={setSelected}
-        fleet={fleet}
-        versions={versions}
-        createFlasher={createFlasher}
-        project={projectParam}
-      />
-      <EnrollBoard onSessionExpired={expire} project={projectParam} />
+      <div
+        className={`tab-panel${activeTab === 'fleet' ? ' active' : ''}`}
+        data-testid="panel-fleet"
+      >
+        <FleetTable
+          fleet={fleet}
+          artifacts={artifacts}
+          onSessionExpired={expire}
+          selectedDeviceId={effective}
+          onSelect={setSelected}
+          versions={versions}
+          onGoToOnboard={() => setActiveTab('onboard')}
+          onGoToBuilds={() => setActiveTab('builds')}
+        />
+        <DeviceLog
+          deviceId={effective}
+          device={logDevice}
+          hasBoards={(fleet.devices?.length ?? 0) > 0}
+          onSessionExpired={expire}
+        />
+      </div>
+
+      {/* Panel 2: BUILDS — Flow 2 step 1 ("Upload a build"), the uploaded builds catalog,
+          and partition profiles ("Naming a detected flash map"). */}
+      <div
+        className={`tab-panel${activeTab === 'builds' ? ' active' : ''}`}
+        data-testid="panel-builds"
+      >
+        <div className="cuj-flow-strip" data-testid="ota-workflow-guide">
+          <span>
+            <strong>OTA UPDATE FLOW:</strong>
+          </span>
+          <span>1. Upload ESP-IDF app .bin</span>
+          <span aria-hidden="true">→</span>
+          <span>2. Match board partition map</span>
+          <span aria-hidden="true">→</span>
+          <span>3. Select version &amp; Deploy in Fleet</span>
+        </div>
+        <UploadBuild
+          devices={fleet.devices}
+          profiles={profiles.profiles}
+          onUploaded={artifacts.reload}
+          onSessionExpired={expire}
+          project={projectParam}
+          onGoToFleet={() => setActiveTab('fleet')}
+        />
+        <UploadedBuilds artifacts={artifacts} onGoToFleet={() => setActiveTab('fleet')} />
+        <PartitionProfiles
+          profiles={profiles}
+          devices={fleet.devices}
+          now={fleet.now}
+          onSessionExpired={expire}
+        />
+      </div>
+
+      {/* Panel 3: ADD BOARD — Web Serial browser flasher above manual CLI token screen. */}
+      <div
+        className={`tab-panel${activeTab === 'onboard' ? ' active' : ''}`}
+        data-testid="panel-onboard"
+      >
+        <FlashBoard
+          onSessionExpired={expire}
+          onBoardIdentified={setSelected}
+          fleet={fleet}
+          versions={versions}
+          createFlasher={createFlasher}
+          project={projectParam}
+          onGoToFleet={() => setActiveTab('fleet')}
+        />
+        <EnrollBoard onSessionExpired={expire} project={projectParam} />
+      </div>
     </>
   )
 }

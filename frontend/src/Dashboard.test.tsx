@@ -374,4 +374,31 @@ describe('Dashboard', () => {
       expect(sources).toHaveBeenCalledTimes(1)
     })
   })
+
+  describe('4-tab console navigation & uploaded builds catalog', () => {
+    it('lists uploaded artifacts in the Uploaded builds catalog and switches tabs via CTAs', async () => {
+      mockApi([])
+      renderDashboard()
+
+      expect(screen.getByTestId('tab-fleet')).toHaveAttribute('aria-pressed', 'true')
+      expect(await screen.findByTestId('empty-onboarding')).toBeInTheDocument()
+
+      await userEvent.click(screen.getByRole('button', { name: /upload firmware \.bin >/i }))
+      expect(screen.getByTestId('tab-builds')).toHaveAttribute('aria-pressed', 'true')
+      expect(screen.getByTestId('panel-builds')).toHaveClass('active')
+
+      const catalog = screen.getByTestId('uploaded-builds')
+      const rows = await within(catalog).findAllByTestId('uploaded-build-row')
+      expect(rows).toHaveLength(1)
+      expect(rows[0]).toHaveTextContent('esp32c6')
+      expect(rows[0]).toHaveTextContent('1.5.0')
+
+      await userEvent.click(within(catalog).getByRole('button', { name: /deploy in fleet >/i }))
+      expect(screen.getByTestId('tab-fleet')).toHaveAttribute('aria-pressed', 'true')
+
+      await userEvent.click(screen.getByRole('button', { name: /flash or enroll a board >/i }))
+      expect(screen.getByTestId('tab-onboard')).toHaveAttribute('aria-pressed', 'true')
+      expect(screen.getByTestId('flash-stepper')).toBeInTheDocument()
+    })
+  })
 })

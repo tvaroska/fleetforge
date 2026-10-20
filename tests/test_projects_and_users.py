@@ -457,6 +457,7 @@ def test_openapi_schema_includes_projects_users_and_tokens() -> None:
 
     expected_paths = {
         "/v1/auth/firebase",
+        "/v1/auth/reset-password",
         "/v1/auth/me",
         "/v1/auth/tokens",
         "/v1/auth/tokens/{token_id}/revoke",
@@ -507,7 +508,9 @@ class FakeFirebaseAuthClient:
     def __init__(self) -> None:
         self.accounts: dict[str, tuple[str, FirebaseIdentity]] = {}
         self.tokens: dict[str, FirebaseIdentity] = {}
+        self.oob_codes: dict[str, str] = {}
         self.reset_emails_sent: list[str] = []
+        self.continue_urls: list[str | None] = []
         self.accounts_created: list[str] = []
         self.fail_create = False
         self.fail_reset = False
@@ -567,13 +570,39 @@ class FakeFirebaseAuthClient:
         self.accounts[key] = (uuid.uuid4().hex, placeholder)
         return True
 
-    async def send_password_reset(self, email: str, *, api_key: str) -> None:
+    async def send_password_reset(
+        self, email: str, *, api_key: str, continue_url: str | None = None
+    ) -> None:
         if self.fail_reset:
             raise FirebaseAuthError("sendOobCode failed")
-        if email.lower() not in self.accounts:
+        key = email.lower()
+        if key not in self.accounts:
             # Mirrors Firebase: a reset for an address with no account is EMAIL_NOT_FOUND.
             raise FirebaseInvalidCredentials("EMAIL_NOT_FOUND")
-        self.reset_emails_sent.append(email.lower())
+        self.reset_emails_sent.append(key)
+        self.continue_urls.append(continue_url)
+        self.oob_codes[f"oob-for-{key}"] = key
+
+    async def reset_password(
+        self,
+        oob_code: str,
+        new_password: str,
+        *,
+        api_key: str,
+        project_id: str | None = None,
+    ) -> FirebaseIdentity:
+        email = self.oob_codes.pop(oob_code, None)
+        if email is None or email not in self.accounts:
+            raise FirebaseInvalidCredentials("INVALID_OOB_CODE")
+        _, old_ident = self.accounts[email]
+        verified_ident = FirebaseIdentity(
+            uid=old_ident.uid,
+            email=old_ident.email,
+            email_verified=True,
+            display_name=old_ident.display_name,
+        )
+        self.accounts[email] = (new_password, verified_ident)
+        return verified_ident
 
 
 FB_SETTINGS = {
@@ -815,8 +844,9 @@ async def test_an_invite_to_a_new_address_creates_the_account_and_sends_the_emai
     clean_tables: None,
     fb_env: FbEnv,
 ) -> None:
-    """S0-sec-1: an invite to an address with no Firebase account still delivers."""
-    fake_fb, _ = fb_env
+    """S0-sec-1: an invite to an address with no Firebase account still delivers and can reset."""
+    fake_fb, reconfigure = fb_env
+    reconfigure(public_base_url="https://bingo.tvaroska.sk")
     admin_token = await login_admin(admin_app, TEST_PASSWORD)
     headers = {"Authorization": f"Bearer {admin_token}"}
 
@@ -828,8 +858,32 @@ async def test_an_invite_to_a_new_address_creates_the_account_and_sends_the_emai
         )
         assert r.status_code == 201, r.text
         assert r.json()["email_delivery"] == "sent"
-    assert fake_fb.accounts_created == ["erin@example.com"]
-    assert fake_fb.reset_emails_sent == ["erin@example.com"]
+        assert fake_fb.accounts_created == ["erin@example.com"]
+        assert fake_fb.reset_emails_sent == ["erin@example.com"]
+        assert fake_fb.continue_urls == ["https://bingo.tvaroska.sk"]
+
+        # Redeem the one-time oobCode directly on Fleetforge's native reset endpoint.
+        reset_res = await client.post(
+            "/v1/auth/reset-password",
+            json={
+                "oob_code": "oob-for-erin@example.com",
+                "new_password": "erin-new-password-88",
+            },
+        )
+        assert reset_res.status_code == 200, reset_res.text
+        erin_headers = {"Authorization": f"Bearer {reset_res.cookies['ff_session']}"}
+        me_erin = (await client.get("/v1/auth/me", headers=erin_headers)).json()
+        assert me_erin["subject"] == "erin"
+
+        # A spent or bogus oobCode is rejected with 401.
+        reuse_res = await client.post(
+            "/v1/auth/reset-password",
+            json={
+                "oob_code": "oob-for-erin@example.com",
+                "new_password": "erin-new-password-99",
+            },
+        )
+        assert reuse_res.status_code == 401, reuse_res.text
 
 
 async def test_an_invite_reports_when_the_email_cannot_be_sent(

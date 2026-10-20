@@ -116,7 +116,7 @@ export function EnrollBoard({
   }
 
   return (
-    <section aria-labelledby="enroll-heading">
+    <section className="console-card" aria-labelledby="enroll-heading">
       <h2 id="enroll-heading">Enroll a board</h2>
       <p className="muted">
         Generate a token, then flash it onto the board with its Wi-Fi credentials. The board

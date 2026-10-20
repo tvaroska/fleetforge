@@ -47,6 +47,7 @@ from fleetforge.api.schemas import (
     LoginRequest,
     LoginResponse,
     MeResponse,
+    PasswordResetRequest,
     UserProjectSummary,
 )
 from fleetforge.auth.cache import VerifiedSecretCache
@@ -491,6 +492,101 @@ async def login_firebase(
         **COOKIE_KWARGS,
     )
     logger.info("firebase login succeeded for %s (%s), token %s", subject, key, issued.token_id)
+    return LoginResponse(expires_at=expires_at)
+
+
+@router.post(
+    "/reset-password",
+    response_model=LoginResponse,
+    summary="Redeem a Firebase password-reset code, set a new password, and issue a session cookie",
+)
+async def reset_password(
+    request: Request,
+    response: Response,
+    body: PasswordResetRequest,
+    settings: SettingsDep,
+    sessionmaker: SessionMakerDep,
+    limiter: LimiterDep,
+    firebase: FirebaseAuthDep,
+) -> LoginResponse:
+    """Redeem an invited user's Firebase `oobCode`, set `new_password`, and mint `ff_session`."""
+    key = client_key(request)
+    if not limiter.allow(key):
+        retry_after = limiter.retry_after(key)
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="too many login attempts",
+            headers={"Retry-After": str(retry_after)},
+        )
+
+    if not settings.firebase_web_api_key:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Firebase login is not configured",
+        )
+
+    try:
+        fb_identity = await firebase.reset_password(
+            body.oob_code,
+            body.new_password,
+            api_key=settings.firebase_web_api_key,
+            project_id=settings.firebase_project_id,
+        )
+    except FirebaseInvalidCredentials:
+        limiter.record_failure(key)
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="invalid or expired password reset link",
+            headers={"WWW-Authenticate": "Bearer"},
+        ) from None
+    except FirebaseAuthError:
+        logger.exception("firebase password reset failure")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Firebase authentication service is unavailable",
+        ) from None
+
+    async with sessionmaker() as session:
+        resolved = await _resolve_invited_firebase_user(
+            session,
+            fb_identity,
+            settings.firebase_superadmin_email_set(),
+            key,
+            limiter,
+        )
+        user_id = resolved.id
+        subject = resolved.username
+        await session.commit()
+
+    issued = await aissue_token(ADMIN_TOKEN_PREFIX)
+    expires_at = now_utc() + dt.timedelta(hours=settings.session_ttl_hours)
+
+    async with sessionmaker() as session:
+        session.add(
+            AdminToken(
+                id=issued.token_id,
+                name=f"firebase session ({key})",
+                secret_hash=issued.secret_hash,
+                subject=subject,
+                scopes=["admin"],
+                user_id=user_id,
+                expires_at=expires_at,
+            )
+        )
+        await session.commit()
+
+    response.set_cookie(
+        COOKIE_NAME,
+        issued.token,
+        max_age=settings.session_ttl_hours * 3600,
+        **COOKIE_KWARGS,
+    )
+    logger.info(
+        "firebase password reset & login succeeded for %s (%s), token %s",
+        subject,
+        key,
+        issued.token_id,
+    )
     return LoginResponse(expires_at=expires_at)
 
 

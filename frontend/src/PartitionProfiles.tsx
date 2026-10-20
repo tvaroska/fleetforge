@@ -209,7 +209,7 @@ export function PartitionProfiles({
   }
 
   return (
-    <section aria-labelledby="profiles-heading" data-testid="profiles">
+    <section className="console-card" aria-labelledby="profiles-heading" data-testid="profiles">
       <h2 id="profiles-heading">Partition profiles</h2>
       <p className="muted">
         The flash maps this server deploys to. A board on a map it does not know is listed under

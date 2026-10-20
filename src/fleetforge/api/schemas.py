@@ -56,6 +56,15 @@ class FirebaseLoginRequest(BaseModel):
     id_token: str = Field(min_length=16, max_length=8192)
 
 
+class PasswordResetRequest(BaseModel):
+    """Redeem a Firebase `PASSWORD_RESET` `oobCode`, set a new password, and sign in."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    oob_code: str = Field(min_length=8, max_length=2048)
+    new_password: str = Field(min_length=8, max_length=1024)
+
+
 class LoginResponse(BaseModel):
     """What login returns — deliberately **not** the token.
 
