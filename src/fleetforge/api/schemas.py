@@ -623,7 +623,7 @@ class DeviceSummary(BaseModel):
     # The latest value of each metric (`up/telemetry`), newest 32 by update, sorted by name.
     metrics: list["MetricValue"] = Field(default_factory=list)
     # R5-be-2: the newest verb the server published to this board and its first answer,
-    # or `None` for a board never commanded. Defaulted and placed directly before `deploy`.
+    # or `None` for a board never commanded. Defaulted and placed before `deploy`.
     last_command: "CommandSummary | None" = None
     # CI-CD-be-1 / CUJ-2: dev target flag (`auto_deploy_target='dev'`), sleepy-board
     # `stay_awake` flag (`dn/cfg`), and last announced `secrets_rev`.

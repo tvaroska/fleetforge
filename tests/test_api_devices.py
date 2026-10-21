@@ -1448,6 +1448,9 @@ async def test_the_health_fields_ride_on_the_list_before_deploy(
         "health",
         "metrics",
         "last_command",
+        "is_dev",
+        "stay_awake",
+        "secrets_rev",
         "deploy",
     ], "frontend/src/api.ts mirrors this order; deploy stays last"
 

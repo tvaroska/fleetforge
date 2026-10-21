@@ -522,4 +522,8 @@ class TestTheCommandRead:
             None,
         )
         assert by_id[OTHER_DEVICE_ID]["last_command"] is None
-        assert list(by_id[DEVICE_ID])[-2:] == ["last_command", "deploy"]
+        keys = list(by_id[DEVICE_ID])
+        # Fields added after R5-be-2 (is_dev, stay_awake, secrets_rev) sit between
+        # last_command and deploy; the invariant api.ts relies on is deploy-last.
+        assert keys[-1] == "deploy"
+        assert keys.index("last_command") < keys.index("deploy")
