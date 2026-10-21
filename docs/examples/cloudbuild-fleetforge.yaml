@@ -1,0 +1,48 @@
+# Example Google Cloud Build Pipeline: Build & Deploy ESP-IDF Firmware to Fleetforge
+#
+# Useful when building from environments without local `idf.py` or Docker (e.g. Cloudtop)
+# or as a repository-triggered Cloud Build pipeline.
+#
+# Run manually:
+#   gcloud builds submit . --config=cloudbuild.yaml \
+#     --substitutions=_VERSION=1.1.0,_TARGET=esp32s3,_FLEETFORGE_URL=https://bingo.tvaroska.sk
+
+steps:
+  - name: "espressif/idf:v5.5.5@sha256:a9231d0697ab8f7517cc072e93b7c83e04907bfbfba80b6440d7dbbf90665cf2"
+    entrypoint: "bash"
+    args:
+      - "-c"
+      - |
+        set -euo pipefail
+        . $$IDF_PATH/export.sh
+        idf.py set-target "${_TARGET}"
+        idf.py build
+
+  - name: "curlimages/curl:8.10.1"
+    entrypoint: "sh"
+    secretEnv: ["FLEETFORGE_TOKEN"]
+    args:
+      - "-c"
+      - |
+        set -eu
+        if [ -z "$${FLEETFORGE_TOKEN:-}" ]; then
+          echo "Skipping direct push (no FLEETFORGE_TOKEN secret configured); binary exported to GCS artifacts."
+          exit 0
+        fi
+        curl --fail-with-body -X POST \
+          "${_FLEETFORGE_URL}/v1/artifact?project=${_PROJECT}&target=${_TARGET}&version=${_VERSION}&partition_layout=${_LAYOUT}&branch=${BRANCH_NAME}&commit_sha=${COMMIT_SHA}&test_passed=true" \
+          -H "Authorization: Bearer $${FLEETFORGE_TOKEN}" \
+          -H "Content-Type: application/octet-stream" \
+          --data-binary "@build/${_BIN_NAME}"
+
+substitutions:
+  _PROJECT: "default"
+  _TARGET: "esp32s3"
+  _LAYOUT: "ab-4m-v1"
+  _VERSION: "1.1.0"
+  _BIN_NAME: "eink.bin"
+  _FLEETFORGE_URL: "https://bingo.tvaroska.sk"
+
+options:
+  machineType: "E2_HIGHCPU_8"
+  logging: CLOUD_LOGGING_ONLY

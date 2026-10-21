@@ -528,7 +528,10 @@ class TestCuj2FirmwareAndTemplates:
 
         # Pillar 3: OTel-compatible up/log + RTC_NOINIT_ATTR crash ring + sleep drain gate
         assert "RTC_NOINIT_ATTR" in ff_log_c
+        assert "[prev-boot] %s" in ff_log_c
+        assert "batch[FF_LOG_CAPACITY]" not in ff_log_c
         assert "ff_log_drained()" in ff_sleep_c
+        assert "-Wframe-larger-than=1024" in (root / "CMakeLists.txt").read_text(encoding="utf-8")
 
         # Pillar 4: NVS ff_net overlay + Improv Wi-Fi BLE GATT service
         assert "00467768-6228-2272-4663-277478268000" in ff_wifi_c

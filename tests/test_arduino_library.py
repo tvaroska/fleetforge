@@ -454,7 +454,9 @@ class TestArduinoGuardsAreConfined:
     def test_the_idf_lines_are_still_there_verbatim(self) -> None:
         source = _code(FF_IDENTITY_C)
         assert "esp_app_get_description()->version" in source
-        assert 'cJSON_AddStringToObject(root, "agent_version", app->version);' in source
+        assert (
+            'cJSON_AddStringToObject(root, "agent_version", ff_lib_marker.lib_version);' in source
+        )
 
     def test_the_wrapper_body_is_guarded(self) -> None:
         code = _wrapper().strip()

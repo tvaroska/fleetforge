@@ -69,7 +69,9 @@ Pulled forward for the e-ink workflow (`CUJ-2`) across migration `0011_ci_cd_and
 - **CLI & GitHub Actions template**:
   - `python -m fleetforge.cli push <bin> --target <chip> --version <ver> [--project <slug>] [--repo ...] [--branch ...] [--commit ...] [--tag ...] [--build-url ...] [--test-passed]` uploads a built binary with git provenance (auto-detecting `GITHUB_*` env vars when present).
   - `python -m fleetforge.cli track --project <slug> --mode <off|branch|tag|commit> [--ref <ref>] [--target <off|dev|all>]` updates project tracking from the terminal.
-  - Ready-to-copy workflow template: `docs/examples/github-actions-fleetforge.yml`.
+  - Ready-to-copy workflow templates:
+    - GitHub Actions: `docs/examples/github-actions-fleetforge.yml`
+    - Google Cloud Build (dockerless / Cloudtop friendly): `docs/examples/cloudbuild-fleetforge.yaml`
 - **Dashboard (`ContinuousDeploymentCard` + `UploadedBuilds` + `FleetView`)**:
   - The `2. BUILDS` tab renders `ContinuousDeploymentCard` (`repo_url`, `track_mode`, `track_ref`, `auto_deploy_target`, `ci_webhook_url`, and `Deploy tracked ref now`) and provenance badges (`commit@branch`, `#tag`, `build` link, `CI PASS`/`CI FAIL`) in `UploadedBuilds`.
   - The `1. FLEET` tab exposes `DEV` (`is_dev`) and `AWAKE` (`stay_awake`) toggles on each device row.

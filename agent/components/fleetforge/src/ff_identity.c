@@ -517,7 +517,8 @@ static cJSON *announce_object(const ff_cfg_t *cfg)
     cJSON_AddStringToObject(root, "agent_version",
                             s_agent_version[0] != '\0' ? s_agent_version : app->version);
 #else
-    cJSON_AddStringToObject(root, "agent_version", app->version);
+    (void)app;
+    cJSON_AddStringToObject(root, "agent_version", ff_lib_marker.lib_version);
 #endif
     cJSON_AddStringToObject(root, "link_type", ff_cfg_link_name(cfg->link));
     /* spec/device-protocol.md -> up/announce: which network this broker session runs over,

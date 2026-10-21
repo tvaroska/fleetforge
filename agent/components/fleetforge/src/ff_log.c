@@ -149,7 +149,9 @@ static void recover_rtc_if_needed_locked(int64_t now_us)
         for (uint32_t i = 0; i < count; i++) {
             const ff_log_rtc_slot_t *saved = &s_rtc.slots[(start + i) % FF_LOG_RTC_LINES];
             if (saved->text[0] != '\0') {
-                push_ring_locked(normalize_level(saved->level), saved->text, now_us);
+                char recovered[FF_LOG_TEXT_MAX + 1];
+                snprintf(recovered, sizeof(recovered), "[prev-boot] %s", saved->text);
+                push_ring_locked(normalize_level(saved->level), recovered, now_us);
             }
         }
     }
@@ -217,25 +219,22 @@ static size_t append_json_escaped(char *dst, size_t pos, size_t cap, const char 
 
 static bool publish_one(void)
 {
-    ff_log_entry_t batch[FF_LOG_CAPACITY];
-    size_t count = 0;
-    uint32_t dropped = 0;
-    const int64_t now_us = esp_timer_get_time();
+    if (!s_connected || s_client == NULL) {
+        return false;
+    }
 
+    const int64_t now_us = esp_timer_get_time();
     portENTER_CRITICAL(&s_lock);
     recover_rtc_if_needed_locked(now_us);
-    if (s_head > s_unsent) {
-        if (s_head - s_unsent > FF_LOG_CAPACITY) {
-            s_unsent = s_head - FF_LOG_CAPACITY;
-        }
-        for (uint64_t seq = s_unsent; seq < s_head && count < FF_LOG_CAPACITY; seq++) {
-            batch[count++] = s_ring[seq % FF_LOG_CAPACITY];
-        }
-        dropped = s_dropped;
+    if (s_head > s_unsent && s_head - s_unsent > FF_LOG_CAPACITY) {
+        s_unsent = s_head - FF_LOG_CAPACITY;
     }
+    uint64_t seq = s_unsent;
+    const uint64_t head = s_head;
+    const uint32_t dropped = s_dropped;
     portEXIT_CRITICAL(&s_lock);
 
-    if (count == 0 || !s_connected || s_client == NULL) {
+    if (seq >= head) {
         return false;
     }
 
@@ -245,17 +244,33 @@ static bool publish_one(void)
         return false;
     }
     size_t pos = (size_t)head_len;
-    uint64_t last_seq = batch[0].seq;
+    uint64_t last_seq = seq;
     size_t packed = 0;
 
-    for (size_t i = 0; i < count; i++) {
+    while (seq < head) {
+        ff_log_entry_t entry;
+        memset(&entry, 0, sizeof(entry));
+        bool have = false;
+        portENTER_CRITICAL(&s_lock);
+        if (seq < s_unsent) {
+            seq = s_unsent;
+        }
+        if (seq < head && seq < s_head) {
+            entry = s_ring[seq % FF_LOG_CAPACITY];
+            have = true;
+        }
+        portEXIT_CRITICAL(&s_lock);
+        if (!have) {
+            break;
+        }
+
         char prefix[64];
-        int64_t age_ms = (now_us - batch[i].at_us) / 1000;
+        int64_t age_ms = (now_us - entry.at_us) / 1000;
         if (age_ms < 0) {
             age_ms = 0;
         }
         int plen = snprintf(prefix, sizeof(prefix), "%s{\"age_ms\":%" PRId64 ",\"level\":\"%c\",\"text\":\"",
-                            packed > 0 ? "," : "", age_ms, batch[i].level);
+                            packed > 0 ? "," : "", age_ms, entry.level);
         if (plen <= 0) {
             break;
         }
@@ -265,7 +280,7 @@ static bool publish_one(void)
         }
         memcpy(s_payload + pos, prefix, (size_t)plen);
         pos += (size_t)plen;
-        size_t next_pos = append_json_escaped(s_payload, pos, sizeof(s_payload) - 4, batch[i].text);
+        size_t next_pos = append_json_escaped(s_payload, pos, sizeof(s_payload) - 4, entry.text);
         if (next_pos == 0 || next_pos + 4 >= sizeof(s_payload)) {
             pos = save;
             s_payload[pos] = '\0';
@@ -275,7 +290,8 @@ static bool publish_one(void)
         s_payload[pos++] = '"';
         s_payload[pos++] = '}';
         s_payload[pos] = '\0';
-        last_seq = batch[i].seq;
+        last_seq = entry.seq;
+        seq = entry.seq + 1;
         packed++;
     }
 

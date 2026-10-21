@@ -1,0 +1,7 @@
+dependencies:
+  idf: ">=5.5"
+  lvgl/lvgl: "^9.2.0"
+  fleetforge:
+    git: "https://github.com/tvaroska/fleetforge.git"
+    path: "agent/components/fleetforge"
+    version: "v0.7.2"
