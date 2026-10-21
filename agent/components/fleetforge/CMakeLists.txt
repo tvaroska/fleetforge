@@ -71,7 +71,7 @@ idf_component_register(SRCS "src/ff_cfg.c"
 # nobody here can fix; scoping it to our files means an unused variable or a format
 # mismatch in the agent stops the build instead of shipping to a fleet. Firmware has no
 # `try:` — a truncated snprintf is a corrupted MQTT topic on a thousand boards.
-target_compile_options(${COMPONENT_LIB} PRIVATE -Wall -Wextra -Werror)
+target_compile_options(${COMPONENT_LIB} PRIVATE -Wall -Wextra -Werror -Wframe-larger-than=1024)
 
 # See the FF_ROLLBACK_TEST block in ../../CMakeLists.txt. Compiled in only when asked for,
 # so the guarded code in src/ff_mqtt.c is absent from every normal build rather than

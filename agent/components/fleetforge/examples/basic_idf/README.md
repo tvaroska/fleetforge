@@ -116,7 +116,5 @@ fleet is not confirmed, and the board rolls back to `1.0.0` on its own.
 
 ## Known gaps
 
-- In an ESP-IDF build the announce's `agent_version` is your `PROJECT_VER`, not the
-  library's version (the Arduino library reports its own).
 - The S3 DevKitC-1's LED is an RGB LED that a plain GPIO cannot light; on that board the
   `morse:` console line is the indicator.

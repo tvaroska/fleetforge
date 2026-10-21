@@ -42,7 +42,7 @@ OpenTelemetry (`OTLP/HTTP`) collector:
 Levels are `'D'`, `'I'`, `'W'`, and `'E'`. Up to 32 lines are buffered in RAM and flushed on
 `up/log` every 5 s while connected; the newest 4 lines are also mirrored into crash-surviving
 `RTC_NOINIT_ATTR` memory (`magic + CRC32`) so lines logged just before a panic or watchdog reset
-are recovered and shipped on the next boot with `"boot": "previous"`. `isReadyForSleep()` waits
+are recovered and shipped on the next boot prefixed with `[prev-boot] `. `isReadyForSleep()` waits
 for the log buffer to drain before allowing deep sleep.
 
 ## Rotating secrets without reflashing (`nvs/ff_sec`)
@@ -184,6 +184,7 @@ library itself never sleeps the board.
 | PlatformIO | [`examples/Basic/README.md`](examples/Basic/README.md) (steps 0-7) |
 | Arduino IDE 2.x | [`examples/Basic/README.md`, *Arduino IDE*](examples/Basic/README.md#arduino-ide) |
 | ESP-IDF v5.5 | [`examples/basic_idf/README.md`](examples/basic_idf/README.md) |
+| ESP-IDF + LVGL v9 E-Paper | [`examples/eink_lvgl/README.md`](examples/eink_lvgl/README.md) |
 
 No board? `just lib-quickstart` (from the repository root) plays the PlatformIO path in the
 QEMU emulator against a local Fleetforge server.
@@ -231,8 +232,30 @@ The library does not compile without `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE` (st
 The library version is `0.5.0`, one number in `agent/version.txt`, `library.json` and
 `src/ff_lib_version.h`. Every image that calls the library carries a 64-byte library marker.
 The server records it at upload, and a build without one needs an explicit override
-(`no_library_marker`) before it deploys. In an Arduino build the announce's `agent_version`
-is the library's version; in an ESP-IDF build it is your `PROJECT_VER`.
+(`no_library_marker`) before it deploys. Both Arduino and ESP-IDF builds report the library's
+version (`FF_LIB_VERSION`) in the announce's `agent_version`, while `fw_version` reports your
+application's version (`FW_VERSION` in Arduino, `PROJECT_VER` in ESP-IDF).
+
+## ESP-IDF hardware & e-paper bring-up notes
+
+- **100 Hz FreeRTOS tick truncation (`pdMS_TO_TICKS(ms) == 0` for `ms < 10`):**
+  ESP-IDF defaults to `CONFIG_FREERTOS_HZ=100` (10 ms per tick). Calling
+  `vTaskDelay(pdMS_TO_TICKS(2))` integer-divides to `0` ticks (`vTaskDelay(0)`), producing a
+  ~1 µs yield instead of a 2 ms delay. That is too short to wake SPI e-paper controllers
+  (such as the SSD1677 after Deep Sleep `0x10 0x01`, which requires `RST` low for `>= 10 ms`
+  and leaves `BUSY` stuck high otherwise). Use `pdMS_TO_TICKS(20)` for `>= 10 ms` task delays
+  or `esp_rom_delay_us()` for sub-10 ms hardware pulses.
+- **GPIO ESD-diode back-powering when cycling a PMIC/LDO rail:**
+  An e-paper controller in deep sleep draws ~1 µA. If you turn off its PMIC LDO rail (e.g.,
+  AXP2101 `ALDO3`) to force a Power-On Reset while `RST` or `CS` GPIOs remain driven high
+  (`3.3 V`), current leaking through the controller's input ESD diodes keeps `VDD` above its
+  POR threshold. Always drive `RST`, `CS`, `DC`, `MOSI`, and `SCLK` low (`0 V`) before
+  disabling the LDO rail.
+- **LVGL v9 `LV_COLOR_FORMAT_I1` 8-byte palette header:**
+  In LVGL v9, `LV_COLOR_FORMAT_I1` full-screen buffers prepend an **8-byte palette header**
+  (two 32-bit `lv_color32_t` entries for index 0 and index 1) ahead of the packed 1-bpp pixel
+  rows. Size your buffer to `FB_BYTES + 8` and pass `px_map + 8` to the SPI panel driver inside
+  your LVGL `flush_cb` (see [`examples/eink_lvgl/README.md`](examples/eink_lvgl/README.md)).
 
 ## Public headers
 
