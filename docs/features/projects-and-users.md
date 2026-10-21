@@ -418,3 +418,22 @@ Proposed:
 > *This does not weaken the hosted model:* it is still a real public domain with a real Let us Encrypt certificate. This is what the devices and Web Serial need. It is "not public" in the product sense (no public signup; invite-only users, a superadmin bootstrapped from `ADMIN_PASSWORD_HASH`), which SPEC already states. Firebase sign-in is optional prod env: `FIREBASE_PROJECT_ID`, `FIREBASE_WEB_API_KEY` and `FIREBASE_SUPERADMIN_EMAILS` are unset on prod today, so only the env admin and local-password users can log in there.
 
 `grep -n -i "single-tenant\|one admin\|ADMIN_PASSWORD_HASH" design/production.md` finds no other stale line.
+
+---
+
+## Rotating Project Secrets & OTel Collector Settings (`SEC-1`, `OTEL-be-1`, 2026-10-21)
+
+Added in migration `0011_ci_cd_and_device_cfg.py` to support sleepy e-ink and IoT fleets (`CUJ-2`) that authenticate to external APIs and forward logs/metrics to an OpenTelemetry collector:
+
+- **Encrypted project secrets (`project_secrets`)**:
+  - Keyed by `(project_id, key)` where `key ~ '^[A-Za-z_][A-Za-z0-9_]{0,63}$'`, max 16 keys per project, each value up to 512 UTF-8 bytes.
+  - Values are encrypted at rest in `encrypted_value` using Fernet (`src/fleetforge/secrets_crypto.py`) keyed by `SECRET_ENCRYPTION_KEY` (or a deterministic key derived from `SIGNING_PRIVATE_KEY_PEM` in dev/test).
+  - Operator API (`src/fleetforge/api/routers/project_secrets.py`):
+    - `GET /v1/projects/{slug}/secrets` — lists secret keys and `updated_at` timestamps only (**never** returns plaintext values to browsers or API callers).
+    - `PUT /v1/projects/{slug}/secrets/{key}` (`{"value": "..."}`) and `DELETE /v1/projects/{slug}/secrets/{key}` — requires project `operator`/`owner` (or superadmin), increments `projects.secrets_rev` atomically, and publishes retained `ff/v1/d/{device_id}/dn/cfg` (`{"stay_awake": bool, "secrets_rev": int}`) to every live board in the project.
+  - Device pull API (`src/fleetforge/api/routers/device_secrets.py`):
+    - `GET /v1/device-secrets` authenticates the device via `Authorization: Basic base64(device_id:mqtt_password)` verified in constant time against `devices.mqtt_password_hash` (SHA-256 hex stored on enrollment in `registry.py`).
+    - Returns `{"secrets_rev": <int>, "secrets": {"KEY": "VALUE", ...}}` over HTTPS. Firmware (`ff_sec.c`) stores the dictionary in NVS namespace `"ff_sec"`, exposes `ff_sec_get()` / `Fleetforge.getSecret()`, holds `ff_is_ready_for_sleep()` false until `local_secrets_rev >= target_secrets_rev`, and re-announces `secrets_rev` on `up/announce`.
+- **Per-project OTel collector settings (`projects.otel_endpoint`, `projects.otel_headers`)**:
+  - `PATCH /v1/projects/{slug}` accepts `otel_endpoint` and `otel_headers` (`Key=Value,Key2=Value2`); `GET /v1/projects/{slug}` returns `otel_endpoint` and `otel_headers_configured: bool` (never echoing raw auth headers back to the browser).
+  - Managed in the `4. ACCESS` tab (`ProjectAccess.tsx` -> Rotating Device Secrets card and Observability / OTel Collector card).

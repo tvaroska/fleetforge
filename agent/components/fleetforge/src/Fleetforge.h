@@ -148,6 +148,16 @@ class FleetforgeClass {
   // (a wake that cannot reach the fleet never becomes ready), longer than the confirm
   // deadline (300 s by default) so a slow network does not roll an update back.
   bool isReadyForSleep();
+
+  // Emit a structured log line (`up/log`, R4-fw-3 / CUJ-2) to the fleet and OTel pipeline.
+  // level: 'D', 'I', 'W', or 'E'. Buffered in RAM (32 lines) and crash-surviving RTC noinit
+  // memory (4 lines). Safe to call before begin(), connected or not.
+  bool logf(char level, const char *fmt, ...) __attribute__((format(printf, 3, 4)));
+
+  // Read a rotating project secret from NVS (`ff_sec` namespace, synced over HTTPS when
+  // `dn/cfg.secrets_rev` advances, SEC-fw-1). Copies at most `cap - 1` bytes + NUL into `buf`.
+  // Returns true when found, false when absent or invalid.
+  bool getSecret(const char *key, char *buf, uint32_t cap);
 };
 
 extern FleetforgeClass Fleetforge;

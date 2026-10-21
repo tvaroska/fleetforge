@@ -65,6 +65,7 @@ from fleetforge.api.routers import (
     auth,
     commands,
     deploys,
+    device_secrets,
     devices,
     enroll,
     enrollment,
@@ -263,6 +264,7 @@ def create_app() -> FastAPI:
     app.include_router(enroll.router)
     app.include_router(events.router)
     app.include_router(devices.router)
+    app.include_router(device_secrets.router)
     app.include_router(agent.router)
     app.include_router(progress.router)
     app.include_router(artifacts.router)

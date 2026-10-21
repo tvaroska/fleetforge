@@ -32,6 +32,7 @@ EXPECTED_TABLES = {
     "enrollment_tokens",
     "partition_profiles",
     "project_members",
+    "project_secrets",
     "projects",
     "users",
 }

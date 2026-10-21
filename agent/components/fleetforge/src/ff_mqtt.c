@@ -57,9 +57,11 @@
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "ff_identity_internal.h"
+#include "ff_log_internal.h"
 #include "ff_ota.h"
 #include "ff_progress.h"
 #include "ff_safe_window_internal.h"
+#include "ff_sec_internal.h"
 #include "ff_selftest_internal.h"
 #include "ff_sleep_internal.h"
 #include "ff_telemetry_internal.h"
@@ -131,7 +133,9 @@ typedef struct {
     char topic_hb[TOPIC_MAX];
     char topic_status[TOPIC_MAX];
     char topic_telemetry[TOPIC_MAX];
+    char topic_log[TOPIC_MAX];
     char topic_ack[TOPIC_MAX]; /* R5-fw-4: verb answers, never retained */
+    char topic_cfg[TOPIC_MAX];
     char topic_dn[TOPIC_MAX];
     int announce_msg_id;   /* the id whose PUBACK means "this board did its job" */
     bool session_confirmed; /* the announce has been acknowledged at least once */
@@ -389,6 +393,9 @@ static volatile bool s_acked_this_connection;
  * the esp-mqtt task. Unlike s_ctx.session_confirmed it is outside s_ctx, so a reader racing
  * ff_mqtt_run()'s memset sees false, never a torn struct. */
 static volatile bool s_checked_in;
+/* CUJ-2: retained dn/cfg stay_awake flag. Holds ff_ready_for_sleep() false during active
+ * development iteration without reflashing. */
+static volatile bool s_stay_awake;
 
 /* R5-fw-2. `selftest failed: <reason>`, with the reason (already printable ASCII without `;`,
  * ff_selftest.c) shortened so that the returned-to image's `<head>; returned to <slot>` fits
@@ -1090,6 +1097,7 @@ static void on_connected(ff_mqtt_ctx_t *ctx)
     /* R4-fw-2. Last: identity, presence and the owed outcome are queued first, and the
      * telemetry drain publishes through the same client lock, so it cannot overtake them. */
     ff_telemetry_session_up(ctx->client, ctx->topic_telemetry);
+    ff_log_session_up(ctx->client, ctx->topic_log);
 }
 
 /* The `up/status` body, key for key as `simulator/device.py::_status()` builds it and
@@ -1982,6 +1990,31 @@ static void on_command(ff_mqtt_ctx_t *ctx, const char *topic, int topic_len, con
     cJSON_Delete(root);
 }
 
+/* CUJ-2: Retained device runtime configuration (`dn/cfg`, QoS 1, retain=true).
+ * Carries `stay_awake` (holds `ff_ready_for_sleep()` false) and `secrets_rev`
+ * (triggers HTTPS fetch of rotated secrets when > local NVS revision). */
+static void on_cfg(ff_mqtt_ctx_t *ctx, const char *data, int data_len)
+{
+    if (data == NULL || data_len <= 0) {
+        return;
+    }
+    cJSON *root = cJSON_ParseWithLength(data, (size_t)data_len);
+    if (root == NULL) {
+        ESP_LOGW(TAG, "dn/cfg: invalid JSON (%d B); ignored", data_len);
+        return;
+    }
+    const cJSON *stay_awake = cJSON_GetObjectItemCaseSensitive(root, "stay_awake");
+    if (cJSON_IsBool(stay_awake)) {
+        s_stay_awake = cJSON_IsTrue(stay_awake);
+        ESP_LOGI(TAG, "dn/cfg: stay_awake=%s", s_stay_awake ? "true" : "false");
+    }
+    const cJSON *secrets_rev = cJSON_GetObjectItemCaseSensitive(root, "secrets_rev");
+    if (cJSON_IsNumber(secrets_rev) && secrets_rev->valuedouble >= 0) {
+        ff_sec_on_cfg((uint32_t)secrets_rev->valuedouble, ctx->client, ctx->topic_announce);
+    }
+    cJSON_Delete(root);
+}
+
 static void mqtt_event_handler(void *arg, esp_event_base_t base, int32_t event_id, void *data)
 {
     (void)base;
@@ -1999,6 +2032,7 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base, int32_t event_i
         ctx->connected = false;
         s_acked_this_connection = false; /* R5-fw-7: isConnected() */
         ff_telemetry_session_down(); /* samples buffer until the next connect */
+        ff_log_session_down();
         ESP_LOGW(TAG, "mqtt disconnected; the client will reconnect");
         break;
 
@@ -2069,7 +2103,12 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base, int32_t event_i
         break;
 
     case MQTT_EVENT_DATA:
-        on_command(ctx, event->topic, event->topic_len, event->data, event->data_len);
+        if (event->topic != NULL && (size_t)event->topic_len == strlen(ctx->topic_cfg) &&
+            strncmp(event->topic, ctx->topic_cfg, (size_t)event->topic_len) == 0) {
+            on_cfg(ctx, event->data, event->data_len);
+        } else {
+            on_command(ctx, event->topic, event->topic_len, event->data, event->data_len);
+        }
         break;
 
     case MQTT_EVENT_ERROR:
@@ -2113,7 +2152,9 @@ esp_err_t ff_mqtt_run(const ff_cfg_t *cfg, const ff_cred_t *cred)
     snprintf(s_ctx.topic_status, sizeof(s_ctx.topic_status), TOPIC_ROOT "/%s/up/status", id);
     snprintf(s_ctx.topic_telemetry, sizeof(s_ctx.topic_telemetry), TOPIC_ROOT "/%s/up/telemetry",
              id);
+    snprintf(s_ctx.topic_log, sizeof(s_ctx.topic_log), TOPIC_ROOT "/%s/up/log", id);
     snprintf(s_ctx.topic_ack, sizeof(s_ctx.topic_ack), TOPIC_ROOT "/%s/up/ack", id);
+    snprintf(s_ctx.topic_cfg, sizeof(s_ctx.topic_cfg), TOPIC_ROOT "/%s/dn/cfg", id);
     snprintf(s_ctx.topic_dn, sizeof(s_ctx.topic_dn), TOPIC_ROOT "/%s/dn/#", id);
 
     const esp_mqtt_client_config_t config = {
@@ -2162,6 +2203,7 @@ esp_err_t ff_mqtt_run(const ff_cfg_t *cfg, const ff_cred_t *cred)
     /* R5-fw-7: the declared power class is fixed here too, before the first connect builds an
      * announce (the `power_class` it carries). */
     ff_sleep_freeze(cfg);
+    ff_sec_init(cfg, cred);
 
     /* What the last reboot left to report. The confirm timer is NOT armed here: it was
      * armed first thing in app_main (R2-fw-4, ff_mqtt_arm_confirm_timer), so it may fire
@@ -2215,6 +2257,12 @@ const char *ff_mqtt_sleep_blocker(void)
     }
     if (s_txn.kind != TXN_NONE) {
         return "a transaction is not closed";
+    }
+    if (s_stay_awake) {
+        return "held awake by dn/cfg";
+    }
+    if (!ff_sec_synced()) {
+        return "secrets sync in progress";
     }
     /* QoS 1 messages queued or awaiting their PUBACK (and an unacknowledged subscribe). Takes
      * the client's lock: may wait while the mqtt task holds it. */

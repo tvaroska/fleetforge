@@ -2184,3 +2184,15 @@ after Patch A, as an amendment to it.
   (Improv) are kept in NVS as an overlay on `ff_cfg`, tagged with the `ff_cfg` CRC they were
   learned on; a flash with a different `ff_cfg` discards them. `ff_cfg` stays flasher-written.
   `dn/cmd set_cfg` is not the way in: it would carry passphrases through the server."
+
+### NVS `"ff_net"` Wi-Fi overlay and Improv BLE fallback as built (`WIFI-BLE-fw-1`, 2026-10-21)
+
+Implemented in `agent/components/fleetforge/include/ff_net.h`, `agent/components/fleetforge/src/ff_net_wifi.c`, `agent/components/fleetforge/src/Fleetforge.h`, and `agent/components/fleetforge/src/Fleetforge.cpp` so a board moved to a new location can join a new Wi-Fi network without USB reflashing:
+
+- **NVS `"ff_net"` credential ring (up to 4 SSIDs, newest first)**:
+  - `ff_net_wifi_save_credential(ssid, pass)` (`Fleetforge.saveWifiCredential(ssid, pass)`) persists `(ssid, pass)` into the writable NVS namespace `"ff_net"` (`count`, `s0`/`p0` .. `s3`/`p3`), moving an existing SSID to slot `0` or shifting older slots down.
+  - On boot/wake, `load_combined_wifi_list()` loads the NVS `"ff_net"` entries first and appends the read-only `ff_cfg` entries behind them (deduplicating by SSID, up to 8 total networks) before starting the connection rotation and RSSI scan.
+- **Bounded 120 s Improv Wi-Fi over BLE fallback (`00467768-6228-2272-4663-277478268000`)**:
+  - When all known SSIDs (NVS `"ff_net"` + `ff_cfg`) exhaust a full rotation without associating, `ff_net_wifi.c` starts the standard Improv Wi-Fi over BLE GATT service (`00467768-6228-2272-4663-277478268000`, advertising as `Fleetforge-<last4mac>`) for a bounded `FF_IMPROV_BLE_WINDOW_MS = 120000` (120 s) window.
+  - When a phone or Web Bluetooth client sends `RPC 0x01` (Send Wi-Fi settings), the board attempts to associate and acquire an IP address, persists the credential to NVS `"ff_net"` via `ff_net_wifi_save_credential()`, transitions Improv state to `0x04` (Provisioned), and stops BLE.
+  - If the 120 s window expires with no provisioning (for example, a home router power outage), BLE advertising stops cleanly so a battery-powered e-ink board can return to deep sleep without draining its battery.

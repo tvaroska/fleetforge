@@ -48,6 +48,8 @@
 #include "Fleetforge.h"
 
 #include <inttypes.h>
+#include <stdarg.h>
+#include <stdio.h>
 
 #include "esp_err.h"
 #include "esp_event.h"
@@ -59,11 +61,13 @@
 #include "ff_identity.h"
 #include "ff_identity_internal.h"
 #include "ff_lib_version.h"
+#include "ff_log.h"
 #include "ff_mqtt.h"
 #include "ff_net.h"
 #include "ff_progress.h"
 #include "ff_safe_mode.h"
 #include "ff_safe_window.h"
+#include "ff_sec.h"
 #include "ff_selftest.h"
 #include "ff_sleep.h"
 #include "ff_store.h"
@@ -96,9 +100,9 @@ static const char *TAG = "ff-lib";
  * exactly these tags and nothing of the sketch's or the core's.
  * tests/test_arduino_library.py pins this list to the TAGs in src/. */
 static const char *const FF_LOG_TAGS[] = {
-    "ff-cfg", "ff-enroll", "ff-eth", "ff-id", "ff-lib", "ff-mqtt", "ff-net",
-    "ff-ota", "ff-progress", "ff-safe", "ff-safemode", "ff-selftest", "ff-sleep", "ff-store",
-    "ff-tel", "ff-time", "ff-txn", "ff-wifi",
+    "ff-cfg", "ff-enroll", "ff-eth", "ff-id", "ff-lib", "ff-log", "ff-mqtt", "ff-net",
+    "ff-ota", "ff-progress", "ff-safe", "ff-safemode", "ff-sec", "ff-selftest", "ff-sleep",
+    "ff-store", "ff-tel", "ff-time", "ff-txn", "ff-wifi",
 };
 
 FleetforgeClass Fleetforge;
@@ -380,6 +384,24 @@ bool FleetforgeClass::isConnected()
 bool FleetforgeClass::isReadyForSleep()
 {
     return ff_is_ready_for_sleep();
+}
+
+bool FleetforgeClass::logf(char level, const char *fmt, ...)
+{
+    if (fmt == nullptr) {
+        return false;
+    }
+    char buf[192];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    return ff_logf(level, "%s", buf) == ESP_OK;
+}
+
+bool FleetforgeClass::getSecret(const char *key, char *buf, uint32_t cap)
+{
+    return ff_get_secret(key, buf, cap) == ESP_OK;
 }
 
 #endif /* ARDUINO */

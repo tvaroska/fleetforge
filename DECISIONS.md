@@ -6,6 +6,32 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-21 — CUJ-2 E-Ink & Developer Experience: hybrid Git-driven CI/CD (`CI-CD-1`), rotating secrets (`SEC-1`), OTel log/metric export (`OTEL-1` + `R4-fw-3/4`), and Improv BLE Wi-Fi (`WIFI-BLE-1`)
+
+- **Cause.** Managing a battery-powered e-ink project (`CUJ-2`) across rapid single-board bench iteration and multi-board field deployment exposed four high-priority gaps:
+  1. Manual browser compile + upload is too slow for daily iteration; operators need Git-driven continuous deployment configured per project (`repo_url`, `track_mode`, `track_ref`, `auto_deploy_target`) plus a way to hold deep sleep on a bench board (`stay_awake`).
+  2. E-ink boards authenticate to an external content/weather API whose API key rotates periodically, and reflashing over USB to rotate a secret defeats fleet management.
+  3. E-ink boards wake briefly, fetch/render, and return to deep sleep; logs and metrics must drain before sleep and forward to an OpenTelemetry-compatible collector (`OTLP/HTTP`).
+  4. Moving an e-ink frame to a new Wi-Fi network (or adding a 2nd/3rd network) when all known APs are out of range must work from a phone or browser without reflashing.
+- **Decisions.**
+  - **Pillar 1 — Hybrid Git-Driven CI/CD (`CI-CD-1`):**
+    - External CI (`GitHub Actions` / `Cloud Build` via `python -m fleetforge.cli push`) compiles and tests the firmware, then uploads `.bin` + git provenance (`repo_url`, `branch`, `commit_sha`, `tag`, `build_url`, `test_passed`) to `POST /v1/artifact`.
+    - `projects` gains `repo_url`, `track_mode` (`off | branch | tag | commit`), `track_ref`, `auto_deploy_target` (`off | dev | all`), and `ci_webhook_url`. When an uploaded artifact's provenance has `test_passed != False` and matches the project's tracking rule, the server automatically deploys it to matching live boards (`is_dev = true` when `auto_deploy_target = 'dev'`, or all live project boards when `'all'`).
+    - When the operator changes `track_mode`/`track_ref` in the dashboard (`PATCH /v1/projects/{slug}`) or calls `POST /v1/projects/{slug}/deploy`, Fleetforge immediately deploys the newest matching already-uploaded artifact; if no matching artifact has been uploaded yet and `ci_webhook_url` is set, Fleetforge fires a best-effort JSON POST (`{"event": "fleetforge.track_ref_changed", ...}`) to trigger an external CI build.
+    - `devices` gains `is_dev` and `stay_awake`, published on retained `ff/v1/d/{device_id}/dn/cfg` (`{"stay_awake": bool, "secrets_rev": int}`). When `stay_awake` is `true`, `ff_is_ready_for_sleep()` / `Fleetforge.isReadyForSleep()` returns `false` so a bench board stays online for rapid CI deploys.
+  - **Pillar 2 — Rotating Secrets Without Reflashing (`SEC-1`):**
+    - Plaintext secrets never ride MQTT or persist in Mosquitto's retained store. Instead, `dn/cfg` carries only the integer revision doorbell (`secrets_rev`), while encrypted secret values live in PostgreSQL (`project_secrets`, encrypted at rest with Fernet via `SECRET_ENCRYPTION_KEY`, falling back to a key derived from `SIGNING_PRIVATE_KEY_PEM` in dev/test).
+    - When a board wakes and observes `dn/cfg.secrets_rev > local_secrets_rev`, it fetches `GET /v1/device-secrets` over HTTPS using `Authorization: Basic base64(device_id:mqtt_password)` (verified against `devices.mqtt_password_hash`, SHA-256 hex backfilled on enroll), writes the key/value pairs to NVS namespace `"ff_sec"`, updates `secrets_rev`, and re-announces `secrets_rev` on `up/announce`. `ff_sec_synced()` holds `ff_is_ready_for_sleep()` false while a pull is pending so a sleepy board never sleeps before rotating its key.
+  - **Pillar 3 — Board-to-OTel Observability (`OTEL-1` + `R4-fw-3/4`):**
+    - Firmware `ff_log.h` / `ff_log.c` (`ff_logf()` / `Fleetforge.logf()`) buffers up to 32 lines (`<= 200 B` text, monotonic `esp_timer` timestamp) in RAM plus a 4-line magic+CRC32 `RTC_NOINIT_ATTR` crash-surviving ring (`0x46464C47`) recovered on boot before the first MQTT connect. A background task flushes batches (`<= 2048 B`, at most 1 publish per 5 s, QoS 0) to `up/log`, and `ff_log_drained()` gates `ff_is_ready_for_sleep()` so lines logged during a wake cycle flush before `esp_deep_sleep_start()`.
+    - `fleetforge-ingestor` (`src/fleetforge/ingestor/otel.py`) exports `up/log` batches (`POST <endpoint>/v1/logs`) and `up/telemetry` batches (`POST <endpoint>/v1/metrics`) as OTLP/HTTP JSON (`service.name = <project_slug>`, `service.version = <fw_version>`, `device.id = <device_id>`), resolved per project (`projects.otel_endpoint` / `projects.otel_headers`) with global fallback (`FF_OTEL_EXPORTER_OTLP_ENDPOINT` / `FF_OTEL_EXPORTER_OTLP_HEADERS`).
+  - **Pillar 4 — Multi-Wi-Fi & Improv Wi-Fi over BLE (`WIFI-BLE-1`):**
+    - `ff_net_wifi.c` prepends a writable NVS `"ff_net"` ring (up to 4 SSIDs, newest first) ahead of read-only `ff_cfg` SSIDs and deduplicates by SSID.
+    - When all known SSIDs fail to associate on boot/wake, `ff_net_wifi.c` starts a bounded 120-second Improv Wi-Fi over BLE GATT window (`00467768-6228-2272-4663-277478268000`, `Fleetforge-<last4mac>`). Provisioned credentials are tested first, persisted to NVS `"ff_net"` via `ff_net_wifi_save_credential()` on IP acquisition, and BLE stops before deep sleep so an unreachable router cannot drain an e-ink battery.
+- **Details:** `spec/device-protocol.md`, `spec/cujs.md` (`CUJ-2`), `docs/features/vcs-integration.md`, `docs/features/health-telemetry.md`, `docs/features/projects-and-users.md`, `docs/features/enrollment.md`, migration `alembic/versions/0011_ci_cd_and_device_cfg.py`.
+
+---
+
 ## 2026-10-19 — P1 ships by dropping and recreating prod's fleetforge database, not by a backfill migration; agent blobs survive the artifact cleanup (S0-rel-1)
 
 - **Cause.** d822f1b (P1) rewrote `alembic/versions/0001_initial_schema.py` (`projects` with the seeded `default` row, `users`, `project_members`, `project_id NOT NULL` on devices, groups and enrollment tokens) and `0004_artifact_versions.py` (PK `(project_id, target, version)`) in place. Prod runs v0.6.0, whose head is `0008`, so `alembic upgrade head` would apply only `0009` and `0010`, stamp `0010`, and never run the P1 DDL; every project-scoped query would then fail.

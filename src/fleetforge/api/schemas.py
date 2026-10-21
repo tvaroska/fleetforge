@@ -150,6 +150,7 @@ class AdminTokenList(BaseModel):
 
 TrackMode = Literal["off", "branch", "tag", "commit"]
 AutoDeployTarget = Literal["off", "dev", "all"]
+SECRET_KEY_PATTERN = r"^[a-zA-Z0-9_.-]{1,15}$"  # noqa: S105 — regex pattern, not a secret
 
 
 class ProjectCreate(BaseModel):
@@ -166,10 +167,12 @@ class ProjectCreate(BaseModel):
     auto_deploy_target: AutoDeployTarget = "off"
     ci_webhook_url: str | None = Field(default=None, max_length=512)
     ci_webhook_header: str | None = Field(default=None, max_length=512)
+    otel_endpoint: str | None = Field(default=None, max_length=512)
+    otel_headers: str | None = Field(default=None, max_length=2048)
 
 
 class ProjectUpdate(BaseModel):
-    """`PATCH /v1/projects/{slug}`: update display name, description, or CD settings."""
+    """`PATCH /v1/projects/{slug}`: update display name, description, CD, or OTel settings."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -181,6 +184,8 @@ class ProjectUpdate(BaseModel):
     auto_deploy_target: AutoDeployTarget | None = None
     ci_webhook_url: str | None = Field(default=None, max_length=512)
     ci_webhook_header: str | None = Field(default=None, max_length=512)
+    otel_endpoint: str | None = Field(default=None, max_length=512)
+    otel_headers: str | None = Field(default=None, max_length=2048)
 
 
 class ProjectSummary(BaseModel):
@@ -196,10 +201,33 @@ class ProjectSummary(BaseModel):
     ci_webhook_url: str | None = None
     has_ci_webhook_header: bool = False
     secrets_rev: int = 0
+    otel_endpoint: str | None = None
+    has_otel_headers: bool = False
     auto_deployed_devices: list[str] | None = None
     ci_webhook_triggered: bool | None = None
     created_at: dt.datetime
     updated_at: dt.datetime
+
+
+class ProjectSecretUpsert(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    value: str = Field(min_length=1, max_length=512)
+
+
+class ProjectSecretSummary(BaseModel):
+    key: str
+    updated_at: dt.datetime
+
+
+class ProjectSecretList(BaseModel):
+    secrets_rev: int
+    secrets: list[ProjectSecretSummary]
+
+
+class DeviceSecretsResponse(BaseModel):
+    secrets_rev: int
+    secrets: dict[str, str]
 
 
 class ProjectList(BaseModel):

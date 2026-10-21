@@ -106,7 +106,9 @@ Edit two lines: `MORSE_MESSAGE` in `main/main.c` to `"HELLO"`, and `PROJECT_VER`
 version: a version names exactly one image.
 
 In the dashboard, under **Upload a build**, upload `build/fleetforge_basic.bin` as target
-`esp32` (or `esp32s3`), version `1.1.0`, layout `ab-4m-v1`. Then press **Deploy** on the
+`esp32` (or `esp32s3`), version `1.1.0`, layout `ab-4m-v1` (or run
+`fleetforge push build/fleetforge_basic.bin --target esp32 --version 1.1.0 --project default`
+for CI/CD auto-deploy). Then press **Deploy** on the
 board's row and pick `1.1.0`. The board downloads the build, reboots into it, reaches the
 fleet and confirms it: the dashboard shows the deploy `confirmed` and the board at `1.1.0`,
 and the console says `morse: HELLO (firmware 1.1.0)`. A build B that cannot reach the

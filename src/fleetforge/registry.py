@@ -66,6 +66,7 @@ async def enroll_device(
     identity: dict[str, Any],
     enrolled_at: dt.datetime,
     project_id: uuid.UUID = DEFAULT_PROJECT_ID,
+    mqtt_password_hash: str | None = None,
 ) -> Device:
     """Insert (or re-enroll) `device_id` and return the row. Does not commit.
 
@@ -95,6 +96,7 @@ async def enroll_device(
         "project_id": project_id,
         "group_id": group_id,
         "enrolled_at": enrolled_at,
+        "mqtt_password_hash": mqtt_password_hash,
         **{field: identity.get(field) for field in IDENTITY_FIELDS},
     }
     # `capabilities` is NOT NULL with a server default; an absent list means "empty",
@@ -117,6 +119,7 @@ async def enroll_device(
                 else_=statement.excluded.group_id,
             ),
             "enrolled_at": statement.excluded.enrolled_at,
+            "mqtt_password_hash": statement.excluded.mqtt_password_hash,
             "decommissioned_at": None,
             "broker_provisioned_at": None,
             "presence_reported": None,

@@ -128,6 +128,21 @@ If build B could not reach the fleet (a wrong Wi-Fi password compiled into your 
 a crash at boot), the board would not confirm it, roll back to `1.0.0` on its own, and the
 dashboard would say `rolled back`. You would not need the USB cable for that either.
 
+### Fast CI/CD iteration (`fleetforge push`)
+
+Instead of uploading builds by hand in the browser, you can push directly from your terminal or
+GitHub Actions (`docs/examples/github-actions-fleetforge.yml`):
+
+```sh
+fleetforge push .pio/build/esp32/firmware.bin --target esp32 --version 1.1.0 --project default
+```
+
+When the project's **Continuous Deployment** card tracks your branch, tag pattern, or pinned commit
+with **Auto-deploy** enabled, uploading a matching artifact automatically stages and applies it to
+eligible project boards (or only `is_dev` boards when **Dev boards only** is checked). Toggling
+`stay awake` on a dev board holds `Fleetforge.isReadyForSleep()` false via retained `dn/cfg` so
+sleepy e-ink boards receive updates immediately during development.
+
 ## Your own project
 
 The example's `platformio.ini` is the recipe, and a project of your own changes exactly one

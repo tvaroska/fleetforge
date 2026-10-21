@@ -51,6 +51,8 @@ export type ProjectSummary = {
   ci_webhook_url?: string | null
   has_ci_webhook_header?: boolean
   secrets_rev?: number
+  otel_endpoint?: string | null
+  has_otel_headers?: boolean
   auto_deployed_devices?: string[] | null
   ci_webhook_triggered?: boolean | null
   created_at: string
@@ -66,6 +68,18 @@ export type ProjectUpdate = {
   auto_deploy_target?: AutoDeployTarget
   ci_webhook_url?: string | null
   ci_webhook_header?: string | null
+  otel_endpoint?: string | null
+  otel_headers?: string | null
+}
+
+export type ProjectSecretSummary = {
+  key: string
+  updated_at: string
+}
+
+export type ProjectSecretList = {
+  secrets_rev: number
+  secrets: ProjectSecretSummary[]
 }
 
 export type ProjectDeployAccepted = {
@@ -845,6 +859,21 @@ export const api = {
   removeProjectMember: (slug: string, username: string) =>
     request<void>(
       `/v1/projects/${encodeURIComponent(slug)}/members/${encodeURIComponent(username)}`,
+      { method: 'DELETE' },
+    ),
+
+  listProjectSecrets: (slug: string) =>
+    request<ProjectSecretList>(`/v1/projects/${encodeURIComponent(slug)}/secrets`),
+
+  upsertProjectSecret: (slug: string, key: string, value: string) =>
+    request<ProjectSecretList>(
+      `/v1/projects/${encodeURIComponent(slug)}/secrets/${encodeURIComponent(key)}`,
+      { method: 'PUT', body: JSON.stringify({ value }) },
+    ),
+
+  deleteProjectSecret: (slug: string, key: string) =>
+    request<ProjectSecretList>(
+      `/v1/projects/${encodeURIComponent(slug)}/secrets/${encodeURIComponent(key)}`,
       { method: 'DELETE' },
     ),
 

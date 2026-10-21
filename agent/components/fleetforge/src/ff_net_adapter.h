@@ -29,6 +29,10 @@ bool ff_net_wifi_rssi(int *out_dbm);
 /* The SSID of the known network that gave this board its address, or NULL while none has. */
 const char *ff_net_wifi_ssid(void);
 
+/* Persist a newly provisioned Wi-Fi network to the NVS `ff_net` overlay (`ssid_0`/`psk_0`)
+ * and prepend it to the active scan list without reflashing `ff_cfg` (WIFI-BLE-fw-1). */
+esp_err_t ff_net_wifi_save_nvs(const char *ssid, const char *passphrase);
+
 /* Called by an adapter's IP_EVENT handler. Unblocks ff_net_bring_up(). */
 void ff_net_report_got_ip(esp_netif_t *netif);
 

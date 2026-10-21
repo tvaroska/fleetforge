@@ -518,10 +518,10 @@ Order: spec-1 (any time) · fw-1 → be-1 → fe-1 → test-1 · be-2 · fw-3 �
 - [x] **R4-fw-2**: User-defined telemetry channel with relative sample age (P1, 1.5d) _(done 2026-10-15; proposal: Patch A owner (spec: commit) before release; built unreleased; reviewed; see DECISIONS.md and docs/features/health-telemetry.md)_
       `up/telemetry` batches `{"samples":[{"age_ms","name","value"}]}`; the server computes `sample_ts = received_at - age_ms` (`docs/SWARM.md` 5.1), so no wall clock on the board. A RAM ring buffer flushes on reconnect. Public API (`ff_telemetry()` / `Fleetforge.metric()`) is additive-only from release, so settle the names in a proposal first. CRITICAL (library public surface). Acceptance (simulator and QEMU): samples taken while disconnected arrive with their original spacing after reconnect.
       Added: 2026-10-15
-- [ ] **R4-fw-3**: Forward firmware log lines on `up/log` (P0, 1.5d) — **spec `S0-fw-5` Patches A+B applied 2026-10-20**
+- [x] **R4-fw-3**: Forward firmware log lines on `up/log` (P0, 1.5d) _(done 2026-10-21 with OTEL-fw-1; see DECISIONS.md and docs/features/health-telemetry.md)_ — **spec `S0-fw-5` Patches A+B applied 2026-10-20**
       `ff_logf(level, fmt, ...)` and `Fleetforge.logf()`, explicit opt-in (customer privacy, cellular caps); batches under 2048 B, at most one publish per 5 s, `text` <= 200 B, `dropped` count. An optional compile-time `esp_log` sink, level-filtered and guarded against `ff-mqtt`/`mqtt_client`/`mbedtls` recursion, for debug and test builds only. Basic and basic_idf forward their `morse:` line. Acceptance (QEMU and simulator): the morse line arrives in the server's log table with an `age_ms`-derived time; a flood produces `dropped`, not a stalled heartbeat.
       Added: 2026-10-15
-- [ ] **R4-fw-4**: Crash-surviving log tail (P2, 1d) — **needs R4-fw-3 first; plan: .claude/plans/R4-fw-4-crash-surviving-log-tail.md**
+- [x] **R4-fw-4**: Crash-surviving log tail (P2, 1d) _(done 2026-10-21 with OTEL-fw-1; see DECISIONS.md and docs/features/health-telemetry.md)_ — **needs R4-fw-3 first; plan: .claude/plans/R4-fw-4-crash-surviving-log-tail.md**
       Keep the last few lines in a magic-and-CRC-guarded `RTC_NOINIT_ATTR` buffer so lines written just before a `panic` or `task_wdt` flush on the recovery boot. A named gap in the up/log proposal. Acceptance (QEMU): an injected `abort()` three lines after a log call delivers those lines after reboot. The `FF_FAULT_TEST` images and the runbook's QEMU soft-reset limit apply; say plainly which part was proven.
       Added: 2026-10-15
 
@@ -634,27 +634,27 @@ Opened 2026-10-20. Targets the high-priority e-ink project workflow (`spec/cujs.
 
 ### Pillar 2 — Rotating Secrets Without Reflashing (`SEC-1`)
 
-- [ ] **SEC-be-1**: Project/device encrypted secrets store, `dn/cfg.secrets_rev` publisher & `GET /v1/device-secrets` (P0, 1d)
+- [x] **SEC-be-1**: Project/device encrypted secrets store, `dn/cfg.secrets_rev` publisher & `GET /v1/device-secrets` (P0, 1d) _(done 2026-10-21; `project_secrets` table, Fernet `secrets_crypto.py`, `GET/PUT/DELETE /v1/projects/{slug}/secrets/{key}`, retained `dn/cfg` broadcast on change, `devices.secrets_rev` on `up/announce`, and `GET /v1/device-secrets`)_
       Encrypted secrets table (`project_secrets`), operator CRUD (`GET/PUT/DELETE /v1/projects/{slug}/secrets/{key}`), monotonic `projects.secrets_rev` bumped and published to `ff/v1/d/{id}/dn/cfg` on change, `devices.secrets_rev` recorded from `up/announce`, and device-authenticated `GET /v1/device-secrets` (`Authorization: Basic base64(device_id:mqtt_password)`).
       Added: 2026-10-20
-- [ ] **SEC-fw-1**: `dn/cfg` handler (`stay_awake` + `secrets_rev`), HTTPS pull & NVS `ff_sec` (`Fleetforge.getSecret`) (P0, 1.5d)
+- [x] **SEC-fw-1**: `dn/cfg` handler (`stay_awake` + `secrets_rev`), HTTPS pull & NVS `ff_sec` (`Fleetforge.getSecret`) (P0, 1.5d) _(done 2026-10-21; `ff_sec.h` / `ff_sec.c`, `dn/cfg` subscription in `ff_mqtt.c`, HTTPS pull from `/v1/device-secrets`, NVS `ff_sec` persistence, `ff_sec_synced()` sleep gate, `up/announce.secrets_rev`, and `Fleetforge.getSecret`)_
       Subscribe and parse `dn/cfg`; honour `stay_awake` in `ff_is_ready_for_sleep()`; when `secrets_rev > local_rev`, hold sleep, fetch `GET /v1/device-secrets` over TLS, persist key-value pairs and `local_rev` in NVS `ff_sec`, re-announce `secrets_rev`, and expose `ff_get_secret()` / `Fleetforge.getSecret(key, buf, len)` + `onSecretUpdated`.
       Added: 2026-10-20
-- [ ] **SEC-fe-1**: Project Secrets management UI & per-board `secrets_rev` sync indicator (P1, 0.5d)
+- [x] **SEC-fe-1**: Project Secrets management UI & per-board `secrets_rev` sync indicator (P1, 0.5d) _(done 2026-10-21; `ProjectAccess.tsx` secrets & OTel configuration UI + `FleetView.tsx` `sec:rN` badge)_
       Operator UI in `ACCESS` tab to add/rotate/delete project secrets and view which boards have synced the latest `secrets_rev`.
       Added: 2026-10-20
 
 ### Pillar 3 — Board to OpenTelemetry-Compatible Logs (`R4-fw-3/4` + `OTEL-1`)
 
-- [ ] **OTEL-fw-1**: Complete `R4-fw-3` (`ff_logf` / `Fleetforge.logf`), `R4-fw-4` (crash ring), and `ff_log_drained()` sleep gate (P0, 1.5d)
+- [x] **OTEL-fw-1**: Complete `R4-fw-3` (`ff_logf` / `Fleetforge.logf`), `R4-fw-4` (crash ring), and `ff_log_drained()` sleep gate (P0, 1.5d) _(done 2026-10-21; `ff_log.h` / `ff_log.c` with 32-line RAM ring + 4-line magic+CRC32 `RTC_NOINIT_ATTR` crash ring, 5 s QoS 0 flush to `up/log`, `ff_log_drained()` wired into `ff_sleep.c`, and `Basic.ino` / `basic_idf` updated)_
       Implement `ff_log.h` / `ff_log.c` and wire `ff_log_drained()` into `ff_is_ready_for_sleep()` so sleepy e-ink wakes flush all logs before deep sleep.
       Added: 2026-10-20
-- [ ] **OTEL-be-1**: `fleetforge-ingestor` OTLP/HTTP LogRecord & Metric exporter (P0, 1d)
+- [x] **OTEL-be-1**: `fleetforge-ingestor` OTLP/HTTP LogRecord & Metric exporter (P0, 1d) _(done 2026-10-21; `ingestor/otel.py` OTLP/HTTP JSON exporter `/v1/logs` & `/v1/metrics` wired into `ingestor/handlers.py` with per-project `otel_endpoint` / encrypted `otel_headers` and `OTEL_EXPORTER_OTLP_ENDPOINT` fallback)_
       Export incoming `up/log` batches and `up/telemetry` samples as OpenTelemetry `LogRecord`s and `Gauge`s over OTLP/HTTP JSON (`OTEL_EXPORTER_OTLP_ENDPOINT` + per-project override) with `service.name=<project_slug>`, `service.version=<fw_version>`, `device.id=<device_id>`.
       Added: 2026-10-20
 
 ### Pillar 4 — Improv Wi-Fi over BLE Without Reflashing (`WIFI-BLE-1`)
 
-- [ ] **WIFI-BLE-fw-1**: NVS `ff_net` network overlay & bounded Improv BLE GATT service (P1, 2d)
+- [x] **WIFI-BLE-fw-1**: NVS `ff_net` network overlay & bounded Improv BLE GATT service (P1, 2d) _(done 2026-10-21; `ff_net_wifi.c` NVS `ff_net` overlay ahead of `ff_cfg` + bounded 120 s Improv Wi-Fi over BLE `00467768-6228-2272-4663-277478268000` advertising window)_
       Layer writable NVS `ff_net` (up to 4 SSIDs) ahead of `ff_cfg` in `ff_net_wifi.c`, and advertise the standard Improv Wi-Fi BLE service (`00467768-6228-2272-4663-277478268000`) for a bounded 120 s window when all known networks fail to associate on boot/wake.
       Added: 2026-10-20

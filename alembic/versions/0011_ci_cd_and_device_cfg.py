@@ -48,6 +48,8 @@ def upgrade() -> None:
         "projects",
         sa.Column("secrets_rev", sa.Integer(), server_default=sa.text("0"), nullable=False),
     )
+    op.add_column("projects", sa.Column("otel_endpoint", sa.Text(), nullable=True))
+    op.add_column("projects", sa.Column("otel_headers", sa.Text(), nullable=True))
 
     op.add_column(
         "devices",
@@ -58,6 +60,30 @@ def upgrade() -> None:
         sa.Column("stay_awake", sa.Boolean(), server_default=sa.text("false"), nullable=False),
     )
     op.add_column("devices", sa.Column("secrets_rev", sa.Integer(), nullable=True))
+    op.add_column("devices", sa.Column("mqtt_password_hash", sa.Text(), nullable=True))
+
+    op.create_table(
+        "project_secrets",
+        sa.Column("project_id", sa.Uuid(), nullable=False),
+        sa.Column("key", sa.Text(), nullable=False),
+        sa.Column("ciphertext", sa.Text(), nullable=False),
+        sa.Column(
+            "updated_at",
+            sa.TIMESTAMP(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.CheckConstraint(
+            "key ~ '^[a-zA-Z0-9_.-]{1,15}$'", name="ck_project_secrets_secret_key_format"
+        ),
+        sa.ForeignKeyConstraint(
+            ["project_id"],
+            ["projects.id"],
+            name=op.f("fk_project_secrets_project_id_projects"),
+            ondelete="CASCADE",
+        ),
+        sa.PrimaryKeyConstraint("project_id", "key", name=op.f("pk_project_secrets")),
+    )
 
     op.add_column("artifact_versions", sa.Column("repo_url", sa.Text(), nullable=True))
     op.add_column("artifact_versions", sa.Column("branch", sa.Text(), nullable=True))
@@ -76,10 +102,15 @@ def downgrade() -> None:
     op.drop_column("artifact_versions", "branch")
     op.drop_column("artifact_versions", "repo_url")
 
+    op.drop_table("project_secrets")
+
+    op.drop_column("devices", "mqtt_password_hash")
     op.drop_column("devices", "secrets_rev")
     op.drop_column("devices", "stay_awake")
     op.drop_column("devices", "is_dev")
 
+    op.drop_column("projects", "otel_headers")
+    op.drop_column("projects", "otel_endpoint")
     op.drop_column("projects", "secrets_rev")
     op.drop_column("projects", "ci_webhook_header")
     op.drop_column("projects", "ci_webhook_url")

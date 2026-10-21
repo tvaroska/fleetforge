@@ -71,7 +71,7 @@ from fleetforge.clock import device_time
 from fleetforge.db.models import DeployEvent, Device
 from fleetforge.deploys import record_observed_status, snapshot_detail
 from fleetforge.events import DeviceEvent, EventType, emit
-from fleetforge.ingestor import store
+from fleetforge.ingestor import otel, store
 from fleetforge.ingestor.protocol import (
     ACK_MAX_BYTES,
     LOG_MAX_BYTES,
@@ -240,9 +240,9 @@ async def handle_up_message(
 
     if parsed.channel == UpChannel.TELEMETRY:
         # Live only (a retained replay returned above) and registered only.
-        await _store_telemetry(session, device_id, topic, payload, received_at)
+        await _store_telemetry(session, device_id, topic, payload, received_at, device=row)
     elif parsed.channel == UpChannel.LOG:
-        await _store_log(session, device_id, topic, payload, received_at)
+        await _store_log(session, device_id, topic, payload, received_at, device=row)
 
     answered: str | None = None
     if parsed.channel == UpChannel.ACK:
@@ -326,7 +326,13 @@ async def _savepoint(
 
 
 async def _store_telemetry(
-    session: AsyncSession, device_id: str, topic: str, payload: bytes, received_at: dt.datetime
+    session: AsyncSession,
+    device_id: str,
+    topic: str,
+    payload: bytes,
+    received_at: dt.datetime,
+    *,
+    device: Device | None = None,
 ) -> None:
     """Decode an `up/telemetry` batch, store it, and log a summary; never raises.
 
@@ -366,10 +372,24 @@ async def _store_telemetry(
             await telemetry_store.record_samples(
                 session, device_id=device_id, samples=telemetry.samples, received_at=received_at
             )
+        if device is not None:
+            async with _savepoint(session, device_id, "otel metrics export", "liveness"):
+                await otel.export_metrics_to_otel(
+                    session,
+                    device=device,
+                    samples=telemetry.samples,
+                    received_at=received_at,
+                )
 
 
 async def _store_log(
-    session: AsyncSession, device_id: str, topic: str, payload: bytes, received_at: dt.datetime
+    session: AsyncSession,
+    device_id: str,
+    topic: str,
+    payload: bytes,
+    received_at: dt.datetime,
+    *,
+    device: Device | None = None,
 ) -> None:
     """Decode an `up/log` batch and store it, bounded; never raises, never logs `text`.
 
@@ -398,6 +418,15 @@ async def _store_log(
         await device_logs.record_log_batch(
             session, device_id=device_id, payload=batch, received_at=received_at
         )
+    if device is not None and batch.lines:
+        async with _savepoint(session, device_id, "otel logs export", "liveness"):
+            await otel.export_logs_to_otel(
+                session,
+                device=device,
+                lines=batch.lines,
+                dropped=batch.dropped or 0,
+                received_at=received_at,
+            )
 
 
 async def _store_ack(

@@ -32,10 +32,7 @@ static const char *const CODES[36] = {  // A-Z, then 0-9
 static void blink(char letter) {
   int c = toupper((unsigned char)letter);
   const char *code = isalpha(c) ? CODES[c - 'A'] : isdigit(c) ? CODES[26 + c - '0'] : nullptr;
-  if (code == nullptr) {  // a space, or anything Morse has no code for: a word gap
-    delay(4 * UNIT_MS);
-    return;
-  }
+  if (code == nullptr) { delay(4 * UNIT_MS); return; }  // a space, or no Morse code: a word gap
   for (; *code != '\0'; code++) {
     digitalWrite(LED_PIN, HIGH);
     delay((*code == '-' ? 3 : 1) * UNIT_MS);
@@ -52,6 +49,7 @@ void setup() {
   Fleetforge.begin(FW_VERSION);  // FIRST: arms the rollback timer, then runs in its own task
   Fleetforge.onSelfTest(selfTest);  // keep an update only if loop() still runs (below)
   Fleetforge.onSafeWindow(safeNow);  // an update or a rollback reboots only when safeNow() agrees
+  Fleetforge.setPowerClass(Fleetforge.ALWAYS_ON);  // or Fleetforge.SLEEPY, 3600 for battery boards
   Serial.begin(115200);
   pinMode(LED_PIN, OUTPUT);
 }
@@ -59,11 +57,12 @@ void setup() {
 // Your firmware. It keeps blinking whether or not the board ever reaches the network.
 void loop() {
   betweenMessages = false;  // a message starts: no reboot until it is done
+  char apiKey[64] = {0};
+  bool hasKey = Fleetforge.getSecret("api_key", apiKey, sizeof(apiKey));  // rotated via dn/cfg
   Serial.printf("morse: %s (firmware %s)\n", MORSE_MESSAGE, FW_VERSION);
+  Fleetforge.logf('I', "morse: %s (loop %u, key=%s)", MORSE_MESSAGE, loops + 1, hasKey ? "set" : "none");
   Fleetforge.metric("morse_loops", ++loops);  // sent to the fleet on up/telemetry
-  for (const char *letter = MORSE_MESSAGE; *letter != '\0'; letter++) {
-    blink(*letter);
-  }
+  for (const char *letter = MORSE_MESSAGE; *letter != '\0'; letter++) { blink(*letter); }
   betweenMessages = true;  // the whole message blinked: a waiting reboot may happen now
   Fleetforge.selfTestDone(true);  // a whole message blinked: this firmware works
   delay(4 * UNIT_MS);  // the gap before the message repeats (7 units in all)

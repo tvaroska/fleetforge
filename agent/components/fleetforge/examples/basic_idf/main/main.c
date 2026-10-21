@@ -4,14 +4,15 @@
 #include <stdio.h>
 #include "driver/gpio.h"
 #include "ff_identity.h"
+#include "ff_log.h"
 #include "ff_safe_window.h"
+#include "ff_sec.h"
 #include "ff_selftest.h"
 #include "ff_sleep.h"
 #include "ff_telemetry.h"
 #include "fleetforge_start.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-
 #ifndef MORSE_MESSAGE
 #define MORSE_MESSAGE "SOS" /* what the LED blinks: change it to see an update land */
 #endif
@@ -19,19 +20,16 @@
 #define LED_GPIO 2 /* an ESP32 DevKit's LED; an S3 DevKitC-1's is RGB: watch the log there */
 #endif
 #define UNIT_MS 200 /* one dot; a dash is three */
-
 static const char *const CODES[36] = { /* A-Z, then 0-9 */
     ".-", "-...", "-.-.", "-..", ".", "..-.", "--.", "....", "..", ".---", "-.-", ".-..", "--",
     "-.", "---", ".--.", "--.-", ".-.", "...", "-", "..-", "...-", ".--", "-..-", "-.--", "--..",
     "-----", ".----", "..---", "...--", "....-", ".....", "-....", "--...", "---..", "----.",
 };
-
 static volatile bool s_idle; /* true in the gap after a whole message: see app_main */
 static void wait_units(int units) { vTaskDelay(pdMS_TO_TICKS(units * UNIT_MS)); }
 static bool between_messages(void *ctx) { (void)ctx; return s_idle; } /* the safe window */
 static ff_selftest_result_t selftest(void *ctx, char *reason, size_t len) /* asked once, after */
 { (void)ctx, (void)reason, (void)len; return FF_SELFTEST_PENDING; } /* an update lands: see below */
-
 static void blink(char letter)
 {
     int c = toupper((unsigned char)letter);
@@ -45,7 +43,6 @@ static void blink(char letter)
     }
     wait_units(2); /* the gap between letters (3 units in all) */
 }
-
 void app_main(void)
 {
     fleetforge_start(); /* FIRST: arms the rollback timer, then runs in its own task */
@@ -56,13 +53,14 @@ void app_main(void)
     gpio_set_direction(LED_GPIO, GPIO_MODE_OUTPUT);
     for (unsigned loops = 1;; loops++) { /* your firmware: it blinks, network or not */
         s_idle = false; /* a message starts: no reboot until it is done */
+        char api_key[64] = {0};
+        bool has_key = ff_get_secret("api_key", api_key, sizeof(api_key)) == ESP_OK;
         printf("morse: %s (firmware %s)\n", MORSE_MESSAGE, ff_identity_fw_version());
         printf("fleet: %s, %s\n", ff_is_connected() ? "connected" : "not connected",
                ff_is_ready_for_sleep() ? "could sleep now" : "must stay awake");
+        ff_logf('I', "morse: %s (loop %u, key=%s)", MORSE_MESSAGE, loops, has_key ? "set" : "none");
         ff_telemetry("morse_loops", loops); /* sent to the fleet on up/telemetry */
-        for (const char *letter = MORSE_MESSAGE; *letter != '\0'; letter++) {
-            blink(*letter);
-        }
+        for (const char *letter = MORSE_MESSAGE; *letter != '\0'; letter++) { blink(*letter); }
         s_idle = true; /* the whole message blinked: a waiting reboot may happen now */
         ff_selftest_report(true, NULL); /* a whole message blinked: this firmware works */
         wait_units(4); /* the gap before the message repeats (7 units in all) */

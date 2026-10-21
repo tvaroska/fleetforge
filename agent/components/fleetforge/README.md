@@ -30,6 +30,45 @@ while the board is offline. The library sends samples on `up/telemetry` at most 
 samples recorded offline arrive with their original spacing. A reboot loses samples not yet
 sent. Both examples report `morse_loops`, one sample per blinked message.
 
+## Structured logs & OpenTelemetry (`up/log`)
+
+Send structured log lines from your firmware to the Fleetforge dashboard and any project-configured
+OpenTelemetry (`OTLP/HTTP`) collector:
+
+- **Arduino / PlatformIO:** `Fleetforge.logf('I', "refresh ok (%d ms)", elapsed_ms);` (returns `bool`).
+- **ESP-IDF:** `#include "ff_log.h"`, then `ff_logf('I', "refresh ok (%d ms)", elapsed_ms);`
+  (returns `ESP_OK` or `ESP_ERR_INVALID_ARG`).
+
+Levels are `'D'`, `'I'`, `'W'`, and `'E'`. Up to 32 lines are buffered in RAM and flushed on
+`up/log` every 5 s while connected; the newest 4 lines are also mirrored into crash-surviving
+`RTC_NOINIT_ATTR` memory (`magic + CRC32`) so lines logged just before a panic or watchdog reset
+are recovered and shipped on the next boot with `"boot": "previous"`. `isReadyForSleep()` waits
+for the log buffer to drain before allowing deep sleep.
+
+## Rotating secrets without reflashing (`nvs/ff_sec`)
+
+Read project-scoped rotating secrets (such as backend API keys) without reflashing firmware or
+`ff_cfg`:
+
+- **Arduino / PlatformIO:** `Fleetforge.getSecret("api_key", buf, sizeof(buf));` (returns `bool`).
+- **ESP-IDF:** `#include "ff_sec.h"`, then `ff_get_secret("api_key", buf, sizeof(buf));`
+  (returns `ESP_OK` or `ESP_ERR_NOT_FOUND`).
+
+When you rotate a secret in the dashboard (`PUT /v1/projects/{slug}/secrets/{key}`), the server
+publishes the bumped `secrets_rev` on the retained `dn/cfg` topic. When the board wakes or is
+online and sees `dn/cfg.secrets_rev` greater than its local NVS revision, it fetches
+`GET /v1/device-secrets` over HTTPS using its per-device broker credential, updates the `ff_sec`
+NVS namespace atomically, and re-announces its new `secrets_rev`. `isReadyForSleep()` stays false
+while a secret sync is in flight.
+
+## Multi-Wi-Fi & Improv Wi-Fi over BLE
+
+`ff_cfg` carries up to 4 known networks (`--net SSID:PSK`), and the Wi-Fi adapter also prepends up
+to 4 runtime-provisioned networks stored in the `ff_net` NVS namespace (`ssid_0..3` / `psk_0..3`)
+ahead of `ff_cfg`. When all known networks fail to associate, the board opens a bounded 120 s
+Improv Wi-Fi over BLE (`00467768-6228-2272-4663-277478268000`) advertising window so you can add
+a new Wi-Fi network from a phone or browser without reflashing.
+
 ## Self-test
 
 Keep an update only if your firmware says it works, not just because it reached the fleet:
@@ -197,11 +236,11 @@ is the library's version; in an ESP-IDF build it is your `PROJECT_VER`.
 
 ## Public headers
 
-- `include/`: `ff_cfg.h`, `ff_enroll.h`, `ff_identity.h`, `ff_mqtt.h`, `ff_net.h`,
-  `ff_progress.h`, `ff_safe_window.h`, `ff_selftest.h`, `ff_sleep.h`, `ff_store.h`,
-  `ff_telemetry.h`, `ff_time.h`. This is the ESP-IDF surface. `ff_safe_window.h`,
-  `ff_selftest.h`, `ff_sleep.h` and `ff_telemetry.h` are the maker API: your firmware calls
-  them, the stock agent does not.
+- `include/`: `ff_cfg.h`, `ff_enroll.h`, `ff_identity.h`, `ff_log.h`, `ff_mqtt.h`, `ff_net.h`,
+  `ff_progress.h`, `ff_safe_window.h`, `ff_sec.h`, `ff_selftest.h`, `ff_sleep.h`, `ff_store.h`,
+  `ff_telemetry.h`, `ff_time.h`. This is the ESP-IDF surface. `ff_log.h`, `ff_safe_window.h`,
+  `ff_sec.h`, `ff_selftest.h`, `ff_sleep.h` and `ff_telemetry.h` are the maker API: your firmware
+  calls them, the stock agent does not.
 - `src/Fleetforge.h`: the Arduino surface. It lives in `src/` because the Arduino build
   reads `src/`.
 

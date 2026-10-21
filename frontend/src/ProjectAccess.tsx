@@ -11,6 +11,7 @@ import {
   type AdminTokenSummary,
   type Me,
   type ProjectMemberSummary,
+  type ProjectSecretSummary,
   type ProjectSummary,
   type UserSummary,
 } from './api'
@@ -96,9 +97,19 @@ export function ProjectAccess({
   const [tokenScope, setTokenScope] = useState('deploy')
   const [tokenPinned, setTokenPinned] = useState(true)
 
+  // Rotating Device Secrets (SEC-fe-1) & OTel (OTEL-be-1)
+  const [secretsRev, setSecretsRev] = useState<number>(0)
+  const [secrets, setSecrets] = useState<ProjectSecretSummary[]>([])
+  const [secretKey, setSecretKey] = useState('')
+  const [secretValue, setSecretValue] = useState('')
+  const [otelEndpoint, setOtelEndpoint] = useState('')
+  const [otelHeaders, setOtelHeaders] = useState('')
+  const [otelStatus, setOtelStatus] = useState<string | null>(null)
+
   // A stale question about another project's member must not survive a switch or a close.
   useEffect(() => {
     setPending(null)
+    setOtelStatus(null)
   }, [activeProject, open])
 
   const handle = useCallback(
@@ -114,17 +125,25 @@ export function ProjectAccess({
 
   const refreshDrawer = useCallback(async () => {
     try {
-      const [projRes, memRes, tokRes, userRes] = await Promise.all([
+      const [projRes, memRes, tokRes, secRes, userRes] = await Promise.all([
         api.listProjects(),
         api.listProjectMembers(activeProject),
         api.listAdminTokens(),
+        api.listProjectSecrets(activeProject),
         me.is_superadmin ? api.listUsers() : Promise.resolve(null),
       ])
-      setProjects(projRes.projects)
-      setMembers(memRes.members)
-      setTokens(tokRes.tokens)
+      const projs = projRes.projects ?? []
+      setProjects(projs)
+      setMembers(memRes.members ?? [])
+      setTokens(tokRes.tokens ?? [])
+      setSecretsRev(secRes?.secrets_rev ?? 0)
+      setSecrets(secRes?.secrets ?? [])
+      const currProj = projs.find((p) => p.slug === activeProject)
+      if (currProj) {
+        setOtelEndpoint(currProj.otel_endpoint ?? '')
+      }
       if (userRes !== null) {
-        setUsers(userRes.users)
+        setUsers(userRes.users ?? [])
       }
     } catch (err) {
       handle(err)
@@ -278,6 +297,68 @@ export function ProjectAccess({
       handle(err)
     } finally {
       setPending(null)
+    }
+  }
+
+  async function handleUpsertSecret(event: FormEvent) {
+    event.preventDefault()
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await api.upsertProjectSecret(
+        activeProject,
+        secretKey.trim(),
+        secretValue,
+      )
+      setSecretKey('')
+      setSecretValue('')
+      setSecretsRev(res.secrets_rev ?? secretsRev + 1)
+      setSecrets(res.secrets ?? [])
+    } catch (err) {
+      handle(err)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function handleDeleteSecret(key: string) {
+    setBusy(true)
+    setError(null)
+    try {
+      const res = await api.deleteProjectSecret(activeProject, key)
+      setSecretsRev(res.secrets_rev ?? secretsRev + 1)
+      setSecrets(res.secrets ?? [])
+    } catch (err) {
+      handle(err)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function handleSaveOtel(event: FormEvent) {
+    event.preventDefault()
+    setBusy(true)
+    setError(null)
+    setOtelStatus(null)
+    try {
+      const patch: { otel_endpoint?: string | null; otel_headers?: string | null } = {
+        otel_endpoint: otelEndpoint.trim() || null,
+      }
+      if (otelHeaders.trim() !== '') {
+        patch.otel_headers = otelHeaders.trim()
+      }
+      const updated = await api.updateProject(activeProject, patch)
+      setOtelHeaders('')
+      setOtelStatus(
+        updated.otel_endpoint
+          ? `Forwarding device logs & metrics to ${updated.otel_endpoint}.`
+          : 'OpenTelemetry forwarding turned off.',
+      )
+      await refreshDrawer()
+    } catch (err) {
+      handle(err)
+    } finally {
+      setBusy(false)
     }
   }
 
@@ -530,6 +611,130 @@ export function ProjectAccess({
                   <button type="button" onClick={() => setPending(null)}>
                     Keep
                   </button>
+                </p>
+              )}
+
+              <h3>
+                Device secrets (NVS <code>ff_sec</code>) ·{' '}
+                <span className="badge muted" data-testid="project-secrets-rev">
+                  rev {secretsRev}
+                </span>
+              </h3>
+              <p className="muted">
+                Encrypted key-value secrets synced over HTTPS to boards in{' '}
+                <code>{activeProject}</code> whenever <code>dn/cfg.secrets_rev</code> advances
+                (read on the board with <code>Fleetforge.getSecret(key, buf, len)</code>).
+              </p>
+              {secrets.length > 0 && (
+                <table data-testid="project-secrets-table">
+                  <thead>
+                    <tr>
+                      <th scope="col">Key</th>
+                      <th scope="col">Updated</th>
+                      <th scope="col" />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {secrets.map((s) => (
+                      <tr key={s.key} data-testid="project-secret-row">
+                        <td>
+                          <code>{s.key}</code>
+                        </td>
+                        <td>{formatWhen(s.updated_at)}</td>
+                        <td>
+                          <button
+                            type="button"
+                            aria-label={`Delete secret ${s.key}`}
+                            disabled={busy}
+                            onClick={() => void handleDeleteSecret(s.key)}
+                          >
+                            Delete
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+              <form className="compact-form" onSubmit={(e) => void handleUpsertSecret(e)}>
+                <div className="form-grid">
+                  <label>
+                    Secret key
+                    <input
+                      type="text"
+                      aria-label="Secret key"
+                      value={secretKey}
+                      onChange={(e) => setSecretKey(e.target.value)}
+                      placeholder="API_KEY"
+                      disabled={busy}
+                    />
+                  </label>
+                  <label>
+                    Secret value
+                    <input
+                      type="password"
+                      aria-label="Secret value"
+                      value={secretValue}
+                      onChange={(e) => setSecretValue(e.target.value)}
+                      placeholder="sk-live-..."
+                      disabled={busy}
+                    />
+                  </label>
+                </div>
+                <p>
+                  <button
+                    type="submit"
+                    disabled={busy || !secretKey.trim() || !secretValue}
+                  >
+                    Save / Rotate secret
+                  </button>
+                </p>
+              </form>
+
+              <h3>OpenTelemetry export (OTLP/HTTP)</h3>
+              <p className="muted">
+                Forward board <code>up/log</code> lines and <code>up/telemetry</code> metrics as
+                OpenTelemetry <code>LogRecord</code>s and <code>Gauge</code>s with{' '}
+                <code>service.name={activeProject}</code>.
+              </p>
+              <form className="compact-form" onSubmit={(e) => void handleSaveOtel(e)}>
+                <div className="form-grid">
+                  <label>
+                    OTLP/HTTP endpoint
+                    <input
+                      type="text"
+                      aria-label="OTLP/HTTP endpoint"
+                      value={otelEndpoint}
+                      onChange={(e) => setOtelEndpoint(e.target.value)}
+                      placeholder="https://otlp.example.com"
+                      disabled={busy}
+                    />
+                  </label>
+                  <label>
+                    OTLP headers (optional)
+                    <input
+                      type="password"
+                      aria-label="OTLP headers"
+                      value={otelHeaders}
+                      onChange={(e) => setOtelHeaders(e.target.value)}
+                      placeholder={
+                        activeOption?.has_otel_headers
+                          ? '(configured — enter to replace)'
+                          : 'Authorization=Bearer ...'
+                      }
+                      disabled={busy}
+                    />
+                  </label>
+                </div>
+                <p>
+                  <button type="submit" disabled={busy}>
+                    Save OTel settings
+                  </button>
+                </p>
+              </form>
+              {otelStatus !== null && (
+                <p className="ok" data-testid="otel-status">
+                  {otelStatus}
                 </p>
               )}
             </div>

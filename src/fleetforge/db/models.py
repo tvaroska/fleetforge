@@ -247,6 +247,10 @@ class Project(Base):
     ci_webhook_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     ci_webhook_header: Mapped[str | None] = mapped_column(Text, nullable=True)
     secrets_rev: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    # OTEL-be-1 / CUJ-2: Optional project-scoped OTLP/HTTP JSON collector endpoint and
+    # encrypted/JSON headers (`{"Authorization": "Bearer ..."}`).
+    otel_endpoint: Mapped[str | None] = mapped_column(Text, nullable=True)
+    otel_headers: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(
         TimestampTZ, nullable=False, server_default=text("now()")
     )
@@ -309,6 +313,29 @@ class ProjectMember(Base):
     role: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[dt.datetime] = mapped_column(
         TimestampTZ, nullable=False, server_default=text("now()")
+    )
+
+
+class ProjectSecret(Base):
+    """Encrypted key-value secret scoped to a `Project` (`SEC-be-1` / CUJ-2).
+
+    Boards in the project fetch decrypted key-value pairs over HTTPS (`GET /v1/device-secrets`)
+    authenticated with their per-device broker credential (`device_id:mqtt_password`) whenever
+    the retained `dn/cfg` payload announces a `secrets_rev` newer than their NVS copy.
+    Keys are constrained to 1-15 ASCII characters (`^[a-zA-Z0-9_.-]{1,15}$`) so every key fits
+    an ESP-IDF NVS key slot (`NVS_KEY_NAME_MAX_SIZE - 1 == 15`).
+    """
+
+    __tablename__ = "project_secrets"
+    __table_args__ = (CheckConstraint("key ~ '^[a-zA-Z0-9_.-]{1,15}$'", name="secret_key_format"),)
+
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True
+    )
+    key: Mapped[str] = mapped_column(Text, primary_key=True)
+    ciphertext: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        TimestampTZ, nullable=False, server_default=text("now()"), onupdate=text("now()")
     )
 
 
@@ -457,6 +484,9 @@ class Device(Base):
     is_dev: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     stay_awake: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     secrets_rev: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # SEC-be-1: Argon2id hash of the device's `mqtt_password` issued at enrollment, used to
+    # authenticate `GET /v1/device-secrets` over HTTPS (`Authorization: Basic <base64(device_id:mqtt_password)>`).
+    mqtt_password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
     group_id: Mapped[uuid.UUID | None] = mapped_column(
         Uuid,
         ForeignKey("device_groups.id", ondelete="SET NULL"),

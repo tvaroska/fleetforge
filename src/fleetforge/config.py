@@ -303,6 +303,18 @@ class Settings(BaseSettings):
     # `signed_url_ttl_s` — one TTL for both layers, one number, one place.
     artifact_url_refresh_margin_s: int = 300
 
+    # --- Rotating device secrets (SEC-be-1) -----------------------------------
+    # Optional Fernet key (32 bytes urlsafe-base64) for encrypting `project_secrets.ciphertext`
+    # at rest. When unset, derived deterministically from `artifact_url_secret` (or a local
+    # fallback key in tests).
+    secrets_encryption_key: str | None = None
+
+    # --- OpenTelemetry OTLP/HTTP export (OTEL-be-1) ---------------------------
+    # Optional default OTLP/HTTP base URL (e.g. `http://otel-collector:4318`) and headers
+    # when a project does not set its own `otel_endpoint` override.
+    otel_exporter_otlp_endpoint: str | None = None
+    otel_exporter_otlp_headers: str | None = None
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

@@ -27,8 +27,15 @@ from fleetforge.broker import (
 )
 from fleetforge.broker.publisher import CFG_RETAIN, QOS, RETAIN, MqttCommandPublisher
 from fleetforge.cli import build_artifact_upload_url, detect_git_metadata, main
-from fleetforge.db.models import Project
-from fleetforge.ingestor.protocol import AnnouncePayload
+from fleetforge.db.models import Device, Project
+from fleetforge.ingestor.otel import (
+    _resolve_endpoint,
+    build_otlp_logs_payload,
+    build_otlp_metrics_payload,
+    parse_otel_headers,
+)
+from fleetforge.ingestor.protocol import AnnouncePayload, LogLine, TelemetrySample
+from fleetforge.secrets_crypto import decrypt_secret, encrypt_secret
 from tests.test_broker_commands import DEVICE_ID, FakeMqttClient
 
 
@@ -391,3 +398,146 @@ class TestCli:
         meta = detect_git_metadata(Path(__file__).resolve().parent)
         assert "commit_sha" in meta
         assert meta["commit_sha"] is None or len(meta["commit_sha"]) >= 7
+
+
+class TestSecretsCryptoAndDeviceSecretsAuth:
+    def test_encrypt_and_decrypt_secret_round_trip(self) -> None:
+        ciphertext = encrypt_secret("sk-live-rotated-key-42", None)
+        assert "sk-live-rotated-key-42" not in ciphertext
+        assert decrypt_secret(ciphertext, None) == "sk-live-rotated-key-42"
+
+    def test_parse_basic_auth_validates_device_id_and_password(self) -> None:
+        import base64
+
+        from fleetforge.api.routers.device_secrets import _parse_basic_auth
+
+        token = base64.b64encode(f"{DEVICE_ID}:my-mqtt-pass:with:colons".encode()).decode("ascii")
+        parsed = _parse_basic_auth(f"Basic {token}")
+        assert parsed == (DEVICE_ID, "my-mqtt-pass:with:colons")
+
+        # Rejects non-Basic, invalid base64, non-MAC device_id, or empty password
+        assert _parse_basic_auth(None) is None
+        assert _parse_basic_auth("Bearer ffa_123") is None
+        bad_id = base64.b64encode(b"not-a-mac:secret").decode("ascii")
+        assert _parse_basic_auth(f"Basic {bad_id}") is None
+        empty_pw = base64.b64encode(f"{DEVICE_ID}:".encode()).decode("ascii")
+        assert _parse_basic_auth(f"Basic {empty_pw}") is None
+
+
+class TestOtelExporter:
+    def test_parse_otel_headers_supports_kv_colon_and_json(self) -> None:
+        assert parse_otel_headers("Authorization=Bearer tok123, X-Org=eink") == {
+            "Authorization": "Bearer tok123",
+            "X-Org": "eink",
+        }
+        assert parse_otel_headers("Authorization: Bearer tok123\nX-Scope: prod") == {
+            "Authorization": "Bearer tok123",
+            "X-Scope": "prod",
+        }
+        assert parse_otel_headers('{"Authorization": "Basic abc=="}') == {
+            "Authorization": "Basic abc==",
+        }
+        assert parse_otel_headers(None) == {}
+
+    def test_resolve_endpoint_normalizes_base_and_full_urls(self) -> None:
+        assert (
+            _resolve_endpoint("https://otel.example.com", "/v1/logs")
+            == "https://otel.example.com/v1/logs"
+        )
+        assert (
+            _resolve_endpoint("https://otel.example.com/v1/logs", "/v1/logs")
+            == "https://otel.example.com/v1/logs"
+        )
+        assert (
+            _resolve_endpoint("https://otel.example.com/v1/logs", "/v1/metrics")
+            == "https://otel.example.com/v1/metrics"
+        )
+
+    def test_build_otlp_logs_and_metrics_payloads(self) -> None:
+        import datetime as dt
+
+        dev = Device(
+            device_id=DEVICE_ID,
+            name="kitchen-eink",
+            platform_type="esp32c6",
+            fw_version="1.2.0",
+            link_type="wifi",
+            power_class="sleepy",
+            expected_wake_interval_s=900,
+            capabilities=["ota"],
+        )
+        now = dt.datetime(2026, 10, 21, 0, 0, 10, tzinfo=dt.UTC)
+        lines = [
+            LogLine(age_ms=2000, level="I", text="morse: ---...--- (cycle 1)"),
+            LogLine(age_ms=500, level="E", text="api key expired"),
+        ]
+        logs_payload = build_otlp_logs_payload(
+            device=dev,
+            project_slug="eink-frame",
+            lines=lines,
+            dropped=3,
+            received_at=now,
+        )
+        res_logs = logs_payload["resourceLogs"][0]
+        attrs = {a["key"]: a["value"]["stringValue"] for a in res_logs["resource"]["attributes"]}
+        assert attrs["service.name"] == "eink-frame"
+        assert attrs["service.version"] == "1.2.0"
+        assert attrs["device.id"] == DEVICE_ID
+        assert attrs["hardware.platform"] == "esp32c6"
+
+        records = res_logs["scopeLogs"][0]["logRecords"]
+        assert len(records) == 2
+        assert records[0]["severityText"] == "INFO"
+        assert records[0]["body"]["stringValue"] == "morse: ---...--- (cycle 1)"
+        assert records[1]["severityNumber"] == 17
+        assert records[1]["severityText"] == "ERROR"
+
+        samples = [
+            TelemetrySample(age_ms=1000, name="battery_v", value=3.92),
+            TelemetrySample(age_ms=0, name="battery_v", value=3.91),
+        ]
+        metrics_payload = build_otlp_metrics_payload(
+            device=dev,
+            project_slug="eink-frame",
+            samples=samples,
+            received_at=now,
+        )
+        metrics = metrics_payload["resourceMetrics"][0]["scopeMetrics"][0]["metrics"]
+        assert len(metrics) == 1
+        assert metrics[0]["name"] == "battery_v"
+        assert len(metrics[0]["gauge"]["dataPoints"]) == 2
+
+
+class TestCuj2FirmwareAndTemplates:
+    def test_firmware_pillars_and_templates_present(self) -> None:
+        root = Path(__file__).resolve().parents[1] / "agent" / "components" / "fleetforge"
+        ff_log_c = (root / "src" / "ff_log.c").read_text(encoding="utf-8")
+        ff_sec_c = (root / "src" / "ff_sec.c").read_text(encoding="utf-8")
+        ff_mqtt_c = (root / "src" / "ff_mqtt.c").read_text(encoding="utf-8")
+        ff_wifi_c = (root / "src" / "ff_net_wifi.c").read_text(encoding="utf-8")
+        ff_sleep_c = (root / "src" / "ff_sleep.c").read_text(encoding="utf-8")
+        basic_ino = (root / "examples" / "Basic" / "Basic.ino").read_text(encoding="utf-8")
+        basic_idf = (root / "examples" / "basic_idf" / "main" / "main.c").read_text(
+            encoding="utf-8"
+        )
+
+        # Pillar 2: Rotating secrets in NVS ff_sec + HTTPS /v1/device-secrets
+        assert "/v1/device-secrets" in ff_sec_c
+        assert "ff_get_secret" in ff_sec_c
+        assert "ff_sec_synced()" in ff_mqtt_c
+
+        # Pillar 3: OTel-compatible up/log + RTC_NOINIT_ATTR crash ring + sleep drain gate
+        assert "RTC_NOINIT_ATTR" in ff_log_c
+        assert "ff_log_drained()" in ff_sleep_c
+
+        # Pillar 4: NVS ff_net overlay + Improv Wi-Fi BLE GATT service
+        assert "00467768-6228-2272-4663-277478268000" in ff_wifi_c
+        assert "load_nvs_net_overlay" in ff_wifi_c
+        assert "IMPROV_BLE_WINDOW_S" in ff_wifi_c
+        assert "improv_ble_window_start" in ff_wifi_c
+
+        # Starter templates demonstrate both logf/ff_logf and getSecret/ff_get_secret
+        assert "Fleetforge.logf" in basic_ino
+        assert "Fleetforge.getSecret" in basic_ino
+        assert "ff_logf" in basic_idf
+        assert "ff_get_secret" in basic_idf

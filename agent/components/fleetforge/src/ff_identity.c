@@ -36,6 +36,7 @@
 #include "ff_marker.h"
 #include "ff_net_internal.h"
 #include "ff_safe_mode_internal.h"
+#include "ff_sec_internal.h"
 #include "ff_sleep_internal.h"
 #include "ff_store_internal.h"
 #include "mbedtls/sha256.h"
@@ -609,6 +610,10 @@ static cJSON *announce_object(const ff_cfg_t *cfg)
      * spec's example, so after `reset_reason` and before `lib_marker`, which stays last. */
     if (ff_safe_mode_active()) {
         cJSON_AddTrueToObject(root, "safe_mode");
+    }
+    const uint32_t sec_rev = ff_sec_rev();
+    if (sec_rev > 0) {
+        cJSON_AddNumberToObject(root, "secrets_rev", sec_rev);
     }
     /* R3-fw-6, spec/device-protocol.md -> up/announce `lib_marker`: the `format` of the
      * library marker in the RUNNING image, the last key. This read from another TU is what

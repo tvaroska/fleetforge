@@ -51,3 +51,25 @@ on device X?" and "roll back to tag v1.3" become first-class.
 | R11-FE-1 | Group policy config UI | P1 | 1d |
 
 **Done when:** you can continuous-deploy a dev fleet while prod stays manual. **v2 complete.**
+
+---
+
+## As built (`CI-CD-1` / `CUJ-2`, 2026-10-21)
+
+Pulled forward for the e-ink workflow (`CUJ-2`) across migration `0011_ci_cd_and_device_cfg.py`, backend routers (`artifacts.py`, `projects.py`, `devices.py`, `deploys.py`), CLI (`src/fleetforge/cli.py`), and the Builds/Fleet dashboard tabs:
+
+- **Artifact git provenance (`artifact_versions`)**:
+  - `POST /v1/artifact` accepts optional multipart fields `repo_url`, `branch`, `commit_sha` (`^[0-9a-fA-F]{7,40}$`, stored lowercase), `tag`, `build_url`, and `test_passed` (`bool`), persisted on `artifact_versions` and returned in `ArtifactUploadResponse` and `ArtifactVersionItem.provenance`.
+- **Project CI/CD tracking (`projects`)**:
+  - `projects` stores `repo_url`, `track_mode` (`off | branch | tag | commit`), `track_ref`, `auto_deploy_target` (`off | dev | all`), and `ci_webhook_url`.
+  - When `POST /v1/artifact` creates a version whose `test_passed` is not `False` and whose provenance matches `matches_project_tracking(project, provenance)`, `deploy_version_to_project_devices()` automatically stages the build to live project boards (`is_dev = true` when `auto_deploy_target = 'dev'`, or all live boards in the project when `auto_deploy_target = 'all'`) and returns `auto_deployed_devices` in the upload response.
+  - When `PATCH /v1/projects/{slug}` updates `track_mode` or `track_ref` (or when `POST /v1/projects/{slug}/deploy` is called explicitly), Fleetforge selects the newest matching `artifact_versions` row (`test_passed IS NOT FALSE`) and deploys it immediately; if no matching build exists yet and `ci_webhook_url` is configured, Fleetforge dispatches a best-effort JSON webhook (`{"event": "fleetforge.track_ref_changed", "project": slug, "repo_url": ..., "track_mode": ..., "track_ref": ...}`).
+- **Dev-board bench controls (`devices` + `dn/cfg`)**:
+  - `PATCH /v1/devices/{device_id}` updates `is_dev` and `stay_awake`. Changing `stay_awake` publishes retained `ff/v1/d/{device_id}/dn/cfg` (`{"stay_awake": bool, "secrets_rev": int}`, QoS 1) so a sleepy e-ink dev board stays awake on the bench during rapid CI iteration.
+- **CLI & GitHub Actions template**:
+  - `python -m fleetforge.cli push <bin> --target <chip> --version <ver> [--project <slug>] [--repo ...] [--branch ...] [--commit ...] [--tag ...] [--build-url ...] [--test-passed]` uploads a built binary with git provenance (auto-detecting `GITHUB_*` env vars when present).
+  - `python -m fleetforge.cli track --project <slug> --mode <off|branch|tag|commit> [--ref <ref>] [--target <off|dev|all>]` updates project tracking from the terminal.
+  - Ready-to-copy workflow template: `docs/examples/github-actions-fleetforge.yml`.
+- **Dashboard (`ContinuousDeploymentCard` + `UploadedBuilds` + `FleetView`)**:
+  - The `2. BUILDS` tab renders `ContinuousDeploymentCard` (`repo_url`, `track_mode`, `track_ref`, `auto_deploy_target`, `ci_webhook_url`, and `Deploy tracked ref now`) and provenance badges (`commit@branch`, `#tag`, `build` link, `CI PASS`/`CI FAIL`) in `UploadedBuilds`.
+  - The `1. FLEET` tab exposes `DEV` (`is_dev`) and `AWAKE` (`stay_awake`) toggles on each device row.

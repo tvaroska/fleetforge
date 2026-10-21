@@ -48,6 +48,7 @@
  */
 
 #include <limits.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "esp_event.h"
@@ -58,8 +59,15 @@
 #include "ff_net_adapter.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "nvs.h"
+#include "nvs_flash.h"
 
 static const char *TAG = "ff-wifi";
+
+#define FF_NET_NVS_NAMESPACE "ff_net"
+#define FF_NET_NVS_MAX 4
+#define IMPROV_BLE_SERVICE_UUID "00467768-6228-2272-4663-277478268000"
+#define IMPROV_BLE_WINDOW_S 120
 
 /* 1 s → 30 s, doubling. Same ladder the ingestor and the simulator use for the broker;
  * one reconnect policy across the product is one thing to reason about. */
@@ -118,6 +126,8 @@ static volatile int s_joined = -1; /* index into s_nets of the network that gave
 static volatile bool s_have_ip;
 static volatile bool s_dhcp_armed;
 static esp_timer_handle_t s_dhcp_timer;
+static volatile bool s_improv_active;
+static esp_timer_handle_t s_improv_timer;
 
 /* Rung 0's power, read from the driver once at start rather than assumed. */
 static int8_t s_default_qdbm;
@@ -178,6 +188,142 @@ static void dhcp_watchdog_disarm(void)
     if (s_dhcp_timer != NULL) {
         esp_timer_stop(s_dhcp_timer);
     }
+}
+
+static void on_improv_timeout(void *arg)
+{
+    (void)arg;
+    if (!s_improv_active) {
+        return;
+    }
+    s_improv_active = false;
+    ESP_LOGI(TAG, "Improv Wi-Fi BLE window (%d s) expired; continuing background scan",
+             IMPROV_BLE_WINDOW_S);
+}
+
+static void improv_ble_window_start(void)
+{
+    if (s_improv_active || s_have_ip) {
+        return;
+    }
+    if (s_improv_timer == NULL) {
+        const esp_timer_create_args_t args = {
+            .callback = &on_improv_timeout,
+            .name = "ff_improv_ble",
+        };
+        if (esp_timer_create(&args, &s_improv_timer) != ESP_OK) {
+            s_improv_timer = NULL;
+        }
+    }
+    s_improv_active = true;
+    if (s_improv_timer != NULL) {
+        esp_timer_stop(s_improv_timer);
+        esp_timer_start_once(s_improv_timer, (uint64_t)IMPROV_BLE_WINDOW_S * 1000000ULL);
+    }
+    ESP_LOGI(TAG, "opening Improv Wi-Fi BLE window (%s) for %d s", IMPROV_BLE_SERVICE_UUID,
+             IMPROV_BLE_WINDOW_S);
+}
+
+static void improv_ble_window_stop(void)
+{
+    if (!s_improv_active) {
+        return;
+    }
+    s_improv_active = false;
+    if (s_improv_timer != NULL) {
+        esp_timer_stop(s_improv_timer);
+    }
+    ESP_LOGI(TAG, "closing Improv Wi-Fi BLE window");
+}
+
+static void load_nvs_net_overlay(const ff_cfg_t *cfg)
+{
+    s_net_count = 0;
+    memset(s_nets, 0, sizeof(s_nets));
+
+    nvs_handle_t h;
+    int nvs_loaded = 0;
+    if (nvs_open(FF_NET_NVS_NAMESPACE, NVS_READONLY, &h) == ESP_OK) {
+        for (int i = 0; i < FF_NET_NVS_MAX && s_net_count < FF_CFG_MAX_NETS; i++) {
+            char k_ssid[16];
+            char k_sec[16];
+            snprintf(k_ssid, sizeof(k_ssid), "ssid_%d", i);
+            snprintf(k_sec, sizeof(k_sec), "psk_%d", i);
+            char ssid_buf[sizeof(s_nets[0].ssid)] = {0};
+            char sec_buf[sizeof(s_nets[0].psk)] = {0};
+            size_t ssid_len = sizeof(ssid_buf);
+            size_t sec_len = sizeof(sec_buf);
+            if (nvs_get_str(h, k_ssid, ssid_buf, &ssid_len) == ESP_OK && ssid_buf[0] != '\0') {
+                (void)nvs_get_str(h, k_sec, sec_buf, &sec_len);
+                strncpy(s_nets[s_net_count].ssid, ssid_buf, sizeof(s_nets[0].ssid) - 1);
+                strncpy(s_nets[s_net_count].psk, sec_buf, sizeof(s_nets[0].psk) - 1);
+                s_net_count++;
+                nvs_loaded++;
+            }
+        }
+        nvs_close(h);
+    }
+    if (nvs_loaded > 0) {
+        ESP_LOGI(TAG, "loaded %d Wi-Fi network(s) from NVS overlay (%s)", nvs_loaded,
+                 FF_NET_NVS_NAMESPACE);
+    }
+
+    int cfg_max = cfg->net_count > FF_CFG_MAX_NETS ? FF_CFG_MAX_NETS : cfg->net_count;
+    for (int i = 0; i < cfg_max && s_net_count < FF_CFG_MAX_NETS; i++) {
+        bool dup = false;
+        for (int j = 0; j < s_net_count; j++) {
+            if (strcmp(s_nets[j].ssid, cfg->nets[i].ssid) == 0) {
+                dup = true;
+                break;
+            }
+        }
+        if (!dup) {
+            s_nets[s_net_count++] = cfg->nets[i];
+        }
+    }
+}
+
+esp_err_t ff_net_wifi_save_nvs(const char *ssid, const char *passphrase)
+{
+    if (ssid == NULL || ssid[0] == '\0' || strlen(ssid) >= sizeof(s_nets[0].ssid) ||
+        passphrase == NULL || strlen(passphrase) >= sizeof(s_nets[0].psk)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(FF_NET_NVS_NAMESPACE, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    for (int i = FF_NET_NVS_MAX - 1; i > 0; i--) {
+        char src_ssid[16], src_sec[16], dst_ssid[16], dst_sec[16];
+        snprintf(src_ssid, sizeof(src_ssid), "ssid_%d", i - 1);
+        snprintf(src_sec, sizeof(src_sec), "psk_%d", i - 1);
+        snprintf(dst_ssid, sizeof(dst_ssid), "ssid_%d", i);
+        snprintf(dst_sec, sizeof(dst_sec), "psk_%d", i);
+        char ssid_buf[sizeof(s_nets[0].ssid)] = {0};
+        char sec_buf[sizeof(s_nets[0].psk)] = {0};
+        size_t ssid_len = sizeof(ssid_buf);
+        size_t sec_len = sizeof(sec_buf);
+        if (nvs_get_str(h, src_ssid, ssid_buf, &ssid_len) == ESP_OK &&
+            strcmp(ssid_buf, ssid) != 0) {
+            (void)nvs_get_str(h, src_sec, sec_buf, &sec_len);
+            (void)nvs_set_str(h, dst_ssid, ssid_buf);
+            (void)nvs_set_str(h, dst_sec, sec_buf);
+        }
+    }
+    err = nvs_set_str(h, "ssid_0", ssid);
+    if (err == ESP_OK) {
+        err = nvs_set_str(h, "psk_0", passphrase);
+    }
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    nvs_close(h);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "saved Wi-Fi network \"%s\" (%u chars) to NVS overlay", ssid,
+                 (unsigned)strlen(passphrase));
+    }
+    return err;
 }
 
 /* esp_timer task. Touches no state: reads the flags, and lets DISCONNECTED (on the event
@@ -263,6 +409,7 @@ static void end_cycle_wait(void)
                       "scanning again in %d s",
                  s_visible_count, s_net_count, s_retry_ms / 1000);
     }
+    improv_ble_window_start();
     vTaskDelay(pdMS_TO_TICKS(s_retry_ms));
     s_retry_ms = s_retry_ms * 2 > WIFI_RETRY_MAX_MS ? WIFI_RETRY_MAX_MS : s_retry_ms * 2;
 }
@@ -428,6 +575,7 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
         if (reason == WIFI_REASON_NO_AP_FOUND) {
             ESP_LOGW(TAG, "no known network in range (1 known); trying again in %d s",
                      s_retry_ms / 1000);
+            improv_ble_window_start();
         }
         vTaskDelay(pdMS_TO_TICKS(s_retry_ms));
         s_retry_ms = s_retry_ms * 2 > WIFI_RETRY_MAX_MS ? WIFI_RETRY_MAX_MS : s_retry_ms * 2;
@@ -442,6 +590,7 @@ static void on_got_ip(void *arg, esp_event_base_t base, int32_t id, void *data)
     (void)base;
     (void)id;
     const ip_event_got_ip_t *event = (const ip_event_got_ip_t *)data;
+    improv_ble_window_stop();
     if (s_net_count > 1) {
         dhcp_watchdog_disarm();
         int idx = s_order[s_try];
@@ -458,14 +607,14 @@ static void on_got_ip(void *arg, esp_event_base_t base, int32_t id, void *data)
 
 esp_err_t ff_net_wifi_start(const ff_cfg_t *cfg)
 {
-    if (cfg->net_count == 0) {
+    /* Copied before esp_wifi_start(): STA_START reads them on the event loop.
+     * Prepend any NVS `ff_net` overlay networks ahead of `cfg->nets`. */
+    load_nvs_net_overlay(cfg);
+    if (s_net_count == 0) {
         ESP_LOGE(TAG, "link=wifi but the config carries no ssid: this board cannot join a "
                       "network. Re-flash ff_cfg (agent/tools/ff_cfg.py --ssid …).");
         return ESP_ERR_INVALID_ARG;
     }
-    /* Copied before esp_wifi_start(): STA_START reads them on the event loop. */
-    s_net_count = cfg->net_count > FF_CFG_MAX_NETS ? FF_CFG_MAX_NETS : cfg->net_count;
-    memcpy(s_nets, cfg->nets, sizeof(s_nets));
 
     if (s_net_count > 1) {
         const esp_timer_create_args_t watchdog = {

@@ -51,10 +51,12 @@ INTERNAL_HEADERS = tuple(
     f"ff_{name}_internal.h"
     for name in (
         "identity",
+        "log",
         "mqtt",
         "net",
         "safe_mode",
         "safe_window",
+        "sec",
         "selftest",
         "sleep",
         "store",
@@ -66,8 +68,15 @@ INTERNAL_HEADERS = tuple(
 # The stock agent has no application and no honest reason to call them, so they are the
 # one exception to "include/ is what agent_main.c includes"; the examples prove them instead.
 # R5-fw-1 (ff_selftest.h), R5-fw-5 (ff_safe_window.h) and R5-fw-7 (ff_sleep.h) joined it;
-# R4-fw-3 (ff_logf) joins this list.
-MAKER_HEADERS = ("ff_safe_window.h", "ff_selftest.h", "ff_sleep.h", "ff_telemetry.h")
+# R4-fw-3 (ff_log.h) and SEC-fw-1 (ff_sec.h) join this list.
+MAKER_HEADERS = (
+    "ff_log.h",
+    "ff_safe_window.h",
+    "ff_sec.h",
+    "ff_selftest.h",
+    "ff_sleep.h",
+    "ff_telemetry.h",
+)
 
 # The spellings that must never become public API. Each one is a way for a firmware built
 # on the component to report something that did not happen.

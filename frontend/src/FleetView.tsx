@@ -275,6 +275,18 @@ function DeviceRow({
                 </button>
               </>
             )}
+            {device.secrets_rev !== undefined && device.secrets_rev !== null && (
+              <>
+                {' '}
+                <span
+                  className="badge muted"
+                  data-testid="device-secrets-rev"
+                  title={`Board synced project secrets revision ${device.secrets_rev}`}
+                >
+                  sec:r{device.secrets_rev}
+                </span>
+              </>
+            )}
           </div>
         )}
       </td>

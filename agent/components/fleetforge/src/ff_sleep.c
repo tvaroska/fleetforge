@@ -29,6 +29,7 @@
 
 #include "esp_log.h"
 #include "esp_ota_ops.h"
+#include "ff_log_internal.h"
 #include "ff_mqtt_internal.h"
 #include "ff_ota.h"
 #include "ff_telemetry_internal.h"
@@ -54,6 +55,7 @@ static const char BLOCK_IN_FLIGHT[] = "an update is in progress";
 static const char BLOCK_BOOT_ELSEWHERE[] = "a reset would boot another image";
 static const char BLOCK_UNCONFIRMED[] = "the running image is not confirmed";
 static const char BLOCK_TELEMETRY[] = "telemetry samples are not published yet";
+static const char BLOCK_LOG[] = "log lines are not published yet";
 
 esp_err_t ff_set_power_class(ff_power_class_t power_class, uint32_t wake_s)
 {
@@ -189,6 +191,9 @@ static const char *sleep_blocker(void)
     }
     if (!ff_telemetry_drained()) {
         return BLOCK_TELEMETRY;
+    }
+    if (!ff_log_drained()) {
+        return BLOCK_LOG;
     }
     return NULL;
 }

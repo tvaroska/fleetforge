@@ -34,6 +34,7 @@ Four orderings, each preventing a specific disaster:
 Nothing here logs the broker password, the token plaintext, or the secret half.
 """
 
+import hashlib
 import logging
 from typing import Annotated
 
@@ -165,6 +166,8 @@ async def enroll(
 
         group_id = row.group_id
         now = now_utc()
+        password = generate_broker_password()
+        password_hash = hashlib.sha256(password.encode("utf-8")).hexdigest()
 
         existing = await session.get(Device, device_id)
         if (
@@ -189,6 +192,7 @@ async def enroll(
                 identity={field: getattr(body, field) for field in IDENTITY_FIELDS},
                 enrolled_at=now,
                 project_id=row.project_id,
+                mqtt_password_hash=password_hash,
             )
         except IntegrityError:
             # The only FK the body can violate is `parent_device_id`. Check-then-insert
@@ -255,7 +259,6 @@ async def enroll(
         await session.commit()
 
     # Committed. Only now does a broker credential get created — see docstring (4).
-    password = generate_broker_password()
     try:
         provisioned = await provisioner.ensure_client(device_id, password)
     except BrokerProvisioningError as exc:

@@ -28,6 +28,7 @@ from fleetforge.api.routers.deploys import (
 )
 from fleetforge.api.schemas import (
     PROJECT_SLUG_PATTERN,
+    SECRET_KEY_PATTERN,
     USERNAME_PATTERN,
     ProjectCreate,
     ProjectDeployAccepted,
@@ -36,10 +37,23 @@ from fleetforge.api.schemas import (
     ProjectMemberList,
     ProjectMemberSummary,
     ProjectMemberUpsert,
+    ProjectSecretList,
+    ProjectSecretSummary,
+    ProjectSecretUpsert,
     ProjectSummary,
     ProjectUpdate,
 )
-from fleetforge.db.models import ArtifactVersion, Project, ProjectMember, ProjectRole, User
+from fleetforge.broker import CommandPublisher, CommandPublishError, cfg_payload
+from fleetforge.db.models import (
+    ArtifactVersion,
+    Device,
+    Project,
+    ProjectMember,
+    ProjectRole,
+    ProjectSecret,
+    User,
+)
+from fleetforge.secrets_crypto import encrypt_secret
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +84,8 @@ def _project_summary(
         ci_webhook_url=proj.ci_webhook_url,
         has_ci_webhook_header=bool(proj.ci_webhook_header),
         secrets_rev=proj.secrets_rev,
+        otel_endpoint=proj.otel_endpoint,
+        has_otel_headers=bool(proj.otel_headers),
         auto_deployed_devices=auto_deployed_devices,
         ci_webhook_triggered=ci_webhook_triggered,
         created_at=proj.created_at,
@@ -122,6 +138,7 @@ async def list_projects(admin: AdminDep, sessionmaker: SessionMakerDep) -> Proje
 async def create_project(
     body: ProjectCreate,
     admin: AdminDep,
+    settings: SettingsDep,
     sessionmaker: SessionMakerDep,
 ) -> ProjectSummary:
     """Create a project (`slug` is immutable once created)."""
@@ -139,6 +156,8 @@ async def create_project(
         auto_deploy_target=body.auto_deploy_target,
         ci_webhook_url=body.ci_webhook_url,
         ci_webhook_header=body.ci_webhook_header,
+        otel_endpoint=body.otel_endpoint,
+        otel_headers=encrypt_secret(body.otel_headers, settings) if body.otel_headers else None,
         created_at=now,
         updated_at=now,
     )
@@ -229,6 +248,12 @@ async def update_project(
             proj.ci_webhook_url = body.ci_webhook_url
         if "ci_webhook_header" in fields:
             proj.ci_webhook_header = body.ci_webhook_header
+        if "otel_endpoint" in fields:
+            proj.otel_endpoint = body.otel_endpoint
+        if "otel_headers" in fields:
+            proj.otel_headers = (
+                encrypt_secret(body.otel_headers, settings) if body.otel_headers else None
+            )
         proj.updated_at = now_utc()
         await session.commit()
 
@@ -482,3 +507,175 @@ async def remove_project_member(
                 )
         await session.delete(existing)
         await session.commit()
+
+
+async def _publish_project_cfg(
+    sessionmaker: SessionMakerDep,
+    publisher: CommandPublisher,
+    project_id: object,
+    secrets_rev: int,
+) -> None:
+    """Best-effort publish retained `dn/cfg` to all active boards in `project_id`."""
+    async with sessionmaker() as session:
+        devices = (
+            await session.scalars(
+                select(Device).where(
+                    Device.project_id == project_id,
+                    Device.decommissioned_at.is_(None),
+                )
+            )
+        ).all()
+    for dev in devices:
+        try:
+            await publisher.publish_cfg(
+                dev.device_id,
+                cfg_payload(secrets_rev=secrets_rev, stay_awake=dev.stay_awake),
+            )
+        except CommandPublishError:
+            logger.warning(
+                "dn/cfg publish skipped or failed for %s (secrets_rev=%d)",
+                dev.device_id,
+                secrets_rev,
+            )
+
+
+@router.get(
+    "/{slug}/secrets",
+    response_model=ProjectSecretList,
+    summary="List rotating secret keys configured on a project (values are never returned)",
+)
+async def list_project_secrets(
+    slug: str = Path(pattern=PROJECT_SLUG_PATTERN),
+    *,
+    admin: AdminDep,
+    sessionmaker: SessionMakerDep,
+) -> ProjectSecretList:
+    """List secret keys and timestamps on `slug` (requires project `viewer` or higher)."""
+    async with sessionmaker() as session:
+        proj = await resolve_project_for_request(
+            session, admin, slug, min_role=ProjectRole.VIEWER, required_scope="read"
+        )
+        rows = (
+            await session.scalars(
+                select(ProjectSecret)
+                .where(ProjectSecret.project_id == proj.id)
+                .order_by(ProjectSecret.key)
+            )
+        ).all()
+        return ProjectSecretList(
+            secrets_rev=proj.secrets_rev,
+            secrets=[ProjectSecretSummary(key=r.key, updated_at=r.updated_at) for r in rows],
+        )
+
+
+@router.put(
+    "/{slug}/secrets/{key}",
+    response_model=ProjectSecretList,
+    summary="Create or rotate a project secret and broadcast the bumped secrets_rev on dn/cfg",
+)
+async def upsert_project_secret(
+    slug: str = Path(pattern=PROJECT_SLUG_PATTERN),
+    key: str = Path(pattern=SECRET_KEY_PATTERN),
+    *,
+    body: ProjectSecretUpsert,
+    admin: AdminDep,
+    settings: SettingsDep,
+    sessionmaker: SessionMakerDep,
+    publisher: CommandPublisherDep,
+) -> ProjectSecretList:
+    """Encrypt and store `key` on `slug`, bump `secrets_rev`, and publish retained `dn/cfg`."""
+    async with sessionmaker() as session:
+        proj = await resolve_project_for_request(
+            session,
+            admin,
+            slug,
+            min_role=ProjectRole.OPERATOR,
+            required_scope="deploy",
+        )
+        now = now_utc()
+        ciphertext = encrypt_secret(body.value, settings)
+        existing = await session.get(ProjectSecret, (proj.id, key))
+        if existing is not None:
+            existing.ciphertext = ciphertext
+            existing.updated_at = now
+        else:
+            session.add(
+                ProjectSecret(
+                    project_id=proj.id,
+                    key=key,
+                    ciphertext=ciphertext,
+                    updated_at=now,
+                )
+            )
+        proj.secrets_rev = (proj.secrets_rev or 0) + 1
+        proj.updated_at = now
+        await session.commit()
+
+        rows = (
+            await session.scalars(
+                select(ProjectSecret)
+                .where(ProjectSecret.project_id == proj.id)
+                .order_by(ProjectSecret.key)
+            )
+        ).all()
+        rev = proj.secrets_rev
+        pid = proj.id
+        summary = ProjectSecretList(
+            secrets_rev=rev,
+            secrets=[ProjectSecretSummary(key=r.key, updated_at=r.updated_at) for r in rows],
+        )
+
+    await _publish_project_cfg(sessionmaker, publisher, pid, rev)
+    return summary
+
+
+@router.delete(
+    "/{slug}/secrets/{key}",
+    response_model=ProjectSecretList,
+    summary="Delete a project secret and broadcast the bumped secrets_rev on dn/cfg",
+)
+async def delete_project_secret(
+    slug: str = Path(pattern=PROJECT_SLUG_PATTERN),
+    key: str = Path(pattern=SECRET_KEY_PATTERN),
+    *,
+    admin: AdminDep,
+    sessionmaker: SessionMakerDep,
+    publisher: CommandPublisherDep,
+) -> ProjectSecretList:
+    """Remove `key` from `slug`, bump `secrets_rev`, and publish retained `dn/cfg`."""
+    async with sessionmaker() as session:
+        proj = await resolve_project_for_request(
+            session,
+            admin,
+            slug,
+            min_role=ProjectRole.OPERATOR,
+            required_scope="deploy",
+        )
+        existing = await session.get(ProjectSecret, (proj.id, key))
+        if existing is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"secret {key!r} not found in project {slug!r}",
+            )
+        now = now_utc()
+        await session.delete(existing)
+        proj.secrets_rev = (proj.secrets_rev or 0) + 1
+        proj.updated_at = now
+        await session.commit()
+
+        rows = (
+            await session.scalars(
+                select(ProjectSecret)
+                .where(ProjectSecret.project_id == proj.id)
+                .order_by(ProjectSecret.key)
+            )
+        ).all()
+        rev = proj.secrets_rev
+        pid = proj.id
+        summary = ProjectSecretList(
+            secrets_rev=rev,
+            secrets=[ProjectSecretSummary(key=r.key, updated_at=r.updated_at) for r in rows],
+        )
+
+    await _publish_project_cfg(sessionmaker, publisher, pid, rev)
+    return summary

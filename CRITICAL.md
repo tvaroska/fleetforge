@@ -26,6 +26,7 @@ exists to delete. The first two rows below are that class of mistake.
 | Enrollment token issuance & burn (`R0-be-2`, `R0-be-4`) | A token that fails to burn lets anyone with one board enroll arbitrary devices into the fleet. |
 | Admin auth (token table, login, cookie flags) | Single admin credential on a public-facing API. Bypass = full fleet control. |
 | Artifact signing keys & `signed_url` generation | Signature *is* the authorization for artifact download. Signing keys are what make R6's verification meaningful. |
+| Project secrets encryption & device secret pull (`src/fleetforge/secrets_crypto.py`, `src/fleetforge/api/routers/project_secrets.py`, `src/fleetforge/api/routers/device_secrets.py`, `SECRET_ENCRYPTION_KEY`) | Encrypts rotating project secrets (`project_secrets`) at rest and serves them over HTTPS (`GET /v1/device-secrets`) to boards presenting their per-device MQTT credential (`devices.mqtt_password_hash`). Key loss or auth bypass exposes external API keys across the project's fleet. |
 | Alembic migrations (`alembic/versions/`) | Irreversible schema/data changes. |
 | Traefik entrypoints / TCP router (in the `services` repo) | Shared ingress. A change here affects every other app on the host, not just fleetforge. |
 | Secrets / env (`.env*`, GCS service-account key, broker credentials) | Never commit real values. Prod env lives in `services/prod/.env` — confirm before changing. |
