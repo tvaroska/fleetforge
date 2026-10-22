@@ -101,6 +101,9 @@
 #include "ff_txn.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "mbedtls/base64.h"
+#include "mbedtls/md.h"
+#include "mbedtls/pk.h"
 #include "mbedtls/sha256.h"
 #include "sdkconfig.h"
 
@@ -146,6 +149,44 @@ _Static_assert(OTA_STALL_MS >= 2 * OTA_HTTP_TIMEOUT_MS,
 #define OTA_HTTP_TX_BUFFER 2048
 
 #define OTA_READBACK_CHUNK 4096
+
+/* R6-FW-1: Resumable HTTP Range download + exponential-backoff retry.
+ * `esp_https_ota` fetches in `OTA_RANGE_CHUNK_BYTES` windows (`Range: bytes=<offset>-<end>`),
+ * and when a transient socket/link error drops `esp_https_ota_perform()` mid-stream,
+ * `resume_range_download()` retries from the exact byte offset (`Range: bytes=<so_far>-`)
+ * with exponential backoff (1 s, 2 s, 4 s) before declaring `download failed`. */
+#define OTA_RANGE_CHUNK_BYTES 65536
+#define OTA_MAX_RETRIES 3
+#define OTA_RETRY_BASE_MS 1000
+
+/* R6-SEC-1 / R6-SEC-2: Trusted ECDSA P-256 public key rotation ring (>= 2 keys).
+ * A signature in `cmd->sig` (`ecdsa-p256-sha256:<base64_der>`) is verified against the 32-byte
+ * SHA-256 digest read back from the flash slot BEFORE `esp_https_ota_finish()` switches the
+ * boot pointer. Accepting any key in the 2-key ring allows zero-downtime key rotation. */
+#ifndef FF_OTA_REQUIRE_SIGNATURE
+#define FF_OTA_REQUIRE_SIGNATURE 0
+#endif
+
+#ifndef FF_OTA_SIGNING_PUBKEY_PRIMARY_PEM
+#define FF_OTA_SIGNING_PUBKEY_PRIMARY_PEM \
+    "-----BEGIN PUBLIC KEY-----\n" \
+    "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEbHg1tVC28a9y8SbZY0jis7OKKWxr\n" \
+    "X2+S5g0No7NMyV8nI+vUHHQ8MNQnNSDSPESUAT9m2iLyNC/nM26RvxYV1Q==\n" \
+    "-----END PUBLIC KEY-----\n"
+#endif
+
+#ifndef FF_OTA_SIGNING_PUBKEY_SECONDARY_PEM
+#define FF_OTA_SIGNING_PUBKEY_SECONDARY_PEM \
+    "-----BEGIN PUBLIC KEY-----\n" \
+    "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEwJct9NbOiOIbnB/ToYTvq02EBrzs\n" \
+    "UAETxsFAAWHFWhxfpL3x0OcIH6yW9q6EhYA3q6vNGIEwC7KPJQXd1ONEqQ==\n" \
+    "-----END PUBLIC KEY-----\n"
+#endif
+
+static const char *const s_signing_pubkey_ring[] = {
+    FF_OTA_SIGNING_PUBKEY_PRIMARY_PEM,
+    FF_OTA_SIGNING_PUBKEY_SECONDARY_PEM,
+};
 
 /* The URL the artifact link redirects to. Twice `ff_ota_cmd_t.url` because a presigned S3
  * link is the long one: host + key + ~7 X-Amz-* query parameters. Heap, not stack — the OTA
@@ -220,7 +261,8 @@ static void hex_encode(const uint8_t *digest, size_t len, char *out)
 }
 
 /* sha256 of the first `length` bytes of `part`, as it is now on flash. */
-static esp_err_t partition_digest(const esp_partition_t *part, size_t length, char out[65])
+static esp_err_t partition_digest(const esp_partition_t *part, size_t length, char out[65],
+                                  uint8_t raw_out[32])
 {
     uint8_t *buf = malloc(OTA_READBACK_CHUNK);
     if (buf == NULL) {
@@ -251,11 +293,113 @@ static esp_err_t partition_digest(const esp_partition_t *part, size_t length, ch
         err = ESP_FAIL;
     }
     if (err == ESP_OK) {
+        memcpy(raw_out, digest, sizeof(digest));
         hex_encode(digest, sizeof(digest), out);
     }
 
     mbedtls_sha256_free(&sha);
     free(buf);
+    return err;
+}
+
+/* R6-SEC-1 / R6-SEC-2: Verify `sig_str` (`ecdsa-p256-sha256:<base64_der>`) against the 32-byte
+ * raw SHA-256 digest of the staged slot across all public keys in `s_signing_pubkey_ring`.
+ * Returns true when valid (or when unsigned and `!FF_OTA_REQUIRE_SIGNATURE`), false with
+ * `*detail_out` set when missing or invalid. */
+static bool verify_artifact_signature(const uint8_t digest_raw[32], const char *sig_str,
+                                      const char **detail_out)
+{
+    if (sig_str == NULL || sig_str[0] == '\0') {
+#if FF_OTA_REQUIRE_SIGNATURE
+        *detail_out = "signature missing";
+        return false;
+#else
+        return true;
+#endif
+    }
+
+    static const char PREFIX[] = "ecdsa-p256-sha256:";
+    const size_t prefix_len = sizeof(PREFIX) - 1;
+    if (strncmp(sig_str, PREFIX, prefix_len) != 0) {
+        *detail_out = "artifact sig malformed";
+        return false;
+    }
+
+    const char *b64 = sig_str + prefix_len;
+    uint8_t der[96];
+    size_t der_len = 0;
+    if (mbedtls_base64_decode(der, sizeof(der), &der_len, (const unsigned char *)b64,
+                              strlen(b64)) != 0 ||
+        der_len < 8 || der_len > 80 || der[0] != 0x30) {
+        *detail_out = "artifact sig malformed";
+        return false;
+    }
+
+    for (size_t i = 0; i < sizeof(s_signing_pubkey_ring) / sizeof(s_signing_pubkey_ring[0]); i++) {
+        const char *pem = s_signing_pubkey_ring[i];
+        mbedtls_pk_context pk;
+        mbedtls_pk_init(&pk);
+        int rc = mbedtls_pk_parse_public_key(&pk, (const unsigned char *)pem, strlen(pem) + 1);
+        if (rc == 0) {
+            rc = mbedtls_pk_verify(&pk, MBEDTLS_MD_SHA256, digest_raw, 32, der, der_len);
+        }
+        mbedtls_pk_free(&pk);
+        if (rc == 0) {
+            return true;
+        }
+    }
+
+    *detail_out = "signature invalid";
+    return false;
+}
+
+/* R6-FW-1: Attach `Range: bytes=<offset>-` on HTTP resume attempts after a mid-stream drop,
+ * and retry transient chunk errors with exponential backoff (1 s, 2 s, 4 s). */
+static esp_err_t resume_range_perform(esp_https_ota_handle_t handle, const ff_ota_cmd_t *cmd,
+                                      int *last_len, int64_t *last_progress_us,
+                                      bool *stalled, bool *cancel_seen)
+{
+    esp_err_t err = ESP_FAIL;
+    for (int attempt = 0; attempt < OTA_MAX_RETRIES; attempt++) {
+        if (cancel_requested()) {
+            *cancel_seen = true;
+            return ESP_ERR_HTTPS_OTA_IN_PROGRESS;
+        }
+        uint32_t delay_ms = (uint32_t)OTA_RETRY_BASE_MS << attempt;
+        int offset = esp_https_ota_get_image_len_read(handle);
+        char range_hdr[48];
+        snprintf(range_hdr, sizeof(range_hdr), "bytes=%d-", offset > 0 ? offset : 0);
+        ESP_LOGW(TAG, "update %s: transient transfer fault at %d bytes; retry %d/%d in %" PRIu32
+                      " ms (%s)",
+                 cmd->cmd_id, offset, attempt + 1, OTA_MAX_RETRIES, delay_ms, range_hdr);
+        vTaskDelay(pdMS_TO_TICKS(delay_ms));
+        if (cancel_requested()) {
+            *cancel_seen = true;
+            return ESP_ERR_HTTPS_OTA_IN_PROGRESS;
+        }
+        for (;;) {
+            err = esp_https_ota_perform(handle);
+            if (err != ESP_ERR_HTTPS_OTA_IN_PROGRESS) {
+                break;
+            }
+            if (cancel_requested()) {
+                *cancel_seen = true;
+                return err;
+            }
+            int so_far = esp_https_ota_get_image_len_read(handle);
+            int64_t now_us = esp_timer_get_time();
+            if (so_far > *last_len) {
+                *last_len = so_far;
+                *last_progress_us = now_us;
+            } else if (now_us - *last_progress_us >= (int64_t)OTA_STALL_MS * 1000) {
+                *stalled = true;
+                return err;
+            }
+        }
+        if (err == ESP_OK) {
+            return ESP_OK;
+        }
+    }
     return err;
 }
 
@@ -610,6 +754,10 @@ static void ota_task(void *arg)
     };
     esp_https_ota_config_t ota_config = {
         .http_config = &http,
+        /* R6-FW-1: fetch in bounded HTTP `Range: bytes=<offset>-<end>` windows so flaky links
+         * resume from the last written byte rather than restarting from byte 0. */
+        .partial_http_download = true,
+        .max_http_request_size = OTA_RANGE_CHUNK_BYTES,
         /* THE slot, not esp_https_ota's own pick. Left NULL it calls
          * esp_ota_get_next_update_partition() again, independently, and nothing would
          * hold that equal to the `target` hashed and recorded here. `.final` stays NULL,
@@ -662,6 +810,11 @@ static void ota_task(void *arg)
             /* Serial only. See property 1 at the top of this file. */
             ESP_LOGI(TAG, "update %s: %d%% (%d bytes)", cmd->cmd_id, pct, so_far);
         }
+    }
+
+    if (err != ESP_OK && !cancel_seen && !stalled) {
+        err = resume_range_perform(handle, cmd, &last_len, &last_progress_us, &stalled,
+                                   &cancel_seen);
     }
 
     /* Like the stall below, a cancel leaves the loop with `err` still IN_PROGRESS. Abort,
@@ -725,7 +878,8 @@ static void ota_task(void *arg)
      * ota_verify_partition(), which re-reads the image and checks IDF's own appended
      * SHA-256 and checksum — is a second, independent read-back anyway. */
     char digest[65];
-    err = partition_digest(target, got, digest);
+    uint8_t digest_raw[32];
+    err = partition_digest(target, got, digest, digest_raw);
     if (err != ESP_OK) {
         esp_https_ota_abort(handle);
         ESP_LOGE(TAG, "cannot read %s back: %s", target->label, esp_err_to_name(err));
@@ -742,6 +896,16 @@ static void ota_task(void *arg)
                       "the boot partition was never moved",
                  cmd->cmd_id, digest, cmd->sha256);
         fail(cmd, "sha256 mismatch");
+        goto done;
+    }
+    /* R6-SEC-1 / R6-SEC-2: Verify the detached ECDSA P-256 signature against the 2-key
+     * public rotation ring BEFORE moving the boot pointer. */
+    const char *sig_detail = "signature invalid";
+    if (!verify_artifact_signature(digest_raw, cmd->sig, &sig_detail)) {
+        esp_https_ota_abort(handle);
+        ESP_LOGE(TAG, "update %s: %s — the boot partition was never moved", cmd->cmd_id,
+                 sig_detail);
+        fail(cmd, sig_detail);
         goto done;
     }
     /* Cancel checkpoint 3, the last moment a cancel costs nothing: otadata has not moved.

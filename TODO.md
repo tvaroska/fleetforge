@@ -542,7 +542,7 @@ Order: spec-1 (any time) · fw-1 → be-1 → fe-1 → test-1 · be-2 · fw-3 �
 
 ### Test
 
-- [ ] **R4-test-1**: A metric and a log line emitted on a device reach the dashboard live (P0, 0.5d)
+- [x] **R4-test-1**: A metric and a log line emitted on a device reach the dashboard live (P0, 0.5d) _(done 2026-10-22; `TestR4LiveTelemetryAndLogsToDashboard` in `tests/test_r6_security_and_kpis.py` verifies `up/telemetry` + `up/log` -> ingestor -> `GET /v1/devices`, `GET /v1/devices/{id}/telemetry`, `GET /v1/devices/{id}/logs` + `EventType.DEVICE_UPDATED` SSE hints)_
       Simulator and QEMU, no bench. Depends on R4-fw-2, R4-fw-3, R4-be-1, R4-fe-1.
       Added: 2026-10-15
 
@@ -658,3 +658,22 @@ Opened 2026-10-20. Targets the high-priority e-ink project workflow (`spec/cujs.
 - [x] **WIFI-BLE-fw-1**: NVS `ff_net` network overlay & bounded Improv BLE GATT service (P1, 2d) _(done 2026-10-21; `ff_net_wifi.c` NVS `ff_net` overlay ahead of `ff_cfg` + bounded 120 s Improv Wi-Fi over BLE `00467768-6228-2272-4663-277478268000` advertising window)_
       Layer writable NVS `ff_net` (up to 4 SSIDs) ahead of `ff_cfg` in `ff_net_wifi.c`, and advertise the standard Improv Wi-Fi BLE service (`00467768-6228-2272-4663-277478268000`) for a bounded 120 s window when all known networks fail to associate on boot/wake.
       Added: 2026-10-20
+
+---
+
+## R6: Signed OTA + Resumable Hardening (→ v1 complete)
+
+Opened 2026-10-22. Closes V1 (`R0`–`R6`): app-level ECDSA P-256 firmware signature verification (`ecdsa-p256-sha256:<base64_der>`) before apply, >=2-key public rotation ring, resumable HTTP `Range: bytes=<offset>-` downloads with exponential backoff, and both V1 KPIs (`Delivery success >= 90%`, `Fleet safety = 100%`) surfaced in the API and dashboard. Plan substance: [docs/features/security-hardening.md](docs/features/security-hardening.md).
+
+- [x] **R6-SEC-1**: Firmware signing: sign artifacts server-side or verify detached `sig`; agent and simulator check signature before apply (P0, 2d) _(done 2026-10-22; `src/fleetforge/signing.py`, `alembic/versions/0012_artifact_sig.py`, `POST /v1/artifact?sig=...` + optional `ARTIFACT_SIGNING_KEY` auto-sign, `stage_payload(..., sig=...)`, `deploy_precheck` `artifact_unsigned` warning, `ff_mqtt.c::is_valid_artifact_sig`, `ff_ota.c::verify_artifact_signature`, `simulator/device.py::_verify_artifact_sig`)_
+      Added: 2026-10-22
+- [x] **R6-SEC-2**: Signing-key management: generation, storage, >=2-key rotation ring, CLI (`python -m fleetforge.signing keygen|sign|verify`, `just signing-key`), docs + defaults (P1, 1d) _(done 2026-10-22; 2-key rotation ring `DEFAULT_PUBLIC_KEY_RING` across `signing.py`, `simulator/device.py`, and `ff_ota.c::s_signing_pubkey_ring`, configurable via `ARTIFACT_SIGNING_PUBLIC_KEYS` and `ARTIFACT_SIGNING_KEY`)_
+      Added: 2026-10-22
+- [x] **R6-FW-1**: Resumable download (`Range: bytes=<offset>-`), retry + exponential backoff (P0, 1.5d) _(done 2026-10-22; `ff_ota.c` `.partial_http_download = true`, `.max_http_request_size = OTA_RANGE_CHUNK_BYTES`, and `resume_range_perform()` with 1 s / 2 s / 4 s exponential backoff; `simulator/device.py::_fetch` HTTP `Range` resume on mid-stream link drop)_
+      Added: 2026-10-22
+- [x] **R6-BE-1**: Surface both KPIs from the `deploy_events` history recorded since R1 (P0, 1d) _(done 2026-10-22; `DeployKpis` and `deploy_kpis()` in `src/fleetforge/deploys.py` + `GET /v1/devices/kpis` in `src/fleetforge/api/routers/deploys.py`)_
+      Added: 2026-10-22
+- [x] **R6-FE-1**: Dashboard KPI view (`DeployKpiStrip` showing delivery success vs. fleet safety and the rollback-saves gap, plus `✓ signed` build badge) (P0, 1d) _(done 2026-10-22; `frontend/src/FleetView.tsx`, `frontend/src/Dashboard.tsx`, `frontend/src/api.ts`, `frontend/src/FleetView.test.tsx`)_
+      Added: 2026-10-22
+- [x] **R6-TEST-1**: E2E verification: unsigned/tampered/malformed artifact rejected, primary + secondary rotation-ring keys verified, interrupted download resumed via HTTP `Range`, and KPIs verified (P0, 1d) _(done 2026-10-22; `tests/test_r6_security_and_kpis.py`, 19/19 tests passing)_
+      Added: 2026-10-22

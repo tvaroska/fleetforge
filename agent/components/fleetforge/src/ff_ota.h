@@ -52,6 +52,9 @@ extern "C" {
 /* A `stage` command, already parsed. Deliberately a plain C struct and not cJSON: the
  * command seam is `ff_mqtt.c::on_command()`, which is the single place the wire JSON is
  * interpreted, and ff_ota never sees a cJSON object or builds a topic string. */
+/* R6-SEC-1: detached ECDSA P-256 signature (`ecdsa-p256-sha256:<base64_der>`). */
+#define FF_OTA_MAX_SIG 160
+
 typedef struct {
     char cmd_id[64];
     /* The signed download link (spec/device-protocol.md → `dn/cmd`). It is a BEARER
@@ -62,6 +65,7 @@ typedef struct {
      * `esp_http_client` rebuilds the request line from it. */
     char url[512];
     char sha256[65];        /* lowercase hex, 64 chars + NUL */
+    char sig[FF_OTA_MAX_SIG]; /* R6-SEC-1: ecdsa-p256-sha256:<base64>, or empty when unsigned */
     size_t size;            /* bytes, from the command; 0 = the server did not say */
     char version[32];       /* the artifact's version, for the log only */
     bool apply_now;         /* false only for `apply: "on_command"` */

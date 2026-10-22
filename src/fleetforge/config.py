@@ -315,6 +315,14 @@ class Settings(BaseSettings):
     otel_exporter_otlp_endpoint: str | None = None
     otel_exporter_otlp_headers: str | None = None
 
+    # --- Firmware artifact signing & key rotation ring (R6-SEC-1, R6-SEC-2) ---
+    # Optional active ECDSA P-256 private key (PEM or base64-encoded PEM) used by
+    # `POST /v1/artifact` to auto-sign uploaded firmware images when no detached `?sig=` is
+    # passed, and optional `;`- or PEM-block-separated public key rotation ring (>=2 P-256
+    # public keys; defaults to `signing.DEFAULT_PUBLIC_KEY_RING`).
+    artifact_signing_key: str | None = None
+    artifact_signing_public_keys: str | None = None
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:

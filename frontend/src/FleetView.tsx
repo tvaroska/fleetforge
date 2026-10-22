@@ -25,7 +25,14 @@
 // reset is a boxed bold word, not a tint: the theme is monochrome and state is never
 // carried by colour alone.
 
-import { ApiError, api, type ArrivalSummary, type ArtifactSummary, type DeviceSummary } from './api'
+import {
+  ApiError,
+  api,
+  type ArrivalSummary,
+  type ArtifactSummary,
+  type DeployKpisSummary,
+  type DeviceSummary,
+} from './api'
 import { DeployCell } from './DeployCell'
 import { useArtifacts, type Artifacts } from './deploy'
 import { STAGE_LABELS, useFleet, type Fleet, type EventSourceFactory } from './fleet'
@@ -341,6 +348,87 @@ function ArrivalRow({ arrival, now }: { arrival: ArrivalSummary; now: number }) 
   )
 }
 
+function computeKpisFromDevices(devices: DeviceSummary[]): DeployKpisSummary | null {
+  let confirmed = 0
+  let rolledBack = 0
+  let failed = 0
+  let cancelled = 0
+  let inFlight = 0
+
+  for (const d of devices) {
+    if (!d.deploy) continue
+    if (!d.deploy.is_terminal) {
+      inFlight += 1
+      continue
+    }
+    if (d.deploy.state === 'cancelled') {
+      cancelled += 1
+    } else if (d.deploy.state === 'confirmed') {
+      confirmed += 1
+    } else if (d.deploy.state === 'rolled_back') {
+      rolledBack += 1
+    } else {
+      failed += 1
+    }
+  }
+
+  const total = confirmed + rolledBack + failed
+  if (total === 0) return null
+  const deliveryPct = Math.round((confirmed / total) * 1000) / 10
+  const safetyPct = Math.round(((confirmed + rolledBack) / total) * 1000) / 10
+  const gapPct = Math.round((rolledBack / total) * 1000) / 10
+  return {
+    total_completed: total,
+    confirmed,
+    rolled_back: rolledBack,
+    failed,
+    cancelled,
+    in_flight: inFlight,
+    delivery_success_pct: deliveryPct,
+    fleet_safety_pct: safetyPct,
+    safety_gap_pct: gapPct,
+    delivery_target_pct: 90,
+    safety_target_pct: 100,
+    delivery_target_met: confirmed * 100 >= total * 90,
+    safety_target_met: confirmed + rolledBack === total,
+  }
+}
+
+function DeployKpiStrip({ kpis }: { kpis: DeployKpisSummary | null }) {
+  if (kpis === null || kpis.total_completed === 0) return null
+  const deliveryMet = kpis.delivery_target_met ?? false
+  const safetyMet = kpis.safety_target_met ?? false
+  return (
+    <div className="kpi-strip muted" data-testid="deploy-kpis">
+      <span data-testid="kpi-delivery">
+        Delivery success:{' '}
+        <strong className={deliveryMet ? 'ok' : 'warn'}>
+          {kpis.delivery_success_pct?.toFixed(1)}%
+        </strong>{' '}
+        ({kpis.confirmed}/{kpis.total_completed} confirmed · target &ge;{kpis.delivery_target_pct}%)
+      </span>
+      {' · '}
+      <span data-testid="kpi-safety">
+        Fleet safety:{' '}
+        <strong className={safetyMet ? 'ok' : 'bad'}>
+          {kpis.fleet_safety_pct?.toFixed(1)}%
+        </strong>{' '}
+        ({kpis.confirmed + kpis.rolled_back}/{kpis.total_completed} safe · target{' '}
+        {kpis.safety_target_pct}%)
+      </span>
+      {kpis.rolled_back > 0 && (
+        <>
+          {' · '}
+          <span data-testid="kpi-rollback-saves">
+            Rollback saves: <strong>{kpis.rolled_back}</strong> (
+            {kpis.safety_gap_pct?.toFixed(1)}% caught &amp; returned to previous slot)
+          </span>
+        </>
+      )}
+    </div>
+  )
+}
+
 // One read of the artifact list for the whole table, not one per row. It is read once on
 // mount and never polled — see `deploy.ts`.
 export function FleetView({
@@ -372,6 +460,7 @@ export function FleetTable({
   versions = null,
   onGoToOnboard,
   onGoToBuilds,
+  kpis = null,
 }: {
   fleet: Fleet
   artifacts: Artifacts
@@ -382,8 +471,10 @@ export function FleetTable({
   versions?: VersionLine | null
   onGoToOnboard?: () => void
   onGoToBuilds?: () => void
+  kpis?: DeployKpisSummary | null
 }) {
   const { devices, arrivals, error, stream, now, refresh } = fleet
+  const effectiveKpis = kpis ?? (devices !== null ? computeKpisFromDevices(devices) : null)
 
   return (
     <section className="console-card" aria-labelledby="fleet-heading">
@@ -488,7 +579,9 @@ export function FleetTable({
           )}
         </div>
       ) : (
-        <table>
+        <>
+          <DeployKpiStrip kpis={effectiveKpis} />
+          <table>
           <thead>
             <tr>
               <th scope="col">Status</th>
@@ -521,6 +614,7 @@ export function FleetTable({
             ))}
           </tbody>
         </table>
+        </>
       )}
     </section>
   )

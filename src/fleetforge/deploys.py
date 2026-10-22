@@ -94,6 +94,7 @@ it. SQL about `deploy_events` belongs to this module, not to a router.
 import datetime as dt
 import logging
 import re
+import uuid
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -765,3 +766,168 @@ async def latest_deploys(
             selftest=selftest_outcome(row.state, detail),
         )
     return snapshots
+
+
+# R6-BE-1: Both v1 KPIs (`Delivery success >= 90%`, `Fleet safety = 100%`) computed over the
+# terminal event of each server-initiated `(device_id, cmd_id)` transaction (`requested` row).
+# Includes soft-deleted (`decommissioned_at IS NOT NULL`) devices on purpose: `test_invariants.py`
+# enforces `ON DELETE RESTRICT` on `deploy_events` specifically so a retired device's KPI
+# evidence survives forever.
+_KPI_TRANSACTIONS_ALL_SQL = text(
+    """
+    WITH requested_txns AS (
+        SELECT DISTINCT ON (requested.device_id, requested.cmd_id)
+               requested.device_id,
+               requested.cmd_id
+          FROM deploy_events AS requested
+         WHERE requested.state = :requested_state
+           AND requested.cmd_id IS NOT NULL
+         ORDER BY requested.device_id, requested.cmd_id, requested.at DESC, requested.id DESC
+    )
+    SELECT r.device_id,
+           r.cmd_id,
+           (SELECT e.state
+              FROM deploy_events AS e
+             WHERE e.device_id = r.device_id
+               AND e.cmd_id = r.cmd_id
+               AND e.is_terminal
+             ORDER BY e.at ASC, e.id ASC
+             LIMIT 1) AS ended_state
+      FROM requested_txns AS r
+    """
+)
+
+_KPI_TRANSACTIONS_PROJECT_SQL = text(
+    """
+    WITH requested_txns AS (
+        SELECT DISTINCT ON (requested.device_id, requested.cmd_id)
+               requested.device_id,
+               requested.cmd_id
+          FROM deploy_events AS requested
+          JOIN devices AS d ON d.device_id = requested.device_id
+         WHERE requested.state = :requested_state
+           AND requested.cmd_id IS NOT NULL
+           AND d.project_id = :project_id
+         ORDER BY requested.device_id, requested.cmd_id, requested.at DESC, requested.id DESC
+    )
+    SELECT r.device_id,
+           r.cmd_id,
+           (SELECT e.state
+              FROM deploy_events AS e
+             WHERE e.device_id = r.device_id
+               AND e.cmd_id = r.cmd_id
+               AND e.is_terminal
+             ORDER BY e.at ASC, e.id ASC
+             LIMIT 1) AS ended_state
+      FROM requested_txns AS r
+    """
+)
+
+DELIVERY_SUCCESS_TARGET_PCT = 90.0
+FLEET_SAFETY_TARGET_PCT = 100.0
+
+
+@dataclass(frozen=True, slots=True)
+class DeployKpis:
+    """R6-BE-1: Delivery success vs. fleet safety over `deploy_events` history.
+
+    * `delivery_success_pct`: `confirmed / total_completed * 100` (target `>= 90%`).
+    * `fleet_safety_pct`: `(confirmed + rolled_back) / total_completed * 100` (target `= 100%`).
+    * `safety_gap_pct`: `rolled_back / total_completed * 100` — the fraction of updates where
+      an unconfirmed image was caught and automatically rolled back to the previous working slot.
+    * `cancelled` transactions (`counts_in_deploy_kpis` -> False) and `in_flight` transactions
+      (no terminal row yet) are reported alongside the counts and excluded from the denominator.
+    """
+
+    total_completed: int
+    confirmed: int
+    rolled_back: int
+    failed: int
+    cancelled: int
+    in_flight: int
+    delivery_success_pct: float | None
+    fleet_safety_pct: float | None
+    safety_gap_pct: float | None
+    delivery_target_pct: float = DELIVERY_SUCCESS_TARGET_PCT
+    safety_target_pct: float = FLEET_SAFETY_TARGET_PCT
+    delivery_target_met: bool | None = None
+    safety_target_met: bool | None = None
+
+
+async def deploy_kpis(
+    session: AsyncSession,
+    *,
+    project_id: uuid.UUID | None = None,
+) -> DeployKpis:
+    """Compute both v1 deploy KPIs over `deploy_events` (optionally scoped to `project_id`)."""
+    if project_id is None:
+        rows = (
+            await session.execute(
+                _KPI_TRANSACTIONS_ALL_SQL,
+                {"requested_state": DeployState.REQUESTED.value},
+            )
+        ).all()
+    else:
+        rows = (
+            await session.execute(
+                _KPI_TRANSACTIONS_PROJECT_SQL,
+                {
+                    "requested_state": DeployState.REQUESTED.value,
+                    "project_id": project_id,
+                },
+            )
+        ).all()
+
+    confirmed = 0
+    rolled_back = 0
+    failed = 0
+    cancelled = 0
+    in_flight = 0
+
+    for row in rows:
+        ended_state = row.ended_state
+        if ended_state is None:
+            in_flight += 1
+            continue
+        if not counts_in_deploy_kpis(terminal_state=ended_state, has_requested_row=True):
+            cancelled += 1
+            continue
+        if ended_state == DeployState.CONFIRMED.value:
+            confirmed += 1
+        elif ended_state == DeployState.ROLLED_BACK.value:
+            rolled_back += 1
+        else:
+            failed += 1
+
+    total_completed = confirmed + rolled_back + failed
+    if total_completed == 0:
+        return DeployKpis(
+            total_completed=0,
+            confirmed=0,
+            rolled_back=0,
+            failed=0,
+            cancelled=cancelled,
+            in_flight=in_flight,
+            delivery_success_pct=None,
+            fleet_safety_pct=None,
+            safety_gap_pct=None,
+            delivery_target_met=None,
+            safety_target_met=None,
+        )
+
+    delivery_pct = round((confirmed / total_completed) * 100.0, 1)
+    safety_pct = round(((confirmed + rolled_back) / total_completed) * 100.0, 1)
+    gap_pct = round((rolled_back / total_completed) * 100.0, 1)
+    return DeployKpis(
+        total_completed=total_completed,
+        confirmed=confirmed,
+        rolled_back=rolled_back,
+        failed=failed,
+        cancelled=cancelled,
+        in_flight=in_flight,
+        delivery_success_pct=delivery_pct,
+        fleet_safety_pct=safety_pct,
+        safety_gap_pct=gap_pct,
+        delivery_target_met=(confirmed * 100 >= total_completed * 90),
+        safety_target_met=((confirmed + rolled_back) == total_completed),
+    )

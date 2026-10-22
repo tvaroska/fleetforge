@@ -113,6 +113,14 @@ admin-password:
 artifact-secret:
     @uv run python -c 'import secrets; print(secrets.token_hex(32))'
 
+# Generate or inspect ECDSA P-256 firmware signing keys, sign a .bin, or verify a
+# detached `ecdsa-p256-sha256:<base64_der>` signature (R6-SEC-1, R6-SEC-2).
+#     just signing-key keygen --out-dir secrets/signing
+#     just signing-key sign path/to/firmware.bin --key secrets/signing/signing-key.pem
+#     just signing-key verify path/to/firmware.bin "$SIG"
+signing-key *args:
+    @PYTHONPATH=src uv run python -m fleetforge.signing {{args}}
+
 # Sign a public download URL for one artifact digest, by hand. stdout is the URL and
 # nothing else, so `URL=$(just artifact-url $SHA)` works; the secret is never printed.
 # Reads ARTIFACT_URL_SECRET and PUBLIC_BASE_URL from .env — the HOST values, so the

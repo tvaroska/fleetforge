@@ -1220,6 +1220,29 @@ static bool is_lowercase_sha256(const char *s)
     return s[64] == '\0';
 }
 
+/* R6-SEC-1: `ecdsa-p256-sha256:<base64_der>` (80..120 base64 characters). Refused at the
+ * command seam before any slot is erased or downloaded when malformed. */
+static bool is_valid_artifact_sig(const char *s)
+{
+    static const char PREFIX[] = "ecdsa-p256-sha256:";
+    const size_t prefix_len = sizeof(PREFIX) - 1;
+    if (strncmp(s, PREFIX, prefix_len) != 0) {
+        return false;
+    }
+    const char *b64 = s + prefix_len;
+    size_t len = 0;
+    while (b64[len] != '\0') {
+        char c = b64[len];
+        bool ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+                  (c >= '0' && c <= '9') || c == '+' || c == '/' || c == '=';
+        if (!ok || len >= 120) {
+            return false;
+        }
+        len++;
+    }
+    return len >= 80 && len <= 120;
+}
+
 /* Parse a `stage` and hand it to ff_ota. This function is the command seam: it is the only
  * place the `dn/cmd` JSON is interpreted, and what leaves it is a plain C struct — ff_ota.c
  * never sees a cJSON object and never builds a topic string. */
@@ -1310,10 +1333,24 @@ static void on_stage(const cJSON *root, const char *id)
         cmd.size = (size_t)size->valuedouble;
     }
 
-    /* `artifact.sig` is parsed by nobody and required by nobody: spec/device-protocol.md
-     * shows the field, `broker/commands.py::stage_payload()` deliberately never emits it
-     * (R1 has no artifact signer, and an empty `sig` would teach a device to accept one),
-     * and the signed URL IS the authorization at R1. Ignored, not rejected. */
+    /* R6-SEC-1: `artifact.sig` (`ecdsa-p256-sha256:<base64_der>`). Optional at the seam unless
+     * `FF_OTA_REQUIRE_SIGNATURE` is compiled in (checked by ff_ota.c), but any present
+     * signature must match the wire format before a slot is erased or downloaded. */
+    switch (take_string(artifact, "sig", cmd.sig, sizeof(cmd.sig))) {
+    case FIELD_OK:
+        if (!is_valid_artifact_sig(cmd.sig)) {
+            ff_mqtt_publish_status(cmd.cmd_id, FF_STATUS_FAILED, FF_STATUS_PCT_NONE,
+                                   "artifact sig malformed");
+            return;
+        }
+        break;
+    case FIELD_MISSING:
+        break;
+    case FIELD_TOO_LONG:
+        ff_mqtt_publish_status(cmd.cmd_id, FF_STATUS_FAILED, FF_STATUS_PCT_NONE,
+                               "artifact sig malformed");
+        return;
+    }
 
     /* `apply`: anything other than the explicit `on_command` means apply now. The default
      * is "auto" (api/schemas.py), and an unknown value erring towards applying matches the

@@ -107,6 +107,8 @@ class ResolvedArtifact:
     # The upload's library-marker verdict (R3-be-1); NULL = never scanned, never warns.
     # No default: every constructor says it, so no path silently drops the gate.
     has_lib_marker: bool | None
+    # R6-SEC-1: detached ECDSA P-256 signature (`ecdsa-p256-sha256:<base64>`) if signed.
+    sig: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

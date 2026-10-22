@@ -323,8 +323,9 @@ function UploadedBuilds({
                 </td>
                 <td>
                   <strong>{a.version}</strong>
-                  {(a.branch || a.tag || a.commit_sha || a.test_passed != null) && (
+                  {(a.sig || a.branch || a.tag || a.commit_sha || a.test_passed != null) && (
                     <div className="muted" data-testid="build-provenance">
+                      {a.sig && <span className="ok">✓ signed </span>}
                       {a.branch && <code>{a.branch} </code>}
                       {a.tag && <code>tag:{a.tag} </code>}
                       {a.commit_sha && <code>@{a.commit_sha.slice(0, 7)} </code>}

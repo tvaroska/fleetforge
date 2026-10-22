@@ -964,6 +964,7 @@ class ProgressReport(BaseModel):
 
 _CI_OPTIONAL_FIELDS = frozenset(
     {
+        "sig",
         "repo_url",
         "branch",
         "commit_sha",
@@ -1002,6 +1003,7 @@ class ArtifactUploaded(BaseModel):
     partition_layout: str
     created: bool
     has_lib_marker: bool
+    sig: str | None = None
     repo_url: str | None = None
     branch: str | None = None
     commit_sha: str | None = None
@@ -1042,6 +1044,7 @@ class ArtifactSummary(BaseModel):
     partition_layout: str | None
     kind: str
     created_at: dt.datetime
+    sig: str | None = None
     repo_url: str | None = None
     branch: str | None = None
     commit_sha: str | None = None
@@ -1156,6 +1159,32 @@ class ProjectDeployAccepted(BaseModel):
     target_filter: str
     deployed: list[DeployAccepted]
     skipped: dict[str, str] = Field(default_factory=dict)
+
+
+class DeployKpisSummary(BaseModel):
+    """`GET /v1/devices/kpis` (R6-BE-1): Delivery success vs. fleet safety over `deploy_events`.
+
+    * `delivery_success_pct`: `confirmed / total_completed * 100` (target `>= 90%`).
+    * `fleet_safety_pct`: `(confirmed + rolled_back) / total_completed * 100` (target `= 100%`).
+    * `safety_gap_pct`: `rolled_back / total_completed * 100` — the fraction of updates where
+      an unconfirmed image was caught and automatically rolled back to the previous working slot.
+    * `cancelled` and `in_flight` transactions are reported alongside the counts and excluded
+      from the denominator (`deploys.counts_in_deploy_kpis`).
+    """
+
+    total_completed: int
+    confirmed: int
+    rolled_back: int
+    failed: int
+    cancelled: int
+    in_flight: int
+    delivery_success_pct: float | None
+    fleet_safety_pct: float | None
+    safety_gap_pct: float | None
+    delivery_target_pct: float
+    safety_target_pct: float
+    delivery_target_met: bool | None
+    safety_target_met: bool | None
 
 
 class PrecheckFinding(BaseModel):

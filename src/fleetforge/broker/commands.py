@@ -111,19 +111,19 @@ def stage_payload(
     version: str,
     apply: str,
     confirm_timeout_s: int,
+    sig: str | None = None,
 ) -> dict[str, Any]:
     """The `stage` command body, key for key as `spec/device-protocol.md` prints it.
 
-    **Conform, do not extend.** Exactly `id`, `type`, `artifact{url,sha256,size,version}`,
+    **Conform, do not extend.** Exactly `id`, `type`, `artifact{url,sha256,size,version[,sig]}`,
     `apply`, `confirm_timeout_s` — no `partition_layout`, no `issued_at`, no `deploy_id`.
     The R0/R1 agent is flash-baked and parses what it was born with; an extra key is at
     best ignored and at worst a parse failure on a board that cannot be updated.
 
-    **`artifact.sig` is deliberately absent.** The spec's example shows it, but R1 has no
-    artifact signer, and emitting an empty or fake `sig` would teach a device to accept
-    one. The signed URL *is* the authorization in R1 (`spec/prd.md` → *Security & data
-    posture*); adding `sig` is a separate task, and a spec clarification is proposed for
-    it in `docs/features/ota-deploy.md`.
+    **`artifact.sig` is included only when `sig` is not None (R6-SEC-1).** Emitting an
+    empty or fake `sig` would teach a device to accept one; omitting it when an artifact is
+    unsigned keeps the exact R1 wire shape while signed artifacts carry
+    `ecdsa-p256-sha256:<base64>`.
 
     `confirm_timeout_s` arrives from `Settings.confirm_timeout_s`, never as a literal
     here: one number, one place.
@@ -132,15 +132,18 @@ def stage_payload(
     published and discarded — never logged, never persisted, never echoed in an API
     response (`api/routers/deploys.py`).
     """
+    artifact: dict[str, Any] = {
+        "url": url,
+        "sha256": sha256,
+        "size": size,
+        "version": version,
+    }
+    if sig is not None:
+        artifact["sig"] = sig
     return {
         "id": cmd_id,
         "type": COMMAND_STAGE,
-        "artifact": {
-            "url": url,
-            "sha256": sha256,
-            "size": size,
-            "version": version,
-        },
+        "artifact": artifact,
         "apply": apply,
         "confirm_timeout_s": confirm_timeout_s,
     }

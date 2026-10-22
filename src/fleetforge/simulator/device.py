@@ -45,6 +45,8 @@ private-API surgery on `aiomqtt`.
 """
 
 import asyncio
+import base64
+import binascii
 import contextlib
 import hashlib
 import json
@@ -58,6 +60,9 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import aiomqtt
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec, utils
 
 from fleetforge.identity import DEVICE_ID_RE
 from fleetforge.simulator.errors import SimulatorError
@@ -86,6 +91,62 @@ ACK = "ack"
 # purpose, not `fleetforge.storage.blobs.SHA256_HEX`: the simulator imports nothing from
 # the server (`tests/test_invariants.py`).
 _SHA256_HEX = re.compile(r"[0-9a-f]{64}")
+
+# R6-SEC-1 / R6-SEC-2: `artifact.sig` (`ecdsa-p256-sha256:<base64_der>`) and the 2-key
+# public key rotation ring, retyped from `ff_ota.c` rather than imported from
+# `fleetforge.signing` so the simulator's import purity (`tests/test_simulator.py`) holds.
+_SIG_PREFIX = "ecdsa-p256-sha256:"
+_SIG_RE = re.compile(r"\Aecdsa-p256-sha256:[A-Za-z0-9+/]{80,120}={0,2}\Z")
+SIGNING_PUBKEY_PRIMARY_PEM = (
+    "-----BEGIN PUBLIC KEY-----\n"
+    "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEbHg1tVC28a9y8SbZY0jis7OKKWxr\n"
+    "X2+S5g0No7NMyV8nI+vUHHQ8MNQnNSDSPESUAT9m2iLyNC/nM26RvxYV1Q==\n"
+    "-----END PUBLIC KEY-----\n"
+)
+SIGNING_PUBKEY_SECONDARY_PEM = (
+    "-----BEGIN PUBLIC KEY-----\n"
+    "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEwJct9NbOiOIbnB/ToYTvq02EBrzs\n"
+    "UAETxsFAAWHFWhxfpL3x0OcIH6yW9q6EhYA3q6vNGIEwC7KPJQXd1ONEqQ==\n"
+    "-----END PUBLIC KEY-----\n"
+)
+DEFAULT_SIGNING_PUBKEY_RING: tuple[str, ...] = (
+    SIGNING_PUBKEY_PRIMARY_PEM,
+    SIGNING_PUBKEY_SECONDARY_PEM,
+)
+
+
+def _is_valid_artifact_sig(sig: object) -> bool:
+    """`ff_mqtt.c::is_valid_artifact_sig`: `ecdsa-p256-sha256:<base64_der>` with DER tag 0x30."""
+    if not isinstance(sig, str) or len(sig) > 159 or not _SIG_RE.match(sig):
+        return False
+    try:
+        der = base64.b64decode(sig.removeprefix(_SIG_PREFIX), validate=True)
+    except binascii.Error:
+        return False
+    return 8 <= len(der) <= 80 and der[0] == 0x30
+
+
+def _verify_artifact_sig(
+    sha256_hex: str,
+    sig: str,
+    pubkey_ring: tuple[str, ...] = DEFAULT_SIGNING_PUBKEY_RING,
+) -> bool:
+    """`ff_ota.c::verify_artifact_signature`: verify DER ECDSA P-256 over the 32-byte digest."""
+    if not _is_valid_artifact_sig(sig):
+        return False
+    der_sig = base64.b64decode(sig.removeprefix(_SIG_PREFIX))
+    digest_bytes = bytes.fromhex(sha256_hex)
+    for pub_pem in pubkey_ring:
+        pub = serialization.load_pem_public_key(pub_pem.encode("utf-8"))
+        if not isinstance(pub, ec.EllipticCurvePublicKey):
+            continue
+        try:
+            pub.verify(der_sig, digest_bytes, ec.ECDSA(utils.Prehashed(hashes.SHA256())))
+            return True
+        except InvalidSignature:
+            continue
+    return False
+
 
 # `spec/device-protocol.md` → *`up/status` — the update transaction*, retyped for the
 # same reason as `POWER_CLASSES`: importing `fleetforge.db` would drag SQLAlchemy into a
@@ -556,25 +617,61 @@ async def _heartbeat_loop(
         await asyncio.sleep(interval_s)
 
 
-def _fetch(url: str) -> bytes:
-    """GET `url` into memory, chunked. **Blocking** — always called via `to_thread`.
+def _fetch(
+    url: str,
+    *,
+    max_retries: int = 3,
+    initial_backoff_s: float = 0.005,
+    step: Step = _silent,
+) -> bytes:
+    """GET `url` into memory, chunked, with HTTP `Range` resume on interruption (`R6-FW-1`).
+    **Blocking** — always called via `to_thread`.
 
     `urllib.request` and never httpx: this module ships in the production image and
     httpx is a dev dependency, which `tests/test_simulator.py`'s AST tripwire enforces.
     An ESP32 streams into the OTA partition instead of buffering; a 1.9 MB cap
     (`spec/prd.md` → *Capacity*) makes buffering fine here and keeps the sha256 check
     trivially correct.
+
+    When a mid-stream read raises `OSError` after `offset > 0` bytes have arrived, the
+    retry sends `Range: bytes=<offset>-` with exponential backoff (`initial_backoff_s * 2**n`)
+    so the already-received prefix is never re-fetched. When `offset == 0`, `url` is passed
+    as a plain `str` to `urlopen` so existing test monkeypatches keep seeing the bare URL.
     """
-    chunks: list[bytes] = []
-    # The URL comes from the server's own `stage` command, over an authenticated broker
-    # connection — not from user input.
-    with urllib.request.urlopen(url, timeout=DOWNLOAD_TIMEOUT_S) as response:  # noqa: S310
-        while True:
-            chunk = response.read(DOWNLOAD_CHUNK_BYTES)
-            if not chunk:
-                break
-            chunks.append(chunk)
-    return b"".join(chunks)
+    buffer = bytearray()
+    attempt = 0
+    while True:
+        offset = len(buffer)
+        request_or_url: str | urllib.request.Request = (
+            urllib.request.Request(url, headers={"Range": f"bytes={offset}-"})  # noqa: S310
+            if offset > 0
+            else url
+        )
+        try:
+            with urllib.request.urlopen(  # noqa: S310
+                request_or_url, timeout=DOWNLOAD_TIMEOUT_S
+            ) as response:
+                status_code = getattr(response, "status", None)
+                if offset > 0 and status_code == 200:
+                    # Upstream ignored `Range` and returned the full representation from byte 0.
+                    buffer.clear()
+                while True:
+                    chunk = response.read(DOWNLOAD_CHUNK_BYTES)
+                    if not chunk:
+                        break
+                    buffer.extend(chunk)
+            return bytes(buffer)
+        except OSError:
+            attempt += 1
+            if attempt > max_retries:
+                raise
+            delay_s = initial_backoff_s * (1 << (attempt - 1))
+            step(
+                f"download retry #{attempt}/{max_retries} from offset {len(buffer)} "
+                f"after {delay_s:.3f}s"
+            )
+            if delay_s > 0:
+                time.sleep(delay_s)
 
 
 def check_safe_window(mode: str) -> None:
@@ -666,6 +763,13 @@ class StageRunner:
     broken_marker: str | None = None
     # An image whose version carries this fails its registered self-test (R5-be-1).
     selftest_fail_marker: str | None = None
+    # R6-SEC-1 / R6-SEC-2: require `artifact.sig` (`True`) or verify when present (`False`),
+    # against the 2-key public key rotation ring.
+    require_signature: bool = False
+    signing_pubkey_ring: tuple[str, ...] = DEFAULT_SIGNING_PUBKEY_RING
+    # R6-FW-1: HTTP Range resume retries and initial backoff on mid-stream download errors.
+    download_retries: int = 3
+    download_backoff_s: float = 0.005
     seen: set[str] = field(default_factory=set)
     downloads: int = 0
     # Not arguments: a caller passing in a pre-set event would start a board that reboots
@@ -1106,6 +1210,7 @@ class StageRunner:
         url = artifact.get("url")
         expected_sha = artifact.get("sha256")
         version = artifact.get("version")
+        sig = artifact.get("sig")
         if not isinstance(url, str) or not isinstance(expected_sha, str):
             await self._status(
                 client, cmd_id, STATE_FAILED, step, detail="artifact url/sha256 missing"
@@ -1117,6 +1222,11 @@ class StageRunner:
             await self._status(
                 client, cmd_id, STATE_FAILED, step, detail="artifact sha256 malformed"
             )
+            return
+        if sig is not None and not _is_valid_artifact_sig(sig):
+            # R6-SEC-1: malformed `artifact.sig` is refused at the command seam (`ff_mqtt.c`),
+            # before `staging` or any download.
+            await self._status(client, cmd_id, STATE_FAILED, step, detail="artifact sig malformed")
             return
 
         await self._status(client, cmd_id, STATE_STAGING, step)
@@ -1155,10 +1265,15 @@ class StageRunner:
 
         await self._status(client, cmd_id, STATE_DOWNLOADING, step)
         try:
-            data = await asyncio.to_thread(_fetch, url)
+            data = await asyncio.to_thread(
+                _fetch,
+                url,
+                max_retries=self.download_retries,
+                initial_backoff_s=self.download_backoff_s,
+                step=step,
+            )
         except OSError as exc:
-            # A real board retries; this one reports and stops, because a silent retry
-            # loop in a transcript is indistinguishable from a hang.
+            # After exhausting `download_retries` Range resumes, report and stop.
             await self._status(
                 client, cmd_id, STATE_FAILED, step, detail=f"download failed: {type(exc).__name__}"
             )
@@ -1175,6 +1290,16 @@ class StageRunner:
             await self._status(client, cmd_id, STATE_FAILED, step, detail="sha256 mismatch")
             return
         step(f"verify   sha256 {digest} matches")
+        if isinstance(sig, str):
+            if not _verify_artifact_sig(digest, sig, self.signing_pubkey_ring):
+                step("verify   SIGNATURE INVALID against the trusted public key ring")
+                await self._status(client, cmd_id, STATE_FAILED, step, detail="signature invalid")
+                return
+            step("verify   ecdsa-p256-sha256 signature verified")
+        elif self.require_signature:
+            step("verify   SIGNATURE MISSING (require_signature=True)")
+            await self._status(client, cmd_id, STATE_FAILED, step, detail="signature missing")
+            return
 
         await self._status(client, cmd_id, STATE_STAGED, step)
 

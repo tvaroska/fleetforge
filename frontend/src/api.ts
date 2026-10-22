@@ -427,6 +427,7 @@ export type ArtifactSummary = {
   partition_layout: string | null
   kind: string
   created_at: string
+  sig?: string | null
   repo_url?: string | null
   branch?: string | null
   commit_sha?: string | null
@@ -447,6 +448,7 @@ export type ArtifactUploaded = {
   partition_layout: string
   created: boolean
   has_lib_marker?: boolean
+  sig?: string | null
   repo_url?: string | null
   branch?: string | null
   commit_sha?: string | null
@@ -454,6 +456,24 @@ export type ArtifactUploaded = {
   build_url?: string | null
   test_passed?: boolean | null
   auto_deployed_devices?: string[] | null
+}
+
+// Mirrors `DeployKpisSummary` in api/schemas.py (R6-BE-1 / R6-FE-1): delivery success
+// (>= 90%) vs. fleet safety (= 100%) and the rollback saves gap.
+export type DeployKpisSummary = {
+  total_completed: number
+  confirmed: number
+  rolled_back: number
+  failed: number
+  cancelled: number
+  in_flight: number
+  delivery_success_pct: number | null
+  fleet_safety_pct: number | null
+  safety_gap_pct: number | null
+  delivery_target_pct: number
+  safety_target_pct: number
+  delivery_target_met: boolean | null
+  safety_target_met: boolean | null
 }
 
 // Mirrors `DeployAccepted` in api/schemas.py — the 202 body of a deploy POST.
@@ -761,6 +781,14 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ version, apply }),
     }),
+
+  // R6-BE-1 / R6-FE-1: Delivery success (>= 90%) and fleet safety (= 100%) KPIs over deploy history.
+  deployKpis: (project?: string) =>
+    request<DeployKpisSummary>(
+      project && project !== 'default'
+        ? `/v1/devices/kpis?project=${encodeURIComponent(project)}`
+        : '/v1/devices/kpis',
+    ),
 
   // R5-be-2 verbs. Admin cookie, NO body (so no content-type), 202 `CommandAccepted`. The
   // errors are plain sentences in `detail` (404 unknown device or deploy, 409 a capability

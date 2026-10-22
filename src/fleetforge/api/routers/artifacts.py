@@ -84,6 +84,7 @@ from fleetforge.firmware.manifest import EXPECTED_PARTITION_LAYOUT, SafeSegment
 from fleetforge.lib_marker import find_marker
 from fleetforge.merged_image import detect_merged
 from fleetforge.partition_profiles import LayoutCatalog, load_layout_catalog
+from fleetforge.signing import SigningKeyRing, is_valid_sig_format
 from fleetforge.storage.blobs import digest_bytes, put_blob
 from fleetforge.storage.objectstore import ObjectStoreError
 
@@ -120,7 +121,7 @@ _LIST_SQL = text(
     """
     SELECT v.target, v.version, v.sha256, v.created_at,
            v.repo_url, v.branch, v.commit_sha, v.tag, v.build_url, v.test_passed,
-           a.size_bytes, a.partition_layout, a.kind
+           a.size_bytes, a.partition_layout, a.kind, a.sig
       FROM artifact_versions AS v
       JOIN artifacts AS a ON a.sha256 = v.sha256
      WHERE v.project_id = :project_id
@@ -137,12 +138,16 @@ _LIST_SQL = text(
 # R3-be-1: a re-upload fills a NULL `has_lib_marker` (a row from before the scan existed)
 # and never changes a known one. The verdict is a pure function of the bytes the digest
 # names, so filling it is idempotent; every other column keeps its first writer's value.
+# R6-SEC-1: a re-upload with a verified `sig` fills a NULL `sig` on an existing row.
 _ARTIFACT_UPSERT_SQL = text(
     """
-    INSERT INTO artifacts (sha256, size_bytes, kind, target, partition_layout, has_lib_marker)
-    VALUES (:sha256, :size_bytes, :kind, :target, :partition_layout, :has_lib_marker)
-    ON CONFLICT (sha256) DO UPDATE SET has_lib_marker = EXCLUDED.has_lib_marker
+    INSERT INTO artifacts (sha256, size_bytes, kind, target, partition_layout, has_lib_marker, sig)
+    VALUES (:sha256, :size_bytes, :kind, :target, :partition_layout, :has_lib_marker, :sig)
+    ON CONFLICT (sha256) DO UPDATE
+       SET has_lib_marker = COALESCE(artifacts.has_lib_marker, EXCLUDED.has_lib_marker),
+           sig = COALESCE(artifacts.sig, EXCLUDED.sig)
      WHERE artifacts.has_lib_marker IS NULL
+        OR (artifacts.sig IS NULL AND EXCLUDED.sig IS NOT NULL)
     """
 )
 
@@ -300,6 +305,16 @@ async def upload_artifact(
         bool | None,
         Query(description="Optional CI test / QEMU verification outcome"),
     ] = None,
+    sig: Annotated[
+        str | None,
+        Query(
+            max_length=160,
+            description=(
+                "Optional detached ECDSA P-256 signature (ecdsa-p256-sha256:<base64>) "
+                "verified against the public key rotation ring"
+            ),
+        ),
+    ] = None,
 ) -> ArtifactUploaded:
     """Store an opaque firmware blob and label it `(target, version)`.
 
@@ -363,6 +378,36 @@ async def upload_artifact(
     marker = find_marker(data)
     has_lib_marker = marker is not None
 
+    # R6-SEC-1 / R6-SEC-2: Either verify a caller-supplied detached signature against the
+    # public key rotation ring, or sign server-side when `artifact_signing_key` is set.
+    try:
+        key_ring = SigningKeyRing.from_config(
+            private_key=settings.artifact_signing_key,
+            public_keys=settings.artifact_signing_public_keys,
+        )
+    except ValueError as exc:
+        logger.error("artifact signing key configuration is invalid: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="server signing key configuration is invalid",
+        ) from None
+
+    verified_sig: str | None = None
+    if sig is not None:
+        if not is_valid_sig_format(sig):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="sig must be ecdsa-p256-sha256:<base64_der_signature>",
+            )
+        if not key_ring.verify_digest(digest, sig):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="artifact signature verification failed against the trusted public key ring",
+            )
+        verified_sig = sig
+    elif key_ring.can_sign:
+        verified_sig = key_ring.sign_digest(digest)
+
     async with sessionmaker() as session:
         # Cheap pre-check so the common conflict costs no upload. It is not the
         # guarantee — the primary key below is — but a 409 discovered after storing
@@ -394,8 +439,14 @@ async def upload_artifact(
                 "target": target,
                 "partition_layout": partition_layout,
                 "has_lib_marker": has_lib_marker,
+                "sig": verified_sig,
             },
         )
+        if verified_sig is None:
+            verified_sig = await session.scalar(
+                text("SELECT sig FROM artifacts WHERE sha256 = :sha256"),
+                {"sha256": digest},
+            )
         labelled = await session.scalar(
             _LABEL_INSERT_SQL,
             {
@@ -494,6 +545,7 @@ async def upload_artifact(
         partition_layout=partition_layout,
         created=created,
         has_lib_marker=has_lib_marker,
+        sig=verified_sig,
         repo_url=repo_url,
         branch=branch,
         commit_sha=commit_sha,
@@ -546,6 +598,7 @@ async def list_artifacts(
                 partition_layout=row.partition_layout,
                 kind=row.kind,
                 created_at=row.created_at,
+                sig=row.sig,
                 repo_url=row.repo_url,
                 branch=row.branch,
                 commit_sha=row.commit_sha,

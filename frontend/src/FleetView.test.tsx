@@ -490,3 +490,44 @@ describe('health, live (R4-fe-1)', () => {
     expect(screen.getByTestId('reset-reason')).toHaveTextContent('last reset: poweron')
   })
 })
+
+describe('deploy KPIs (R6-fe-1)', () => {
+  it('shows delivery success, fleet safety, and the rollback saves gap when deploys exist', async () => {
+    await renderFleet([
+      device({
+        device_id: 'a4cf12b3de01',
+        fw_version: '1.5.0',
+        deploy: deploy({ cmd_id: 'c1', state: 'confirmed', is_terminal: true }),
+      }),
+      device({
+        device_id: 'a4cf12b3de02',
+        fw_version: '1.5.0',
+        deploy: deploy({ cmd_id: 'c2', state: 'confirmed', is_terminal: true }),
+      }),
+      device({
+        device_id: 'a4cf12b3de03',
+        fw_version: '1.4.2',
+        deploy: deploy({ cmd_id: 'c3', state: 'rolled_back', is_terminal: true }),
+      }),
+    ])
+
+    const strip = screen.getByTestId('deploy-kpis')
+    expect(within(strip).getByTestId('kpi-delivery')).toHaveTextContent('66.7%')
+    expect(within(strip).getByTestId('kpi-delivery')).toHaveTextContent('2/3 confirmed')
+    expect(within(strip).getByTestId('kpi-safety')).toHaveTextContent('100.0%')
+    expect(within(strip).getByTestId('kpi-safety')).toHaveTextContent('3/3 safe')
+    expect(within(strip).getByTestId('kpi-rollback-saves')).toHaveTextContent('Rollback saves: 1')
+    expect(within(strip).getByTestId('kpi-rollback-saves')).toHaveTextContent('33.3%')
+  })
+
+  it('hides the KPI strip before any deploy has finished', async () => {
+    await renderFleet([
+      device({
+        device_id: 'a4cf12b3de01',
+        deploy: deploy({ state: 'downloading', is_terminal: false }),
+      }),
+    ])
+
+    expect(screen.queryByTestId('deploy-kpis')).toBeNull()
+  })
+})

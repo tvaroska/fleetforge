@@ -803,6 +803,11 @@ class Artifact(Base):
     # at upload, a pure function of the digest. NULL = never scanned (uploaded before
     # R3-be-1): fail-open, never warns. False gates a deploy as `no_library_marker`.
     has_lib_marker: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    # R6-SEC-1: detached ECDSA P-256 signature (`ecdsa-p256-sha256:<base64>`) over `sha256`,
+    # either computed server-side at upload when `ARTIFACT_SIGNING_KEY` is configured or
+    # verified against the public key rotation ring when supplied as `?sig=` on upload.
+    # NULL = unsigned.
+    sig: Mapped[str | None] = mapped_column(Text, nullable=True)
     # `source_commit`, `idf_version`, `idf_image`, `agent_version`, `config_sha256`,
     # `build_digest` — i.e. the S0-infra-3 manifest identity, **copied, never
     # recomputed**. JSONB rather than columns because the shape belongs to the producer

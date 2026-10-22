@@ -73,9 +73,9 @@ import fnmatch
 import logging
 import uuid
 from collections.abc import Collection
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -88,10 +88,13 @@ from fleetforge.api.deps import (
     bearer_scheme,
     check_project_access,
     cookie_scheme,
+    resolve_project_for_request,
 )
 from fleetforge.api.routers.artifacts import VERSION_PATTERN
 from fleetforge.api.schemas import (
+    PROJECT_SLUG_PATTERN,
     DeployAccepted,
+    DeployKpisSummary,
     DeployPrecheck,
     DeployRequest,
     PrecheckFinding,
@@ -118,6 +121,7 @@ from fleetforge.deploy_precheck import (
 )
 from fleetforge.deploys import (
     DeploySender,
+    deploy_kpis,
     latest_open_transaction,
     record_publish_failure,
     record_requested,
@@ -138,7 +142,7 @@ router = APIRouter(
 # request field" structural instead of a comment.
 _ARTIFACT_FOR_TARGET_SQL = text(
     """
-    SELECT a.sha256, a.size_bytes, a.partition_layout, a.has_lib_marker
+    SELECT a.sha256, a.size_bytes, a.partition_layout, a.has_lib_marker, a.sig
       FROM artifact_versions AS v
       JOIN artifacts AS a ON a.sha256 = v.sha256
      WHERE v.project_id = :project_id AND v.target = :target AND v.version = :version
@@ -207,6 +211,47 @@ def _public_base_url(settings: Settings) -> str:
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=URL_NOT_CONFIGURED
         )
     return settings.public_base_url
+
+
+@router.get(
+    "/kpis",
+    response_model=DeployKpisSummary,
+    summary="Delivery success (>= 90%) and fleet safety (= 100%) KPIs over deploy history",
+)
+async def get_deploy_kpis(
+    admin: AdminDep,
+    sessionmaker: SessionMakerDep,
+    project: Annotated[
+        str | None,
+        Query(pattern=PROJECT_SLUG_PATTERN, description="Project slug (defaults to token/default)"),
+    ] = None,
+) -> DeployKpisSummary:
+    """Compute both v1 KPIs (`Delivery success >= 90%`, `Fleet safety = 100%`) over the
+    project's `deploy_events` history (`R6-BE-1`)."""
+    async with sessionmaker() as session:
+        target_project = await resolve_project_for_request(
+            session,
+            admin,
+            project_slug=project,
+            min_role=ProjectRole.VIEWER,
+            required_scope="read",
+        )
+        kpis = await deploy_kpis(session, project_id=target_project.id)
+    return DeployKpisSummary(
+        total_completed=kpis.total_completed,
+        confirmed=kpis.confirmed,
+        rolled_back=kpis.rolled_back,
+        failed=kpis.failed,
+        cancelled=kpis.cancelled,
+        in_flight=kpis.in_flight,
+        delivery_success_pct=kpis.delivery_success_pct,
+        fleet_safety_pct=kpis.fleet_safety_pct,
+        safety_gap_pct=kpis.safety_gap_pct,
+        delivery_target_pct=kpis.delivery_target_pct,
+        safety_target_pct=kpis.safety_target_pct,
+        delivery_target_met=kpis.delivery_target_met,
+        safety_target_met=kpis.safety_target_met,
+    )
 
 
 @router.post(
@@ -293,6 +338,7 @@ async def deploy_device(
             version=body.version,
             apply=body.apply,
             confirm_timeout_s=settings.confirm_timeout_s,
+            sig=artifact.sig,
         )
         await _publish(
             publisher,
@@ -379,6 +425,7 @@ async def _resolve(
         size_bytes=row.size_bytes,
         partition_layout=row.partition_layout,
         has_lib_marker=row.has_lib_marker,
+        sig=row.sig,
     )
 
 
@@ -663,6 +710,7 @@ async def deploy_version_to_project_devices(
             version=version,
             apply=apply,
             confirm_timeout_s=settings.confirm_timeout_s,
+            sig=found_artifact.sig,
         )
         if best_effort_broker:
             try:
