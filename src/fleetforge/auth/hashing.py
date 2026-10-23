@@ -23,8 +23,10 @@ Request handlers use `ahash_secret` / `averify_secret`.
 a credential that may appear in a log line.
 """
 
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+
 import anyio
-import anyio.to_thread
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError
 
@@ -32,7 +34,10 @@ from argon2.exceptions import InvalidHashError, VerificationError
 ARGON2 = PasswordHasher(time_cost=2, memory_cost=19456, parallelism=1, hash_len=32, salt_len=16)
 
 # Two concurrent argon2 calls at 19 MiB each fit inside the api container's 256 M.
+# A dedicated 2-thread executor keeps libargon2's 19 MiB allocations off Starlette's
+# 40-thread anyio pool so glibc cannot scatter per-thread arenas across worker threads.
 ARGON2_LIMITER = anyio.CapacityLimiter(2)
+_ARGON2_EXECUTOR = ThreadPoolExecutor(max_workers=2, thread_name_prefix="argon2")
 
 # Burned when a lookup finds no row, so "unknown id" and "wrong secret" cost the
 # same. Computed once at import — it is a hash of a constant, not a credential.
@@ -60,12 +65,16 @@ def verify_secret(secret: str, phc: str) -> bool:
 
 async def ahash_secret(secret: str) -> str:
     """`hash_secret` off the event loop, under `ARGON2_LIMITER`."""
-    return await anyio.to_thread.run_sync(hash_secret, secret, limiter=ARGON2_LIMITER)
+    async with ARGON2_LIMITER:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(_ARGON2_EXECUTOR, hash_secret, secret)
 
 
 async def averify_secret(secret: str, phc: str) -> bool:
     """`verify_secret` off the event loop, under `ARGON2_LIMITER`."""
-    return await anyio.to_thread.run_sync(verify_secret, secret, phc, limiter=ARGON2_LIMITER)
+    async with ARGON2_LIMITER:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(_ARGON2_EXECUTOR, verify_secret, secret, phc)
 
 
 async def dummy_verify() -> None:

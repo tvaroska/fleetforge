@@ -69,51 +69,41 @@ A second thin waist, mirroring the device side: the **core is headless** — a s
 
 ## API surface & authentication
 
-Three credentials, two zones, and nothing else. Devices never hold an admin credential.
+Four credentials, two zones, and nothing else. Devices never hold an admin credential.
 
 | Zone | Endpoints | Credential |
 |---|---|---|
-| **Admin** | everything else | **opaque bearer token** |
-| **Device** | `POST /v1/enroll` | single-use **enrollment token** in the body |
+| **Admin / Operator** | everything else (`/v1/devices`, `/v1/artifact`, `/v1/projects`, `/v1/users`, `/v1/events`, …) | **opaque bearer token** (`ffa_…` header or `ff_session` cookie) |
+| **Device** | `POST /v1/enroll` | single-use **enrollment token** (`ffe_…`) in the body |
+| **Device** | `GET /v1/device-progress` / `POST /v1/device-progress` | pre-enrollment stage report keyed by the active enrollment token |
 | **Device** | `GET /v1/artifact/…` | **short-lived signed URL** (signature *is* the authorization) |
+| **Device** | `GET /v1/device-secrets` | per-device **MQTT credential** (`Authorization: Basic base64(device_id:mqtt_password)`) |
 
-### v1 admin auth — one credential type, two transports
+### Admin auth — one credential type, two transports
 
-Every admin request authenticates with **`Authorization: Bearer <token>`**. Tokens are
-rows: `id, name, hash, subject, scopes, created, last_used, expires_at, revoked_at`.
+Every admin request authenticates with **`Authorization: Bearer <token>`** (or the `ff_session` cookie). Tokens are rows in `admin_tokens`: `id, name, secret_hash, subject, scopes, user_id, project_id, created_at, last_used_at, expires_at, revoked_at`. `user_id` names the human the token acts for (`NULL` for the env admin and for userless machine tokens); `project_id` pins it to one project (`NULL` = unpinned).
 
-The dashboard is not a special case. It POSTs the admin password to `/v1/auth/login` and
-receives *the same kind of token*, returned in an **HttpOnly / Secure / SameSite=Strict**
-cookie instead of the response body — so browser XSS cannot read it. The API accepts a
-token from either the `Authorization` header or that cookie, through one verification
-path. CLI, Home Assistant and MCP use the header form and are in no way second-class.
+The dashboard is not a special case. It POSTs credentials to `/v1/auth/login` (or a verified Firebase ID token to `/v1/auth/firebase`) and receives *the same kind of token*, returned in an **HttpOnly / Secure / SameSite=Strict** cookie instead of the response body — so browser XSS cannot read it. The API accepts a token from either the `Authorization` header or that cookie, through one verification path (`deps.require_admin`). CLI (`fleetforge push`), CI pipelines, Home Assistant and MCP use the header form and are in no way second-class.
 
-**Opaque random tokens, hashed at rest — not JWT**. JWT buys stateless verification we do
-not need at one admin and a handful of clients, and costs instant revocation, which we do
-need on a public-facing API. A DB lookup per request is free at this scale.
+**Opaque random tokens, hashed at rest — not JWT**. JWT buys stateless verification we do not need at a handful of users and clients, and costs instant revocation, which we do need on a public-facing API. A DB lookup per request (with an in-process verification cache) is cheap at this scale.
 
-Serve the dashboard and the API from **one origin** behind the same Traefik host: no CORS
-configuration, and SameSite=Strict is then sufficient against CSRF.
+Serve the dashboard and the API from **one origin** behind the same Traefik host: no CORS configuration, and SameSite=Strict is then sufficient against CSRF.
 
-**Bootstrap:** admin password from the environment (`services/prod/.env`, per house
-convention), argon2id at rest, and the login endpoint rate-limited — it is a password
-endpoint on the public internet.
+**Bootstrap:** admin password from the environment (`services/prod/.env`, per house convention), argon2id at rest, and the login endpoint rate-limited — it is a password endpoint on the public internet. That login (`username` `admin`, verified against `ADMIN_PASSWORD_HASH`) issues a userless, unpinned `admin` session, which is the superadmin; it needs no `users` row. Named users live in `users` (local `password_hash`, or a Firebase identity bound by `firebase_uid` on first login; invite-only, see [docs/features/projects-and-users.md](../docs/features/projects-and-users.md)). Firebase is optional (`FIREBASE_PROJECT_ID`, `FIREBASE_WEB_API_KEY`, `FIREBASE_SUPERADMIN_EMAILS`).
 
-### The extension points — deliberately reserved, unused in v1
+### Users, projects and scopes
 
-- **`scopes`** — always `admin` in v1. *Frontend design* above already promises MCP a *"read-rich,
-  guarded writes … scoped token"*. Thus, the column has to exist before that is buildable.
-  Later: `read`, `deploy`, `enroll`.
-- **`subject`** — always `"admin"` in v1. There is no users table and no rows to manage.
-  When multi-tenant arrives, subjects gain an org and nothing else changes shape.
-- **Versioned path** (`/v1/…`) so a breaking API revision can run alongside the old one,
-  exactly as the device protocol does.
+- **`projects`** own devices, groups, enrollment tokens, rotating secrets (`project_secrets`), continuous-deployment rules (`repo_url`, `track_mode`, `track_ref`, `auto_deploy_target`, `otel_endpoint`), and version labels (`artifact_versions` is keyed `(project_id, target, version)` with optional Git provenance `repo_url`, `branch`, `commit_sha`, `tag`, `build_url`, `test_passed`); blobs (`artifacts`) stay global and content-addressed. A seeded `default` project (`00000000-0000-4000-8000-000000000001`) is what an omitted `?project=` resolves to.
+- **`users`** and **`project_members`** (`role` in `viewer`, `operator`, `owner`); `users.is_superadmin` spans every project. `deps.check_project_access` checks visibility (pin, then membership) before scope and role, and a device in a project the caller cannot see answers like an unknown one (`404`).
+- **`scopes`**: `admin`, `read`, `deploy`, `enroll`, `write:artifacts`. A project-pinned token never mints tokens.
+- **`subject`** is the acting username (`admin` for the env admin).
+- **Versioned path** (`/v1/…`) so a breaking API revision can run alongside the old one, exactly as the device protocol does.
+
+Detail: [docs/features/projects-and-users.md](../docs/features/projects-and-users.md).
 
 ### Explicitly not in v1
 
-OAuth/OIDC · multi-user · RBAC · JWT · refresh tokens · MFA. Each is additive on top of
-the token table rather than a rewrite of it. This is the entire point of paying for the
-table now.
+Generic OAuth/OIDC providers · public signup · JWT sessions · refresh tokens · MFA. Firebase ID tokens are verified on the way in and exchanged for an opaque session; they are not the session. Each is additive on top of the token table rather than a rewrite of it. This is the entire point of paying for the table now.
 
 ## Artifact storage — one more adapter
 Artifact *bytes* sit behind a narrow object-store adapter (`put` / `get` / `signed_url` / `delete`). Artifact *metadata* lives in the database. **GCS in v1, MinIO for self-hosting** — S3-compatible, so a second implementation rather than a redesign. The adapter generates signed URLs, which is what keeps the `stage` command's authorization model identical across backends. Concrete configuration in [architecture.md](production.md).

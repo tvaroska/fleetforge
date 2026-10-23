@@ -1,7 +1,14 @@
-# Fleetforge — recommendation
+# Fleetforge — recommendation (Archived 2026-09-23 Snapshot)
+
+> **ARCHIVED:** This document is a historical product review written on **2026-09-23** right after R1 closed. All three gaps identified below were subsequently closed in **R2–R6** and **CUJ-2** (`v0.7.2`):
+> 1. **Gap 1 (Embeddable library & dashboard upload):** Closed in **R2b** (dashboard `.bin` upload, pre-check, device naming) and **R3** (`agent/components/fleetforge/` ESP-IDF component + Arduino/PlatformIO library with `FFOTALIB` marker detection).
+> 2. **Gap 2 (Self-test confirm, sleepy confirm, terminal states, and signing):** Closed in **R2** (`confirmed`/`rolled_back` terminal reporting), **R5** (`ff_set_selftest` / `Fleetforge.onSelfTest`, `confirm_timeout_s`, safe-window deferral, sleepy stay-awake-through-confirm, and `safe_mode`), and **R6** (ECDSA P-256 signature verification, HTTP `Range` resume, and KPI strip).
+> 3. **Gap 3 (Moving between Wi-Fi networks without reflashing):** Closed in **R2b** (multi-network `ff_cfg` priority list up to 4 SSIDs) and **CUJ-2** (`ff_net` NVS overlay; note that the NimBLE GATT server for Improv BLE in `ff_net_wifi.c` remains an open follow-up in [`TODO.md`](../TODO.md)).
+>
+> For current status and open work, see [`README.md`](../README.md) and [`TODO.md`](../TODO.md).
 
 **Date:** 2026-09-23
-**Status:** product review — not a spec, not a plan.
+**Status:** archived product review — not a spec, not a plan.
 **Audience:** the operator of this instance, deciding what to build next.
 
 A reading of specs, documentation and code against the people who would actually use

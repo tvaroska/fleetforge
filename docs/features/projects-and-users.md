@@ -358,9 +358,9 @@ Invite flow: `POST /v1/users` with `send_invite_email` -> `accounts:signUp` (unv
 
 Known limits: on `?project=` routes an unknown slug is `404` and a slug the caller cannot see is `403`, so project-slug existence is still distinguishable. The dashboard still shows the profile add/adopt controls to non-superadmins, who get the `403` banner.
 
-## Owner proposals (S0-rel-1)
+## Owner proposals (S0-rel-1 — applied 2026-10-23)
 
-P1 changed who can log in and what a credential can reach, but the protected docs still describe one admin and no RBAC. These are paste-ready patches for the owner (agents do not edit `spec/` or `CRITICAL.md` during `/implement`, and `design/` follows the spec). Each quotes the current text, then the proposed text. The decision behind the release is in `DECISIONS.md` (2026-10-19, S0-rel-1).
+Patches A (`spec/prd.md`), B (`CRITICAL.md`), C (`design/architecture.md`), and D (`design/production.md`) below were applied on 2026-10-23 to reconcile the protected specs and architecture docs with `v0.7.2`. The decision behind the release is in `DECISIONS.md` (2026-10-19, S0-rel-1).
 
 ### Patch A — `spec/prd.md` (owner, `spec:` commit)
 

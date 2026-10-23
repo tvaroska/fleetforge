@@ -1,12 +1,14 @@
 """The fleetforge registry schema — R0-db-1, plus `device_progress` (S0-fw-1), the
 content-addressed artifact tables (S0-infra-4), the version labels over them
 (R1-be-1), the partition profiles (R3-be-2), the stored device health, faults, logs
-and telemetry (R4-be-1) and the verbs the server sent with their answers (R5-be-2).
+and telemetry (R4-be-1), the verbs the server sent with their answers (R5-be-2),
+multi-project / multi-user RBAC (`P1`), and encrypted project secrets (`SEC-be-1`).
 
-Fifteen tables: `device_groups`, `devices`, `enrollment_tokens`, `admin_tokens`,
-`deploy_events`, `device_progress`, `artifacts`, `artifact_versions`, `builds`,
-`partition_profiles`, `device_faults`, `device_logs`, `device_telemetry`,
-`device_metrics`, `device_commands`. Two of them (`enrollment_tokens`, `admin_tokens`) are CRITICAL.md
+Nineteen tables: `projects`, `users`, `project_members`, `project_secrets`,
+`device_groups`, `devices`, `enrollment_tokens`, `admin_tokens`, `deploy_events`,
+`device_progress`, `artifacts`, `artifact_versions`, `builds`, `partition_profiles`,
+`device_faults`, `device_logs`, `device_telemetry`, `device_metrics`, `device_commands`.
+Three of them (`enrollment_tokens`, `admin_tokens`, `project_secrets`) are CRITICAL.md
 paths; read their docstrings before changing anything.
 
 Three conventions that hold across the whole file, each with a reason that is not

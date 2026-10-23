@@ -2,54 +2,33 @@
 
 **Goal:** Self-hosted OTA firmware management for embedded fleets (ESP32 first) — a bad
 build is caught before the fleet, and any device that gets one recovers itself.
-**Updated:** 2026-10-09
+**Updated:** 2026-10-23
 
 ## Where this stands
 
-**Works on metal** — device `94a990dd09a4`, an ESP32-S3, against prod (`bingo.tvaroska.sk`):
+**Shipped through `v0.7.2` (V1 `R0–R6` + Multi-Project RBAC + `CUJ-2`):**
 
-- **Enroll** (R0, closed 2026-09-22). Browser flash → enrolled → live on the broker in
-  13 s. `S0-test-3` passed an unaided run by someone who never saw the code.
-  Write-up: [docs/features/enrollment.md](docs/features/enrollment.md).
-- **OTA of the agent** (R1, `R1-test-1` passed 2026-09-23). A dashboard-driven deploy
-  took the board `0.3.2 → 0.3.1` in ~25 s. Getting there fixed three prod defects that made deploy impossible (`../docs/ops-log.md` F-2026-09-23-001/002/003, all deployed).
-  Write-up: [docs/features/ota-deploy.md](docs/features/ota-deploy.md).
-- **Auto-rollback of "boots, joins, never confirms"** (2026-09-23). A deliberately broken
-  `0.3.2-rbtest` came back on 0.3.1 in 71 s, unattended
-  ([docs/runbooks/rollback-test.md](docs/runbooks/rollback-test.md)).
+- **R0 — Enroll** (closed 2026-09-22): Browser Web Serial flash → `POST /v1/enroll` → live on the broker in 13 s ([docs/features/enrollment.md](docs/features/enrollment.md)).
+- **R1 & R2 — Safe OTA deploy & auto-rollback** (closed 2026-10-08): Flash read-back SHA-256 check before apply, device-armed 300 s confirm timer, and automatic A/B rollback of builds that hang or fail to confirm ([docs/features/ota-deploy.md](docs/features/ota-deploy.md)).
+- **R2b — Operator flows & board profiles** (closed 2026-10-09): Guided onboard/update/network flows (`spec/flows.md`), multi-SSID `ff_cfg` priority list, device naming, and measured partition profiles (`partition_profiles`, [docs/features/board-profiles.md](docs/features/board-profiles.md)).
+- **R3 — Embeddable OTA library** (closed 2026-10-09, `v0.5.0`): ESP-IDF component and Arduino/PlatformIO library (`agent/components/fleetforge/`) with `FFOTALIB` binary marker verification ([docs/features/ota-library.md](docs/features/ota-library.md)).
+- **R4 — Health, telemetry & remote logs** (closed 2026-10-22): `min_free_heap`, `boot_ok`, `reset_reason` + rolling fault counts (`panic`, `task_wdt`, `brownout`), `up/telemetry` batched metrics, and `up/log` with crash-surviving `RTC_NOINIT_ATTR` tail ([docs/features/health-telemetry.md](docs/features/health-telemetry.md)).
+- **R5 — Custom self-test, safe window & device verbs** (closed 2026-10-16): `ff_set_selftest` / `Fleetforge.onSelfTest`, safe-window reboot deferral (`awaiting_safe_window`) gating both apply and rollback, rapid-crash `safe_mode`, sleepy helpers (`ff_is_ready_for_sleep`), and `apply`/`cancel`/`rollback`/`reboot` verbs with `up/ack` ([docs/features/self-test.md](docs/features/self-test.md)).
+- **P1 — Projects, multi-user RBAC & scoped tokens** (closed 2026-10-19): Project isolation (`projects`), invite-only users (`users`, local password + verified Firebase Auth), per-project roles (`owner`, `operator`, `viewer`), and scoped/project-pinned `ffa_...` machine tokens ([docs/features/projects-and-users.md](docs/features/projects-and-users.md)).
+- **CUJ-2 — Git CI/CD, rotating secrets & OTel export** (closed 2026-10-21): Git provenance + branch/tag/commit tracking & auto-deploy (`CI-CD-1`), Fernet-encrypted rotating project secrets (`SEC-1`, `dn/cfg.secrets_rev` + `GET /v1/device-secrets`), and OTLP/HTTP log & metric export (`OTEL-1`).
+- **R6 — Signed OTA, resumable downloads & KPIs → V1 complete** (closed 2026-10-22, `v0.7.2`): App-level ECDSA P-256 signature verification (`ecdsa-p256-sha256:<base64>`) against a multi-key rotation ring, HTTP `Range` resumable OTA downloads with exponential backoff, and delivery-success / fleet-safety KPIs in the API and dashboard ([docs/features/security-hardening.md](docs/features/security-hardening.md)).
 
-**Not yet, and why it matters:**
+**Recently closed follow-ups (2026-10-23):**
 
-- Confirm/rollback is reported only from agent 0.4.0 on (R2-be-1). From then on every deploy
-  ends `confirmed` or `rolled_back`.
-- An image that boots, gets its announce acked and is broken anyway confirms itself and
-  **nothing recovers it**. Roll to **one board at a time**. (The flaky radio is no longer a
-  reason: R2-test-2 showed in QEMU that the download and the confirm timer never overlap.)
-- A store connection that goes silent mid-download no longer holds the board's update
-  slot: since agent 0.4.4 (R2-fw-5) the download fails as `download stalled` 60-80 s after
-  the last byte and the next deploy starts (proven in QEMU). A peer that
-  goes silent before the first 1 KB of body is still not caught.
-- An OTA'd image that hangs before its broker session rolls back by itself since agent
-  0.4.3 (R2-fw-4): proven in QEMU.
-- Every device has `name: null`. Now `R2b-be-1` / `R2b-fe-6`.
-- The operator experience (onboard, update, change Wi-Fi) is specified as three flows in
-  `spec/flows.md` (2026-10-04) and is **R2b** below. Almost all of it is dashboard work that
-  needs no new protocol; only the known-networks list touches the agent and `ff_cfg`.
+- **Improv BLE provisioning & non-blocking Wi-Fi retry timer (`ff_net_wifi.c`):** Attached the NimBLE GATT service (`00467768-6228-2272-4663-277478268000`, characteristics `...8001`–`...8004`) and RPC command parser (`improv_handle_rpc_command`) to call `ff_net_wifi_save_nvs()` and trigger an immediate reconnect on the default event loop, and replaced all blocking `vTaskDelay` sleeps on `sys_evt` with a non-blocking one-shot `esp_timer` (`s_retry_timer`).
+- **Ingestor OTel async queue, pooled client & rate-limiter global bucket:** Decoupled outbound OTLP/HTTP exports from the PostgreSQL transaction via a bounded `asyncio.Queue` (`OTEL_QUEUE_MAX = 256`) and a persistent connection-pooled `httpx.AsyncClient` (`ingestor/otel.py`, `ingestor/main.py`), and isolated `GLOBAL_KEY = "*"` into its own `deque` in `FixedWindowLimiter` (`auth/ratelimit.py`) so spoofed `X-Forwarded-For` churn cannot evict the global failure counter.
+- **Staged/canary rollouts for project-wide & CI auto-deploy:** `deploy_version_to_project_devices` (`api/routers/deploys.py`) now enforces Wave 1 canary gating (1 canary board first until `confirmed`), Wave 2 bounded concurrency (`max_parallel = 5`), and automatic rollout halt if any board in the cohort enters `rolled_back` or `failed` on the target version ([docs/features/groups-deploy.md](docs/features/groups-deploy.md)).
 
-**Approach change (2026-10-08): no hardware bench tests.** Every proof is QEMU, the simulator
-or a unit test; a task whose acceptance needs a person at a board is not filed. The bench
-tasks, scripts and runbooks are gone (`DECISIONS.md` 2026-10-08). **R3 is now open.**
+**Testing approach (since 2026-10-08):** Every proof runs in QEMU, the Python simulator, or host/integration tests; no task requires manual hardware bench intervention (`DECISIONS.md` 2026-10-08).
 
-**Was: R2 — safe deploy (verify + auto-rollback), opened 2026-10-03.** The CUJ-1 T3 gate
-re-ran and passed on its graded segments (3: enroll, 5: OTA reports the new version); the dashboard
-and server half of 6 and of the wrong-layout refusal is `just update-e2e` (R2b-test-3); the
-on-device half is still QEMU. `jeep` found nothing assessable in what the
-run could show, so the pass rests on the deterministic judge. Task list below; background in
-[docs/features/ota-deploy.md](docs/features/ota-deploy.md) → *Phase 2*.
+**Withdrawn (hardware-gated):**
 
-**Blocked:**
-
-- `S0-bug-1` and `R2b-test-1` withdrawn 2026-10-09 (hardware-gated, no-bench approach).
+- `S0-bug-1` and `R2b-test-1` withdrawn 2026-10-09 (no-bench approach).
 
 <!-- Counters: spec=1 infra=7 db=1 be=6 fe=7 sec=1 fw=4 test=3 -->
 <!-- Sprint 0 counters: fe=8 fw=6 infra=10 test=4 ops=1 bug=4 -->

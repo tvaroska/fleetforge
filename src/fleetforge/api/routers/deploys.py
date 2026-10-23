@@ -122,6 +122,7 @@ from fleetforge.deploy_precheck import (
 from fleetforge.deploys import (
     DeploySender,
     deploy_kpis,
+    latest_deploys,
     latest_open_transaction,
     record_publish_failure,
     record_requested,
@@ -617,6 +618,9 @@ def matches_project_tracking(
     return False
 
 
+DEFAULT_ROLLOUT_MAX_PARALLEL = 5
+
+
 async def deploy_version_to_project_devices(
     session: AsyncSession,
     *,
@@ -630,8 +634,19 @@ async def deploy_version_to_project_devices(
     publisher: CommandPublisher,
     target_chip: str | None = None,
     best_effort_broker: bool = False,
+    canary: bool = True,
+    max_parallel: int = DEFAULT_ROLLOUT_MAX_PARALLEL,
 ) -> tuple[list[DeployAccepted], dict[str, str]]:
-    """Stage `version` onto compatible live boards in `project_id`.
+    """Stage `version` onto compatible live boards in `project_id` with staged rollout safety.
+
+    Enforces the three cohort rollout gates (`docs/features/groups-deploy.md`):
+    1. **Auto-Halt on Rollback / Failure:** If any board in the project cohort has already
+       entered `rolled_back` or `failed` on `version`, halt immediately and skip remaining boards.
+    2. **Wave 1 (Canary Gate):** When `canary=True` and multiple boards are eligible, if no
+       board in the project has confirmed `version` yet, stage onto 1 canary board (preferring
+       online `is_dev` / `always_on` boards) and hold the rest until confirmation.
+    3. **Wave 2 (Bounded Concurrency):** Cap concurrent in-flight downloads for `version` at
+       `max_parallel` (default 5) so a multi-board rollout does not saturate a 2.4 GHz AP.
 
     Used by both `POST /v1/projects/{slug}/deploy` (`best_effort_broker=False`) and automatic
     CD triggers on `POST /v1/artifact` / `PATCH /v1/projects/{slug}` (`best_effort_broker=True`).
@@ -644,26 +659,66 @@ async def deploy_version_to_project_devices(
     ):
         return [], {}
 
-    stmt = (
+    all_project_stmt = (
         select(Device)
         .where(Device.project_id == project_id, Device.decommissioned_at.is_(None))
         .order_by(Device.device_id)
     )
-    if target_filter == "dev":
-        stmt = stmt.where(Device.is_dev.is_(True))
     if target_chip is not None:
-        stmt = stmt.where(Device.platform_type == target_chip)
+        all_project_stmt = all_project_stmt.where(Device.platform_type == target_chip)
+    all_project_devices = list((await session.scalars(all_project_stmt)).all())
+    if not all_project_devices:
+        return [], {}
 
-    devices = list((await session.scalars(stmt)).all())
+    devices = (
+        [d for d in all_project_devices if d.is_dev]
+        if target_filter == "dev"
+        else list(all_project_devices)
+    )
     if not devices:
         return [], {}
 
+    snapshots = await latest_deploys(session, device_ids=[d.device_id for d in all_project_devices])
+
+    # Rule 1: Auto-halt if any board in the project cohort rolled back or failed on `version`.
+    for d in all_project_devices:
+        snap = snapshots.get(d.device_id)
+        if (
+            snap is not None
+            and snap.artifact_version == version
+            and snap.state
+            in (
+                "rolled_back",
+                "failed",
+            )
+        ):
+            halt_reason = f"rollout halted: device {d.device_id} {snap.state} on version {version}"
+            return [], {cand.device_id: halt_reason for cand in devices}
+
+    has_confirmed_canary = any(
+        d.fw_version == version
+        or (
+            (snap := snapshots.get(d.device_id)) is not None
+            and snap.artifact_version == version
+            and snap.state == "confirmed"
+        )
+        for d in all_project_devices
+    )
+
     catalog = await load_layout_catalog(session)
-    sent_by = await _sender(session, admin)
-    deployed: list[DeployAccepted] = []
+    now = now_utc()
+    eligible: list[tuple[Device, ResolvedArtifact, bool]] = []
     skipped: dict[str, str] = {}
 
     for device in devices:
+        dev_snap = snapshots.get(device.device_id)
+        if device.fw_version == version or (
+            dev_snap is not None
+            and dev_snap.artifact_version == version
+            and dev_snap.state == "confirmed"
+        ):
+            skipped[device.device_id] = f"already running version {version}"
+            continue
         _, found_artifact = await _resolve(session, device.device_id, version)
         found_refusals: list[Finding] = [
             *refusals(device, found_artifact, version=version, catalog=catalog),
@@ -679,7 +734,63 @@ async def deploy_version_to_project_devices(
         if found_artifact is None:
             skipped[device.device_id] = "no such artifact"
             continue
+        online = is_online(device, now=now, tolerance=settings.presence_tolerance)
+        eligible.append((device, found_artifact, online))
 
+    if not eligible:
+        return [], skipped
+
+    # Prioritise any board already in-flight on `version`, then online dev boards, then
+    # online always_on boards, then online boards, then deterministic device_id order.
+    def _canary_priority(
+        item: tuple[Device, ResolvedArtifact, bool],
+    ) -> tuple[int, int, int, int, str]:
+        dev, _, online = item
+        snap = snapshots.get(dev.device_id)
+        in_flight_this_ver = (
+            snap is not None and snap.artifact_version == version and not snap.is_terminal
+        )
+        return (
+            0 if in_flight_this_ver else 1,
+            0 if online else 1,
+            0 if dev.is_dev else 1,
+            0 if str(dev.power_class) == "always_on" else 1,
+            dev.device_id,
+        )
+
+    if canary and not has_confirmed_canary and len(eligible) > 1:
+        ordered = sorted(eligible, key=_canary_priority)
+        canary_item = ordered[0]
+        canary_id = canary_item[0].device_id
+        for dev, _, _ in ordered[1:]:
+            skipped[dev.device_id] = f"waiting for canary {canary_id} to confirm {version}"
+        wave_items = [canary_item]
+    else:
+        # Wave 2: Bounded concurrency (`max_parallel`). Count boards already in-flight on `version`
+        # outside the current eligible republish set.
+        eligible_ids = {dev.device_id for dev, _, _ in eligible}
+        active_in_flight = sum(
+            1
+            for d in all_project_devices
+            if d.device_id not in eligible_ids
+            and (snap := snapshots.get(d.device_id)) is not None
+            and snap.artifact_version == version
+            and not snap.is_terminal
+        )
+        effective_cap = max(1, max_parallel)
+        available_slots = max(0, effective_cap - active_in_flight)
+        ordered = sorted(eligible, key=_canary_priority)
+        wave_items = ordered[:available_slots]
+        for dev, _, _ in ordered[available_slots:]:
+            skipped[dev.device_id] = f"queued for next wave (max_parallel={effective_cap})"
+
+    if not wave_items:
+        return [], skipped
+
+    sent_by = await _sender(session, admin)
+    deployed: list[DeployAccepted] = []
+
+    for device, found_artifact, online in wave_items:
         open_transaction = await latest_open_transaction(
             session, device_id=device.device_id, window_s=settings.signed_url_ttl_s
         )
@@ -739,7 +850,6 @@ async def deploy_version_to_project_devices(
                 version=version,
             )
 
-        online = is_online(device, now=now_utc(), tolerance=settings.presence_tolerance)
         deployed.append(
             DeployAccepted(
                 cmd_id=cmd_id,

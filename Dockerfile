@@ -17,10 +17,16 @@ WORKDIR /app
 
 # Bytecode up front (slower build, faster cold start); copy rather than hardlink
 # because the uv cache mount and /app are different filesystems.
+# MALLOC_ARENA_MAX=2 and MALLOC_MMAP_THRESHOLD_=131072 prevent glibc from raising
+# its dynamic mmap threshold after 19 MiB Argon2 calls and retaining ~20 MiB per
+# worker-thread arena inside the 256 M container limit.
 ENV UV_COMPILE_BYTECODE=1 \
     UV_LINK_MODE=copy \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
+    MALLOC_ARENA_MAX=2 \
+    MALLOC_MMAP_THRESHOLD_=131072 \
+    MALLOC_TRIM_THRESHOLD_=131072 \
     PATH="/app/.venv/bin:$PATH" \
     PYTHONPATH="/app/src"
 

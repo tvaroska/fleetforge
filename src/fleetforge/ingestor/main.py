@@ -41,6 +41,7 @@ from fleetforge import retention
 from fleetforge.clock import now_utc
 from fleetforge.config import get_settings
 from fleetforge.db.base import get_engine, get_sessionmaker
+from fleetforge.ingestor import otel
 from fleetforge.ingestor.handlers import handle_up_message
 
 logger = logging.getLogger("fleetforge.ingestor")
@@ -304,6 +305,7 @@ async def main() -> None:
     )
 
     sweeper = asyncio.create_task(retention_loop(sessionmaker))
+    otel_worker = asyncio.create_task(otel.otel_export_loop())
 
     # `docker compose down` sends SIGTERM; cancelling the task lets aiomqtt send a
     # proper DISCONNECT instead of leaving a half-open session on the broker.
@@ -314,8 +316,13 @@ async def main() -> None:
     with contextlib.suppress(asyncio.CancelledError):
         await task
     sweeper.cancel()
+    otel_worker.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await sweeper
+    with contextlib.suppress(asyncio.CancelledError):
+        await otel_worker
+    await otel.flush_otel_queue()
+    await otel.close_otel_client()
     # Close the pool rather than leaving connections for the server to reap.
     await get_engine().dispose()
     logger.info("ingestor stopped")

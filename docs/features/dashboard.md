@@ -19,6 +19,19 @@ When `/implement` finishes a task, it appends a completed entry below.
 <!-- Newest first. One entry per completed task. Capture what a future reader
      needs WITHOUT the local plan file. -->
 
+### 2026-10-17 — Stitch Design System Extraction & Visual Hierarchy Polish (Recs 2 & 3)
+
+Extracted the Fleetforge Monochrome Pixel design system into [`.stitch/DESIGN.md`](../../.stitch/DESIGN.md) (Stitch project `10710750743754666019`, design system asset `31242094f75c486a9b0b1494adb9eb34`, baseline screen `15568291776129989580`, and v2 screen `7693909253347765266`) and landed two visual-hierarchy improvements in `frontend/src/index.css` while preserving the two load-bearing visual invariants (single achromatic ramp `#0c0c0c`–`#ffffff` with non-color glyph/weight/underline state encoding, and `Press Start 2P` strictly for short chrome vs `DejaVu Sans Mono` with `tabular-nums` for data/IDs/logs):
+
+- **Fleet Table Proportion & Row Focus (Rec 2):**
+  - Widened `<main>` from `56rem` to `68rem` (`1088px`) and allocated `width: 38%; min-width: 22rem` to the `Deploy` column (`th:last-child, td:last-child`) so inline `.precheck` and `.deploy-result` cards no longer squeeze columns 1–6.
+  - Added explicit selected-row surface elevation (`tbody tr[data-selected='true'] { background: var(--ff-panel); }` with `box-shadow: inset 3px 0 0 var(--ff-hi)` on the first cell) so the board currently pinned in the sticky `.status-strip` is unmistakable.
+  - Framed inline `.precheck` and `.deploy-result` cards with `#0c0c0c` recessed backgrounds, `3px` left border accents (`--ff-line-hi` by default, `--ff-hi` on `rolled-back` / `failed-before-reboot` / `failed`), and crisp internal dividers.
+- **Form Grid Alignment, Callout Panels & 4-Step Flasher Rail (Rec 3):**
+  - Aligned stacked form labels (`label:not(.choice):has(> input, > select)`) into a 2-column CSS Grid (`grid-template-columns: 11rem minmax(14rem, max-content)`) matching `<dl>` (`<dt>`/`<dd>`) rhythm, with compact side-by-side `SSID` / `Passphrase` columns inside `.network-row`.
+  - Framed `arrivals`, `preflight-card`, and un-adopted `profile-row` callouts as recessed `--ff-panel` cards with `3px` left border bars.
+  - Added a 4-step visual stepper rail (`data-testid="flash-stepper"`) above `FlashBoard` and subsequently split the single-scroll vertical stack into the 4-tab 8-bit console (`1. FLEET`, `2. BUILDS`, `3. ADD BOARD`, `4. ACCESS`) with `.tab-panel:not(.active) { display: none; }` so the single `useFleet` SSE stream and active Web Serial handles stay mounted across tab switches.
+
 ### 2026-10-09 — R3-fe-1 Partition profiles section: name a detected flash map
 
 A "Partition profiles" section between the fleet table and the upload form lists the flash
@@ -352,6 +365,14 @@ _Tracked in `TODO.md` (live status lives there, not here)._
 ## Planned Work
 
 _Use `/new-feature` / `/new-task`. Requirements land in `spec/`._
+
+### Scaling the Fleet View to 10s of MCUs per Use-Case / Project (Priority: P1)
+- **Context:** When a single operator manages multiple use-cases (`projects`), each with 20–80+ microcontrollers (`50–300+` boards total), the project switcher (`docs/features/projects-and-users.md`) and 4-tab console (`1. FLEET`, `2. BUILDS`, `3. ADD BOARD`, `4. ACCESS`) solve cross-use-case artifact isolation and page-scroll fatigue, but the Fleet table inside a single project still needs cohort-scale ergonomics:
+  1. **Compact Healthy Rows vs. Expanded Exception Rows:** Rendering a multi-line `.deploy-result` card inside every row makes a 50-board table ~4,000px tall. Steady-state `good` rows (running the confirmed target version) should collapse to a compact 1-line inline verdict badge (`1.5.0 ✓`), while `.deploy-result` diagnostic cards auto-expand only for active (`downloading`, `flashing`, `confirming`), `rolled_back`, or `failed` boards (or on click).
+  2. **Exception-First Default Sorting & Quick Filter Pills:** Sort rows so `rolled_back` / `failed` boards appear first, `updating` boards second, `version drift` third, and healthy `on-target` boards last. Pair with single-click filter pills above the table (`[ All ]`, `[ ! Attention / Rolled Back ]`, `[ ↺ Updating ]`, `[ ≠ Version Drift ]`, `[ ○ Offline ]`) and a name/MAC/group search filter.
+  3. **Use-Case Version Convergence Bar:** Display cohort convergence at the top of `FleetView` (`34/38 on target v1.5.0 · 3 updating · 1 rolled back`) using monochrome block glyphs (`█`/`░`).
+  4. **Batch USB Bench Provisioning Mode (`FlashBoard.tsx`):** Support an auto-incrementing board name prefix (e.g., `gh-node-` proposing `gh-node-01`, `gh-node-02`, …) and pre-selected `group_id` so bench-flashing 20–40 new MCUs in a row is a plug → click Flash → unplug assembly line.
+- **Added:** 2026-10-17
 
 ### Name a board (Priority: P2)
 - **Progress:** the API landed in R2b-be-1 (`PATCH /v1/devices/{id}`, `{name?, group_id?}`); the result-card UI landed in R2b-fe-6

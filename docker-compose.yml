@@ -287,6 +287,11 @@ services:
       minio-init:
         condition: service_completed_successfully
     environment:
+      # Keep glibc from retaining 19 MiB Argon2 / GCS buffers across per-thread arenas
+      # (MALLOC_MMAP_THRESHOLD_ explicitly disables dynamic mmap threshold growth).
+      MALLOC_ARENA_MAX: "2"
+      MALLOC_MMAP_THRESHOLD_: "131072"
+      MALLOC_TRIM_THRESHOLD_: "131072"
       # Container URL, not the host URL from .env — see the header note.
       DATABASE_URL: postgresql+asyncpg://fleetforge:fleetforge@postgres:5432/fleetforge
       RUN_MIGRATIONS: "true"          # the api migrates; the ingestor must not
@@ -425,6 +430,9 @@ services:
       mosquitto-config:
         condition: service_completed_successfully
     environment:
+      MALLOC_ARENA_MAX: "2"
+      MALLOC_MMAP_THRESHOLD_: "131072"
+      MALLOC_TRIM_THRESHOLD_: "131072"
       DATABASE_URL: postgresql+asyncpg://fleetforge:fleetforge@postgres:5432/fleetforge
       MQTT_HOST: mosquitto
       MQTT_PORT: "1883"

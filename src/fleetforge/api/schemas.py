@@ -1149,6 +1149,16 @@ class ProjectDeployRequest(BaseModel):
     target_filter: Literal["all", "dev"] = "all"
     apply: Literal["auto", "on_command"] = "auto"
     override: list[OverrideCode] = Field(default_factory=list, max_length=8)
+    canary: bool = Field(
+        default=True,
+        description="Stage onto 1 canary board first until a board in the cohort confirms the version",
+    )
+    max_parallel: int = Field(
+        default=5,
+        ge=1,
+        le=100,
+        description="Maximum concurrent in-flight OTA downloads per wave after canary confirmation",
+    )
 
 
 class ProjectDeployAccepted(BaseModel):

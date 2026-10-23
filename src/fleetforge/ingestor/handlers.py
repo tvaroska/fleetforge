@@ -374,7 +374,7 @@ async def _store_telemetry(
             )
         if device is not None:
             async with _savepoint(session, device_id, "otel metrics export", "liveness"):
-                await otel.export_metrics_to_otel(
+                await otel.enqueue_metrics_to_otel(
                     session,
                     device=device,
                     samples=telemetry.samples,
@@ -420,7 +420,7 @@ async def _store_log(
         )
     if device is not None and batch.lines:
         async with _savepoint(session, device_id, "otel logs export", "liveness"):
-            await otel.export_logs_to_otel(
+            await otel.enqueue_logs_to_otel(
                 session,
                 device=device,
                 lines=batch.lines,

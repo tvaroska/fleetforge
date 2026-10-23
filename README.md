@@ -5,12 +5,15 @@ grow to Raspberry Pi and eventually FPGAs.
 
 **Safe remote firmware updates**, where "safe" means the gate catches a bad build before the fleet. Any device that does get a bad update recovers itself.
 
-> **Where this stands:** R0-R2b are released (v0.4.3 and earlier): enroll a board from the
-> browser, deploy from the dashboard, device-side rollback of a build that never confirms,
-> and the operator flows around them. R3 adds the thin OTA library, so a maker's own
-> Arduino, PlatformIO or ESP-IDF firmware updates and rolls back the same way; it is proved
-> in QEMU and the simulator, not on a hardware bench (DECISIONS 2026-10-08). What is open,
-> next and blocked lives in [`TODO.md`](TODO.md) and nowhere else.
+> **Where this stands:** V1 (`R0–R6`) and `CUJ-2` are complete (`v0.7.2`):
+> - **R0–R2b:** browser Web Serial flash & enroll, dashboard OTA deploy, device-side A/B rollback of builds that fail to confirm, multi-network Wi-Fi config (`ff_cfg`), and measured board partition profiles.
+> - **R3:** embeddable OTA library (`agent/components/fleetforge/`) for ESP-IDF, PlatformIO, and Arduino, with binary library-marker detection.
+> - **R4:** live device health (`min_free_heap`, `boot_ok`, `reset_reason`), fault tracking, user-defined telemetry (`up/telemetry`), and remote firmware logs (`up/log` + crash-surviving `RTC_NOINIT_ATTR` log ring).
+> - **R5:** custom self-test confirmation (`ff_set_selftest` / `Fleetforge.onSelfTest`), safe-window reboot deferral (`awaiting_safe_window`), rapid-crash safe mode, sleepy lifecycle helpers, and operator commands (`apply`, `cancel`, `rollback`, `reboot`) with `up/ack`.
+> - **R6:** app-level ECDSA P-256 firmware signature verification (`ecdsa-p256-sha256:<base64>`) with a multi-key rotation ring, resumable HTTP `Range` downloads with exponential backoff, and delivery-success / fleet-safety KPIs.
+> - **Multi-project & CUJ-2:** multi-project isolation (`projects`), invite-only multi-user RBAC (`users`, `project_members`, Firebase Auth + local passwords, scoped `ffa_...` tokens), Git CI/CD provenance & branch/tag/commit auto-deploy (`fleetforge push`), rotating encrypted project secrets over HTTPS (`dn/cfg.secrets_rev` + `GET /v1/device-secrets`), and OTLP/HTTP log & metric export.
+>
+> Live task state and open follow-ups live in [`TODO.md`](TODO.md) and nowhere else.
 
 ## Why
 

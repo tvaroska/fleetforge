@@ -15,6 +15,19 @@ per-device capability checking matters far more than group targeting.
 the dashboard organises by tag. It is the bulk-deploy *release* that moves here, to the
 first genuinely homogeneous fleet: many identical drones.
 
+## Multi-Use-Case × 10s of MCUs Architecture (2026-10-17 Design Notes)
+
+When a single operator runs **multiple distinct use-cases** (e.g., *Greenhouse Climate*, *Irrigation Valves*, *Solar Telemetry*, *E-Ink Frames*) with **20–80+ microcontrollers per use-case**:
+
+1. **Two-Level Boundary (`projects` vs. `device_groups`):**
+   - **Use-Case / Application Boundary = `projects`** ([`projects-and-users.md`](projects-and-users.md)): Scopes `artifact_versions` to `(project_id, target, version)` so two use-cases that both run `esp32c6` can each upload `1.5.0` without `409 Conflict` and a board can never be offered firmware from a different use-case.
+   - **Intra-Use-Case Cohort / Ring = `device_groups`** (`UNIQUE (project_id, name)`): Within a single project/use-case, groups represent release rings (`canary`, `prod`) or physical sub-locations (`zone-north`, `zone-south`). Both `FlashBoard` and `EnrollBoard` should allow binding minted `enrollment_tokens` to a `group_id` so batches of newly flashed boards land in their cohort automatically on first boot.
+2. **Staged Cohort Rollout ("Canary → Bounded Wave" Instead of 40 Per-Row Clicks):**
+   - Clicking `Deploy` → `Send` row-by-row breaks down past ~10 boards. A project rollout (`POST /v1/projects/{slug}/deploy`, plus CI auto-deploy on `POST /v1/artifact` and ref-switch auto-deploy on `PATCH /v1/projects/{slug}`) executes server-side across three state-driven rules in `deploy_version_to_project_devices` (`api/routers/deploys.py`):
+     - **Wave 1 (Canary Gate):** When `canary=True` (default) and no board in the project has confirmed `version` yet, deploy to 1 canary board first (preferring online `is_dev`, then online `always_on` boards) and hold the remaining cohort (`waiting for canary <id> to confirm <version>`) until a board reports `confirmed`.
+     - **Wave 2 (Bounded Concurrency):** Once a canary has confirmed `version`, roll out to the remaining $N$ boards with a concurrency cap (`max_parallel = 5` by default) so 40–80 ESP32s pulling a ~1.2 MB image simultaneously do not saturate a local 2.4 GHz Wi-Fi AP.
+     - **Auto-Halt on Rollback / Failure:** If any board in the project cohort enters `rolled_back` or `failed` on `version`, halt immediately (`rollout halted: device <id> <state> on version <version>`) and stage nothing further.
+
 ## Phase 1: Groups & bulk deploy
 
 | ID | Task | Priority | Effort |

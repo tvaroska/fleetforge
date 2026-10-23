@@ -58,16 +58,47 @@
 #include "esp_wifi.h"
 #include "ff_net_adapter.h"
 #include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
 #include "nvs.h"
 #include "nvs_flash.h"
+
+#if defined(CONFIG_BT_ENABLED) && defined(CONFIG_BT_NIMBLE_ENABLED)
+#include "host/ble_hs.h"
+#include "nimble/nimble_port.h"
+#include "nimble/nimble_port_freertos.h"
+#include "services/gap/ble_svc_gap.h"
+#include "services/gatt/ble_svc_gatt.h"
+#endif
 
 static const char *TAG = "ff-wifi";
 
 #define FF_NET_NVS_NAMESPACE "ff_net"
 #define FF_NET_NVS_MAX 4
 #define IMPROV_BLE_SERVICE_UUID "00467768-6228-2272-4663-277478268000"
+#define IMPROV_BLE_STATE_CHAR_UUID "00467768-6228-2272-4663-277478268001"
+#define IMPROV_BLE_ERROR_CHAR_UUID "00467768-6228-2272-4663-277478268002"
+#define IMPROV_BLE_RPC_CMD_CHAR_UUID "00467768-6228-2272-4663-277478268003"
+#define IMPROV_BLE_RPC_RES_CHAR_UUID "00467768-6228-2272-4663-277478268004"
 #define IMPROV_BLE_WINDOW_S 120
+
+#define IMPROV_STATE_AUTHORIZED 0x02
+#define IMPROV_STATE_PROVISIONING 0x03
+#define IMPROV_STATE_PROVISIONED 0x04
+#define IMPROV_ERR_NONE 0x00
+#define IMPROV_ERR_INVALID_RPC 0x01
+#define IMPROV_CMD_WIFI_SETTINGS 0x01
+
+/* Internal event IDs posted to WIFI_EVENT on the default event loop by one-shot timers
+ * and Improv BLE provisioning so the system event task never sleeps or blocks and
+ * all Wi-Fi state transitions stay single-threaded on the default event loop. */
+#define FF_WIFI_EVENT_RETRY 0x7F00
+#define FF_WIFI_EVENT_IMPROV_CRED 0x7F01
+
+typedef enum {
+    RETRY_NONE = 0,
+    RETRY_CONNECT_SINGLE,
+    RETRY_BEGIN_CYCLE,
+    RETRY_NEXT_CANDIDATE,
+} retry_action_t;
 
 /* 1 s → 30 s, doubling. Same ladder the ingestor and the simulator use for the broker;
  * one reconnect policy across the product is one thing to reason about. */
@@ -108,7 +139,9 @@ static const int8_t TX_LADDER_QDBM[] = {0 /* placeholder: the captured default *
 static esp_netif_t *s_netif;
 static int s_retry_ms = WIFI_RETRY_MIN_MS;
 
-/* The known networks, copied out of ff_cfg at start and immutable afterwards. */
+/* The known networks, copied out of ff_cfg at start and refreshed when Improv BLE writes
+ * a new credential to the NVS `ff_net` overlay. */
+static ff_cfg_t s_saved_cfg;
 static ff_cfg_net_t s_nets[FF_CFG_MAX_NETS];
 static int s_net_count;
 
@@ -126,8 +159,14 @@ static volatile int s_joined = -1; /* index into s_nets of the network that gave
 static volatile bool s_have_ip;
 static volatile bool s_dhcp_armed;
 static esp_timer_handle_t s_dhcp_timer;
+static esp_timer_handle_t s_retry_timer;
+static volatile retry_action_t s_retry_action = RETRY_NONE;
 static volatile bool s_improv_active;
 static esp_timer_handle_t s_improv_timer;
+static uint8_t s_improv_state = IMPROV_STATE_AUTHORIZED;
+static uint8_t s_improv_error = IMPROV_ERR_NONE;
+static char s_improv_ssid[FF_CFG_MAX_SSID];
+static char s_improv_sec[FF_CFG_MAX_PSK];
 
 /* Rung 0's power, read from the driver once at start rather than assumed. */
 static int8_t s_default_qdbm;
@@ -190,6 +229,213 @@ static void dhcp_watchdog_disarm(void)
     }
 }
 
+static void on_retry_timeout(void *arg)
+{
+    (void)arg;
+    if (s_have_ip || s_retry_action == RETRY_NONE) {
+        return;
+    }
+    (void)esp_event_post(WIFI_EVENT, FF_WIFI_EVENT_RETRY, NULL, 0, 0);
+}
+
+static void retry_timer_arm(retry_action_t action, int delay_ms)
+{
+    s_retry_action = action;
+    if (s_retry_timer != NULL) {
+        esp_timer_stop(s_retry_timer);
+        if (esp_timer_start_once(s_retry_timer, (uint64_t)delay_ms * 1000ULL) == ESP_OK) {
+            return;
+        }
+    }
+    (void)esp_event_post(WIFI_EVENT, FF_WIFI_EVENT_RETRY, NULL, 0, 0);
+}
+
+static void retry_timer_disarm(void)
+{
+    s_retry_action = RETRY_NONE;
+    if (s_retry_timer != NULL) {
+        esp_timer_stop(s_retry_timer);
+    }
+}
+
+/* Parse an Improv Wi-Fi RPC command (`00467768-6228-2272-4663-277478268003`, cmd `0x01`:
+ * `[0x01, data_len, ssid_len, ssid..., passphrase_len, passphrase..., checksum]`), persist
+ * the credential to the NVS `ff_net` overlay, and trigger an immediate reconnect cycle on
+ * the default event loop without blocking the BLE host or event task. */
+static esp_err_t improv_handle_rpc_command(const uint8_t *buf, size_t len)
+{
+    if (buf == NULL || len < 4 || buf[0] != IMPROV_CMD_WIFI_SETTINGS) {
+        s_improv_error = IMPROV_ERR_INVALID_RPC;
+        return ESP_ERR_INVALID_ARG;
+    }
+    size_t data_len = buf[1];
+    if (2 + data_len > len || data_len < 2) {
+        s_improv_error = IMPROV_ERR_INVALID_RPC;
+        return ESP_ERR_INVALID_ARG;
+    }
+    size_t ssid_len = buf[2];
+    if (ssid_len == 0 || ssid_len >= sizeof(s_improv_ssid) || 1 + ssid_len + 1 > data_len) {
+        s_improv_error = IMPROV_ERR_INVALID_RPC;
+        return ESP_ERR_INVALID_ARG;
+    }
+    size_t sec_len = buf[3 + ssid_len];
+    if (sec_len >= sizeof(s_improv_sec) || 1 + ssid_len + 1 + sec_len > data_len) {
+        s_improv_error = IMPROV_ERR_INVALID_RPC;
+        return ESP_ERR_INVALID_ARG;
+    }
+    memset(s_improv_ssid, 0, sizeof(s_improv_ssid));
+    memset(s_improv_sec, 0, sizeof(s_improv_sec));
+    memcpy(s_improv_ssid, &buf[3], ssid_len);
+    if (sec_len > 0) {
+        memcpy(s_improv_sec, &buf[4 + ssid_len], sec_len);
+    }
+    esp_err_t err = ff_net_wifi_save_nvs(s_improv_ssid, s_improv_sec);
+    if (err != ESP_OK) {
+        s_improv_error = IMPROV_ERR_INVALID_RPC;
+        return err;
+    }
+    s_improv_error = IMPROV_ERR_NONE;
+    s_improv_state = IMPROV_STATE_PROVISIONING;
+    (void)esp_event_post(WIFI_EVENT, FF_WIFI_EVENT_IMPROV_CRED, NULL, 0, 0);
+    return ESP_OK;
+}
+
+#if defined(CONFIG_BT_ENABLED) && defined(CONFIG_BT_NIMBLE_ENABLED)
+static bool s_nimble_started;
+
+/* UUID 00467768-6228-2272-4663-277478268000..8004 in little-endian byte order for NimBLE. */
+static const ble_uuid128_t s_improv_svc_uuid =
+    BLE_UUID128_INIT(0x00, 0x80, 0x26, 0x78, 0x74, 0x27, 0x63, 0x46,
+                     0x72, 0x22, 0x28, 0x62, 0x68, 0x77, 0x46, 0x00);
+static const ble_uuid128_t s_improv_state_uuid =
+    BLE_UUID128_INIT(0x01, 0x80, 0x26, 0x78, 0x74, 0x27, 0x63, 0x46,
+                     0x72, 0x22, 0x28, 0x62, 0x68, 0x77, 0x46, 0x00);
+static const ble_uuid128_t s_improv_err_uuid =
+    BLE_UUID128_INIT(0x02, 0x80, 0x26, 0x78, 0x74, 0x27, 0x63, 0x46,
+                     0x72, 0x22, 0x28, 0x62, 0x68, 0x77, 0x46, 0x00);
+static const ble_uuid128_t s_improv_rpc_cmd_uuid =
+    BLE_UUID128_INIT(0x03, 0x80, 0x26, 0x78, 0x74, 0x27, 0x63, 0x46,
+                     0x72, 0x22, 0x28, 0x62, 0x68, 0x77, 0x46, 0x00);
+static const ble_uuid128_t s_improv_rpc_res_uuid =
+    BLE_UUID128_INIT(0x04, 0x80, 0x26, 0x78, 0x74, 0x27, 0x63, 0x46,
+                     0x72, 0x22, 0x28, 0x62, 0x68, 0x77, 0x46, 0x00);
+
+static int improv_gatt_access(uint16_t conn_handle, uint16_t attr_handle,
+                              struct ble_gatt_access_ctxt *ctxt, void *arg)
+{
+    (void)conn_handle;
+    (void)attr_handle;
+    uintptr_t ch = (uintptr_t)arg;
+    if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
+        uint8_t val = (ch == 1) ? s_improv_state : ((ch == 2) ? s_improv_error : 0);
+        return os_mbuf_append(ctxt->om, &val, sizeof(val)) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
+    }
+    if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR && ch == 3) {
+        static uint8_t s_rpc_buf[128];
+        uint16_t copied = 0;
+        int rc = ble_hs_mbuf_to_flat(ctxt->om, s_rpc_buf, sizeof(s_rpc_buf), &copied);
+        if (rc != 0) {
+            return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
+        }
+        return improv_handle_rpc_command(s_rpc_buf, copied) == ESP_OK ? 0 : BLE_ATT_ERR_UNLIKELY;
+    }
+    return BLE_ATT_ERR_UNLIKELY;
+}
+
+static const struct ble_gatt_svc_def s_improv_gatt_svcs[] = {
+    {
+        .type = BLE_GATT_SVC_TYPE_PRIMARY,
+        .uuid = &s_improv_svc_uuid.u,
+        .characteristics =
+            (struct ble_gatt_chr_def[]){
+                {
+                    .uuid = &s_improv_state_uuid.u,
+                    .access_cb = improv_gatt_access,
+                    .arg = (void *)1,
+                    .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY,
+                },
+                {
+                    .uuid = &s_improv_err_uuid.u,
+                    .access_cb = improv_gatt_access,
+                    .arg = (void *)2,
+                    .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY,
+                },
+                {
+                    .uuid = &s_improv_rpc_cmd_uuid.u,
+                    .access_cb = improv_gatt_access,
+                    .arg = (void *)3,
+                    .flags = BLE_GATT_CHR_F_WRITE,
+                },
+                {
+                    .uuid = &s_improv_rpc_res_uuid.u,
+                    .access_cb = improv_gatt_access,
+                    .arg = (void *)4,
+                    .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY,
+                },
+                {0},
+            },
+    },
+    {0},
+};
+
+static void improv_ble_advertise_start(void)
+{
+    struct ble_hs_adv_fields fields = {0};
+    fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
+    fields.uuids128 = (ble_uuid128_t *)&s_improv_svc_uuid;
+    fields.num_uuids128 = 1;
+    fields.uuids128_is_complete = 1;
+    (void)ble_gap_adv_set_fields(&fields);
+
+    struct ble_gap_adv_params adv_params = {0};
+    adv_params.conn_mode = BLE_GAP_CONN_MODE_UND;
+    adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;
+    (void)ble_gap_adv_start(BLE_OWN_ADDR_PUBLIC, NULL, BLE_HS_FOREVER, &adv_params, NULL, NULL);
+}
+
+static void improv_nimble_host_task(void *param)
+{
+    (void)param;
+    nimble_port_run();
+    nimble_port_freertos_deinit();
+}
+
+static void improv_ble_gatt_start(void)
+{
+    if (!s_nimble_started) {
+        if (nimble_port_init() != ESP_OK) {
+            return;
+        }
+        ble_svc_gap_init();
+        ble_svc_gatt_init();
+        (void)ble_svc_gap_device_name_set("fleetforge-improv");
+        (void)ble_gatts_count_cfg(s_improv_gatt_svcs);
+        (void)ble_gatts_add_svcs(s_improv_gatt_svcs);
+        ble_hs_cfg.sync_cb = improv_ble_advertise_start;
+        nimble_port_freertos_init(improv_nimble_host_task);
+        s_nimble_started = true;
+        return;
+    }
+    improv_ble_advertise_start();
+}
+
+static void improv_ble_gatt_stop(void)
+{
+    if (s_nimble_started && ble_gap_adv_active()) {
+        (void)ble_gap_adv_stop();
+    }
+}
+#else
+static void improv_ble_gatt_start(void)
+{
+    /* When NimBLE is not enabled in sdkconfig, keep the RPC handler referenced so
+     * -Werror=unused-function stays clean on non-BLE builds. */
+    (void)&improv_handle_rpc_command;
+}
+
+static void improv_ble_gatt_stop(void) {}
+#endif
+
 static void on_improv_timeout(void *arg)
 {
     (void)arg;
@@ -197,6 +443,7 @@ static void on_improv_timeout(void *arg)
         return;
     }
     s_improv_active = false;
+    improv_ble_gatt_stop();
     ESP_LOGI(TAG, "Improv Wi-Fi BLE window (%d s) expired; continuing background scan",
              IMPROV_BLE_WINDOW_S);
 }
@@ -216,6 +463,9 @@ static void improv_ble_window_start(void)
         }
     }
     s_improv_active = true;
+    s_improv_state = IMPROV_STATE_AUTHORIZED;
+    s_improv_error = IMPROV_ERR_NONE;
+    improv_ble_gatt_start();
     if (s_improv_timer != NULL) {
         esp_timer_stop(s_improv_timer);
         esp_timer_start_once(s_improv_timer, (uint64_t)IMPROV_BLE_WINDOW_S * 1000000ULL);
@@ -230,9 +480,11 @@ static void improv_ble_window_stop(void)
         return;
     }
     s_improv_active = false;
+    s_improv_state = IMPROV_STATE_PROVISIONED;
     if (s_improv_timer != NULL) {
         esp_timer_stop(s_improv_timer);
     }
+    improv_ble_gatt_stop();
     ESP_LOGI(TAG, "closing Improv Wi-Fi BLE window");
 }
 
@@ -398,7 +650,8 @@ static void build_order(void)
     }
 }
 
-/* The cycle tried everything and nothing gave an address: say so ONCE, then back off. */
+/* The cycle tried everything and nothing gave an address: say so ONCE, then schedule a
+ * non-blocking retry timer so the default system event task (`sys_evt`) is never blocked. */
 static void end_cycle_wait(void)
 {
     if (s_visible_count == 0) {
@@ -410,36 +663,34 @@ static void end_cycle_wait(void)
                  s_visible_count, s_net_count, s_retry_ms / 1000);
     }
     improv_ble_window_start();
-    vTaskDelay(pdMS_TO_TICKS(s_retry_ms));
+    int delay_ms = s_retry_ms;
     s_retry_ms = s_retry_ms * 2 > WIFI_RETRY_MAX_MS ? WIFI_RETRY_MAX_MS : s_retry_ms * 2;
+    retry_timer_arm(RETRY_BEGIN_CYCLE, delay_ms);
 }
 
 /* Begin an attempt cycle with a scan; SCAN_DONE carries it on. THE ONLY CALLER OF
  * esp_wifi_scan_start(), and only ever reached while not associated. If the scan cannot
- * start, every network is tried directly. Loops (rather than recursing) when even that
- * cannot start an attempt, so a permanently broken driver costs a log line per cycle and
- * no stack. */
+ * start, every network is tried directly; if none can start an attempt, end_cycle_wait()
+ * arms the one-shot retry timer rather than blocking or recursing. */
 static void begin_cycle(void)
 {
-    for (;;) {
-        memset(s_visible, 0, sizeof(s_visible));
-        s_visible_count = 0;
-        s_try = 0;
-        wifi_scan_config_t scan = {0}; /* active, all channels, hidden SSIDs not shown */
-        s_scanning = true;
-        esp_err_t err = esp_wifi_scan_start(&scan, false);
-        if (err == ESP_OK) {
-            return;
-        }
-        s_scanning = false;
-        ESP_LOGW(TAG, "cannot start a scan (%s); trying every known network directly",
-                 esp_err_to_name(err));
-        build_order();
-        if (attempt_from(0)) {
-            return;
-        }
-        end_cycle_wait();
+    memset(s_visible, 0, sizeof(s_visible));
+    s_visible_count = 0;
+    s_try = 0;
+    wifi_scan_config_t scan = {0}; /* active, all channels, hidden SSIDs not shown */
+    s_scanning = true;
+    esp_err_t err = esp_wifi_scan_start(&scan, false);
+    if (err == ESP_OK) {
+        return;
     }
+    s_scanning = false;
+    ESP_LOGW(TAG, "cannot start a scan (%s); trying every known network directly",
+             esp_err_to_name(err));
+    build_order();
+    if (attempt_from(0)) {
+        return;
+    }
+    end_cycle_wait();
 }
 
 /* SCAN_DONE: mark which known networks are in range, one record at a time (never an array
@@ -472,7 +723,6 @@ static void on_scan_done(const wifi_event_sta_scan_done_t *event)
         return;
     }
     end_cycle_wait();
-    begin_cycle();
 }
 
 /* DISCONNECTED with several known networks: a dropped link re-selects from a fresh scan;
@@ -493,9 +743,9 @@ static void on_disconnected_multi(int reason)
     if (had_ip) {
         ESP_LOGW(TAG, "disconnected (reason %d); link to \"%s\" lost; re-selecting in %d ms",
                  reason, s_nets[failed].ssid, s_retry_ms);
-        vTaskDelay(pdMS_TO_TICKS(s_retry_ms));
+        int delay_ms = s_retry_ms;
         s_retry_ms = s_retry_ms * 2 > WIFI_RETRY_MAX_MS ? WIFI_RETRY_MAX_MS : s_retry_ms * 2;
-        begin_cycle();
+        retry_timer_arm(RETRY_BEGIN_CYCLE, delay_ms);
         return;
     }
 
@@ -508,15 +758,11 @@ static void on_disconnected_multi(int reason)
     if (next < s_net_count) {
         ESP_LOGW(TAG, "disconnected (reason %d); trying \"%s\" next", reason,
                  s_nets[s_order[next]].ssid);
-        vTaskDelay(pdMS_TO_TICKS(WIFI_RETRY_MIN_MS));
-        if (attempt_from(next)) {
-            return;
-        }
-    } else {
-        ESP_LOGW(TAG, "disconnected (reason %d); that was the last known network", reason);
+        retry_timer_arm(RETRY_NEXT_CANDIDATE, WIFI_RETRY_MIN_MS);
+        return;
     }
+    ESP_LOGW(TAG, "disconnected (reason %d); that was the last known network", reason);
     end_cycle_wait();
-    begin_cycle();
 }
 
 static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *data)
@@ -531,6 +777,46 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
         }
         return;
     }
+    if (id == FF_WIFI_EVENT_RETRY) {
+        if (s_have_ip) {
+            return;
+        }
+        retry_action_t act = s_retry_action;
+        s_retry_action = RETRY_NONE;
+        if (act == RETRY_CONNECT_SINGLE) {
+            apply_tx_rung();
+            esp_wifi_connect();
+        } else if (act == RETRY_NEXT_CANDIDATE) {
+            if (!attempt_from(s_try + 1)) {
+                end_cycle_wait();
+            }
+        } else if (act == RETRY_BEGIN_CYCLE) {
+            begin_cycle();
+        }
+        return;
+    }
+    if (id == FF_WIFI_EVENT_IMPROV_CRED) {
+        retry_timer_disarm();
+        dhcp_watchdog_disarm();
+        load_nvs_net_overlay(&s_saved_cfg);
+        s_retry_ms = WIFI_RETRY_MIN_MS;
+        if (s_net_count > 1) {
+            if (!s_scanning) {
+                (void)esp_wifi_disconnect();
+                begin_cycle();
+            }
+        } else if (s_net_count == 1) {
+            wifi_config_t wifi = {0};
+            strncpy((char *)wifi.sta.ssid, s_nets[0].ssid, sizeof(wifi.sta.ssid) - 1);
+            strncpy((char *)wifi.sta.password, s_nets[0].psk, sizeof(wifi.sta.password) - 1);
+            wifi.sta.threshold.authmode = WIFI_AUTH_OPEN;
+            (void)esp_wifi_disconnect();
+            (void)esp_wifi_set_config(WIFI_IF_STA, &wifi);
+            apply_tx_rung();
+            (void)esp_wifi_connect();
+        }
+        return;
+    }
     if (id == WIFI_EVENT_SCAN_DONE) {
         /* Only a scan begin_cycle() started; never the single-network path's. */
         if (s_net_count > 1 && s_scanning) {
@@ -539,6 +825,7 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
         return;
     }
     if (id == WIFI_EVENT_STA_CONNECTED) {
+        retry_timer_disarm();
         s_retry_ms = WIFI_RETRY_MIN_MS;
         /* Freeze the ladder where it succeeded, and stop counting. */
         s_working_rung = (s_working_rung + s_fail_count / TX_LADDER_ATTEMPTS) % TX_LADDER_RUNGS;
@@ -577,10 +864,9 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
                      s_retry_ms / 1000);
             improv_ble_window_start();
         }
-        vTaskDelay(pdMS_TO_TICKS(s_retry_ms));
+        int delay_ms = s_retry_ms;
         s_retry_ms = s_retry_ms * 2 > WIFI_RETRY_MAX_MS ? WIFI_RETRY_MAX_MS : s_retry_ms * 2;
-        apply_tx_rung();
-        esp_wifi_connect();
+        retry_timer_arm(RETRY_CONNECT_SINGLE, delay_ms);
     }
 }
 
@@ -590,6 +876,7 @@ static void on_got_ip(void *arg, esp_event_base_t base, int32_t id, void *data)
     (void)base;
     (void)id;
     const ip_event_got_ip_t *event = (const ip_event_got_ip_t *)data;
+    retry_timer_disarm();
     improv_ble_window_stop();
     if (s_net_count > 1) {
         dhcp_watchdog_disarm();
@@ -607,6 +894,9 @@ static void on_got_ip(void *arg, esp_event_base_t base, int32_t id, void *data)
 
 esp_err_t ff_net_wifi_start(const ff_cfg_t *cfg)
 {
+    if (cfg != NULL) {
+        s_saved_cfg = *cfg;
+    }
     /* Copied before esp_wifi_start(): STA_START reads them on the event loop.
      * Prepend any NVS `ff_net` overlay networks ahead of `cfg->nets`. */
     load_nvs_net_overlay(cfg);
@@ -614,6 +904,16 @@ esp_err_t ff_net_wifi_start(const ff_cfg_t *cfg)
         ESP_LOGE(TAG, "link=wifi but the config carries no ssid: this board cannot join a "
                       "network. Re-flash ff_cfg (agent/tools/ff_cfg.py --ssid …).");
         return ESP_ERR_INVALID_ARG;
+    }
+
+    if (s_retry_timer == NULL) {
+        const esp_timer_create_args_t retry_args = {
+            .callback = &on_retry_timeout,
+            .name = "ff_wifi_retry",
+        };
+        if (esp_timer_create(&retry_args, &s_retry_timer) != ESP_OK) {
+            s_retry_timer = NULL;
+        }
     }
 
     if (s_net_count > 1) {

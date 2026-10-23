@@ -15,6 +15,8 @@ precedence over the environment defaults `OTEL_EXPORTER_OTLP_ENDPOINT` and
 and never interrupt PostgreSQL ingestion.
 """
 
+import asyncio
+import dataclasses
 import datetime as dt
 import json
 import logging
@@ -36,6 +38,124 @@ from fleetforge.secrets_crypto import decrypt_secret
 logger = logging.getLogger(__name__)
 
 OTEL_HTTP_TIMEOUT_S = 5.0
+OTEL_QUEUE_MAX = 256
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class OtelExportBatch:
+    """Pre-serialized OTLP/HTTP export item queued outside the PostgreSQL transaction."""
+
+    signal: str
+    device_id: str
+    url: str
+    body: dict[str, Any]
+    headers: dict[str, str]
+
+
+_otel_client: httpx.AsyncClient | None = None
+_otel_queue: asyncio.Queue[OtelExportBatch] | None = None
+
+
+def get_otel_client() -> httpx.AsyncClient:
+    """Return the shared, connection-pooled `httpx.AsyncClient` for OTLP/HTTP exports."""
+    global _otel_client
+    if _otel_client is None or _otel_client.is_closed:
+        _otel_client = httpx.AsyncClient(
+            timeout=OTEL_HTTP_TIMEOUT_S,
+            limits=httpx.Limits(max_keepalive_connections=8, max_connections=16),
+        )
+    return _otel_client
+
+
+async def close_otel_client() -> None:
+    """Close the shared `httpx.AsyncClient` on ingestor shutdown."""
+    global _otel_client
+    if _otel_client is not None and not _otel_client.is_closed:
+        await _otel_client.aclose()
+    _otel_client = None
+
+
+def get_otel_queue() -> asyncio.Queue[OtelExportBatch]:
+    """Return the bounded async queue for background OTLP/HTTP exports."""
+    global _otel_queue
+    if _otel_queue is None:
+        _otel_queue = asyncio.Queue(maxsize=OTEL_QUEUE_MAX)
+    return _otel_queue
+
+
+def _enqueue_batch(batch: OtelExportBatch) -> bool:
+    """Enqueue an OTLP batch without blocking; drop the oldest entry on backpressure."""
+    queue = get_otel_queue()
+    if queue.full():
+        try:
+            dropped = queue.get_nowait()
+            queue.task_done()
+            logger.warning(
+                "otel export queue full (%d); dropped oldest %s batch for device %s",
+                OTEL_QUEUE_MAX,
+                dropped.signal,
+                dropped.device_id,
+            )
+        except asyncio.QueueEmpty:
+            pass
+    try:
+        queue.put_nowait(batch)
+        return True
+    except asyncio.QueueFull:
+        return False
+
+
+async def send_otel_batch(batch: OtelExportBatch) -> bool:
+    """POST one `OtelExportBatch` using the persistent `httpx.AsyncClient`."""
+    client = get_otel_client()
+    try:
+        resp = await client.post(batch.url, json=batch.body, headers=batch.headers)
+        if resp.status_code >= 400:
+            logger.warning(
+                "otel %s export for device %s returned HTTP %d",
+                batch.signal,
+                batch.device_id,
+                resp.status_code,
+            )
+            return False
+        return True
+    except httpx.HTTPError:
+        logger.warning(
+            "otel %s export failed for device %s",
+            batch.signal,
+            batch.device_id,
+            exc_info=True,
+        )
+        return False
+
+
+async def flush_otel_queue() -> int:
+    """Drain all currently queued OTLP batches through the persistent HTTP client."""
+    queue = get_otel_queue()
+    sent = 0
+    while not queue.empty():
+        try:
+            batch = queue.get_nowait()
+        except asyncio.QueueEmpty:
+            break
+        try:
+            if await send_otel_batch(batch):
+                sent += 1
+        finally:
+            queue.task_done()
+    return sent
+
+
+async def otel_export_loop() -> None:
+    """Background worker that drains queued OTLP batches off the critical DB/MQTT path."""
+    queue = get_otel_queue()
+    while True:
+        batch = await queue.get()
+        try:
+            await send_otel_batch(batch)
+        finally:
+            queue.task_done()
+
 
 _SEVERITY_MAP: dict[str, tuple[int, str]] = {
     "E": (17, "ERROR"),
@@ -240,20 +360,19 @@ async def _resolve_project_otel(
     return project_slug, endpoint, parse_otel_headers(raw_headers)
 
 
-async def export_logs_to_otel(
+async def _build_logs_batch(
     session: AsyncSession,
     *,
     device: Device,
     lines: list[LogLine],
     dropped: int,
     received_at: dt.datetime,
-) -> bool:
-    """Export a device log batch to OTLP/HTTP `/v1/logs` if configured."""
+) -> OtelExportBatch | None:
     if not lines:
-        return False
+        return None
     resolved = await _resolve_project_otel(session, device)
     if resolved is None:
-        return False
+        return None
     project_slug, base_endpoint, headers = resolved
     url = _resolve_endpoint(base_endpoint, "/v1/logs")
     body = build_otlp_logs_payload(
@@ -263,21 +382,103 @@ async def export_logs_to_otel(
         dropped=dropped,
         received_at=received_at,
     )
-    req_headers = {"Content-Type": "application/json", **headers}
-    try:
-        async with httpx.AsyncClient(timeout=OTEL_HTTP_TIMEOUT_S) as client:
-            resp = await client.post(url, json=body, headers=req_headers)
-            if resp.status_code >= 400:
-                logger.warning(
-                    "otel logs export for device %s returned HTTP %d",
-                    device.device_id,
-                    resp.status_code,
-                )
-                return False
-        return True
-    except httpx.HTTPError:
-        logger.warning("otel logs export failed for device %s", device.device_id, exc_info=True)
+    return OtelExportBatch(
+        signal="logs",
+        device_id=device.device_id,
+        url=url,
+        body=body,
+        headers={"Content-Type": "application/json", **headers},
+    )
+
+
+async def _build_metrics_batch(
+    session: AsyncSession,
+    *,
+    device: Device,
+    samples: list[TelemetrySample],
+    received_at: dt.datetime,
+) -> OtelExportBatch | None:
+    if not samples:
+        return None
+    resolved = await _resolve_project_otel(session, device)
+    if resolved is None:
+        return None
+    project_slug, base_endpoint, headers = resolved
+    url = _resolve_endpoint(base_endpoint, "/v1/metrics")
+    body = build_otlp_metrics_payload(
+        device=device,
+        project_slug=project_slug,
+        samples=samples,
+        received_at=received_at,
+    )
+    return OtelExportBatch(
+        signal="metrics",
+        device_id=device.device_id,
+        url=url,
+        body=body,
+        headers={"Content-Type": "application/json", **headers},
+    )
+
+
+async def enqueue_logs_to_otel(
+    session: AsyncSession,
+    *,
+    device: Device,
+    lines: list[LogLine],
+    dropped: int,
+    received_at: dt.datetime,
+) -> bool:
+    """Resolve OTel config in `session` and enqueue the `/v1/logs` batch without blocking."""
+    batch = await _build_logs_batch(
+        session,
+        device=device,
+        lines=lines,
+        dropped=dropped,
+        received_at=received_at,
+    )
+    if batch is None:
         return False
+    return _enqueue_batch(batch)
+
+
+async def enqueue_metrics_to_otel(
+    session: AsyncSession,
+    *,
+    device: Device,
+    samples: list[TelemetrySample],
+    received_at: dt.datetime,
+) -> bool:
+    """Resolve OTel config in `session` and enqueue the `/v1/metrics` batch without blocking."""
+    batch = await _build_metrics_batch(
+        session,
+        device=device,
+        samples=samples,
+        received_at=received_at,
+    )
+    if batch is None:
+        return False
+    return _enqueue_batch(batch)
+
+
+async def export_logs_to_otel(
+    session: AsyncSession,
+    *,
+    device: Device,
+    lines: list[LogLine],
+    dropped: int,
+    received_at: dt.datetime,
+) -> bool:
+    """Export a device log batch to OTLP/HTTP `/v1/logs` via the shared `httpx.AsyncClient`."""
+    batch = await _build_logs_batch(
+        session,
+        device=device,
+        lines=lines,
+        dropped=dropped,
+        received_at=received_at,
+    )
+    if batch is None:
+        return False
+    return await send_otel_batch(batch)
 
 
 async def export_metrics_to_otel(
@@ -287,32 +488,13 @@ async def export_metrics_to_otel(
     samples: list[TelemetrySample],
     received_at: dt.datetime,
 ) -> bool:
-    """Export a device telemetry batch to OTLP/HTTP `/v1/metrics` if configured."""
-    if not samples:
-        return False
-    resolved = await _resolve_project_otel(session, device)
-    if resolved is None:
-        return False
-    project_slug, base_endpoint, headers = resolved
-    url = _resolve_endpoint(base_endpoint, "/v1/metrics")
-    body = build_otlp_metrics_payload(
+    """Export a device telemetry batch to OTLP/HTTP `/v1/metrics` via the shared `httpx.AsyncClient`."""
+    batch = await _build_metrics_batch(
+        session,
         device=device,
-        project_slug=project_slug,
         samples=samples,
         received_at=received_at,
     )
-    req_headers = {"Content-Type": "application/json", **headers}
-    try:
-        async with httpx.AsyncClient(timeout=OTEL_HTTP_TIMEOUT_S) as client:
-            resp = await client.post(url, json=body, headers=req_headers)
-            if resp.status_code >= 400:
-                logger.warning(
-                    "otel metrics export for device %s returned HTTP %d",
-                    device.device_id,
-                    resp.status_code,
-                )
-                return False
-        return True
-    except httpx.HTTPError:
-        logger.warning("otel metrics export failed for device %s", device.device_id, exc_info=True)
+    if batch is None:
         return False
+    return await send_otel_batch(batch)

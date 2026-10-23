@@ -13,9 +13,13 @@ same conventions as `content` and `boris` (Artifact Registry image, digest-pinne
 bingo* below). Expedient, not branded — **Fleetforge is not a public product until V3**.
 Thus, the domain is an operational detail. A proper domain lands when it goes public.
 
-*This does not weaken the single-tenant hosted model:* it is still a real public domain
-with a real Let us Encrypt certificate. This is what the devices and Web Serial need. It
-is "not public" in the product sense (no signup, one admin) which SPEC already states.
+*This does not weaken the hosted model:* it is still a real public domain with a real
+Let's Encrypt certificate. This is what the devices and Web Serial need. It is "not
+public" in the product sense (no public signup; invite-only users, a superadmin
+bootstrapped from `ADMIN_PASSWORD_HASH`), which SPEC already states. Firebase sign-in is
+optional prod env: `FIREBASE_PROJECT_ID`, `FIREBASE_WEB_API_KEY` and
+`FIREBASE_SUPERADMIN_EMAILS` are unset on prod today, so only the env admin and
+local-password users can log in there.
 
 ## Components
 

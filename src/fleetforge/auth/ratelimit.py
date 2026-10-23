@@ -42,9 +42,12 @@ class FixedWindowLimiter:
         self._per_global = per_global
         self._window_s = window_s
         self._max_keys = max_keys
+        self._global_failures: deque[float] = deque()
         self._failures: OrderedDict[str, deque[float]] = OrderedDict()
 
     def _bucket(self, key: str) -> deque[float]:
+        if key == GLOBAL_KEY:
+            return self._global_failures
         bucket = self._failures.get(key)
         if bucket is None:
             if len(self._failures) >= self._max_keys:

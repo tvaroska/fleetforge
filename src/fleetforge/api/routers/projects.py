@@ -350,6 +350,8 @@ async def deploy_project(
             settings=settings,
             publisher=publisher,
             best_effort_broker=False,
+            canary=body.canary,
+            max_parallel=body.max_parallel,
         )
 
     return ProjectDeployAccepted(
