@@ -31,6 +31,7 @@ import {
   type ArrivalSummary,
   type ArtifactSummary,
   type DeployKpisSummary,
+  type DeviceGroupSummary,
   type DeviceSummary,
 } from './api'
 import { DeployCell } from './DeployCell'
@@ -192,6 +193,7 @@ function DeviceRow({
   onSelect,
   versions = null,
   onGoToBuilds,
+  groups,
 }: {
   device: DeviceSummary
   now: number
@@ -203,6 +205,7 @@ function DeviceRow({
   onSelect?: (deviceId: string) => void
   versions?: VersionLine | null
   onGoToBuilds?: () => void
+  groups?: DeviceGroupSummary[]
 }) {
   // Why a sleepy board went offline is its wake interval, so put it where the pointer is.
   const power =
@@ -212,7 +215,7 @@ function DeviceRow({
 
   const identity = device.name ?? <code>{device.device_id}</code>
 
-  async function toggleFlag(patch: { is_dev?: boolean; stay_awake?: boolean }) {
+  async function toggleFlag(patch: { is_dev?: boolean; stay_awake?: boolean; group_id?: string | null }) {
     try {
       await api.updateDevice(device.device_id, patch)
       onDeployed()
@@ -292,6 +295,26 @@ function DeviceRow({
                 >
                   sec:r{device.secrets_rev}
                 </span>
+              </>
+            )}
+            {groups && groups.length > 0 && (
+              <>
+                {' '}
+                <select
+                  aria-label="Device group"
+                  data-testid="device-group-select"
+                  className="flag-pill"
+                  value={device.group_id ?? ''}
+                  onChange={(e) => void toggleFlag({ group_id: e.target.value || null })}
+                  title="Assign device to a cohort group"
+                >
+                  <option value="">(no group)</option>
+                  {groups.map((g) => (
+                    <option key={g.id} value={g.id}>
+                      {g.name}
+                    </option>
+                  ))}
+                </select>
               </>
             )}
           </div>
@@ -461,6 +484,7 @@ export function FleetTable({
   onGoToOnboard,
   onGoToBuilds,
   kpis = null,
+  groups,
 }: {
   fleet: Fleet
   artifacts: Artifacts
@@ -472,6 +496,7 @@ export function FleetTable({
   onGoToOnboard?: () => void
   onGoToBuilds?: () => void
   kpis?: DeployKpisSummary | null
+  groups?: DeviceGroupSummary[]
 }) {
   const { devices, arrivals, error, stream, now, refresh } = fleet
   const effectiveKpis = kpis ?? (devices !== null ? computeKpisFromDevices(devices) : null)
@@ -610,6 +635,7 @@ export function FleetTable({
                 onSelect={onSelect}
                 versions={versions}
                 onGoToBuilds={onGoToBuilds}
+                groups={groups}
               />
             ))}
           </tbody>

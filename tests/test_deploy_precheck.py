@@ -77,7 +77,7 @@ def artifact(
     )
 
 
-def codes(found: list) -> list[str]:  # type: ignore[type-arg]
+def codes(found: list[typing.Any]) -> list[str]:
     return [f.code for f in found]
 
 

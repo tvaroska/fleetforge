@@ -67,7 +67,9 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from fleetforge import device_commands, device_logs, faults, partition_profiles, telemetry_store
+from fleetforge.broker import CommandPublisher
 from fleetforge.clock import device_time
+from fleetforge.config import Settings
 from fleetforge.db.models import DeployEvent, Device
 from fleetforge.deploys import record_observed_status, snapshot_detail
 from fleetforge.events import DeviceEvent, EventType, emit
@@ -101,6 +103,8 @@ async def handle_up_message(
     retained: bool,
     received_at: dt.datetime,
     tolerance: float,
+    publisher: CommandPublisher | None = None,
+    settings: Settings | None = None,
 ) -> DeviceEvent | None:
     """Ingest one `up/` message; return the event emitted, or `None` if it was dropped.
 

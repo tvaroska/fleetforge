@@ -58,6 +58,7 @@ export type FlashProgress = {
 export type FlashRequest = {
   config: FlashConfigInput
   baudRate: number
+  groupId?: string | null
 }
 
 /**
@@ -448,9 +449,10 @@ export function useFlashBoard({
 
         // 4. Mint last. Single-use: every attempt that got this far will write it.
         setStep('Minting an enrollment token…')
+        const groupId = request.groupId ?? null
         const issued = await (project
-          ? api.issueEnrollmentToken(null, project)
-          : api.issueEnrollmentToken(null))
+          ? api.issueEnrollmentToken(groupId, project)
+          : api.issueEnrollmentToken(groupId))
         tokenId = issued.id
         minted = true
 

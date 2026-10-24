@@ -167,7 +167,11 @@ again while any of these holds:
 - a message to the fleet is not yet acknowledged (heartbeats included, so a wake whose network
   dropped is normally not ready);
 - a `metric()` sample has not been published yet (samples go out at most every 5 s, so readiness
-  can lag the last `metric()` by that much).
+  can lag the last `metric()` by that much);
+- a `logf()` line in the `up/log` ring buffer (`ff_log_drained()`) has not been published yet;
+- the retained `dn/cfg` payload sets `stay_awake: true` (bench development hold), or a rotating
+  secrets bundle (`secrets_rev` via `GET /v1/device-secrets`, `ff_sec_synced()`) is still being
+  fetched.
 
 `isConnected()` is true while the broker connection is up and the fleet has acknowledged this
 board's announce on it. Neither function logs, so `loop()` can call them on every pass. Call

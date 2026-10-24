@@ -181,9 +181,9 @@ GCS_IMPERSONATE_SERVICE_ACCOUNT=fleetforge-artifacts@btvaroska.iam.gserviceaccou
   `--key "secrets/ff-impersonation-probe-$(uuidgen).bin"` exits non-zero with
   `SELFTEST FAILED: ObjectStoreError: gcs put of secrets/… failed: Forbidden`.
 
-Still owed: the same run **on prod**, whose runtime identity is `mainsite@sites-470716`
-(granted, so it must pass, but its metadata server and egress are its own). It
-is S0-infra-6's first act. The probe is in
+Verified on prod (`bingo.tvaroska.sk`), whose runtime identity is `mainsite@sites-470716`
+impersonating `fleetforge-artifacts@btvaroska.iam.gserviceaccount.com` (S0-infra-6 / `v0.4.0+`).
+Historical probe details are in
 `.claude/plans/S0-infra-5-gcs-credential-that-is-not-a-key-file.md` → AC3a.
 
 ## The credential already exists — it is just not a key
@@ -208,8 +208,8 @@ keeping straight:
 
 | Consumer | Needs | Status |
 |---|---|---|
-| Agent bundles from the object store (`docs/features/infrastructure.md`) | authenticated **reads** only — the flasher is a browser on an admin session, the API streams the bytes, no signed URL in the path | **Unblocked** (S0-infra-5). Wiring the prod container is S0-infra-6. |
-| R1 artifact delivery | **V4 signing** — a device holds no GCP identity, so the signature *is* the authorization | **Unblocked and checked** 2026-09-15: a `signBlob`-signed URL was redeemed with no credentials. Not yet exercised from prod. |
+| Agent bundles from the object store (`docs/features/infrastructure.md`) | authenticated **reads** only — the flasher is a browser on an admin session, the API streams the bytes, no signed URL in the path | **Live on dev and prod** (S0-infra-5 / S0-infra-6). |
+| R1 artifact delivery | **V4 signing** — a device holds no GCP identity, so the signature *is* the authorization | **Live on dev and prod** (checked 2026-09-15 and wired in `v0.4.0+`): a `signBlob`-signed URL is redeemed with no credentials. |
 
 ### But do not simply switch on ADC
 
@@ -404,11 +404,8 @@ no longer carries them, or the flasher answers 503 in the window between. And ne
 
 ## Production configuration
 
-**Still not wired on the running container as of S0-infra-6**. `services/prod/` lives in
-the `services` repo and its env has protection (root `CLAUDE.md`: ask first), so S0-infra-6
-PROPOSES the change rather than applying it — and **until it applies, prod's flasher
-answers 503**. This is because the deployed app image will no longer carry the bundles. Four env
-lines wire it, and **nothing mounts**:
+**Wired on the running prod container since `v0.4.0`**. Four env lines in
+`services/prod/docker-compose.yml` wire it, and **nothing mounts**:
 
 ```yaml
       OBJECT_STORE_BACKEND: gcs

@@ -12,7 +12,13 @@
 // it.
 
 import { useCallback, useEffect, useState } from 'react'
-import { ApiError, api, type EnrollmentTokenIssued, type EnrollmentTokenSummary } from './api'
+import {
+  ApiError,
+  api,
+  type DeviceGroupSummary,
+  type EnrollmentTokenIssued,
+  type EnrollmentTokenSummary,
+} from './api'
 import { formatWhen } from './format'
 
 function IssuedToken({ issued, onDismiss }: { issued: EnrollmentTokenIssued; onDismiss: () => void }) {
@@ -52,12 +58,15 @@ function IssuedToken({ issued, onDismiss }: { issued: EnrollmentTokenIssued; onD
 export function EnrollBoard({
   onSessionExpired,
   project,
+  groups,
 }: {
   onSessionExpired: () => void
   project?: string
+  groups?: DeviceGroupSummary[]
 }) {
   const [tokens, setTokens] = useState<EnrollmentTokenSummary[] | null>(null)
   const [issued, setIssued] = useState<EnrollmentTokenIssued | null>(null)
+  const [selectedGroupId, setSelectedGroupId] = useState<string>('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -90,10 +99,12 @@ export function EnrollBoard({
   async function generate() {
     setBusy(true)
     setError(null)
+    const groupId = selectedGroupId || null
     try {
-      // Ungrouped: R0 has no group CRUD, so there is nothing to scope to yet.
       setIssued(
-        await (project ? api.issueEnrollmentToken(null, project) : api.issueEnrollmentToken(null)),
+        await (project
+          ? api.issueEnrollmentToken(groupId, project)
+          : api.issueEnrollmentToken(groupId)),
       )
       await refresh()
     } catch (err) {
@@ -123,6 +134,25 @@ export function EnrollBoard({
         trades the token for its own broker credential the first time it boots.
       </p>
 
+      {groups && groups.length > 0 && (
+        <p>
+          <label>
+            Group{' '}
+            <select
+              value={selectedGroupId}
+              onChange={(event) => setSelectedGroupId(event.target.value)}
+              disabled={busy}
+            >
+              <option value="">Ungrouped</option>
+              {groups.map((g) => (
+                <option key={g.id} value={g.id}>
+                  {g.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        </p>
+      )}
       <button type="button" onClick={() => void generate()} disabled={busy}>
         {busy ? 'Generating…' : 'Generate enrollment token'}
       </button>

@@ -16,10 +16,9 @@ Thus, the domain is an operational detail. A proper domain lands when it goes pu
 *This does not weaken the hosted model:* it is still a real public domain with a real
 Let's Encrypt certificate. This is what the devices and Web Serial need. It is "not
 public" in the product sense (no public signup; invite-only users, a superadmin
-bootstrapped from `ADMIN_PASSWORD_HASH`), which SPEC already states. Firebase sign-in is
-optional prod env: `FIREBASE_PROJECT_ID`, `FIREBASE_WEB_API_KEY` and
-`FIREBASE_SUPERADMIN_EMAILS` are unset on prod today, so only the env admin and
-local-password users can log in there.
+bootstrapped from `ADMIN_PASSWORD_HASH`), which SPEC already states. Firebase sign-in
+(`FIREBASE_PROJECT_ID`, `FIREBASE_WEB_API_KEY` and `FIREBASE_SUPERADMIN_EMAILS`) is live on
+prod (`bingo.tvaroska.sk`) as of `v0.7.0`, alongside the env admin and local-password users.
 
 ## Components
 
@@ -163,6 +162,13 @@ forced reclaims at the limit, long before an OOM kill.
 
 **Note:** The frontend figure (5 MiB) is nginx-shaped. `just up` (dev) runs Vite and reads
 ~48 MiB — measure in the production shape or the verdict is wrong.
+
+**Argon2 & glibc arena tuning (F-2026-10-16-001):** Each Argon2id hash/verify call allocates
+a temporary 64 MiB block in glibc's thread-pool `malloc` arenas. Without tuning, glibc retains
+those arenas inside the 256 MiB API cgroup limit after login/enrollment bursts, causing steady
+`memory.events max` reclaims. `Dockerfile.backend` sets `MALLOC_ARENA_MAX=2`,
+`MALLOC_MMAP_THRESHOLD_=131072`, and `MALLOC_TRIM_THRESHOLD_=131072` so large Argon2 buffers
+are allocated via `mmap` and returned to the kernel immediately on free.
 
 ### Prod Host (2026-09-09, Before R0-infra-4)
 

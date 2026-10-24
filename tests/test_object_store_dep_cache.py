@@ -7,11 +7,15 @@ sat at 84 %. These tests pin the three properties that keep the cache safe: it i
 it follows the settings, and a failed build is never cached.
 """
 
+from collections.abc import Iterator
+
 import pytest
 from fastapi import HTTPException
 
 from fleetforge.api import deps
 from fleetforge.api.deps import get_object_store
+from fleetforge.config import Settings
+from fleetforge.storage.objectstore import ObjectStore
 from tests.conftest import settings_for_tests
 
 S3 = {
@@ -23,7 +27,7 @@ S3 = {
 
 
 @pytest.fixture(autouse=True)
-def _fresh_cache() -> None:
+def _fresh_cache() -> Iterator[None]:
     deps._store_cache = None
     yield
     deps._store_cache = None
@@ -43,7 +47,7 @@ def test_create_object_store_runs_once_across_many_requests(
     calls = []
     real = factory.create_object_store
 
-    def counting(settings):  # type: ignore[no-untyped-def]
+    def counting(settings: Settings) -> ObjectStore:
         calls.append(1)
         return real(settings)
 

@@ -297,6 +297,72 @@ async def latest_open_transaction(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class RequestedRollout:
+    """Cohort rollout parameters recorded on a `requested` row (`detail.rollout`)."""
+
+    artifact_version: str
+    apply: str
+    sent_by: DeploySender
+    rollout: dict[str, Any]
+
+
+_REQUESTED_ROLLOUT_SQL = text(
+    """
+    SELECT artifact_version, detail
+      FROM deploy_events
+     WHERE device_id = :device_id
+       AND cmd_id = :cmd_id
+       AND state = :requested_state
+     ORDER BY at DESC, id DESC
+     LIMIT 1
+    """
+)
+
+
+async def requested_rollout(
+    session: AsyncSession, *, device_id: str, cmd_id: str
+) -> RequestedRollout | None:
+    """Return cohort rollout parameters from the `requested` row of `(device_id, cmd_id)`, or None."""
+    row = (
+        await session.execute(
+            _REQUESTED_ROLLOUT_SQL,
+            {
+                "device_id": device_id,
+                "cmd_id": cmd_id,
+                "requested_state": DeployState.REQUESTED.value,
+            },
+        )
+    ).first()
+    if row is None or not isinstance(row.artifact_version, str):
+        return None
+    detail = row.detail if isinstance(row.detail, dict) else {}
+    rollout = detail.get("rollout")
+    if not isinstance(rollout, dict):
+        return None
+    apply_val = detail.get("apply")
+    apply_str = apply_val if isinstance(apply_val, str) else "auto"
+    raw_sender = detail.get("sent_by")
+    if isinstance(raw_sender, dict):
+        sent_by = DeploySender(
+            subject=str(raw_sender.get("subject") or "system"),
+            token_id=str(raw_sender.get("token_id") or "rollout"),
+            credential=(
+                str(raw_sender["credential"])
+                if isinstance(raw_sender.get("credential"), str)
+                else None
+            ),
+        )
+    else:
+        sent_by = DeploySender("system", "rollout", None)
+    return RequestedRollout(
+        artifact_version=row.artifact_version,
+        apply=apply_str,
+        sent_by=sent_by,
+        rollout=rollout,
+    )
+
+
 async def record_requested(
     session: AsyncSession,
     *,
@@ -309,6 +375,7 @@ async def record_requested(
     target: str,
     apply: str,
     sent_by: DeploySender,
+    rollout: dict[str, Any] | None = None,
 ) -> DeployEvent:
     """Record the intent to deploy: one `requested` row, never terminal.
 
@@ -322,6 +389,19 @@ async def record_requested(
     without joining three tables, and who sent it (`sent_by`, R2b-be-4: the transaction's
     sender is whoever opened it) — and nothing else. **No URL, no bucket, no key.**
     """
+    detail_blob: dict[str, Any] = {
+        "sha256": sha256,
+        "size_bytes": size_bytes,
+        "target": target,
+        "apply": apply,
+        "sent_by": {
+            "subject": sent_by.subject,
+            "token_id": sent_by.token_id,
+            "credential": sent_by.credential,
+        },
+    }
+    if rollout is not None:
+        detail_blob["rollout"] = rollout
     row = DeployEvent(
         device_id=device_id,
         cmd_id=cmd_id,
@@ -329,17 +409,7 @@ async def record_requested(
         is_terminal=False,
         from_version=from_version,
         artifact_version=artifact_version,
-        detail={
-            "sha256": sha256,
-            "size_bytes": size_bytes,
-            "target": target,
-            "apply": apply,
-            "sent_by": {
-                "subject": sent_by.subject,
-                "token_id": sent_by.token_id,
-                "credential": sent_by.credential,
-            },
-        },
+        detail=detail_blob,
     )
     session.add(row)
     await session.flush()

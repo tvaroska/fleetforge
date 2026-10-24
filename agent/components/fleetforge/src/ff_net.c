@@ -106,3 +106,12 @@ const char *ff_net_ssid(void)
     }
     return ff_net_wifi_ssid();
 }
+
+int ff_net_known_networks(int fallback)
+{
+    if (s_link != FF_LINK_WIFI) {
+        return 0;
+    }
+    int active = ff_net_wifi_known_count();
+    return active > 0 ? active : fallback;
+}

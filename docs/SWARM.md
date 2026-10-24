@@ -1,5 +1,7 @@
 # Fleetforge for the swarm builder
 
+> **ARCHIVED (Historical R1 Snapshot — 2026-09-21, with 2026-10-14 §5 Addendum):** The V1 status claims in §1–§4 reflect the R1 snapshot before R2–R6 and CUJ-2 shipped; the V3 swarm gateway/hierarchy notes and §5 addendum remain design input for V3 (`docs/features/groups-deploy.md`). See [`TODO.md`](../TODO.md) and [`spec/prd.md`](../spec/prd.md) for current V1 status.
+
 **Date:** 2026-09-21
 **Status:** product review and recommendation — not a spec, not a plan.
 **Audience:** someone building mixed flying + ground drone swarms that have to

@@ -210,7 +210,9 @@ def test_two_bundles_one_stale_reports_both(git_repo: Path) -> None:
     assert result == 1
 
 
-def test_no_vacuity_on_dirty_tree_check(git_repo: Path, capsys) -> None:
+def test_no_vacuity_on_dirty_tree_check(
+    git_repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     """Removing the dirty-tree check would let an uncommitted change pass — check that it fails."""
     head = _git(git_repo, "rev-parse", "HEAD").stdout.strip()
     bundle_dir = git_repo / "agent" / "dist" / "esp32"
@@ -225,7 +227,9 @@ def test_no_vacuity_on_dirty_tree_check(git_repo: Path, capsys) -> None:
     assert "uncommitted changes" in captured.err
 
 
-def test_no_vacuity_on_stale_check(git_repo: Path, capsys) -> None:
+def test_no_vacuity_on_stale_check(
+    git_repo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     """Removing the ancestry check would let a stale bundle pass — check that it fails."""
     old_head = _git(git_repo, "rev-parse", "HEAD").stdout.strip()
     bundle_dir = git_repo / "agent" / "dist" / "esp32"

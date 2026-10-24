@@ -13,7 +13,7 @@ endpoint works from inside the compose network and fails on every real device.
 import datetime as dt
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.parse import parse_qs, urlparse
 
 import boto3
@@ -865,13 +865,16 @@ async def test_gcs_describe_names_the_credential_mode_and_never_a_path(
 ) -> None:
     """`describe` is what the selftest prints. An SA email is not a credential; a path is."""
     _patch_gcs_sdk(monkeypatch, FakeBucket())
-    impersonated = create_object_store(_impersonating_settings())
+    impersonated = cast(GcsObjectStore, create_object_store(_impersonating_settings()))
     assert f"creds=impersonated({TARGET_SA})" in impersonated.describe
 
     key_file = tmp_path / "fleetforge-artifacts.json"
     key_file.write_text("{}")
-    with_key = create_object_store(
-        _settings(gcs_bucket="btvaroska", gcs_credentials_file=str(key_file))
+    with_key = cast(
+        GcsObjectStore,
+        create_object_store(
+            _settings(gcs_bucket="btvaroska", gcs_credentials_file=str(key_file))
+        ),
     )
     assert "creds=key-file" in with_key.describe
     assert str(key_file) not in with_key.describe

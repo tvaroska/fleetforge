@@ -265,6 +265,13 @@ class TestCFirmwareSecurityAndRangeResumeTripwires:
 
         assert ".partial_http_download = true" in ota_c
         assert ".max_http_request_size = OTA_RANGE_CHUNK_BYTES" in ota_c
+        assert ".http_client_init_cb = ota_http_client_init_cb" in ota_c
+        assert 'esp_http_client_set_header(s_ota_http_client, "Range", s_resume_range_hdr)' in ota_c
+        assert "esp_http_client_close(s_ota_http_client)" in ota_c
+        assert "esp_http_client_open(s_ota_http_client, 0)" in ota_c
+        assert "esp_http_client_fetch_headers(s_ota_http_client)" in ota_c
+        assert "status != 206" in ota_c
+        assert "FF_OTA_PRODUCTION_BUILD" in ota_c
         assert "resume_range_perform" in ota_c
         assert '"bytes=%d-"' in ota_c
         assert "OTA_MAX_RETRIES" in ota_c

@@ -51,7 +51,7 @@ The first functioning app: *I can register a board and see it online*. No code-d
 - **You can now:** catch "boots but app logic broken," not just boot-loops.
 - *Lands before the simulation gate that reuses it — so the self-test is written once, proven on-device, then adopted by sim in V2 with no code change.*
 
-### R6 — Signed OTA + resumable hardening → **v1 complete**
+### R6 — Signed OTA + resumable hardening → **v1 complete (shipped)**
 - **Add:** **app-level firmware signing** (agent checks a signature over the artifact before apply — *not* Secure Boot v2, which needs eFuse burns at flash time and is new-devices-only, see design/architecture.md), resumable range downloads, retry/backoff, both KPIs surfaced.
 - **You can now:** run it in earnest — production-grade safety + security.
 
@@ -63,12 +63,12 @@ The first functioning app: *I can register a board and see it online*. No code-d
 
 *Theme: stop hand-carrying `.bin` files. Connect a repo, and let the server ingest, build, and check before anything reaches a board.*
 
-### R7 — Artifact API + provenance
-- **Add:** upload API accepting `.bin` + provenance (repo/commit/tag/build URL). Dashboard shows provenance.
+### R7 — Artifact API + provenance (shipped via CUJ-2)
+- **Add:** upload API accepting `.bin` + provenance (repo/commit/tag/build URL/test_passed). Dashboard shows provenance.
 - **You can now:** upload versions from any script, with commit-level traceability.
 
-### R8 — Push ingestion (GitHub Action + templates)
-- **Add:** reusable GitHub Action + GitLab/Gitea templates that build & push on tag.
+### R8 — Push ingestion (GitHub Action + templates, shipped via CUJ-2)
+- **Add:** reusable GitHub Action (`actions/fleetforge-push/action.yml`), GitLab CI (`.gitlab/fleetforge-push.yml`), Gitea Actions (`.gitea/workflows/fleetforge-push.yml`), and Google Cloud Build (`cloudbuild/fleetforge-push.yaml`) templates that build & push on tag.
 - **You can now:** `git tag` → a deployable, commit-linked version appears automatically.
 
 ### R9 — Advisory simulation gate
@@ -82,10 +82,9 @@ The first functioning app: *I can register a board and see it online*. No code-d
 - ⚠️ **This reverses a v1 non-goal** ("the server never builds"). Two things follow: artifacts stay *opaque to the core* (the builder is a producer feeding the same upload API, not a special path) and **building a repo is arbitrary code execution on the server**. Thus, the build step must be sandboxed and resource-capped from its first commit.
 - **Toolchain:** native `idf.py` projects first. PlatformIO second. Pin the IDF version per project or builds stop being reproducible.
 
-### R11 — Deploy policy → **v2 complete**
-- **Add:** per-target policy — manual (appears as deployable, human clicks) versus auto-deploy on a matching tag.
-- **You can now:** continuously deploy your dev board while everything else stays manual.
-- *Per-device granularity here. **Group** granularity needs group deploy from V3.*
+### R11 — Deploy policy & staged project rollouts (shipped via CUJ-2)
+- **Add:** per-project deploy policy (`manual` vs `auto_on_tag` with `auto_deploy_tag_pattern`, `auto_deploy_target_filter`, and `require_ci_tests`), plus staged project/group rollouts (`POST /v1/projects/{slug}/deploy`) with automatic rollback halt, Wave 1 canary gating (`canary=True`), and Wave 2 bounded concurrency (`max_parallel`, progressed automatically via `ff_events` on `confirmed`).
+- **You can now:** continuously deploy your dev board or staged project cohort while everything else stays manual or canary-gated.
 - ⚠️ *Sequencing:* auto-deploy is only as safe as its rollback. Per-device auto-rollback (R2) makes it survivable. Canary makes it comfortable.
 
 ---

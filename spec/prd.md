@@ -1,6 +1,6 @@
 # Fleetforge — v1 Specification
 
-*What the product must do, for whom, and to what standard. **How** it does it is [design/architecture.md](../design/architecture.md); the concrete stack and topology is [architecture.md](../design/production.md); the wire form is [device-protocol.md](device-protocol.md); the order of work is [releases.md](../docs/releases.md).*
+*What the product must do, for whom, and to what standard. **How** it does it is [design/architecture.md](../design/architecture.md); the concrete stack and topology is [production.md](../design/production.md); the wire form is [device-protocol.md](device-protocol.md); the order of work is [releases.md](../docs/releases.md).*
 
 ## Problem
 Makers and small teams who deploy connected devices they can't easily reach (sensors, home/farm/product installs) have no safe way to update firmware remotely, without handing their fleet to a vendor cloud. USB flashing doesn't scale past the bench; a bad push with no recovery bricks devices and kills trust.
@@ -14,7 +14,7 @@ Primary: **solo makers / small teams** with a deployed ESP32 project (a handful 
 ## Deployment model
 **v1 ships as a single hosted instance on a public domain** (TLS via Let's Encrypt). One instance holds one or more **projects** (separate fleets), each behind authenticated, invite-only access. Projects are a boundary inside one operator's instance, not tenancy. The stack stays a Docker Compose deployment throughout, so nothing about the architecture assumes hosting; but the *supported* v1 deployment is the hosted one.
 
-**Not a public product until V3.** The instance is internet-reachable — devices and the Web Serial flasher both require real TLS — but there is no public signup and no marketing surface: users exist only when a superadmin invites them, and each holds a role per project. Hosting details, including the domain it currently occupies, are in [architecture.md](../design/production.md).
+**Not a public product until V3.** The instance is internet-reachable — devices and the Web Serial flasher both require real TLS — but there is no public signup and no marketing surface: users exist only when a superadmin invites them, and each holds a role per project. Hosting details, including the domain it currently occupies, are in [production.md](../design/production.md).
 
 **Deferred to V2:** turnkey self-hosting (the hard part is TLS without public DNS — a local CA the browser and the device both trust) and multi-tenant/public signup. Local Compose on `localhost` remains the dev loop, which is what keeps the V2 self-host path a configuration change rather than a rewrite.
 
@@ -58,7 +58,7 @@ A 100+ node low-power swarm reaches past Wi-Fi's ceiling; **Thread** is the answ
 **Client constraint:** the in-browser flasher uses **Web Serial — Chromium-based browsers only** (Chrome/Edge), over HTTPS or `localhost`, with one mandatory click to grant the port. Firefox and Safari users cannot onboard a board in v1; there is no fallback until the post-v1 CLI flasher. This is a real limit on the primary onboarding path and is accepted knowingly.
 
 ## How it works — the deployment funnel
-Every deployment passes gates; each catches what the previous can't (**defense in depth**). **v1 implements only the last one** — at ~5 boards a bad build costs one board a reboot, so per-device auto-rollback carries the whole load; the earlier gates arrive as the fleet and the automation grow:
+Every deployment passes gates; each catches what the previous can't (**defense in depth**). **v1 implements per-device auto-rollback and project/group canary + bounded-wave rollouts** — pre-flight simulation arrives as the fleet and the automation grow at V2:
 
 1. **Simulate (pre-flight, advisory) — V2.** Boot the artifact in an emulator and run the user's self-test. Warns on failure; user may override. Catches boots-but-crashes bugs at **zero device cost**. Earns its keep once builds arrive automatically from CI and nobody is watching each one.
 2. **Deliver.** The device pulls the update, verifies **checksum + signature**, applies to a secondary A/B slot, and reboots in a window it declares safe. Control and payload travel on **separate channels** — the command path never carries firmware bytes. Mechanism in [design/architecture.md](../design/architecture.md) → *Transport*.
@@ -125,7 +125,7 @@ What the operator is promised, in v1 terms. Mechanism in [design/architecture.md
 
 **Product boundary — Fleetforge manages *firmware versions, device observability, and rotating device secrets*, not general application state.** It does not provide remote shell or general-purpose application configuration management. The `dn/cfg` channel tunes the agent (intervals, thresholds, `stay_awake` dev hold) and carries the monotonic `secrets_rev` pointer so boards can pull rotated API keys over HTTPS (`GET /v1/device-secrets`) without reflashing, while `fleetforge-ingestor` exports device logs (`up/log`) and metrics (`up/telemetry`) over OTLP/HTTP.
 
-Also out: on-server interactive debugging · staged/canary rollouts *(beyond project dev/all targets)* · Raspberry Pi & FPGA implementations · turnkey self-hosting · multi-tenant/orgs & public signup *(projects are an intra-instance boundary for one operator's fleets, not tenancy)* · non-Chromium browser USB onboarding.
+Also out: on-server interactive debugging · Raspberry Pi & FPGA implementations · turnkey self-hosting · multi-tenant/orgs & public signup *(projects are an intra-instance boundary for one operator's fleets, not tenancy)* · non-Chromium browser USB onboarding.
 
 ## Roadmap (beyond v1)
 - **V2 — source to artifact:** VCS ingestion with provenance, server-side compilation, the advisory simulation gate, deploy policy.
@@ -140,7 +140,7 @@ Detail and ordering in [roadmap.md](../docs/roadmap.md) and [releases.md](../doc
 2. **Public exposure** — hosting the broker + artifact endpoint on the open internet makes auth load-bearing from R0: per-device broker credentials, topic ACLs, single-use enrollment tokens. There is no LAN perimeter to fall back on.
 3. **Bad pushes on flaky links** — mitigate with resumable range download, integrity check, atomic A/B apply, mandatory rollback handshake.
 4. **Flash-time immutables** — the partition table, the bootloader's rollback support and eFuse posture cannot be changed by OTA. Getting them wrong at R0 means a physical recall of every deployed board. Mitigate by freezing the full A/B-capable layout at R0, before any device ships. See [design/architecture.md](../design/architecture.md) → *Flash-time immutables*.
-5. **One layer of defense** — v1 relies on per-device auto-rollback alone; simulation (V2) and canary (later) do not exist yet. A deliberate bet that holds at 5 boards and stops holding when builds arrive unattended from CI.
+5. **No pre-flight emulator gate in v1** — v1 relies on per-device auto-rollback and project/group canary waves (`canary=True`, `max_parallel=5`, auto-halt on rollback); pre-flight simulation (V2) does not exist yet. A deliberate bet that holds for small fleets and is closed when V2 adds pre-flight QEMU gating.
 6. **Browser lock-in on the onboarding path** — Web Serial is Chromium-only, and it is the *only* v1 way to flash a board. Mitigate by keeping the flasher a client of the same public API, so the post-v1 CLI flasher is an alternative rather than a rewrite.
 7. **Wrong abstraction guess** for Pi/FPGA — mitigate by keeping the contract minimal and opaque (see design/architecture.md).
 

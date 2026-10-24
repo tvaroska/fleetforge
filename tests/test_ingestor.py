@@ -522,7 +522,7 @@ async def test_offline_presence_never_advances_last_seen(
     reading dead and reading alive forever: its LWT fires on every normal sleep.
     """
     seen = NOW - dt.timedelta(hours=3)
-    await seed_device(session, power_class=power_class, last_seen=seen, **extra)
+    await seed_device(session, device_id=DEVICE_ID, power_class=power_class, last_seen=seen, **extra)
 
     await publish(session, "presence", {"online": False})
 

@@ -66,12 +66,18 @@ FORBIDDEN_RESOLVED = re.compile(
     r"^(" + "|".join(FORBIDDEN_RESOLVED_OPTIONS) + r")=y$", re.MULTILINE
 )
 
+# Default development public key fragment from ff_ota.c (R6-SEC-1). Production bundles
+# verified with `--production` must replace the default dev key ring with real release keys.
+DEFAULT_DEV_SIGNING_PUBKEY_MARKER = (
+    b"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEbHg1tVC28a9y8SbZY0jis7OKKWxr"
+)
+
 
 class BundleError(RuntimeError):
     """The bundle does not match its manifest, or carries the wrong posture."""
 
 
-def verify(bundle_dir: Path) -> dict[str, Any]:
+def verify(bundle_dir: Path, *, production: bool = False) -> dict[str, Any]:
     manifest_path = bundle_dir / "manifest.json"
     if not manifest_path.is_file():
         raise BundleError(f"no manifest in {bundle_dir} — run: just agent-build <target>")
@@ -145,6 +151,16 @@ def verify(bundle_dir: Path) -> dict[str, Any]:
     if burned:
         raise BundleError(f"the BUILT config enables an irreversible eFuse option: {burned}")
 
+    app_bytes = (bundle_dir / app["path"]).read_bytes()
+    if DEFAULT_DEV_SIGNING_PUBKEY_MARKER in app_bytes:
+        if production:
+            raise BundleError(
+                "app.bin embeds the default development OTA signing public key; "
+                "build production bundles with FF_OTA_PRODUCTION_BUILD=1 and custom "
+                "FF_OTA_SIGNING_PUBKEY_PRIMARY_PEM"
+            )
+        print("  signing key:  default dev P-256 ring (pass --production to require release keys)")
+
     print(
         f"  {manifest['target']} / {manifest['chip_family']}"
         f" · agent {manifest['agent_version']} · idf {manifest['idf_version']}"
@@ -157,9 +173,14 @@ def verify(bundle_dir: Path) -> dict[str, Any]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("bundle_dir", type=Path)
+    parser.add_argument(
+        "--production",
+        action="store_true",
+        help="Reject bundles that embed the default development OTA signing key.",
+    )
     args = parser.parse_args(argv)
     try:
-        verify(args.bundle_dir)
+        verify(args.bundle_dir, production=args.production)
     except (BundleError, BuildError, KeyError, OSError, ValueError) as exc:
         print(f"verify_bundle: {exc}", file=sys.stderr)
         return 1

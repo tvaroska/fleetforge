@@ -45,8 +45,8 @@ def fake_api(
         assert f"{parts.scheme}://{parts.netloc}" == TEST_PUBLIC_BASE_URL
         if parts.path == "/v1/readyz":
             if not_ready:
-                body = io.BytesIO(json.dumps({"detail": not_ready}).encode())
-                raise urllib.error.HTTPError(url, 503, "Service Unavailable", Message(), body)
+                err_body = io.BytesIO(json.dumps({"detail": not_ready}).encode())
+                raise urllib.error.HTTPError(url, 503, "Service Unavailable", Message(), err_body)
             return FakeResponse(b'{"status": "ready"}', url)
         sha256 = parts.path.split("/")[3]
         query = dict(urllib.parse.parse_qsl(parts.query))
@@ -54,10 +54,10 @@ def fake_api(
             verify_artifact_url(sha256, exp=query.get("exp"), sig=query.get("sig"), secret=secret)
         except ArtifactUrlRefused:
             raise urllib.error.HTTPError(url, 403, "Forbidden", Message(), None) from None
-        body = store.objects.get(blob_key(sha256))
-        if body is None:
+        artifact_bytes = store.objects.get(blob_key(sha256))
+        if artifact_bytes is None:
             raise urllib.error.HTTPError(url, 404, "Not Found", Message(), None)
-        return FakeResponse(body, f"https://store.invalid/{blob_key(sha256)}?X-Sig=secret")
+        return FakeResponse(artifact_bytes, f"https://store.invalid/{blob_key(sha256)}?X-Sig=secret")
 
     return opener
 

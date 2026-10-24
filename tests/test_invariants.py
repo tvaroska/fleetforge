@@ -121,10 +121,10 @@ async def test_token_burn_is_single_use(session: AsyncSession) -> None:
     token = await seed_token(session)
 
     first = await session.execute(BURN_SQL, {"token_id": token.id, "device_id": "a4cf12b3de90"})
-    assert first.rowcount == 1
+    assert getattr(first, "rowcount", 0) == 1
 
     second = await session.execute(BURN_SQL, {"token_id": token.id, "device_id": "b0b1b2b3b4b5"})
-    assert second.rowcount == 0, "a second burn must never succeed — that is fleet takeover"
+    assert getattr(second, "rowcount", 0) == 0, "a second burn must never succeed — that is fleet takeover"
 
 
 async def test_expired_token_cannot_burn(session: AsyncSession) -> None:
@@ -132,7 +132,7 @@ async def test_expired_token_cannot_burn(session: AsyncSession) -> None:
     token = await seed_token(session, expires_at=dt.datetime.now(dt.UTC) - dt.timedelta(seconds=1))
 
     result = await session.execute(BURN_SQL, {"token_id": token.id, "device_id": "a4cf12b3de90"})
-    assert result.rowcount == 0
+    assert getattr(result, "rowcount", 0) == 0
 
 
 async def test_revoked_token_cannot_burn(session: AsyncSession) -> None:
@@ -140,7 +140,7 @@ async def test_revoked_token_cannot_burn(session: AsyncSession) -> None:
     token = await seed_token(session, revoked_at=dt.datetime.now(dt.UTC))
 
     result = await session.execute(BURN_SQL, {"token_id": token.id, "device_id": "a4cf12b3de90"})
-    assert result.rowcount == 0
+    assert getattr(result, "rowcount", 0) == 0
 
 
 async def test_token_burn_is_atomic_under_concurrency(engine: AsyncEngine) -> None:
@@ -277,10 +277,14 @@ def test_secret_hash_is_not_plaintext_column() -> None:
     """Guard against a future "just store the token" regression."""
     forbidden = {"token", "secret", "plaintext", "password"}
     for model in (EnrollmentToken, AdminToken):
-        columns = {c.name for c in inspect(model).columns}
+        mapper = inspect(model)
+        assert mapper is not None
+        columns = {c.name for c in mapper.columns}  # type: ignore[attr-defined]
         assert "secret_hash" in columns
         assert not (columns & forbidden), f"{model.__tablename__} must not store a plaintext secret"
-    user_columns = {c.name for c in inspect(User).columns}
+    user_mapper = inspect(User)
+    assert user_mapper is not None
+    user_columns = {c.name for c in user_mapper.columns}
     assert "password_hash" in user_columns
     assert not (user_columns & forbidden), "users must not store a plaintext password"
 

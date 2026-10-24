@@ -1291,7 +1291,7 @@ async def test_a_device_in_another_project_is_indistinguishable_from_an_unknown_
         }
 
         def requests(device_id: str) -> list[tuple[str, str, dict[str, object] | None]]:
-            deploy = {"version": "1.0.0", "apply": "auto"}
+            deploy: dict[str, object] = {"version": "1.0.0", "apply": "auto"}
             return [
                 ("POST", f"/v1/devices/{device_id}/reboot", None),
                 ("POST", f"/v1/devices/{device_id}/rollback", None),

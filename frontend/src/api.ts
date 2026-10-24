@@ -86,6 +86,7 @@ export type ProjectDeployAccepted = {
   project: string
   version: string
   target_filter: 'all' | 'dev'
+  group_id?: string | null
   deployed: DeployAccepted[]
   skipped: Record<string, string>
 }
@@ -96,6 +97,15 @@ export type ProjectMemberSummary = {
   display_name: string | null
   role: 'owner' | 'operator' | 'viewer'
   created_at: string
+}
+
+export type DeviceGroupSummary = {
+  id: string
+  project_id: string
+  name: string
+  description: string | null
+  created_at: string
+  updated_at: string
 }
 
 export type UserSummary = {
@@ -842,6 +852,33 @@ export const api = {
   // P1-fe-1: Projects, project members, and scoped API tokens.
   listProjects: () => request<{ projects: ProjectSummary[] }>('/v1/projects'),
 
+  listGroups: (project?: string) =>
+    request<{ groups: DeviceGroupSummary[] }>(
+      project && project !== 'default'
+        ? `/v1/groups?project=${encodeURIComponent(project)}`
+        : '/v1/groups',
+    ),
+
+  createGroup: (body: { name: string; description?: string | null }, project?: string) =>
+    request<DeviceGroupSummary>(
+      project && project !== 'default'
+        ? `/v1/groups?project=${encodeURIComponent(project)}`
+        : '/v1/groups',
+      {
+        method: 'POST',
+        body: JSON.stringify(body),
+      },
+    ),
+
+  updateGroup: (groupId: string, patch: { name?: string; description?: string | null }) =>
+    request<DeviceGroupSummary>(`/v1/groups/${encodeURIComponent(groupId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    }),
+
+  deleteGroup: (groupId: string) =>
+    request<void>(`/v1/groups/${encodeURIComponent(groupId)}`, { method: 'DELETE' }),
+
   createProject: (body: { slug: string; name: string; description?: string | null }) =>
     request<ProjectSummary>('/v1/projects', {
       method: 'POST',
@@ -861,6 +898,7 @@ export const api = {
       target_filter?: 'all' | 'dev'
       apply?: 'auto' | 'on_command'
       override?: readonly string[]
+      group_id?: string | null
     },
   ) =>
     request<ProjectDeployAccepted>(`/v1/projects/${encodeURIComponent(slug)}/deploy`, {

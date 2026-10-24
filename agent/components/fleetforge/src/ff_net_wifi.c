@@ -85,6 +85,7 @@ static const char *TAG = "ff-wifi";
 #define IMPROV_STATE_PROVISIONED 0x04
 #define IMPROV_ERR_NONE 0x00
 #define IMPROV_ERR_INVALID_RPC 0x01
+#define IMPROV_ERR_UNABLE_TO_CONNECT 0x03
 #define IMPROV_CMD_WIFI_SETTINGS 0x01
 
 /* Internal event IDs posted to WIFI_EVENT on the default event loop by one-shot timers
@@ -258,6 +259,8 @@ static void retry_timer_disarm(void)
     }
 }
 
+static void improv_ble_notify_status(void);
+
 /* Parse an Improv Wi-Fi RPC command (`00467768-6228-2272-4663-277478268003`, cmd `0x01`:
  * `[0x01, data_len, ssid_len, ssid..., passphrase_len, passphrase..., checksum]`), persist
  * the credential to the NVS `ff_net` overlay, and trigger an immediate reconnect cycle on
@@ -266,21 +269,36 @@ static esp_err_t improv_handle_rpc_command(const uint8_t *buf, size_t len)
 {
     if (buf == NULL || len < 4 || buf[0] != IMPROV_CMD_WIFI_SETTINGS) {
         s_improv_error = IMPROV_ERR_INVALID_RPC;
+        improv_ble_notify_status();
         return ESP_ERR_INVALID_ARG;
     }
     size_t data_len = buf[1];
     if (2 + data_len > len || data_len < 2) {
         s_improv_error = IMPROV_ERR_INVALID_RPC;
+        improv_ble_notify_status();
         return ESP_ERR_INVALID_ARG;
+    }
+    if (len >= 2 + data_len + 1) {
+        uint8_t expected_csum = 0;
+        for (size_t i = 0; i < 2 + data_len; i++) {
+            expected_csum = (uint8_t)(expected_csum + buf[i]);
+        }
+        if (buf[2 + data_len] != expected_csum) {
+            s_improv_error = IMPROV_ERR_INVALID_RPC;
+            improv_ble_notify_status();
+            return ESP_ERR_INVALID_CRC;
+        }
     }
     size_t ssid_len = buf[2];
     if (ssid_len == 0 || ssid_len >= sizeof(s_improv_ssid) || 1 + ssid_len + 1 > data_len) {
         s_improv_error = IMPROV_ERR_INVALID_RPC;
+        improv_ble_notify_status();
         return ESP_ERR_INVALID_ARG;
     }
     size_t sec_len = buf[3 + ssid_len];
     if (sec_len >= sizeof(s_improv_sec) || 1 + ssid_len + 1 + sec_len > data_len) {
         s_improv_error = IMPROV_ERR_INVALID_RPC;
+        improv_ble_notify_status();
         return ESP_ERR_INVALID_ARG;
     }
     memset(s_improv_ssid, 0, sizeof(s_improv_ssid));
@@ -292,16 +310,21 @@ static esp_err_t improv_handle_rpc_command(const uint8_t *buf, size_t len)
     esp_err_t err = ff_net_wifi_save_nvs(s_improv_ssid, s_improv_sec);
     if (err != ESP_OK) {
         s_improv_error = IMPROV_ERR_INVALID_RPC;
+        improv_ble_notify_status();
         return err;
     }
     s_improv_error = IMPROV_ERR_NONE;
     s_improv_state = IMPROV_STATE_PROVISIONING;
+    improv_ble_notify_status();
     (void)esp_event_post(WIFI_EVENT, FF_WIFI_EVENT_IMPROV_CRED, NULL, 0, 0);
     return ESP_OK;
 }
 
 #if defined(CONFIG_BT_ENABLED) && defined(CONFIG_BT_NIMBLE_ENABLED)
 static bool s_nimble_started;
+static uint16_t s_improv_state_val_handle;
+static uint16_t s_improv_err_val_handle;
+static uint16_t s_improv_rpc_res_val_handle;
 
 /* UUID 00467768-6228-2272-4663-277478268000..8004 in little-endian byte order for NimBLE. */
 static const ble_uuid128_t s_improv_svc_uuid =
@@ -319,6 +342,19 @@ static const ble_uuid128_t s_improv_rpc_cmd_uuid =
 static const ble_uuid128_t s_improv_rpc_res_uuid =
     BLE_UUID128_INIT(0x04, 0x80, 0x26, 0x78, 0x74, 0x27, 0x63, 0x46,
                      0x72, 0x22, 0x28, 0x62, 0x68, 0x77, 0x46, 0x00);
+
+static void improv_ble_notify_status(void)
+{
+    if (!s_nimble_started) {
+        return;
+    }
+    if (s_improv_state_val_handle != 0) {
+        ble_gatts_chr_updated(s_improv_state_val_handle);
+    }
+    if (s_improv_err_val_handle != 0) {
+        ble_gatts_chr_updated(s_improv_err_val_handle);
+    }
+}
 
 static int improv_gatt_access(uint16_t conn_handle, uint16_t attr_handle,
                               struct ble_gatt_access_ctxt *ctxt, void *arg)
@@ -352,12 +388,14 @@ static const struct ble_gatt_svc_def s_improv_gatt_svcs[] = {
                     .uuid = &s_improv_state_uuid.u,
                     .access_cb = improv_gatt_access,
                     .arg = (void *)1,
+                    .val_handle = &s_improv_state_val_handle,
                     .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY,
                 },
                 {
                     .uuid = &s_improv_err_uuid.u,
                     .access_cb = improv_gatt_access,
                     .arg = (void *)2,
+                    .val_handle = &s_improv_err_val_handle,
                     .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY,
                 },
                 {
@@ -370,6 +408,7 @@ static const struct ble_gatt_svc_def s_improv_gatt_svcs[] = {
                     .uuid = &s_improv_rpc_res_uuid.u,
                     .access_cb = improv_gatt_access,
                     .arg = (void *)4,
+                    .val_handle = &s_improv_rpc_res_val_handle,
                     .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY,
                 },
                 {0},
@@ -426,6 +465,8 @@ static void improv_ble_gatt_stop(void)
     }
 }
 #else
+static void improv_ble_notify_status(void) {}
+
 static void improv_ble_gatt_start(void)
 {
     /* When NimBLE is not enabled in sdkconfig, keep the RPC handler referenced so
@@ -845,6 +886,11 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
     if (id == WIFI_EVENT_STA_DISCONNECTED) {
         const wifi_event_sta_disconnected_t *event = (const wifi_event_sta_disconnected_t *)data;
         int reason = event != NULL ? event->reason : -1;
+        if (s_improv_state == IMPROV_STATE_PROVISIONING) {
+            s_improv_state = IMPROV_STATE_AUTHORIZED;
+            s_improv_error = IMPROV_ERR_UNABLE_TO_CONNECT;
+            improv_ble_notify_status();
+        }
         if (s_net_count > 1) {
             on_disconnected_multi(reason);
             return;
@@ -877,6 +923,11 @@ static void on_got_ip(void *arg, esp_event_base_t base, int32_t id, void *data)
     (void)id;
     const ip_event_got_ip_t *event = (const ip_event_got_ip_t *)data;
     retry_timer_disarm();
+    if (s_improv_state == IMPROV_STATE_PROVISIONING || s_improv_active) {
+        s_improv_state = IMPROV_STATE_PROVISIONED;
+        s_improv_error = IMPROV_ERR_NONE;
+        improv_ble_notify_status();
+    }
     improv_ble_window_stop();
     if (s_net_count > 1) {
         dhcp_watchdog_disarm();
@@ -1021,4 +1072,9 @@ const char *ff_net_wifi_ssid(void)
         return NULL;
     }
     return s_nets[idx].ssid;
+}
+
+int ff_net_wifi_known_count(void)
+{
+    return s_net_count;
 }

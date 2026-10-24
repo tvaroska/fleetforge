@@ -532,7 +532,7 @@ static cJSON *announce_object(const ff_cfg_t *cfg)
         cJSON_AddNullToObject(root, "ssid");
     }
     if (cfg->link == FF_LINK_WIFI) {
-        cJSON_AddNumberToObject(root, "known_networks", cfg->net_count);
+        cJSON_AddNumberToObject(root, "known_networks", ff_net_known_networks(cfg->net_count));
     } else {
         cJSON_AddNullToObject(root, "known_networks");
     }

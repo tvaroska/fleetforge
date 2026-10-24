@@ -42,7 +42,7 @@ import asyncio
 import contextlib
 import logging
 import uuid
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -224,10 +224,18 @@ class PostgresEventListener:
     into the database from the API" (`db/base.py`).
     """
 
-    def __init__(self, dsn: str, hub: EventHub, *, ping_s: float) -> None:
+    def __init__(
+        self,
+        dsn: str,
+        hub: EventHub,
+        *,
+        ping_s: float,
+        on_event: Callable[[DeviceEvent], Awaitable[None]] | None = None,
+    ) -> None:
         self._dsn = dsn
         self._hub = hub
         self._ping_s = ping_s
+        self._on_event = on_event
         # Set while connected and registered. Tests wait on it; nothing in the
         # request path does — `/v1/readyz` deliberately ignores the listener, because
         # a reconnecting listener must not restart the container mid-outage.
@@ -302,3 +310,14 @@ class PostgresEventListener:
         # Validated, then forwarded as-is: re-serializing would strip any field a
         # newer ingestor added, and additive evolution is the protocol's whole rule.
         self._hub.publish(payload, project_id=event.project_id)
+        if self._on_event is not None:
+            with contextlib.suppress(RuntimeError):
+                asyncio.get_running_loop().create_task(self._run_on_event(event))
+
+    async def _run_on_event(self, event: DeviceEvent) -> None:
+        if self._on_event is None:
+            return
+        try:
+            await self._on_event(event)
+        except Exception:
+            logger.warning("ff_events on_event hook failed for %s", event.device_id, exc_info=True)

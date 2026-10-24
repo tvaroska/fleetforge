@@ -97,7 +97,9 @@ def test_a_malformed_ssid_logs_the_field_and_reason_never_the_value(
     assert DEVICE_ID in message
     assert str(value) not in message
     assert repr(value) not in message
-    assert value not in records[0].args
+    assert records[0].args is None or (
+        isinstance(records[0].args, tuple) and value not in records[0].args
+    )
 
 
 def test_a_malformed_ssid_value_never_appears_in_the_log() -> None:

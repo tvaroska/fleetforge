@@ -125,6 +125,20 @@ function mockApi(devices: DeviceSummary[] | (() => DeviceSummary[]), logs: () =>
       })
     }
     if (url === '/v1/enrollment-tokens') return json({ tokens: [] })
+    if (url === '/v1/groups' || url.startsWith('/v1/groups')) {
+      return json({
+        groups: [
+          {
+            id: 'grp-canary',
+            project_id: '00000000-0000-4000-8000-000000000001',
+            name: 'canary',
+            description: 'Canary ring',
+            created_at: '2026-10-24T00:00:00Z',
+            updated_at: '2026-10-24T00:00:00Z',
+          },
+        ],
+      })
+    }
     return json({})
   })
 }
@@ -399,6 +413,231 @@ describe('Dashboard', () => {
       await userEvent.click(screen.getByRole('button', { name: /flash or enroll a board >/i }))
       expect(screen.getByTestId('tab-onboard')).toHaveAttribute('aria-pressed', 'true')
       expect(screen.getByTestId('flash-stepper')).toBeInTheDocument()
+    })
+
+    it('hydrates ContinuousDeploymentCard from /v1/projects and saves ci_webhook_header', async () => {
+      let patchedBody: Record<string, unknown> | null = null
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (input?: unknown, init?: RequestInit) => {
+        const url = String(input)
+        if (url === '/v1/projects' && (!init?.method || init.method === 'GET')) {
+          return json({
+            projects: [
+              {
+                id: '00000000-0000-4000-8000-000000000001',
+                slug: 'default',
+                name: 'Default',
+                description: null,
+                role: 'owner',
+                repo_url: 'https://github.com/org/eink-fw',
+                track_mode: 'branch',
+                track_ref: 'main',
+                auto_deploy_target: 'dev',
+                ci_webhook_url: 'https://api.github.com/repos/org/eink-fw/dispatches',
+                has_ci_webhook_header: true,
+                secrets_rev: 0,
+                otel_endpoint: null,
+                has_otel_headers: false,
+                created_at: '2026-10-09T10:00:00Z',
+                updated_at: '2026-10-09T10:00:00Z',
+              },
+            ],
+          })
+        }
+        if (url === '/v1/projects/default' && init?.method === 'PATCH') {
+          patchedBody = JSON.parse(String(init.body)) as Record<string, unknown>
+          return json({
+            id: '00000000-0000-4000-8000-000000000001',
+            slug: 'default',
+            name: 'Default',
+            description: null,
+            role: 'owner',
+            repo_url: patchedBody.repo_url ?? null,
+            track_mode: patchedBody.track_mode ?? 'off',
+            track_ref: patchedBody.track_ref ?? null,
+            auto_deploy_target: patchedBody.auto_deploy_target ?? 'off',
+            ci_webhook_url: patchedBody.ci_webhook_url ?? null,
+            has_ci_webhook_header: true,
+            secrets_rev: 0,
+            otel_endpoint: null,
+            has_otel_headers: false,
+            ci_webhook_triggered: true,
+            created_at: '2026-10-09T10:00:00Z',
+            updated_at: '2026-10-09T10:00:00Z',
+          })
+        }
+        if (url === '/v1/artifact') return json({ artifacts: [artifact] })
+        if (url === '/v1/partition-profiles') return json({ profiles: [builtinProfile] })
+        if (url.startsWith('/v1/devices')) return json({ devices: [] })
+        return json({})
+      })
+
+      renderDashboard()
+      const cdCard = screen.getByTestId('continuous-deployment')
+      await waitFor(() =>
+        expect(within(cdCard).getByLabelText('Git repository URL')).toHaveValue(
+          'https://github.com/org/eink-fw',
+        ),
+      )
+      expect(within(cdCard).getByLabelText('Track mode')).toHaveValue('branch')
+      expect(within(cdCard).getByLabelText('Tracked ref')).toHaveValue('main')
+      expect(within(cdCard).getByLabelText('CI build webhook URL')).toHaveValue(
+        'https://api.github.com/repos/org/eink-fw/dispatches',
+      )
+      const headerInput = within(cdCard).getByLabelText('CI webhook Authorization header')
+      expect(headerInput).toHaveAttribute('placeholder', '(configured — leave blank to keep)')
+
+      await userEvent.type(headerInput, 'Bearer ghp_secret123')
+      await userEvent.click(within(cdCard).getByRole('button', { name: /save & sync tracking/i }))
+
+      await waitFor(() => expect(patchedBody).not.toBeNull())
+      expect(patchedBody).toMatchObject({
+        repo_url: 'https://github.com/org/eink-fw',
+        track_mode: 'branch',
+        track_ref: 'main',
+        auto_deploy_target: 'dev',
+        ci_webhook_url: 'https://api.github.com/repos/org/eink-fw/dispatches',
+        ci_webhook_header: 'Bearer ghp_secret123',
+      })
+      expect(await screen.findByTestId('cd-status')).toHaveTextContent(
+        /dispatched CI build webhook/i,
+      )
+    })
+
+    it('supports cohort group selection for staged rollouts and device group assignment', async () => {
+      let deployedPayload: Record<string, unknown> | null = null
+      let updatedDevicePayload: Record<string, unknown> | null = null
+
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (input?: unknown, init?: RequestInit) => {
+        const url = String(input)
+        if (url === '/v1/projects' && (!init?.method || init.method === 'GET')) {
+          return json({
+            projects: [
+              {
+                id: '00000000-0000-4000-8000-000000000001',
+                slug: 'default',
+                name: 'Default',
+                description: null,
+                role: 'owner',
+                repo_url: null,
+                track_mode: 'off',
+                track_ref: null,
+                auto_deploy_target: 'off',
+                ci_webhook_url: null,
+                has_ci_webhook_header: false,
+                secrets_rev: 0,
+                otel_endpoint: null,
+                has_otel_headers: false,
+                created_at: '2026-10-09T10:00:00Z',
+                updated_at: '2026-10-09T10:00:00Z',
+              },
+            ],
+          })
+        }
+        if (url.startsWith('/v1/groups')) {
+          return json({
+            groups: [
+              {
+                id: 'grp-canary',
+                project_id: '00000000-0000-4000-8000-000000000001',
+                name: 'canary',
+                description: 'Canary ring',
+                created_at: '2026-10-24T00:00:00Z',
+                updated_at: '2026-10-24T00:00:00Z',
+              },
+            ],
+          })
+        }
+        if (url === '/v1/devices') {
+          return json({
+            devices: [
+              {
+                device_id: 'a4cf12b3de90',
+                name: 'Test Board',
+                group_id: null,
+                platform_type: 'esp32c6',
+                fw_version: '1.4.2',
+                agent_version: '0.4.5',
+                link_type: 'wifi',
+                ssid: 'lab',
+                known_networks: 1,
+                power_class: 'always_on',
+                expected_wake_interval_s: null,
+                parent_device_id: null,
+                partition_layout: 'ab-4m-v1',
+                ota_slot_size: 1966080,
+                capabilities: ['ota', 'apply'],
+                last_seen: '2026-10-24T02:00:00Z',
+                enrolled_at: '2026-10-09T10:00:00Z',
+                broker_provisioned_at: '2026-10-09T10:00:00Z',
+                online: true,
+                is_dev: true,
+                stay_awake: false,
+                deploy: null,
+              },
+            ],
+            arrivals: [],
+          })
+        }
+        if (url === '/v1/artifact') {
+          return json({
+            artifacts: [
+              {
+                target: 'esp32c6',
+                version: '1.5.0',
+                sha256: 'a'.repeat(64),
+                size_bytes: 230_000,
+                partition_layout: 'ab-4m-v1',
+                created_at: '2026-10-09T10:00:00Z',
+              },
+            ],
+          })
+        }
+        if (url.includes('/deploy') && init?.method === 'POST') {
+          deployedPayload = JSON.parse(String(init.body))
+          return json({
+            project: 'default',
+            version: '1.5.0',
+            target_filter: 'dev',
+            group_id: deployedPayload?.group_id ?? null,
+            deployed: [],
+            skipped: {},
+          })
+        }
+        if (url.startsWith('/v1/devices/a4cf12b3de90') && init?.method === 'PATCH') {
+          updatedDevicePayload = JSON.parse(String(init.body))
+          return json({ device_id: 'a4cf12b3de90', ...updatedDevicePayload })
+        }
+        if (url === '/v1/partition-profiles') return json({ profiles: [] })
+        if (url === '/v1/enrollment-tokens') return json({ tokens: [] })
+        return json({})
+      })
+
+      renderDashboard()
+
+      // 1. Device group selector in Fleet table row
+      const groupSelect = await screen.findByTestId('device-group-select')
+      expect(groupSelect).toBeInTheDocument()
+      expect(groupSelect).toHaveValue('')
+      await userEvent.selectOptions(groupSelect, 'grp-canary')
+      await waitFor(() => expect(updatedDevicePayload).not.toBeNull())
+      expect(updatedDevicePayload).toEqual({ group_id: 'grp-canary' })
+
+      // 2. Target group selector in Uploaded builds
+      await userEvent.click(screen.getByTestId('tab-builds'))
+      const targetGroupSelect = await screen.findByLabelText('Target group')
+      expect(targetGroupSelect).toBeInTheDocument()
+      await userEvent.selectOptions(targetGroupSelect, 'grp-canary')
+
+      const deployDevBtn = screen.getByRole('button', { name: /deploy dev/i })
+      await userEvent.click(deployDevBtn)
+
+      await waitFor(() => expect(deployedPayload).not.toBeNull())
+      expect(deployedPayload).toMatchObject({
+        version: '1.5.0',
+        target_filter: 'dev',
+        apply: 'auto',
+        group_id: 'grp-canary',
+      })
     })
   })
 })

@@ -29,6 +29,10 @@ bool ff_net_rssi(int *out_dbm);
  * (spec/device-protocol.md). The string lives as long as the agent; never a passphrase. */
 const char *ff_net_ssid(void);
 
+/* Total known Wi-Fi networks including any NVS `ff_net` overlay networks once the Wi-Fi
+ * adapter has started, or `fallback` (`cfg->net_count`) before start. */
+int ff_net_known_networks(int fallback);
+
 #ifdef __cplusplus
 }
 #endif

@@ -27,7 +27,7 @@ import stat
 import time
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import pytest
 
@@ -650,7 +650,7 @@ class FakeHttpResponse:
     def __enter__(self) -> "FakeHttpResponse":
         return self
 
-    def __exit__(self, *_exc: object) -> bool:
+    def __exit__(self, *_exc: object) -> Literal[False]:
         return False
 
     def read(self, size: int = -1) -> bytes:
@@ -1517,7 +1517,7 @@ def test_redact_url_keeps_the_origin_and_drops_everything_else() -> None:
 
 
 def test_redacted_command_leaves_a_command_without_an_artifact_alone() -> None:
-    body = {"id": "x", "type": "reboot"}
+    body: dict[str, object] = {"id": "x", "type": "reboot"}
     assert redacted_command(body) == body
 
 
@@ -2424,7 +2424,8 @@ async def test_a_closed_file_window_defers_apply_until_the_file_appears(
     assert acks(opened) == []  # the first answer stays the answer
     assert stage.reboot.is_set()
     assert stage.pending is not None and stage.pending.cmd_id == "cmd-stage-1"
-    assert (stage.staged, stage.apply_deferred) == (None, None)
+    assert stage.staged is None
+    assert stage.apply_deferred is None
     assert any("the safe window opened" in line for line in lines)
 
     stage.reboot.clear()

@@ -774,6 +774,127 @@ async def test_the_sweep_caps_each_devices_telemetry(session: AsyncSession) -> N
     assert await count(session, DeviceTelemetry, OTHER_DEVICE) == 3
 
 
+async def test_the_sweep_purges_revoked_and_expired_tokens_after_90_days(
+    session: AsyncSession,
+) -> None:
+    await seed_device(session)
+    old_cutoff = NOW - dt.timedelta(days=90, seconds=1)
+    fresh_cutoff = NOW - dt.timedelta(days=89)
+    await session.execute(
+        text(
+            "INSERT INTO enrollment_tokens (id, secret_hash, expires_at, revoked_at, used_at, used_by_device_id) VALUES "
+            "('00000000-0000-4000-8000-000000000101', 'h', :old, NULL, NULL, NULL), "
+            "('00000000-0000-4000-8000-000000000102', 'h', :fresh, :old, NULL, NULL), "
+            "('00000000-0000-4000-8000-000000000103', 'h', :fresh, NULL, NULL, NULL), "
+            "('00000000-0000-4000-8000-000000000104', 'h', :old, :old, :old, :dev)"
+        ),
+        {"old": old_cutoff, "fresh": fresh_cutoff, "dev": DEVICE_ID},
+    )
+    await session.execute(
+        text(
+            "INSERT INTO admin_tokens (id, name, secret_hash, expires_at, revoked_at) VALUES "
+            "('00000000-0000-4000-8000-000000000201', 'expired-old', 'h', :old, NULL), "
+            "('00000000-0000-4000-8000-000000000202', 'revoked-old', 'h', NULL, :old), "
+            "('00000000-0000-4000-8000-000000000203', 'active', 'h', NULL, NULL)"
+        ),
+        {"old": old_cutoff},
+    )
+    result = await retention.sweep(session, now=NOW)
+    assert result.tokens == 4
+    enrollment_ids = {
+        str(r)
+        for r in (await session.scalars(text("SELECT id FROM enrollment_tokens"))).all()
+    }
+    assert enrollment_ids == {
+        "00000000-0000-4000-8000-000000000103",
+        "00000000-0000-4000-8000-000000000104",
+    }
+    admin_names = set((await session.scalars(text("SELECT name FROM admin_tokens"))).all())
+    assert admin_names == {"active"}
+
+
+async def test_the_sweep_prunes_artifact_versions_preserving_running_and_previous(
+    session: AsyncSession,
+) -> None:
+    await seed_device(session)
+    await session.execute(
+        text("UPDATE devices SET fw_version = 'v2' WHERE device_id = :d"),
+        {"d": DEVICE_ID},
+    )
+    sha = "a" * 64
+    await session.execute(
+        text(
+            "INSERT INTO artifacts (sha256, size_bytes, kind, target, partition_layout) "
+            "VALUES (:sha, 1024, 'user_firmware', 'esp32c6', 'ab-4m-v1')"
+        ),
+        {"sha": sha},
+    )
+    for i in range(1, 7):
+        await session.execute(
+            text(
+                "INSERT INTO artifact_versions (target, version, sha256, created_at) "
+                "VALUES ('esp32c6', :ver, :sha, :at)"
+            ),
+            {"ver": f"v{i}", "sha": sha, "at": NOW - dt.timedelta(days=10 - i)},
+        )
+    # Record a confirmed deploy from v1 -> v2 so v1 is the device's previous version.
+    await session.execute(
+        text(
+            "INSERT INTO deploy_events (at, device_id, cmd_id, state, is_terminal, from_version, artifact_version) "
+            "VALUES (:at, :d, 'cmd-1', 'confirmed', true, 'v1', 'v2')"
+        ),
+        {"at": NOW - dt.timedelta(days=5), "d": DEVICE_ID},
+    )
+    result = await retention.sweep(session, now=NOW, version_cap=3)
+    # Newest 3 are v6, v5, v4. v2 (running) and v1 (previous) are protected; only v3 is pruned!
+    assert result.artifact_versions == 1
+    kept = set(
+        (
+            await session.scalars(
+                text("SELECT version FROM artifact_versions WHERE target = 'esp32c6'")
+            )
+        ).all()
+    )
+    assert kept == {"v1", "v2", "v4", "v5", "v6"}
+
+
+async def test_the_sweep_garbage_collects_unreferenced_user_firmware_artifacts_and_blobs(
+    session: AsyncSession,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    from fleetforge.storage.blobs import blob_key
+
+    await seed_device(session)
+    sha_kept = "a" * 64
+    sha_orphan = "b" * 64
+    sha_agent = "c" * 64
+    await session.execute(
+        text(
+            "INSERT INTO artifacts (sha256, size_bytes, kind, target, partition_layout) VALUES "
+            "(:kept, 1024, 'user_firmware', 'esp32c6', 'ab-4m-v1'), "
+            "(:orphan, 1024, 'user_firmware', 'esp32c6', 'ab-4m-v1'), "
+            "(:agent, 1024, 'agent_app', 'esp32c6', 'ab-4m-v1')"
+        ),
+        {"kept": sha_kept, "orphan": sha_orphan, "agent": sha_agent},
+    )
+    await session.execute(
+        text(
+            "INSERT INTO artifact_versions (target, version, sha256, created_at) VALUES "
+            "('esp32c6', 'v1', :orphan, :old), "
+            "('esp32c6', 'v2', :kept, :new)"
+        ),
+        {"orphan": sha_orphan, "kept": sha_kept, "old": NOW - dt.timedelta(days=5), "new": NOW},
+    )
+    fake_store = AsyncMock()
+    result = await retention.sweep(session, now=NOW, version_cap=1, store=fake_store)
+    assert result.artifact_versions == 1
+    assert result.artifacts == 1
+    fake_store.delete.assert_awaited_once_with(blob_key(sha_orphan))
+    remaining = set((await session.scalars(text("SELECT sha256 FROM artifacts"))).all())
+    assert remaining == {sha_kept, sha_agent}
+
+
 async def test_reads_hide_expired_rows_before_any_sweep(session: AsyncSession) -> None:
     await seed_device(session)
     await publish(session, "log", {"lines": [{"text": "hello"}]})
@@ -887,6 +1008,11 @@ def test_the_retention_windows_are_the_prds() -> None:
     prd = PRD.read_text()
     assert _days(_retention_row(prd, "Telemetry samples")) == retention.TELEMETRY_RETENTION
     assert _days(_retention_row(prd, "Device logs")) == retention.LOG_RETENTION
+    assert _days(_retention_row(prd, "Revoked/expired tokens")) == retention.TOKEN_RETENTION
+    versions_row = _retention_row(prd, "Stored versions per platform")
+    match = re.search(r"\*\*(\d+)\*\*", versions_row)
+    assert match is not None, versions_row
+    assert int(match.group(1)) == retention.MAX_VERSIONS_PER_PLATFORM
 
 
 def test_the_per_device_bounds_are_the_prds_or_the_pending_patches() -> None:

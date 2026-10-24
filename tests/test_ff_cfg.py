@@ -30,8 +30,10 @@ import json
 import re
 import struct
 import zlib
+from collections.abc import Mapping
 from pathlib import Path
 from types import ModuleType
+from typing import Any, cast
 
 import pytest
 
@@ -81,7 +83,7 @@ ff_cfg = _load_module()
 
 
 def _blob(fields: dict[str, object] | None = None) -> bytes:
-    return ff_cfg.encode(dict(MINIMAL) if fields is None else fields)
+    return cast(bytes, ff_cfg.encode(dict(MINIMAL) if fields is None else fields))
 
 
 def _code(path: Path) -> str:
@@ -143,7 +145,7 @@ class TestEncode:
 
     def test_refuses_a_non_object(self) -> None:
         with pytest.raises(ff_cfg.ConfigError):
-            ff_cfg.encode(["api_base"])  # type: ignore[arg-type]
+            ff_cfg.encode(["api_base"])
 
 
 class TestDecodeRejections:
@@ -241,7 +243,7 @@ class TestKnownNetworks:
     PSK = "hunter2-not-real"
     BASE = {**MINIMAL, "link": "wifi", "ssid": "home", "psk": "top-secret-psk"}
 
-    def _refused(self, fields: dict[str, object], match: str) -> None:
+    def _refused(self, fields: Mapping[str, object], match: str) -> None:
         with pytest.raises(ff_cfg.ConfigError, match=match) as info:
             ff_cfg.validate(fields)
         assert self.PSK not in str(info.value)
@@ -376,12 +378,12 @@ class TestTypeScriptWriterAgrees:
 
     @staticmethod
     def _vector(path: Path) -> dict[str, object]:
-        return json.loads(path.read_text())
+        return cast(dict[str, object], json.loads(path.read_text()))
 
     @VECTORS
     def test_the_python_writer_reproduces_the_vector_digest(self, vector_path: Path) -> None:
         vector = self._vector(vector_path)
-        blob = ff_cfg.encode(vector["fields"])  # type: ignore[arg-type]
+        blob = ff_cfg.encode(vector["fields"])
         assert hashlib.sha256(blob).hexdigest() == vector["sha256"]
 
     @VECTORS
@@ -392,12 +394,13 @@ class TestTypeScriptWriterAgrees:
 
     @VECTORS
     def test_the_vector_is_a_config_both_sides_would_accept(self, vector_path: Path) -> None:
-        ff_cfg.validate(self._vector(vector_path)["fields"])  # type: ignore[arg-type]
+        ff_cfg.validate(self._vector(vector_path)["fields"])
 
     def test_the_nets_vector_carries_an_open_network(self) -> None:
         """Pins the "psk absent, never empty" rule in bytes both writers must reproduce."""
-        nets = self._vector(FF_CFG_NETS_VECTOR)["fields"]["nets"]  # type: ignore[index]
-        assert any("psk" not in entry for entry in nets)  # type: ignore[union-attr]
+        fields = cast(dict[str, Any], self._vector(FF_CFG_NETS_VECTOR)["fields"])
+        nets = cast(list[dict[str, Any]], fields["nets"])
+        assert any("psk" not in entry for entry in nets)
 
     @pytest.mark.parametrize("key", ff_cfg.KNOWN_KEYS)
     def test_every_field_name_is_written_by_the_browser(self, key: str) -> None:

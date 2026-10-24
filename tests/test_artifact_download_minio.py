@@ -20,6 +20,7 @@ import contextlib
 import socket
 import urllib.error
 import urllib.request
+from collections.abc import AsyncGenerator
 
 import pytest
 from fastapi import FastAPI
@@ -107,7 +108,7 @@ def _fetch(url: str, headers: dict[str, str] | None = None) -> tuple[int, dict[s
 
 
 @pytest.fixture
-async def artifact() -> tuple[str, bytes]:
+async def artifact() -> AsyncGenerator[tuple[str, bytes], None]:
     """A 200 KB blob in MinIO, and its bytes. Removed afterwards.
 
     Deterministic content rather than `os.urandom`: a failing slice assertion should

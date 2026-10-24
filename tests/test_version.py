@@ -11,6 +11,8 @@ import json
 import tomllib
 from pathlib import Path
 
+import pytest
+
 from fleetforge import __version__
 from fleetforge.buildinfo import UNKNOWN, build_info
 
@@ -19,11 +21,11 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 def _pyproject_version() -> str:
     with (REPO_ROOT / "pyproject.toml").open("rb") as handle:
-        return tomllib.load(handle)["project"]["version"]
+        return str(tomllib.load(handle)["project"]["version"])
 
 
 def _frontend_version() -> str:
-    return json.loads((REPO_ROOT / "frontend" / "package.json").read_text())["version"]
+    return str(json.loads((REPO_ROOT / "frontend" / "package.json").read_text())["version"])
 
 
 def test_package_version_matches_pyproject() -> None:
@@ -41,7 +43,7 @@ def test_frontend_version_matches_backend() -> None:
     )
 
 
-def test_build_info_reports_unknown_without_build_args(monkeypatch) -> None:
+def test_build_info_reports_unknown_without_build_args(monkeypatch: pytest.MonkeyPatch) -> None:
     """A plain `docker build` says so, rather than inventing provenance."""
     monkeypatch.delenv("FF_SOURCE_COMMIT", raising=False)
     monkeypatch.delenv("FF_BUILT_AT", raising=False)
@@ -54,7 +56,7 @@ def test_build_info_reports_unknown_without_build_args(monkeypatch) -> None:
     assert info.short_commit == UNKNOWN
 
 
-def test_build_info_reads_baked_provenance(monkeypatch) -> None:
+def test_build_info_reads_baked_provenance(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FF_SOURCE_COMMIT", "815596b2c0ffee1234567890abcdef0123456789")
     monkeypatch.setenv("FF_BUILT_AT", "2026-09-23T19:26:56Z")
 

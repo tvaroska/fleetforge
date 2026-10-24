@@ -55,6 +55,7 @@ from fleetforge.api.deps import (
     SettingsDep,
     deploy_config_gaps,
     dynsec_configured,
+    get_command_publisher,
     mqtt_command_configured,
 )
 from fleetforge.api.eventstream import EventHub, PostgresEventListener
@@ -70,6 +71,7 @@ from fleetforge.api.routers import (
     enroll,
     enrollment,
     events,
+    groups,
     partition_profiles,
     progress,
     projects,
@@ -80,6 +82,8 @@ from fleetforge.auth.ratelimit import FixedWindowLimiter
 from fleetforge.buildinfo import build_info
 from fleetforge.config import Settings, get_settings
 from fleetforge.db.base import asyncpg_dsn, get_sessionmaker
+from fleetforge.db.models import DeployState
+from fleetforge.events import DeviceEvent, EventType
 from fleetforge.firmware import DEFAULT_INDEX_KEY, CatalogCache
 from fleetforge.storage import SignedUrlCache
 from fleetforge.storage.factory import object_store_configured
@@ -144,10 +148,28 @@ def create_app() -> FastAPI:
         hub: EventHub = app.state.event_hub
         task: asyncio.Task[None] | None = None
         if settings is not None:
+            async def _on_device_event(event: DeviceEvent) -> None:
+                if (
+                    event.type == EventType.DEVICE_DEPLOY
+                    and event.state == DeployState.CONFIRMED.value
+                    and event.cmd_id is not None
+                ):
+                    publisher = get_command_publisher(settings)
+                    sessionmaker = get_sessionmaker()
+                    async with sessionmaker() as session:
+                        await deploys.advance_project_rollout_on_confirm(
+                            session,
+                            device_id=event.device_id,
+                            cmd_id=event.cmd_id,
+                            settings=settings,
+                            publisher=publisher,
+                        )
+
             listener = PostgresEventListener(
                 asyncpg_dsn(settings.database_url),
                 hub,
                 ping_s=settings.events_listener_ping_s,
+                on_event=_on_device_event,
             )
             app.state.event_listener = listener
             task = asyncio.create_task(listener.run(), name="ff-events-listener")
@@ -259,6 +281,7 @@ def create_app() -> FastAPI:
 
     app.include_router(auth.router)
     app.include_router(projects.router)
+    app.include_router(groups.router)
     app.include_router(users.router)
     app.include_router(enrollment.router)
     app.include_router(enroll.router)

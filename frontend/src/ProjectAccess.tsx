@@ -9,6 +9,7 @@ import {
   api,
   type AdminTokenIssued,
   type AdminTokenSummary,
+  type DeviceGroupSummary,
   type Me,
   type ProjectMemberSummary,
   type ProjectSecretSummary,
@@ -106,6 +107,11 @@ export function ProjectAccess({
   const [otelHeaders, setOtelHeaders] = useState('')
   const [otelStatus, setOtelStatus] = useState<string | null>(null)
 
+  // Device groups (cohorts)
+  const [groups, setGroups] = useState<DeviceGroupSummary[]>([])
+  const [groupName, setGroupName] = useState('')
+  const [groupDesc, setGroupDesc] = useState('')
+
   // A stale question about another project's member must not survive a switch or a close.
   useEffect(() => {
     setPending(null)
@@ -144,6 +150,10 @@ export function ProjectAccess({
       }
       if (userRes !== null) {
         setUsers(userRes.users ?? [])
+      }
+      if (typeof api.listGroups === 'function') {
+        const grpRes = await api.listGroups(activeProject !== 'default' ? activeProject : undefined)
+        setGroups(grpRes?.groups ?? [])
       }
     } catch (err) {
       handle(err)
@@ -362,11 +372,44 @@ export function ProjectAccess({
     }
   }
 
+  async function handleCreateGroup(event: FormEvent) {
+    event.preventDefault()
+    if (!groupName.trim()) {
+      return
+    }
+    setBusy(true)
+    setError(null)
+    try {
+      await api.createGroup(
+        { name: groupName.trim(), description: groupDesc.trim() || null },
+        activeProject !== 'default' ? activeProject : undefined,
+      )
+      setGroupName('')
+      setGroupDesc('')
+      await refreshDrawer()
+    } catch (err) {
+      handle(err)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function handleDeleteGroup(groupId: string) {
+    setError(null)
+    try {
+      await api.deleteGroup(groupId)
+      await refreshDrawer()
+    } catch (err) {
+      handle(err)
+    }
+  }
+
   const options =
     projects.length > 0
       ? projects
       : [{ id: 'default', slug: activeProject, name: activeProject, description: null, role: 'owner', created_at: '' }]
   const activeOption = options.find((p) => p.slug === activeProject) ?? options[0]
+  const canManage = me.is_superadmin || activeOption?.role === 'owner'
 
   return (
     <section aria-label="Project and access" data-testid="project-access">
@@ -736,6 +779,79 @@ export function ProjectAccess({
                 <p className="ok" data-testid="otel-status">
                   {otelStatus}
                 </p>
+              )}
+
+              <h3>Device groups (cohorts)</h3>
+              <p className="muted">
+                Named release rings (e.g. <code>canary</code>, <code>prod</code>) or sub-locations in{' '}
+                <code>{activeProject}</code> for targeted rollouts.
+              </p>
+              {groups.length > 0 && (
+                <table data-testid="project-groups-table">
+                  <thead>
+                    <tr>
+                      <th scope="col">Name</th>
+                      <th scope="col">Description</th>
+                      <th scope="col" />
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {groups.map((g) => (
+                      <tr key={g.id} data-testid="project-group-row">
+                        <td>
+                          <code>{g.name}</code>
+                        </td>
+                        <td>{g.description ?? <span className="muted">—</span>}</td>
+                        <td>
+                          {canManage && (
+                            <button
+                              type="button"
+                              aria-label={`Delete group ${g.name}`}
+                              disabled={busy}
+                              onClick={() => void handleDeleteGroup(g.id)}
+                            >
+                              Delete
+                            </button>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              )}
+              {canManage && (
+                <form className="compact-form" onSubmit={(e) => void handleCreateGroup(e)}>
+                  <div className="form-grid">
+                    <label>
+                      Group name
+                      <input
+                        type="text"
+                        aria-label="Group name"
+                        value={groupName}
+                        onChange={(e) => setGroupName(e.target.value)}
+                        placeholder="canary"
+                        disabled={busy}
+                        required
+                      />
+                    </label>
+                    <label>
+                      Description (optional)
+                      <input
+                        type="text"
+                        aria-label="Group description"
+                        value={groupDesc}
+                        onChange={(e) => setGroupDesc(e.target.value)}
+                        placeholder="Canary test cohort"
+                        disabled={busy}
+                      />
+                    </label>
+                  </div>
+                  <p>
+                    <button type="submit" disabled={busy || !groupName.trim()}>
+                      Create group
+                    </button>
+                  </p>
+                </form>
               )}
             </div>
 

@@ -17,7 +17,7 @@
 //   `defaultMqttUri` below.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ApiError, api, type AgentManifest } from './api'
+import { ApiError, api, type AgentManifest, type DeviceGroupSummary } from './api'
 import { type Fleet } from './fleet'
 import { BoardConsolePanel } from './BoardConsole'
 import { type ConsoleFactory } from './boardConsole'
@@ -147,6 +147,7 @@ export function FlashBoard({
   fleet,
   versions,
   project,
+  groups,
   onGoToFleet,
 }: {
   onSessionExpired: () => void
@@ -164,9 +165,11 @@ export function FlashBoard({
   createFlasher?: FlasherFactory
   createConsole?: ConsoleFactory
   project?: string
+  groups?: DeviceGroupSummary[]
   onGoToFleet?: () => void
 }) {
   const [form, setForm] = useState<FormState>(INITIAL_FORM)
+  const [selectedGroupId, setSelectedGroupId] = useState<string>('')
   const [board, setBoard] = useState<string>(OTHER_BOARD_ID)
   const [manifest, setManifest] = useState<AgentManifest | null>(null)
   const [manifestError, setManifestError] = useState<string | null>(null)
@@ -339,7 +342,8 @@ export function FlashBoard({
   // Not memoised on purpose: it is only ever used from an `onClick`, and `config` is a
   // fresh literal on every render, so a `useCallback` would churn and buy nothing — and
   // one with an honest dependency list would be rebuilt every render anyway.
-  const recoverByReflash = () => state.reflash({ config, baudRate: form.baudRate })
+  const groupId = selectedGroupId || null
+  const recoverByReflash = () => state.reflash({ config, baudRate: form.baudRate, groupId })
 
   // R2b-fe-3. What this page knows for the result card. A plain literal for the same
   // reason as `diagnostics` below.
@@ -381,7 +385,7 @@ export function FlashBoard({
         onClick={() => {
           const baudRate = failure.retryBaud ?? form.baudRate
           if (failure.retryBaud !== null) set('baudRate', baudRate)
-          void state.reflash({ config, baudRate })
+          void state.reflash({ config, baudRate, groupId })
         }}
       >
         {failure.retryBaud !== null ? `Retry at ${failure.retryBaud}` : 'Try the flash again'}
@@ -743,10 +747,29 @@ export function FlashBoard({
           {configError}
         </p>
       )}
+      {groups && groups.length > 0 && (
+        <p>
+          <label>
+            Group{' '}
+            <select
+              value={selectedGroupId}
+              onChange={(event) => setSelectedGroupId(event.target.value)}
+              disabled={state.busy}
+            >
+              <option value="">Ungrouped</option>
+              {groups.map((g) => (
+                <option key={g.id} value={g.id}>
+                  {g.name}
+                </option>
+              ))}
+            </select>
+          </label>
+        </p>
+      )}
       <p>
         <button
           type="button"
-          onClick={() => void state.flash({ config, baudRate: form.baudRate })}
+          onClick={() => void state.flash({ config, baudRate: form.baudRate, groupId })}
           // `manifest === null` disables it too: since S0-infra-6 the agent images come
           // from the object store, so "no manifest" is a real running state (store down,
           // nothing published). Without this the operator presses Flash, the board is put

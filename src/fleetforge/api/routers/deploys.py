@@ -126,6 +126,7 @@ from fleetforge.deploys import (
     latest_open_transaction,
     record_publish_failure,
     record_requested,
+    requested_rollout,
 )
 from fleetforge.partition_profiles import LayoutCatalog, load_layout_catalog
 from fleetforge.presence import is_online
@@ -629,13 +630,16 @@ async def deploy_version_to_project_devices(
     target_filter: str,
     apply: str,
     override: Collection[str],
-    admin: AuthContext,
+    admin: AuthContext | None = None,
     settings: Settings,
     publisher: CommandPublisher,
     target_chip: str | None = None,
+    group_id: uuid.UUID | None = None,
     best_effort_broker: bool = False,
     canary: bool = True,
     max_parallel: int = DEFAULT_ROLLOUT_MAX_PARALLEL,
+    sent_by_override: DeploySender | None = None,
+    republish_in_flight: bool = True,
 ) -> tuple[list[DeployAccepted], dict[str, str]]:
     """Stage `version` onto compatible live boards in `project_id` with staged rollout safety.
 
@@ -659,6 +663,10 @@ async def deploy_version_to_project_devices(
     ):
         return [], {}
 
+    # Serialize concurrent rollout evaluations for the same project across API workers
+    # so simultaneous 'confirmed' notifications cannot stage duplicate waves or exceed max_parallel.
+    await session.execute(select(Project.id).where(Project.id == project_id).with_for_update())
+
     all_project_stmt = (
         select(Device)
         .where(Device.project_id == project_id, Device.decommissioned_at.is_(None))
@@ -666,6 +674,8 @@ async def deploy_version_to_project_devices(
     )
     if target_chip is not None:
         all_project_stmt = all_project_stmt.where(Device.platform_type == target_chip)
+    if group_id is not None:
+        all_project_stmt = all_project_stmt.where(Device.group_id == group_id)
     all_project_devices = list((await session.scalars(all_project_stmt)).all())
     if not all_project_devices:
         return [], {}
@@ -719,6 +729,14 @@ async def deploy_version_to_project_devices(
         ):
             skipped[device.device_id] = f"already running version {version}"
             continue
+        if (
+            not republish_in_flight
+            and dev_snap is not None
+            and dev_snap.artifact_version == version
+            and not dev_snap.is_terminal
+        ):
+            skipped[device.device_id] = f"already in flight on version {version}"
+            continue
         _, found_artifact = await _resolve(session, device.device_id, version)
         found_refusals: list[Finding] = [
             *refusals(device, found_artifact, version=version, catalog=catalog),
@@ -767,7 +785,8 @@ async def deploy_version_to_project_devices(
         wave_items = [canary_item]
     else:
         # Wave 2: Bounded concurrency (`max_parallel`). Count boards already in-flight on `version`
-        # outside the current eligible republish set.
+        # outside the current eligible republish set whose state is actively transferring/applying
+        # or online, so offline/sleepy boards parked in requested state do not starve max_parallel.
         eligible_ids = {dev.device_id for dev, _, _ in eligible}
         active_in_flight = sum(
             1
@@ -776,6 +795,10 @@ async def deploy_version_to_project_devices(
             and (snap := snapshots.get(d.device_id)) is not None
             and snap.artifact_version == version
             and not snap.is_terminal
+            and (
+                snap.state != "requested"
+                or is_online(d, now=now, tolerance=settings.presence_tolerance)
+            )
         )
         effective_cap = max(1, max_parallel)
         available_slots = max(0, effective_cap - active_in_flight)
@@ -787,9 +810,25 @@ async def deploy_version_to_project_devices(
     if not wave_items:
         return [], skipped
 
-    sent_by = await _sender(session, admin)
+    if sent_by_override is not None:
+        sent_by = sent_by_override
+    elif admin is not None:
+        sent_by = await _sender(session, admin)
+    else:
+        sent_by = DeploySender("system", "rollout", None)
+    rollout_meta: dict[str, Any] = {
+        "target_filter": target_filter,
+        "canary": canary,
+        "max_parallel": max_parallel,
+        "override": list(override),
+        "target_chip": target_chip,
+        "group_id": str(group_id) if group_id is not None else None,
+    }
     deployed: list[DeployAccepted] = []
 
+    # First pass: resolve artifacts and record all 'requested' transactions in DB while
+    # holding the Project.id FOR UPDATE lock.
+    stage_tasks: list[tuple[Device, ResolvedArtifact, str, bool, bool, dict[str, Any]]] = []
     for device, found_artifact, online in wave_items:
         open_transaction = await latest_open_transaction(
             session, device_id=device.device_id, window_s=settings.signed_url_ttl_s
@@ -810,8 +849,8 @@ async def deploy_version_to_project_devices(
                 target=device.platform_type,
                 apply=apply,
                 sent_by=sent_by,
+                rollout=rollout_meta,
             )
-            await session.commit()
 
         payload = stage_payload(
             cmd_id=cmd_id,
@@ -823,6 +862,12 @@ async def deploy_version_to_project_devices(
             confirm_timeout_s=settings.confirm_timeout_s,
             sig=found_artifact.sig,
         )
+        stage_tasks.append((device, found_artifact, cmd_id, reused, online, payload))
+
+    # Commit all recorded transactions atomically once before publishing over MQTT
+    await session.commit()
+
+    for device, found_artifact, cmd_id, reused, online, payload in stage_tasks:
         if best_effort_broker:
             try:
                 await publisher.publish(device.device_id, payload)
@@ -864,3 +909,64 @@ async def deploy_version_to_project_devices(
         )
 
     return deployed, skipped
+
+
+async def advance_project_rollout_on_confirm(
+    session: AsyncSession,
+    *,
+    cmd_id: str,
+    settings: Settings,
+    publisher: CommandPublisher,
+    device: Device | None = None,
+    device_id: str | None = None,
+) -> list[DeployAccepted]:
+    """Advance a staged project cohort rollout when a board confirms its wave transaction."""
+    resolved_device = device
+    if resolved_device is None and device_id is not None:
+        resolved_device = await session.get(Device, device_id)
+    if resolved_device is None:
+        return []
+
+    req = await requested_rollout(session, device_id=resolved_device.device_id, cmd_id=cmd_id)
+    if req is None:
+        return []
+
+    rollout_cfg = req.rollout
+    target_filter = str(rollout_cfg.get("target_filter") or "all")
+    canary = bool(rollout_cfg.get("canary", True))
+    raw_max_parallel = rollout_cfg.get("max_parallel", DEFAULT_ROLLOUT_MAX_PARALLEL)
+    max_parallel = (
+        int(raw_max_parallel)
+        if isinstance(raw_max_parallel, int)
+        else DEFAULT_ROLLOUT_MAX_PARALLEL
+    )
+    raw_override = rollout_cfg.get("override")
+    override = (
+        tuple(str(item) for item in raw_override)
+        if isinstance(raw_override, list)
+        else ()
+    )
+    raw_chip = rollout_cfg.get("target_chip")
+    target_chip = str(raw_chip) if isinstance(raw_chip, str) else None
+    raw_group = rollout_cfg.get("group_id")
+    group_id = uuid.UUID(raw_group) if isinstance(raw_group, str) and raw_group else None
+
+    deployed, _ = await deploy_version_to_project_devices(
+        session,
+        project_id=resolved_device.project_id,
+        version=req.artifact_version,
+        target_filter=target_filter,
+        apply=req.apply,
+        override=override,
+        admin=None,
+        settings=settings,
+        publisher=publisher,
+        target_chip=target_chip,
+        group_id=group_id,
+        best_effort_broker=True,
+        canary=canary,
+        max_parallel=max_parallel,
+        sent_by_override=req.sent_by,
+        republish_in_flight=False,
+    )
+    return deployed

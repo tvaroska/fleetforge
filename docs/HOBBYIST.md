@@ -1,5 +1,7 @@
 # Fleetforge for the electronic hobbyist
 
+> **ARCHIVED (Historical R1 Snapshot — 2026-09-21):** The R1-era gaps and recommendations in this document have been closed across R2 (auto-rollback), R2b (pre-check, known networks, operator flows), R3 (thin OTA library & partition profiles), R4 (health, `up/log`, `up/telemetry`), R5 (self-test, safe windows, 3-crash safe mode, `isReadyForSleep`), R6 (ECDSA P-256 signing, HTTP Range resume, KPIs), and CUJ-2 (Git CI/CD, rotating secrets, OTel, Improv BLE Wi-Fi). See [`TODO.md`](../TODO.md) and [`spec/prd.md`](../spec/prd.md) for current status.
+
 **Date:** 2026-09-21
 **Status:** product review and recommendation — not a spec, not a plan.
 **Audience:** the operator of this instance, and anyone deciding what to build next

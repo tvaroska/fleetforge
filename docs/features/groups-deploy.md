@@ -1,19 +1,23 @@
-# Groups, Bulk Deploy & the Swarm Gateway
+# Groups, Cohort Rollouts & the Swarm Gateway
 
-**Priority:** P1
-**Target:** V3 — robotic swarm (was R4)
-**Depends on:** OTA Deploy & Auto-Rollback (ota-deploy.md) — R2
-**Scope:** [prd.md](../../spec/prd.md) → *Scope* · [releases.md](../releases.md) → *V3 — robotic swarm*
+**Priority:** P1  
+**Status:** Phase 1 (Groups & Staged Cohort Rollouts) **Shipped in V1 / CUJ-2 (`v0.7.2+`)**; Phases 2 & 3 scoped to **V3 — robotic swarm**  
+**Depends on:** OTA Deploy & Auto-Rollback (`ota-deploy.md`) — R2, Multi-Project RBAC (`projects-and-users.md`) — P1, and Continuous Deployment (`vcs-integration.md`) — CUJ-2 / R11  
+**Scope:** [`spec/prd.md`](../../spec/prd.md) → *Scope* · [`docs/releases.md`](../releases.md) → *R11 / V3 — robotic swarm*
 
-## Why this left v1
+## Evolution from V1 to V3
 
-v1 targets **~5 heterogeneous boards** — an e-paper frame, a vehicle, a drone, a morse
-blinker: five projects, five different builds. There is nothing to bulk-deploy, and
-per-device capability checking matters far more than group targeting.
+V1 initially targeted **~5 heterogeneous boards** — an e-paper frame, a vehicle, a drone, a morse
+blinker: five projects, five different builds, where per-device capability checking mattered far
+more than bulk deployment.
 
-**Groups do not disappear from v1** — enrollment tokens are group-scoped (R0-BE-2) and
-the dashboard organises by tag. It is the bulk-deploy *release* that moves here, to the
-first genuinely homogeneous fleet: many identical drones.
+However, as multi-project support and the e-ink fleet workflow expanded (`CUJ-2`), single operators
+began managing multiple devices per project. Consequently, **Phase 1 (Groups schema, group assignment,
+and staged canary cohort rollouts)** was pulled forward into **V1 / CUJ-2 (`v0.7.2+`)**.
+
+The remainder of this feature area — **Phase 2 (Swarm Gateway edge relay & hierarchy)** and
+**Phase 3 (Airtime-aware radio scheduling & binary delta updates)** — remains scheduled for
+**V3 — robotic swarm**.
 
 ## Multi-Use-Case × 10s of MCUs Architecture (2026-10-17 Design Notes)
 
@@ -28,20 +32,20 @@ When a single operator runs **multiple distinct use-cases** (e.g., *Greenhouse C
      - **Wave 2 (Bounded Concurrency):** Once a canary has confirmed `version`, roll out to the remaining $N$ boards with a concurrency cap (`max_parallel = 5` by default) so 40–80 ESP32s pulling a ~1.2 MB image simultaneously do not saturate a local 2.4 GHz Wi-Fi AP.
      - **Auto-Halt on Rollback / Failure:** If any board in the project cohort enters `rolled_back` or `failed` on `version`, halt immediately (`rollout halted: device <id> <state> on version <version>`) and stage nothing further.
 
-## Phase 1: Groups & bulk deploy
+## Phase 1: Groups & Staged Cohort Rollouts (Shipped in V1 / CUJ-2)
 
-| ID | Task | Priority | Effort |
-|----|------|----------|--------|
-| SW-DB-1 | Tags/groups schema + device↔group membership | P0 | 0.5d |
-| SW-BE-1 | Assign devices to groups/tags (API) | P0 | 1d |
-| SW-BE-2 | Deploy to a group (distribute the per-device transaction) | P0 | 1.5d |
-| SW-FE-1 | Group management UI + group deploy | P0 | 1d |
-| SW-FE-2 | Per-device progress view for a bulk deploy | P0 | 1.5d |
-| SW-TEST-1 | E2E: deploy to a group → all members update, progress visible | P0 | 1d |
+| ID | Task | Priority | Status | Description |
+|----|------|----------|--------|-------------|
+| SW-DB-1 | Tags/groups schema + device↔group membership | P0 | **Done** | `device_groups` table with `UNIQUE (project_id, name)` and `devices.group_id` / `enrollment_tokens.group_id` foreign keys (`alembic/versions/0001_initial_schema.py`). |
+| SW-BE-1 | Assign devices to groups/tags (API) | P0 | **Done** | CRUD endpoints in `src/fleetforge/api/routers/groups.py` and `PATCH /v1/devices/{id}` group binding. |
+| SW-BE-2 | Deploy to a group & staged cohort rollouts | P0 | **Done** | `POST /v1/projects/{slug}/deploy` with `group_id` cohort filter, Wave 1 Canary Gating, Wave 2 Bounded Concurrency (`max_parallel=5`), and automatic halt on rollback/failure (`src/fleetforge/api/routers/deploys.py`). |
+| SW-FE-1 | Group management UI + group deploy | P0 | **Done** | Cohort management in `ProjectAccess.tsx`, target group selector in `Dashboard.tsx` (`UploadedBuilds`), and group assignment in `FleetView.tsx`, `EnrollBoard.tsx`, and `FlashBoard.tsx`. |
+| SW-FE-2 | Per-device progress view for a bulk deploy | P0 | **Done** | `DeployKpiStrip`, `DeployCell`, and `DeployTimeline` progress visibility across multiple boards. |
+| SW-TEST-1 | E2E & integration verification | P0 | **Done** | `tests/test_ci_cd.py` staged cohort rollout verification, group filtering, and canary gating. |
 
-**Done when:** you can update many boards at once and watch per-device progress.
+**Done when:** operators can organize devices into cohort groups, deploy firmware to a group with automated canary gating, and monitor rollout progress live.
 
-## Phase 2: Gateway & hierarchy — ground vehicle + drones
+## Phase 2: Gateway & hierarchy — ground vehicle + drones (V3 — robotic swarm)
 
 One ground vehicle acts as **gateway** for a large number of flying drones. It is a
 *mobile, in-fleet* node, not static on-site infrastructure: simultaneously a managed
@@ -59,7 +63,7 @@ device in the registry and the parent of its drones.
   no protocol bridging is necessary at all. Zigbee/BLE/LoRa bridging is a separate,
   later question.
 
-## Phase 3: Scale hardening
+## Phase 3: Scale hardening (V3 — robotic swarm)
 
 - **Airtime-aware scheduling** — concurrency limits so a fleet deploy does not saturate
   the local link.
@@ -67,8 +71,3 @@ device in the registry and the parent of its drones.
   write-inactive-slot. Thus, the A/B layout frozen at R0 is a prerequisite.
 - **Safe-window deferral at scale** — drones must not apply mid-flight. The
   device-owned-reboot rule (design/architecture.md principle 5) is load-bearing here.
-
-## Post-v1
-
-Staged / canary rollout — deploy to a canary subset, gate the rest on canary health.
-Unlocks *safe* auto-deploy (see vcs-integration.md, R11).

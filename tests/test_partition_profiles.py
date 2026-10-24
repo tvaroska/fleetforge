@@ -64,7 +64,7 @@ async def unknown_board(session: AsyncSession, **overrides: object) -> Device:
         "partition_table_sha256": WRONG_SHA,
     }
     values.update(overrides)
-    return await seed_device(session, **values)
+    return await seed_device(session, device_id=DEVICE_ID, **values)
 
 
 class TestSeed:
@@ -142,6 +142,7 @@ class TestNoteDetected:
 
     async def test_a_known_fingerprint_is_no_new_row(self, session: AsyncSession) -> None:
         await clear_non_builtin(session)
+        assert AB_SHA is not None
         board = await unknown_board(session, partition_table_sha256=AB_SHA)
         assert await note_detected(session, board) is False
         assert await profiles(session, AB_SHA) == [

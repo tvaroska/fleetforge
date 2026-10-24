@@ -299,8 +299,9 @@ done at R0.
 
 **These are not compose services**. Never add `fleetforge-agent-*` to `PULL_SERVICES` or
 `APP_SERVICES` in `services/scripts/deploy.sh`: `docker compose pull` fails as a unit. Thus,
-one unresolvable reference breaks the deploy for every other app on the box. Production
-gets the binaries inside the app image, not from these.
+one unresolvable reference breaks the deploy for every other app on the box. Since
+S0-infra-6, production reads the published bundles from the object store (`agent/index.json`
++ `blobs/sha256/…`, published via `just agent-publish`), not from the app container image.
 
 ## Bump the ESP-IDF pin
 
@@ -345,5 +346,5 @@ table has one, is missing `ota_1`, or whose slots differ in size.
 | `no space left on device` during pull | see *Disk* above. The partial image drops, re-pull after reclaiming |
 | `make_manifest: build/config/sdkconfig is missing` | IDF 5.x keeps the text config at the project root. It is resolved from `project_description.json["config_file"]` — do not hardcode a path |
 | Build succeeds but the bundle is stale | a `sdkconfig` at the project root **overrides** `sdkconfig.defaults`. It stays in .gitignore and dockerignored, but check the build context |
-| `/v1/agent/manifest` is 503 with bundles on disk | the api loads them at startup — restart it. Then read the WARNING, which names the path and the dropped targets |
-| A target is missing from the manifest | it dropped at load: the WARNING names it and the reason (usually a partial `agent-build-all` after a disk failure) |
+| `/v1/agent/manifest` is 503 | the object store is not configured, unreachable, or `agent/index.json` has not been published yet (`just agent-publish` / `just agent-publish-local`). The API caches the index for `AGENT_CATALOG_TTL_S` (60 s by default), so no restart is needed after publishing |
+| A target is missing from the manifest | it was not published (`just agent-publish <target>`) or failed validation in `CatalogCache` — read the API's WARNING log |

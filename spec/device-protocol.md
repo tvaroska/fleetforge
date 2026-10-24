@@ -122,7 +122,10 @@ V3 (*Hierarchy*).
   "parent_device_id": null,
   "partition_layout": "ab-4m-v1",
   "ota_slot_size": 1966080,
-  "capabilities": ["ota", "selftest", "identify"],
+  "flash_chip_size": 4194304,
+  "partition_table_sha256": "1fa67e6bbd034e434d04e9d6f4f52bbe899361602cd498573eb3bde97d1559ed",
+  "rollback_capable": true,
+  "capabilities": ["ota", "apply", "cancel", "rollback", "reboot", "selftest", "identify"],
   "reset_reason": "poweron",
   "lib_marker": 1
 }

@@ -38,11 +38,17 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from fleetforge import retention
+from fleetforge.api.deps import get_command_publisher
+from fleetforge.api.routers.deploys import advance_project_rollout_on_confirm
 from fleetforge.clock import now_utc
 from fleetforge.config import get_settings
 from fleetforge.db.base import get_engine, get_sessionmaker
+from fleetforge.events import EventType
 from fleetforge.ingestor import otel
 from fleetforge.ingestor.handlers import handle_up_message
+from fleetforge.storage.blobs import blob_key
+from fleetforge.storage.factory import create_object_store, object_store_configured
+from fleetforge.storage.objectstore import ObjectStore, ObjectStoreError
 
 logger = logging.getLogger("fleetforge.ingestor")
 
@@ -156,6 +162,28 @@ async def handle_message(
             logger.info(
                 "ingested %s device=%s online=%s", event.type, event.device_id, event.online
             )
+            if (
+                event.type == EventType.DEVICE_DEPLOY
+                and event.state == "confirmed"
+                and event.cmd_id is not None
+            ):
+                try:
+                    settings = get_settings()
+                    publisher = get_command_publisher(settings)
+                    async with sessionmaker() as session:
+                        await advance_project_rollout_on_confirm(
+                            session,
+                            cmd_id=event.cmd_id,
+                            settings=settings,
+                            publisher=publisher,
+                            device_id=event.device_id,
+                        )
+                except Exception:
+                    logger.exception(
+                        "failed to advance rollout for device %s cmd_id %s",
+                        event.device_id,
+                        event.cmd_id,
+                    )
     except (SQLAlchemyError, OSError, ValueError) as exc:
         logger.error("ingest failed for topic %s: %s", topic, exc)
 
@@ -238,7 +266,10 @@ async def run(
 
 
 async def sweep_once(
-    sessionmaker: async_sessionmaker[AsyncSession], *, always_log: bool = False
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    always_log: bool = False,
+    store: ObjectStore | None = None,
 ) -> retention.SweepResult | None:
     """One retention pass in its own session and transaction; `None` if it failed.
 
@@ -247,20 +278,37 @@ async def sweep_once(
     """
     try:
         async with sessionmaker() as session:
-            result = await retention.sweep(session, now=now_utc())
+            if store is None:
+                result = await retention.sweep(session, now=now_utc())
+            else:
+                result = await retention.sweep(session, now=now_utc(), prune_orphans=True)
             await session.commit()
     except (SQLAlchemyError, OSError) as exc:
         logger.error("retention sweep failed: %s", exc)
         return None
+
+    if store is not None and result.orphan_sha256s:
+        for sha256 in result.orphan_sha256s:
+            try:
+                await store.delete(blob_key(sha256))
+            except ObjectStoreError as exc:
+                logger.warning("retention blob delete failed for %s: %s", sha256, exc)
     if always_log or result.total:
+        extra = ""
+        if result.tokens or result.artifact_versions or result.artifacts:
+            extra = (
+                f" tokens={result.tokens} artifact_versions={result.artifact_versions}"
+                + (f" artifacts={result.artifacts}" if result.artifacts else "")
+            )
         logger.info(
             "retention sweep deleted logs=%d telemetry_expired=%d telemetry_capped=%d "
-            "metrics=%d faults=%d",
+            "metrics=%d faults=%d%s",
             result.logs,
             result.telemetry_expired,
             result.telemetry_capped,
             result.metrics,
             result.faults,
+            extra,
         )
     return result
 
@@ -269,16 +317,17 @@ async def retention_loop(
     sessionmaker: async_sessionmaker[AsyncSession],
     *,
     interval_s: float = retention.SWEEP_INTERVAL_S,
+    store: ObjectStore | None = None,
 ) -> None:
     """Sweep once at start (always logged), then every `interval_s`, until cancelled.
 
     Its own task, so a broker outage does not stop retention and a slow sweep does not
     stall ingestion; it never touches the liveness file.
     """
-    await sweep_once(sessionmaker, always_log=True)
+    await sweep_once(sessionmaker, always_log=True, store=store)
     while True:
         await asyncio.sleep(interval_s)
-        await sweep_once(sessionmaker)
+        await sweep_once(sessionmaker, store=store)
 
 
 async def main() -> None:
@@ -304,7 +353,8 @@ async def main() -> None:
         )
     )
 
-    sweeper = asyncio.create_task(retention_loop(sessionmaker))
+    object_store = create_object_store(settings) if object_store_configured(settings) else None
+    sweeper = asyncio.create_task(retention_loop(sessionmaker, store=object_store))
     otel_worker = asyncio.create_task(otel.otel_export_loop())
 
     # `docker compose down` sends SIGTERM; cancelling the task lets aiomqtt send a

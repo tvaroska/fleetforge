@@ -162,9 +162,21 @@ _Static_assert(OTA_STALL_MS >= 2 * OTA_HTTP_TIMEOUT_MS,
 /* R6-SEC-1 / R6-SEC-2: Trusted ECDSA P-256 public key rotation ring (>= 2 keys).
  * A signature in `cmd->sig` (`ecdsa-p256-sha256:<base64_der>`) is verified against the 32-byte
  * SHA-256 digest read back from the flash slot BEFORE `esp_https_ota_finish()` switches the
- * boot pointer. Accepting any key in the 2-key ring allows zero-downtime key rotation. */
+ * boot pointer. Accepting any key in the 2-key ring allows zero-downtime key rotation.
+ *
+ * When `FF_OTA_PRODUCTION_BUILD` is defined, signature verification defaults to mandatory
+ * (`FF_OTA_REQUIRE_SIGNATURE=1`) and building with the committed dev public key fails at
+ * compile time unless `FF_OTA_SIGNING_PUBKEY_PRIMARY_PEM` is supplied. */
+#if defined(FF_OTA_PRODUCTION_BUILD) && !defined(FF_OTA_SIGNING_PUBKEY_PRIMARY_PEM)
+#error "FF_OTA_PRODUCTION_BUILD requires overriding FF_OTA_SIGNING_PUBKEY_PRIMARY_PEM"
+#endif
+
 #ifndef FF_OTA_REQUIRE_SIGNATURE
+#if defined(FF_OTA_PRODUCTION_BUILD)
+#define FF_OTA_REQUIRE_SIGNATURE 1
+#else
 #define FF_OTA_REQUIRE_SIGNATURE 0
+#endif
 #endif
 
 #ifndef FF_OTA_SIGNING_PUBKEY_PRIMARY_PEM
@@ -355,6 +367,18 @@ static bool verify_artifact_signature(const uint8_t digest_raw[32], const char *
 
 /* R6-FW-1: Attach `Range: bytes=<offset>-` on HTTP resume attempts after a mid-stream drop,
  * and retry transient chunk errors with exponential backoff (1 s, 2 s, 4 s). */
+static esp_http_client_handle_t s_ota_http_client;
+static char s_resume_range_hdr[48];
+
+static esp_err_t ota_http_client_init_cb(esp_http_client_handle_t client)
+{
+    s_ota_http_client = client;
+    if (s_resume_range_hdr[0] != '\0') {
+        return esp_http_client_set_header(client, "Range", s_resume_range_hdr);
+    }
+    return ESP_OK;
+}
+
 static esp_err_t resume_range_perform(esp_https_ota_handle_t handle, const ff_ota_cmd_t *cmd,
                                       int *last_len, int64_t *last_progress_us,
                                       bool *stalled, bool *cancel_seen)
@@ -369,6 +393,7 @@ static esp_err_t resume_range_perform(esp_https_ota_handle_t handle, const ff_ot
         int offset = esp_https_ota_get_image_len_read(handle);
         char range_hdr[48];
         snprintf(range_hdr, sizeof(range_hdr), "bytes=%d-", offset > 0 ? offset : 0);
+        memcpy(s_resume_range_hdr, range_hdr, sizeof(s_resume_range_hdr));
         ESP_LOGW(TAG, "update %s: transient transfer fault at %d bytes; retry %d/%d in %" PRIu32
                       " ms (%s)",
                  cmd->cmd_id, offset, attempt + 1, OTA_MAX_RETRIES, delay_ms, range_hdr);
@@ -376,6 +401,26 @@ static esp_err_t resume_range_perform(esp_https_ota_handle_t handle, const ff_ot
         if (cancel_requested()) {
             *cancel_seen = true;
             return ESP_ERR_HTTPS_OTA_IN_PROGRESS;
+        }
+        if (s_ota_http_client != NULL) {
+            (void)esp_http_client_close(s_ota_http_client);
+            (void)esp_http_client_set_header(s_ota_http_client, "Range", s_resume_range_hdr);
+            esp_err_t open_err = esp_http_client_open(s_ota_http_client, 0);
+            if (open_err != ESP_OK) {
+                err = open_err;
+                continue;
+            }
+            if (esp_http_client_fetch_headers(s_ota_http_client) < 0) {
+                (void)esp_http_client_close(s_ota_http_client);
+                err = ESP_ERR_INVALID_RESPONSE;
+                continue;
+            }
+            int status = esp_http_client_get_status_code(s_ota_http_client);
+            if (status != 206 && !(offset <= 0 && status == 200)) {
+                (void)esp_http_client_close(s_ota_http_client);
+                err = ESP_ERR_INVALID_RESPONSE;
+                continue;
+            }
         }
         for (;;) {
             err = esp_https_ota_perform(handle);
@@ -388,6 +433,10 @@ static esp_err_t resume_range_perform(esp_https_ota_handle_t handle, const ff_ot
             }
             int so_far = esp_https_ota_get_image_len_read(handle);
             int64_t now_us = esp_timer_get_time();
+            if (so_far > offset) {
+                attempt = 0;
+                offset = so_far;
+            }
             if (so_far > *last_len) {
                 *last_len = so_far;
                 *last_progress_us = now_us;
@@ -752,8 +801,11 @@ static void ota_task(void *arg)
          * that bounces further would hit the Host-header defect described above — so the
          * fix is to arrive at the final URL, not to try to switch redirects off. */
     };
+    s_ota_http_client = NULL;
+    s_resume_range_hdr[0] = '\0';
     esp_https_ota_config_t ota_config = {
         .http_config = &http,
+        .http_client_init_cb = ota_http_client_init_cb,
         /* R6-FW-1: fetch in bounded HTTP `Range: bytes=<offset>-<end>` windows so flaky links
          * resume from the last written byte rather than restarting from byte 0. */
         .partial_http_download = true,
@@ -1083,6 +1135,8 @@ done:
         s_phase = FF_OTA_TXN_NONE;
         portEXIT_CRITICAL(&s_cancel_lock);
     }
+    s_ota_http_client = NULL;
+    s_resume_range_hdr[0] = '\0';
     free(resolved);
     free(cmd);
     vTaskDelete(NULL);

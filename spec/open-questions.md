@@ -26,27 +26,11 @@ identical to board #1 — re-enter Wi-Fi, re-detect chip, re-flash. Remembered p
 and batch flashing are listed under Post-v1, but if the first fleet is realistically
 more than a handful of boards, that is a v1 concern rather than a later one.
 
-**Proposed: a second CUJ for the prebuilt-agent path.** `cujs.md` → *CUJ-1* is the
-maker's journey and reaches the fleet list through the **library**, so the flasher-page
-path that R0 actually built is only covered as one of its steps. The agent path is a
-journey in its own right — "I want to see this thing work before I commit to it" — and
-unlike CUJ-1 it is fully playable today, which would give T3 something to grade before
-R3 lands. Not written here because `R3-spec-1` scoped itself to the first CUJ.
-Filed 2026-09-22 (R3-spec-1).
-
 ---
 
 ## protocol — proposals from the 2026-10-02 spec review
 
 Filed as proposals, not edits: `device-protocol.md` is near-frozen (`CRITICAL.md`).
-
-**`artifact.type` on `dn/cmd` `stage` — document the default now.** `design/artifacts.md`
-carries an advisory `kind`; the wire command has no counterpart. Adding an optional field
-is additive, so it can wait for a platform that needs it. What cannot wait is the
-sentence "absent means `app`", so the meaning of absence is fixed before anyone assigns
-another. FPGA bitstreams and PX4 payloads reach the device through a companion CPU
-(`docs/PLATFORMS.md`), so the type may never need to cross the wire. Answered (R4-spec-1): `device-protocol.md` → `dn/cmd` says absence means `app` and
-reserves `mcu_fw`, `model_weights` and `fpga_bitstream`.
 
 **Does `ff_cfg` need room for an optional CA root?** `ff_cfg` carries up to 4080 payload
 bytes and its reader ignores unknown keys (`agent/main/ff_cfg.c`), so an optional `ca`
@@ -66,13 +50,6 @@ platform with a different id takes a new tree or a `proto` bump (evolution rule 
 the server-side regex needs to widen later; no device recall is involved. The 2026-10-15 focus group proposes `^[a-z0-9_-]{1,32}$`; that shape admits the broker's
 service usernames, so any widening needs a reserved-name rule first (R4-spec-1, not built).
 
-**Confirm semantics for sleepy / airborne devices — narrower than reported.** The confirm
-timer is device-armed after the reboot, which only happens inside the safe window, so an
-airborne drone does not roll back for being in the air. The real question is whether a
-sleepy node confirms within its first wake; `confirm_timeout_s` is already per-command.
-Needs a statement in `device-protocol.md`, not new fields. Answered (R5-spec-1): `device-protocol.md` → `up/status` says a sleepy device stays awake
-through its confirm, and that the safe window gates the rollback reboot as well as the apply.
-
 **Attestation before the first OTA.** `rollback_capable` is measured by an OTA, so a
 board's first OTA runs unprotected if its bootloader lacks rollback, and nothing on the
 wire says so beforehand. Candidate: a `bootloader_sha256` in `up/announce`, compared
@@ -82,24 +59,14 @@ equals the bundle file's, since esptool rewrites the image header's flash parame
 write time. The same digest would invalidate a stale persisted `rollback_capable` after
 an Arduino IDE upload.
 
-**Field Wi-Fi change.** Answered (`WIFI-BLE-1`): a board flashed with up to 4 known
-networks in `ff_cfg` roams between them automatically ([device-protocol.md](device-protocol.md)
-→ *Known networks*, `flows.md` Flow 3), and when no known network is in range on boot/wake
-it opens a bounded 120 s Improv Wi-Fi over BLE provisioning window that writes newly
-provisioned networks into the NVS `ff_net` overlay ahead of `ff_cfg` without reflashing.
-
-**An OTA image that does not contain the agent.** The confirm timer lives in the agent
-(`ff_mqtt.c::confirm_timeout_cb`), so an image without it arms no timer. The bootloader
-holds it in `PENDING_VERIFY`, and it is rolled back only if the board resets; otherwise it
-runs unconfirmed and offline, the deploy stays at `rebooting`, and no remote action
-reaches it. The pre-check refuses a merged binary and a wrong layout or slot size. Two
-candidates. (1) Decided for detection (R3-spec-3): the library marker read from the image
-at upload ([device-protocol.md](device-protocol.md) → *Library marker*), shown at
-pre-check as the gating warning `no_library_marker`. It catches the plain-sketch mistake,
-not a library that is linked but never started, and not broken logic. (2) Open: a watchdog
-the bootloader arms before it enters a `PENDING_VERIFY` image and only the agent's confirm
-path disarms, so a silent image resets and rolls back. It needs a custom bootloader (a
-one-time USB flash, so not OTA-able), applies only where we own the bootloader (not
-Arduino's), and it is unverified whether IDF's startup disables that watchdog before the
-app runs. Neither covers an image that has the agent and confirms but whose own logic is
-wrong; that is the R5 custom self-test. Its semantics: `device-protocol.md` → `up/status` → *Custom self-test* (R5-spec-1).
+**Bootloader-armed watchdog for an OTA image that does not contain the agent.** The confirm
+timer lives in the agent (`ff_mqtt.c::confirm_timeout_cb`), so an image without it arms no
+timer. The library marker read from the image at upload ([device-protocol.md](device-protocol.md)
+→ *Library marker*, R3-spec-3) catches the plain-sketch mistake at pre-check as the gating
+warning `no_library_marker`, and the R5 custom self-test (`device-protocol.md` → `up/status`
+→ *Custom self-test*) covers an image that links the agent but fails its own checks. Still
+open: a hardware watchdog the bootloader arms before entering a `PENDING_VERIFY` image and
+only the agent's confirm path disarms, so a silent image that links the library without
+starting it resets and rolls back. It needs a custom bootloader (a one-time USB flash, not
+OTA-able), applies only where we own the bootloader (not Arduino's), and it is unverified
+whether IDF's startup disables that watchdog before the app runs.

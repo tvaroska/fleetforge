@@ -59,7 +59,7 @@ on device X?" and "roll back to tag v1.3" become first-class.
 Pulled forward for the e-ink workflow (`CUJ-2`) across migration `0011_ci_cd_and_device_cfg.py`, backend routers (`artifacts.py`, `projects.py`, `devices.py`, `deploys.py`), CLI (`src/fleetforge/cli.py`), and the Builds/Fleet dashboard tabs:
 
 - **Artifact git provenance (`artifact_versions`)**:
-  - `POST /v1/artifact` accepts optional multipart fields `repo_url`, `branch`, `commit_sha` (`^[0-9a-fA-F]{7,40}$`, stored lowercase), `tag`, `build_url`, and `test_passed` (`bool`), persisted on `artifact_versions` and returned in `ArtifactUploadResponse` and `ArtifactVersionItem.provenance`.
+  - `POST /v1/artifact` accepts the raw firmware binary (`application/octet-stream`) in the request body and optional query parameters `repo_url`, `branch`, `commit_sha` (`^[0-9a-fA-F]{7,40}$`, stored lowercase), `tag`, `build_url`, `test_passed` (`bool`), and `sig` (`ecdsa-p256-sha256:<base64>`), persisted on `artifact_versions` / `artifacts` and returned in `ArtifactUploaded` and `ArtifactSummary`.
 - **Project CI/CD tracking (`projects`)**:
   - `projects` stores `repo_url`, `track_mode` (`off | branch | tag | commit`), `track_ref`, `auto_deploy_target` (`off | dev | all`), and `ci_webhook_url`.
   - When `POST /v1/artifact` creates a version whose `test_passed` is not `False` and whose provenance matches `matches_project_tracking(project, provenance)`, `deploy_version_to_project_devices()` automatically stages the build to live project boards (`is_dev = true` when `auto_deploy_target = 'dev'`, or all live boards in the project when `auto_deploy_target = 'all'`) and returns `auto_deployed_devices` in the upload response.

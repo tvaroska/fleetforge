@@ -525,6 +525,10 @@ class TestCuj2FirmwareAndTemplates:
         assert "/v1/device-secrets" in ff_sec_c
         assert "ff_get_secret" in ff_sec_c
         assert "ff_sec_synced()" in ff_mqtt_c
+        assert "nvs_erase_all" not in ff_sec_c
+        assert "nvs_erase_key" in ff_sec_c
+        assert "SECRETS_MAX_RETRIES" in ff_sec_c
+        assert "s_failed_rev >= s_target_rev" in ff_sec_c
 
         # Pillar 3: OTel-compatible up/log + RTC_NOINIT_ATTR crash ring + sleep drain gate
         assert "RTC_NOINIT_ATTR" in ff_log_c
@@ -534,14 +538,22 @@ class TestCuj2FirmwareAndTemplates:
         assert "-Wframe-larger-than=1024" in (root / "CMakeLists.txt").read_text(encoding="utf-8")
 
         # Pillar 4: NVS ff_net overlay + Improv Wi-Fi BLE GATT service + non-blocking retry timer
+        ff_identity_c = (root / "src" / "ff_identity.c").read_text(encoding="utf-8")
+        ff_net_c = (root / "src" / "ff_net.c").read_text(encoding="utf-8")
         assert "00467768-6228-2272-4663-277478268000" in ff_wifi_c
         assert "00467768-6228-2272-4663-277478268003" in ff_wifi_c
         assert "improv_handle_rpc_command" in ff_wifi_c
+        assert "expected_csum" in ff_wifi_c
+        assert "ble_gatts_chr_updated" in ff_wifi_c
+        assert "improv_ble_notify_status" in ff_wifi_c
+        assert "IMPROV_STATE_PROVISIONED" in ff_wifi_c
         assert "load_nvs_net_overlay" in ff_wifi_c
         assert "IMPROV_BLE_WINDOW_S" in ff_wifi_c
         assert "improv_ble_window_start" in ff_wifi_c
         assert "s_retry_timer" in ff_wifi_c
         assert "vTaskDelay(" not in ff_wifi_c
+        assert "ff_net_known_networks(cfg->net_count)" in ff_identity_c
+        assert "ff_net_wifi_known_count()" in ff_net_c
 
         # Starter templates demonstrate both logf/ff_logf and getSecret/ff_get_secret
         assert "Fleetforge.logf" in basic_ino
@@ -775,3 +787,169 @@ class TestOtelQueueAndRateLimiterAndStagedRollout:
                 )
                 assert deployed3 == []
                 assert all("rollout halted" in msg for msg in skipped3.values())
+
+    async def test_advance_project_rollout_on_confirm_progresses_waves_without_republishing_in_flight(
+        self,
+    ) -> None:
+        import datetime as dt
+        import uuid
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        from fleetforge.api.routers.deploys import advance_project_rollout_on_confirm
+        from fleetforge.config import Settings
+        from fleetforge.deploys import DeploySender, DeploySnapshot, RequestedRollout
+        from fleetforge.firmware.manifest import BUILTIN_LAYOUTS
+        from fleetforge.partition_profiles import LayoutCatalog
+
+        proj_id = uuid.uuid4()
+        now = dt.datetime.now(dt.UTC)
+
+        def make_dev(idx: int, *, is_dev: bool = False, fw: str = "1.0.0") -> Device:
+            return Device(
+                device_id=f"a4cf12b3de0{idx}",
+                project_id=proj_id,
+                platform_type="esp32c6",
+                fw_version=fw,
+                partition_layout="ab-4m-v1",
+                ota_slot_size=1966080,
+                rollback_capable=True,
+                capabilities=["ota"],
+                link_type="wifi",
+                power_class="always_on",
+                is_dev=is_dev,
+                presence_reported=True,
+                last_seen=now,
+            )
+
+        devices = [make_dev(i, is_dev=(i == 1)) for i in range(1, 6)]
+        dev_by_id = {d.device_id: d for d in devices}
+        session = AsyncMock()
+        scalars_res = SimpleNamespace(all=lambda: devices)
+        session.scalars = AsyncMock(return_value=scalars_res)
+        session.get = AsyncMock(side_effect=lambda model, key: dev_by_id.get(str(key)))
+        art_row = SimpleNamespace(
+            sha256="c" * 64,
+            size_bytes=2048,
+            partition_layout="ab-4m-v1",
+            has_lib_marker=True,
+            sig=None,
+        )
+        session.execute = AsyncMock(return_value=SimpleNamespace(first=lambda: art_row))
+
+        settings = Settings(
+            database_url="postgresql+asyncpg://u:p@localhost/db",
+            artifact_url_secret="s" * 32,
+            public_base_url="https://fleet.example.com",
+        )
+        publisher = AsyncMock()
+        catalog = LayoutCatalog(layouts=BUILTIN_LAYOUTS, by_fingerprint={}, pending=frozenset())
+        rollout_req = RequestedRollout(
+            artifact_version="1.2.0",
+            apply="auto",
+            sent_by=DeploySender(subject="ci", token_id="tok-1", credential="ci-token"),
+            rollout={
+                "target_filter": "all",
+                "canary": True,
+                "max_parallel": 2,
+                "override": [],
+                "target_chip": "esp32c6",
+            },
+        )
+
+        with (
+            patch(
+                "fleetforge.api.routers.deploys.requested_rollout",
+                return_value=rollout_req,
+            ),
+            patch(
+                "fleetforge.api.routers.deploys.load_layout_catalog",
+                return_value=catalog,
+            ),
+            patch(
+                "fleetforge.api.routers.deploys.latest_open_transaction",
+                return_value=None,
+            ),
+            patch("fleetforge.api.routers.deploys.record_requested", AsyncMock()),
+        ):
+            # Canary (device 1) confirmed, device 2 is already in-flight -> only 1 new board (device 3) stages
+            with patch(
+                "fleetforge.api.routers.deploys.latest_deploys",
+                return_value={
+                    "a4cf12b3de01": DeploySnapshot(
+                        cmd_id="cmd-1",
+                        state="confirmed",
+                        at=now,
+                        is_terminal=True,
+                        artifact_version="1.2.0",
+                        from_version="1.0.0",
+                        pct=None,
+                        detail=None,
+                        steps=(),
+                        sent_by=None,
+                        selftest=None,
+                    ),
+                    "a4cf12b3de02": DeploySnapshot(
+                        cmd_id="cmd-2",
+                        state="downloading",
+                        at=now,
+                        is_terminal=False,
+                        artifact_version="1.2.0",
+                        from_version="1.0.0",
+                        pct=50,
+                        detail=None,
+                        steps=(),
+                        sent_by=None,
+                        selftest=None,
+                    ),
+                },
+            ):
+                advanced = await advance_project_rollout_on_confirm(
+                    session,
+                    device=devices[0],
+                    cmd_id="cmd-1",
+                    settings=settings,
+                    publisher=publisher,
+                )
+                assert [d.device_id for d in advanced] == ["a4cf12b3de03"]
+
+    async def test_ci_webhook_header_encrypted_at_rest_and_decrypted_on_dispatch(self) -> None:
+        from unittest.mock import AsyncMock
+
+        from fleetforge.api.routers.projects import _trigger_ci_webhook
+        from fleetforge.config import Settings
+        from fleetforge.secrets_crypto import decrypt_secret, encrypt_secret
+
+        settings = Settings(
+            database_url="postgresql+asyncpg://u:p@localhost/db",
+            artifact_url_secret="k" * 32,
+        )
+        raw_header = "Bearer ghp_super_secret_token"
+        encrypted = encrypt_secret(raw_header, settings)
+        assert encrypted != raw_header
+        assert encrypted.startswith("gAAAAA")
+        assert decrypt_secret(encrypted, settings) == raw_header
+
+        proj = Project(
+            slug="eink",
+            name="E-Ink",
+            repo_url="https://github.com/org/eink",
+            track_mode="branch",
+            track_ref="main",
+            auto_deploy_target="dev",
+            ci_webhook_url="https://api.github.com/repos/org/eink/dispatches",
+            ci_webhook_header=encrypted,
+        )
+
+        mock_resp = AsyncMock()
+        mock_resp.status_code = 204
+        with patch("fleetforge.api.routers.projects.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.post = AsyncMock(return_value=mock_resp)
+            mock_client_cls.return_value.__aenter__.return_value = mock_client
+
+            ok = await _trigger_ci_webhook(proj, settings=settings)
+            assert ok is True
+            mock_client.post.assert_called_once()
+            sent_headers = mock_client.post.call_args.kwargs["headers"]
+            assert sent_headers["Authorization"] == raw_header

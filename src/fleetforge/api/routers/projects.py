@@ -44,6 +44,7 @@ from fleetforge.api.schemas import (
     ProjectUpdate,
 )
 from fleetforge.broker import CommandPublisher, CommandPublishError, cfg_payload
+from fleetforge.config import Settings
 from fleetforge.db.models import (
     ArtifactVersion,
     Device,
@@ -53,7 +54,7 @@ from fleetforge.db.models import (
     ProjectSecret,
     User,
 )
-from fleetforge.secrets_crypto import encrypt_secret
+from fleetforge.secrets_crypto import decrypt_secret, encrypt_secret
 
 logger = logging.getLogger(__name__)
 
@@ -155,7 +156,9 @@ async def create_project(
         track_ref=body.track_ref,
         auto_deploy_target=body.auto_deploy_target,
         ci_webhook_url=body.ci_webhook_url,
-        ci_webhook_header=body.ci_webhook_header,
+        ci_webhook_header=(
+            encrypt_secret(body.ci_webhook_header, settings) if body.ci_webhook_header else None
+        ),
         otel_endpoint=body.otel_endpoint,
         otel_headers=encrypt_secret(body.otel_headers, settings) if body.otel_headers else None,
         created_at=now,
@@ -186,13 +189,16 @@ async def create_project(
     return _project_summary(proj, role=ProjectRole.OWNER.value)
 
 
-async def _trigger_ci_webhook(proj: Project) -> bool:
+async def _trigger_ci_webhook(proj: Project, settings: Settings | None = None) -> bool:
     """Best-effort webhook POST to trigger an external CI build when switching refs."""
     if not proj.ci_webhook_url:
         return False
     headers: dict[str, str] = {"Content-Type": "application/json"}
     if proj.ci_webhook_header:
-        headers["Authorization"] = proj.ci_webhook_header
+        try:
+            headers["Authorization"] = decrypt_secret(proj.ci_webhook_header, settings)
+        except ValueError:
+            headers["Authorization"] = proj.ci_webhook_header
     payload = {
         "project": proj.slug,
         "repo_url": proj.repo_url,
@@ -247,7 +253,9 @@ async def update_project(
         if "ci_webhook_url" in fields:
             proj.ci_webhook_url = body.ci_webhook_url
         if "ci_webhook_header" in fields:
-            proj.ci_webhook_header = body.ci_webhook_header
+            proj.ci_webhook_header = (
+                encrypt_secret(body.ci_webhook_header, settings) if body.ci_webhook_header else None
+            )
         if "otel_endpoint" in fields:
             proj.otel_endpoint = body.otel_endpoint
         if "otel_headers" in fields:
@@ -305,7 +313,7 @@ async def update_project(
                     deployed_ids.extend(d.device_id for d in deployed_list)
                 auto_deployed = deployed_ids
             elif proj.ci_webhook_url:
-                webhook_triggered = await _trigger_ci_webhook(proj)
+                webhook_triggered = await _trigger_ci_webhook(proj, settings=settings)
 
         return _project_summary(
             proj,
@@ -349,6 +357,7 @@ async def deploy_project(
             admin=admin,
             settings=settings,
             publisher=publisher,
+            group_id=body.group_id,
             best_effort_broker=False,
             canary=body.canary,
             max_parallel=body.max_parallel,

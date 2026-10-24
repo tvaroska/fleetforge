@@ -34,6 +34,9 @@ static const char *TAG = "ff-sec";
 #define SECRETS_MAX_RESPONSE 4096
 #define SECRETS_TASK_STACK 6144
 #define SECRETS_TASK_PRIO 4
+#define SECRETS_MAX_RETRIES 3
+#define SECRETS_RETRY_BASE_MS 1000
+#define SECRETS_MAX_STALE_KEYS 32
 
 static const ff_cfg_t *s_cfg;
 static const ff_cred_t *s_cred;
@@ -42,6 +45,7 @@ static char s_topic_announce[96];
 
 static volatile uint32_t s_local_rev;
 static volatile uint32_t s_target_rev;
+static volatile uint32_t s_failed_rev;
 static volatile bool s_sync_in_flight;
 
 static bool valid_secret_key(const char *key)
@@ -116,11 +120,15 @@ uint32_t ff_sec_rev(void)
 
 bool ff_sec_synced(void)
 {
-    return !s_sync_in_flight && s_local_rev >= s_target_rev;
+    return !s_sync_in_flight && (s_local_rev >= s_target_rev || s_failed_rev >= s_target_rev);
 }
 
 static esp_err_t store_secrets_json(const cJSON *secrets_obj, uint32_t rev)
 {
+    if (!cJSON_IsObject(secrets_obj)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
     nvs_handle_t handle;
     esp_err_t err = nvs_open(FF_SEC_NAMESPACE, NVS_READWRITE, &handle);
     if (err != ESP_OK) {
@@ -129,20 +137,45 @@ static esp_err_t store_secrets_json(const cJSON *secrets_obj, uint32_t rev)
         return err;
     }
 
-    err = nvs_erase_all(handle);
-    if (err == ESP_OK && cJSON_IsObject(secrets_obj)) {
-        const cJSON *item = NULL;
-        cJSON_ArrayForEach(item, secrets_obj)
-        {
-            if (item->string != NULL && valid_secret_key(item->string) && cJSON_IsString(item) &&
-                item->valuestring != NULL) {
-                err = nvs_set_str(handle, item->string, item->valuestring);
-                if (err != ESP_OK) {
-                    break;
-                }
+    /* Validate and write all incoming keys in-place BEFORE removing stale keys,
+     * so a power loss or write error never wipes existing secrets. */
+    const cJSON *item = NULL;
+    cJSON_ArrayForEach(item, secrets_obj)
+    {
+        if (item->string != NULL && valid_secret_key(item->string) && cJSON_IsString(item) &&
+            item->valuestring != NULL) {
+            err = nvs_set_str(handle, item->string, item->valuestring);
+            if (err != ESP_OK) {
+                break;
             }
         }
     }
+
+    /* Prune only keys that were removed from `secrets_obj` in this revision. */
+    if (err == ESP_OK) {
+        char stale_keys[SECRETS_MAX_STALE_KEYS][16];
+        size_t stale_count = 0;
+        nvs_iterator_t it = NULL;
+        if (nvs_entry_find_in_handle(handle, NVS_TYPE_STR, &it) == ESP_OK) {
+            while (it != NULL && stale_count < SECRETS_MAX_STALE_KEYS) {
+                nvs_entry_info_t info;
+                nvs_entry_info(it, &info);
+                if (valid_secret_key(info.key) &&
+                    !cJSON_HasObjectItem(secrets_obj, info.key)) {
+                    strlcpy(stale_keys[stale_count], info.key, sizeof(stale_keys[0]));
+                    stale_count++;
+                }
+                if (nvs_entry_next(&it) != ESP_OK) {
+                    break;
+                }
+            }
+            nvs_release_iterator(it);
+        }
+        for (size_t i = 0; i < stale_count; i++) {
+            (void)nvs_erase_key(handle, stale_keys[i]);
+        }
+    }
+
     if (err == ESP_OK) {
         err = nvs_set_u32(handle, FF_SEC_KEY_REV, rev);
     }
@@ -209,29 +242,50 @@ static void secrets_sync_task(void *arg)
     esp_http_client_set_header(client, "authorization", auth_hdr);
     memset(auth_hdr, 0, sizeof(auth_hdr));
 
-    char *response = NULL;
-    esp_err_t err = esp_http_client_open(client, 0);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "cannot reach %s: %s", url, esp_err_to_name(err));
+    char *response = calloc(1, SECRETS_MAX_RESPONSE + 1);
+    if (response == NULL) {
+        s_failed_rev = s_target_rev;
         goto done;
     }
 
-    int64_t content_length = esp_http_client_fetch_headers(client);
-    int status = esp_http_client_get_status_code(client);
-    if (content_length > SECRETS_MAX_RESPONSE) {
-        ESP_LOGW(TAG, "device-secrets %d: response too large", status);
+    bool fetched = false;
+    for (int attempt = 0; attempt < SECRETS_MAX_RETRIES; attempt++) {
+        if (attempt > 0) {
+            uint32_t delay_ms = (uint32_t)SECRETS_RETRY_BASE_MS << (attempt - 1);
+            vTaskDelay(pdMS_TO_TICKS(delay_ms));
+            (void)esp_http_client_close(client);
+        }
+        esp_err_t err = esp_http_client_open(client, 0);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "cannot reach %s (attempt %d/%d): %s", url, attempt + 1,
+                     SECRETS_MAX_RETRIES, esp_err_to_name(err));
+            continue;
+        }
+        int64_t content_length = esp_http_client_fetch_headers(client);
+        int status = esp_http_client_get_status_code(client);
+        if (content_length > SECRETS_MAX_RESPONSE) {
+            ESP_LOGW(TAG, "device-secrets %d: response too large", status);
+            break;
+        }
+        int read_len = esp_http_client_read_response(client, response, SECRETS_MAX_RESPONSE);
+        if (read_len >= 0 && status == 200) {
+            response[read_len] = '\0';
+            fetched = true;
+            break;
+        }
+        ESP_LOGW(TAG, "device-secrets HTTP %d (attempt %d/%d)", status, attempt + 1,
+                 SECRETS_MAX_RETRIES);
+        if (status >= 400 && status < 500 && status != 429) {
+            break;
+        }
+    }
+
+    if (!fetched) {
+        /* Release the sleep blocker for this wake cycle after bounded retries fail
+         * so a transient server outage does not drain a sleepy board's battery. */
+        s_failed_rev = s_target_rev;
         goto done;
     }
-    response = calloc(1, SECRETS_MAX_RESPONSE + 1);
-    if (response == NULL) {
-        goto done;
-    }
-    int read_len = esp_http_client_read_response(client, response, SECRETS_MAX_RESPONSE);
-    if (read_len < 0 || status != 200) {
-        ESP_LOGW(TAG, "device-secrets HTTP %d", status);
-        goto done;
-    }
-    response[read_len] = '\0';
 
     cJSON *root = cJSON_Parse(response);
     if (root != NULL) {
@@ -241,6 +295,7 @@ static void secrets_sync_task(void *arg)
             uint32_t rev = (uint32_t)rev_item->valuedouble;
             if (store_secrets_json(secrets_obj, rev) == ESP_OK) {
                 s_local_rev = rev;
+                s_failed_rev = 0;
                 if (s_target_rev < rev) {
                     s_target_rev = rev;
                 }
@@ -253,9 +308,15 @@ static void secrets_sync_task(void *arg)
                         free(announce);
                     }
                 }
+            } else {
+                s_failed_rev = s_target_rev;
             }
+        } else {
+            s_failed_rev = s_target_rev;
         }
         cJSON_Delete(root);
+    } else {
+        s_failed_rev = s_target_rev;
     }
 
 done:

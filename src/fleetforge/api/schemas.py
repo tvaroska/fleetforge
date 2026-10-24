@@ -252,6 +252,42 @@ class ProjectMemberList(BaseModel):
     members: list[ProjectMemberSummary]
 
 
+GROUP_NAME_PATTERN = r"^[a-zA-Z0-9][a-zA-Z0-9 _.-]{0,63}$"
+
+
+class DeviceGroupCreate(BaseModel):
+    """`POST /v1/groups`: create a named device group within a project."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(pattern=GROUP_NAME_PATTERN)
+    description: str | None = Field(default=None, max_length=256)
+
+
+class DeviceGroupUpdate(BaseModel):
+    """`PATCH /v1/groups/{group_id}`: rename or update description of a device group."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str | None = Field(default=None, pattern=GROUP_NAME_PATTERN)
+    description: str | None = Field(default=None, max_length=256)
+
+
+class DeviceGroupSummary(BaseModel):
+    """One row of `GET /v1/groups`."""
+
+    id: uuid.UUID
+    project_id: uuid.UUID
+    name: str
+    description: str | None = None
+    created_at: dt.datetime
+    updated_at: dt.datetime
+
+
+class DeviceGroupList(BaseModel):
+    groups: list[DeviceGroupSummary]
+
+
 class UserCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1147,6 +1183,10 @@ class ProjectDeployRequest(BaseModel):
 
     version: str = Field(min_length=1, max_length=64, description="the label, e.g. 1.5.0")
     target_filter: Literal["all", "dev"] = "all"
+    group_id: uuid.UUID | None = Field(
+        default=None,
+        description="Optional device_groups.id cohort filter within the project",
+    )
     apply: Literal["auto", "on_command"] = "auto"
     override: list[OverrideCode] = Field(default_factory=list, max_length=8)
     canary: bool = Field(

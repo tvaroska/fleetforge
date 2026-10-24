@@ -14,6 +14,7 @@ ids the test created.
 
 import datetime as dt
 import uuid
+from typing import Any
 
 import httpx
 import pytest
@@ -78,7 +79,7 @@ async def _burn(engine: AsyncEngine, token_id: uuid.UUID | str) -> int:
             BURN_SQL, {"token_id": uuid.UUID(str(token_id)), "device_id": device_id}
         )
         await session.commit()
-        return int(result.rowcount)
+        return int(getattr(result, "rowcount", 0))
 
 
 # ---------------------------------------------------------------------------
@@ -207,7 +208,7 @@ async def test_list_reports_status(admin_app: FastAPI, engine: AsyncEngine) -> N
     """Four seeded states map to four statuses, newest first."""
     device_id = await _ensure_burn_device(engine)
     now = dt.datetime.now(dt.UTC)
-    seeds = {
+    seeds: dict[str, dict[str, Any]] = {
         "active": {"expires_at": now + dt.timedelta(hours=24)},
         "used": {
             "expires_at": now + dt.timedelta(hours=24),
@@ -289,7 +290,7 @@ async def test_status_matches_burn_predicate(
     assert derived == expected
 
     result = await session.execute(BURN_SQL, {"token_id": row.id, "device_id": "bbccddee0001"})
-    burned = result.rowcount == 1
+    burned = getattr(result, "rowcount", 0) == 1
 
     assert burned == (derived == EnrollmentTokenStatus.ACTIVE)
 

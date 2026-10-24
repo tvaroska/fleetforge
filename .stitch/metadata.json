@@ -1,0 +1,28 @@
+{
+  "projectId": "10710750743754666019",
+  "title": "Fleetforge",
+  "screens": [
+    {
+      "screenId": "7693909253347765266",
+      "title": "Fleetforge Operator Dashboard (v2 \u2014 Recs 2 & 3)",
+      "deviceType": "DESKTOP"
+    },
+    {
+      "screenId": "15568291776129989580",
+      "title": "Fleetforge Operator Dashboard",
+      "deviceType": "DESKTOP"
+    },
+    {
+      "screenId": "9618459169634823378",
+      "title": "Fleetforge Monochrome Pixel Design System",
+      "deviceType": "DESKTOP"
+    }
+  ],
+  "designSystem": {
+    "assetId": "31242094f75c486a9b0b1494adb9eb34",
+    "primaryColor": "#ffffff",
+    "secondaryColor": "#d8d8d8",
+    "backgroundColor": "#0c0c0c",
+    "fontFamily": "Press Start 2P / DejaVu Sans Mono"
+  }
+}

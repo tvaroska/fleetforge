@@ -17,7 +17,7 @@ import asyncio
 import contextlib
 import datetime as dt
 import json
-from collections.abc import AsyncIterator, Callable, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator, MutableMapping
 from typing import Any
 
 import pytest
@@ -138,7 +138,8 @@ async def take(frames: AsyncIterator[bytes], count: int, timeout: float = 5.0) -
     try:
         await asyncio.wait_for(pump(), timeout)
     finally:
-        await frames.aclose()
+        if hasattr(frames, "aclose"):
+            await frames.aclose()
     return collected
 
 
@@ -313,7 +314,7 @@ async def drive_sse(
         await disconnect.wait()
         return {"type": "http.disconnect"}
 
-    async def send(message: dict[str, Any]) -> None:
+    async def send(message: MutableMapping[str, Any]) -> None:
         if message["type"] == "http.response.start":
             started.update(message)
             if on_attach is not None:

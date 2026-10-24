@@ -15,12 +15,13 @@
 // The device log (R4-fe-2) follows the strip's board and is re-read when THAT board's
 // `last_seen` changes (an `up/log` batch moves it): no new stream, no frame body read.
 
-import { useState, type FormEvent } from 'react'
+import { useEffect, useState, type FormEvent } from 'react'
 import {
   ApiError,
   api,
   type ArtifactSummary,
   type AutoDeployTarget,
+  type DeviceGroupSummary,
   type Me,
   type TrackMode,
 } from './api'
@@ -57,9 +58,44 @@ function ContinuousDeploymentCard({
   const [trackRef, setTrackRef] = useState('')
   const [autoTarget, setAutoTarget] = useState<AutoDeployTarget>('dev')
   const [webhookUrl, setWebhookUrl] = useState('')
+  const [webhookHeader, setWebhookHeader] = useState('')
+  const [hasWebhookHeader, setHasWebhookHeader] = useState(false)
   const [busy, setBusy] = useState(false)
   const [statusMsg, setStatusMsg] = useState<string | null>(null)
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    setStatusMsg(null)
+    setErrorMsg(null)
+    api
+      .listProjects()
+      .then((res) => {
+        if (cancelled) return
+        const found = res.projects?.find((p) => p.slug === projectSlug)
+        if (!found) return
+        setRepoUrl(found.repo_url ?? '')
+        setTrackMode(found.track_mode ?? 'off')
+        setTrackRef(found.track_ref ?? '')
+        setAutoTarget(
+          found.auto_deploy_target && found.auto_deploy_target !== 'off'
+            ? found.auto_deploy_target
+            : 'dev',
+        )
+        setWebhookUrl(found.ci_webhook_url ?? '')
+        setHasWebhookHeader(Boolean(found.has_ci_webhook_header))
+        setWebhookHeader('')
+      })
+      .catch((err: unknown) => {
+        if (cancelled) return
+        if (err instanceof ApiError && err.isUnauthorized) {
+          onSessionExpired()
+        }
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [projectSlug, onSessionExpired])
 
   async function save(e: FormEvent) {
     e.preventDefault()
@@ -67,13 +103,19 @@ function ContinuousDeploymentCard({
     setStatusMsg(null)
     setErrorMsg(null)
     try {
-      const updated = await api.updateProject(projectSlug, {
+      const payload: Parameters<typeof api.updateProject>[1] = {
         repo_url: repoUrl.trim() || null,
         track_mode: trackMode,
         track_ref: trackMode === 'off' ? null : trackRef.trim() || null,
         auto_deploy_target: trackMode === 'off' ? 'off' : autoTarget,
         ci_webhook_url: webhookUrl.trim() || null,
-      })
+      }
+      if (webhookHeader.trim() !== '') {
+        payload.ci_webhook_header = webhookHeader.trim()
+      }
+      const updated = await api.updateProject(projectSlug, payload)
+      setHasWebhookHeader(Boolean(updated.has_ci_webhook_header))
+      setWebhookHeader('')
       const deployedCount = updated.auto_deployed_devices?.length ?? 0
       if (deployedCount > 0) {
         onDeployed()
@@ -162,7 +204,7 @@ function ContinuousDeploymentCard({
             </select>
           </label>
         </div>
-        <div className="form-grid form-grid-2">
+        <div className="form-grid form-grid-3">
           <label>
             Git repository URL (optional){' '}
             <input
@@ -182,6 +224,19 @@ function ContinuousDeploymentCard({
               placeholder="https://api.github.com/repos/org/eink-firmware/dispatches"
               value={webhookUrl}
               onChange={(e) => setWebhookUrl(e.target.value)}
+              disabled={busy}
+            />
+          </label>
+          <label>
+            CI webhook Authorization header (optional){' '}
+            <input
+              type="password"
+              aria-label="CI webhook Authorization header"
+              placeholder={
+                hasWebhookHeader ? '(configured — leave blank to keep)' : 'Bearer ghp_...'
+              }
+              value={webhookHeader}
+              onChange={(e) => setWebhookHeader(e.target.value)}
               disabled={busy}
             />
           </label>
@@ -225,6 +280,29 @@ function UploadedBuilds({
   const [deployingKey, setDeployingKey] = useState<string | null>(null)
   const [bulkStatus, setBulkStatus] = useState<string | null>(null)
   const [bulkError, setBulkError] = useState<string | null>(null)
+  const [groups, setGroups] = useState<DeviceGroupSummary[]>([])
+  const [targetGroupId, setTargetGroupId] = useState<string>('')
+
+  useEffect(() => {
+    let active = true
+    if (typeof api.listGroups === 'function') {
+      api
+        .listGroups(projectSlug !== 'default' ? projectSlug : undefined)
+        .then((res) => {
+          if (active) {
+            setGroups(res.groups ?? [])
+          }
+        })
+        .catch(() => {
+          if (active) {
+            setGroups([])
+          }
+        })
+    }
+    return () => {
+      active = false
+    }
+  }, [projectSlug])
 
   const rows: ArtifactSummary[] = []
   for (const list of artifacts.byTarget.values()) {
@@ -232,7 +310,7 @@ function UploadedBuilds({
   }
 
   async function bulkDeploy(version: string, targetFilter: 'dev' | 'all') {
-    const key = `${version}:${targetFilter}`
+    const key = `${version}:${targetFilter}:${targetGroupId}`
     setDeployingKey(key)
     setBulkStatus(null)
     setBulkError(null)
@@ -241,6 +319,7 @@ function UploadedBuilds({
         version,
         target_filter: targetFilter,
         apply: 'auto',
+        ...(targetGroupId ? { group_id: targetGroupId } : {}),
       })
       onDeployed()
       const count = res.deployed.length
@@ -343,6 +422,23 @@ function UploadedBuilds({
                 </td>
                 <td>{formatWhen(a.created_at)}</td>
                 <td>
+                  {groups.length > 0 && (
+                    <>
+                      <select
+                        aria-label="Target group"
+                        value={targetGroupId}
+                        onChange={(e) => setTargetGroupId(e.target.value)}
+                        disabled={deployingKey !== null}
+                      >
+                        <option value="">All groups</option>
+                        {groups.map((g) => (
+                          <option key={g.id} value={g.id}>
+                            {g.name}
+                          </option>
+                        ))}
+                      </select>{' '}
+                    </>
+                  )}
                   <button
                     type="button"
                     disabled={deployingKey !== null}
@@ -396,6 +492,28 @@ export function Dashboard({
   const fleet = useFleet({ onSessionExpired: expire, createEventSource, project: projectParam })
   const artifacts = useArtifacts({ onSessionExpired: expire, project: projectParam })
   const profiles = useProfiles({ onSessionExpired: expire, hint: fleet.announceSeq })
+  const [groups, setGroups] = useState<DeviceGroupSummary[]>([])
+
+  useEffect(() => {
+    let active = true
+    if (typeof api.listGroups === 'function') {
+      api
+        .listGroups(projectParam)
+        .then((res) => {
+          if (active) {
+            setGroups(res.groups ?? [])
+          }
+        })
+        .catch(() => {
+          if (active) {
+            setGroups([])
+          }
+        })
+    }
+    return () => {
+      active = false
+    }
+  }, [projectParam])
   const [selected, setSelected] = useState<string | null>(null)
   const board = describeBoard(selected, fleet.devices, fleet.arrivals)
   const effective = board.kind === 'board' ? board.deviceId : null
@@ -504,6 +622,7 @@ export function Dashboard({
           versions={versions}
           onGoToOnboard={() => setActiveTab('onboard')}
           onGoToBuilds={() => setActiveTab('builds')}
+          groups={groups}
         />
         <DeviceLog
           deviceId={effective}
