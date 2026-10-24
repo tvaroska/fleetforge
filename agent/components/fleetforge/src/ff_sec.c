@@ -186,6 +186,24 @@ static esp_err_t store_secrets_json(const cJSON *secrets_obj, uint32_t rev)
     return err;
 }
 
+/* The task's request buffers, on the heap: on the stack they put the frame past the
+ * component's -Wframe-larger-than=1024. Wiped before free — raw_cred, b64 and auth_hdr
+ * carry the broker credential. */
+typedef struct {
+    char url[FF_CFG_MAX_URI + sizeof(SECRETS_PATH)];
+    char raw_cred[FF_CRED_MAX_USER + 1 + FF_CRED_MAX_PASS];
+    unsigned char b64[256];
+    char auth_hdr[272];
+} secrets_scratch_t;
+
+static void free_scratch(secrets_scratch_t *scratch)
+{
+    if (scratch != NULL) {
+        memset(scratch, 0, sizeof(*scratch));
+        free(scratch);
+    }
+}
+
 static void secrets_sync_task(void *arg)
 {
     (void)arg;
@@ -196,37 +214,44 @@ static void secrets_sync_task(void *arg)
         return;
     }
 
-    char url[FF_CFG_MAX_URI + sizeof(SECRETS_PATH)];
-    int written = snprintf(url, sizeof(url), "%s" SECRETS_PATH, s_cfg->api_base);
-    if (written < 0 || (size_t)written >= sizeof(url)) {
+    secrets_scratch_t *scratch = calloc(1, sizeof(*scratch));
+    if (scratch == NULL) {
+        s_failed_rev = s_target_rev;
+        s_sync_in_flight = false;
+        vTaskDelete(NULL);
+        return;
+    }
+
+    int written =
+        snprintf(scratch->url, sizeof(scratch->url), "%s" SECRETS_PATH, s_cfg->api_base);
+    if (written < 0 || (size_t)written >= sizeof(scratch->url)) {
         ESP_LOGE(TAG, "api_base too long for device-secrets URL");
+        free_scratch(scratch);
         s_sync_in_flight = false;
         vTaskDelete(NULL);
         return;
     }
 
-    char raw_cred[FF_CRED_MAX_USER + 1 + FF_CRED_MAX_PASS];
-    int cred_len = snprintf(raw_cred, sizeof(raw_cred), "%s:%s", s_cred->device_id,
-                            s_cred->mqtt_pass);
-    unsigned char b64[256];
+    int cred_len = snprintf(scratch->raw_cred, sizeof(scratch->raw_cred), "%s:%s",
+                            s_cred->device_id, s_cred->mqtt_pass);
     size_t b64_len = 0;
-    if (cred_len <= 0 || (size_t)cred_len >= sizeof(raw_cred) ||
-        mbedtls_base64_encode(b64, sizeof(b64) - 1, &b64_len, (const unsigned char *)raw_cred,
-                              (size_t)cred_len) != 0) {
-        memset(raw_cred, 0, sizeof(raw_cred));
+    if (cred_len <= 0 || (size_t)cred_len >= sizeof(scratch->raw_cred) ||
+        mbedtls_base64_encode(scratch->b64, sizeof(scratch->b64) - 1, &b64_len,
+                              (const unsigned char *)scratch->raw_cred, (size_t)cred_len) != 0) {
+        free_scratch(scratch);
         s_sync_in_flight = false;
         vTaskDelete(NULL);
         return;
     }
-    memset(raw_cred, 0, sizeof(raw_cred));
-    b64[b64_len] = '\0';
+    memset(scratch->raw_cred, 0, sizeof(scratch->raw_cred));
+    scratch->b64[b64_len] = '\0';
 
-    char auth_hdr[272];
-    snprintf(auth_hdr, sizeof(auth_hdr), "Basic %s", (const char *)b64);
-    memset(b64, 0, sizeof(b64));
+    snprintf(scratch->auth_hdr, sizeof(scratch->auth_hdr), "Basic %s",
+             (const char *)scratch->b64);
+    memset(scratch->b64, 0, sizeof(scratch->b64));
 
     esp_http_client_config_t config = {
-        .url = url,
+        .url = scratch->url,
         .method = HTTP_METHOD_GET,
         .timeout_ms = SECRETS_TIMEOUT_MS,
         .crt_bundle_attach = esp_crt_bundle_attach,
@@ -234,13 +259,13 @@ static void secrets_sync_task(void *arg)
     };
     esp_http_client_handle_t client = esp_http_client_init(&config);
     if (client == NULL) {
-        memset(auth_hdr, 0, sizeof(auth_hdr));
+        free_scratch(scratch);
         s_sync_in_flight = false;
         vTaskDelete(NULL);
         return;
     }
-    esp_http_client_set_header(client, "authorization", auth_hdr);
-    memset(auth_hdr, 0, sizeof(auth_hdr));
+    esp_http_client_set_header(client, "authorization", scratch->auth_hdr);
+    memset(scratch->auth_hdr, 0, sizeof(scratch->auth_hdr));
 
     char *response = calloc(1, SECRETS_MAX_RESPONSE + 1);
     if (response == NULL) {
@@ -257,7 +282,7 @@ static void secrets_sync_task(void *arg)
         }
         esp_err_t err = esp_http_client_open(client, 0);
         if (err != ESP_OK) {
-            ESP_LOGW(TAG, "cannot reach %s (attempt %d/%d): %s", url, attempt + 1,
+            ESP_LOGW(TAG, "cannot reach %s (attempt %d/%d): %s", scratch->url, attempt + 1,
                      SECRETS_MAX_RETRIES, esp_err_to_name(err));
             continue;
         }
@@ -326,6 +351,7 @@ done:
     }
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
+    free_scratch(scratch);
     s_sync_in_flight = false;
     vTaskDelete(NULL);
 }
