@@ -61,6 +61,12 @@ const builtinProfile = {
   adopted_at: '2026-10-09T10:00:00Z',
 }
 
+// Every fetch mock must serve this: FlashBoard maps `builds` and the `{}` fallback crashes it.
+const agentManifest = {
+  agent_version: '0.4.5',
+  builds: [{ chip_family: 'ESP32', agent_version: '0.4.5', partition_layout: 'ab-4m-v1', parts: [] }],
+}
+
 function json(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
@@ -118,12 +124,7 @@ function mockApi(devices: DeviceSummary[] | (() => DeviceSummary[]), logs: () =>
     if (url === '/v1/devices') {
       return json({ devices: typeof devices === 'function' ? devices() : devices, arrivals: [] })
     }
-    if (url === '/v1/agent/manifest') {
-      return json({
-        agent_version: '0.4.5',
-        builds: [{ chip_family: 'ESP32', agent_version: '0.4.5', partition_layout: 'ab-4m-v1', parts: [] }],
-      })
-    }
+    if (url === '/v1/agent/manifest') return json(agentManifest)
     if (url === '/v1/enrollment-tokens') return json({ tokens: [] })
     if (url === '/v1/groups' || url.startsWith('/v1/groups')) {
       return json({
@@ -468,6 +469,8 @@ describe('Dashboard', () => {
         if (url === '/v1/artifact') return json({ artifacts: [artifact] })
         if (url === '/v1/partition-profiles') return json({ profiles: [builtinProfile] })
         if (url.startsWith('/v1/devices')) return json({ devices: [] })
+        if (url === '/v1/enrollment-tokens') return json({ tokens: [] })
+        if (url === '/v1/agent/manifest') return json(agentManifest)
         return json({})
       })
 
@@ -609,6 +612,7 @@ describe('Dashboard', () => {
         }
         if (url === '/v1/partition-profiles') return json({ profiles: [] })
         if (url === '/v1/enrollment-tokens') return json({ tokens: [] })
+        if (url === '/v1/agent/manifest') return json(agentManifest)
         return json({})
       })
 
