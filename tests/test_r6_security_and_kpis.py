@@ -709,7 +709,7 @@ class TestR4LiveTelemetryAndLogsToDashboard:
         )
         await db.commit()
         assert telemetry_event is not None
-        assert telemetry_event.type is EventType.DEVICE_UPDATED
+        assert telemetry_event.type is EventType.DEVICE_SEEN
 
         # 2. Board emits `up/log` with a live log line (`"radio calibrated ok"`).
         log_event = await handle_up_message(
@@ -727,7 +727,7 @@ class TestR4LiveTelemetryAndLogsToDashboard:
         )
         await db.commit()
         assert log_event is not None
-        assert log_event.type is EventType.DEVICE_UPDATED
+        assert log_event.type is EventType.DEVICE_SEEN
 
         # 3. Dashboard re-reads `GET /v1/devices`, `GET /v1/devices/{id}/telemetry`, and
         #    `GET /v1/devices/{id}/logs` on the SSE hint and sees both live.

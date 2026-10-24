@@ -802,13 +802,30 @@ async def test_the_sweep_purges_revoked_and_expired_tokens_after_90_days(
     result = await retention.sweep(session, now=NOW)
     assert result.tokens == 4
     enrollment_ids = {
-        str(r) for r in (await session.scalars(text("SELECT id FROM enrollment_tokens"))).all()
+        str(r)
+        for r in (
+            await session.scalars(
+                text(
+                    "SELECT id FROM enrollment_tokens WHERE id::text LIKE '00000000-0000-4000-8000-0000000001%'"
+                )
+            )
+        ).all()
     }
     assert enrollment_ids == {
         "00000000-0000-4000-8000-000000000103",
         "00000000-0000-4000-8000-000000000104",
     }
-    admin_names = set((await session.scalars(text("SELECT name FROM admin_tokens"))).all())
+    # Scoped to the seeded ids: API tests commit real-clock tokens through the
+    # session-scoped engine, and those rows outlive their test.
+    admin_names = set(
+        (
+            await session.scalars(
+                text(
+                    "SELECT name FROM admin_tokens WHERE id::text LIKE '00000000-0000-4000-8000-0000000002%'"
+                )
+            )
+        ).all()
+    )
     assert admin_names == {"active"}
 
 
