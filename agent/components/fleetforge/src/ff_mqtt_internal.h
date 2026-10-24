@@ -95,6 +95,17 @@ bool ff_mqtt_is_connected(void);
  * never logs, never touches NVS. */
 const char *ff_mqtt_sleep_blocker(void);
 
+/* H5 / R7-cargo-1: Register a non-app cargo capability (`artifact.type` != "app") and
+ * complete a verified cargo update without rebooting the host MCU: records
+ * `sub_versions[type] = version`, republishes the retained `up/announce`, and reports
+ * `confirming` -> `confirmed` for `cmd_id`. */
+esp_err_t ff_mqtt_register_cargo_type(const char *type);
+void ff_mqtt_complete_cargo(const char *cmd_id, const char *type, const char *version);
+
+/* CUJ-3: Venue Offline Mode and offline PENDING_VERIFY self-test confirmation. */
+void ff_mqtt_set_offline_mode(bool offline);
+esp_err_t ff_mqtt_confirm_offline(void);
+
 #ifdef __cplusplus
 }
 #endif

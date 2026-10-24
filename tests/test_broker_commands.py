@@ -273,3 +273,59 @@ async def test_null_publisher_raises_rather_than_pretending() -> None:
     assert len(warnings) == 1
     assert DEVICE_ID in warnings[0].getMessage()
     assert URL not in warnings[0].getMessage()
+
+
+async def test_clear_cfg_publishes_empty_retained_payload_to_cfg_topic() -> None:
+    from fleetforge.broker import cfg_topic
+    from fleetforge.broker.publisher import CFG_RETAIN
+
+    client = FakeMqttClient()
+    await _publisher(client).clear_cfg(DEVICE_ID)
+
+    assert client.published == [(cfg_topic(DEVICE_ID), b"", QOS, CFG_RETAIN)]
+    assert CFG_RETAIN is True
+
+
+async def test_null_publisher_clear_cfg_raises() -> None:
+    with capture_logs() as records, pytest.raises(CommandPublishError):
+        await NullCommandPublisher().clear_cfg(DEVICE_ID)
+
+    warnings = [record for record in records if record.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert DEVICE_ID in warnings[0].getMessage()
+
+
+def test_stage_payload_artifact_type_omitted_for_app_and_included_for_cargo() -> None:
+    app_payload = _payload()
+    assert "type" not in app_payload["artifact"]
+
+    explicit_app = _payload(artifact_type="app")
+    assert "type" not in explicit_app["artifact"]
+
+    cargo_payload = _payload(artifact_type="fpga_bitstream")
+    assert cargo_payload["artifact"]["type"] == "fpga_bitstream"
+
+
+async def test_publish_many_and_publish_cfg_many_reuse_single_connection() -> None:
+    from fleetforge.broker import cfg_payload, cfg_topic
+    from fleetforge.broker.publisher import CFG_RETAIN, RETAIN
+
+    client = FakeMqttClient()
+    publisher = _publisher(client)
+
+    await publisher.publish_many([])
+    await publisher.publish_cfg_many([])
+    assert client.entered == 0
+
+    devs = ["a4cf12b3de01", "a4cf12b3de02", "a4cf12b3de03"]
+    await publisher.publish_many([(d, _payload(cmd_id=f"c_{i}")) for i, d in enumerate(devs)])
+    assert client.entered == 1
+    assert len(client.published) == 3
+    assert [t for t, _, _, r in client.published] == [command_topic(d) for d in devs]
+    assert all(r is RETAIN for _, _, _, r in client.published)
+
+    await publisher.publish_cfg_many([(d, cfg_payload(secrets_rev=2)) for d in devs])
+    assert client.entered == 2
+    assert len(client.published) == 6
+    assert [t for t, _, _, _ in client.published[3:]] == [cfg_topic(d) for d in devs]
+    assert all(r is CFG_RETAIN for _, _, _, r in client.published[3:])

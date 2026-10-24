@@ -163,6 +163,9 @@ static esp_timer_handle_t s_dhcp_timer;
 static esp_timer_handle_t s_retry_timer;
 static volatile retry_action_t s_retry_action = RETRY_NONE;
 static volatile bool s_improv_active;
+static volatile bool s_venue_offline;
+static volatile bool s_improv_ble_enabled = true;
+static bool s_wifi_started;
 static esp_timer_handle_t s_improv_timer;
 static uint8_t s_improv_state = IMPROV_STATE_AUTHORIZED;
 static uint8_t s_improv_error = IMPROV_ERR_NONE;
@@ -441,7 +444,14 @@ static void improv_nimble_host_task(void *param)
 
 static void improv_ble_gatt_start(void)
 {
+    if (s_venue_offline || !s_improv_ble_enabled) {
+        return;
+    }
     if (!s_nimble_started) {
+        /* CUJ-3: Never hijack a shared application NimBLE GATT server that is already running. */
+        if (ble_hs_synced()) {
+            return;
+        }
         if (nimble_port_init() != ESP_OK) {
             return;
         }
@@ -472,6 +482,9 @@ static void improv_ble_gatt_start(void)
     /* When NimBLE is not enabled in sdkconfig, keep the RPC handler referenced so
      * -Werror=unused-function stays clean on non-BLE builds. */
     (void)&improv_handle_rpc_command;
+    if (s_venue_offline || !s_improv_ble_enabled) {
+        return;
+    }
 }
 
 static void improv_ble_gatt_stop(void) {}
@@ -491,7 +504,7 @@ static void on_improv_timeout(void *arg)
 
 static void improv_ble_window_start(void)
 {
-    if (s_improv_active || s_have_ip) {
+    if (s_venue_offline || !s_improv_ble_enabled || s_improv_active || s_have_ip) {
         return;
     }
     if (s_improv_timer == NULL) {
@@ -1009,7 +1022,12 @@ esp_err_t ff_net_wifi_start(const ff_cfg_t *cfg)
         ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi));
     }
     /* With several networks, try_candidate() sets the config per attempt. */
+    if (s_venue_offline) {
+        ESP_LOGI(TAG, "venue offline mode active: skipping esp_wifi_start (0 RF frames emitted)");
+        return ESP_OK;
+    }
     ESP_ERROR_CHECK(esp_wifi_start());
+    s_wifi_started = true;
 
     /* Rung 0 of the TX ladder, READ rather than assumed — see the ladder comment above.
      * After a brownout reset CONFIG_ESP_PHY_REDUCE_TX_POWER has already brought the PHY
@@ -1077,4 +1095,44 @@ const char *ff_net_wifi_ssid(void)
 int ff_net_wifi_known_count(void)
 {
     return s_net_count;
+}
+
+esp_err_t ff_net_wifi_set_offline_mode(bool offline)
+{
+    s_venue_offline = offline;
+    if (offline) {
+        retry_timer_disarm();
+        dhcp_watchdog_disarm();
+        improv_ble_window_stop();
+        s_have_ip = false;
+        s_joined = -1;
+        if (s_wifi_started) {
+            (void)esp_wifi_disconnect();
+            esp_err_t err = esp_wifi_stop();
+            s_wifi_started = false;
+            return err;
+        }
+        return ESP_OK;
+    }
+    if (s_netif != NULL && !s_wifi_started) {
+        esp_err_t err = esp_wifi_start();
+        if (err == ESP_OK) {
+            s_wifi_started = true;
+        }
+        return err;
+    }
+    return ESP_OK;
+}
+
+bool ff_net_wifi_is_offline_mode(void)
+{
+    return s_venue_offline;
+}
+
+void ff_net_wifi_set_improv_ble_enabled(bool enabled)
+{
+    s_improv_ble_enabled = enabled;
+    if (!enabled) {
+        improv_ble_window_stop();
+    }
 }

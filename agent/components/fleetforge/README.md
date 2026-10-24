@@ -179,7 +179,44 @@ them from a task, never from an interrupt. `isReadyForSleep()` may wait briefly 
 connection. Give your loop its own wake limit, because a wake that cannot reach the fleet never
 becomes ready. Make the limit longer than the confirm deadline (300 s by default) on a slow
 network: if the board sleeps before a new image is confirmed, it rolls the update back. The
-library itself never sleeps the board.
+library itself never sleeps the board. When a sleepy board wakes up while a deploy is still in
+`requested` state, the server automatically mints a fresh signed download URL (scaled by
+`2 * expected_wake_interval_s + signed_url_ttl_s`) and re-publishes the `stage` command with the
+same `cmd_id`.
+
+## Companion cargo (`artifact.type` & `sub_versions`)
+
+Update a co-processor, quantized ML model weights, an FPGA bitstream, or a data partition attached
+to your board without overwriting the ESP32 application slot or rebooting:
+
+- Register a cargo handler before starting the MQTT session (`ff_ota_register_cargo_handler(type, write_cb, finish_cb, ctx)` in `src/ff_ota.h`).
+- Registering a handler automatically adds `type` (for example `"model_weights"`, `"mcu_fw"`,
+  `"fpga_bitstream"`, or `"data_partition"`) to the board's announced `capabilities`, which unlocks
+  `POST /v1/artifact?artifact_type=<type>` deploys to that board.
+- During a cargo deploy, the library streams the artifact over HTTPS (with `Range` resume), verifies
+  the SHA-256 digest and optional ECDSA P-256 signature (`artifact.sig`), invokes `write_cb` per
+  chunk and `finish_cb` at the end, records the installed version in `sub_versions[type]`
+  (`ff_identity_set_sub_version`), re-announces identity, and reports `confirming` → `confirmed`
+  without rebooting or changing `fw_version`.
+
+## Venue offline mode & USB-C dock updates (`CUJ-3`, `link_type: "dock"`)
+
+- **Venue / EMCON offline radio lockout (`ff_set_offline_mode(true)` / `Fleetforge.setOfflineMode(true)`)**:
+  Hard-disables `802.11` Wi-Fi (`esp_wifi_stop()`), suppresses the 120-second Improv Wi-Fi BLE GATT
+  service (`ff_net_wifi_set_improv_ble_enabled(false)`), and guards NimBLE startup with
+  `ble_hs_synced()` so `libfleetforge` never collides with your application's own NimBLE GATT
+  services inside RF-restricted competition arenas (`E301`). `ff_get_secret()`, `ff_logf()`,
+  `ff_telemetry()`, `ff_selftest`, and `ff_safe_window` remain active, and
+  `ff_mqtt_confirm_offline()` confirms `ESP_OTA_IMG_PENDING_VERIFY` images locally via your
+  registered `ff_selftest` without waiting for an MQTT `PUBACK`.
+- **Tethered USB-C dock stage & ring drains (`ff_ota_dock_stage`, `ff_log_drain_json`, `ff_telemetry_drain_json`)**:
+  When Wi-Fi is banned, a tethered host (`FluxTray.jar` or `fleetforge` CLI) streams a signed `app`
+  image or non-`app` `data_partition` cargo into `ff_ota_dock_stage(&cmd, data, len)` (`src/ff_ota.h`),
+  preserving SHA-256 + ECDSA P-256 verification, `ota_slot_size` checks, and `ff_safe_window`
+  deferral (`link_type: "dock"`). `ff_log_drain_json(buf, cap)` and `ff_telemetry_drain_json(buf, cap)`
+  drain buffered RAM + `[prev-boot]` `RTC_NOINIT_ATTR` logs and `age_ms` telemetry into JSON so the
+  laptop can replay the bundle later via `POST /v1/devices/{device_id}/dock-sync` or
+  `fleetforge dock-sync <device_id> <bundle.json>`.
 
 ## Quickstart: pick your toolchain
 
@@ -233,7 +270,7 @@ The library does not compile without `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE` (st
 
 ## Version and marker
 
-The library version is `0.5.0`, one number in `agent/version.txt`, `library.json` and
+The library version is `0.6.0`, one number in `agent/version.txt`, `library.json` and
 `src/ff_lib_version.h`. Every image that calls the library carries a 64-byte library marker.
 The server records it at upload, and a build without one needs an explicit override
 (`no_library_marker`) before it deploys. Both Arduino and ESP-IDF builds report the library's

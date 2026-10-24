@@ -89,6 +89,7 @@ export function UploadBuild({
   const [chosenTarget, setChosenTarget] = useState<string | null>(null)
   const [version, setVersion] = useState('')
   const [chosenLayout, setChosenLayout] = useState<string | null>(null)
+  const [artifactType, setArtifactType] = useState<string>('app')
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<ArtifactUploaded | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -120,7 +121,8 @@ export function UploadBuild({
         : layouts[0]!
   const layout = chosenLayout ?? defaultLayout
 
-  const mismatch = info?.target != null && target !== '' && target !== info.target
+  const mismatch =
+    artifactType === 'app' && info?.target != null && target !== '' && target !== info.target
 
   async function pick(next: File | null) {
     const mine = ++pickRef.current
@@ -154,6 +156,7 @@ export function UploadBuild({
         target,
         version,
         partitionLayout: layout,
+        ...(artifactType !== 'app' ? { artifactType } : {}),
         ...(project ? { project } : {}),
       })
       onUploaded()
@@ -258,6 +261,21 @@ export function UploadBuild({
                   {l}
                 </option>
               ))}
+            </select>
+          </label>
+          <label>
+            Artifact type{' '}
+            <select
+              aria-label="Artifact type"
+              value={artifactType}
+              onChange={(event) => setArtifactType(event.target.value)}
+              disabled={busy}
+            >
+              <option value="app">app (ESP-IDF firmware)</option>
+              <option value="mcu_fw">mcu_fw (co-processor)</option>
+              <option value="model_weights">model_weights (ML weights)</option>
+              <option value="fpga_bitstream">fpga_bitstream (FPGA)</option>
+              <option value="data_partition">data_partition (assets)</option>
             </select>
           </label>
         </div>

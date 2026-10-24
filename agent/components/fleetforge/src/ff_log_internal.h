@@ -6,6 +6,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 
 #include "mqtt_client.h"
 
@@ -16,6 +17,7 @@ extern "C" {
 void ff_log_session_up(esp_mqtt_client_handle_t client, const char *topic);
 void ff_log_session_down(void);
 bool ff_log_drained(void);
+int ff_log_drain_json(char *buf, size_t cap);
 
 #ifdef __cplusplus
 }

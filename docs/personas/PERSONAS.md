@@ -1,6 +1,6 @@
 # Personas — Users of Fleetforge
 
-**Last Updated:** 2026-09-21
+**Last Updated:** 2026-10-24
 **Purpose:** Canonical reference for who uses Fleetforge, what constraints they face,
 and what makes or breaks the product for them.
 **Companions:** Detailed reviews and technical roadmaps in [`docs/HOBBYIST.md`](../HOBBYIST.md),
@@ -87,30 +87,30 @@ and what makes or breaks the product for them.
 ## 3. Other High-Value Personas for Fleetforge
 
 Looking at Fleetforge’s architecture (two thin waists, opaque versioned artifacts,
-device-owned reboots, headless API, strict topic ACLs), three additional personas
+device-owned reboots, headless API, strict topic ACLs), four additional personas
 naturally fit the system without distorting its core boundaries:
 
 ```
-                  ┌─────────────────────────────────────────┐
-                  │          FLEETFORGE CORE API            │
-                  │   Opaque Artifacts · 4-Verb Contract    │
-                  └────────────────────┬────────────────────┘
-                                       │
-         ┌─────────────────────────────┼─────────────────────────────┐
-         │                             │                             │
-┌────────▼────────┐           ┌────────▼────────┐           ┌────────▼────────┐
-│  1. Alex        │           │  2. Elena       │           │  3. Marcus      │
-│  The Hobbyist   │           │  The Swarm Op   │           │  Commercial OEM │
-│  (Bench → Shed) │           │  (Air & Ground) │           │  (AgTech / HVAC)│
-└─────────────────┘           └─────────────────┘           └─────────────────┘
-                                       │
-                      ┌────────────────┴────────────────┐
-                      │                                 │
-             ┌────────▼────────┐               ┌────────▼────────┐
-             │  4. DevSecOps   │               │  5. Hardware    │
-             │  Platform Eng   │               │  Test Engineer  │
-             │  (Enterprise/CI)│               │  (HIL Testbed)  │
-             └─────────────────┘               └─────────────────┘
+                   ┌─────────────────────────────────────────┐
+                   │          FLEETFORGE CORE API            │
+                   │   Opaque Artifacts · 4-Verb Contract    │
+                   └────────────────────┬────────────────────┘
+                                        │
+          ┌─────────────────────────────┼─────────────────────────────┐
+          │                             │                             │
+ ┌────────▼────────┐           ┌────────▼────────┐           ┌────────▼────────┐
+ │  1. Alex        │           │  2. Elena       │           │  3. Marcus      │
+ │  The Hobbyist   │           │  The Swarm Op   │           │  Commercial OEM │
+ │  (Bench → Shed) │           │  (Air & Ground) │           │  (AgTech / HVAC)│
+ └─────────────────┘           └─────────────────┘           └─────────────────┘
+                                        │
+          ┌─────────────────────────────┼─────────────────────────────┐
+          │                             │                             │
+ ┌────────▼────────┐           ┌────────▼────────┐           ┌────────▼────────┐
+ │  4. DevSecOps   │           │  5. Hardware    │           │  6. Chloe       │
+ │  Platform Eng   │           │  Test Engineer  │           │  Comp Pit / RF  │
+ │  (Enterprise/CI)│           │  (HIL Testbed)  │           │  (LoRa+BLE+Dock)│
+ └─────────────────┘           └─────────────────┘           └─────────────────┘
 ```
 
 ---
@@ -174,28 +174,64 @@ naturally fit the system without distorting its core boundaries:
 
 ---
 
+### 6. Competition Pit & Contested-Venue Telemetry Engineer ("Chloe")
+*Operating a small, mission-critical `ESP32-S3 + 915 MHz LoRa + BLE` pit/stands/cart mesh (`FLUX-10413-Hub`) that develops over Wi-Fi in the shop or hotel, then operates under a strict `802.11` Wi-Fi radio ban inside competition arenas.*
+
+> *"In the shop and at the hotel, our three `ESP32-S3 + SX1262 915 MHz LoRa` nodes
+> (`Pit Node`, `Robot Cart Node`, `Scouting Chief Node`) pull firmware, rotating
+> `AES-256-GCM` keys, and battery/schedule lookup tables from Fleetforge over Wi-Fi.
+> The moment we walk into the competition arena, `802.11` Wi-Fi is strictly banned
+> by event rules (`E301`), our BLE GATT stack is busy serving scouters' phones, and
+> any mid-event firmware or `data_partition` patch has to flow over the magnetic
+> breakaway USB-C dock cable from the pit laptop."*
+
+### Context & Scale
+- **Fleet:** 3 to 6 specialized `ESP32-S3` nodes in one project (`flux-10413-hub`), grouped by role (`pit`, `cart`, `scouting-chief`).
+- **Environment:** Dual-regime:
+  1. **Shop / Hotel (Online):** Normal Wi-Fi (`ff_cfg` / `ff_net`) connected to `bingo.tvaroska.sk` with Git-driven CI/CD (`cloudbuild.yaml` $\to$ `fleetforge push`), secret rotation (`GET /v1/device-secrets`), and OTLP log export.
+  2. **Competition Venue (EMCON / Zero `802.11` Wi-Fi):** Event rules (`E301`) strictly prohibit any `802.11` Wi-Fi or `ESP-NOW` transmission (`esp_wifi_stop()`), and `G303`/`R905` prohibit wireless dongles inside the field alliance station. Inside the arena, nodes communicate exclusively via **Sub-GHz `915 MHz LoRa` (`SX1262`)**, authenticated **BLE (`AES-256-GCM`)** to scouter phones, **CAN 2.0 (`SN65HVD230`)** to battery fuel gauges, and a **magnetic breakaway USB-C cable (`link_type: "dock"`)** to the Driver Station / Pit laptop (`FluxTray.jar`).
+- **Hardware:** `ESP32-S3` (4 MB / 8 MB flash, `ab-4m-v1`) + `SX1262 915 MHz LoRa` + OLED/e-Paper + `SN65HVD230` CAN transceiver.
+
+### Core Goals
+- **One OTA, Secret & Crash-Recovery Stack:** Reuse Fleetforge's `ab-4m-v1` partition layout, ECDSA P-256 signature verification, 3-crash `safe_mode`, `RTC_NOINIT_ATTR` `[prev-boot]` crash log ring, and NVS `ff_sec` secret storage instead of writing bespoke OTA or key-provisioning code.
+- **Hard `802.11` Venue Radio Lockout + Shared NimBLE Coexistence:** Guarantee that in Venue Mode (`ff_set_offline_mode(true)`), `libfleetforge` never turns on the `802.11` Wi-Fi radio and never hijacks the NimBLE GATT server for 120 s Improv Wi-Fi advertising while scouters' phones are syncing over BLE.
+- **USB-C Dock (`link_type: "dock"`) Pit Updates & Log Drain:** When Wi-Fi is banned at the venue, push a Fleetforge-signed `.bin` or `artifact_type=data_partition` cargo bundle (`batteries.csv` + match schedule) over the magnetic USB-C cable from the pit laptop into the node's A/B slot—preserving full ECDSA verification, `ff_selftest` (`SX1262` SPI + BLE + CAN check), and automatic rollback—while draining buffered `up/log` and `up/telemetry` (`age_ms`) rings.
+- **LoRa Mesh Peer Version & Health Visibility:** Surface the bleacher node's firmware version (`sub_versions`) and battery/RSSI telemetry through the tethered Pit/Cart node so the pit crew spots version skew or a low power bank before a match.
+
+### Pain Points & Blockers (Addressed by `CUJ-3`)
+- **Unconditional Wi-Fi & Improv BLE Startup in `ff_net_wifi.c` (Solved by `ff_set_offline_mode`):** Calling `fleetforge_start()` without offline mode starts `esp_wifi_start()` and, after association failure in a Wi-Fi-banned arena, opens the 120 s Improv Wi-Fi BLE GATT service (`00467768-6228-2272-4663-277478268000`). Calling `ff_set_offline_mode(true)` / `Fleetforge.setOfflineMode(true)` hard-stops `esp_wifi`, disables Improv BLE advertising, and checks `ble_hs_synced()` so the application's own NimBLE GATT stack runs undisturbed, while `ff_mqtt_confirm_offline()` confirms `ESP_OTA_IMG_PENDING_VERIFY` images locally via `ff_selftest`.
+- **Tethered / Dock (`link_type: "dock"`) Stage & Drain Path (Solved by `ff_ota_dock_stage` & `dock-sync`):** At the venue with Wi-Fi disabled, the pit laptop connected over USB-C feeds a signed Fleetforge `stage` transaction into `ff_ota_dock_stage()`, drains the node's offline `ff_log_drain_json()` / `ff_telemetry_drain_json()` ring buffers, and replays the bundle to `POST /v1/devices/{device_id}/dock-sync` (`fleetforge dock-sync`) when back on hotel/shop Wi-Fi.
+- **Rebooting During Queue / BLE Sync (Solved by `ff_safe_window`):** A node defers OTA reboots (`ff_safe_window_set(false)` / callback) while a scouter phone is mid-BLE transfer or while the Robot Cart USB-C link is actively streaming queue updates before a match.
+
+### Make-or-Break Features
+1. **Venue / EMCON Offline Radio Mode & NimBLE Coexistence (`ff_set_offline_mode` + shared NimBLE host):** Allows firmware (via hardware switch, USB-C command, or `dn/cfg`) to hard-disable `802.11` Wi-Fi and Improv BLE while keeping `ff_get_secret()`, `ff_logf()`, `ff_telemetry()`, `ff_selftest`, and `ff_safe_window` active alongside the app's own NimBLE GATT services.
+2. **USB-C Dock Transport (`link_type: "dock"`) for Signed A/B OTA, `data_partition` Cargo & Offline Ring Drain:** Lets a host companion (`FluxTray.jar` or `fleetforge` CLI over USB-CDC serial) stream a signed `.bin` or `data_partition` cargo (`batteries.csv` + match schedule) directly into `ff_ota` and drain buffered `up/log` + `up/telemetry` (`age_ms`) samples without Wi-Fi.
+3. **Hardware Peripheral Self-Test (`ff_selftest`), Safe-Window Interlock (`ff_safe_window`) & Peer `sub_versions` Reporting:** Holds `confirmed` until `SX1262` LoRa SPI, BLE GATT, and CAN transceiver self-tests pass; defers reboots while BLE/LoRa/USB-C queue traffic is active; and reports peer mesh versions (`sub_versions: {"cart_node": "...", "chief_node": "...", "batteries_csv": "..."}`).
+
+---
+
 ## 4. Persona Priority Matrix
 
-| Capability / Need | Alex (Hobbyist) | Elena (Swarm) | Marcus (OEM) | Siddharth (CI/Ops)| Sarah (HIL Lab) |
-|---|:---:|:---:|:---:|:---:|:---:|
-| **Target Scale** | 3–15 | 10–50 | 50–500 | N/A (Pipelines)| 20–100 |
-| **Embeddable Library** | **P0 (Blocker)**| **P0 (Blocker)**| **P0 (Blocker)**| P1 | P1 |
-| **Auto-Rollback (R2)** | **P0** | **P0** | **P0** | P1 | **P0** |
-| **Web Serial Flasher** | **P0** | P2 | P2 | P3 (Wants CLI)| P3 (Wants CLI) |
-| **Batch CLI Onboarding**| P2 | P1 | **P0** | **P0** | **P0** |
-| **Disconnected Gateway**| P3 | **P0 (Blocker)**| P3 | P3 | P2 |
-| **Group / Ring Deploy** | P2 | **P0** | **P0** | **P0** | P1 |
-| **Safe-Window Deferral**| P1 (Sleepy) | **P0 (Flight)** | P1 (In-use) | P3 | P3 |
-| **Delta Updates** | P2 | **P0** | P1 (Cellular) | P3 | P2 |
-| **CI / Provenance (V2)** | P3 | P1 | **P0** | **P0 (Blocker)**| P1 |
-| **Custom Confirm (R5)** | P1 | **P0** | **P0** | P1 | **P0** |
+| Capability / Need | Alex (Hobbyist) | Elena (Swarm) | Marcus (OEM) | Siddharth (CI/Ops)| Sarah (HIL Lab) | Chloe (Comp Pit / RF) |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|
+| **Target Scale** | 3–15 | 10–50 | 50–500 | N/A (Pipelines)| 20–100 | 3–6 (Mesh) |
+| **Embeddable Library** | **P0 (Blocker)**| **P0 (Blocker)**| **P0 (Blocker)**| P1 | P1 | **P0 (Blocker)** |
+| **Auto-Rollback (R2)** | **P0** | **P0** | **P0** | P1 | **P0** | **P0** |
+| **Web Serial Flasher** | **P0** | P2 | P2 | P3 (Wants CLI)| P3 (Wants CLI) | P1 |
+| **Batch CLI Onboarding**| P2 | P1 | **P0** | **P0** | **P0** | P2 |
+| **Venue Offline Mode & Shared BLE** | P3 | P1 (EMCON) | P2 | P3 | P3 | **P0 (Blocker)** |
+| **USB-C Dock OTA & Log Drain (`dock`)** | P3 | **P0 (Deck)** | P2 | P2 | P1 | **P0 (Blocker)** |
+| **Rotating Secrets (`ff_sec`)** | P1 | P1 | **P0** | **P0** | P2 | **P0 (`AES-256-GCM`)** |
+| **`data_partition` Cargo & `sub_versions`** | P2 | **P0 (Co-proc)**| **P0** | P1 | P1 | **P0 (CSVs / Mesh)** |
+| **Disconnected Gateway**| P3 | **P0 (Blocker)**| P3 | P3 | P2 | P1 (Laptop USB-C) |
+| **Group / Ring Deploy** | P2 | **P0** | **P0** | **P0** | P1 | **P0 (Canary 1-of-3)**|
+| **Safe-Window Deferral**| P1 (Sleepy) | **P0 (Flight)** | P1 (In-use) | P3 | P3 | **P0 (Queue/BLE)** |
+| **Delta Updates** | P2 | **P0** | P1 (Cellular) | P3 | P2 | P2 |
+| **CI / Provenance (V2)** | P3 | P1 | **P0** | **P0 (Blocker)**| P1 | **P0** |
+| **Custom Confirm (R5)** | P1 | **P0** | **P0** | P1 | **P0** | **P0 (LoRa/CAN SPI)** |
 
 ### Strategic Recommendation for Fleetforge
 
-1. **V1 Horizon (Current):** Focus exclusively on **Alex (Hobbyist)** and the shared foundation
-   with **Sarah (HIL Lab)**. The embeddable library (R3) and rock-solid auto-rollback (R2)
-   are the common denominators that unlock real usage on hardware.
-2. **V2 Horizon:** Attracts **Marcus (OEM)** and **Siddharth (CI/Ops)** through provenance (R7),
-   CLI automation (R8), and simulation gating (R9).
-3. **V3 Horizon:** Delivers the disconnected gateway, airtime scheduling, and hierarchy required
-   by **Elena (Swarm Operator)**.
+1. **V1 Horizon (Current):** Focus on **Alex (Hobbyist)**, **Sarah (HIL Lab)**, and the online shop/hotel loop of **Chloe (Comp Pit / RF)**. The embeddable library (R3), auto-rollback (R2), custom self-test & safe window (R5), ECDSA signing (R6), rotating secrets (`SEC-1`), and `data_partition` cargo (`0013_artifact_type`) are the common foundation.
+2. **V2 Horizon:** Attracts **Marcus (OEM)**, **Siddharth (CI/Ops)**, and **Chloe (Comp Pit / RF)** through provenance & auto-deploy (`CI-CD-1`), venue radio lockout + NimBLE coexistence (`ff_set_offline_mode`), and tethered USB-C dock (`link_type: "dock"`) stage & log drain.
+3. **V3 Horizon:** Delivers the disconnected gateway, airtime scheduling, and hierarchy required by **Elena (Swarm Operator)** and **Chloe (Comp Pit / RF)**.

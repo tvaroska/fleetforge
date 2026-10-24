@@ -36,6 +36,7 @@ from fleetforge.announce_fields import (
     normalize_reset_reason,
     normalize_rollback_capable,
     normalize_ssid,
+    normalize_sub_versions,
 )
 from fleetforge.identity import DEVICE_ID_RE
 from fleetforge.retention import LOG_RETENTION, TELEMETRY_RETENTION
@@ -154,6 +155,7 @@ class AnnouncePayload(_TolerantPayload):
     capabilities: list[str] | None = None
     reset_reason: str | None = None
     secrets_rev: int | None = None
+    sub_versions: dict[str, str] | None = None
 
     @field_validator("ssid", mode="before")
     @classmethod
@@ -196,6 +198,12 @@ class AnnouncePayload(_TolerantPayload):
     def _usable_secrets_rev(cls, value: object) -> int | None:
         """A non-negative integer, or `None` — never a `ValidationError` (CUJ-2)."""
         return _bounded_int(value, 0, 2**31 - 1)
+
+    @field_validator("sub_versions", mode="before")
+    @classmethod
+    def _usable_sub_versions(cls, value: object, info: ValidationInfo) -> dict[str, str] | None:
+        """A 1-level `{component: version}` map, or `None` — never a `ValidationError`."""
+        return normalize_sub_versions(value, device_id=_logged_device_id(info))
 
 
 class PresencePayload(_TolerantPayload):

@@ -266,3 +266,29 @@ bool ff_telemetry_drained(void)
     portEXIT_CRITICAL(&s_lock);
     return drained;
 }
+
+int ff_telemetry_drain_json(char *buf, size_t cap)
+{
+    if (buf == NULL || cap < 32) {
+        return -1;
+    }
+    int len = 0;
+    uint32_t last_seq = 0;
+    uint32_t dropped_reported = 0;
+    const int count = build_payload(&len, &last_seq, &dropped_reported);
+    if (count == 0) {
+        buf[0] = '\0';
+        return 0;
+    }
+    if ((size_t)len + 1 > cap) {
+        return -1;
+    }
+    memcpy(buf, s_payload, (size_t)len + 1);
+    portENTER_CRITICAL(&s_lock);
+    if ((int32_t)(last_seq + 1 - s_unsent) > 0) {
+        s_unsent = last_seq + 1;
+    }
+    s_dropped -= s_dropped < dropped_reported ? s_dropped : dropped_reported;
+    portEXIT_CRITICAL(&s_lock);
+    return count;
+}

@@ -872,9 +872,7 @@ async def test_gcs_describe_names_the_credential_mode_and_never_a_path(
     key_file.write_text("{}")
     with_key = cast(
         GcsObjectStore,
-        create_object_store(
-            _settings(gcs_bucket="btvaroska", gcs_credentials_file=str(key_file))
-        ),
+        create_object_store(_settings(gcs_bucket="btvaroska", gcs_credentials_file=str(key_file))),
     )
     assert "creds=key-file" in with_key.describe
     assert str(key_file) not in with_key.describe

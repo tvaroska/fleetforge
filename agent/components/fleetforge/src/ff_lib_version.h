@@ -18,4 +18,4 @@
 
 #pragma once
 
-#define FF_LIB_VERSION "0.5.0"
+#define FF_LIB_VERSION "0.6.0"

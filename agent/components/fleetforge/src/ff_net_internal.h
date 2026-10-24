@@ -18,8 +18,12 @@
 extern "C" {
 #endif
 
-/* "wifi" | "ethernet" — what actually came up, and what up/announce reports. */
+/* "wifi" | "ethernet" | "dock" — what actually came up, and what up/announce reports. */
 const char *ff_net_link_type(void);
+
+/* CUJ-3: Venue Offline Mode and tethered USB-C dock link override. */
+bool ff_is_offline_mode(void);
+void ff_net_set_dock_active(bool active);
 
 /* The current RSSI in dBm, or false on a link that has none (Ethernet). */
 bool ff_net_rssi(int *out_dbm);

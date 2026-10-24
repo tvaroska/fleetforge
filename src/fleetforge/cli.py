@@ -213,6 +213,17 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     track_p.add_argument("--repo", default=None, help="Git repository URL")
 
+    dock_p = sub.add_parser(
+        "dock-sync",
+        help="Sync an offline USB-C dock bundle (announce, statuses, telemetry, logs) for a device",
+    )
+    dock_p.add_argument("device_id", help="12-hex device ID (e.g. a4cf12b3de90)")
+    dock_p.add_argument(
+        "bundle",
+        type=Path,
+        help="Path to the JSON bundle drained from the USB-C pit dock",
+    )
+
     return parser
 
 
@@ -297,6 +308,30 @@ def main(argv: list[str] | None = None) -> int:
             patch_url,
             token=args.token,
             body=json.dumps(payload).encode("utf-8"),
+            content_type="application/json",
+        )
+        if status_code != 200:
+            print(f"error ({status_code}): {resp.get('detail', resp)}", file=sys.stderr)
+            return 1
+        print(json.dumps(resp, indent=2))
+        return 0
+
+    if args.command == "dock-sync":
+        bundle_path: Path = args.bundle
+        if not bundle_path.is_file():
+            print(f"error: bundle not found: {bundle_path}", file=sys.stderr)
+            return 2
+        try:
+            raw_bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            print(f"error: invalid JSON bundle {bundle_path}: {exc}", file=sys.stderr)
+            return 2
+        sync_url = f"{args.url.rstrip('/')}/v1/devices/{args.device_id}/dock-sync"
+        status_code, resp = _request_json(
+            "POST",
+            sync_url,
+            token=args.token,
+            body=json.dumps(raw_bundle).encode("utf-8"),
             content_type="application/json",
         )
         if status_code != 200:

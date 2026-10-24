@@ -84,6 +84,11 @@ void ff_identity_note_selftest(bool registered);
  * with ff_safe_window_freeze()'s answer, on the same terms as ff_identity_note_selftest(). */
 void ff_identity_note_safe_window(bool registered);
 
+/* H5 / R7-cargo-1: Record a registered cargo capability (`mcu_fw`, `model_weights`, etc.)
+ * and the running version of that sub-component (`up/announce.sub_versions`). */
+esp_err_t ff_identity_note_cargo_type(const char *type);
+esp_err_t ff_identity_set_sub_version(const char *type, const char *version);
+
 /* R5-fw-6. The one reset-reason vocabulary (`esp_reset_reason_t` lowercased without
  * `ESP_RST_`, the announce's `reset_reason`), for ff_safe_mode.c's log lines. A string
  * literal, never NULL; `unknown` for a value this build does not know. */

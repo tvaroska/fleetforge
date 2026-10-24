@@ -36,6 +36,12 @@ int ff_net_wifi_known_count(void);
  * and prepend it to the active scan list without reflashing `ff_cfg` (WIFI-BLE-fw-1). */
 esp_err_t ff_net_wifi_save_nvs(const char *ssid, const char *passphrase);
 
+/* CUJ-3: Venue Offline Mode radio silence (`esp_wifi_stop()`) and Improv BLE suppression
+ * for shared NimBLE coexistence. */
+esp_err_t ff_net_wifi_set_offline_mode(bool offline);
+bool ff_net_wifi_is_offline_mode(void);
+void ff_net_wifi_set_improv_ble_enabled(bool enabled);
+
 /* Called by an adapter's IP_EVENT handler. Unblocks ff_net_bring_up(). */
 void ff_net_report_got_ip(esp_netif_t *netif);
 

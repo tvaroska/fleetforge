@@ -569,3 +569,31 @@ class TestLayoutProfiles:
 class TestOverrideCodes:
     def test_the_schema_literal_is_the_gating_codes(self) -> None:
         assert set(typing.get_args(OverrideCode)) == set(GATING_CODES)
+
+
+class TestNonAppCargoRefusals:
+    def test_non_app_cargo_skips_mcu_partition_checks_and_requires_cargo_capability(self) -> None:
+        cargo = ResolvedArtifact(
+            sha256="ab" * 32,
+            size_bytes=3_500_000,
+            partition_layout=None,
+            has_lib_marker=None,
+            artifact_type="fpga_bitstream",
+        )
+        # Even when the board has an unknown layout or small MCU ota_slot_size, non-app cargo
+        # only checks `ota` and the cargo capability handler.
+        d_missing = device(
+            partition_layout=UNKNOWN_PARTITION_LAYOUT,
+            ota_slot_size=1000,
+            capabilities=["ota"],
+        )
+        found = refusals(d_missing, cargo, version="2.0.0", catalog=BUILTIN)
+        assert codes(found) == ["no_cargo_capability"]
+        assert "fpga_bitstream" in found[0].message
+
+        d_capable = device(
+            partition_layout=UNKNOWN_PARTITION_LAYOUT,
+            ota_slot_size=1000,
+            capabilities=["ota", "fpga_bitstream"],
+        )
+        assert refusals(d_capable, cargo, version="2.0.0", catalog=BUILTIN) == []

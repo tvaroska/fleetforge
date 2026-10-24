@@ -32,6 +32,7 @@ in `broker/publisher.py` rather than a parameter anything could pass wrongly.
 import json
 import logging
 import uuid
+from collections.abc import Sequence
 from typing import Any, Protocol
 
 logger = logging.getLogger(__name__)
@@ -112,10 +113,11 @@ def stage_payload(
     apply: str,
     confirm_timeout_s: int,
     sig: str | None = None,
+    artifact_type: str | None = None,
 ) -> dict[str, Any]:
     """The `stage` command body, key for key as `spec/device-protocol.md` prints it.
 
-    **Conform, do not extend.** Exactly `id`, `type`, `artifact{url,sha256,size,version[,sig]}`,
+    **Conform, do not extend.** Exactly `id`, `type`, `artifact{url,sha256,size,version[,sig][,type]}`,
     `apply`, `confirm_timeout_s` — no `partition_layout`, no `issued_at`, no `deploy_id`.
     The R0/R1 agent is flash-baked and parses what it was born with; an extra key is at
     best ignored and at worst a parse failure on a board that cannot be updated.
@@ -124,6 +126,11 @@ def stage_payload(
     empty or fake `sig` would teach a device to accept one; omitting it when an artifact is
     unsigned keeps the exact R1 wire shape while signed artifacts carry
     `ecdsa-p256-sha256:<base64>`.
+
+    **`artifact.type` is omitted when `artifact_type` is `None` or `"app"`.** Per
+    `spec/device-protocol.md`, absent means `"app"` (the device's own application image);
+    non-app cargo (`mcu_fw`, `model_weights`, `fpga_bitstream`, `data_partition`) includes
+    `artifact.type` explicitly.
 
     `confirm_timeout_s` arrives from `Settings.confirm_timeout_s`, never as a literal
     here: one number, one place.
@@ -140,6 +147,8 @@ def stage_payload(
     }
     if sig is not None:
         artifact["sig"] = sig
+    if artifact_type is not None and artifact_type != "app":
+        artifact["type"] = artifact_type
     return {
         "id": cmd_id,
         "type": COMMAND_STAGE,
@@ -196,6 +205,18 @@ class CommandPublisher(Protocol):
         """Publish `payload` to `ff/v1/d/{device_id}/dn/cfg`, QoS 1, **retained**."""
         ...
 
+    async def clear_cfg(self, device_id: str) -> None:
+        """Clear the retained `ff/v1/d/{device_id}/dn/cfg` message (zero-byte retained)."""
+        ...
+
+    async def publish_many(self, items: Sequence[tuple[str, dict[str, Any]]]) -> None:
+        """Publish multiple `(device_id, payload)` commands over a single broker session."""
+        ...
+
+    async def publish_cfg_many(self, items: Sequence[tuple[str, dict[str, Any]]]) -> None:
+        """Publish multiple retained `(device_id, payload)` configs over a single broker session."""
+        ...
+
 
 class NullCommandPublisher:
     """Publishes nothing and says so — by **raising**.
@@ -228,6 +249,41 @@ class NullCommandPublisher:
         logger.warning(
             "dn/cfg for %s not published: MQTT_COMMAND_USERNAME/_PASSWORD are unset.",
             device_id,
+        )
+        raise CommandPublishError(
+            "no broker command credential is configured; dn/cfg was not published"
+        )
+
+    async def clear_cfg(self, device_id: str) -> None:
+        """Log one WARNING and raise when no broker credential is configured."""
+        logger.warning(
+            "dn/cfg clear for %s not published: MQTT_COMMAND_USERNAME/_PASSWORD are unset.",
+            device_id,
+        )
+        raise CommandPublishError(
+            "no broker command credential is configured; dn/cfg was not cleared"
+        )
+
+    async def publish_many(self, items: Sequence[tuple[str, dict[str, Any]]]) -> None:
+        """Log one WARNING and raise when no broker credential is configured."""
+        if not items:
+            return
+        logger.warning(
+            "deploy commands for %d device(s) not published: MQTT_COMMAND_USERNAME/_PASSWORD "
+            "are unset, so no broker publisher is configured.",
+            len(items),
+        )
+        raise CommandPublishError(
+            "no broker command credential is configured; the commands were not published"
+        )
+
+    async def publish_cfg_many(self, items: Sequence[tuple[str, dict[str, Any]]]) -> None:
+        """Log one WARNING and raise when no broker credential is configured."""
+        if not items:
+            return
+        logger.warning(
+            "dn/cfg for %d device(s) not published: MQTT_COMMAND_USERNAME/_PASSWORD are unset.",
+            len(items),
         )
         raise CommandPublishError(
             "no broker command credential is configured; dn/cfg was not published"

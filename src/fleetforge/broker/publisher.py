@@ -28,7 +28,7 @@ from `publish()` proves the packet was accepted, never that the device received 
 import asyncio
 import logging
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from contextlib import AbstractAsyncContextManager
 from typing import Any
 
@@ -133,3 +133,82 @@ class MqttCommandPublisher:
             QOS,
             CFG_RETAIN,
         )
+
+    async def clear_cfg(self, device_id: str) -> None:
+        """Clear retained `ff/v1/d/{device_id}/dn/cfg` by publishing empty retained bytes."""
+        topic = cfg_topic(device_id)
+        try:
+            async with asyncio.timeout(self._timeout_s), self._client_factory() as client:
+                await client.publish(topic, b"", qos=QOS, retain=CFG_RETAIN)
+        except TimeoutError as exc:
+            raise CommandPublishError(
+                f"the broker did not accept dn/cfg clear for {device_id} within {self._timeout_s}s"
+            ) from exc
+        except (aiomqtt.MqttError, OSError) as exc:
+            raise CommandPublishError(
+                f"broker transport failure clearing dn/cfg for {device_id}: {type(exc).__name__}"
+            ) from exc
+        logger.info(
+            "cleared retained dn/cfg on %s (qos %d, retain %s)",
+            topic,
+            QOS,
+            CFG_RETAIN,
+        )
+
+    async def publish_many(self, items: Sequence[tuple[str, dict[str, Any]]]) -> None:
+        """Publish multiple commands to `ff/v1/d/{device_id}/dn/cmd` over a single connection."""
+        if not items:
+            return
+        active_device_id = items[0][0]
+        try:
+            async with asyncio.timeout(self._timeout_s), self._client_factory() as client:
+                for device_id, payload in items:
+                    active_device_id = device_id
+                    topic = command_topic(device_id)
+                    await client.publish(topic, encode_command(payload), qos=QOS, retain=RETAIN)
+                    logger.info(
+                        "published %s command %s to %s (qos %d, retain %s)",
+                        payload.get("type"),
+                        payload.get("id"),
+                        topic,
+                        QOS,
+                        RETAIN,
+                    )
+        except TimeoutError as exc:
+            raise CommandPublishError(
+                f"the broker did not accept the command batch (at {active_device_id}) "
+                f"within {self._timeout_s}s"
+            ) from exc
+        except (aiomqtt.MqttError, OSError) as exc:
+            raise CommandPublishError(
+                f"broker transport failure publishing batch (at {active_device_id}): "
+                f"{type(exc).__name__}"
+            ) from exc
+
+    async def publish_cfg_many(self, items: Sequence[tuple[str, dict[str, Any]]]) -> None:
+        """Publish multiple retained `dn/cfg` payloads over a single broker connection."""
+        if not items:
+            return
+        active_device_id = items[0][0]
+        try:
+            async with asyncio.timeout(self._timeout_s), self._client_factory() as client:
+                for device_id, payload in items:
+                    active_device_id = device_id
+                    topic = cfg_topic(device_id)
+                    await client.publish(topic, encode_command(payload), qos=QOS, retain=CFG_RETAIN)
+                    logger.info(
+                        "published dn/cfg to %s (qos %d, retain %s)",
+                        topic,
+                        QOS,
+                        CFG_RETAIN,
+                    )
+        except TimeoutError as exc:
+            raise CommandPublishError(
+                f"the broker did not accept the dn/cfg batch (at {active_device_id}) "
+                f"within {self._timeout_s}s"
+            ) from exc
+        except (aiomqtt.MqttError, OSError) as exc:
+            raise CommandPublishError(
+                f"broker transport failure publishing dn/cfg batch (at {active_device_id}): "
+                f"{type(exc).__name__}"
+            ) from exc

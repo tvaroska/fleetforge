@@ -18,6 +18,7 @@
 
 #pragma once
 
+#include <stdbool.h>
 #include <stddef.h>
 
 #include "esp_err.h"
@@ -27,6 +28,13 @@ extern "C" {
 #endif
 
 esp_err_t ff_get_secret(const char *key, char *out, size_t cap);
+
+/* CUJ-3 (Venue Offline Mode): When `offline` is true, disables Wi-Fi STA scanning/probing
+ * (`esp_wifi_stop()`) and Improv BLE advertising so zero 802.11 frames are emitted and the
+ * application's shared NimBLE GATT server operates without interference. `ff_get_secret()`,
+ * `ff_logf()`, `ff_telemetry()`, `ff_selftest`, and `ff_safe_window` continue operating
+ * normally while offline. */
+esp_err_t ff_set_offline_mode(bool offline);
 
 #ifdef __cplusplus
 }

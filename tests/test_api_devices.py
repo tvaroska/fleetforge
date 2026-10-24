@@ -224,6 +224,7 @@ async def test_the_summary_carries_the_fleet_view_and_no_presence_ingredients(
         "is_dev",
         "stay_awake",
         "secrets_rev",
+        "sub_versions",
         "deploy",
     }
     assert row["fw_version"] == "1.4.2"
@@ -1628,3 +1629,100 @@ async def test_a_telemetry_series_is_newest_first_limited_and_validated(
     for query in ("name=Temp", "name=", "name=a%0Ab", "", "name=temp_c&limit=0"):
         response = await get_sub(admin_app, f"/v1/devices/{DEVICE_ID}/telemetry?{query}", token)
         assert response.status_code == 422, query
+
+
+async def test_decommission_endpoint_soft_deletes_revokes_broker_and_clears_cfg(
+    admin_app: FastAPI, fleet: AsyncSession
+) -> None:
+    from fleetforge.api.deps import get_broker_provisioner, get_command_publisher
+    from tests.conftest import FakeCommandPublisher
+    from tests.test_enroll import RecordingProvisioner
+
+    now = now_utc()
+    await add_device(
+        fleet,
+        presence_reported=True,
+        broker_provisioned_at=now,
+        mqtt_password_hash="argon2-hash",
+        is_dev=True,
+        stay_awake=True,
+    )
+    await fleet.commit()
+
+    provisioner = RecordingProvisioner()
+    publisher = FakeCommandPublisher()
+    admin_app.dependency_overrides[get_broker_provisioner] = lambda: provisioner
+    admin_app.dependency_overrides[get_command_publisher] = lambda: publisher
+
+    token = await login_admin(admin_app)
+    async with client_for(admin_app) as client:
+        resp = await client.post(
+            f"/v1/devices/{DEVICE_ID}/decommission",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["device_id"] == DEVICE_ID
+    assert body["online"] is False
+    assert body["broker_provisioned_at"] is None
+    assert body["is_dev"] is False
+    assert body["stay_awake"] is False
+    assert provisioner.removed == [DEVICE_ID]
+    assert publisher.cleared_cfg == [DEVICE_ID]
+
+    # Default GET /v1/devices excludes the decommissioned board.
+    default_list = await list_devices(admin_app, token)
+    assert [d["device_id"] for d in default_list["devices"]] == []
+
+    # ?include_decommissioned=true returns it with online=False.
+    async with client_for(admin_app) as client:
+        inc_resp = await client.get(
+            "/v1/devices?include_decommissioned=true",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert inc_resp.status_code == 200, inc_resp.text
+    inc_devices = inc_resp.json()["devices"]
+    assert len(inc_devices) == 1
+    assert inc_devices[0]["device_id"] == DEVICE_ID
+    assert inc_devices[0]["online"] is False
+
+    # Decommissioning an already-decommissioned board returns 404.
+    async with client_for(admin_app) as client:
+        second = await client.delete(
+            f"/v1/devices/{DEVICE_ID}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert second.status_code == 404
+
+
+async def test_delete_device_alias_and_broker_failure_returns_503(
+    admin_app: FastAPI, fleet: AsyncSession
+) -> None:
+    from fleetforge.api.deps import get_broker_provisioner
+    from fleetforge.broker import BrokerProvisioningError
+    from tests.test_enroll import RecordingProvisioner
+
+    await add_device(fleet, OTHER_ID, presence_reported=True)
+    await fleet.commit()
+
+    provisioner = RecordingProvisioner()
+    provisioner.error = BrokerProvisioningError("broker down")
+    admin_app.dependency_overrides[get_broker_provisioner] = lambda: provisioner
+    token = await login_admin(admin_app)
+
+    async with client_for(admin_app) as client:
+        failed = await client.delete(
+            f"/v1/devices/{OTHER_ID}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert failed.status_code == 503
+    assert failed.headers["Retry-After"] == "5"
+
+    # Once broker recovers, DELETE succeeds with 204.
+    provisioner.error = None
+    async with client_for(admin_app) as client:
+        ok = await client.delete(
+            f"/v1/devices/{OTHER_ID}",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+    assert ok.status_code == 204

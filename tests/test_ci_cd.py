@@ -953,3 +953,811 @@ class TestOtelQueueAndRateLimiterAndStagedRollout:
             mock_client.post.assert_called_once()
             sent_headers = mock_client.post.call_args.kwargs["headers"]
             assert sent_headers["Authorization"] == raw_header
+
+    async def test_otel_project_cache_avoids_repeated_db_queries_and_invalidates_on_update(
+        self,
+    ) -> None:
+        import uuid
+        from unittest.mock import AsyncMock
+
+        from fleetforge.config import Settings
+        from fleetforge.ingestor.otel import (
+            _project_otel_cache,
+            _resolve_project_otel,
+            invalidate_project_otel_cache,
+        )
+        from fleetforge.secrets_crypto import encrypt_secret
+
+        proj_id = uuid.uuid4()
+        invalidate_project_otel_cache()
+        settings = Settings(
+            database_url="postgresql+asyncpg://u:p@localhost/db",
+            artifact_url_secret="k" * 32,
+        )
+        enc_headers = encrypt_secret('{"Authorization": "Bearer secret-tok"}', settings)
+
+        session = AsyncMock()
+        session.identity_map = {}
+        nested_cm = AsyncMock()
+        session.begin_nested = lambda: nested_cm
+        proj = Project(
+            id=proj_id,
+            slug="eink",
+            name="E-Ink",
+            otel_endpoint="https://otel.example.com",
+            otel_headers=enc_headers,
+        )
+        session.get = AsyncMock(return_value=proj)
+        dev = Device(
+            device_id="a4cf12b3de01",
+            project_id=proj_id,
+            platform_type="esp32c6",
+            link_type="wifi",
+            power_class="always_on",
+        )
+
+        with patch("fleetforge.ingestor.otel._safe_settings", return_value=settings):
+            res1 = await _resolve_project_otel(session, dev)
+            res2 = await _resolve_project_otel(session, dev)
+            assert res1 == (
+                "eink",
+                "https://otel.example.com",
+                {"Authorization": "Bearer secret-tok"},
+            )
+            assert res2 == res1
+            assert session.get.call_count == 1
+            assert any(k[0] == proj_id for k in _project_otel_cache)
+
+            invalidate_project_otel_cache(proj_id)
+            assert not any(k[0] == proj_id for k in _project_otel_cache)
+            res3 = await _resolve_project_otel(session, dev)
+            assert res3 == res1
+            assert session.get.call_count == 2
+
+    def test_non_app_artifact_schema_serialization_omits_app_and_includes_cargo(self) -> None:
+        import datetime as dt
+
+        from fleetforge.api.schemas import ArtifactSummary, ArtifactUploaded
+
+        now = dt.datetime.now(dt.UTC)
+        app_up = ArtifactUploaded(
+            sha256="a" * 64,
+            size_bytes=1024,
+            target="esp32s3",
+            version="1.0.0",
+            partition_layout="ab-4m-v1",
+            created=True,
+            has_lib_marker=True,
+        )
+        assert "artifact_type" not in app_up.model_dump()
+
+        cargo_up = ArtifactUploaded(
+            sha256="b" * 64,
+            size_bytes=3_000_000,
+            target="rpi5",
+            version="2.0.0",
+            partition_layout=None,
+            created=True,
+            has_lib_marker=None,
+            artifact_type="model_weights",
+        )
+        dumped = cargo_up.model_dump()
+        assert dumped["artifact_type"] == "model_weights"
+        assert dumped["partition_layout"] is None
+        assert dumped["has_lib_marker"] is None
+
+        app_sum = ArtifactSummary(
+            target="esp32s3",
+            version="1.0.0",
+            sha256="a" * 64,
+            size_bytes=1024,
+            partition_layout="ab-4m-v1",
+            kind="user_firmware",
+            created_at=now,
+        )
+        assert "artifact_type" not in app_sum.model_dump()
+
+        cargo_sum = ArtifactSummary(
+            target="rpi5",
+            version="2.0.0",
+            sha256="b" * 64,
+            size_bytes=3_000_000,
+            partition_layout=None,
+            kind="user_firmware",
+            created_at=now,
+            artifact_type="model_weights",
+        )
+        assert cargo_sum.model_dump()["artifact_type"] == "model_weights"
+
+    async def test_wake_aware_url_ttl_and_on_wake_stage_republish(self) -> None:
+        import datetime as dt
+        import uuid
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        from fleetforge.api.routers.deploys import (
+            effective_url_ttl_s,
+            republish_open_requested_on_wake,
+        )
+        from fleetforge.config import Settings
+        from fleetforge.deploys import DeploySnapshot, DeployTransaction
+
+        settings = Settings(
+            database_url="postgresql+asyncpg://u:p@localhost/db",
+            artifact_url_secret="s" * 32,
+            public_base_url="https://fleet.example.com",
+            signed_url_ttl_s=1800,
+        )
+        always_on = Device(
+            device_id="a4cf12b3de01",
+            platform_type="esp32c6",
+            link_type="wifi",
+            power_class="always_on",
+        )
+        sleepy = Device(
+            device_id="a4cf12b3de02",
+            project_id=uuid.uuid4(),
+            platform_type="esp32c6",
+            link_type="wifi",
+            power_class="sleepy",
+            expected_wake_interval_s=3600,
+        )
+        assert effective_url_ttl_s(always_on, settings) == 1800
+        assert effective_url_ttl_s(sleepy, settings) == 2 * 3600 + 1800
+
+        session = AsyncMock()
+        session.get = AsyncMock(return_value=sleepy)
+        art_row = SimpleNamespace(
+            sha256="d" * 64,
+            size_bytes=4096,
+            partition_layout="ab-4m-v1",
+            has_lib_marker=True,
+            sig=None,
+            artifact_type="app",
+        )
+        session.execute = AsyncMock(return_value=SimpleNamespace(first=lambda: art_row))
+        publisher = AsyncMock()
+        now = dt.datetime.now(dt.UTC)
+
+        with (
+            patch(
+                "fleetforge.api.routers.deploys.latest_deploys",
+                return_value={
+                    sleepy.device_id: DeploySnapshot(
+                        cmd_id="cmd-wake-1",
+                        state="requested",
+                        at=now - dt.timedelta(hours=1),
+                        is_terminal=False,
+                        artifact_version="1.3.0",
+                        from_version="1.0.0",
+                        pct=None,
+                        detail=None,
+                        steps=(),
+                        sent_by=None,
+                        selftest=None,
+                    )
+                },
+            ),
+            patch(
+                "fleetforge.api.routers.deploys.deploy_transaction",
+                return_value=DeployTransaction(
+                    cmd_id="cmd-wake-1",
+                    apply="on_command",
+                    newest_state="requested",
+                    ended_state=None,
+                ),
+            ),
+        ):
+            republished = await republish_open_requested_on_wake(
+                session,
+                device_id=sleepy.device_id,
+                settings=settings,
+                publisher=publisher,
+            )
+            assert republished is True
+            publisher.publish.assert_awaited_once()
+            pub_dev_id, pub_payload = publisher.publish.call_args.args
+            assert pub_dev_id == sleepy.device_id
+            assert pub_payload["id"] == "cmd-wake-1"
+            assert pub_payload["apply"] == "on_command"
+            assert pub_payload["artifact"]["version"] == "1.3.0"
+
+    async def test_stalled_wave_recovery_and_cohort_cancel(self) -> None:
+        import datetime as dt
+        import uuid
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        from fleetforge.api.deps import AuthContext
+        from fleetforge.api.routers.deploys import advance_project_rollout_on_confirm
+        from fleetforge.api.routers.projects import cancel_project_deploy
+        from fleetforge.api.schemas import ProjectDeployCancelRequest
+        from fleetforge.config import Settings
+        from fleetforge.deploys import DeploySender, DeploySnapshot, RequestedRollout
+        from fleetforge.firmware.manifest import BUILTIN_LAYOUTS
+        from fleetforge.partition_profiles import LayoutCatalog
+
+        proj_id = uuid.uuid4()
+        token_id = uuid.uuid4()
+        now = dt.datetime.now(dt.UTC)
+
+        # Device 1 confirmed canary; Device 2 went offline 10 minutes ago while downloading
+        # (past confirm_timeout_s=120s); Device 3 is online and waiting.
+        dev1 = Device(
+            device_id="a4cf12b3de01",
+            project_id=proj_id,
+            platform_type="esp32c6",
+            fw_version="1.2.0",
+            partition_layout="ab-4m-v1",
+            ota_slot_size=1966080,
+            rollback_capable=True,
+            capabilities=["ota", "cancel"],
+            link_type="wifi",
+            power_class="always_on",
+            is_dev=True,
+            presence_reported=True,
+            last_seen=now,
+        )
+        dev2_stalled = Device(
+            device_id="a4cf12b3de02",
+            project_id=proj_id,
+            platform_type="esp32c6",
+            fw_version="1.0.0",
+            partition_layout="ab-4m-v1",
+            ota_slot_size=1966080,
+            rollback_capable=True,
+            capabilities=["ota", "cancel"],
+            link_type="wifi",
+            power_class="always_on",
+            is_dev=False,
+            presence_reported=False,
+            last_seen=now - dt.timedelta(minutes=10),
+        )
+        dev3_online = Device(
+            device_id="a4cf12b3de03",
+            project_id=proj_id,
+            platform_type="esp32c6",
+            fw_version="1.0.0",
+            partition_layout="ab-4m-v1",
+            ota_slot_size=1966080,
+            rollback_capable=True,
+            capabilities=["ota", "cancel"],
+            link_type="wifi",
+            power_class="always_on",
+            is_dev=False,
+            presence_reported=True,
+            last_seen=now,
+        )
+        devices = [dev1, dev2_stalled, dev3_online]
+        dev_by_id = {d.device_id: d for d in devices}
+
+        session = AsyncMock()
+        session.scalars = AsyncMock(return_value=SimpleNamespace(all=lambda: devices))
+        session.get = AsyncMock(
+            side_effect=lambda model, key: (
+                dev_by_id.get(str(key)) if model is Device else SimpleNamespace(name="ci-token")
+            )
+        )
+        art_row = SimpleNamespace(
+            sha256="c" * 64,
+            size_bytes=2048,
+            partition_layout="ab-4m-v1",
+            has_lib_marker=True,
+            sig=None,
+            artifact_type="app",
+        )
+        session.execute = AsyncMock(return_value=SimpleNamespace(first=lambda: art_row))
+
+        settings = Settings(
+            database_url="postgresql+asyncpg://u:p@localhost/db",
+            artifact_url_secret="s" * 32,
+            public_base_url="https://fleet.example.com",
+            confirm_timeout_s=120,
+        )
+        publisher = AsyncMock()
+        catalog = LayoutCatalog(layouts=BUILTIN_LAYOUTS, by_fingerprint={}, pending=frozenset())
+        rollout_req = RequestedRollout(
+            artifact_version="1.2.0",
+            apply="auto",
+            sent_by=DeploySender(subject="ci", token_id="tok-1", credential="ci-token"),
+            rollout={
+                "target_filter": "all",
+                "canary": True,
+                "max_parallel": 1,
+                "override": [],
+                "target_chip": "esp32c6",
+            },
+        )
+        snapshots = {
+            dev1.device_id: DeploySnapshot(
+                cmd_id="cmd-1",
+                state="confirmed",
+                at=now,
+                is_terminal=True,
+                artifact_version="1.2.0",
+                from_version="1.0.0",
+                pct=None,
+                detail=None,
+                steps=(),
+                sent_by=None,
+                selftest=None,
+            ),
+            dev2_stalled.device_id: DeploySnapshot(
+                cmd_id="cmd-2",
+                state="downloading",
+                at=now - dt.timedelta(minutes=10),
+                is_terminal=False,
+                artifact_version="1.2.0",
+                from_version="1.0.0",
+                pct=25,
+                detail=None,
+                steps=(),
+                sent_by=None,
+                selftest=None,
+            ),
+        }
+
+        with (
+            patch("fleetforge.api.routers.deploys.requested_rollout", return_value=rollout_req),
+            patch("fleetforge.api.routers.deploys.load_layout_catalog", return_value=catalog),
+            patch("fleetforge.api.routers.deploys.latest_open_transaction", return_value=None),
+            patch("fleetforge.api.routers.deploys.record_requested", AsyncMock()),
+            patch("fleetforge.api.routers.deploys.latest_deploys", return_value=snapshots),
+        ):
+            # Even with max_parallel=1, stalled offline dev2 does NOT starve dev3_online!
+            advanced = await advance_project_rollout_on_confirm(
+                session,
+                device=dev1,
+                cmd_id="cmd-1",
+                settings=settings,
+                publisher=publisher,
+            )
+            assert [d.device_id for d in advanced] == [dev3_online.device_id]
+
+        # Test cohort cancel (`POST /v1/projects/{slug}/deploy/cancel`)
+        proj = Project(id=proj_id, slug="eink-frame", name="E-Ink")
+        admin = AuthContext(
+            token_id=token_id,
+            subject="ci",
+            expires_at=now + dt.timedelta(hours=1),
+            scopes=("deploy",),
+            is_superadmin=True,
+        )
+
+        class _FakeSessionCM:
+            async def __aenter__(self) -> Any:
+                return session
+
+            async def __aexit__(self, *args: object) -> None:
+                return None
+
+        with (
+            patch(
+                "fleetforge.api.routers.projects.resolve_project_for_request",
+                return_value=proj,
+            ),
+            patch("fleetforge.api.routers.projects.latest_deploys", return_value=snapshots),
+            patch("fleetforge.api.routers.projects.record_sent", AsyncMock()) as mock_rec_sent,
+        ):
+            cancel_res = await cancel_project_deploy(
+                slug="eink-frame",
+                body=ProjectDeployCancelRequest(version="1.2.0"),
+                admin=admin,
+                settings=settings,
+                sessionmaker=lambda: _FakeSessionCM(),  # type: ignore[arg-type]
+                publisher=publisher,
+            )
+            assert [c.device_id for c in cancel_res.cancelled] == [dev2_stalled.device_id]
+            assert cancel_res.cancelled[0].cmd_id == "cmd-2"
+            assert dev1.device_id in cancel_res.skipped
+            assert dev3_online.device_id in cancel_res.skipped
+            mock_rec_sent.assert_awaited_once()
+
+    async def test_sub_versions_and_pluggable_cargo_handler_end_to_end(self) -> None:
+        import hashlib
+
+        from fleetforge.announce_fields import normalize_sub_versions
+        from fleetforge.ingestor.protocol import AnnouncePayload
+        from fleetforge.simulator.device import DeviceIdentity, LinkProfile, StageRunner
+
+        assert normalize_sub_versions({"model_weights": "2.1.0"}) == {"model_weights": "2.1.0"}
+        assert normalize_sub_versions({"model_weights": "2.1.0", " bad key ": "1.0"}) is None
+        ann = AnnouncePayload.model_validate(
+            {
+                "device_id": DEVICE_ID,
+                "sub_versions": {"model_weights": "2.1.0", "voice_pack": "1.0.4"},
+            }
+        )
+        assert ann.sub_versions == {"model_weights": "2.1.0", "voice_pack": "1.0.4"}
+
+        identity = DeviceIdentity(device_id=DEVICE_ID, fw_version="1.0.0")
+        applied_cargo: list[tuple[str | None, bytes]] = []
+        payload_bytes = b"quantized-weights-v2.1.0"
+        digest = hashlib.sha256(payload_bytes).hexdigest()
+
+        def on_weights(data: bytes, version: str | None) -> None:
+            applied_cargo.append((version, data))
+
+        client = FakeMqttClient()
+        runner = StageRunner(
+            identity=identity,
+            link=LinkProfile(),
+            cargo_handlers={"model_weights": on_weights},
+        )
+        with patch("fleetforge.simulator.device._fetch", return_value=payload_bytes):
+            await runner._stage(
+                client,  # type: ignore[arg-type]
+                "cmd-cargo-1",
+                {
+                    "artifact": {
+                        "url": "https://fleet.example.com/v1/artifact/bin",
+                        "sha256": digest,
+                        "size": len(payload_bytes),
+                        "version": "2.1.0",
+                        "type": "model_weights",
+                    }
+                },
+                lambda _msg: None,
+            )
+        assert applied_cargo == [("2.1.0", payload_bytes)]
+        assert runner.identity.fw_version == "1.0.0"
+        assert runner.identity.sub_versions == {"model_weights": "2.1.0"}
+        published_statuses = [
+            json.loads(raw)["state"]
+            for topic, raw, _, _ in client.published
+            if topic.endswith("/up/status")
+        ]
+        assert published_statuses == [
+            "staging",
+            "downloading",
+            "verifying",
+            "staged",
+            "applying",
+            "confirming",
+            "confirmed",
+        ]
+        published_announces = [
+            json.loads(raw)
+            for topic, raw, _, _ in client.published
+            if topic.endswith("/up/announce")
+        ]
+        assert published_announces[-1]["sub_versions"] == {"model_weights": "2.1.0"}
+
+        # Verify C firmware agent cargo handler & sub_versions registration symbols
+        root = Path(__file__).resolve().parents[1] / "agent" / "components" / "fleetforge"
+        ff_ota_h = (root / "src" / "ff_ota.h").read_text(encoding="utf-8")
+        ff_ota_c = (root / "src" / "ff_ota.c").read_text(encoding="utf-8")
+        ff_id_c = (root / "src" / "ff_identity.c").read_text(encoding="utf-8")
+        ff_mqtt_c = (root / "src" / "ff_mqtt.c").read_text(encoding="utf-8")
+        assert "ff_ota_register_cargo_handler" in ff_ota_h
+        assert "run_cargo_ota" in ff_ota_c
+        assert "ff_identity_set_sub_version" in ff_id_c
+        assert "ff_mqtt_complete_cargo" in ff_mqtt_c
+
+
+class TestCuj3PitTetheredDockAndVenueOffline:
+    def test_cuj3_firmware_venue_offline_nimble_coexistence_and_dock_drain(self) -> None:
+        root = Path(__file__).resolve().parents[1] / "agent" / "components" / "fleetforge"
+        ff_sec_h = (root / "include" / "ff_sec.h").read_text(encoding="utf-8")
+        ff_net_c = (root / "src" / "ff_net.c").read_text(encoding="utf-8")
+        ff_wifi_c = (root / "src" / "ff_net_wifi.c").read_text(encoding="utf-8")
+        ff_mqtt_c = (root / "src" / "ff_mqtt.c").read_text(encoding="utf-8")
+        ff_log_c = (root / "src" / "ff_log.c").read_text(encoding="utf-8")
+        ff_telem_c = (root / "src" / "ff_telemetry.c").read_text(encoding="utf-8")
+        ff_ota_h = (root / "src" / "ff_ota.h").read_text(encoding="utf-8")
+        ff_ota_c = (root / "src" / "ff_ota.c").read_text(encoding="utf-8")
+        arduino_h = (root / "src" / "Fleetforge.h").read_text(encoding="utf-8")
+        arduino_cpp = (root / "src" / "Fleetforge.cpp").read_text(encoding="utf-8")
+        basic_idf = (root / "examples" / "basic_idf" / "main" / "main.c").read_text(
+            encoding="utf-8"
+        )
+
+        # Track 1 (CUJ-3 Step 4): Venue Offline Mode, NimBLE coexistence, offline PENDING_VERIFY
+        assert "esp_err_t ff_set_offline_mode(bool offline);" in ff_sec_h
+        assert "ff_set_offline_mode(" in ff_net_c
+        assert "ff_net_set_dock_active(" in ff_net_c
+        assert 'return "dock";' in ff_net_c
+        assert "s_venue_offline" in ff_wifi_c
+        assert "s_improv_ble_enabled" in ff_wifi_c
+        assert "ble_hs_synced()" in ff_wifi_c
+        assert "ff_net_wifi_set_offline_mode(" in ff_wifi_c
+        assert "ff_net_wifi_set_improv_ble_enabled(" in ff_wifi_c
+        assert "ff_mqtt_confirm_offline(" in ff_mqtt_c
+        assert "setOfflineMode(bool offline)" in arduino_h
+        assert "FleetforgeClass::setOfflineMode(bool offline)" in arduino_cpp
+        assert "ff_set_offline_mode(false);" in basic_idf
+
+        # Track 2 (CUJ-3 Steps 5-6): Offline ring-drain JSON + USB-C dock stage
+        assert "ff_log_drain_json(" in ff_log_c
+        assert "ff_telemetry_drain_json(" in ff_telem_c
+        assert "esp_err_t ff_ota_dock_stage(" in ff_ota_h
+        assert "ff_ota_dock_stage(const ff_ota_cmd_t *cmd" in ff_ota_c
+
+    async def test_cuj3_end_to_end_venue_offline_dock_stage_selftest_and_sync(
+        self, tmp_path: Path
+    ) -> None:
+        import datetime as dt
+        import hashlib
+        import uuid
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        from fleetforge.api.deps import AuthContext
+        from fleetforge.api.routers.devices import dock_sync_device
+        from fleetforge.api.schemas import DockSyncRequest
+        from fleetforge.config import Settings
+        from fleetforge.deploys import DeploySnapshot
+        from fleetforge.signing import sign_digest
+        from fleetforge.simulator.device import (
+            CAPABILITY_SELFTEST,
+            SAFE_WINDOW_AUTO,
+            SAFE_WINDOW_HOLD,
+            DeviceIdentity,
+            LinkProfile,
+            StageRunner,
+        )
+
+        # 1. Chloe's FLUX-10413-Hub node enters Venue Offline Mode at the competition venue
+        fake_now = [1000.0]
+        identity = DeviceIdentity(
+            device_id=DEVICE_ID,
+            platform_type="esp32s3",
+            fw_version="2026.2.1-qual11",
+            capabilities=("ota", CAPABILITY_SELFTEST, "data_partition"),
+        )
+        applied_luts: list[tuple[str | None, bytes]] = []
+        runner = StageRunner(
+            identity=identity,
+            link=LinkProfile(),
+            safe_window=SAFE_WINDOW_HOLD,
+            selftest_fail_marker="badcan",
+            require_signature=True,
+            cargo_handlers={"data_partition": lambda data, ver: applied_luts.append((ver, data))},
+            clock=lambda: fake_now[0],
+        )
+        runner.set_offline_mode(True)
+        assert runner.offline_mode is True
+
+        # 2. During Qual 11, node records telemetry and structured logs offline with relative age_ms
+        assert runner.record_telemetry("lora_rssi", -78.0) is True
+        fake_now[0] += 5.0
+        assert runner.record_telemetry("can_bus_err_cnt", 0.0) is True
+        runner.record_log("I", "qual 11: scouting packet synced over NimBLE")
+        fake_now[0] += 5.0
+        runner.record_log("E", "watchdog reset before pit dock", prev_boot=True)
+
+        # 3. Pit dock stage while safe_window="hold" (active BLE sync) parks in awaiting_safe_window
+        lut_bytes = b"BAT01,12.8V\nBAT02,12.6V\n"
+        lut_sha = hashlib.sha256(lut_bytes).hexdigest()
+        lut_sig = sign_digest(lut_sha)
+        cargo_steps = runner.dock_stage(
+            "cmd-dock-lut-1",
+            lut_bytes,
+            sha256=lut_sha,
+            version="v14",
+            sig=lut_sig,
+            artifact_type="data_partition",
+        )
+        assert [s["state"] for s in cargo_steps] == [
+            "staging",
+            "downloading",
+            "verifying",
+            "staged",
+            "applying",
+            "confirming",
+            "confirmed",
+        ]
+        assert applied_luts == [("v14", lut_bytes)]
+        assert runner.identity.sub_versions == {"data_partition": "v14"}
+        assert runner.identity.link_type == "dock"
+
+        # Unsigned or tampered app binary over USB-C dock is rejected before flashing
+        good_bin = b"\xe9\x00" + b"FFOTALIB:2026.2.2-qual12" * 16
+        good_sha = hashlib.sha256(good_bin).hexdigest()
+        good_sig = sign_digest(good_sha)
+
+        unsigned_steps = runner.dock_stage(
+            "cmd-dock-unsigned",
+            good_bin,
+            sha256=good_sha,
+            version="2026.2.2-qual12",
+            sig=None,
+        )
+        assert unsigned_steps[-1]["state"] == "failed"
+        assert unsigned_steps[-1]["detail"] == "signature missing"
+        assert runner.identity.fw_version == "2026.2.1-qual11"
+
+        # While safe_window="hold", a valid signed app stage parks in awaiting_safe_window
+        held_steps = runner.dock_stage(
+            "cmd-dock-app-hold",
+            good_bin,
+            sha256=good_sha,
+            version="2026.2.2-qual12",
+            sig=good_sig,
+        )
+        assert [s["state"] for s in held_steps] == [
+            "staging",
+            "downloading",
+            "verifying",
+            "staged",
+            "awaiting_safe_window",
+        ]
+        runner._clear_staged()
+
+        # 4. Safe window opens in the pit -> signed app stages, reboots, and confirms via local ff_selftest
+        runner.safe_window = SAFE_WINDOW_AUTO
+        app_steps = runner.dock_stage(
+            "cmd-dock-app-1",
+            good_bin,
+            sha256=good_sha,
+            version="2026.2.2-qual12",
+            sig=good_sig,
+        )
+        assert [s["state"] for s in app_steps] == [
+            "staging",
+            "downloading",
+            "verifying",
+            "staged",
+            "applying",
+            "rebooting",
+        ]
+        boot_steps = runner.dock_confirm_boot()
+        assert [s["state"] for s in boot_steps] == ["confirming", "confirmed"]
+        assert boot_steps[-1]["detail"] == "selftest passed"
+        assert runner.identity.fw_version == "2026.2.2-qual12"
+
+        # 5. A broken build whose CAN/LoRa self-test fails rolls back offline to 2026.2.2-qual12
+        bad_bin = b"\xe9\x00" + b"FFOTALIB:2026.2.3-badcan" * 16
+        bad_sha = hashlib.sha256(bad_bin).hexdigest()
+        bad_sig = sign_digest(bad_sha)
+        runner.dock_stage(
+            "cmd-dock-app-bad",
+            bad_bin,
+            sha256=bad_sha,
+            version="2026.2.3-badcan",
+            sig=bad_sig,
+        )
+        rb_steps = runner.dock_confirm_boot()
+        assert [s["state"] for s in rb_steps] == ["confirming", "rolling_back", "rolled_back"]
+        assert (
+            rb_steps[-1]["detail"]
+            == "selftest failed: simulated self-test failure; returned to ota_1"
+        )
+        assert runner.identity.fw_version == "2026.2.2-qual12"
+
+        # 6. Drain the USB-C dock bundle and sync to `POST /v1/devices/{device_id}/dock-sync`
+        bundle = runner.dock_drain()
+        assert bundle["announce"]["link_type"] == "dock"  # type: ignore[index]
+        assert bundle["announce"]["fw_version"] == "2026.2.2-qual12"  # type: ignore[index]
+        assert bundle["announce"]["sub_versions"] == {"data_partition": "v14"}  # type: ignore[index]
+        assert len(bundle["telemetry"]) == 1  # type: ignore[arg-type]
+        assert len(bundle["logs"]) == 1  # type: ignore[arg-type]
+        # Second drain is empty because rings were committed
+        empty_bundle = runner.dock_drain()
+        assert empty_bundle["statuses"] == []
+        assert empty_bundle["telemetry"] == []
+        assert empty_bundle["logs"] == []
+
+        proj_id = uuid.uuid4()
+        now = dt.datetime.now(dt.UTC)
+        dev_row = Device(
+            device_id=DEVICE_ID,
+            project_id=proj_id,
+            platform_type="esp32s3",
+            fw_version="2026.2.1-qual11",
+            partition_layout="ab-4m-v1",
+            ota_slot_size=1966080,
+            rollback_capable=True,
+            capabilities=["ota", "selftest", "data_partition"],
+            link_type="wifi",
+            power_class="always_on",
+            presence_reported=False,
+            last_seen=now - dt.timedelta(hours=2),
+            enrolled_at=now - dt.timedelta(days=1),
+            is_dev=False,
+            stay_awake=False,
+        )
+        session = AsyncMock()
+        session.get = AsyncMock(return_value=dev_row)
+
+        class _FakeSessionCM:
+            async def __aenter__(self) -> Any:
+                return session
+
+            async def __aexit__(self, *args: object) -> None:
+                return None
+
+        admin = AuthContext(
+            token_id=uuid.uuid4(),
+            subject="chloe",
+            expires_at=now + dt.timedelta(hours=1),
+            scopes=("deploy",),
+            is_superadmin=True,
+        )
+        settings = Settings(
+            database_url="postgresql+asyncpg://u:p@localhost/db",
+            artifact_url_secret="s" * 32,
+        )
+
+        async def fake_handle_up_message(
+            _sess: Any,
+            *,
+            topic: str,
+            payload: bytes,
+            retained: bool,
+            received_at: dt.datetime,
+            tolerance: float,
+            settings: Any = None,
+            publisher: Any = None,
+        ) -> Any:
+            parsed = json.loads(payload.decode("utf-8"))
+            if topic.endswith("/up/announce"):
+                dev_row.link_type = parsed["link_type"]
+                dev_row.fw_version = parsed["fw_version"]
+                dev_row.sub_versions = parsed.get("sub_versions")
+                dev_row.last_seen = received_at
+            return SimpleNamespace(topic=topic)
+
+        with (
+            patch(
+                "fleetforge.api.routers.devices.handle_up_message",
+                side_effect=fake_handle_up_message,
+            ),
+            patch(
+                "fleetforge.api.routers.devices.latest_deploys",
+                return_value={
+                    DEVICE_ID: DeploySnapshot(
+                        cmd_id="cmd-dock-app-1",
+                        state="confirmed",
+                        at=now,
+                        is_terminal=True,
+                        artifact_version="2026.2.2-qual12",
+                        from_version="2026.2.1-qual11",
+                        pct=100,
+                        detail="selftest passed",
+                        steps=(),
+                        sent_by=None,
+                        selftest=None,
+                    )
+                },
+            ),
+            patch("fleetforge.api.routers.devices.latest_commands", return_value={}),
+            patch("fleetforge.api.routers.devices.fault_counts", return_value={}),
+            patch("fleetforge.api.routers.devices.latest_metrics", return_value={}),
+        ):
+            sync_resp = await dock_sync_device(
+                device_id=DEVICE_ID,
+                body=DockSyncRequest.model_validate(bundle),
+                admin=admin,
+                settings=settings,
+                sessionmaker=lambda: _FakeSessionCM(),  # type: ignore[arg-type]
+            )
+            assert sync_resp.device_id == DEVICE_ID
+            assert sync_resp.link_type == "dock"
+            assert sync_resp.fw_version == "2026.2.2-qual12"
+            assert sync_resp.sub_versions == {"data_partition": "v14"}
+            assert sync_resp.statuses_recorded == len(bundle["statuses"])  # type: ignore[arg-type]
+            assert sync_resp.telemetry_batches_recorded == 1
+            assert sync_resp.log_batches_recorded == 1
+
+        # Verify `fleetforge dock-sync` CLI subcommand
+        bundle_file = tmp_path / "dock_bundle.json"
+        bundle_file.write_text(json.dumps(bundle), encoding="utf-8")
+        with patch(
+            "fleetforge.cli._request_json",
+            return_value=(200, sync_resp.model_dump(mode="json")),
+        ) as mock_cli_req:
+            rc = main(
+                [
+                    "--url",
+                    "http://localhost:8000",
+                    "--token",
+                    "ffa_chloe.pit",
+                    "dock-sync",
+                    DEVICE_ID,
+                    str(bundle_file),
+                ]
+            )
+            assert rc == 0
+            mock_cli_req.assert_called_once()
+            assert mock_cli_req.call_args.args[1].endswith(f"/v1/devices/{DEVICE_ID}/dock-sync")

@@ -226,6 +226,17 @@ function DeviceRow({
     }
   }
 
+  async function decommission() {
+    try {
+      await api.decommissionDevice(device.device_id)
+      onDeployed()
+    } catch (err) {
+      if (err instanceof ApiError && err.isUnauthorized) {
+        onSessionExpired()
+      }
+    }
+  }
+
   return (
     <tr
       data-testid="device-row"
@@ -316,12 +327,32 @@ function DeviceRow({
                   ))}
                 </select>
               </>
-            )}
+            )}{' '}
+            <button
+              type="button"
+              className="flag-pill"
+              data-testid="decommission-device"
+              title="Decommission this board (revokes broker ACL, cancels in-flight deploys, and removes from fleet)"
+              onClick={() => void decommission()}
+            >
+              decommission
+            </button>
           </div>
         )}
       </td>
       <td>{device.platform_type}</td>
-      <td>{device.fw_version ?? '—'}</td>
+      <td>
+        {device.fw_version ?? '—'}
+        {device.sub_versions && Object.keys(device.sub_versions).length > 0 && (
+          <div className="muted" data-testid="device-sub-versions">
+            {Object.entries(device.sub_versions).map(([k, v]) => (
+              <code key={k}>
+                {k}:{v}{' '}
+              </code>
+            ))}
+          </div>
+        )}
+      </td>
       <td title={device.last_seen === null ? undefined : formatWhen(device.last_seen)}>
         {formatAgo(device.last_seen, now)}
       </td>

@@ -11,7 +11,9 @@
 #include "ff_net_internal.h"
 
 #include "esp_log.h"
+#include "ff_mqtt_internal.h"
 #include "ff_net_adapter.h"
+#include "ff_sec.h"
 #include "freertos/event_groups.h"
 
 static const char *TAG = "ff-net";
@@ -20,6 +22,8 @@ static const char *TAG = "ff-net";
 
 static EventGroupHandle_t s_events;
 static ff_link_t s_link = FF_LINK_WIFI;
+static volatile bool s_offline_mode;
+static volatile bool s_dock_active;
 /* The adapter is started ONCE. agent_main.c calls ff_net_bring_up() in a retry loop, and
  * an adapter's *_start() is not re-entrant: a second esp_netif_create_default_wifi_sta() /
  * esp_wifi_init() / handler registration fails or asserts. Set only when start returned
@@ -88,7 +92,27 @@ esp_err_t ff_net_bring_up(const ff_cfg_t *cfg, TickType_t timeout)
 
 const char *ff_net_link_type(void)
 {
+    if (s_dock_active) {
+        return "dock";
+    }
     return ff_cfg_link_name(s_link);
+}
+
+esp_err_t ff_set_offline_mode(bool offline)
+{
+    s_offline_mode = offline;
+    ff_mqtt_set_offline_mode(offline);
+    return ff_net_wifi_set_offline_mode(offline);
+}
+
+bool ff_is_offline_mode(void)
+{
+    return s_offline_mode;
+}
+
+void ff_net_set_dock_active(bool active)
+{
+    s_dock_active = active;
 }
 
 bool ff_net_rssi(int *out_dbm)

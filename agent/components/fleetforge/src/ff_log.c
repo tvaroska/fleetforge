@@ -365,3 +365,103 @@ bool ff_log_drained(void)
     portEXIT_CRITICAL(&s_lock);
     return drained;
 }
+
+int ff_log_drain_json(char *buf, size_t cap)
+{
+    if (buf == NULL || cap < 32) {
+        return -1;
+    }
+
+    const int64_t now_us = esp_timer_get_time();
+    portENTER_CRITICAL(&s_lock);
+    recover_rtc_if_needed_locked(now_us);
+    if (s_head > s_unsent && s_head - s_unsent > FF_LOG_CAPACITY) {
+        s_unsent = s_head - FF_LOG_CAPACITY;
+    }
+    uint64_t seq = s_unsent;
+    const uint64_t head = s_head;
+    const uint32_t dropped = s_dropped;
+    portEXIT_CRITICAL(&s_lock);
+
+    if (seq >= head) {
+        buf[0] = '\0';
+        return 0;
+    }
+
+    int head_len = snprintf(buf, cap, "{\"dropped\":%" PRIu32 ",\"lines\":[", dropped);
+    if (head_len <= 0 || (size_t)head_len >= cap - 4) {
+        return -1;
+    }
+    size_t pos = (size_t)head_len;
+    uint64_t last_seq = seq;
+    int packed = 0;
+
+    while (seq < head) {
+        ff_log_entry_t entry;
+        memset(&entry, 0, sizeof(entry));
+        bool have = false;
+        portENTER_CRITICAL(&s_lock);
+        if (seq < s_unsent) {
+            seq = s_unsent;
+        }
+        if (seq < head && seq < s_head) {
+            entry = s_ring[seq % FF_LOG_CAPACITY];
+            have = true;
+        }
+        portEXIT_CRITICAL(&s_lock);
+        if (!have) {
+            break;
+        }
+
+        char prefix[64];
+        int64_t age_ms = (now_us - entry.at_us) / 1000;
+        if (age_ms < 0) {
+            age_ms = 0;
+        }
+        int plen = snprintf(prefix, sizeof(prefix), "%s{\"age_ms\":%" PRId64 ",\"level\":\"%c\",\"text\":\"",
+                            packed > 0 ? "," : "", age_ms, entry.level);
+        if (plen <= 0) {
+            break;
+        }
+        const size_t save = pos;
+        if (pos + (size_t)plen + 8 >= cap) {
+            break;
+        }
+        memcpy(buf + pos, prefix, (size_t)plen);
+        pos += (size_t)plen;
+        size_t next_pos = append_json_escaped(buf, pos, cap - 4, entry.text);
+        if (next_pos == 0 || next_pos + 4 >= cap) {
+            pos = save;
+            buf[pos] = '\0';
+            break;
+        }
+        pos = next_pos;
+        buf[pos++] = '"';
+        buf[pos++] = '}';
+        buf[pos] = '\0';
+        last_seq = entry.seq;
+        seq = entry.seq + 1;
+        packed++;
+    }
+
+    if (packed == 0) {
+        buf[0] = '\0';
+        return 0;
+    }
+    buf[pos++] = ']';
+    buf[pos++] = '}';
+    buf[pos] = '\0';
+
+    portENTER_CRITICAL(&s_lock);
+    if (last_seq + 1 > s_unsent) {
+        s_unsent = last_seq + 1;
+    }
+    if (s_dropped >= dropped) {
+        s_dropped -= dropped;
+    } else {
+        s_dropped = 0;
+    }
+    portEXIT_CRITICAL(&s_lock);
+
+    return packed;
+}

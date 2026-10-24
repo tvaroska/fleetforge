@@ -54,6 +54,7 @@ ANNOUNCE_FIELDS = (
     "ota_slot_size",
     "capabilities",
     "secrets_rev",
+    "sub_versions",
 )
 
 

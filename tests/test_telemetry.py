@@ -271,6 +271,7 @@ class TestTheSessionWiring:
             "ff_telemetry_session_up",
             "ff_telemetry_session_down",
             "ff_telemetry_drained",
+            "ff_telemetry_drain_json",
         }
         assert FF_TELEMETRY_INTERNAL_H.parent == COMPONENT_SRC
 

@@ -404,4 +404,9 @@ bool FleetforgeClass::getSecret(const char *key, char *buf, uint32_t cap)
     return ff_get_secret(key, buf, cap) == ESP_OK;
 }
 
+bool FleetforgeClass::setOfflineMode(bool offline)
+{
+    return ff_set_offline_mode(offline) == ESP_OK;
+}
+
 #endif /* ARDUINO */

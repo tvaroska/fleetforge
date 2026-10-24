@@ -201,3 +201,48 @@ def normalize_reset_reason(value: object, *, device_id: str | None = None) -> st
         _unusable("reset_reason", "control character or lone surrogate", device_id)
         return None
     return value
+
+
+SUB_VERSIONS_MAX_ENTRIES = 16
+SUB_VERSIONS_KEY_MAX_CHARS = 32
+SUB_VERSIONS_VAL_MAX_CHARS = 64
+
+
+def normalize_sub_versions(value: object, *, device_id: str | None = None) -> dict[str, str] | None:
+    """`sub_versions` mapping (`spec/device-protocol.md` -> `up/announce`), or `None`.
+
+    An object one level deep mapping a 1..32 character printable ASCII component name to a
+    1..64 character printable ASCII version string (up to 16 entries). Empty or malformed
+    values return `None` rather than raising a `ValidationError`.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        _unusable("sub_versions", "not an object", device_id)
+        return None
+    if len(value) == 0:
+        return None
+    if len(value) > SUB_VERSIONS_MAX_ENTRIES:
+        _unusable(
+            "sub_versions",
+            f"more than {SUB_VERSIONS_MAX_ENTRIES} entries",
+            device_id,
+        )
+        return None
+    cleaned: dict[str, str] = {}
+    for k, v in value.items():
+        if not isinstance(k, str) or not isinstance(v, str):
+            _unusable("sub_versions", "non-string key or value", device_id)
+            return None
+        if not (1 <= len(k) <= SUB_VERSIONS_KEY_MAX_CHARS) or not all(
+            0x21 <= ord(ch) <= 0x7E for ch in k
+        ):
+            _unusable("sub_versions", "invalid component key", device_id)
+            return None
+        if not (1 <= len(v) <= SUB_VERSIONS_VAL_MAX_CHARS) or not all(
+            0x20 <= ord(ch) <= 0x7E for ch in v
+        ):
+            _unusable("sub_versions", "invalid version string", device_id)
+            return None
+        cleaned[k] = v
+    return cleaned

@@ -49,6 +49,7 @@ void app_main(void)
     ff_set_selftest(selftest, NULL); /* keep an update only if the loop below still runs */
     ff_set_safe_window_cb(between_messages, NULL); /* reboot only between two messages */
     ff_set_power_class(FF_POWER_ALWAYS_ON, 0); /* never sleeps; a battery board: FF_POWER_SLEEPY */
+    ff_set_offline_mode(false); /* CUJ-3: true silences Wi-Fi/Improv BLE in contested venues */
     gpio_reset_pin(LED_GPIO);
     gpio_set_direction(LED_GPIO, GPIO_MODE_OUTPUT);
     for (unsigned loops = 1;; loops++) { /* your firmware: it blinks, network or not */

@@ -55,6 +55,7 @@ IDENTITY_FIELDS = (
     "partition_table_sha256",
     "rollback_capable",
     "capabilities",
+    "sub_versions",
 )
 
 
@@ -107,22 +108,38 @@ async def enroll_device(
         values["proto"] = 1
 
     statement = insert(Device).values(**values)
+    same_live_project = (
+        Device.project_id == statement.excluded.project_id
+    ) & Device.decommissioned_at.is_(None)
     updates: dict[str, Any] = {field: statement.excluded[field] for field in IDENTITY_FIELDS}
     updates.update(
         {
             "project_id": statement.excluded.project_id,
             "group_id": case(
                 (
-                    Device.project_id == statement.excluded.project_id,
+                    same_live_project,
                     func.coalesce(statement.excluded.group_id, Device.group_id),
                 ),
                 else_=statement.excluded.group_id,
             ),
+            "is_dev": case(
+                (same_live_project, Device.is_dev),
+                else_=False,
+            ),
+            "stay_awake": False,
+            "secrets_rev": None,
             "enrolled_at": statement.excluded.enrolled_at,
             "mqtt_password_hash": statement.excluded.mqtt_password_hash,
             "decommissioned_at": None,
             "broker_provisioned_at": None,
             "presence_reported": None,
+            "last_reset_reason": None,
+            "health_at": None,
+            "uptime_s": None,
+            "rssi": None,
+            "free_heap": None,
+            "min_free_heap": None,
+            "boot_ok": None,
             "updated_at": func.now(),
         }
     )

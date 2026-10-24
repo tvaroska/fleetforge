@@ -158,6 +158,11 @@ class FleetforgeClass {
   // `dn/cfg.secrets_rev` advances, SEC-fw-1). Copies at most `cap - 1` bytes + NUL into `buf`.
   // Returns true when found, false when absent or invalid.
   bool getSecret(const char *key, char *buf, uint32_t cap);
+
+  // CUJ-3 (Venue Offline Mode): When `offline` is true, stops Wi-Fi STA scanning/probing
+  // (`esp_wifi_stop()`) and Improv BLE advertising so zero 802.11 frames are emitted and the
+  // sketch's shared NimBLE GATT server operates without interference.
+  bool setOfflineMode(bool offline);
 };
 
 extern FleetforgeClass Fleetforge;

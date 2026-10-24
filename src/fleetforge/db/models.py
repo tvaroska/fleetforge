@@ -215,6 +215,22 @@ class ArtifactKind(StrEnum):
     USER_FIRMWARE = "user_firmware"
 
 
+class ArtifactType(StrEnum):
+    """Payload cargo type carried in `stage.artifact.type` (`spec/device-protocol.md`).
+
+    **Advisory** — `artifacts.artifact_type` is TEXT with no CHECK (convention 1),
+    defaulting to `app`. Non-`app` cargo (`mcu_fw`, `model_weights`, `fpga_bitstream`,
+    `data_partition`) bypasses ESP32 OTA slot/partition checks and requires the target
+    board's `capabilities` to list a matching handler.
+    """
+
+    APP = "app"
+    MCU_FW = "mcu_fw"
+    MODEL_WEIGHTS = "model_weights"
+    FPGA_BITSTREAM = "fpga_bitstream"
+    DATA_PARTITION = "data_partition"
+
+
 TERMINAL_DEPLOY_STATES = frozenset(
     {DeployState.CONFIRMED, DeployState.ROLLED_BACK, DeployState.FAILED, DeployState.CANCELLED}
 )
@@ -486,6 +502,9 @@ class Device(Base):
     is_dev: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     stay_awake: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     secrets_rev: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # H5 / R7-cargo-1: component -> version mapping for attached co-processors / cargo
+    # (`spec/device-protocol.md` -> `up/announce.sub_versions`); NULL = none reported.
+    sub_versions: Mapped[dict[str, str] | None] = mapped_column(JSONB, nullable=True)
     # SEC-be-1: Argon2id hash of the device's `mqtt_password` issued at enrollment, used to
     # authenticate `GET /v1/device-secrets` over HTTPS (`Authorization: Basic <base64(device_id:mqtt_password)>`).
     mqtt_password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -795,6 +814,9 @@ class Artifact(Base):
     size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
     # Plain TEXT with no CHECK — see `ArtifactKind`, and convention 1 above.
     kind: Mapped[str] = mapped_column(Text, nullable=False)
+    # Payload cargo type (`spec/device-protocol.md` -> *stage.artifact.type*).
+    # Plain TEXT with no CHECK — see `ArtifactType`, and convention 1 above.
+    artifact_type: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'app'"))
     # Chip target (`esp32c6`). NULL where the bytes are target-independent, or where a
     # user upload simply did not say.
     target: Mapped[str | None] = mapped_column(Text, nullable=True)

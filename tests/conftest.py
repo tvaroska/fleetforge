@@ -404,6 +404,7 @@ class FakeCommandPublisher:
         # (device_id, payload) per publish, in order.
         self.published: list[tuple[str, dict[str, Any]]] = []
         self.published_cfg: list[tuple[str, dict[str, Any]]] = []
+        self.cleared_cfg: list[str] = []
         self.fail_with: Exception | None = None
 
     async def publish(self, device_id: str, payload: dict[str, Any]) -> None:
@@ -415,6 +416,23 @@ class FakeCommandPublisher:
         if self.fail_with is not None:
             raise self.fail_with
         self.published_cfg.append((device_id, payload))
+
+    async def clear_cfg(self, device_id: str) -> None:
+        if self.fail_with is not None:
+            raise self.fail_with
+        self.cleared_cfg.append(device_id)
+
+    async def publish_many(self, items: Any) -> None:
+        if self.fail_with is not None:
+            raise self.fail_with
+        for device_id, payload in items:
+            self.published.append((device_id, payload))
+
+    async def publish_cfg_many(self, items: Any) -> None:
+        if self.fail_with is not None:
+            raise self.fail_with
+        for device_id, payload in items:
+            self.published_cfg.append((device_id, payload))
 
     @property
     def last(self) -> dict[str, Any]:

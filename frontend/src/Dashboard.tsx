@@ -340,6 +340,36 @@ function UploadedBuilds({
     }
   }
 
+  async function cancelBulkDeploy(version: string) {
+    const key = `${version}:cancel:${targetGroupId}`
+    setDeployingKey(key)
+    setBulkStatus(null)
+    setBulkError(null)
+    try {
+      const res = await api.cancelProjectDeploy(projectSlug, {
+        version,
+        target_filter: 'all',
+        ...(targetGroupId ? { group_id: targetGroupId } : {}),
+      })
+      onDeployed()
+      const count = res.cancelled.length
+      const skippedCount = Object.keys(res.skipped).length
+      setBulkStatus(
+        `Cancelled in-flight ${version} deploy on ${count} board(s)` +
+          (skippedCount > 0 ? ` (${skippedCount} skipped)` : '') +
+          '.',
+      )
+    } catch (err) {
+      if (err instanceof ApiError && err.isUnauthorized) {
+        onSessionExpired()
+        return
+      }
+      setBulkError(err instanceof Error ? err.message : 'Project deploy cancel failed')
+    } finally {
+      setDeployingKey(null)
+    }
+  }
+
   return (
     <section
       className="console-card"
@@ -402,8 +432,16 @@ function UploadedBuilds({
                 </td>
                 <td>
                   <strong>{a.version}</strong>
-                  {(a.sig || a.branch || a.tag || a.commit_sha || a.test_passed != null) && (
+                  {((a.artifact_type && a.artifact_type !== 'app') ||
+                    a.sig ||
+                    a.branch ||
+                    a.tag ||
+                    a.commit_sha ||
+                    a.test_passed != null) && (
                     <div className="muted" data-testid="build-provenance">
+                      {a.artifact_type && a.artifact_type !== 'app' && (
+                        <code data-testid="build-artifact-type">{a.artifact_type} </code>
+                      )}
                       {a.sig && <span className="ok">✓ signed </span>}
                       {a.branch && <code>{a.branch} </code>}
                       {a.tag && <code>tag:{a.tag} </code>}
@@ -454,6 +492,14 @@ function UploadedBuilds({
                     title="Stage this version onto all compatible boards in this project"
                   >
                     Deploy all
+                  </button>{' '}
+                  <button
+                    type="button"
+                    disabled={deployingKey !== null}
+                    onClick={() => void cancelBulkDeploy(a.version)}
+                    title="Cancel in-flight deploys of this version across the selected cohort"
+                  >
+                    Cancel rollout
                   </button>
                 </td>
               </tr>

@@ -57,7 +57,9 @@ def fake_api(
         artifact_bytes = store.objects.get(blob_key(sha256))
         if artifact_bytes is None:
             raise urllib.error.HTTPError(url, 404, "Not Found", Message(), None)
-        return FakeResponse(artifact_bytes, f"https://store.invalid/{blob_key(sha256)}?X-Sig=secret")
+        return FakeResponse(
+            artifact_bytes, f"https://store.invalid/{blob_key(sha256)}?X-Sig=secret"
+        )
 
     return opener
 

@@ -63,6 +63,16 @@ static bool s_selftest_registered;
 /* R5-fw-5. Set by ff_identity_note_safe_window() from ff_mqtt_run(); same threading argument. */
 static bool s_safe_window_registered;
 
+/* H5 / R7-cargo-1: registered companion cargo types (`capabilities`) and their current
+ * versions (`sub_versions` in `up/announce`). */
+#define FF_MAX_CARGO_TYPES 8
+typedef struct {
+    char type[32];
+    char version[65];
+} ff_cargo_slot_t;
+static ff_cargo_slot_t s_cargo_slots[FF_MAX_CARGO_TYPES];
+static size_t s_cargo_count;
+
 /* S0-fw-6, spec/device-protocol.md -> up/announce `reset_reason`: why the chip last reset,
  * read once in ff_identity_init() (every boot path calls it: agent_main.c,
  * fleetforge_start.c, Fleetforge.cpp) and never again, so a reconnect inside one boot
@@ -394,6 +404,47 @@ void ff_identity_note_safe_window(bool registered)
     s_safe_window_registered = registered;
 }
 
+esp_err_t ff_identity_note_cargo_type(const char *type)
+{
+    if (type == NULL || type[0] == '\0' || strlen(type) >= sizeof(s_cargo_slots[0].type)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    for (size_t i = 0; i < s_cargo_count; i++) {
+        if (strcmp(s_cargo_slots[i].type, type) == 0) {
+            return ESP_OK;
+        }
+    }
+    if (s_cargo_count >= FF_MAX_CARGO_TYPES) {
+        return ESP_ERR_NO_MEM;
+    }
+    strlcpy(s_cargo_slots[s_cargo_count].type, type, sizeof(s_cargo_slots[0].type));
+    s_cargo_slots[s_cargo_count].version[0] = '\0';
+    s_cargo_count++;
+    return ESP_OK;
+}
+
+esp_err_t ff_identity_set_sub_version(const char *type, const char *version)
+{
+    if (type == NULL || type[0] == '\0' || version == NULL || version[0] == '\0') {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (strlen(type) >= sizeof(s_cargo_slots[0].type) ||
+        strlen(version) >= sizeof(s_cargo_slots[0].version)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    esp_err_t err = ff_identity_note_cargo_type(type);
+    if (err != ESP_OK) {
+        return err;
+    }
+    for (size_t i = 0; i < s_cargo_count; i++) {
+        if (strcmp(s_cargo_slots[i].type, type) == 0) {
+            strlcpy(s_cargo_slots[i].version, version, sizeof(s_cargo_slots[0].version));
+            return ESP_OK;
+        }
+    }
+    return ESP_ERR_NOT_FOUND;
+}
+
 const char *ff_device_id(void)
 {
     return s_device_id;
@@ -603,6 +654,9 @@ static cJSON *announce_object(const ff_cfg_t *cfg)
     if (s_safe_window_registered) {
         cJSON_AddItemToArray(capabilities, cJSON_CreateString("safe_window"));
     }
+    for (size_t i = 0; i < s_cargo_count; i++) {
+        cJSON_AddItemToArray(capabilities, cJSON_CreateString(s_cargo_slots[i].type));
+    }
     cJSON_AddItemToObject(root, "capabilities", capabilities);
     /* S0-fw-6: after `capabilities`, before `lib_marker`, as the spec prints it. */
     cJSON_AddStringToObject(root, "reset_reason", s_reset_reason);
@@ -615,6 +669,21 @@ static cJSON *announce_object(const ff_cfg_t *cfg)
     const uint32_t sec_rev = ff_sec_rev();
     if (sec_rev > 0) {
         cJSON_AddNumberToObject(root, "secrets_rev", sec_rev);
+    }
+    cJSON *sub_versions = NULL;
+    for (size_t i = 0; i < s_cargo_count; i++) {
+        if (s_cargo_slots[i].version[0] != '\0') {
+            if (sub_versions == NULL) {
+                sub_versions = cJSON_CreateObject();
+            }
+            if (sub_versions != NULL) {
+                cJSON_AddStringToObject(sub_versions, s_cargo_slots[i].type,
+                                        s_cargo_slots[i].version);
+            }
+        }
+    }
+    if (sub_versions != NULL) {
+        cJSON_AddItemToObject(root, "sub_versions", sub_versions);
     }
     /* R3-fw-6, spec/device-protocol.md -> up/announce `lib_marker`: the `format` of the
      * library marker in the RUNNING image, the last key. This read from another TU is what

@@ -83,7 +83,11 @@ from fleetforge.deploy_precheck import merged_binary
 from fleetforge.firmware.manifest import EXPECTED_PARTITION_LAYOUT, SafeSegment
 from fleetforge.lib_marker import find_marker
 from fleetforge.merged_image import detect_merged
-from fleetforge.partition_profiles import LayoutCatalog, load_layout_catalog
+from fleetforge.partition_profiles import (
+    MAX_PROFILE_SLOT_SIZE,
+    LayoutCatalog,
+    load_layout_catalog,
+)
 from fleetforge.signing import SigningKeyRing, is_valid_sig_format
 from fleetforge.storage.blobs import digest_bytes, put_blob
 from fleetforge.storage.objectstore import ObjectStoreError
@@ -121,7 +125,7 @@ _LIST_SQL = text(
     """
     SELECT v.target, v.version, v.sha256, v.created_at,
            v.repo_url, v.branch, v.commit_sha, v.tag, v.build_url, v.test_passed,
-           a.size_bytes, a.partition_layout, a.kind, a.sig
+           a.size_bytes, a.partition_layout, a.kind, a.artifact_type, a.sig
       FROM artifact_versions AS v
       JOIN artifacts AS a ON a.sha256 = v.sha256
      WHERE v.project_id = :project_id
@@ -141,8 +145,13 @@ _LIST_SQL = text(
 # R6-SEC-1: a re-upload with a verified `sig` fills a NULL `sig` on an existing row.
 _ARTIFACT_UPSERT_SQL = text(
     """
-    INSERT INTO artifacts (sha256, size_bytes, kind, target, partition_layout, has_lib_marker, sig)
-    VALUES (:sha256, :size_bytes, :kind, :target, :partition_layout, :has_lib_marker, :sig)
+    INSERT INTO artifacts (
+        sha256, size_bytes, kind, artifact_type, target, partition_layout, has_lib_marker, sig
+    )
+    VALUES (
+        :sha256, :size_bytes, :kind, :artifact_type, :target, :partition_layout,
+        :has_lib_marker, :sig
+    )
     ON CONFLICT (sha256) DO UPDATE
        SET has_lib_marker = COALESCE(artifacts.has_lib_marker, EXCLUDED.has_lib_marker),
            sig = COALESCE(artifacts.sig, EXCLUDED.sig)
@@ -277,6 +286,14 @@ async def upload_artifact(
     partition_layout: Annotated[
         SafeSegment, Query(description="Partition layout the image is built for")
     ] = EXPECTED_PARTITION_LAYOUT,
+    artifact_type: Annotated[
+        SafeSegment,
+        Query(
+            description=(
+                "Artifact cargo type (app, mcu_fw, model_weights, fpga_bitstream, data_partition)"
+            )
+        ),
+    ] = "app",
     project: Annotated[
         str | None,
         Query(pattern=PROJECT_SLUG_PATTERN, description="Project slug (defaults to token/default)"),
@@ -345,7 +362,16 @@ async def upload_artifact(
         )
         project_id = target_project.id
         catalog = await load_layout_catalog(session)
-    limit = _slot_size(partition_layout, catalog)
+    if artifact_type == "app":
+        limit = _slot_size(partition_layout, catalog)
+        stored_layout: str | None = partition_layout
+    else:
+        limit = MAX_PROFILE_SLOT_SIZE
+        stored_layout = (
+            partition_layout
+            if ("partition_layout" in request.query_params and partition_layout in catalog.layouts)
+            else None
+        )
     _declared_length(request, limit)
     data = await _read_capped(request, limit)
 
@@ -358,25 +384,26 @@ async def upload_artifact(
             detail="artifact is empty; a deploy that ships nothing is never intended",
         )
 
-    merged = detect_merged(data)
-    if merged is not None:
-        finding = merged_binary(merged)
-        logger.info(
-            "artifact upload refused: %s (%s/%s, %d bytes) by %s",
-            finding.code,
-            target,
-            version,
-            len(data),
-            admin.token_id,
-        )
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=finding.message
-        )
+    if artifact_type == "app":
+        merged = detect_merged(data)
+        if merged is not None:
+            finding = merged_binary(merged)
+            logger.info(
+                "artifact upload refused: %s (%s/%s, %d bytes) by %s",
+                finding.code,
+                target,
+                version,
+                len(data),
+                admin.token_id,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=finding.message
+            )
 
     digest = digest_bytes(data)
     # R3-be-1: never a refusal. The pre-check gates a deploy of an unmarked build.
-    marker = find_marker(data)
-    has_lib_marker = marker is not None
+    marker = find_marker(data) if artifact_type == "app" else None
+    has_lib_marker: bool | None = (marker is not None) if artifact_type == "app" else None
 
     # R6-SEC-1 / R6-SEC-2: Either verify a caller-supplied detached signature against the
     # public key rotation ring, or sign server-side when `artifact_signing_key` is set.
@@ -436,8 +463,9 @@ async def upload_artifact(
                 "sha256": digest,
                 "size_bytes": len(data),
                 "kind": ArtifactKind.USER_FIRMWARE.value,
+                "artifact_type": artifact_type,
                 "target": target,
-                "partition_layout": partition_layout,
+                "partition_layout": stored_layout,
                 "has_lib_marker": has_lib_marker,
                 "sig": verified_sig,
             },
@@ -522,12 +550,13 @@ async def upload_artifact(
         response.status_code = status.HTTP_200_OK
 
     logger.info(
-        "artifact %s (%d bytes, %s/%s, layout %s, %s) %s by %s",
+        "artifact %s (%d bytes, %s/%s, type %s, layout %s, %s) %s by %s",
         digest,
         len(data),
         target,
         version,
-        partition_layout,
+        artifact_type,
+        stored_layout,
         (
             f"lib_marker format={marker.format} lib_version={marker.lib_version} "
             f"at 0x{marker.offset:x}"
@@ -542,9 +571,10 @@ async def upload_artifact(
         size_bytes=len(data),
         target=target,
         version=version,
-        partition_layout=partition_layout,
+        partition_layout=stored_layout,
         created=created,
         has_lib_marker=has_lib_marker,
+        artifact_type=artifact_type,
         sig=verified_sig,
         repo_url=repo_url,
         branch=branch,
@@ -598,6 +628,7 @@ async def list_artifacts(
                 partition_layout=row.partition_layout,
                 kind=row.kind,
                 created_at=row.created_at,
+                artifact_type=getattr(row, "artifact_type", "app"),
                 sig=row.sig,
                 repo_url=row.repo_url,
                 branch=row.branch,

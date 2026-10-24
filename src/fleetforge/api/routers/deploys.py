@@ -121,7 +121,9 @@ from fleetforge.deploy_precheck import (
 )
 from fleetforge.deploys import (
     DeploySender,
+    DeploySnapshot,
     deploy_kpis,
+    deploy_transaction,
     latest_deploys,
     latest_open_transaction,
     record_publish_failure,
@@ -144,7 +146,7 @@ router = APIRouter(
 # request field" structural instead of a comment.
 _ARTIFACT_FOR_TARGET_SQL = text(
     """
-    SELECT a.sha256, a.size_bytes, a.partition_layout, a.has_lib_marker, a.sig
+    SELECT a.sha256, a.size_bytes, a.partition_layout, a.has_lib_marker, a.sig, a.artifact_type
       FROM artifact_versions AS v
       JOIN artifacts AS a ON a.sha256 = v.sha256
      WHERE v.project_id = :project_id AND v.target = :target AND v.version = :version
@@ -167,7 +169,16 @@ async def _sender(session: AsyncSession, admin: AuthContext) -> DeploySender:
     )
 
 
-def _artifact_url(sha256: str, settings: Settings) -> str:
+def effective_url_ttl_s(device: Device, settings: Settings) -> int:
+    """Signed URL TTL for `device`: extended by `2 * expected_wake_interval_s` for sleepy boards."""
+    base_ttl = int(settings.signed_url_ttl_s)
+    wake_s = int(device.expected_wake_interval_s or 0)
+    if str(device.power_class) == "sleepy" and wake_s > 0:
+        return max(base_ttl, 2 * wake_s + base_ttl)
+    return base_ttl
+
+
+def _artifact_url(sha256: str, settings: Settings, *, ttl_s: int | None = None) -> str:
     """Mint the public download URL for this artifact. **The only mint site.**
 
     Local HMAC, no I/O and nothing to fail transiently (R1-be-3): the URL points at this
@@ -181,7 +192,7 @@ def _artifact_url(sha256: str, settings: Settings) -> str:
         _public_base_url(settings),
         sha256,
         secret=_url_secret(settings),
-        ttl_s=settings.signed_url_ttl_s,
+        ttl_s=ttl_s if ttl_s is not None else settings.signed_url_ttl_s,
     )
 
 
@@ -306,14 +317,15 @@ async def deploy_device(
         # The reuse window is the minted URL's lifetime: past it the first URL has
         # expired, so a board that never acted on the first command cannot act on it
         # now and a fresh intent is the honest record (`deploys.py`).
+        ttl_s = effective_url_ttl_s(device, settings)
         open_transaction = await latest_open_transaction(
-            session, device_id=device_id, window_s=settings.signed_url_ttl_s
+            session, device_id=device_id, window_s=ttl_s
         )
         reused = open_transaction is not None and open_transaction.sha256 == artifact.sha256
         cmd_id = open_transaction.cmd_id if reused and open_transaction else new_command_id()
 
         # Before any row exists: a deploy that could not mint a URL never happened.
-        url = _artifact_url(artifact.sha256, settings)
+        url = _artifact_url(artifact.sha256, settings, ttl_s=ttl_s)
 
         if not reused:
             sent_by = await _sender(session, admin)
@@ -341,6 +353,7 @@ async def deploy_device(
             apply=body.apply,
             confirm_timeout_s=settings.confirm_timeout_s,
             sig=artifact.sig,
+            artifact_type=artifact.artifact_type,
         )
         await _publish(
             publisher,
@@ -428,6 +441,7 @@ async def _resolve(
         partition_layout=row.partition_layout,
         has_lib_marker=row.has_lib_marker,
         sig=row.sig,
+        artifact_type=getattr(row, "artifact_type", "app"),
     )
 
 
@@ -758,15 +772,25 @@ async def deploy_version_to_project_devices(
     if not eligible:
         return [], skipped
 
-    # Prioritise any board already in-flight on `version`, then online dev boards, then
-    # online always_on boards, then online boards, then deterministic device_id order.
+    def _is_stalled_in_flight(dev: Device, snap: DeploySnapshot | None) -> bool:
+        if snap is None or snap.artifact_version != version or snap.is_terminal:
+            return False
+        if is_online(dev, now=now, tolerance=settings.presence_tolerance):
+            return False
+        return (now - snap.at).total_seconds() >= settings.confirm_timeout_s
+
+    # Prioritise any non-stalled board already in-flight on `version`, then online dev boards,
+    # then online always_on boards, then online boards, then deterministic device_id order.
     def _canary_priority(
         item: tuple[Device, ResolvedArtifact, bool],
     ) -> tuple[int, int, int, int, str]:
         dev, _, online = item
         snap = snapshots.get(dev.device_id)
         in_flight_this_ver = (
-            snap is not None and snap.artifact_version == version and not snap.is_terminal
+            snap is not None
+            and snap.artifact_version == version
+            and not snap.is_terminal
+            and not _is_stalled_in_flight(dev, snap)
         )
         return (
             0 if in_flight_this_ver else 1,
@@ -786,7 +810,8 @@ async def deploy_version_to_project_devices(
     else:
         # Wave 2: Bounded concurrency (`max_parallel`). Count boards already in-flight on `version`
         # outside the current eligible republish set whose state is actively transferring/applying
-        # or online, so offline/sleepy boards parked in requested state do not starve max_parallel.
+        # or online (and not stalled offline past confirm_timeout_s), so offline/sleepy or stalled
+        # boards do not starve max_parallel.
         eligible_ids = {dev.device_id for dev, _, _ in eligible}
         active_in_flight = sum(
             1
@@ -795,6 +820,7 @@ async def deploy_version_to_project_devices(
             and (snap := snapshots.get(d.device_id)) is not None
             and snap.artifact_version == version
             and not snap.is_terminal
+            and not _is_stalled_in_flight(d, snap)
             and (
                 snap.state != "requested"
                 or is_online(d, now=now, tolerance=settings.presence_tolerance)
@@ -830,12 +856,13 @@ async def deploy_version_to_project_devices(
     # holding the Project.id FOR UPDATE lock.
     stage_tasks: list[tuple[Device, ResolvedArtifact, str, bool, bool, dict[str, Any]]] = []
     for device, found_artifact, online in wave_items:
+        ttl_s = effective_url_ttl_s(device, settings)
         open_transaction = await latest_open_transaction(
-            session, device_id=device.device_id, window_s=settings.signed_url_ttl_s
+            session, device_id=device.device_id, window_s=ttl_s
         )
         reused = open_transaction is not None and open_transaction.sha256 == found_artifact.sha256
         cmd_id = open_transaction.cmd_id if reused and open_transaction else new_command_id()
-        url = _artifact_url(found_artifact.sha256, settings)
+        url = _artifact_url(found_artifact.sha256, settings, ttl_s=ttl_s)
 
         if not reused:
             await record_requested(
@@ -861,11 +888,38 @@ async def deploy_version_to_project_devices(
             apply=apply,
             confirm_timeout_s=settings.confirm_timeout_s,
             sig=found_artifact.sig,
+            artifact_type=found_artifact.artifact_type,
         )
         stage_tasks.append((device, found_artifact, cmd_id, reused, online, payload))
 
     # Commit all recorded transactions atomically once before publishing over MQTT
     await session.commit()
+
+    batch_published = False
+    if len(stage_tasks) > 1:
+        try:
+            await publisher.publish_many(
+                [(dev.device_id, payload) for dev, _, _, _, _, payload in stage_tasks]
+            )
+            batch_published = True
+        except CommandPublishError:
+            batch_published = False
+
+    if batch_published:
+        for device, found_artifact, cmd_id, reused, online, _ in stage_tasks:
+            deployed.append(
+                DeployAccepted(
+                    cmd_id=cmd_id,
+                    device_id=device.device_id,
+                    version=version,
+                    sha256=found_artifact.sha256,
+                    size_bytes=found_artifact.size_bytes,
+                    apply=apply,
+                    reused=reused,
+                    device_online=online,
+                )
+            )
+        return deployed, skipped
 
     for device, found_artifact, cmd_id, reused, online, payload in stage_tasks:
         if best_effort_broker:
@@ -936,16 +990,10 @@ async def advance_project_rollout_on_confirm(
     canary = bool(rollout_cfg.get("canary", True))
     raw_max_parallel = rollout_cfg.get("max_parallel", DEFAULT_ROLLOUT_MAX_PARALLEL)
     max_parallel = (
-        int(raw_max_parallel)
-        if isinstance(raw_max_parallel, int)
-        else DEFAULT_ROLLOUT_MAX_PARALLEL
+        int(raw_max_parallel) if isinstance(raw_max_parallel, int) else DEFAULT_ROLLOUT_MAX_PARALLEL
     )
     raw_override = rollout_cfg.get("override")
-    override = (
-        tuple(str(item) for item in raw_override)
-        if isinstance(raw_override, list)
-        else ()
-    )
+    override = tuple(str(item) for item in raw_override) if isinstance(raw_override, list) else ()
     raw_chip = rollout_cfg.get("target_chip")
     target_chip = str(raw_chip) if isinstance(raw_chip, str) else None
     raw_group = rollout_cfg.get("group_id")
@@ -970,3 +1018,59 @@ async def advance_project_rollout_on_confirm(
         republish_in_flight=False,
     )
     return deployed
+
+
+async def republish_open_requested_on_wake(
+    session: AsyncSession,
+    *,
+    device_id: str,
+    settings: Settings,
+    publisher: CommandPublisher,
+) -> bool:
+    """Re-mint a fresh signed URL and re-publish `stage` when a board wakes with an open `requested` deploy."""
+    if (
+        isinstance(publisher, NullCommandPublisher)
+        or not settings.artifact_url_secret
+        or not settings.public_base_url
+    ):
+        return False
+
+    device = await session.get(Device, device_id)
+    if device is None or device.decommissioned_at is not None:
+        return False
+
+    snapshots = await latest_deploys(session, device_ids=[device_id])
+    snap = snapshots.get(device_id)
+    if (
+        snap is None
+        or snap.state != "requested"
+        or snap.is_terminal
+        or not snap.artifact_version
+        or not snap.cmd_id
+    ):
+        return False
+
+    _, found_artifact = await _resolve(session, device_id, snap.artifact_version)
+    if found_artifact is None:
+        return False
+
+    tx = await deploy_transaction(session, device_id=device_id, cmd_id=snap.cmd_id)
+    apply_mode = tx.apply if tx is not None and tx.apply else "auto"
+    url = _artifact_url(
+        found_artifact.sha256,
+        settings,
+        ttl_s=effective_url_ttl_s(device, settings),
+    )
+    payload = stage_payload(
+        cmd_id=snap.cmd_id,
+        url=url,
+        sha256=found_artifact.sha256,
+        size=found_artifact.size_bytes,
+        version=snap.artifact_version,
+        apply=apply_mode,
+        confirm_timeout_s=settings.confirm_timeout_s,
+        sig=found_artifact.sig,
+        artifact_type=found_artifact.artifact_type,
+    )
+    await publisher.publish(device_id, payload)
+    return True

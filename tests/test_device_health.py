@@ -802,8 +802,7 @@ async def test_the_sweep_purges_revoked_and_expired_tokens_after_90_days(
     result = await retention.sweep(session, now=NOW)
     assert result.tokens == 4
     enrollment_ids = {
-        str(r)
-        for r in (await session.scalars(text("SELECT id FROM enrollment_tokens"))).all()
+        str(r) for r in (await session.scalars(text("SELECT id FROM enrollment_tokens"))).all()
     }
     assert enrollment_ids == {
         "00000000-0000-4000-8000-000000000103",

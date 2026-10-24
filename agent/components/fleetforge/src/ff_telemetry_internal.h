@@ -7,6 +7,8 @@
 
 #pragma once
 
+#include <stddef.h>
+
 #include "ff_telemetry.h"
 #include "mqtt_client.h"
 
@@ -28,6 +30,10 @@ void ff_telemetry_session_down(void);
  * never wakes the flush task (a loop asking every pass would otherwise publish one payload
  * per pass). */
 bool ff_telemetry_drained(void);
+
+/* CUJ-3: Drain one JSON batch (`{"dropped":...,"samples":[...]}`) of unsent `age_ms`
+ * telemetry samples over USB-C dock (`link_type: "dock"`) and advance `s_unsent`. */
+int ff_telemetry_drain_json(char *buf, size_t cap);
 
 #ifdef __cplusplus
 }

@@ -78,6 +78,7 @@ MERGED_BINARY = "merged_binary"  # refused at upload, not by refusals()
 ROLLBACK_INCAPABLE = "rollback_incapable"
 NO_LIBRARY_MARKER = "no_library_marker"
 NO_APPLY_CAPABILITY = "no_apply_capability"
+NO_CARGO_CAPABILITY = "no_cargo_capability"
 
 # The warnings `/deploy` enforces unless `override` names them, in the order they are
 # raised. `api/schemas.py`'s `OverrideCode` literal is kept equal to this by
@@ -109,6 +110,9 @@ class ResolvedArtifact:
     has_lib_marker: bool | None
     # R6-SEC-1: detached ECDSA P-256 signature (`ecdsa-p256-sha256:<base64>`) if signed.
     sig: str | None = None
+    # H5 / R7-cargo-1: payload cargo type (`app`, `mcu_fw`, `model_weights`, `fpga_bitstream`,
+    # `data_partition`, ...). Default `"app"` preserves every existing constructor.
+    artifact_type: str = "app"
 
 
 @dataclass(frozen=True, slots=True)
@@ -230,6 +234,7 @@ def refusals(
     layout = device.partition_layout
     effective = catalog.resolve(layout, device.partition_table_sha256)
     unsupported = layout is not None and effective is None
+    is_non_app = artifact is not None and artifact.artifact_type != "app"
 
     if artifact is None:
         found.append(
@@ -240,56 +245,57 @@ def refusals(
                 f"built for {device.platform_type} under that version.",
             )
         )
-    if unsupported:
-        found.append(_unsupported_layout(device, artifact, version, catalog))
-    if artifact is not None:
-        if (
-            not unsupported
-            and effective is not None
-            and artifact.partition_layout is not None
-            and effective != artifact.partition_layout
-        ):
-            found.append(
-                Finding(
-                    LAYOUT_MISMATCH,
-                    f"this device runs partition layout {effective} and "
-                    f"{version} was built for {artifact.partition_layout}. "
-                    "An image written into the wrong partition table does not boot.",
+    if not is_non_app:
+        if unsupported:
+            found.append(_unsupported_layout(device, artifact, version, catalog))
+        if artifact is not None:
+            if (
+                not unsupported
+                and effective is not None
+                and artifact.partition_layout is not None
+                and effective != artifact.partition_layout
+            ):
+                found.append(
+                    Finding(
+                        LAYOUT_MISMATCH,
+                        f"this device runs partition layout {effective} and "
+                        f"{version} was built for {artifact.partition_layout}. "
+                        "An image written into the wrong partition table does not boot.",
+                    )
                 )
-            )
-        if device.ota_slot_size is not None and artifact.size_bytes > device.ota_slot_size:
-            found.append(
-                Finding(
-                    SLOT_TOO_SMALL,
-                    f"{version} is {artifact.size_bytes} bytes and this device's OTA slot "
-                    f"is {device.ota_slot_size}. The image must fit the slot it is "
-                    "written into.",
+            if device.ota_slot_size is not None and artifact.size_bytes > device.ota_slot_size:
+                found.append(
+                    Finding(
+                        SLOT_TOO_SMALL,
+                        f"{version} is {artifact.size_bytes} bytes and this device's OTA slot "
+                        f"is {device.ota_slot_size}. The image must fit the slot it is "
+                        "written into.",
+                    )
                 )
-            )
 
-    announced = device.partition_table_sha256
-    profile = catalog.layouts.get(layout) if layout is not None else None
-    if announced is not None and layout is not None and profile is not None:
-        expected = profile.partition_table_sha256
-        if expected is None:
-            logger.info(
-                "device %s announces a partition table fingerprint for layout %s, which has "
-                "no known fingerprint; not checked",
-                device.device_id,
-                layout,
-            )
-        elif announced != expected:
-            found.append(
-                Finding(
-                    PARTITION_TABLE_MISMATCH,
-                    f"this device announces partition layout {layout} but its partition "
-                    f"table fingerprint is {announced}, not the {expected} that {layout} "
-                    "has. The device disagrees with its profile, so an image built for "
-                    f"{layout} could be written over the wrong partitions. {layout} has two "
-                    f"OTA slots of {profile.ota_slot_size} bytes each. A partition table "
-                    f"never changes over the air: {_fix_for([layout])}",
+        announced = device.partition_table_sha256
+        profile = catalog.layouts.get(layout) if layout is not None else None
+        if announced is not None and layout is not None and profile is not None:
+            expected = profile.partition_table_sha256
+            if expected is None:
+                logger.info(
+                    "device %s announces a partition table fingerprint for layout %s, which has "
+                    "no known fingerprint; not checked",
+                    device.device_id,
+                    layout,
                 )
-            )
+            elif announced != expected:
+                found.append(
+                    Finding(
+                        PARTITION_TABLE_MISMATCH,
+                        f"this device announces partition layout {layout} but its partition "
+                        f"table fingerprint is {announced}, not the {expected} that {layout} "
+                        "has. The device disagrees with its profile, so an image built for "
+                        f"{layout} could be written over the wrong partitions. {layout} has two "
+                        f"OTA slots of {profile.ota_slot_size} bytes each. A partition table "
+                        f"never changes over the air: {_fix_for([layout])}",
+                    )
+                )
 
     if OTA_CAPABILITY not in device.capabilities:
         found.append(
@@ -297,6 +303,15 @@ def refusals(
                 NO_OTA_CAPABILITY,
                 "this device did not announce the `ota` capability, so it has no agent "
                 "that can stage an update. It announced: "
+                f"{', '.join(device.capabilities) or 'nothing'}.",
+            )
+        )
+    if is_non_app and artifact is not None and artifact.artifact_type not in device.capabilities:
+        found.append(
+            Finding(
+                NO_CARGO_CAPABILITY,
+                f"this device did not announce the `{artifact.artifact_type}` capability, so it "
+                f"has no handler for `{artifact.artifact_type}` cargo. It announced: "
                 f"{', '.join(device.capabilities) or 'nothing'}.",
             )
         )

@@ -68,6 +68,7 @@ typedef struct {
     char sig[FF_OTA_MAX_SIG]; /* R6-SEC-1: ecdsa-p256-sha256:<base64>, or empty when unsigned */
     size_t size;            /* bytes, from the command; 0 = the server did not say */
     char version[32];       /* the artifact's version, for the log only */
+    char type[32];          /* H5 / R7-cargo-1: artifact.type ("app" default, or cargo type) */
     bool apply_now;         /* false only for `apply: "on_command"` */
     /* R5-fw-3: the command's deadline, already clamped by on_stage (30-3600 s;
      * CONFIRM_TIMEOUT_S when absent). ff_ota only records it. */
@@ -147,6 +148,23 @@ esp_err_t ff_ota_cancel(const char *cmd_id, bool *reported);
  * no NVS, no otadata, no log. A staged update whose task has ended answers false: the boot
  * pointer on another slot says that one (ff_sleep.c checks it). */
 bool ff_ota_in_flight(void);
+
+/* H5 / R7-cargo-1: Pluggable non-app cargo handler (`artifact.type` != "app").
+ * Streams downloaded chunks to `write_cb(offset, data, len, ctx)` and invokes
+ * `finish_cb(total_bytes, sha256_hex, version, ctx)` only AFTER the full stream's
+ * SHA-256 and ECDSA P-256 signature have been verified. */
+typedef esp_err_t (*ff_cargo_write_fn_t)(size_t offset, const uint8_t *data, size_t len, void *ctx);
+typedef esp_err_t (*ff_cargo_finish_fn_t)(size_t total_bytes, const char *sha256_hex,
+                                          const char *version, void *ctx);
+
+esp_err_t ff_ota_register_cargo_handler(const char *type, ff_cargo_write_fn_t write_cb,
+                                        ff_cargo_finish_fn_t finish_cb, void *ctx);
+
+/* CUJ-3: Stage a signed `app` image or non-`app` `data_partition` cargo delivered over
+ * tethered USB-C dock (`link_type: "dock"`), enforcing `choose_target_slot`, `ota_slot_size`,
+ * SHA-256 read-back verification, `verify_artifact_signature` against the 2-key ECDSA P-256
+ * rotation ring, and `ff_safe_window_is_safe()`. */
+esp_err_t ff_ota_dock_stage(const ff_ota_cmd_t *cmd, const uint8_t *data, size_t len);
 
 #ifdef __cplusplus
 }

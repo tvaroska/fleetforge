@@ -396,6 +396,8 @@ static volatile bool s_checked_in;
 /* CUJ-2: retained dn/cfg stay_awake flag. Holds ff_ready_for_sleep() false during active
  * development iteration without reflashing. */
 static volatile bool s_stay_awake;
+/* CUJ-3: Venue Offline Mode flag. */
+static volatile bool s_venue_offline;
 
 /* R5-fw-2. `selftest failed: <reason>`, with the reason (already printable ASCII without `;`,
  * ff_selftest.c) shortened so that the returned-to image's `<head>; returned to <slot>` fits
@@ -1327,6 +1329,19 @@ static void on_stage(const cJSON *root, const char *id)
     }
     /* Optional, and only ever logged. */
     (void)take_string(artifact, "version", cmd.version, sizeof(cmd.version));
+
+    /* H5 / R7-cargo-1: `artifact.type` defaults to "app" when omitted. */
+    switch (take_string(artifact, "type", cmd.type, sizeof(cmd.type))) {
+    case FIELD_OK:
+        break;
+    case FIELD_MISSING:
+        strlcpy(cmd.type, "app", sizeof(cmd.type));
+        break;
+    case FIELD_TOO_LONG:
+        ff_mqtt_publish_status(cmd.cmd_id, FF_STATUS_FAILED, FF_STATUS_PCT_NONE,
+                               "artifact type malformed");
+        return;
+    }
 
     const cJSON *size = cJSON_GetObjectItemCaseSensitive(artifact, "size");
     if (cJSON_IsNumber(size) && size->valuedouble > 0) {
@@ -2307,4 +2322,69 @@ const char *ff_mqtt_sleep_blocker(void)
         return "messages await their PUBACK";
     }
     return NULL;
+}
+
+esp_err_t ff_mqtt_register_cargo_type(const char *type)
+{
+    return ff_identity_note_cargo_type(type);
+}
+
+void ff_mqtt_complete_cargo(const char *cmd_id, const char *type, const char *version)
+{
+    if (cmd_id == NULL || cmd_id[0] == '\0' || type == NULL || type[0] == '\0') {
+        return;
+    }
+    if (version != NULL && version[0] != '\0') {
+        (void)ff_identity_set_sub_version(type, version);
+        if (s_ctx.client != NULL && s_ctx.cfg != NULL) {
+            char *announce = ff_identity_announce_json(s_ctx.cfg);
+            if (announce != NULL) {
+                (void)esp_mqtt_client_publish(s_ctx.client, s_ctx.topic_announce, announce, 0, QOS,
+                                              1);
+                free(announce);
+            }
+        }
+    }
+    ff_mqtt_publish_status(cmd_id, FF_STATUS_CONFIRMING, FF_STATUS_PCT_NONE, NULL);
+    ff_mqtt_publish_status(cmd_id, FF_STATUS_CONFIRMED, 100, NULL);
+}
+
+void ff_mqtt_set_offline_mode(bool offline)
+{
+    s_venue_offline = offline;
+    if (offline && (pending_verify() || s_txn.kind == TXN_BOOTED_NEW)) {
+        (void)ff_mqtt_confirm_offline();
+    }
+}
+
+esp_err_t ff_mqtt_confirm_offline(void)
+{
+    const bool selftest_reg = (ff_selftest_freeze)();
+    (&s_selftest_registered)[0] = selftest_reg;
+    (ff_identity_note_selftest)(selftest_reg);
+    (ff_identity_note_safe_window)((ff_safe_window_freeze)());
+    ff_txn_init();
+    classify_txn();
+
+    if (!pending_verify() && s_txn.kind != TXN_BOOTED_NEW) {
+        return ESP_OK;
+    }
+    if (s_rollback_decided) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (s_selftest_registered) {
+        if (s_txn.kind == TXN_CONFIRMING) {
+            (void)(ff_txn_set_detail)(s_txn.cmd_id, DETAIL_SELFTEST_TIMED_OUT);
+        }
+        return (ff_selftest_run)(selftest_done);
+    }
+    if (confirm_this_image() && s_txn.kind == TXN_CONFIRMING) {
+        s_txn.kind = TXN_ALREADY_CONFIRMED;
+        return ESP_OK;
+    }
+    if (s_txn.kind == TXN_BOOTED_NEW && accept_unverified_image()) {
+        s_txn.kind = TXN_ALREADY_CONFIRMED;
+        return ESP_OK;
+    }
+    return ESP_OK;
 }

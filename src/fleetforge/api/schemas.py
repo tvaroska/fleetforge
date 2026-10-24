@@ -27,6 +27,7 @@ from fleetforge.announce_fields import (
     normalize_partition_table_sha256,
     normalize_rollback_capable,
     normalize_ssid,
+    normalize_sub_versions,
 )
 from fleetforge.auth.enrollment import EnrollmentTokenStatus
 from fleetforge.auth.tokens import MAX_TOKEN_LENGTH
@@ -477,6 +478,7 @@ class EnrollRequest(BaseModel):
     partition_table_sha256: str | None = None
     rollback_capable: bool | None = None
     capabilities: list[str] = Field(default_factory=list, max_length=32)
+    sub_versions: dict[str, str] | None = None
 
     @field_validator("device_id", "parent_device_id")
     @classmethod
@@ -520,6 +522,12 @@ class EnrollRequest(BaseModel):
     def _usable_rollback_capable(cls, value: object, info: ValidationInfo) -> bool | None:
         """A real JSON boolean, or `None` — never a 422, and `"true"` is not coerced."""
         return normalize_rollback_capable(value, device_id=_logged_device_id(info))
+
+    @field_validator("sub_versions", mode="before")
+    @classmethod
+    def _usable_sub_versions(cls, value: object, info: ValidationInfo) -> dict[str, str] | None:
+        """A 1-level `{component: version}` map, or `None` — never a 422."""
+        return normalize_sub_versions(value, device_id=_logged_device_id(info))
 
     @field_validator("power_class")
     @classmethod
@@ -666,6 +674,7 @@ class DeviceSummary(BaseModel):
     is_dev: bool = False
     stay_awake: bool = False
     secrets_rev: int | None = None
+    sub_versions: dict[str, str] | None = None
     # The newest deploy transaction's current state, or `None` for a board that has
     # never been deployed to. Rides on this response for the same reason `arrivals`
     # does — see `DeploySummary` and `routers/devices.py`.
@@ -747,6 +756,35 @@ class TelemetrySeries(BaseModel):
     device_id: str
     name: str
     samples: list[TelemetryPoint]
+
+
+class DockSyncRequest(BaseModel):
+    """`POST /v1/devices/{device_id}/dock-sync` (CUJ-3): USB-C dock offline bundle sync.
+
+    Carries the pit-docked device's `announce` snapshot (`link_type: "dock"`), any offline
+    `up/status` deploy transitions (`confirming` -> `confirmed`, `rolling_back` -> `rolled_back`),
+    and the drained `up/telemetry` and `up/log` ring-buffer batches with relative `age_ms`.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    announce: dict[str, Any] | None = None
+    statuses: list[dict[str, Any]] = Field(default_factory=list, max_length=64)
+    telemetry: list[dict[str, Any]] = Field(default_factory=list, max_length=64)
+    logs: list[dict[str, Any]] = Field(default_factory=list, max_length=64)
+
+
+class DockSyncResponse(BaseModel):
+    """Summary of what `POST /v1/devices/{device_id}/dock-sync` ingested."""
+
+    device_id: str
+    link_type: str
+    fw_version: str | None
+    sub_versions: dict[str, str] | None = None
+    statuses_recorded: int
+    telemetry_batches_recorded: int
+    log_batches_recorded: int
+    device: DeviceSummary
 
 
 class DeployStep(BaseModel):
@@ -1036,9 +1074,10 @@ class ArtifactUploaded(BaseModel):
     size_bytes: int
     target: str
     version: str
-    partition_layout: str
+    partition_layout: str | None = None
     created: bool
-    has_lib_marker: bool
+    has_lib_marker: bool | None = None
+    artifact_type: str = "app"
     sig: str | None = None
     repo_url: str | None = None
     branch: str | None = None
@@ -1051,7 +1090,12 @@ class ArtifactUploaded(BaseModel):
     @model_serializer(mode="wrap")
     def _omit_unset_ci_fields(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
         data = handler(self)
-        return {k: v for k, v in data.items() if k not in _CI_OPTIONAL_FIELDS or v is not None}
+        return {
+            k: v
+            for k, v in data.items()
+            if (k not in _CI_OPTIONAL_FIELDS or v is not None)
+            and not (k == "artifact_type" and v in (None, "app"))
+        }
 
 
 class ArtifactSummary(BaseModel):
@@ -1080,6 +1124,7 @@ class ArtifactSummary(BaseModel):
     partition_layout: str | None
     kind: str
     created_at: dt.datetime
+    artifact_type: str = "app"
     sig: str | None = None
     repo_url: str | None = None
     branch: str | None = None
@@ -1091,7 +1136,12 @@ class ArtifactSummary(BaseModel):
     @model_serializer(mode="wrap")
     def _omit_unset_ci_fields(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
         data = handler(self)
-        return {k: v for k, v in data.items() if k not in _CI_OPTIONAL_FIELDS or v is not None}
+        return {
+            k: v
+            for k, v in data.items()
+            if (k not in _CI_OPTIONAL_FIELDS or v is not None)
+            and not (k == "artifact_type" and v in (None, "app"))
+        }
 
 
 class ArtifactList(BaseModel):
@@ -1208,6 +1258,32 @@ class ProjectDeployAccepted(BaseModel):
     version: str
     target_filter: str
     deployed: list[DeployAccepted]
+    skipped: dict[str, str] = Field(default_factory=dict)
+
+
+class ProjectDeployCancelRequest(BaseModel):
+    """`POST /v1/projects/{slug}/deploy/cancel`: cancel in-flight pre-apply deploys in a cohort."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    version: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=64,
+        description="Optional version filter; when omitted, cancels any in-flight pre-apply deploy",
+    )
+    target_filter: Literal["all", "dev"] = "all"
+    group_id: uuid.UUID | None = Field(
+        default=None,
+        description="Optional device_groups.id cohort filter within the project",
+    )
+
+
+class ProjectDeployCancelAccepted(BaseModel):
+    """What `POST /v1/projects/{slug}/deploy/cancel` returns with 202."""
+
+    project: str
+    cancelled: list[CommandAccepted]
     skipped: dict[str, str] = Field(default_factory=dict)
 
 

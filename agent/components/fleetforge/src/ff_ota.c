@@ -374,7 +374,9 @@ static esp_err_t ota_http_client_init_cb(esp_http_client_handle_t client)
 {
     s_ota_http_client = client;
     if (s_resume_range_hdr[0] != '\0') {
-        return esp_http_client_set_header(client, "Range", s_resume_range_hdr);
+        esp_err_t err = esp_http_client_set_header(client, "Range", s_resume_range_hdr);
+        s_resume_range_hdr[0] = '\0';
+        return err;
     }
     return ESP_OK;
 }
@@ -391,8 +393,17 @@ static esp_err_t resume_range_perform(esp_https_ota_handle_t handle, const ff_ot
         }
         uint32_t delay_ms = (uint32_t)OTA_RETRY_BASE_MS << attempt;
         int offset = esp_https_ota_get_image_len_read(handle);
+        int start = offset > 0 ? offset : 0;
         char range_hdr[48];
-        snprintf(range_hdr, sizeof(range_hdr), "bytes=%d-", offset > 0 ? offset : 0);
+        if (cmd->size > 0 && (uint32_t)start < cmd->size) {
+            uint32_t end = (uint32_t)start + (uint32_t)OTA_RANGE_CHUNK_BYTES - 1U;
+            if (end >= cmd->size) {
+                end = cmd->size - 1U;
+            }
+            snprintf(range_hdr, sizeof(range_hdr), "bytes=%d-%" PRIu32, start, end);
+        } else {
+            snprintf(range_hdr, sizeof(range_hdr), "bytes=%d-", start);
+        }
         memcpy(s_resume_range_hdr, range_hdr, sizeof(s_resume_range_hdr));
         ESP_LOGW(TAG, "update %s: transient transfer fault at %d bytes; retry %d/%d in %" PRIu32
                       " ms (%s)",
@@ -405,6 +416,8 @@ static esp_err_t resume_range_perform(esp_https_ota_handle_t handle, const ff_ot
         if (s_ota_http_client != NULL) {
             (void)esp_http_client_close(s_ota_http_client);
             (void)esp_http_client_set_header(s_ota_http_client, "Range", s_resume_range_hdr);
+            /* Consume once so subsequent partial_http_download chunks use IDF's advancing range. */
+            s_resume_range_hdr[0] = '\0';
             esp_err_t open_err = esp_http_client_open(s_ota_http_client, 0);
             if (open_err != ESP_OK) {
                 err = open_err;
@@ -737,6 +750,187 @@ static const esp_partition_t *choose_target_slot(const ff_ota_cmd_t *cmd)
     return target;
 }
 
+/* H5 / R7-cargo-1: Pluggable non-app cargo handlers (`mcu_fw`, `model_weights`, etc.). */
+#define OTA_MAX_CARGO_HANDLERS 8
+typedef struct {
+    char type[32];
+    ff_cargo_write_fn_t write_cb;
+    ff_cargo_finish_fn_t finish_cb;
+    void *ctx;
+} ff_cargo_handler_t;
+
+static ff_cargo_handler_t s_cargo_handlers[OTA_MAX_CARGO_HANDLERS];
+static size_t s_cargo_handler_count;
+
+esp_err_t ff_ota_register_cargo_handler(const char *type, ff_cargo_write_fn_t write_cb,
+                                        ff_cargo_finish_fn_t finish_cb, void *ctx)
+{
+    if (type == NULL || type[0] == '\0' || strcmp(type, "app") == 0 || write_cb == NULL ||
+        finish_cb == NULL || strlen(type) >= sizeof(s_cargo_handlers[0].type)) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    for (size_t i = 0; i < s_cargo_handler_count; i++) {
+        if (strcmp(s_cargo_handlers[i].type, type) == 0) {
+            s_cargo_handlers[i].write_cb = write_cb;
+            s_cargo_handlers[i].finish_cb = finish_cb;
+            s_cargo_handlers[i].ctx = ctx;
+            return ff_mqtt_register_cargo_type(type);
+        }
+    }
+    if (s_cargo_handler_count >= OTA_MAX_CARGO_HANDLERS) {
+        return ESP_ERR_NO_MEM;
+    }
+    strlcpy(s_cargo_handlers[s_cargo_handler_count].type, type,
+            sizeof(s_cargo_handlers[0].type));
+    s_cargo_handlers[s_cargo_handler_count].write_cb = write_cb;
+    s_cargo_handlers[s_cargo_handler_count].finish_cb = finish_cb;
+    s_cargo_handlers[s_cargo_handler_count].ctx = ctx;
+    s_cargo_handler_count++;
+    return ff_mqtt_register_cargo_type(type);
+}
+
+static const ff_cargo_handler_t *find_cargo_handler(const char *type)
+{
+    for (size_t i = 0; i < s_cargo_handler_count; i++) {
+        if (strcmp(s_cargo_handlers[i].type, type) == 0) {
+            return &s_cargo_handlers[i];
+        }
+    }
+    return NULL;
+}
+
+static void run_cargo_ota(const ff_ota_cmd_t *cmd)
+{
+    const ff_cargo_handler_t *handler = find_cargo_handler(cmd->type);
+    if (handler == NULL) {
+        fail(cmd, "unsupported artifact type");
+        return;
+    }
+    char *resolved = malloc(OTA_RESOLVED_URL_MAX);
+    uint8_t *buf = malloc(OTA_READBACK_CHUNK);
+    if (resolved == NULL || buf == NULL) {
+        free(resolved);
+        free(buf);
+        fail(cmd, "out of memory");
+        return;
+    }
+    if (resolve_artifact_url(cmd->url, resolved) != ESP_OK) {
+        free(resolved);
+        free(buf);
+        fail(cmd, "cannot open the artifact");
+        return;
+    }
+    if (cancel_requested()) {
+        free(resolved);
+        free(buf);
+        report_cancelled(cmd);
+        return;
+    }
+
+    esp_http_client_config_t http = {
+        .url = resolved,
+        .method = HTTP_METHOD_GET,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .timeout_ms = OTA_HTTP_TIMEOUT_MS,
+        .keep_alive_enable = true,
+        .buffer_size = OTA_HTTP_RX_BUFFER,
+        .buffer_size_tx = OTA_HTTP_TX_BUFFER,
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&http);
+    if (client == NULL || esp_http_client_open(client, 0) != ESP_OK ||
+        esp_http_client_fetch_headers(client) < 0) {
+        if (client != NULL) {
+            esp_http_client_close(client);
+            esp_http_client_cleanup(client);
+        }
+        free(resolved);
+        free(buf);
+        fail(cmd, "cannot open the artifact");
+        return;
+    }
+
+    ff_mqtt_publish_status(cmd->cmd_id, FF_STATUS_DOWNLOADING, 0, NULL);
+
+    mbedtls_sha256_context sha;
+    mbedtls_sha256_init(&sha);
+    (void)mbedtls_sha256_starts(&sha, 0);
+
+    size_t total = 0;
+    bool download_failed = false;
+    bool cancelled = false;
+    for (;;) {
+        if (cancel_requested()) {
+            cancelled = true;
+            break;
+        }
+        int r = esp_http_client_read(client, (char *)buf, OTA_READBACK_CHUNK);
+        if (r < 0) {
+            download_failed = true;
+            break;
+        }
+        if (r == 0) {
+            if (esp_http_client_is_complete_data_received(client)) {
+                break;
+            }
+            download_failed = true;
+            break;
+        }
+        if (mbedtls_sha256_update(&sha, buf, (size_t)r) != 0 ||
+            handler->write_cb(total, buf, (size_t)r, handler->ctx) != ESP_OK) {
+            download_failed = true;
+            break;
+        }
+        total += (size_t)r;
+    }
+
+    esp_http_client_close(client);
+    esp_http_client_cleanup(client);
+    free(resolved);
+    free(buf);
+
+    uint8_t digest_raw[32];
+    (void)mbedtls_sha256_finish(&sha, digest_raw);
+    mbedtls_sha256_free(&sha);
+
+    if (cancelled) {
+        report_cancelled(cmd);
+        return;
+    }
+    if (download_failed) {
+        fail(cmd, "download failed");
+        return;
+    }
+    if (cmd->size != 0 && total != cmd->size) {
+        fail(cmd, "size mismatch");
+        return;
+    }
+
+    ff_mqtt_publish_status(cmd->cmd_id, FF_STATUS_VERIFYING, FF_STATUS_PCT_NONE, NULL);
+    char digest_hex[65];
+    hex_encode(digest_raw, sizeof(digest_raw), digest_hex);
+    if (strcmp(digest_hex, cmd->sha256) != 0) {
+        fail(cmd, "sha256 mismatch");
+        return;
+    }
+    const char *sig_detail = "signature invalid";
+    if (!verify_artifact_signature(digest_raw, cmd->sig, &sig_detail)) {
+        fail(cmd, sig_detail);
+        return;
+    }
+    if (cancel_requested()) {
+        report_cancelled(cmd);
+        return;
+    }
+
+    ff_mqtt_publish_status(cmd->cmd_id, FF_STATUS_STAGED, 100, NULL);
+    ff_mqtt_publish_status(cmd->cmd_id, FF_STATUS_APPLYING, 100, NULL);
+    if (handler->finish_cb(total, digest_hex, cmd->version, handler->ctx) != ESP_OK) {
+        fail(cmd, "cargo apply failed");
+        return;
+    }
+    ff_mqtt_complete_cargo(cmd->cmd_id, cmd->type, cmd->version);
+}
+
 static void ota_task(void *arg)
 {
     ff_ota_cmd_t *cmd = (ff_ota_cmd_t *)arg;
@@ -745,6 +939,11 @@ static void ota_task(void *arg)
     ESP_LOGI(TAG, "update %s: staging version %s (%u bytes, sha256 %s)", cmd->cmd_id,
              cmd->version[0] != '\0' ? cmd->version : "?", (unsigned)cmd->size, cmd->sha256);
     ff_mqtt_publish_status(cmd->cmd_id, FF_STATUS_STAGING, 0, NULL);
+
+    if (cmd->type[0] != '\0' && strcmp(cmd->type, "app") != 0) {
+        run_cargo_ota(cmd);
+        goto done;
+    }
 
     /* The slot the download lands in, chosen ONCE and before any I/O (property 5). The
      * same pointer goes to esp_https_ota below, is hashed, switched to and recorded. It is
@@ -1329,4 +1528,120 @@ bool ff_ota_in_flight(void)
     const bool in_flight = s_running;
     portEXIT_CRITICAL(&s_cancel_lock);
     return in_flight;
+}
+
+esp_err_t ff_ota_dock_stage(const ff_ota_cmd_t *cmd, const uint8_t *data, size_t len)
+{
+    if (cmd == NULL || data == NULL || len == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (s_running) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    ff_mqtt_publish_status(cmd->cmd_id, FF_STATUS_STAGING, 0, NULL);
+    if (cmd->size != 0 && len != cmd->size) {
+        fail(cmd, "size mismatch");
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    if (cmd->type[0] != '\0' && strcmp(cmd->type, "app") != 0) {
+        const ff_cargo_handler_t *handler = find_cargo_handler(cmd->type);
+        if (handler == NULL) {
+            fail(cmd, "unsupported artifact type");
+            return ESP_ERR_NOT_SUPPORTED;
+        }
+        ff_mqtt_publish_status(cmd->cmd_id, FF_STATUS_DOWNLOADING, 0, NULL);
+        if (handler->write_cb(0, data, len, handler->ctx) != ESP_OK) {
+            fail(cmd, "download failed");
+            return ESP_FAIL;
+        }
+        uint8_t digest_raw[32];
+        mbedtls_sha256_context sha;
+        mbedtls_sha256_init(&sha);
+        (void)mbedtls_sha256_starts(&sha, 0);
+        (void)mbedtls_sha256_update(&sha, data, len);
+        (void)mbedtls_sha256_finish(&sha, digest_raw);
+        mbedtls_sha256_free(&sha);
+
+        ff_mqtt_publish_status(cmd->cmd_id, FF_STATUS_VERIFYING, FF_STATUS_PCT_NONE, NULL);
+        char digest_hex[65];
+        hex_encode(digest_raw, sizeof(digest_raw), digest_hex);
+        if (strcmp(digest_hex, cmd->sha256) != 0) {
+            fail(cmd, "sha256 mismatch");
+            return ESP_ERR_INVALID_CRC;
+        }
+        const char *sig_detail = "signature invalid";
+        if (!verify_artifact_signature(digest_raw, cmd->sig, &sig_detail)) {
+            fail(cmd, sig_detail);
+            return ESP_ERR_INVALID_STATE;
+        }
+        ff_mqtt_publish_status(cmd->cmd_id, FF_STATUS_STAGED, 100, NULL);
+        ff_mqtt_publish_status(cmd->cmd_id, FF_STATUS_APPLYING, 100, NULL);
+        if (handler->finish_cb(len, digest_hex, cmd->version, handler->ctx) != ESP_OK) {
+            fail(cmd, "cargo apply failed");
+            return ESP_FAIL;
+        }
+        ff_mqtt_complete_cargo(cmd->cmd_id, cmd->type, cmd->version);
+        return ESP_OK;
+    }
+
+    const esp_partition_t *target = choose_target_slot(cmd);
+    if (target == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (len > target->size) {
+        fail(cmd, "artifact larger than the ota slot");
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    esp_ota_handle_t ota_handle = 0;
+    if (esp_ota_begin(target, len, &ota_handle) != ESP_OK) {
+        fail(cmd, "cannot open the artifact");
+        return ESP_FAIL;
+    }
+    ff_mqtt_publish_status(cmd->cmd_id, FF_STATUS_DOWNLOADING, 0, NULL);
+    if (esp_ota_write(ota_handle, data, len) != ESP_OK) {
+        (void)esp_ota_abort(ota_handle);
+        fail(cmd, "download failed");
+        return ESP_FAIL;
+    }
+
+    ff_mqtt_publish_status(cmd->cmd_id, FF_STATUS_VERIFYING, FF_STATUS_PCT_NONE, NULL);
+    char digest[65];
+    uint8_t digest_raw[32];
+    if (partition_digest(target, len, digest, digest_raw) != ESP_OK) {
+        (void)esp_ota_abort(ota_handle);
+        fail(cmd, "cannot verify the staged image");
+        return ESP_FAIL;
+    }
+    if (strcmp(digest, cmd->sha256) != 0) {
+        (void)esp_ota_abort(ota_handle);
+        fail(cmd, "sha256 mismatch");
+        return ESP_ERR_INVALID_CRC;
+    }
+    const char *sig_detail = "signature invalid";
+    if (!verify_artifact_signature(digest_raw, cmd->sig, &sig_detail)) {
+        (void)esp_ota_abort(ota_handle);
+        fail(cmd, sig_detail);
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (esp_ota_end(ota_handle) != ESP_OK || (esp_ota_set_boot_partition)(target) != ESP_OK) {
+        fail(cmd, "cannot finish the update");
+        (void)(restore_boot_partition)(WHY_REJECTED);
+        return ESP_FAIL;
+    }
+    (void)(ff_txn_save)(cmd->cmd_id, target->address, cmd->confirm_timeout_s);
+    ff_mqtt_publish_status(cmd->cmd_id, FF_STATUS_STAGED, 100, NULL);
+    if (!cmd->apply_now) {
+        return ESP_OK;
+    }
+    if (!ff_safe_window_is_safe()) {
+        ff_mqtt_publish_status(cmd->cmd_id, FF_STATUS_AWAITING_SAFE_WINDOW, 100,
+                               FF_DETAIL_APPLY_WAITS);
+        return ESP_OK;
+    }
+    ff_mqtt_publish_status(cmd->cmd_id, FF_STATUS_APPLYING, 100, NULL);
+    ff_mqtt_publish_status(cmd->cmd_id, FF_STATUS_REBOOTING, 100, NULL);
+    return ESP_OK;
 }

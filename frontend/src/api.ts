@@ -91,6 +91,12 @@ export type ProjectDeployAccepted = {
   skipped: Record<string, string>
 }
 
+export type ProjectDeployCancelAccepted = {
+  project: string
+  cancelled: CommandAccepted[]
+  skipped: Record<string, string>
+}
+
 export type ProjectMemberSummary = {
   user_id: string
   username: string
@@ -248,6 +254,7 @@ export type DeviceSummary = {
   is_dev?: boolean
   stay_awake?: boolean
   secrets_rev?: number | null
+  sub_versions?: Record<string, string> | null
   deploy: DeploySummary | null
 }
 
@@ -436,6 +443,7 @@ export type ArtifactSummary = {
   size_bytes: number
   partition_layout: string | null
   kind: string
+  artifact_type?: string
   created_at: string
   sig?: string | null
   repo_url?: string | null
@@ -456,6 +464,7 @@ export type ArtifactUploaded = {
   target: string
   version: string
   partition_layout: string
+  artifact_type?: string
   created: boolean
   has_lib_marker?: boolean
   sig?: string | null
@@ -696,6 +705,16 @@ export const api = {
       body: JSON.stringify(patch),
     }),
 
+  decommissionDevice: (deviceId: string) =>
+    request<DeviceSummary>(`/v1/devices/${encodeURIComponent(deviceId)}/decommission`, {
+      method: 'POST',
+    }),
+
+  deleteDevice: (deviceId: string) =>
+    request<void>(`/v1/devices/${encodeURIComponent(deviceId)}`, {
+      method: 'DELETE',
+    }),
+
   // R4-fe-2. A board's log tail: admin-only, newest first, the last 7 days, at most `limit`
   // lines (server range 1..5000). The path is relative, like every other call here.
   deviceLogs: (deviceId: string, limit: number) =>
@@ -742,12 +761,21 @@ export const api = {
   // `content-type` key is what overrides `request()`'s JSON default.
   uploadArtifact: (
     file: Blob,
-    meta: { target: string; version: string; partitionLayout: string; project?: string },
+    meta: {
+      target: string
+      version: string
+      partitionLayout: string
+      artifactType?: string
+      project?: string
+    },
   ) => {
     const params: Record<string, string> = {
       target: meta.target,
       version: meta.version,
       partition_layout: meta.partitionLayout,
+    }
+    if (meta.artifactType && meta.artifactType !== 'app') {
+      params.artifact_type = meta.artifactType
     }
     if (meta.project && meta.project !== 'default') {
       params.project = meta.project
@@ -902,6 +930,19 @@ export const api = {
     },
   ) =>
     request<ProjectDeployAccepted>(`/v1/projects/${encodeURIComponent(slug)}/deploy`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  cancelProjectDeploy: (
+    slug: string,
+    body: {
+      version?: string | null
+      target_filter?: 'all' | 'dev'
+      group_id?: string | null
+    } = {},
+  ) =>
+    request<ProjectDeployCancelAccepted>(`/v1/projects/${encodeURIComponent(slug)}/deploy/cancel`, {
       method: 'POST',
       body: JSON.stringify(body),
     }),

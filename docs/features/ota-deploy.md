@@ -2372,3 +2372,21 @@ holds hundreds of rows and a full page is 30000 px tall.
 Observed, not changed: `artifacts` is keyed by sha256 with `ON CONFLICT DO NOTHING`, so the
 same bytes uploaded under a second label with another layout silently keep the first layout
 (the harness gives every build distinct bytes).
+
+## Wake-Aware Signed URLs, On-Wake Refresh & Companion Cargo (`v0.7.2+`, 2026-10-24)
+
+1. **Wake-Aware Signed URL TTL (`effective_url_ttl_s`) & On-Wake Refresh (`republish_open_requested_on_wake`):**
+   - A sleepy board (`power_class == "sleepy"`) with `expected_wake_interval_s` greater than the default 30-minute `SIGNED_URL_TTL_S` (e.g., an e-paper frame waking every 1–6 hours) would otherwise receive a queued QoS-1 `stage` command whose signed download URL had already expired (`403 Forbidden`).
+   - `effective_url_ttl_s(device, settings)` (`src/fleetforge/api/routers/deploys.py`) scales both the minted HMAC URL TTL and the open-transaction reuse window (`latest_open_transaction`) to `max(signed_url_ttl_s, 2 * expected_wake_interval_s + signed_url_ttl_s)` for sleepy boards.
+   - In addition, when `fleetforge-ingestor` (`src/fleetforge/ingestor/main.py::handle_message`) ingests a live (`not retain`) `up/announce` for a device whose newest deploy state is still `requested`, `republish_open_requested_on_wake` mints a fresh signed URL and re-publishes the `stage` command with the same `cmd_id` (preserving device-side `cmd_id` deduplication).
+2. **Non-`app` Companion Cargo (`artifact_type`) & `sub_versions` (`alembic/versions/0013_artifact_type.py`):**
+   - `POST /v1/artifact?artifact_type=<type>` supports `app` (default), `mcu_fw`, `model_weights`, `fpga_bitstream`, and `data_partition`. Non-`app` cargo bypasses ESP32 `ota_slot_size`, merged-image `0xE9` header, and `FFOTALIB` marker gates, and is guarded at precheck/deploy time by `NO_CARGO_CAPABILITY` (`deploy_precheck.py`), requiring the target board to announce `<artifact_type>` in `capabilities`.
+   - On the device (`agent/components/fleetforge/src/ff_ota.c` and `src/fleetforge/simulator/device.py`), `ff_ota_register_cargo_handler(type, write_cb, finish_cb, ctx)` streams and verifies SHA-256 + ECDSA P-256 signatures for non-`app` cargo, invokes the registered handler, updates `sub_versions[type] = version` (`ff_identity_set_sub_version`), and completes the transaction (`confirming` → `confirmed` via `ff_mqtt_complete_cargo`) without rebooting or overwriting `fw_version`.
+   - `devices.sub_versions` (`JSONB`) is persisted across `up/announce` and `POST /v1/enroll` (`normalize_sub_versions` in `src/fleetforge/announce_fields.py`) and returned on `GET /v1/devices` (`DeviceSummary.sub_versions`).
+3. **Venue Offline Mode, Local `PENDING_VERIFY` Confirm & Tethered USB-C Dock Stage (`CUJ-3`, 2026-10-24):**
+   - `ff_set_offline_mode(bool)` (`include/ff_sec.h`, `src/ff_net.c`, `src/ff_net_wifi.c`, `src/ff_mqtt.c`) and `Fleetforge.setOfflineMode(bool)` hard-disable `802.11` Wi-Fi (`esp_wifi_stop()`) and Improv BLE (`ff_net_wifi_set_improv_ble_enabled(false)` + `ble_hs_synced()` guard) so competition nodes (`FLUX-10413-Hub`) never transmit `802.11` inside RF-restricted venues or clobber a shared NimBLE GATT server.
+   - `ff_mqtt_confirm_offline()` (`src/ff_mqtt.c`) evaluates `ff_selftest_run()` locally when a board boots into `ESP_OTA_IMG_PENDING_VERIFY` while offline or dock-staged, marking the slot valid (`esp_ota_mark_app_valid_cancel_rollback()`) on pass or triggering immediate rollback (`esp_ota_mark_app_invalid_rollback_and_reboot()`) on fail without waiting for an MQTT `PUBACK`.
+   - `ff_ota_dock_stage(const ff_ota_cmd_t *cmd, const uint8_t *data, size_t len)` (`src/ff_ota.h`, `src/ff_ota.c`) stages signed `app` images and non-`app` `data_partition` cargo over USB-C (`link_type: "dock"`), enforcing SHA-256 + ECDSA P-256 verification, `choose_target_slot`, `ota_slot_size`, and `ff_safe_window_is_safe()`.
+   - When the pit laptop returns to shop/hotel Wi-Fi, `POST /v1/devices/{device_id}/dock-sync` (`src/fleetforge/api/routers/devices.py`) and `fleetforge dock-sync <device_id> <bundle.json>` (`src/fleetforge/cli.py`) replay the drained `announce` (`link_type: "dock"`), `statuses`, `telemetry`, and `logs` through `ingestor/handlers.py::handle_up_message`.
+
+

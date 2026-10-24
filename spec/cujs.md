@@ -197,3 +197,57 @@ and pick up rotated backend API keys without reflashing.
 - `spec/device-protocol.md` → `up/log`, `up/telemetry`, `dn/cfg` (`stay_awake`, `secrets_rev`),
   and *Known networks* (`ff_net` NVS overlay + Improv BLE)
 - Pillars: `CI-CD-1` (`R7`+`R8`+`R11`), `SEC-1`, `R4-fw-3/4` + `OTEL-1`, `WIFI-BLE-1`
+
+---
+
+## CUJ-3: A 3-node competition LoRa & BLE mesh updates at the shop, goes Wi-Fi-silent at the venue, takes tethered USB-C dock updates in the pit, and flushes field telemetry
+
+**Persona:** Chloe, Competition Pit & Contested-Venue Telemetry Engineer (`docs/personas/PERSONAS.md` §3.6, `FLUX-10413-Hub`). Operates three `ESP32-S3 + SX1262 915 MHz LoRa` nodes (`Pit Node` on the battery cart with a CAN 2.0 transceiver, `Robot Cart Node` with a magnetic breakaway USB-C cable to the Driver Station laptop, and `Scouting Chief Node` in the bleachers syncing scouter phones over `AES-256-GCM` Web Bluetooth).
+
+**Description:** In the shop and at the hotel, all three nodes connect over Wi-Fi to Fleetforge (`flux-10413-hub` project) to receive Canary-gated firmware rollouts, rotated `AES-256-GCM` mesh/BLE keys (`ff_sec`), and `artifact_type=data_partition` cargo (`batteries.csv` CAN serial lookup table + event match schedule). Inside the competition venue, event rules (`E301`) strictly prohibit `802.11` Wi-Fi traffic, and the nodes' NimBLE GATT server is dedicated to scouter phone syncs. The nodes switch to Venue Offline Mode (`ff_set_offline_mode(true)`), keeping `802.11` Wi-Fi and Improv BLE completely silent while continuing to use `ff_get_secret()`, `ff_logf()`, `ff_telemetry()` (`age_ms`), `ff_selftest`, and `ff_safe_window`. When a firmware fix or updated `batteries.csv` cargo is needed in the pit between matches, the pit laptop pushes the Fleetforge-signed bundle over the magnetic USB-C dock cable (`link_type: "dock"`) and drains buffered logs, crash rings, and mesh peer telemetry (`sub_versions`) without turning on Wi-Fi.
+
+**Steps:**
+
+1. In the shop, Chloe creates the `flux-10413-hub` project with cohort groups (`pit`, `cart`, `scouting-chief`), configures the `hub_aes_key` secret in Project Secrets, and enables Canary-gated Continuous Deployment (`canary: true`).
+2. Pushing a commit triggers CI to compile the ESP-IDF firmware (`ab-4m-v1`) and upload the ECDSA P-256 signed `.bin` to Fleetforge. Fleetforge stages the build to the Canary node (`pit`) first. On boot, the node runs its registered `ff_selftest` (`SX1262` LoRa SPI version check, NimBLE GATT service registration, and `SN65HVD230` CAN loopback) before reporting `confirmed`, automatically advancing the wave to `cart` and `scouting-chief`.
+3. Chloe uploads `hub-config.bin` (`batteries.csv` + event match schedule) with `?artifact_type=data_partition`. Each node's registered cargo handler (`ff_ota_register_cargo_handler`) writes the table to LittleFS/NVS without rebooting the application slot and reports `"sub_versions": {"batteries_csv": "v14", "schedule": "2027nytr"}` in `up/announce`.
+4. Entering the competition venue, Chloe flips the Venue Mode switch (or the pit companion sends the venue lockout command over USB-C). Each node calls `ff_set_offline_mode(true)`: `libfleetforge` keeps `802.11` Wi-Fi (`esp_wifi_stop()`) and Improv BLE advertising 100% disabled while leaving the shared NimBLE GATT stack running the team's `AES-256-GCM` scouting service and returning `hub_aes_key` from NVS (`ff_get_secret`).
+5. During matches, the nodes exchange `915 MHz LoRa` packets and log diagnostics (`ff_logf`) and link metrics (`ff_telemetry("lora_rssi", -78)` with relative `age_ms`) into RAM / `RTC_NOINIT_ATTR` rings. The `Robot Cart Node` and `Pit Node` track the bleacher node's firmware and battery status in `sub_versions` (`{"chief_node": "1.2.0", "batteries_csv": "v14"}`). While a BLE sync or USB-C queue session is active, `ff_safe_window` returns `false` so no pending reboot interrupts match queuing.
+6. Between matches in the pit (with Wi-Fi still off), Chloe plugs the magnetic USB-C cable (`link_type: "dock"`) into the pit laptop. The laptop drains the node's buffered `up/log` (including any `[prev-boot]` crash lines) and `up/telemetry` (`age_ms`) rings over USB-C serial, and stages a signed hotfix `.bin` (or updated `data_partition` cargo) directly over USB-C into the node's OTA/cargo pipeline—verifying the ECDSA P-256 signature on-chip, waiting for `ff_safe_window`, and confirming via `ff_selftest` with zero Wi-Fi packets transmitted.
+
+**Success Criteria:**
+
+- In Venue Offline Mode (`ff_set_offline_mode(true)`), the node transmits **zero** `802.11` Wi-Fi frames and never starts Improv BLE advertising (`00467768-6228-2272-4663-277478268000`), while the application's own NimBLE GATT service, `ff_get_secret()`, `ff_logf()`, and `ff_telemetry()` operate without interruption.
+- A bad firmware update whose `SX1262` LoRa SPI or CAN transceiver check fails in `ff_selftest` automatically rolls back to the previous slot and halts the Canary rollout before `cart` or `scouting-chief` are touched.
+- Non-`app` `data_partition` cargo updates (`batteries.csv`, match schedule) apply in place via `ff_ota_register_cargo_handler` and update `sub_versions` without rebooting or overwriting the A/B firmware slot.
+- Tethered USB-C dock (`link_type: "dock"`) updates enforce the exact same ECDSA P-256 signature ring, `ota_slot_size` check, `ff_safe_window` deferral, and `ff_selftest` rollback contract as Wi-Fi OTA, and buffered offline logs/metrics preserve their original capture spacing via `age_ms`.
+
+**Supported By:**
+
+- `spec/device-protocol.md` → `up/announce` (`link_type: "dock"`, `sub_versions`, `capabilities`), `dn/cmd` (`stage` with `artifact.type` and `sig`), `up/log`, `up/telemetry` (`age_ms`), and `dn/cfg` (`secrets_rev`)
+- `docs/SWARM.md` → §5.1 (`age_ms` store-and-forward), §5.3 (`link_type: "dock"`), and §5.4 (`artifact.type` + `sub_versions`)
+- Pillars: `R4` (crash-surviving `up/log` + `age_ms` `up/telemetry`), `R5` (`ff_selftest` + `ff_safe_window`), `R6` (ECDSA P-256 signing), `CUJ-2` (`SEC-1` NVS `ff_sec` + Canary wave rollouts + `0013_artifact_type` cargo handlers), and Venue/Dock extensions (`ff_set_offline_mode`, NimBLE coexistence, `link_type: "dock"` serial bridge)
+
+**Driver:** segmented — the online shop/hotel segments run against the existing simulator and C component test suites today; the Venue Offline Mode and USB-C `link_type: "dock"` serial bridge segments are graded as their firmware hooks land.
+
+| Steps | Segment | Harness | Graded |
+|---|---|---|---|
+| 1–2 | Canary rollout + `ff_selftest` gate + `ff_sec` secret sync | `pytest tests/test_api_deploy.py tests/test_device_secrets.py tests/test_selftest.py`: Wave 1 canary stages 1 board, advances to cohort on `confirmed`, halts on `rolled_back`; `GET /v1/device-secrets` syncs `hub_aes_key` | yes |
+| 3 | `data_partition` cargo deploy & `sub_versions` reporting | `pytest tests/test_api_deploy.py tests/test_ota_component.py`: `POST /v1/artifact?artifact_type=data_partition` stages via `ff_ota_register_cargo_handler` and updates `sub_versions` in `up/announce` | yes |
+| 4 | Venue Offline Mode (`ff_set_offline_mode`) & shared NimBLE coexistence | `pytest tests/test_ci_cd.py tests/test_ota_component.py`: enabling `ff_set_offline_mode(true)` suppresses `esp_wifi_start()` and Improv BLE GATT registration, coexists with shared NimBLE (`ble_hs_synced()`), and confirms `ESP_OTA_IMG_PENDING_VERIFY` locally via `ff_selftest` | yes |
+| 5–6 | USB-C `link_type: "dock"` signed stage, `ff_safe_window` deferral & offline `age_ms` ring drain | `pytest tests/test_ci_cd.py`: stages signed `.bin` / `data_partition` over USB-C dock (`ff_ota_dock_stage` / `StageRunner.dock_stage`), verifies ECDSA P-256 signature and `ff_safe_window` hold, drains `up/log` + `up/telemetry` (`age_ms`), and syncs via `POST /v1/devices/{device_id}/dock-sync` (`fleetforge dock-sync`) | yes |
+
+**Judge:**
+
+- *Deterministic (must-pass):*
+  - After step 2, a Canary failure (`rolled_back` from `ff_selftest`) leaves the remaining group devices untouched on their prior `fw_version`.
+  - After step 3, the device's `sub_versions` map in `GET /v1/devices` contains the deployed `data_partition` version while `fw_version` is unchanged.
+  - In step 4, `ff_get_secret("hub_aes_key", ...)` returns the provisioned secret from NVS with zero network sockets opened.
+  - In steps 5–6, offline `up/telemetry` samples flushed after a delay preserve their relative capture timestamps (`receipt_ts - age_ms`), and an unsigned or tampered dock image is rejected before flashing.
+- *Hard-fail traps (cap the score at 0):*
+  - Any `802.11` Wi-Fi frame or Improv BLE advertisement (`00467768-6228-2272-4663-277478268000`) is emitted while Venue Offline Mode is active.
+  - A node reboots to apply an update while `ff_safe_window` reports `false` (active BLE sync or USB-C queue session).
+  - `hub_aes_key` appears in plaintext in any MQTT payload, `up/log` line, or diagnostic bundle.
+- *LLM-judge rubric (graded by `jeep` against the Success Criteria):*
+  - The transition between Shop/Hotel Wi-Fi Mode and Venue Offline Mode is explicit and requires no reflashing or source edits.
+  - Every failure (bad LoRa SPI self-test, invalid ECDSA signature over dock, stalled safe window) names the cause and recovery state clearly.

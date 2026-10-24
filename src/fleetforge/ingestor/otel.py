@@ -21,10 +21,13 @@ import datetime as dt
 import json
 import logging
 import os
+import time
+import uuid
 from typing import Any
 
 import httpx
 from pydantic import ValidationError
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from fleetforge import __version__
@@ -39,6 +42,24 @@ logger = logging.getLogger(__name__)
 
 OTEL_HTTP_TIMEOUT_S = 5.0
 OTEL_QUEUE_MAX = 256
+OTEL_PROJECT_CACHE_TTL_S = 30.0
+
+_ProjectOtelResolved = tuple[str, str, dict[str, str]]
+_project_otel_cache: dict[
+    tuple[uuid.UUID, str | None, str | None],
+    tuple[float, _ProjectOtelResolved | None],
+] = {}
+_cached_safe_settings: tuple[bool, Settings | None] = (False, None)
+
+
+def invalidate_project_otel_cache(project_id: uuid.UUID | None = None) -> None:
+    """Invalidate cached project OTel endpoint/header resolution."""
+    if project_id is None:
+        _project_otel_cache.clear()
+        return
+    stale = [key for key in _project_otel_cache if key[0] == project_id]
+    for key in stale:
+        _project_otel_cache.pop(key, None)
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -318,19 +339,68 @@ def build_otlp_metrics_payload(
 
 
 def _safe_settings() -> Settings | None:
-    try:
+    global _cached_safe_settings
+    if get_settings.cache_info().currsize > 0:
         return get_settings()
+    initialized, cached = _cached_safe_settings
+    if initialized:
+        return cached
+    try:
+        resolved = get_settings()
     except ValidationError:
-        return None
+        resolved = None
+    _cached_safe_settings = (True, resolved)
+    return resolved
 
 
 async def _resolve_project_otel(
     session: AsyncSession, device: Device
 ) -> tuple[str, str, dict[str, str]] | None:
-    """Return `(project_slug, base_endpoint, headers)` if OTel export is enabled, else `None`."""
-    project = await session.get(Project, device.project_id)
-    project_slug = project.slug if project is not None else "default"
+    """Return `(project_slug, base_endpoint, headers)` if OTel export is enabled, else `None`.
+
+    Caches the resolved project OTel configuration (and decrypted headers) in memory for
+    `OTEL_PROJECT_CACHE_TTL_S` seconds so high-frequency `up/log` and `up/telemetry` packets
+    do not open a DB SAVEPOINT, query `projects`, or run AES-GCM decryption on every message.
+    """
     settings = _safe_settings()
+    env_endpoint = (
+        settings.otel_exporter_otlp_endpoint
+        if settings and settings.otel_exporter_otlp_endpoint
+        else os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
+    )
+    env_headers = (
+        settings.otel_exporter_otlp_headers
+        if settings and settings.otel_exporter_otlp_headers
+        else os.environ.get("OTEL_EXPORTER_OTLP_HEADERS")
+    )
+
+    project_id = device.project_id
+    cache_key = (project_id, env_endpoint, env_headers)
+    now_mono = time.monotonic()
+
+    identity_map = getattr(session, "identity_map", None)
+    in_identity_map = bool(
+        identity_map is not None
+        and hasattr(identity_map, "values")
+        and any(isinstance(obj, Project) and obj.id == project_id for obj in identity_map.values())
+    )
+    if not in_identity_map and cache_key in _project_otel_cache:
+        expires_at, cached_result = _project_otel_cache[cache_key]
+        if now_mono < expires_at:
+            return cached_result
+
+    try:
+        async with session.begin_nested():
+            project = await session.get(Project, project_id)
+    except SQLAlchemyError:
+        logger.warning(
+            "device %s: project OTel lookup failed; skipping OTel export",
+            device.device_id,
+            exc_info=True,
+        )
+        return None
+
+    project_slug = project.slug if project is not None else "default"
 
     endpoint: str | None = None
     raw_headers: str | None = None
@@ -343,21 +413,15 @@ async def _resolve_project_otel(
             except ValueError:
                 raw_headers = project.otel_headers
     else:
-        endpoint = (
-            settings.otel_exporter_otlp_endpoint
-            if settings and settings.otel_exporter_otlp_endpoint
-            else os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
-        )
-        raw_headers = (
-            settings.otel_exporter_otlp_headers
-            if settings and settings.otel_exporter_otlp_headers
-            else os.environ.get("OTEL_EXPORTER_OTLP_HEADERS")
-        )
+        endpoint = env_endpoint
+        raw_headers = env_headers
 
-    if not endpoint:
-        return None
-
-    return project_slug, endpoint, parse_otel_headers(raw_headers)
+    result: _ProjectOtelResolved | None = (
+        (project_slug, endpoint, parse_otel_headers(raw_headers)) if endpoint else None
+    )
+    if not in_identity_map:
+        _project_otel_cache[cache_key] = (now_mono + OTEL_PROJECT_CACHE_TTL_S, result)
+    return result
 
 
 async def _build_logs_batch(

@@ -6,6 +6,28 @@ history — supersede an old decision with a new entry that references it.
 
 ---
 
+## 2026-10-24 — CUJ-3 Competition Pit & Contested-Venue Telemetry ("Chloe" / `FLUX-10413-Hub`): Venue Offline Mode (`ff_set_offline_mode`), shared NimBLE coexistence, local `PENDING_VERIFY` self-test confirm, and USB-C dock (`link_type: "dock"`) stage & ring drain
+
+- **Cause.** Supporting Persona #6 ("Chloe" — Competition Pit & Contested-Venue Telemetry Engineer operating a 3-node `ESP32-S3 + SX1262 915 MHz LoRa + BLE + CAN` mesh under competition rules `E301` / `G303` / `R905`, `CUJ-3` in `spec/cujs.md`) exposed four gaps when the fleet transitions from shop/hotel Wi-Fi to an `802.11`-banned competition arena:
+  1. `ff_net_wifi.c` unconditionally started `esp_wifi_start()` and opened a 120 s Improv Wi-Fi BLE GATT service (`00467768-6228-2272-4663-277478268000`) via its own `nimble_port_init()` when known SSIDs were unreachable — violating `802.11` competition radio bans and colliding with the application's own NimBLE GATT stack (`AES-256-GCM` scouting phone sync).
+  2. `ff_mqtt.c` only evaluated `ff_selftest` and marked `ESP_OTA_IMG_PENDING_VERIFY` slots valid (`esp_ota_mark_app_valid_cancel_rollback()`) upon receiving an MQTT `PUBACK` (`MQTT_EVENT_PUBLISHED`) for `up/announce`. Any firmware update staged at the pit without Wi-Fi would time out after 300 s and roll back.
+  3. There was no tethered USB-C dock (`link_type: "dock"`) entry point in `ff_ota.c` to stage a signed `.bin` or `artifact_type=data_partition` cargo (`batteries.csv` + match schedule) or drain buffered `ff_log` / `ff_telemetry` rings into a JSON bundle when Wi-Fi is disabled.
+  4. There was no server endpoint or CLI command to ingest a pit laptop's drained USB-C dock bundle (`announce`, `statuses`, `telemetry`, `logs`) once the laptop regained hotel/shop internet.
+- **Decisions & Learnings.**
+  - **Venue / EMCON Offline Radio Lockout & Shared NimBLE Coexistence (`ff_set_offline_mode`):**
+    - `ff_set_offline_mode(bool offline)` (`include/ff_sec.h`, `src/ff_net.c`, `src/ff_net_wifi.c`, `src/ff_mqtt.c`) and `Fleetforge.setOfflineMode(bool offline)` (`src/Fleetforge.h`, `src/Fleetforge.cpp`) immediately stop `802.11` Wi-Fi (`esp_wifi_stop()`), suppress Improv BLE GATT startup, and halt background MQTT reconnect attempts while keeping NVS `ff_get_secret()`, `ff_logf()` (`RTC_NOINIT_ATTR` + RAM ring), `ff_telemetry()`, `ff_selftest`, and `ff_safe_window` active.
+    - `improv_ble_gatt_start()` in `src/ff_net_wifi.c` now checks `s_venue_offline || !s_improv_ble_enabled` (`ff_net_wifi_set_improv_ble_enabled`) and inspects `ble_hs_synced()` before calling `nimble_port_init()`, guaranteeing `libfleetforge` never hijacks a NimBLE host already initialized by application firmware.
+  - **Decoupling `PENDING_VERIFY` Self-Test Confirmation from MQTT (`ff_mqtt_confirm_offline`):**
+    - `ff_mqtt_confirm_offline(void)` (`src/ff_mqtt.c`) evaluates the registered `ff_selftest_run()` (`SX1262` LoRa SPI + CAN loopback + BLE GATT check) locally without waiting for a broker `PUBACK`. On pass, it marks the `ESP_OTA_IMG_PENDING_VERIFY` slot valid (`esp_ota_mark_app_valid_cancel_rollback()`), cancels the 300 s rollback timer, and clears `ff_txn`. On failure (`false`), it triggers immediate rollback (`esp_ota_mark_app_invalid_rollback_and_reboot()`) so a broken pit build still rolls back deterministically offline.
+  - **Tethered USB-C Dock Stage & Offline Ring Drains (`ff_ota_dock_stage`, `ff_log_drain_json`, `ff_telemetry_drain_json`):**
+    - `ff_ota_dock_stage(const ff_ota_cmd_t *cmd, const uint8_t *data, size_t len)` (`src/ff_ota.h`, `src/ff_ota.c`) sets `ff_net_set_dock_active(true)` (`ff_net_link_type() -> "dock"`), verifies SHA-256 and ECDSA P-256 signature against the 2-key rotation ring (`ff_cfg` primary + NVS secondary), enforces `choose_target_slot` and `ota_slot_size` for `app` images (with flash read-back SHA-256 before moving the boot pointer) or streams non-`app` cargo (`data_partition`) through `find_cargo_handler()`, and respects `ff_safe_window_is_safe()`.
+    - `ff_log_drain_json(char *buf, size_t cap)` (`src/ff_log.c`) and `ff_telemetry_drain_json(char *buf, size_t cap)` (`src/ff_telemetry.c`) drain buffered RAM + `[prev-boot]` `RTC_NOINIT_ATTR` log lines and `age_ms` telemetry samples into `proto: 1` `up/log` and `up/telemetry` JSON envelopes for the tethered host.
+  - **Single-Writer Ingest Reuse for Dock Sync (`POST /v1/devices/{device_id}/dock-sync` & `fleetforge dock-sync`):**
+    - `POST /v1/devices/{device_id}/dock-sync` (`src/fleetforge/api/routers/devices.py`) and `fleetforge dock-sync <device_id> <bundle.json>` (`src/fleetforge/cli.py`) replay a dock bundle's `announce` (forced `link_type: "dock"`), `statuses`, `telemetry`, and `logs` through `ingestor/handlers.py::handle_up_message`. Reusing `handle_up_message` preserves single-writer `deploy_events` invariants (`deploys.py`), `(device_id, cmd_id, state)` deduplication, `received_at - age_ms` timestamp reconstruction, and OTLP/HTTP forwarding without duplicating ingestion logic.
+- **Details:** `spec/cujs.md` (`CUJ-3`), `docs/personas/PERSONAS.md` (§3.6), `agent/components/fleetforge/README.md`, `docs/features/ota-deploy.md`, `docs/features/health-telemetry.md`, `tests/test_ci_cd.py` (`TestCuj3PitTetheredDockAndVenueOffline`).
+
+---
+
 ## 2026-10-21 — CUJ-2 E-Ink & Developer Experience: hybrid Git-driven CI/CD (`CI-CD-1`), rotating secrets (`SEC-1`), OTel log/metric export (`OTEL-1` + `R4-fw-3/4`), and Improv BLE Wi-Fi (`WIFI-BLE-1`)
 
 - **Cause.** Managing a battery-powered e-ink project (`CUJ-2`) across rapid single-board bench iteration and multi-board field deployment exposed four high-priority gaps:

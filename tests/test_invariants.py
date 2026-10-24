@@ -124,7 +124,9 @@ async def test_token_burn_is_single_use(session: AsyncSession) -> None:
     assert getattr(first, "rowcount", 0) == 1
 
     second = await session.execute(BURN_SQL, {"token_id": token.id, "device_id": "b0b1b2b3b4b5"})
-    assert getattr(second, "rowcount", 0) == 0, "a second burn must never succeed — that is fleet takeover"
+    assert getattr(second, "rowcount", 0) == 0, (
+        "a second burn must never succeed — that is fleet takeover"
+    )
 
 
 async def test_expired_token_cannot_burn(session: AsyncSession) -> None:

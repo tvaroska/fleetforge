@@ -47,7 +47,7 @@ from typing import Any, Protocol
 
 import aiomqtt
 
-from fleetforge.broker.provisioner import BrokerProvisioningError
+from fleetforge.broker.provisioner import BrokerProvisioningError, generate_broker_password
 from fleetforge.config import Settings
 
 logger = logging.getLogger(__name__)
@@ -58,12 +58,20 @@ DYNSEC_RESPONSE_TOPIC = "$CONTROL/dynamic-security/v1/response"
 CREATE_CLIENT = "createClient"
 SET_CLIENT_PASSWORD = "setClientPassword"  # noqa: S105 - a dynsec command name
 ENABLE_CLIENT = "enableClient"
+DELETE_CLIENT = "deleteClient"
+
+# Retained uplink channels a device publishes (`spec/device-protocol.md` → *Topic
+# namespace* and `db/models.py` → `decommissioned_at`). Cleared with a zero-byte
+# retained payload when decommissioning a board so a future ingestor reconnect does not
+# replay stale retained messages.
+RETAINED_UP_CHANNELS = ("announce", "presence", "status")
 
 # Mosquitto's wording for "that username is taken". Version-fragile on purpose: if an
 # upgrade changes the phrasing, `ensure_client` raises `BrokerProvisioningError` and
 # the enrollment answers 503 — loud, rather than silently leaving a client with the
 # wrong password. That is the right direction to fail in.
 ALREADY_EXISTS_MARKER = "already exists"
+NOT_FOUND_MARKER = "not found"
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,6 +125,20 @@ def enable_client_command(username: str, correlation: str) -> dict[str, Any]:
     }
 
 
+def delete_client_command(username: str, correlation: str) -> dict[str, Any]:
+    """`deleteClient` — remove a device's broker credential on decommission."""
+    return {
+        "command": DELETE_CLIENT,
+        "username": username,
+        "correlationData": correlation,
+    }
+
+
+def retained_up_topics(device_id: str) -> tuple[str, ...]:
+    """The three retained uplink topics a decommissioned board's cleanup must clear."""
+    return tuple(f"ff/v1/d/{device_id}/up/{ch}" for ch in RETAINED_UP_CHANNELS)
+
+
 def encode_command(command: dict[str, Any]) -> bytes:
     """Wrap one command in dynsec's `{"commands": [...]}` envelope."""
     return json.dumps({"commands": [command]}).encode("utf-8")
@@ -165,6 +187,11 @@ def is_already_exists(error: str) -> bool:
     return ALREADY_EXISTS_MARKER in error.lower()
 
 
+def is_not_found(error: str) -> bool:
+    """Does `error` mean "that username does not exist"? Used for idempotent delete."""
+    return NOT_FOUND_MARKER in error.lower()
+
+
 class DynsecSession(Protocol):
     """One request/response round-trip against the dynsec control topic."""
 
@@ -181,9 +208,18 @@ class MqttDynsecSession:
     goes only to the issuing client and a subscribe-after-publish loses it.
     """
 
-    def __init__(self, client: aiomqtt.Client, messages: AsyncIterator[aiomqtt.Message]) -> None:
+    def __init__(
+        self,
+        client: aiomqtt.Client,
+        messages: AsyncIterator[aiomqtt.Message],
+        *,
+        hostname: str = "localhost",
+        port: int = 1883,
+    ) -> None:
         self._client = client
         self._messages = messages
+        self._hostname = hostname
+        self._port = port
 
     async def command(
         self, payload: dict[str, Any], *, expect: str, correlation: str
@@ -202,6 +238,24 @@ class MqttDynsecSession:
                 continue
             return parse_response(body, expect=expect, correlation=correlation)
         raise BrokerProvisioningError(f"dynsec connection closed while awaiting {expect}")
+
+    async def clear_retained_up_topics(self, device_id: str, password: str) -> None:
+        """Clear `up/{announce,presence,status}` retained messages as `device_id`.
+
+        `mosquitto/acl` grants `pattern write ff/v1/d/%u/up/#` only to `%u == device_id`,
+        so publishing zero-byte retained payloads under a one-time rotated password just
+        before `deleteClient` clears the broker's retained store without widening any ACL.
+        """
+        async with aiomqtt.Client(
+            hostname=self._hostname,
+            port=self._port,
+            identifier=f"fleetforge-decomm-{uuid.uuid4().hex[:8]}",
+            username=device_id,
+            password=password,
+            clean_session=True,
+        ) as device_client:
+            for topic in retained_up_topics(device_id):
+                await device_client.publish(topic, b"", qos=1, retain=True)
 
 
 @contextlib.asynccontextmanager
@@ -226,7 +280,12 @@ async def mqtt_dynsec_session(settings: Settings) -> AsyncIterator[DynsecSession
     ) as client:
         # BEFORE any publish: the response is delivered only to the issuing client.
         await client.subscribe(DYNSEC_RESPONSE_TOPIC, qos=1)
-        yield MqttDynsecSession(client, client.messages.__aiter__())
+        yield MqttDynsecSession(
+            client,
+            client.messages.__aiter__(),
+            hostname=settings.mqtt_host,
+            port=settings.mqtt_port,
+        )
 
 
 SessionFactory = Callable[[], AbstractAsyncContextManager[DynsecSession]]
@@ -276,6 +335,51 @@ class DynsecProvisioner:
                 f"dynsec transport failure provisioning {device_id}: {type(exc).__name__}"
             ) from exc
         return True
+
+    async def remove_client(self, device_id: str) -> bool:
+        """Delete `device_id`'s broker client and clear its retained `up/` topics.
+
+        Idempotent: if `device_id` is already absent from dynsec, returns `True`.
+        """
+        try:
+            async with asyncio.timeout(self._timeout_s), self._session_factory() as session:
+                if isinstance(session, MqttDynsecSession):
+                    temp_password = generate_broker_password()
+                    correlation = new_correlation()
+                    pw_resp = await session.command(
+                        set_client_password_command(device_id, temp_password, correlation),
+                        expect=SET_CLIENT_PASSWORD,
+                        correlation=correlation,
+                    )
+                    if pw_resp.error is None:
+                        await self._run(session, enable_client_command, ENABLE_CLIENT, device_id)
+                        await session.clear_retained_up_topics(device_id, temp_password)
+                    elif not is_not_found(pw_resp.error):
+                        raise BrokerProvisioningError(
+                            f"dynsec {SET_CLIENT_PASSWORD} refused: {pw_resp.error}"
+                        )
+                await self._delete(session, device_id)
+        except TimeoutError as exc:
+            raise BrokerProvisioningError(
+                f"dynsec timed out after {self._timeout_s}s removing {device_id}"
+            ) from exc
+        except (aiomqtt.MqttError, OSError) as exc:
+            raise BrokerProvisioningError(
+                f"dynsec transport failure removing {device_id}: {type(exc).__name__}"
+            ) from exc
+        return True
+
+    async def _delete(self, session: DynsecSession, device_id: str) -> None:
+        """`deleteClient`; "not found" is idempotent success, anything else raises."""
+        correlation = new_correlation()
+        response = await session.command(
+            delete_client_command(device_id, correlation),
+            expect=DELETE_CLIENT,
+            correlation=correlation,
+        )
+        if response.error is None or is_not_found(response.error):
+            return
+        raise BrokerProvisioningError(f"dynsec {DELETE_CLIENT} refused: {response.error}")
 
     async def _create(self, session: DynsecSession, device_id: str, password: str) -> bool:
         """`createClient`; `False` means "already exists", anything else raises."""

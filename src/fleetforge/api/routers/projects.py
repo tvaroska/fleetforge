@@ -23,6 +23,7 @@ from fleetforge.api.deps import (
     resolve_project_for_request,
 )
 from fleetforge.api.routers.deploys import (
+    _sender,
     deploy_version_to_project_devices,
     matches_project_tracking,
 )
@@ -30,8 +31,11 @@ from fleetforge.api.schemas import (
     PROJECT_SLUG_PATTERN,
     SECRET_KEY_PATTERN,
     USERNAME_PATTERN,
+    CommandAccepted,
     ProjectCreate,
     ProjectDeployAccepted,
+    ProjectDeployCancelAccepted,
+    ProjectDeployCancelRequest,
     ProjectDeployRequest,
     ProjectList,
     ProjectMemberList,
@@ -43,10 +47,18 @@ from fleetforge.api.schemas import (
     ProjectSummary,
     ProjectUpdate,
 )
-from fleetforge.broker import CommandPublisher, CommandPublishError, cfg_payload
+from fleetforge.broker import (
+    CommandPublisher,
+    CommandPublishError,
+    cfg_payload,
+    new_command_id,
+    verb_payload,
+)
 from fleetforge.config import Settings
 from fleetforge.db.models import (
     ArtifactVersion,
+    CommandType,
+    DeployState,
     Device,
     Project,
     ProjectMember,
@@ -54,6 +66,10 @@ from fleetforge.db.models import (
     ProjectSecret,
     User,
 )
+from fleetforge.deploys import latest_deploys
+from fleetforge.device_commands import mark_publish_failed, record_sent
+from fleetforge.ingestor.otel import invalidate_project_otel_cache
+from fleetforge.presence import is_online
 from fleetforge.secrets_crypto import decrypt_secret, encrypt_secret
 
 logger = logging.getLogger(__name__)
@@ -264,6 +280,8 @@ async def update_project(
             )
         proj.updated_at = now_utc()
         await session.commit()
+        if "otel_endpoint" in fields or "otel_headers" in fields:
+            invalidate_project_otel_cache(proj.id)
 
         auto_deployed: list[str] | None = None
         webhook_triggered: bool | None = None
@@ -368,6 +386,134 @@ async def deploy_project(
         version=body.version,
         target_filter=body.target_filter,
         deployed=deployed,
+        skipped=skipped,
+    )
+
+
+_PRE_APPLY_CANCEL_STATES = frozenset(
+    {
+        DeployState.REQUESTED.value,
+        DeployState.STAGING.value,
+        DeployState.DOWNLOADING.value,
+        DeployState.VERIFYING.value,
+        DeployState.STAGED.value,
+        DeployState.AWAITING_SAFE_WINDOW.value,
+    }
+)
+
+
+@router.post(
+    "/{slug}/deploy/cancel",
+    response_model=ProjectDeployCancelAccepted,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Cancel in-flight pre-apply deploys across a project or group cohort",
+)
+async def cancel_project_deploy(
+    slug: str = Path(pattern=PROJECT_SLUG_PATTERN),
+    *,
+    body: ProjectDeployCancelRequest,
+    admin: AdminDep,
+    settings: SettingsDep,
+    sessionmaker: SessionMakerDep,
+    publisher: CommandPublisherDep,
+) -> ProjectDeployCancelAccepted:
+    """Publish `cancel` commands to all cohort boards with an in-flight pre-apply deploy."""
+    async with sessionmaker() as session:
+        proj = await resolve_project_for_request(
+            session,
+            admin,
+            slug,
+            min_role=ProjectRole.OPERATOR,
+            required_scope="deploy",
+        )
+        stmt = (
+            select(Device)
+            .where(Device.project_id == proj.id, Device.decommissioned_at.is_(None))
+            .order_by(Device.device_id)
+        )
+        if body.group_id is not None:
+            stmt = stmt.where(Device.group_id == body.group_id)
+        all_devices = list((await session.scalars(stmt)).all())
+        devices = (
+            [d for d in all_devices if d.is_dev] if body.target_filter == "dev" else all_devices
+        )
+        if not devices:
+            return ProjectDeployCancelAccepted(project=slug, cancelled=[], skipped={})
+
+        snapshots = await latest_deploys(session, device_ids=[d.device_id for d in devices])
+        sent_by = await _sender(session, admin)
+        now = now_utc()
+
+        skipped: dict[str, str] = {}
+        pending_publishes: list[tuple[Device, str, str, bool]] = []
+        for device in devices:
+            snap = snapshots.get(device.device_id)
+            if snap is None or snap.is_terminal or snap.cmd_id is None:
+                skipped[device.device_id] = "no in-flight transaction"
+                continue
+            if body.version is not None and snap.artifact_version != body.version:
+                skipped[device.device_id] = (
+                    f"in-flight version is {snap.artifact_version}, not {body.version}"
+                )
+                continue
+            if snap.state not in _PRE_APPLY_CANCEL_STATES:
+                skipped[device.device_id] = (
+                    f"transaction is at {snap.state}, past the pre-apply cancel window"
+                )
+                continue
+            if CommandType.CANCEL.value not in (device.capabilities or ()):
+                skipped[device.device_id] = "device does not announce cancel capability"
+                continue
+
+            command_id = new_command_id()
+            await record_sent(
+                session,
+                command_id=command_id,
+                device_id=device.device_id,
+                type=CommandType.CANCEL.value,
+                cmd_id=snap.cmd_id,
+                sent_by=sent_by,
+            )
+            online = is_online(device, now=now, tolerance=settings.presence_tolerance)
+            pending_publishes.append((device, command_id, snap.cmd_id, online))
+
+        if not pending_publishes:
+            return ProjectDeployCancelAccepted(project=slug, cancelled=[], skipped=skipped)
+
+        await session.commit()
+
+        cancelled: list[CommandAccepted] = []
+        for device, command_id, cmd_id, online in pending_publishes:
+            payload = verb_payload(
+                command_id=command_id,
+                type=CommandType.CANCEL,
+                cmd_id=cmd_id,
+            )
+            try:
+                await publisher.publish(device.device_id, payload)
+            except CommandPublishError:
+                logger.exception(
+                    "cohort cancel %s for %s could not be published",
+                    command_id,
+                    device.device_id,
+                )
+                await mark_publish_failed(session, command_id=command_id)
+                await session.commit()
+                skipped[device.device_id] = "broker publish failed"
+                continue
+            cancelled.append(
+                CommandAccepted(
+                    command_id=command_id,
+                    device_id=device.device_id,
+                    type=CommandType.CANCEL.value,
+                    cmd_id=cmd_id,
+                    device_online=online,
+                )
+            )
+
+    return ProjectDeployCancelAccepted(
+        project=slug,
+        cancelled=cancelled,
         skipped=skipped,
     )
 
@@ -536,18 +682,27 @@ async def _publish_project_cfg(
                 )
             )
         ).all()
-    for dev in devices:
-        try:
-            await publisher.publish_cfg(
-                dev.device_id,
-                cfg_payload(secrets_rev=secrets_rev, stay_awake=dev.stay_awake),
-            )
-        except CommandPublishError:
-            logger.warning(
-                "dn/cfg publish skipped or failed for %s (secrets_rev=%d)",
-                dev.device_id,
-                secrets_rev,
-            )
+    if not devices:
+        return
+    items = [
+        (
+            dev.device_id,
+            cfg_payload(secrets_rev=secrets_rev, stay_awake=dev.stay_awake),
+        )
+        for dev in devices
+    ]
+    try:
+        await publisher.publish_cfg_many(items)
+    except CommandPublishError:
+        for dev_id, payload in items:
+            try:
+                await publisher.publish_cfg(dev_id, payload)
+            except CommandPublishError:
+                logger.warning(
+                    "dn/cfg publish skipped or failed for %s (secrets_rev=%d)",
+                    dev_id,
+                    secrets_rev,
+                )
 
 
 @router.get(

@@ -66,6 +66,7 @@ ids). The verbs themselves are `api/routers/commands.py`.
 """
 
 import datetime as dt
+import json
 import logging
 from collections.abc import Sequence
 from dataclasses import dataclass, field
@@ -78,6 +79,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from fleetforge.api.deps import (
     AdminDep,
+    BrokerDep,
     CommandPublisherDep,
     SessionMakerDep,
     SettingsDep,
@@ -99,13 +101,15 @@ from fleetforge.api.schemas import (
     DeviceLogTail,
     DeviceSummary,
     DeviceUpdate,
+    DockSyncRequest,
+    DockSyncResponse,
     FaultResets,
     HealthSnapshot,
     MetricValue,
     TelemetryPoint,
     TelemetrySeries,
 )
-from fleetforge.broker import CommandPublishError, cfg_payload
+from fleetforge.broker import BrokerProvisioningError, CommandPublishError, cfg_payload
 from fleetforge.clock import now_utc
 from fleetforge.db.models import Device, DeviceGroup, Project, ProjectRole
 from fleetforge.deploys import DeploySnapshot, latest_deploys
@@ -113,6 +117,7 @@ from fleetforge.device_commands import CommandSnapshot, latest_commands
 from fleetforge.device_logs import read_tail
 from fleetforge.events import DeviceEvent, EventType, emit
 from fleetforge.faults import fault_counts
+from fleetforge.ingestor.handlers import handle_up_message
 from fleetforge.presence import is_online
 from fleetforge.progress import has_already_arrived, latest_progress
 from fleetforge.retention import LOG_MAX_LINES_PER_DEVICE
@@ -284,6 +289,7 @@ def _device_summary(
         is_dev=row.is_dev,
         stay_awake=row.stay_awake,
         secrets_rev=row.secrets_rev,
+        sub_versions=row.sub_versions,
         deploy=deploy,
     )
 
@@ -297,6 +303,10 @@ async def list_devices(
         str | None,
         Query(pattern=PROJECT_SLUG_PATTERN, description="Project slug (defaults to token/default)"),
     ] = None,
+    include_decommissioned: Annotated[
+        bool,
+        Query(description="Include soft-deleted (decommissioned) devices"),
+    ] = False,
 ) -> DeviceList:
     """The fleet, newest enrollment first, with `online` derived per row."""
     now = now_utc()
@@ -308,13 +318,13 @@ async def list_devices(
             min_role=ProjectRole.VIEWER,
             required_scope="read",
         )
+        filters = [Device.project_id == target_project.id]
+        if not include_decommissioned:
+            filters.append(Device.decommissioned_at.is_(None))
         rows = (
             await session.scalars(
                 select(Device)
-                .where(
-                    Device.decommissioned_at.is_(None),
-                    Device.project_id == target_project.id,
-                )
+                .where(*filters)
                 .order_by(Device.enrolled_at.desc(), Device.device_id)
                 .limit(LIST_LIMIT)
             )
@@ -341,12 +351,13 @@ async def list_devices(
     online_now = {
         row.device_id
         for row in rows
-        if is_online(row, now=now, tolerance=settings.presence_tolerance)
+        if row.decommissioned_at is None
+        and is_online(row, now=now, tolerance=settings.presence_tolerance)
     }
     # The same rows the fleet list is built from — the arrivals filter needs their
     # `broker_provisioned_at` and `last_seen`, and re-querying for them would be a
     # second read of a list this endpoint already holds.
-    by_device_id = {row.device_id: row for row in rows}
+    by_device_id = {row.device_id: row for row in rows if row.decommissioned_at is None}
 
     return DeviceList(
         devices=[
@@ -558,6 +569,118 @@ async def _live_device_or_404(session: AsyncSession, device_id: str) -> Device:
     return device
 
 
+async def _decommission_device_impl(
+    device_id: str,
+    admin: AdminDep,
+    settings: SettingsDep,
+    sessionmaker: SessionMakerDep,
+    provisioner: BrokerDep,
+    publisher: CommandPublisherDep,
+) -> DeviceSummary:
+    """Soft-delete `device_id`, remove its broker client, and clear retained topics."""
+    now = now_utc()
+    async with sessionmaker() as session:
+        device = await _live_device_or_404(session, device_id)
+        await check_project_access(
+            session,
+            admin,
+            device.project_id,
+            min_role=ProjectRole.OPERATOR,
+            not_found=_no_such_device(device_id),
+        )
+        try:
+            await provisioner.remove_client(device_id)
+        except BrokerProvisioningError as exc:
+            logger.warning("broker client removal failed for %s: %s", device_id, exc)
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="broker unavailable during decommission",
+                headers={"Retry-After": "5"},
+            ) from exc
+
+        try:
+            await publisher.clear_cfg(device_id)
+        except CommandPublishError:
+            logger.warning("dn/cfg retained clear skipped or failed for %s", device_id)
+
+        device.decommissioned_at = now
+        device.presence_reported = None
+        device.broker_provisioned_at = None
+        device.mqtt_password_hash = None
+        device.stay_awake = False
+        device.is_dev = False
+        device.group_id = None
+
+        await emit(
+            session,
+            DeviceEvent(
+                type=EventType.DEVICE_UPDATED,
+                device_id=device_id,
+                project_id=device.project_id,
+                at=now,
+                online=False,
+                fw_version=device.fw_version,
+            ),
+        )
+        await session.commit()
+
+        deploys = await latest_deploys(session, device_ids=[device_id])
+        commands = await latest_commands(session, device_ids=[device_id])
+        extras = await _health_extras(
+            session, device_ids=[device_id], now=now, window_s=settings.fault_window_s
+        )
+        summary = _device_summary(
+            device,
+            online=False,
+            deploy=_deploy_summary(
+                deploys.get(device_id), confirm_timeout_s=settings.confirm_timeout_s
+            ),
+            extras=extras,
+            last_command=command_summary(commands.get(device_id)),
+        )
+
+    logger.info("device %s decommissioned by %s", device_id, admin.token_id)
+    return summary
+
+
+@router.post(
+    "/{device_id}/decommission",
+    response_model=DeviceSummary,
+    summary="Decommission (soft-delete) a device, revoking its broker credential",
+)
+async def decommission_device(
+    device_id: str,
+    admin: AdminDep,
+    settings: SettingsDep,
+    sessionmaker: SessionMakerDep,
+    provisioner: BrokerDep,
+    publisher: CommandPublisherDep,
+) -> DeviceSummary:
+    """Soft-delete `device_id`, delete its Mosquitto dynsec client, and clear retained topics."""
+    return await _decommission_device_impl(
+        device_id, admin, settings, sessionmaker, provisioner, publisher
+    )
+
+
+@router.delete(
+    "/{device_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Decommission (soft-delete) a device",
+)
+async def delete_device(
+    device_id: str,
+    admin: AdminDep,
+    settings: SettingsDep,
+    sessionmaker: SessionMakerDep,
+    provisioner: BrokerDep,
+    publisher: CommandPublisherDep,
+) -> None:
+    """REST alias for `POST /v1/devices/{device_id}/decommission`."""
+    await _decommission_device_impl(
+        device_id, admin, settings, sessionmaker, provisioner, publisher
+    )
+
+
 @router.get(
     "/{device_id}/logs",
     response_model=DeviceLogTail,
@@ -627,4 +750,144 @@ async def device_telemetry_series(
         device_id=device_id,
         name=name,
         samples=[TelemetryPoint(at=point.at, value=point.value) for point in points],
+    )
+
+
+@router.post(
+    "/{device_id}/dock-sync",
+    response_model=DockSyncResponse,
+    summary="Ingest a pit-docked device's offline announce, status, telemetry, and log bundle",
+)
+async def dock_sync_device(
+    device_id: str,
+    body: DockSyncRequest,
+    admin: AdminDep,
+    settings: SettingsDep,
+    sessionmaker: SessionMakerDep,
+) -> DockSyncResponse:
+    """Ingest a USB-C dock sync bundle (`link_type: "dock"`, CUJ-3 Steps 5–6).
+
+    Replays the pit-docked device's `announce`, `statuses` (`up/status`), `telemetry`
+    (`up/telemetry` with relative `age_ms`), and `logs` (`up/log` with relative `age_ms`)
+    through `handle_up_message` so `deploy_events`, `device_telemetry`, `device_metrics`,
+    `device_logs`, and OTel exporters share the exact same single-writer pipelines as
+    live MQTT ingestion.
+    """
+    now = now_utc()
+    async with sessionmaker() as session:
+        device = await _live_device_or_404(session, device_id)
+        await check_project_access(
+            session,
+            admin,
+            device.project_id,
+            min_role=ProjectRole.OPERATOR,
+            required_scope="deploy",
+            not_found=_no_such_device(device_id),
+        )
+
+        announce_payload = dict(body.announce) if body.announce is not None else {}
+        if (
+            "device_id" in announce_payload
+            and announce_payload["device_id"] is not None
+            and announce_payload["device_id"] != device_id
+        ):
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                f"announce.device_id {announce_payload['device_id']!r} does not match {device_id}",
+            )
+        announce_payload.setdefault("device_id", device_id)
+        announce_payload.setdefault("platform_type", device.platform_type)
+        announce_payload["link_type"] = announce_payload.get("link_type") or "dock"
+        if "fw_version" not in announce_payload and device.fw_version is not None:
+            announce_payload["fw_version"] = device.fw_version
+        if "sub_versions" not in announce_payload and device.sub_versions is not None:
+            announce_payload["sub_versions"] = device.sub_versions
+
+        await handle_up_message(
+            session,
+            topic=f"ff/v1/d/{device_id}/up/announce",
+            payload=json.dumps(announce_payload, separators=(",", ":")).encode("utf-8"),
+            retained=False,
+            received_at=now,
+            tolerance=settings.presence_tolerance,
+            settings=settings,
+        )
+
+        statuses_recorded = 0
+        for status_item in body.statuses:
+            ev = await handle_up_message(
+                session,
+                topic=f"ff/v1/d/{device_id}/up/status",
+                payload=json.dumps(status_item, separators=(",", ":")).encode("utf-8"),
+                retained=False,
+                received_at=now,
+                tolerance=settings.presence_tolerance,
+                settings=settings,
+            )
+            if ev is not None:
+                statuses_recorded += 1
+
+        telemetry_batches_recorded = 0
+        for telem_batch in body.telemetry:
+            ev = await handle_up_message(
+                session,
+                topic=f"ff/v1/d/{device_id}/up/telemetry",
+                payload=json.dumps(telem_batch, separators=(",", ":")).encode("utf-8"),
+                retained=False,
+                received_at=now,
+                tolerance=settings.presence_tolerance,
+                settings=settings,
+            )
+            if ev is not None:
+                telemetry_batches_recorded += 1
+
+        log_batches_recorded = 0
+        for log_batch in body.logs:
+            ev = await handle_up_message(
+                session,
+                topic=f"ff/v1/d/{device_id}/up/log",
+                payload=json.dumps(log_batch, separators=(",", ":")).encode("utf-8"),
+                retained=False,
+                received_at=now,
+                tolerance=settings.presence_tolerance,
+                settings=settings,
+            )
+            if ev is not None:
+                log_batches_recorded += 1
+
+        await session.commit()
+        await session.refresh(device)
+
+        deploys = await latest_deploys(session, device_ids=[device_id])
+        commands = await latest_commands(session, device_ids=[device_id])
+        extras = await _health_extras(
+            session, device_ids=[device_id], now=now, window_s=settings.fault_window_s
+        )
+        summary = _device_summary(
+            device,
+            online=is_online(device, now=now, tolerance=settings.presence_tolerance),
+            deploy=_deploy_summary(
+                deploys.get(device_id), confirm_timeout_s=settings.confirm_timeout_s
+            ),
+            extras=extras,
+            last_command=command_summary(commands.get(device_id)),
+        )
+
+    logger.info(
+        "device %s dock-synced by %s: statuses=%d telemetry_batches=%d log_batches=%d",
+        device_id,
+        admin.token_id,
+        statuses_recorded,
+        telemetry_batches_recorded,
+        log_batches_recorded,
+    )
+    return DockSyncResponse(
+        device_id=device_id,
+        link_type=device.link_type,
+        fw_version=device.fw_version,
+        sub_versions=device.sub_versions,
+        statuses_recorded=statuses_recorded,
+        telemetry_batches_recorded=telemetry_batches_recorded,
+        log_batches_recorded=log_batches_recorded,
+        device=summary,
     )

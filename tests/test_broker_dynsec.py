@@ -31,16 +31,20 @@ from fleetforge.broker import (
 )
 from fleetforge.broker.dynsec import (
     CREATE_CLIENT,
+    DELETE_CLIENT,
     ENABLE_CLIENT,
     SET_CLIENT_PASSWORD,
     DynsecProvisioner,
     DynsecResponse,
     DynsecSession,
     create_client_command,
+    delete_client_command,
     enable_client_command,
     encode_command,
     is_already_exists,
+    is_not_found,
     parse_response,
+    retained_up_topics,
     set_client_password_command,
 )
 from tests.conftest import capture_logs
@@ -270,3 +274,117 @@ def test_generated_passwords_are_long_and_unique() -> None:
     passwords = {generate_broker_password() for _ in range(20)}
     assert len(passwords) == 20
     assert all(len(password) >= 32 for password in passwords)
+
+
+def test_delete_client_command_and_retained_up_topics() -> None:
+    command = delete_client_command(DEVICE_ID, CORRELATION)
+    assert command == {
+        "command": DELETE_CLIENT,
+        "username": DEVICE_ID,
+        "correlationData": CORRELATION,
+    }
+    assert retained_up_topics(DEVICE_ID) == (
+        f"ff/v1/d/{DEVICE_ID}/up/announce",
+        f"ff/v1/d/{DEVICE_ID}/up/presence",
+        f"ff/v1/d/{DEVICE_ID}/up/status",
+    )
+    assert is_not_found("Client not found")
+    assert not is_not_found("Permission denied")
+
+
+async def test_remove_client_is_idempotent_when_found_or_already_absent() -> None:
+    session = FakeDynsecSession([_reply(DELETE_CLIENT)])
+    assert await _provisioner(session).remove_client(DEVICE_ID) is True
+    assert [c["command"] for c in session.commands] == [DELETE_CLIENT]
+
+    absent = FakeDynsecSession([_reply(DELETE_CLIENT, error="Client not found")])
+    assert await _provisioner(absent).remove_client(DEVICE_ID) is True
+    assert [c["command"] for c in absent.commands] == [DELETE_CLIENT]
+
+
+async def test_remove_client_raises_on_unexpected_dynsec_error() -> None:
+    session = FakeDynsecSession([_reply(DELETE_CLIENT, error="Permission denied")])
+    with pytest.raises(BrokerProvisioningError):
+        await _provisioner(session).remove_client(DEVICE_ID)
+
+
+async def test_null_provisioner_remove_client_logs_warning_and_returns_false() -> None:
+    with capture_logs() as records:
+        assert await NullProvisioner().remove_client(DEVICE_ID) is False
+    warnings = [r for r in records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert DEVICE_ID in warnings[0].getMessage()
+
+
+def test_decommission_routes_and_include_decommissioned_query_are_registered() -> None:
+    from fleetforge.api.main import create_app
+
+    schema = create_app().openapi()
+    assert "/v1/devices/{device_id}/decommission" in schema["paths"]
+    assert "post" in schema["paths"]["/v1/devices/{device_id}/decommission"]
+    assert "delete" in schema["paths"]["/v1/devices/{device_id}"]
+    list_params = {
+        param["name"] for param in schema["paths"]["/v1/devices"]["get"].get("parameters", [])
+    }
+    assert "include_decommissioned" in list_params
+
+
+async def test_enroll_device_upsert_resets_transient_health_and_cfg_columns() -> None:
+    import datetime as dt
+    import uuid
+    from unittest.mock import AsyncMock, MagicMock
+
+    from sqlalchemy.dialects import postgresql
+
+    from fleetforge.db.models import Device
+    from fleetforge.registry import enroll_device
+
+    captured_sql: list[str] = []
+    captured_params: list[dict[str, Any]] = []
+
+    class _FakeScalarResult:
+        def one(self) -> Device:
+            return Device(device_id=DEVICE_ID)
+
+    async def _fake_scalars(stmt: Any, **kwargs: Any) -> _FakeScalarResult:
+        compiled = stmt.compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": False},
+        )
+        captured_sql.append(str(compiled))
+        captured_params.append(dict(compiled.params or {}))
+        return _FakeScalarResult()
+
+    fake_session = MagicMock()
+    fake_session.scalars = AsyncMock(side_effect=_fake_scalars)
+    fake_session.flush = AsyncMock()
+
+    await enroll_device(
+        fake_session,
+        device_id=DEVICE_ID,
+        identity={"platform_type": "esp32c6", "link_type": "wifi", "power_class": "always_on"},
+        project_id=uuid.UUID("00000000-0000-4000-8000-000000000001"),
+        group_id=None,
+        enrolled_at=dt.datetime.now(dt.UTC),
+        mqtt_password_hash="argon2-hash",
+    )
+
+    assert len(captured_sql) == 1
+    sql = captured_sql[0]
+    for fragment in (
+        "decommissioned_at = %(",
+        "broker_provisioned_at = %(",
+        "presence_reported = %(",
+        "last_reset_reason = %(",
+        "health_at = %(",
+        "uptime_s = %(",
+        "rssi = %(",
+        "free_heap = %(",
+        "min_free_heap = %(",
+        "boot_ok = %(",
+        "secrets_rev = %(",
+        "stay_awake = %(",
+        "is_dev = CASE WHEN (devices.project_id = excluded.project_id AND devices.decommissioned_at IS NULL) THEN devices.is_dev",
+        "group_id = CASE WHEN (devices.project_id = excluded.project_id AND devices.decommissioned_at IS NULL) THEN coalesce(excluded.group_id, devices.group_id)",
+    ):
+        assert fragment in sql, f"missing {fragment!r} in {sql}"

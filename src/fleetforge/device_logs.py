@@ -43,22 +43,24 @@ from fleetforge.retention import LOG_MAX_LINES_PER_DEVICE, LOG_RETENTION
 MAX_DROPPED = 2**31 - 1
 GAP_MARKER_LEVEL = "I"
 
-# Keep this device's newest `:keep` lines. The subquery names the newest line that does
-# NOT survive (`OFFSET :keep`); everything at or below it in `(logged_at, id)` order goes,
-# read straight off `ix_device_logs_device_id_logged_at`. Fewer lines than the cap make
-# it NULL, and nothing is deleted. `id` breaks ties: lines of one batch can share an age.
+# Keep this device's newest `:keep` lines. The CTE names the newest line that does
+# NOT survive (`OFFSET :keep`); when the device has `:keep` or fewer lines the CTE
+# produces zero rows and the `USING cutoff` join short-circuits without scanning
+# `device_logs`. `id` breaks ties: lines of one batch can share an age.
 TRIM_SQL = text(
     """
-    DELETE FROM device_logs
-     WHERE device_id = :device_id
-       AND (logged_at, id) <= (
-           SELECT logged_at, id
-             FROM device_logs
-            WHERE device_id = :device_id
-            ORDER BY logged_at DESC, id DESC
-           OFFSET :keep
-            LIMIT 1
-       )
+    WITH cutoff AS (
+        SELECT logged_at, id
+          FROM device_logs
+         WHERE device_id = :device_id
+         ORDER BY logged_at DESC, id DESC
+        OFFSET :keep
+         LIMIT 1
+    )
+    DELETE FROM device_logs AS dl
+     USING cutoff
+     WHERE dl.device_id = :device_id
+       AND (dl.logged_at, dl.id) <= (cutoff.logged_at, cutoff.id)
     """
 )
 

@@ -81,6 +81,16 @@ class BrokerProvisioner(Protocol):
         """
         ...
 
+    async def remove_client(self, device_id: str) -> bool:
+        """Delete `device_id`'s broker credential and clear its retained `up/` topics.
+
+        **Idempotent by contract** — removing a client that does not exist in dynsec
+        succeeds and returns `True`. Returns `False` when no dynsec credential store is
+        configured (`NullProvisioner`), and raises `BrokerProvisioningError` on broker
+        transport or protocol failures.
+        """
+        ...
+
 
 class NullProvisioner:
     """Provisions nothing, because no dynsec control credential is configured.
@@ -103,6 +113,15 @@ class NullProvisioner:
             "broker provisioning skipped for %s: MQTT_DYNSEC_USERNAME/_PASSWORD are "
             "unset, so no broker client was created. The broker refuses anonymous "
             "clients, so this device cannot connect until it re-enrolls.",
+            device_id,
+        )
+        return False
+
+    async def remove_client(self, device_id: str) -> bool:
+        """Log one WARNING and remove nothing when no dynsec credential is configured."""
+        logger.warning(
+            "broker decommission skipped for %s: MQTT_DYNSEC_USERNAME/_PASSWORD are "
+            "unset, so no broker client was removed.",
             device_id,
         )
         return False

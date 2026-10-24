@@ -434,6 +434,9 @@ class DeviceIdentity:
     # first start, `sw` after the simulated OTA reboot (`StageRunner`). Not checked by
     # `validate()`: the server logs whatever arrives, and junk is how that is tested.
     reset_reason: str | None = "poweron"
+    # H5 / R7-cargo-1: component -> version map for attached co-processors (`sub_versions`).
+    # Omitted from `announce()` when None/empty so the default announce stays flat.
+    sub_versions: dict[str, str] | None = None
     proto: int = 1
 
     def validate(self) -> None:
@@ -492,6 +495,7 @@ class DeviceIdentity:
             "capabilities": list(self.capabilities),
             # S0-fw-6: after `capabilities`, as the spec prints it.
             "reset_reason": self.reset_reason,
+            **({"sub_versions": dict(self.sub_versions)} if self.sub_versions else {}),
         }
 
     def enroll_body(self, token: str) -> dict[str, object]:
@@ -770,6 +774,12 @@ class StageRunner:
     # R6-FW-1: HTTP Range resume retries and initial backoff on mid-stream download errors.
     download_retries: int = 3
     download_backoff_s: float = 0.005
+    # H5 / R7-cargo-1: pluggable non-app cargo handlers (`artifact.type` -> callback(data, version)).
+    cargo_handlers: dict[str, Callable[[bytes, str | None], None]] = field(default_factory=dict)
+    # CUJ-3: Venue Offline Mode (`ff_set_offline_mode`) and USB-C dock (`link_type: "dock"`)
+    # ring buffers for log lines, telemetry samples, and deploy status transitions.
+    offline_mode: bool = False
+    clock: Callable[[], float] = time.monotonic
     seen: set[str] = field(default_factory=set)
     downloads: int = 0
     # Not arguments: a caller passing in a pre-set event would start a board that reboots
@@ -788,6 +798,12 @@ class StageRunner:
     # When the confirm timer of the current boot fires (monotonic). Armed once per boot,
     # like the firmware's esp_timer: a reconnect resumes it rather than restarting it.
     _confirm_deadline: float | None = field(default=None, init=False, repr=False)
+    _dock_statuses: list[dict[str, object]] = field(default_factory=list, init=False, repr=False)
+    _offline_logs: list[tuple[float, str, str]] = field(
+        default_factory=list, init=False, repr=False
+    )
+    _offline_logs_dropped: int = field(default=0, init=False, repr=False)
+    _offline_telemetry: TelemetryBuffer = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         check_safe_window(self.safe_window)
@@ -810,6 +826,277 @@ class StageRunner:
                 "an image can fail a self-test only if one is registered: "
                 f"add --capabilities {CAPABILITY_SELFTEST}"
             )
+        self._offline_telemetry = TelemetryBuffer(clock=self.clock)
+
+    def set_offline_mode(self, offline: bool) -> None:
+        """`ff_set_offline_mode(bool)`: enable or disable Venue Offline Mode (CUJ-3)."""
+        self.offline_mode = bool(offline)
+
+    def record_log(
+        self, level: str, text: str, *, prev_boot: bool = False, capacity: int = 32
+    ) -> None:
+        """`ff_logf(level, fmt, ...)`: record a structured log line into the offline ring."""
+        rendered = f"[prev-boot] {text}" if prev_boot else text
+        if len(self._offline_logs) >= capacity:
+            self._offline_logs.pop(0)
+            self._offline_logs_dropped += 1
+        self._offline_logs.append((self.clock(), level, rendered))
+
+    def record_telemetry(self, name: str, value: float) -> bool:
+        """`ff_telemetry(name, value)`: record a telemetry sample into the offline ring."""
+        return self._offline_telemetry.record(name, value)
+
+    def _record_dock_status(
+        self,
+        cmd_id: str,
+        state: str,
+        *,
+        pct: int | None = None,
+        detail: str | None = None,
+    ) -> dict[str, object]:
+        status_item: dict[str, object] = {
+            "cmd_id": cmd_id,
+            "state": state,
+            "pct": pct,
+            "detail": detail,
+        }
+        self._dock_statuses.append(status_item)
+        return status_item
+
+    def dock_stage(
+        self,
+        cmd_id: str,
+        data: bytes,
+        *,
+        sha256: str,
+        version: str | None = None,
+        sig: str | None = None,
+        artifact_type: str = "app",
+        apply: str = APPLY_AUTO,
+        size: int | None = None,
+    ) -> list[dict[str, object]]:
+        """`ff_ota_dock_stage`: stage a signed `.bin` or `data_partition` cargo over USB-C dock."""
+        emitted: list[dict[str, object]] = []
+
+        def emit(
+            state: str, *, pct: int | None = None, detail: str | None = None
+        ) -> dict[str, object]:
+            item = self._record_dock_status(cmd_id, state, pct=pct, detail=detail)
+            emitted.append(item)
+            return item
+
+        self.identity = replace(self.identity, link_type="dock", ssid=None)
+        if not _SHA256_HEX.fullmatch(sha256):
+            emit(STATE_FAILED, detail="artifact sha256 malformed")
+            return emitted
+        if sig is not None and not _is_valid_artifact_sig(sig):
+            emit(STATE_FAILED, detail="artifact sig malformed")
+            return emitted
+
+        emit(STATE_STAGING)
+
+        if artifact_type != "app":
+            handler = self.cargo_handlers.get(artifact_type)
+            if handler is None and artifact_type not in self.identity.capabilities:
+                emit(STATE_FAILED, detail="unsupported artifact type")
+                return emitted
+            emit(STATE_DOWNLOADING)
+            self.downloads += 1
+            emit(STATE_VERIFYING)
+            digest = hashlib.sha256(data).hexdigest()
+            if digest != sha256:
+                emit(STATE_FAILED, detail="sha256 mismatch")
+                return emitted
+            if sig is not None:
+                if not _verify_artifact_sig(digest, sig, self.signing_pubkey_ring):
+                    emit(STATE_FAILED, detail="signature invalid")
+                    return emitted
+            elif self.require_signature:
+                emit(STATE_FAILED, detail="signature missing")
+                return emitted
+            emit(STATE_STAGED, pct=100)
+            emit(STATE_APPLYING, pct=100)
+            if handler is not None:
+                try:
+                    handler(data, version)
+                except Exception as exc:  # noqa: BLE001
+                    emit(STATE_FAILED, detail=f"cargo apply failed: {type(exc).__name__}")
+                    return emitted
+            if version:
+                updated_subs = dict(self.identity.sub_versions or {})
+                updated_subs[artifact_type] = version
+                self.identity = replace(self.identity, sub_versions=updated_subs)
+            emit(STATE_CONFIRMING)
+            emit(STATE_CONFIRMED, pct=100)
+            return emitted
+
+        if self.pending is not None:
+            emit(STATE_FAILED, detail="the running image is not confirmed yet")
+            return emitted
+        if self.staged is not None:
+            emit(STATE_FAILED, detail="an update is already staged and waits for a reboot")
+            return emitted
+
+        effective_size = size if size is not None else len(data)
+        if effective_size > self.identity.ota_slot_size or len(data) > self.identity.ota_slot_size:
+            emit(STATE_FAILED, detail="artifact larger than the ota slot")
+            return emitted
+
+        emit(STATE_DOWNLOADING)
+        self.downloads += 1
+        emit(STATE_VERIFYING)
+        digest = hashlib.sha256(data).hexdigest()
+        if digest != sha256:
+            emit(STATE_FAILED, detail="sha256 mismatch")
+            return emitted
+        if sig is not None:
+            if not _verify_artifact_sig(digest, sig, self.signing_pubkey_ring):
+                emit(STATE_FAILED, detail="signature invalid")
+                return emitted
+        elif self.require_signature:
+            emit(STATE_FAILED, detail="signature missing")
+            return emitted
+
+        emit(STATE_STAGED, pct=100)
+        staged_version = version if isinstance(version, str) and version else None
+        if apply == APPLY_ON_COMMAND:
+            self.staged = cmd_id
+            self.staged_version = staged_version
+            return emitted
+        if self._unsafe_now():
+            emit(STATE_AWAITING_SAFE_WINDOW, pct=100)
+            self.staged = cmd_id
+            self.staged_version = staged_version
+            self.apply_deferred = cmd_id
+            return emitted
+
+        emit(STATE_APPLYING)
+        emit(STATE_REBOOTING)
+        self.pending = PendingConfirm(
+            cmd_id=cmd_id, previous_identity=self.identity, previous_slot=self.slot
+        )
+        self.slot = SLOT_LABELS[1] if self.slot == SLOT_LABELS[0] else SLOT_LABELS[0]
+        self._confirm_deadline = None
+        self.identity = replace(self.identity, reset_reason=RESET_REASON_SW)
+        if staged_version:
+            self.identity = replace(self.identity, fw_version=staged_version)
+        self.reboot.set()
+        return emitted
+
+    def dock_confirm_boot(self) -> list[dict[str, object]]:
+        """`ff_mqtt_confirm_offline`: evaluate `PENDING_VERIFY` locally in Venue Offline Mode."""
+        emitted: list[dict[str, object]] = []
+
+        def emit(
+            cmd_id: str, state: str, *, pct: int | None = None, detail: str | None = None
+        ) -> None:
+            item = self._record_dock_status(cmd_id, state, pct=pct, detail=detail)
+            emitted.append(item)
+
+        self.reboot.clear()
+        if self.rolled_back is not None:
+            head = self.rolled_back_head
+            emit(
+                self.rolled_back,
+                STATE_ROLLED_BACK,
+                detail=(
+                    f"{head}{RETURNED_TO}{self.slot}"
+                    if head is not None
+                    else f"returned to {self.identity.fw_version}; the new image did not confirm"
+                ),
+            )
+            self.rolled_back = None
+            self.rolled_back_head = None
+            return emitted
+
+        pending = self.pending
+        if pending is None:
+            return emitted
+
+        emit(pending.cmd_id, STATE_CONFIRMING)
+        broken = self._is_broken(self.identity.fw_version)
+        registered = self._selftest_registered
+        if self.confirm == CONFIRM_AUTO and not broken:
+            if registered and self._fails_selftest(self.identity.fw_version):
+                head = SELFTEST_FAILED + SELFTEST_FAIL_REASON
+                emit(pending.cmd_id, STATE_ROLLING_BACK)
+                self.identity = replace(pending.previous_identity, reset_reason=RESET_REASON_SW)
+                self.slot = pending.previous_slot
+                self.pending = None
+                self.returnable = None
+                self._confirm_deadline = None
+                emit(
+                    pending.cmd_id,
+                    STATE_ROLLED_BACK,
+                    detail=f"{head}{RETURNED_TO}{self.slot}",
+                )
+                return emitted
+
+            emit(
+                pending.cmd_id,
+                STATE_CONFIRMED,
+                pct=100,
+                detail=SELFTEST_PASSED if registered else None,
+            )
+            self.returnable = (pending.previous_identity, pending.previous_slot)
+            self.pending = None
+            self._confirm_deadline = None
+            return emitted
+
+        head = SELFTEST_TIMED_OUT if registered else None
+        emit(pending.cmd_id, STATE_ROLLING_BACK)
+        self.identity = replace(pending.previous_identity, reset_reason=RESET_REASON_SW)
+        self.slot = pending.previous_slot
+        self.pending = None
+        self.returnable = None
+        self._confirm_deadline = None
+        emit(
+            pending.cmd_id,
+            STATE_ROLLED_BACK,
+            detail=(
+                f"{head}{RETURNED_TO}{self.slot}"
+                if head is not None
+                else f"returned to {self.identity.fw_version}; the new image did not confirm"
+            ),
+        )
+        return emitted
+
+    def dock_drain(self) -> dict[str, object]:
+        """`ff_log_drain_json` + `ff_telemetry_drain_json`: drain rings for USB-C dock sync."""
+        now = self.clock()
+        announce = replace(self.identity, link_type="dock", ssid=None).announce()
+        statuses = list(self._dock_statuses)
+        self._dock_statuses.clear()
+
+        telemetry_batches: list[dict[str, object]] = []
+        while True:
+            built = self._offline_telemetry.next_payload()
+            if built is None:
+                break
+            payload_bytes, last_seq, dropped = built
+            self._offline_telemetry.commit(last_seq, dropped)
+            telemetry_batches.append(json.loads(payload_bytes.decode("utf-8")))
+
+        log_batches: list[dict[str, object]] = []
+        if self._offline_logs or self._offline_logs_dropped > 0:
+            lines = [
+                {
+                    "age_ms": max(int((now - taken) * 1000), 0),
+                    "level": level,
+                    "text": text,
+                }
+                for taken, level, text in self._offline_logs
+            ]
+            log_batches.append({"dropped": self._offline_logs_dropped, "lines": lines})
+            self._offline_logs.clear()
+            self._offline_logs_dropped = 0
+
+        return {
+            "announce": announce,
+            "statuses": statuses,
+            "telemetry": telemetry_batches,
+            "logs": log_batches,
+        }
 
     @property
     def boot_ok(self) -> bool:
@@ -1211,6 +1498,8 @@ class StageRunner:
         expected_sha = artifact.get("sha256")
         version = artifact.get("version")
         sig = artifact.get("sig")
+        raw_type = artifact.get("type")
+        artifact_type = raw_type if isinstance(raw_type, str) and raw_type else "app"
         if not isinstance(url, str) or not isinstance(expected_sha, str):
             await self._status(
                 client, cmd_id, STATE_FAILED, step, detail="artifact url/sha256 missing"
@@ -1230,6 +1519,19 @@ class StageRunner:
             return
 
         await self._status(client, cmd_id, STATE_STAGING, step)
+
+        if artifact_type != "app":
+            await self._stage_cargo(
+                client,
+                cmd_id,
+                artifact_type=artifact_type,
+                url=url,
+                expected_sha=expected_sha,
+                sig=sig if isinstance(sig, str) else None,
+                version=version if isinstance(version, str) and version else None,
+                step=step,
+            )
+            return
 
         # The firmware's two read-only refusals (ff_ota.c::choose_target_slot, R2-fw-2),
         # in its order and with its details: after `staging`, before the slot-size guard
@@ -1329,6 +1631,87 @@ class StageRunner:
             return
 
         await self._release(client, cmd_id, staged_version, step)
+
+    async def _stage_cargo(
+        self,
+        client: aiomqtt.Client,
+        cmd_id: str,
+        *,
+        artifact_type: str,
+        url: str,
+        expected_sha: str,
+        sig: str | None,
+        version: str | None,
+        step: Step,
+    ) -> None:
+        """H5 / R7-cargo-1: Execute a non-`app` companion cargo update without rebooting."""
+        handler = self.cargo_handlers.get(artifact_type)
+        if handler is None and artifact_type not in self.identity.capabilities:
+            await self._status(
+                client, cmd_id, STATE_FAILED, step, detail="unsupported artifact type"
+            )
+            return
+
+        await self._status(client, cmd_id, STATE_DOWNLOADING, step)
+        try:
+            data = await asyncio.to_thread(
+                _fetch,
+                url,
+                max_retries=self.download_retries,
+                initial_backoff_s=self.download_backoff_s,
+                step=step,
+            )
+        except OSError as exc:
+            await self._status(
+                client, cmd_id, STATE_FAILED, step, detail=f"download failed: {type(exc).__name__}"
+            )
+            return
+        self.downloads += 1
+        step(f"download {len(data)} bytes from {redact_url(url)} (download #{self.downloads})")
+
+        await self._status(client, cmd_id, STATE_VERIFYING, step)
+        digest = hashlib.sha256(data).hexdigest()
+        if digest != expected_sha:
+            await self._status(client, cmd_id, STATE_FAILED, step, detail="sha256 mismatch")
+            return
+        if sig is not None:
+            if not _verify_artifact_sig(digest, sig, self.signing_pubkey_ring):
+                await self._status(client, cmd_id, STATE_FAILED, step, detail="signature invalid")
+                return
+        elif self.require_signature:
+            await self._status(client, cmd_id, STATE_FAILED, step, detail="signature missing")
+            return
+
+        await self._status(client, cmd_id, STATE_STAGED, step, pct=100)
+        await self._status(client, cmd_id, STATE_APPLYING, step, pct=100)
+        if handler is not None:
+            try:
+                handler(data, version)
+            except Exception as exc:  # noqa: BLE001
+                await self._status(
+                    client,
+                    cmd_id,
+                    STATE_FAILED,
+                    step,
+                    detail=f"cargo apply failed: {type(exc).__name__}",
+                )
+                return
+
+        if version:
+            updated_subs = dict(self.identity.sub_versions or {})
+            updated_subs[artifact_type] = version
+            self.identity = replace(self.identity, sub_versions=updated_subs)
+            await _paced_publish(
+                client,
+                self.link,
+                up_topic(self.identity.device_id, ANNOUNCE),
+                encode(self.identity.announce()),
+                retain=True,
+                step=step,
+            )
+
+        await self._status(client, cmd_id, STATE_CONFIRMING, step)
+        await self._status(client, cmd_id, STATE_CONFIRMED, step, pct=100)
 
     async def _release(
         self, client: aiomqtt.Client, cmd_id: str, version: str | None, step: Step

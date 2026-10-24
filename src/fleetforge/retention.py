@@ -317,8 +317,7 @@ async def sweep(
     orphan_sha256s: list[str] = []
     if artifact_versions > 0 or store is not None or prune_orphans:
         orphan_sha256s = [
-            str(sha)
-            for sha in (await session.scalars(_PRUNE_ORPHAN_ARTIFACTS_SQL)).all()
+            str(sha) for sha in (await session.scalars(_PRUNE_ORPHAN_ARTIFACTS_SQL)).all()
         ]
     if store is not None and orphan_sha256s:
         for sha256 in orphan_sha256s:

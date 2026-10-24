@@ -57,11 +57,18 @@ class RecordingProvisioner:
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, str]] = []
+        self.removed: list[str] = []
         self.result = True
         self.error: Exception | None = None
 
     async def ensure_client(self, device_id: str, password: str) -> bool:
         self.calls.append((device_id, password))
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+    async def remove_client(self, device_id: str) -> bool:
+        self.removed.append(device_id)
         if self.error is not None:
             raise self.error
         return self.result
@@ -655,6 +662,45 @@ async def test_re_enrollment_upserts_and_keeps_the_operator_s_name(
     for issued in (first, second):
         row = await fetch_token(engine, issued["id"])
         assert row.used_by_device_id == device_id
+
+
+async def test_re_enrollment_resets_stale_runtime_health_and_cfg_state(
+    enroll_app: FastAPI, engine: AsyncEngine
+) -> None:
+    """Re-enrolling a decommissioned board resets transient health/runtime/config columns."""
+    device_id = "a4cf12b3de49"
+    first = await issue_token(enroll_app)
+    assert (await post_enroll(enroll_app, enroll_body(first["token"], device_id))).status_code == (
+        200
+    )
+
+    await execute(
+        engine,
+        "UPDATE devices SET decommissioned_at = now(), is_dev = true, stay_awake = true, "
+        "secrets_rev = 7, last_reset_reason = 'panic', health_at = now(), uptime_s = 900, "
+        "rssi = -55, free_heap = 120000, min_free_heap = 80000, boot_ok = true "
+        "WHERE device_id = :d",
+        d=device_id,
+    )
+
+    second = await issue_token(enroll_app)
+    assert (await post_enroll(enroll_app, enroll_body(second["token"], device_id))).status_code == (
+        200
+    )
+
+    device = await fetch_device(engine, device_id)
+    assert device is not None
+    assert device.decommissioned_at is None
+    assert device.is_dev is False
+    assert device.stay_awake is False
+    assert device.secrets_rev is None
+    assert device.last_reset_reason is None
+    assert device.health_at is None
+    assert device.uptime_s is None
+    assert device.rssi is None
+    assert device.free_heap is None
+    assert device.min_free_heap is None
+    assert device.boot_ok is None
 
 
 async def test_an_ungrouped_token_does_not_ungroup_a_placed_device(
