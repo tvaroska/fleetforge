@@ -9,26 +9,29 @@ from __future__ import annotations
 import base64
 import hashlib
 
-from cryptography.fernet import Fernet, InvalidToken
+from cryptography.fernet import Fernet, InvalidToken, MultiFernet
 from pydantic import ValidationError
 
 from fleetforge.config import Settings, get_settings
 
 
-def _fernet_for(settings: Settings | None = None) -> Fernet:
+def _fernet_for(settings: Settings | None = None) -> MultiFernet:
     cfg = settings
     if cfg is None:
         try:
             cfg = get_settings()
         except ValidationError:
             cfg = None
-    raw = (
-        (cfg.secrets_encryption_key if cfg else None)
-        or (cfg.artifact_url_secret if cfg else None)
-        or "fleetforge-dev-secrets-key-do-not-use-in-prod"
+    candidates: list[str] = []
+    if cfg is not None:
+        for raw in (cfg.secrets_encryption_key, cfg.artifact_url_secret):
+            if raw and raw not in candidates:
+                candidates.append(raw)
+    if not candidates:
+        candidates.append("fleetforge-dev-secrets-key-do-not-use-in-prod")
+    return MultiFernet(
+        [Fernet(base64.urlsafe_b64encode(hashlib.sha256(k.encode()).digest())) for k in candidates]
     )
-    digest = hashlib.sha256(raw.encode("utf-8")).digest()
-    return Fernet(base64.urlsafe_b64encode(digest))
 
 
 def encrypt_secret(plaintext: str, settings: Settings | None = None) -> str:

@@ -291,6 +291,12 @@ def create_app() -> FastAPI:
             "Correct until R0-sec-1 secures the broker; reconcile afterwards with "
             "SELECT device_id FROM devices WHERE broker_provisioned_at IS NULL."
         )
+    if settings is not None and not settings.artifact_signing_public_keys:
+        logger.warning(
+            "ARTIFACT_SIGNING_PUBLIC_KEYS is not set: signature verification uses the "
+            "built-in R6 development public key ring. Mint a production key pair with "
+            "`just signing-key keygen` and configure ARTIFACT_SIGNING_PUBLIC_KEYS."
+        )
 
     app.include_router(auth.router)
     app.include_router(projects.router)

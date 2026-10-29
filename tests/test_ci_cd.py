@@ -1476,11 +1476,7 @@ class TestCuj3PitTetheredDockAndVenueOffline:
 
         # Verify ingestor/main.py does not import from fleetforge.api (ARCH-1 / ARCH-5)
         ingestor_main = (
-            Path(__file__).resolve().parents[1]
-            / "src"
-            / "fleetforge"
-            / "ingestor"
-            / "main.py"
+            Path(__file__).resolve().parents[1] / "src" / "fleetforge" / "ingestor" / "main.py"
         ).read_text(encoding="utf-8")
         assert "fleetforge.api" not in ingestor_main
 
@@ -1772,3 +1768,268 @@ class TestCuj3PitTetheredDockAndVenueOffline:
             assert rc == 0
             mock_cli_req.assert_called_once()
             assert mock_cli_req.call_args.args[1].endswith(f"/v1/devices/{DEVICE_ID}/dock-sync")
+
+
+class TestTrack1InfrastructureAndSecurityHardening:
+    def test_multifernet_secret_rotation_fallback_and_signing_default_ring_flag(self) -> None:
+        from fleetforge.config import Settings
+        from fleetforge.secrets_crypto import decrypt_secret, encrypt_secret
+        from fleetforge.signing import DEFAULT_PRIMARY_PUBLIC_KEY_PEM, SigningKeyRing
+
+        # 1. Encrypt under legacy ARTIFACT_URL_SECRET only
+        legacy_settings = Settings(
+            database_url="postgresql+asyncpg://u:p@localhost/db",
+            artifact_url_secret="legacy-artifact-url-secret-0001",
+            secrets_encryption_key=None,
+        )
+        token = encrypt_secret("wifi-psk-top-secret", legacy_settings)
+
+        # 2. Introduce SECRETS_ENCRYPTION_KEY while keeping ARTIFACT_URL_SECRET in MultiFernet ring
+        dual_settings = Settings(
+            database_url="postgresql+asyncpg://u:p@localhost/db",
+            artifact_url_secret="legacy-artifact-url-secret-0001",
+            secrets_encryption_key="dedicated-secrets-key-0002",
+        )
+        assert decrypt_secret(token, dual_settings) == "wifi-psk-top-secret"
+
+        # 3. Re-encrypting under dual_settings uses primary SECRETS_ENCRYPTION_KEY, surviving ARTIFACT_URL_SECRET rotation
+        rotated_token = encrypt_secret("wifi-psk-top-secret", dual_settings)
+        post_rotate_settings = Settings(
+            database_url="postgresql+asyncpg://u:p@localhost/db",
+            artifact_url_secret="brand-new-artifact-url-secret-0003",
+            secrets_encryption_key="dedicated-secrets-key-0002",
+        )
+        assert decrypt_secret(rotated_token, post_rotate_settings) == "wifi-psk-top-secret"
+
+        # 4. SigningKeyRing tracks whether it fell back to the built-in default dev ring
+        assert SigningKeyRing.from_config().uses_default_ring is True
+        assert (
+            SigningKeyRing.from_config(public_keys=DEFAULT_PRIMARY_PUBLIC_KEY_PEM).uses_default_ring
+            is False
+        )
+
+    def test_event_hub_fails_closed_for_tenant_projects_when_event_project_id_is_none(
+        self,
+    ) -> None:
+        import uuid
+
+        from fleetforge.api.eventstream import EventHub
+        from fleetforge.db.models import DEFAULT_PROJECT_ID
+
+        tenant_proj = uuid.uuid4()
+        hub = EventHub(queue_size=8, max_subscribers=8)
+        with (
+            hub.subscribe(project_id=tenant_proj) as sub_tenant,
+            hub.subscribe(project_id=DEFAULT_PROJECT_ID) as sub_default,
+            hub.subscribe(project_id=None) as sub_unscoped,
+        ):
+            hub.publish('{"type":"device.seen"}', project_id=None)
+            assert sub_tenant.queue.empty()
+            assert sub_default.queue.get_nowait() == '{"type":"device.seen"}'
+            assert sub_unscoped.queue.get_nowait() == '{"type":"device.seen"}'
+
+    async def test_device_secrets_fails_500_instead_of_truncating_on_decrypt_error(self) -> None:
+        import base64
+        import hashlib
+        import uuid
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        from fastapi import HTTPException
+
+        from fleetforge.api.routers.device_secrets import get_device_secrets
+        from fleetforge.config import Settings
+        from fleetforge.db.models import Device, Project, ProjectSecret
+
+        pw = "device-mqtt-pass-123"
+        proj_id = uuid.uuid4()
+        dev = Device(
+            device_id=DEVICE_ID,
+            project_id=proj_id,
+            platform_type="esp32s3",
+            link_type="wifi",
+            power_class="always_on",
+            mqtt_password_hash=hashlib.sha256(pw.encode()).hexdigest(),
+        )
+        proj = Project(id=proj_id, slug="eink", name="E-Ink", secrets_rev=3)
+        corrupt_row = ProjectSecret(
+            project_id=proj_id,
+            key="API_KEY",
+            ciphertext="not-a-valid-fernet-token",
+        )
+
+        session = AsyncMock()
+        call_idx = [0]
+
+        def fake_scalars(_stmt: Any) -> Any:
+            call_idx[0] += 1
+            if call_idx[0] == 1:
+                return SimpleNamespace(one_or_none=lambda: dev)
+            return SimpleNamespace(all=lambda: [corrupt_row])
+
+        session.scalars = AsyncMock(side_effect=fake_scalars)
+        session.get = AsyncMock(return_value=proj)
+
+        class _FakeSessionCM:
+            async def __aenter__(self) -> Any:
+                return session
+
+            async def __aexit__(self, *args: object) -> None:
+                return None
+
+        auth_b64 = base64.b64encode(f"{DEVICE_ID}:{pw}".encode()).decode("ascii")
+        req = SimpleNamespace(headers={"Authorization": f"Basic {auth_b64}"})
+        settings = Settings(
+            database_url="postgresql+asyncpg://u:p@localhost/db",
+            artifact_url_secret="k" * 32,
+        )
+
+        with pytest.raises(HTTPException) as exc_info:
+            await get_device_secrets(
+                request=req,  # type: ignore[arg-type]
+                settings=settings,
+                sessionmaker=lambda: _FakeSessionCM(),  # type: ignore[arg-type]
+            )
+        assert exc_info.value.status_code == 500
+
+    async def test_rollout_auto_advancement_halts_on_cancelled_and_caches_artifact_per_target(
+        self,
+    ) -> None:
+        import datetime as dt
+        import uuid
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        from fleetforge.api.routers.deploys import advance_project_rollout_on_confirm
+        from fleetforge.config import Settings
+        from fleetforge.deploys import DeploySender, DeploySnapshot, RequestedRollout
+        from fleetforge.firmware.manifest import BUILTIN_LAYOUTS
+        from fleetforge.partition_profiles import LayoutCatalog
+
+        proj_id = uuid.uuid4()
+        now = dt.datetime.now(dt.UTC)
+        devices = [
+            Device(
+                device_id=f"a4cf12b3de0{i}",
+                project_id=proj_id,
+                platform_type="esp32c6",
+                fw_version="1.2.0" if i == 1 else "1.0.0",
+                partition_layout="ab-4m-v1",
+                ota_slot_size=1966080,
+                rollback_capable=True,
+                capabilities=["ota", "cancel"],
+                link_type="wifi",
+                power_class="always_on",
+                is_dev=(i == 1),
+                presence_reported=True,
+                last_seen=now,
+            )
+            for i in range(1, 5)
+        ]
+
+        session = AsyncMock()
+        session.scalars = AsyncMock(return_value=SimpleNamespace(all=lambda: devices))
+        art_row = SimpleNamespace(
+            sha256="c" * 64,
+            size_bytes=2048,
+            partition_layout="ab-4m-v1",
+            has_lib_marker=True,
+            sig=None,
+            artifact_type="app",
+        )
+        session.execute = AsyncMock(return_value=SimpleNamespace(first=lambda: art_row))
+        settings = Settings(
+            database_url="postgresql+asyncpg://u:p@localhost/db",
+            artifact_url_secret="s" * 32,
+            public_base_url="https://fleet.example.com",
+        )
+        publisher = AsyncMock()
+        catalog = LayoutCatalog(layouts=BUILTIN_LAYOUTS, by_fingerprint={}, pending=frozenset())
+        rollout_req = RequestedRollout(
+            artifact_version="1.2.0",
+            apply="auto",
+            sent_by=DeploySender(subject="ci", token_id="tok-1", credential="ci-token"),
+            rollout={
+                "target_filter": "all",
+                "canary": True,
+                "max_parallel": 2,
+                "override": [],
+                "target_chip": "esp32c6",
+            },
+        )
+
+        # When device 2 was cancelled on 1.2.0, background rollout auto-advancement halts
+        cancelled_snapshots = {
+            "a4cf12b3de01": DeploySnapshot(
+                cmd_id="cmd-1",
+                state="confirmed",
+                at=now,
+                is_terminal=True,
+                artifact_version="1.2.0",
+                from_version="1.0.0",
+                pct=None,
+                detail=None,
+                steps=(),
+                sent_by=None,
+                selftest=None,
+            ),
+            "a4cf12b3de02": DeploySnapshot(
+                cmd_id="cmd-2",
+                state="cancelled",
+                at=now,
+                is_terminal=True,
+                artifact_version="1.2.0",
+                from_version="1.0.0",
+                pct=None,
+                detail="cancelled by operator",
+                steps=(),
+                sent_by=None,
+                selftest=None,
+            ),
+        }
+        with (
+            patch("fleetforge.api.routers.deploys.requested_rollout", return_value=rollout_req),
+            patch("fleetforge.api.routers.deploys.load_layout_catalog", return_value=catalog),
+            patch("fleetforge.api.routers.deploys.latest_open_transaction", return_value=None),
+            patch("fleetforge.api.routers.deploys.record_requested", AsyncMock()),
+            patch(
+                "fleetforge.api.routers.deploys.latest_deploys",
+                return_value=cancelled_snapshots,
+            ),
+        ):
+            advanced = await advance_project_rollout_on_confirm(
+                session,
+                device=devices[0],
+                cmd_id="cmd-1",
+                settings=settings,
+                publisher=publisher,
+            )
+            assert advanced == []
+            # Only the Project.id FOR UPDATE lock query executed; zero artifact lookups ran
+            assert session.execute.call_count == 1
+
+        # When not cancelled, all 3 eligible esp32c6 boards share 1 cached artifact lookup
+        session.execute.reset_mock()
+        confirmed_only_snapshots = {
+            "a4cf12b3de01": cancelled_snapshots["a4cf12b3de01"],
+        }
+        with (
+            patch("fleetforge.api.routers.deploys.requested_rollout", return_value=rollout_req),
+            patch("fleetforge.api.routers.deploys.load_layout_catalog", return_value=catalog),
+            patch("fleetforge.api.routers.deploys.latest_open_transaction", return_value=None),
+            patch("fleetforge.api.routers.deploys.record_requested", AsyncMock()),
+            patch(
+                "fleetforge.api.routers.deploys.latest_deploys",
+                return_value=confirmed_only_snapshots,
+            ),
+        ):
+            advanced2 = await advance_project_rollout_on_confirm(
+                session,
+                device=devices[0],
+                cmd_id="cmd-1",
+                settings=settings,
+                publisher=publisher,
+            )
+            assert len(advanced2) == 2
+            # 1 FOR UPDATE lock query + 1 cached _ARTIFACT_FOR_TARGET_SQL query for esp32c6
+            assert session.execute.call_count == 2

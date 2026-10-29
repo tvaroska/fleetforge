@@ -6,8 +6,7 @@ questions that are deliberately not v1's problem.
 
 > This file is an **index**. Requirements and targets live in [prd.md](../spec/prd.md).
 > Release contents in [releases.md](releases.md). Task history in `features/*.md`.
-> **Where each release stands (closed, active, blocked) lives only in
-> [TODO.md](../TODO.md)**. Nothing here carries live state.
+> Architectural decisions live in [DECISIONS.md](../DECISIONS.md) (and [archive/DECISIONS-history.md](archive/DECISIONS-history.md)). An ephemeral root `TODO.md` can be created when an active sprint requires granular task tracking.
 
 ## Strategic vision
 

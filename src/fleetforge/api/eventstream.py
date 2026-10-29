@@ -49,6 +49,7 @@ from typing import Any
 import asyncpg
 from pydantic import ValidationError
 
+from fleetforge.db.models import DEFAULT_PROJECT_ID
 from fleetforge.events import EVENTS_CHANNEL, NOTIFY_PAYLOAD_LIMIT, DeviceEvent
 
 logger = logging.getLogger(__name__)
@@ -131,11 +132,11 @@ class EventHub:
         construction: a copy of the subscriber set, `put_nowait` guarded by the one
         `QueueFull` handler, and `discard`.
         """
+        effective_project_id = project_id if project_id is not None else DEFAULT_PROJECT_ID
         for subscription in list(self._subscribers):
             if (
-                project_id is not None
-                and subscription.project_id is not None
-                and subscription.project_id != project_id
+                subscription.project_id is not None
+                and subscription.project_id != effective_project_id
             ):
                 continue
             try:

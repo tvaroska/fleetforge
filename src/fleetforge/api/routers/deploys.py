@@ -412,6 +412,36 @@ def _no_such_device(device_id: str) -> HTTPException:
     )
 
 
+async def _resolve_artifact_for_target(
+    session: AsyncSession,
+    *,
+    project_id: uuid.UUID,
+    target: str,
+    version: str,
+) -> ResolvedArtifact | None:
+    """Resolve the artifact behind `(project_id, target, version)`, if any."""
+    row = (
+        await session.execute(
+            _ARTIFACT_FOR_TARGET_SQL,
+            {
+                "project_id": project_id,
+                "target": target,
+                "version": version,
+            },
+        )
+    ).first()
+    if row is None:
+        return None
+    return ResolvedArtifact(
+        sha256=row.sha256,
+        size_bytes=row.size_bytes,
+        partition_layout=row.partition_layout,
+        has_lib_marker=row.has_lib_marker,
+        sig=row.sig,
+        artifact_type=getattr(row, "artifact_type", "app"),
+    )
+
+
 async def _resolve(
     session: AsyncSession, device_id: str, version: str
 ) -> tuple[Device, ResolvedArtifact | None]:
@@ -422,26 +452,11 @@ async def _resolve(
         # the fleet view and from the ingestor, and a deploy to it is the same
         # mistake as a deploy to a device id that was never enrolled.
         raise _no_such_device(device_id)
-
-    row = (
-        await session.execute(
-            _ARTIFACT_FOR_TARGET_SQL,
-            {
-                "project_id": device.project_id,
-                "target": device.platform_type,
-                "version": version,
-            },
-        )
-    ).first()
-    if row is None:
-        return device, None
-    return device, ResolvedArtifact(
-        sha256=row.sha256,
-        size_bytes=row.size_bytes,
-        partition_layout=row.partition_layout,
-        has_lib_marker=row.has_lib_marker,
-        sig=row.sig,
-        artifact_type=getattr(row, "artifact_type", "app"),
+    return device, await _resolve_artifact_for_target(
+        session,
+        project_id=device.project_id,
+        target=device.platform_type,
+        version=version,
     )
 
 
@@ -704,18 +719,14 @@ async def deploy_version_to_project_devices(
 
     snapshots = await latest_deploys(session, device_ids=[d.device_id for d in all_project_devices])
 
-    # Rule 1: Auto-halt if any board in the project cohort rolled back or failed on `version`.
+    # Rule 1: Auto-halt if any board in the project cohort rolled back or failed on `version`
+    # (or was cancelled during background rollout auto-advancement).
+    halt_states = (
+        ("rolled_back", "failed") if republish_in_flight else ("rolled_back", "failed", "cancelled")
+    )
     for d in all_project_devices:
         snap = snapshots.get(d.device_id)
-        if (
-            snap is not None
-            and snap.artifact_version == version
-            and snap.state
-            in (
-                "rolled_back",
-                "failed",
-            )
-        ):
+        if snap is not None and snap.artifact_version == version and snap.state in halt_states:
             halt_reason = f"rollout halted: device {d.device_id} {snap.state} on version {version}"
             return [], {cand.device_id: halt_reason for cand in devices}
 
@@ -733,6 +744,7 @@ async def deploy_version_to_project_devices(
     now = now_utc()
     eligible: list[tuple[Device, ResolvedArtifact, bool]] = []
     skipped: dict[str, str] = {}
+    artifacts_by_target: dict[str, ResolvedArtifact | None] = {}
 
     for device in devices:
         dev_snap = snapshots.get(device.device_id)
@@ -751,7 +763,14 @@ async def deploy_version_to_project_devices(
         ):
             skipped[device.device_id] = f"already in flight on version {version}"
             continue
-        _, found_artifact = await _resolve(session, device.device_id, version)
+        if device.platform_type not in artifacts_by_target:
+            artifacts_by_target[device.platform_type] = await _resolve_artifact_for_target(
+                session,
+                project_id=project_id,
+                target=device.platform_type,
+                version=version,
+            )
+        found_artifact = artifacts_by_target[device.platform_type]
         found_refusals: list[Finding] = [
             *refusals(device, found_artifact, version=version, catalog=catalog),
             *apply_refusals(device, apply),
@@ -1060,7 +1079,12 @@ async def republish_open_requested_on_wake(
     ):
         return False
 
-    _, found_artifact = await _resolve(session, device_id, snap.artifact_version)
+    found_artifact = await _resolve_artifact_for_target(
+        session,
+        project_id=device.project_id,
+        target=device.platform_type,
+        version=snap.artifact_version,
+    )
     if found_artifact is None:
         return False
 

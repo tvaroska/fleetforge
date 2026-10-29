@@ -110,11 +110,15 @@ async def get_device_secrets(
         try:
             secrets_map[row.key] = decrypt_secret(row.ciphertext, settings)
         except ValueError:
-            logger.warning(
+            logger.error(
                 "device-secrets: failed to decrypt secret key=%s for project=%s",
                 row.key,
                 project.slug,
             )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="secret decryption failed",
+            ) from None
 
     return DeviceSecretsResponse(
         secrets_rev=project.secrets_rev,

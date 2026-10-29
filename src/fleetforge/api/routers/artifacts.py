@@ -522,7 +522,7 @@ async def upload_artifact(
             matches_project_tracking,
         )
 
-        if matches_project_tracking(
+        if ("admin" in admin.scopes or "deploy" in admin.scopes) and matches_project_tracking(
             target_project,
             repo_url=repo_url,
             branch=branch,

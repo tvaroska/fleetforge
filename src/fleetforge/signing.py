@@ -269,6 +269,7 @@ class SigningKeyRing:
 
     public_keys_pem: tuple[str, ...]
     private_key_pem: str | None = None
+    uses_default_ring: bool = False
 
     @classmethod
     def from_config(
@@ -277,11 +278,18 @@ class SigningKeyRing:
         private_key: str | None = None,
         public_keys: str | Sequence[str] | None = None,
     ) -> SigningKeyRing:
+        using_default = public_keys is None or (
+            isinstance(public_keys, str) and not public_keys.strip()
+        )
         ring = parse_public_key_ring(public_keys, active_private_key=private_key)
         norm_priv = _normalize_pem(private_key) if private_key else None
         if norm_priv is not None:
             load_private_key(norm_priv)
-        return cls(public_keys_pem=ring, private_key_pem=norm_priv)
+        return cls(
+            public_keys_pem=ring,
+            private_key_pem=norm_priv,
+            uses_default_ring=using_default,
+        )
 
     @property
     def can_sign(self) -> bool:
