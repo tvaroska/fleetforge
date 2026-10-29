@@ -74,3 +74,6 @@ agent/components/fleetforge/examples/*/sdkconfig
 agent/components/fleetforge/examples/*/sdkconfig.old
 agent/components/fleetforge/examples/*/dependencies.lock
 agent/components/fleetforge/examples/*/managed_components/
+
+# Due-diligence report lives in gs://btvaroska/fleetforge/ only; never commit
+FEEDBACK.md
