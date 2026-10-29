@@ -1,0 +1,126 @@
+# Google Cloud Build CI pipeline for Fleetforge (OTA firmware management)
+#
+# Executes parallel verification tracks on E2_HIGHCPU_8:
+#   - Track A (t=0): resolve-git-metadata
+#   - Track B (t=0): python-lint-typecheck-and-unit-tests (uv + ruff + mypy + firmware/unit pytest)
+#   - Track C (t=0): frontend-typecheck-and-tests (npm ci + tsc -b + vitest + vite build)
+#   - Fan-in Gate  : docker-build-images builds both production container targets (`api`/`ingestor`
+#                    from `Dockerfile` and `frontend` from `frontend/Dockerfile`) only after all
+#                    verification tracks pass.
+#
+# Usage:
+#   gcloud builds submit --config cloudbuild.yaml
+
+substitutions:
+  _REGION: us-central1
+  _AR_REPO: containers
+  _BACKEND_IMAGE: ""
+  _FRONTEND_IMAGE: ""
+
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: E2_HIGHCPU_8
+
+steps:
+  # ------------------------------------------------------------------------- #
+  # 1. Resolve Git commit & timestamp metadata (t=0)                          #
+  # ------------------------------------------------------------------------- #
+  - id: resolve-git-metadata
+    name: gcr.io/cloud-builders/git
+    waitFor: ["-"]
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        SHA="${COMMIT_SHA:-$(git rev-parse --short=12 HEAD 2>/dev/null || echo 'local')}"
+        BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf '%s' "${SHA}" > /workspace/.resolved_sha
+        printf '%s' "${BUILT_AT}" > /workspace/.built_at
+        printf "Resolved commit=%s built_at=%s\n" "${SHA}" "${BUILT_AT}"
+
+  # ------------------------------------------------------------------------- #
+  # 2. Python Ruff Lint, Format, Mypy Typecheck & Firmware/Unit Pytest (t=0)  #
+  # ------------------------------------------------------------------------- #
+  - id: python-lint-typecheck-and-unit-tests
+    name: ghcr.io/astral-sh/uv:0.9.1-python3.12-bookworm-slim
+    waitFor: ["-"]
+    entrypoint: bash
+    env:
+      - UV_COMPILE_BYTECODE=1
+      - UV_LINK_MODE=copy
+      - UV_PROJECT_ENVIRONMENT=/workspace/.venv
+      - PYTHONPATH=/workspace/src:/workspace
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        uv sync --frozen --no-install-project
+        /workspace/.venv/bin/ruff check .
+        /workspace/.venv/bin/ruff format --check .
+        /workspace/.venv/bin/mypy src/
+        /workspace/.venv/bin/pytest \
+          tests/test_ci_cd.py \
+          tests/test_agent_partitions.py \
+          tests/test_arduino_library.py \
+          tests/test_arduino_package.py \
+          tests/test_worked_example.py \
+          tests/test_ota_component.py \
+          tests/test_layout_detection.py \
+          tests/test_selftest.py \
+          tests/test_safe_window.py \
+          tests/test_sleep_helpers.py \
+          -k "not (TestCiCdDatabaseAndApi or TestTrack1 and database)" \
+          -q
+
+  # ------------------------------------------------------------------------- #
+  # 3. Frontend TypeScript Check, Vitest Suite & Production Bundle Build (t=0)#
+  # ------------------------------------------------------------------------- #
+  - id: frontend-typecheck-and-tests
+    name: node:22-slim
+    waitFor: ["-"]
+    dir: frontend
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        npm ci
+        npm run typecheck
+        npm test -- --exclude src/flash.test.tsx
+        npm run build
+
+  # ------------------------------------------------------------------------- #
+  # 4. Build Production Container Images (Gated on All Verification Tracks)   #
+  # ------------------------------------------------------------------------- #
+  - id: docker-build-images
+    name: gcr.io/cloud-builders/docker
+    waitFor:
+      - resolve-git-metadata
+      - python-lint-typecheck-and-unit-tests
+      - frontend-typecheck-and-tests
+    entrypoint: bash
+    env:
+      - DOCKER_BUILDKIT=1
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        SHA="$(cat /workspace/.resolved_sha)"
+        BUILT_AT="$(cat /workspace/.built_at)"
+        BACKEND_TAG="${_BACKEND_IMAGE:-${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/fleetforge:${SHA}}"
+        FRONTEND_TAG="${_FRONTEND_IMAGE:-${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/fleetforge-frontend:${SHA}}"
+        docker build \
+          --target production \
+          --build-arg SOURCE_COMMIT="${SHA}" \
+          --build-arg BUILT_AT="${BUILT_AT}" \
+          -t "${BACKEND_TAG}" \
+          -f Dockerfile \
+          .
+        docker build \
+          --target production \
+          --build-arg SOURCE_COMMIT="${SHA}" \
+          --build-arg BUILT_AT="${BUILT_AT}" \
+          -t "${FRONTEND_TAG}" \
+          -f frontend/Dockerfile \
+          frontend

@@ -2033,3 +2033,93 @@ class TestTrack1InfrastructureAndSecurityHardening:
             assert len(advanced2) == 2
             # 1 FOR UPDATE lock query + 1 cached _ARTIFACT_FOR_TARGET_SQL query for esp32c6
             assert session.execute.call_count == 2
+
+
+class TestTrack2ShowcaseAndUxHygiene:
+    """Track 2 showcase repo & documentation hygiene checks (DOC-1..DOC-5, IMPL-1)."""
+
+    def test_license_and_manifest_metadata_present(self) -> None:
+        repo_root = Path(__file__).resolve().parent.parent
+        license_file = repo_root / "LICENSE"
+        assert license_file.is_file()
+        assert "MIT License" in license_file.read_text()
+
+        pyproject = (repo_root / "pyproject.toml").read_text()
+        assert 'license = { text = "MIT" }' in pyproject
+
+        pkg_json = json.loads((repo_root / "frontend" / "package.json").read_text())
+        assert pkg_json.get("license") == "MIT"
+
+        lib_json = json.loads(
+            (repo_root / "agent" / "components" / "fleetforge" / "library.json").read_text()
+        )
+        assert lib_json.get("license") == "MIT"
+
+        idf_yml = (
+            repo_root / "agent" / "components" / "fleetforge" / "idf_component.yml"
+        ).read_text()
+        assert 'license: "MIT"' in idf_yml
+
+    def test_critical_md_paths_exist(self) -> None:
+        """DOC-5: Every concrete repository file path named in CRITICAL.md must exist."""
+        import re
+
+        repo_root = Path(__file__).resolve().parent.parent
+        critical_text = (repo_root / "CRITICAL.md").read_text()
+        # Extract backticked repo-relative paths containing a slash and not wildcards/routes
+        tokens = re.findall(r"`([A-Za-z0-9_./-]+\.[A-Za-z0-9_]+)`", critical_text)
+        checked = 0
+        for tok in tokens:
+            if "/" not in tok or tok.startswith("/"):
+                continue
+            target = repo_root / tok
+            assert target.exists(), f"CRITICAL.md references missing path: {tok}"
+            checked += 1
+        assert checked >= 15
+
+    def test_docs_have_no_unshipped_claims_or_stale_todo_links(self) -> None:
+        """DOC-2, DOC-4: README, releases.md, and library README match shipped code."""
+        repo_root = Path(__file__).resolve().parent.parent
+        readme = (repo_root / "README.md").read_text()
+        assert "v0.8.0" in readme
+        assert "(TODO.md)" not in readme
+
+        releases = (repo_root / "docs" / "releases.md").read_text()
+        for unshipped in (
+            "actions/fleetforge-push/action.yml",
+            ".gitlab/fleetforge-push.yml",
+            ".gitea/workflows/fleetforge-push.yml",
+            "cloudbuild/fleetforge-push.yaml",
+            "auto_on_tag",
+            "require_ci_tests",
+        ):
+            assert unshipped not in releases, unshipped
+
+        lib_readme = (repo_root / "agent" / "components" / "fleetforge" / "README.md").read_text()
+        assert "FluxTray.jar" not in lib_readme
+
+    def test_cloudbuild_ci_pipeline_present_and_no_github_workflows(self) -> None:
+        """IMPL-1: CI runs on GCP Cloud Build (`cloudbuild.yaml`) with no `.github/workflows`."""
+        repo_root = Path(__file__).resolve().parent.parent
+        cb = repo_root / "cloudbuild.yaml"
+        assert cb.is_file()
+        cb_text = cb.read_text()
+        assert "python-lint-typecheck-and-unit-tests" in cb_text
+        assert "frontend-typecheck-and-tests" in cb_text
+        assert "docker-build-images" in cb_text
+        assert not (repo_root / ".github" / "workflows").exists()
+
+    def test_frontend_ux4_ux5_ux6_confirmations_queued_breakdown_and_copy_snippet(self) -> None:
+        """UX-4, UX-5, UX-6, UX-14: Destructive confirmations, queued vs skipped, and copy snippet."""
+        repo_root = Path(__file__).resolve().parent.parent
+        dashboard_tsx = (repo_root / "frontend" / "src" / "Dashboard.tsx").read_text()
+        assert 'data-testid="confirm-bulk-action"' in dashboard_tsx
+        assert "Confirm deploy all" in dashboard_tsx
+        assert "Confirm cancel rollout" in dashboard_tsx
+        assert "queued for next wave" in dashboard_tsx
+        assert 'data-testid="copy-cli-snippet"' in dashboard_tsx
+        assert "RULE E301" not in dashboard_tsx
+
+        project_access_tsx = (repo_root / "frontend" / "src" / "ProjectAccess.tsx").read_text()
+        assert 'data-testid="confirm-delete-secret"' in project_access_tsx
+        assert 'data-testid="confirm-delete-group"' in project_access_tsx

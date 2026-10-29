@@ -199,18 +199,18 @@ to your board without overwriting the ESP32 application slot or rebooting:
   (`ff_identity_set_sub_version`), re-announces identity, and reports `confirming` → `confirmed`
   without rebooting or changing `fw_version`.
 
-## Venue offline mode & USB-C dock updates (`CUJ-3`, `link_type: "dock"`)
+## Offline radio lockout & USB-C dock updates (`CUJ-3`, `link_type: "dock"`)
 
-- **Venue / EMCON offline radio lockout (`ff_set_offline_mode(true)` / `Fleetforge.setOfflineMode(true)`)**:
+- **Offline radio lockout (`ff_set_offline_mode(true)` / `Fleetforge.setOfflineMode(true)`)**:
   Hard-disables `802.11` Wi-Fi (`esp_wifi_stop()`), suppresses the 120-second Improv Wi-Fi BLE GATT
   service (`ff_net_wifi_set_improv_ble_enabled(false)`), and guards NimBLE startup with
   `ble_hs_synced()` so `libfleetforge` never collides with your application's own NimBLE GATT
-  services inside RF-restricted competition arenas (`E301`). `ff_get_secret()`, `ff_logf()`,
+  services inside RF-restricted environments. `ff_get_secret()`, `ff_logf()`,
   `ff_telemetry()`, `ff_selftest`, and `ff_safe_window` remain active, and
   `ff_mqtt_confirm_offline()` confirms `ESP_OTA_IMG_PENDING_VERIFY` images locally via your
   registered `ff_selftest` without waiting for an MQTT `PUBACK`.
 - **Tethered USB-C dock stage & ring drains (`ff_ota_dock_stage`, `ff_log_drain_json`, `ff_telemetry_drain_json`)**:
-  When Wi-Fi is banned, a tethered host (`FluxTray.jar` or `fleetforge` CLI) streams a signed `app`
+  When Wi-Fi is disabled, a tethered host (`fleetforge` CLI) streams a signed `app`
   image or non-`app` `data_partition` cargo into `ff_ota_dock_stage(&cmd, data, len)` (`src/ff_ota.h`),
   preserving SHA-256 + ECDSA P-256 verification, `ota_slot_size` checks, and `ff_safe_window`
   deferral (`link_type: "dock"`). `ff_log_drain_json(buf, cap)` and `ff_telemetry_drain_json(buf, cap)`

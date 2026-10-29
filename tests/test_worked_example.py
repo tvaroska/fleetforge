@@ -432,6 +432,15 @@ class TestTheLibraryReadme:
             for name in re.findall(r"Fleetforge-(\d+\.\d+\.\d+)\.zip", readme.read_text()):
                 assert name == version, (readme, name)
 
+    def test_the_git_pin_matches_the_library_version(self) -> None:
+        """DOC-3: PlatformIO `lib_deps ...#vX.Y.Z` pins in READMEs must match agent/version.txt."""
+        version = (AGENT_DIR / "version.txt").read_text().strip()
+        for readme in (EXAMPLE_README, COMPONENT_README):
+            pins = re.findall(r"fleetforge\.git#v(\d+\.\d+\.\d+)", readme.read_text())
+            assert pins, f"expected at least one fleetforge.git#vX.Y.Z pin in {readme}"
+            for pinned in pins:
+                assert pinned == version, (readme, pinned, version)
+
     def test_both_example_readmes_link_back(self) -> None:
         for readme in (EXAMPLE_README, IDF_EXAMPLE_README):
             assert "](../../README.md)" in readme.read_text(), readme

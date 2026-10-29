@@ -67,9 +67,9 @@ The first functioning app: *I can register a board and see it online*. No code-d
 - **Add:** upload API accepting `.bin` + provenance (repo/commit/tag/build URL/test_passed). Dashboard shows provenance.
 - **You can now:** upload versions from any script, with commit-level traceability.
 
-### R8 — Push ingestion (GitHub Action + templates, shipped via CUJ-2)
-- **Add:** reusable GitHub Action (`actions/fleetforge-push/action.yml`), GitLab CI (`.gitlab/fleetforge-push.yml`), Gitea Actions (`.gitea/workflows/fleetforge-push.yml`), and Google Cloud Build (`cloudbuild/fleetforge-push.yaml`) templates that build & push on tag.
-- **You can now:** `git tag` → a deployable, commit-linked version appears automatically.
+### R8 — Push ingestion (`fleetforge push` CLI + CI examples, shipped via CUJ-2)
+- **Add:** `fleetforge push` CLI (`src/fleetforge/cli.py`) plus Google Cloud Build ([`examples/cloudbuild-fleetforge.yaml`](examples/cloudbuild-fleetforge.yaml)) and GitHub Actions ([`examples/github-actions-fleetforge.yml`](examples/github-actions-fleetforge.yml)) workflow examples that build & push firmware with provenance on branch/tag.
+- **You can now:** push a tag or branch → a deployable, commit-linked version appears automatically.
 
 ### R9 — Advisory simulation gate
 - **Add:** `pytest-embedded` + Espressif QEMU boots the artifact and runs the **R5 self-test** *before* deploy. Warn + override in the UI.
@@ -83,7 +83,7 @@ The first functioning app: *I can register a board and see it online*. No code-d
 - **Toolchain:** native `idf.py` projects first. PlatformIO second. Pin the IDF version per project or builds stop being reproducible.
 
 ### R11 — Deploy policy & staged project rollouts (shipped via CUJ-2)
-- **Add:** per-project deploy policy (`manual` vs `auto_on_tag` with `auto_deploy_tag_pattern`, `auto_deploy_target_filter`, and `require_ci_tests`), plus staged project/group rollouts (`POST /v1/projects/{slug}/deploy`) with automatic rollback halt, Wave 1 canary gating (`canary=True`), and Wave 2 bounded concurrency (`max_parallel`, progressed automatically via `ff_events` on `confirmed`).
+- **Add:** per-project continuous deployment tracking (`track_mode`: `off` | `branch` | `tag` | `commit`, `track_ref`, and `auto_deploy_target`: `off` | `dev` | `all`, gated on `test_passed != false`), plus staged project/group rollouts (`POST /v1/projects/{slug}/deploy`) with automatic rollback halt, Wave 1 canary gating (`canary=True`), and Wave 2 bounded concurrency (`max_parallel`, progressed automatically via `ff_events` on `confirmed`).
 - **You can now:** continuously deploy your dev board or staged project cohort while everything else stays manual or canary-gated.
 - ⚠️ *Sequencing:* auto-deploy is only as safe as its rollback. Per-device auto-rollback (R2) makes it survivable. Canary makes it comfortable.
 

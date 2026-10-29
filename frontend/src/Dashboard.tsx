@@ -295,6 +295,13 @@ function UploadedBuilds({
   const [deployingKey, setDeployingKey] = useState<string | null>(null)
   const [bulkStatus, setBulkStatus] = useState<string | null>(null)
   const [bulkError, setBulkError] = useState<string | null>(null)
+  const [copiedSnippet, setCopiedSnippet] = useState(false)
+  const [pendingAction, setPendingAction] = useState<{
+    rowKey: string
+    kind: 'deploy-all' | 'cancel-rollout'
+    version: string
+    rowGroupId: string
+  } | null>(null)
   const [groups, setGroups] = useState<DeviceGroupSummary[]>([])
   const [targetGroupByRow, setTargetGroupByRow] = useState<Record<string, string>>({})
 
@@ -337,22 +344,36 @@ function UploadedBuilds({
         ...(rowGroupId ? { group_id: rowGroupId } : {}),
       })
       onDeployed()
+      setPendingAction(null)
       const count = res.deployed.length
+      const queuedReasons = new Set(['awaiting_canary_confirm', 'queued_next_wave'])
       const skippedEntries = Object.entries(res.skipped ?? {})
-      const skippedCount = skippedEntries.length
-      let skippedSummary = ''
-      if (skippedCount > 0) {
+      const queuedEntries = skippedEntries.filter(([, r]) => queuedReasons.has(r))
+      const actualSkipped = skippedEntries.filter(([, r]) => !queuedReasons.has(r))
+      const summaryParts: string[] = []
+      if (queuedEntries.length > 0) {
         const countsByReason: Record<string, number> = {}
-        for (const [, reason] of skippedEntries) {
+        for (const [, reason] of queuedEntries) {
           countsByReason[reason] = (countsByReason[reason] ?? 0) + 1
         }
         const reasonBreakdown = Object.entries(countsByReason)
           .map(([reason, n]) => `${n} ${reason}`)
           .join(', ')
-        skippedSummary = ` (${skippedCount} skipped: ${reasonBreakdown})`
+        summaryParts.push(`${queuedEntries.length} queued for next wave: ${reasonBreakdown}`)
       }
+      if (actualSkipped.length > 0) {
+        const countsByReason: Record<string, number> = {}
+        for (const [, reason] of actualSkipped) {
+          countsByReason[reason] = (countsByReason[reason] ?? 0) + 1
+        }
+        const reasonBreakdown = Object.entries(countsByReason)
+          .map(([reason, n]) => `${n} ${reason}`)
+          .join(', ')
+        summaryParts.push(`${actualSkipped.length} skipped: ${reasonBreakdown}`)
+      }
+      const suffix = summaryParts.length > 0 ? ` (${summaryParts.join('; ')})` : ''
       setBulkStatus(
-        `Staged ${version} to ${count} ${targetFilter} board(s)${skippedSummary}.`,
+        `Staged ${version} to ${count} ${targetFilter} board(s)${suffix}.`,
       )
     } catch (err) {
       if (err instanceof ApiError && err.isUnauthorized) {
@@ -377,6 +398,7 @@ function UploadedBuilds({
         ...(rowGroupId ? { group_id: rowGroupId } : {}),
       })
       onDeployed()
+      setPendingAction(null)
       const count = res.cancelled.length
       const skippedCount = Object.keys(res.skipped).length
       setBulkStatus(
@@ -421,6 +443,18 @@ function UploadedBuilds({
         <pre>
           <code>{cliSnippet}</code>
         </pre>
+        <p>
+          <button
+            type="button"
+            data-testid="copy-cli-snippet"
+            onClick={() => {
+              void navigator.clipboard?.writeText?.(cliSnippet)?.catch(() => {})
+              setCopiedSnippet(true)
+            }}
+          >
+            {copiedSnippet ? 'Copied' : 'Copy snippet'}
+          </button>
+        </p>
       </details>
       {bulkStatus !== null && (
         <p className="ok" data-testid="bulk-deploy-status">
@@ -547,22 +581,82 @@ function UploadedBuilds({
                     >
                       Deploy dev
                     </button>{' '}
-                    <button
-                      type="button"
-                      disabled={deployingKey !== null}
-                      onClick={() => void bulkDeploy(a.version, 'all', rowGroupId)}
-                      title="Stage this version onto all compatible boards in this project"
-                    >
-                      Deploy all
-                    </button>{' '}
-                    <button
-                      type="button"
-                      disabled={deployingKey !== null}
-                      onClick={() => void cancelBulkDeploy(a.version, rowGroupId)}
-                      title="Cancel in-flight deploys of this version across the selected cohort"
-                    >
-                      Cancel rollout
-                    </button>
+                    {pendingAction?.rowKey === rowKey ? (
+                      <span data-testid="confirm-bulk-action">
+                        {pendingAction.kind === 'deploy-all' ? (
+                          <button
+                            type="button"
+                            className="bad"
+                            data-testid="confirm-deploy-all-btn"
+                            disabled={deployingKey !== null}
+                            onClick={() =>
+                              void bulkDeploy(
+                                pendingAction.version,
+                                'all',
+                                pendingAction.rowGroupId,
+                              )
+                            }
+                          >
+                            Confirm deploy all
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            className="bad"
+                            data-testid="confirm-cancel-rollout-btn"
+                            disabled={deployingKey !== null}
+                            onClick={() =>
+                              void cancelBulkDeploy(
+                                pendingAction.version,
+                                pendingAction.rowGroupId,
+                              )
+                            }
+                          >
+                            Confirm cancel rollout
+                          </button>
+                        )}{' '}
+                        <button
+                          type="button"
+                          data-testid="cancel-bulk-action-btn"
+                          onClick={() => setPendingAction(null)}
+                        >
+                          Keep
+                        </button>
+                      </span>
+                    ) : (
+                      <>
+                        <button
+                          type="button"
+                          disabled={deployingKey !== null}
+                          onClick={() =>
+                            setPendingAction({
+                              rowKey,
+                              kind: 'deploy-all',
+                              version: a.version,
+                              rowGroupId,
+                            })
+                          }
+                          title="Stage this version onto all compatible boards in this project"
+                        >
+                          Deploy all
+                        </button>{' '}
+                        <button
+                          type="button"
+                          disabled={deployingKey !== null}
+                          onClick={() =>
+                            setPendingAction({
+                              rowKey,
+                              kind: 'cancel-rollout',
+                              version: a.version,
+                              rowGroupId,
+                            })
+                          }
+                          title="Cancel in-flight deploys of this version across the selected cohort"
+                        >
+                          Cancel rollout
+                        </button>
+                      </>
+                    )}
                   </td>
                 </tr>
               )
@@ -872,7 +966,7 @@ export function Dashboard({
               Boolean((d as { offline_mode?: boolean }).offline_mode),
           )}
         >
-          <summary>Venue Offline &amp; USB-C Dock Sync (RULE E301)</summary>
+          <summary>Offline Radio Lockout &amp; USB-C Dock Sync</summary>
           <PitDockCockpit
             devices={fleet.devices}
             artifacts={artifacts}

@@ -488,5 +488,11 @@ describe('ProjectAccess', () => {
       otel_endpoint: 'https://otlp.example.com',
       otel_headers: '',
     })
+
+    // Confirm before deleting a project secret (UX-5)
+    await userEvent.click(screen.getByRole('button', { name: /Delete secret API_KEY/i }))
+    expect(screen.getByTestId('confirm-delete-secret')).toHaveTextContent('Delete secret API_KEY?')
+    await userEvent.click(screen.getByRole('button', { name: 'Keep' }))
+    expect(screen.queryByTestId('confirm-delete-secret')).not.toBeInTheDocument()
   })
 })

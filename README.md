@@ -5,15 +5,15 @@ grow to Raspberry Pi and eventually FPGAs.
 
 **Safe remote firmware updates**, where "safe" means the gate catches a bad build before the fleet. Any device that does get a bad update recovers itself.
 
-> **Where this stands:** V1 (`R0–R6`) and `CUJ-2` are complete (`v0.7.2`):
+> **Where this stands:** V1 (`R0–R6`), `CUJ-2`, and `CUJ-3` are complete (`v0.8.0`):
 > - **R0–R2b:** browser Web Serial flash & enroll, dashboard OTA deploy, device-side A/B rollback of builds that fail to confirm, multi-network Wi-Fi config (`ff_cfg`), and measured board partition profiles.
 > - **R3:** embeddable OTA library (`agent/components/fleetforge/`) for ESP-IDF, PlatformIO, and Arduino, with binary library-marker detection.
 > - **R4:** live device health (`min_free_heap`, `boot_ok`, `reset_reason`), fault tracking, user-defined telemetry (`up/telemetry`), and remote firmware logs (`up/log` + crash-surviving `RTC_NOINIT_ATTR` log ring).
 > - **R5:** custom self-test confirmation (`ff_set_selftest` / `Fleetforge.onSelfTest`), safe-window reboot deferral (`awaiting_safe_window`), rapid-crash safe mode, sleepy lifecycle helpers, and operator commands (`apply`, `cancel`, `rollback`, `reboot`) with `up/ack`.
 > - **R6:** app-level ECDSA P-256 firmware signature verification (`ecdsa-p256-sha256:<base64>`) with a multi-key rotation ring, resumable HTTP `Range` downloads with exponential backoff, and delivery-success / fleet-safety KPIs.
-> - **Multi-project & CUJ-2:** multi-project isolation (`projects`), invite-only multi-user RBAC (`users`, `project_members`, Firebase Auth + local passwords, scoped `ffa_...` tokens), Git CI/CD provenance & branch/tag/commit auto-deploy (`fleetforge push`), staged cohort rollouts with single-owner wave progression, stalled-wave recovery & cohort cancel (`POST /v1/projects/{slug}/deploy/cancel`), wake-aware signed download URLs for sleepy boards, companion cargo (`artifact_type` + `sub_versions`), rotating encrypted project secrets over HTTPS (`dn/cfg.secrets_rev` + `GET /v1/device-secrets`), and OTLP/HTTP log & metric export.
+> - **Multi-project, CUJ-2 & CUJ-3:** multi-project isolation (`projects`), invite-only multi-user RBAC (`users`, `project_members`, Firebase Auth + local passwords, scoped `ffa_...` tokens), Git CI/CD provenance & branch/tag/commit auto-deploy (`fleetforge push`), staged cohort rollouts with single-owner wave progression, stalled-wave recovery & cohort cancel (`POST /v1/projects/{slug}/deploy/cancel`), wake-aware signed download URLs for sleepy boards, companion cargo (`artifact_type` + `sub_versions`), rotating encrypted project secrets over HTTPS (`dn/cfg.secrets_rev` + `GET /v1/device-secrets`), OTLP/HTTP log & metric export, and offline self-test confirmation + tethered dock sync (`POST /v1/devices/{device_id}/dock-sync`).
 >
-> Live task state and open follow-ups live in [`TODO.md`](TODO.md) and nowhere else.
+> Release horizon and priorities live in [`docs/roadmap.md`](docs/roadmap.md).
 
 ## Why
 
@@ -36,7 +36,8 @@ MQTT is the control plane. HTTPS carries artifact bytes.
 
 | Path | Holds |
 |---|---|
-| [`TODO.md`](TODO.md) | **Live status — the only place task state lives** |
+| [`docs/roadmap.md`](docs/roadmap.md) | **Release ladder & capability index — single source of project horizon** |
+| [`LICENSE`](LICENSE) | MIT license |
 | [`src/fleetforge/`](src/fleetforge/) | The Python package — one image, two entrypoints (api, ingestor) |
 | [`src/fleetforge/auth/`](src/fleetforge/auth/) | Credential primitives: argon2id hashing, opaque tokens, verification cache, login rate limiting. A protected path |
 | [`alembic/`](alembic/) | Migrations. `alembic/versions/` is a protected path |

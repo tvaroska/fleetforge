@@ -37,6 +37,8 @@ type PendingConfirm =
   | { kind: 'remove-member'; username: string }
   | { kind: 'revoke-token'; id: string; name: string }
   | { kind: 'disable-user'; username: string }
+  | { kind: 'delete-secret'; key: string }
+  | { kind: 'delete-group'; id: string; name: string }
 
 export function ProjectAccess({
   me,
@@ -360,6 +362,7 @@ export function ProjectAccess({
       handle(err)
     } finally {
       setBusy(false)
+      setPending(null)
     }
   }
 
@@ -422,6 +425,8 @@ export function ProjectAccess({
       await refreshDrawer()
     } catch (err) {
       handle(err)
+    } finally {
+      setPending(null)
     }
   }
 
@@ -800,7 +805,7 @@ export function ProjectAccess({
                             type="button"
                             aria-label={`Delete secret ${s.key}`}
                             disabled={busy || isViewer}
-                            onClick={() => void handleDeleteSecret(s.key)}
+                            onClick={() => setPending({ kind: 'delete-secret', key: s.key })}
                           >
                             Delete
                           </button>
@@ -809,6 +814,21 @@ export function ProjectAccess({
                     ))}
                   </tbody>
                 </table>
+              )}
+              {pending?.kind === 'delete-secret' && (
+                <p data-testid="confirm-delete-secret">
+                  Delete secret <code>{pending.key}</code>? Boards will erase it on next sync.{' '}
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => void handleDeleteSecret(pending.key)}
+                  >
+                    Yes, delete {pending.key}
+                  </button>{' '}
+                  <button type="button" onClick={() => setPending(null)}>
+                    Keep
+                  </button>
+                </p>
               )}
               <form className="compact-form" onSubmit={(e) => void handleUpsertSecret(e)}>
                 <div className="form-grid">
@@ -932,7 +952,9 @@ export function ProjectAccess({
                               type="button"
                               aria-label={`Delete group ${g.name}`}
                               disabled={busy}
-                              onClick={() => void handleDeleteGroup(g.id)}
+                              onClick={() =>
+                                setPending({ kind: 'delete-group', id: g.id, name: g.name })
+                              }
                             >
                               Delete
                             </button>
@@ -942,6 +964,21 @@ export function ProjectAccess({
                     ))}
                   </tbody>
                 </table>
+              )}
+              {pending?.kind === 'delete-group' && (
+                <p data-testid="confirm-delete-group">
+                  Delete group <code>{pending.name}</code>? Boards in it become ungrouped.{' '}
+                  <button
+                    type="button"
+                    disabled={busy}
+                    onClick={() => void handleDeleteGroup(pending.id)}
+                  >
+                    Yes, delete {pending.name}
+                  </button>{' '}
+                  <button type="button" onClick={() => setPending(null)}>
+                    Keep
+                  </button>
+                </p>
               )}
               {canManage && (
                 <form className="compact-form" onSubmit={(e) => void handleCreateGroup(e)}>

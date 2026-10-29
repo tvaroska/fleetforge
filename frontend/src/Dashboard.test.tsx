@@ -803,5 +803,94 @@ describe('Dashboard', () => {
         /CI webhook dispatch.*did not succeed/i,
       )
     })
+
+    it('requires confirmation before Deploy all or Cancel rollout and separates queued wave boards from skipped (UX-5, UX-6)', async () => {
+      const deployCalls: Array<{ url: string; body: Record<string, unknown> }> = []
+
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (input?: unknown, init?: RequestInit) => {
+        const url = String(input)
+        if (url === '/v1/artifact') {
+          return json({
+            artifacts: [
+              {
+                target: 'esp32c6',
+                version: '1.5.0',
+                sha256: 'a'.repeat(64),
+                size_bytes: 230_000,
+                partition_layout: 'ab-4m-v1',
+                created_at: '2026-10-09T10:00:00Z',
+                sig: 'ecdsa-sig',
+              },
+            ],
+          })
+        }
+        if (url.endsWith('/deploy/cancel') && init?.method === 'POST') {
+          const body = JSON.parse(String(init.body)) as Record<string, unknown>
+          deployCalls.push({ url, body })
+          return json({
+            project: 'default',
+            version: body.version,
+            target_filter: 'all',
+            group_id: null,
+            cancelled: ['a4cf12b3de90'],
+            skipped: {},
+          })
+        }
+        if (url.includes('/deploy') && init?.method === 'POST') {
+          const body = JSON.parse(String(init.body)) as Record<string, unknown>
+          deployCalls.push({ url, body })
+          return json({
+            project: 'default',
+            version: body.version,
+            target_filter: body.target_filter,
+            group_id: null,
+            deployed: [{ cmd_id: 'c1', device_id: 'a4cf12b3de90', version: '1.5.0', apply: 'auto', reused: false }],
+            skipped: {
+              'dev-2': 'awaiting_canary_confirm',
+              'dev-3': 'queued_next_wave',
+              'dev-4': 'already_at_version',
+            },
+          })
+        }
+        if (url === '/v1/devices') return json({ devices: [device()], arrivals: [] })
+        if (url === '/v1/partition-profiles') return json({ profiles: [] })
+        if (url === '/v1/enrollment-tokens') return json({ tokens: [] })
+        if (url === '/v1/agent/manifest') return json(agentManifest)
+        return json({})
+      })
+
+      renderDashboard()
+      await userEvent.click(screen.getByTestId('tab-builds'))
+
+      expect(screen.getByTestId('copy-cli-snippet')).toBeInTheDocument()
+
+      const row = (await screen.findAllByTestId('uploaded-build-row'))[0]!
+      await userEvent.click(within(row).getByRole('button', { name: /^deploy all$/i }))
+      expect(deployCalls).toHaveLength(0)
+      expect(within(row).getByTestId('confirm-bulk-action')).toBeInTheDocument()
+
+      // Dismiss confirmation
+      await userEvent.click(within(row).getByTestId('cancel-bulk-action-btn'))
+      expect(within(row).queryByTestId('confirm-bulk-action')).not.toBeInTheDocument()
+      expect(deployCalls).toHaveLength(0)
+
+      // Confirm Deploy all and verify queued vs skipped breakdown
+      await userEvent.click(within(row).getByRole('button', { name: /^deploy all$/i }))
+      await userEvent.click(within(row).getByTestId('confirm-deploy-all-btn'))
+      await waitFor(() => expect(deployCalls).toHaveLength(1))
+      expect(deployCalls[0]!.body).toMatchObject({ version: '1.5.0', target_filter: 'all' })
+      expect(await screen.findByTestId('bulk-deploy-status')).toHaveTextContent(
+        'Staged 1.5.0 to 1 all board(s) (2 queued for next wave: 1 awaiting_canary_confirm, 1 queued_next_wave; 1 skipped: 1 already_at_version).',
+      )
+
+      // Confirm Cancel rollout
+      await userEvent.click(within(row).getByRole('button', { name: /cancel rollout/i }))
+      expect(deployCalls).toHaveLength(1)
+      await userEvent.click(within(row).getByTestId('confirm-cancel-rollout-btn'))
+      await waitFor(() => expect(deployCalls).toHaveLength(2))
+      expect(await screen.findByTestId('bulk-deploy-status')).toHaveTextContent(
+        'Cancelled in-flight 1.5.0 deploy on 1 board(s).',
+      )
+    })
   })
 })
