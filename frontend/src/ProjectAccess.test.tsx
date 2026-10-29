@@ -351,4 +351,142 @@ describe('ProjectAccess', () => {
     const init = sent(fetchMock, 'PATCH')[0][1] as RequestInit
     expect(JSON.parse(String(init.body))).toEqual({ disabled: false })
   })
+
+  it('displays active role badge, supports TTL & enroll scope on tokens, OTel clear headers, and secrets convergence', async () => {
+    let tokenPostBody: Record<string, unknown> | null = null
+    let otelPatchBody: Record<string, unknown> | null = null
+
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input?: unknown, init?: RequestInit) => {
+      const url = String(input)
+      const method = init?.method ?? 'GET'
+      if (url === '/v1/projects' && method === 'GET') {
+        return json({
+          projects: [
+            {
+              id: '1',
+              slug: 'default',
+              name: 'Default',
+              description: null,
+              role: 'owner',
+              otel_endpoint: 'https://otlp.example.com',
+              has_otel_headers: true,
+              created_at: '2026-10-19T00:00:00Z',
+            },
+          ],
+        })
+      }
+      if (url === '/v1/projects/default' && method === 'PATCH') {
+        otelPatchBody = JSON.parse(String(init?.body)) as Record<string, unknown>
+        return json({
+          id: '1',
+          slug: 'default',
+          name: 'Default',
+          description: null,
+          role: 'owner',
+          otel_endpoint: otelPatchBody.otel_endpoint ?? null,
+          has_otel_headers: false,
+          created_at: '2026-10-19T00:00:00Z',
+        })
+      }
+      if (url === '/v1/projects/default/secrets' && method === 'GET') {
+        return json({
+          secrets_rev: 3,
+          secrets: [{ key: 'API_KEY', updated_at: '2026-10-20T00:00:00Z' }],
+        })
+      }
+      if (url === '/v1/projects/default/members' && method === 'GET') {
+        return json({ members: [] })
+      }
+      if (url === '/v1/auth/tokens' && method === 'POST') {
+        tokenPostBody = JSON.parse(String(init?.body)) as Record<string, unknown>
+        return json(
+          {
+            id: 't-new',
+            token: 'ffa_scoped_ttl_token',
+            name: String(tokenPostBody.name),
+            subject: 'admin',
+            scopes: tokenPostBody.scopes ?? [],
+            project_id: '1',
+            project_slug: 'default',
+            created_at: '2026-10-25T00:00:00Z',
+            expires_at: '2026-11-24T00:00:00Z',
+          },
+          201,
+        )
+      }
+      if (url === '/v1/auth/tokens' && method === 'GET') {
+        return json({
+          tokens: [
+            {
+              id: 'tok-existing',
+              name: 'ci-runner',
+              subject: 'admin',
+              scopes: ['read', 'deploy'],
+              project_id: '1',
+              project_slug: 'default',
+              created_at: '2026-10-19T00:00:00Z',
+              last_used_at: '2026-10-24T12:00:00Z',
+              expires_at: '2026-11-19T00:00:00Z',
+              revoked_at: null,
+            },
+          ],
+        })
+      }
+      if (url === '/v1/users' && method === 'GET') {
+        return json({ users: [] })
+      }
+      return json({})
+    })
+
+    render(
+      <ProjectAccess
+        me={me}
+        activeProject="default"
+        onSelectProject={vi.fn()}
+        onSessionExpired={vi.fn()}
+        devices={
+          [
+            { device_id: 'dev-synced', name: 'Node-A', secrets_rev: 3 },
+            { device_id: 'dev-lagging', name: 'Node-B', secrets_rev: 1 },
+          ] as never
+        }
+      />,
+    )
+
+    expect(screen.getByTestId('active-project-role')).toHaveTextContent('role: owner')
+
+    await userEvent.click(screen.getByRole('button', { name: /Project access & API tokens/i }))
+
+    // Token lifecycle columns
+    expect(await screen.findByTestId('token-last-used')).toBeInTheDocument()
+    expect(screen.getByTestId('token-expires-at')).toBeInTheDocument()
+
+    // Issue token with TTL and enroll scope
+    await userEvent.type(screen.getByLabelText('Token label'), 'factory-jig')
+    await userEvent.selectOptions(screen.getByTestId('token-ttl-select'), '30')
+    await userEvent.click(screen.getByTestId('token-enroll-scope'))
+    await userEvent.click(screen.getByRole('button', { name: /Issue API token/i }))
+
+    await waitFor(() => expect(tokenPostBody).not.toBeNull())
+    expect(tokenPostBody).toEqual({
+      name: 'factory-jig',
+      project: 'default',
+      scopes: ['read', 'write:artifacts', 'deploy', 'enroll'],
+      expires_in_days: 30,
+    })
+    expect(await screen.findByTestId('copy-issued-token')).toBeInTheDocument()
+
+    // Secrets convergence
+    expect(screen.getByTestId('secrets-convergence')).toHaveTextContent('1/2 synced to rev 3')
+    expect(screen.getByTestId('secrets-lagging-boards')).toHaveTextContent('Node-B (rev 1)')
+
+    // Clear saved OTLP headers
+    await userEvent.click(screen.getByTestId('clear-otel-headers'))
+    await userEvent.click(screen.getByRole('button', { name: /Save OTel settings/i }))
+    await waitFor(() => expect(otelPatchBody).not.toBeNull())
+    expect(otelPatchBody).toMatchObject({
+      otel_endpoint: 'https://otlp.example.com',
+      otel_headers: '',
+    })
+  })
 })

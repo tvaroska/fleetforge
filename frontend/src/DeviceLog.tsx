@@ -9,6 +9,7 @@
 // No `aria-live`: the table re-renders on every heartbeat of the selected board (the
 // `StatusStrip.tsx` reason).
 
+import { useEffect, useState } from 'react'
 import { type DeviceSummary } from './api'
 import {
   describeLevel,
@@ -18,6 +19,8 @@ import {
   useDeviceLog,
 } from './deviceLog'
 import { formatWhen } from './format'
+
+export type LogFilterMode = 'all' | 'errors' | 'prev-boot'
 
 export function DeviceLog({
   deviceId,
@@ -37,8 +40,40 @@ export function DeviceLog({
     hint: device?.last_seen ?? null,
     onSessionExpired,
   })
+  const [filterMode, setFilterMode] = useState<LogFilterMode>('all')
+  const [searchQuery, setSearchQuery] = useState('')
+
+  useEffect(() => {
+    setFilterMode('all')
+    setSearchQuery('')
+  }, [deviceId])
 
   if (!hasBoards) return null
+
+  const prevBootLines =
+    lines?.filter((line) => line.text !== null && line.text.startsWith('[prev-boot]')) ?? []
+
+  const visibleLines =
+    lines === null
+      ? null
+      : filterMode === 'all' && searchQuery.trim() === ''
+        ? lines
+        : lines.filter((line) => {
+            if (line.text === null) return false
+            if (filterMode === 'errors' && line.level !== 'E' && line.level !== 'W') {
+              return false
+            }
+            if (filterMode === 'prev-boot' && !line.text.startsWith('[prev-boot]')) {
+              return false
+            }
+            if (
+              searchQuery.trim() !== '' &&
+              !line.text.toLowerCase().includes(searchQuery.trim().toLowerCase())
+            ) {
+              return false
+            }
+            return true
+          })
 
   let body
   if (deviceId === null) {
@@ -78,6 +113,54 @@ export function DeviceLog({
           </p>
         ) : (
           <>
+            <div className="quick-filter-bar" data-testid="device-log-filters">
+              <button
+                type="button"
+                data-testid="device-log-filter-all"
+                className={filterMode === 'all' ? 'active' : undefined}
+                onClick={() => setFilterMode('all')}
+              >
+                All
+              </button>{' '}
+              <button
+                type="button"
+                data-testid="device-log-filter-errors"
+                className={filterMode === 'errors' ? 'active' : undefined}
+                onClick={() => setFilterMode('errors')}
+              >
+                Errors/Warn
+              </button>{' '}
+              <button
+                type="button"
+                data-testid="device-log-filter-prev-boot"
+                className={filterMode === 'prev-boot' ? 'active' : undefined}
+                onClick={() => setFilterMode('prev-boot')}
+              >
+                [prev-boot]{prevBootLines.length > 0 ? ` (${prevBootLines.length})` : ''}
+              </button>{' '}
+              <input
+                type="text"
+                data-testid="device-log-search"
+                aria-label="Search device logs"
+                placeholder="Search logs…"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+              />
+            </div>
+            {prevBootLines.length > 0 && (
+              <div className="prev-boot-box" data-testid="prev-boot-crash-box">
+                <strong>
+                  Pinned [prev-boot] Crash Ring (RTC_NOINIT_ATTR) ({prevBootLines.length})
+                </strong>
+                <ul>
+                  {prevBootLines.map((crashLine) => (
+                    <li key={`prev-boot-${crashLine.id}`} data-testid="prev-boot-crash-line">
+                      <bdi>{`${formatWhen(crashLine.logged_at)} [${crashLine.level}] ${crashLine.text}`}</bdi>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
             <table className="log device-log" data-testid="device-log-lines">
               <thead>
                 <tr>
@@ -87,7 +170,7 @@ export function DeviceLog({
                 </tr>
               </thead>
               <tbody>
-                {tailRows(lines).map((row) => {
+                {tailRows(visibleLines ?? []).map((row) => {
                   if (row.kind === 'gap') {
                     return (
                       <tr key={row.key} data-testid="log-gap" data-dropped={row.dropped}>

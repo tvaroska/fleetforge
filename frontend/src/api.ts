@@ -151,7 +151,16 @@ export type AdminTokenIssued = {
   project_slug: string | null
   created_at: string
   expires_at: string | null
+  last_used_at?: string | null
 }
+
+export type ArtifactType =
+  | 'app'
+  | 'data_partition'
+  | 'mcu_fw'
+  | 'model_weights'
+  | 'fpga_bitstream'
+  | string
 
 export type LoginResult = { expires_at: string }
 
@@ -255,6 +264,10 @@ export type DeviceSummary = {
   stay_awake?: boolean
   secrets_rev?: number | null
   sub_versions?: Record<string, string> | null
+  safe_mode?: boolean
+  offline_mode?: boolean
+  expected_back_s?: number | null
+  presence_reason?: string | null
   deploy: DeploySummary | null
 }
 
@@ -329,6 +342,8 @@ export type DeploySummary = {
   is_terminal: boolean
   artifact_version: string | null
   from_version: string | null
+  artifact_type?: ArtifactType | string | null
+  returned_to?: string | null
   pct: number | null
   detail: string | null
   // R2b-fe-9, both OPTIONAL: a dashboard served against an older API, and every fixture
@@ -393,6 +408,40 @@ export type DeviceLogLine = {
   dropped: number
 }
 export type DeviceLogTail = { device_id: string; lines: DeviceLogLine[] }
+export type DeviceLogList = DeviceLogTail
+
+export type TelemetryPoint = {
+  at: string
+  value: number
+}
+
+export type TelemetrySeries = {
+  device_id: string
+  name: string
+  samples: TelemetryPoint[]
+}
+
+export type DockSyncRequest = {
+  announce?: Record<string, unknown> | null
+  statuses?: Record<string, unknown>[]
+  telemetry?: Record<string, unknown>[]
+  logs?: Record<string, unknown>[]
+}
+
+export type DockSyncResponse = {
+  device_id: string
+  link_type: string
+  fw_version: string | null
+  sub_versions?: Record<string, string> | null
+  statuses_recorded: number
+  telemetry_batches_recorded: number
+  log_batches_recorded: number
+  device: DeviceSummary
+  ingested_statuses?: number
+  ingested_telemetry?: number
+  ingested_logs?: number
+  corrupted_lines?: number
+}
 
 // Mirrors `firmware/manifest.py::ConfigPartition`. Optional in the schema ON PURPOSE:
 // bundles built before R0-fw-1 have nowhere to write a board's config, and the flasher
@@ -715,10 +764,34 @@ export const api = {
       method: 'DELETE',
     }),
 
-  // R4-fe-2. A board's log tail: admin-only, newest first, the last 7 days, at most `limit`
-  // lines (server range 1..5000). The path is relative, like every other call here.
-  deviceLogs: (deviceId: string, limit: number) =>
-    request<DeviceLogTail>(`/v1/devices/${encodeURIComponent(deviceId)}/logs?limit=${limit}`),
+  // R4-fe-2 / P0-6. A board's log tail: admin-only, newest first, the last 7 days, at most `limit`
+  // lines (server range 1..5000), with optional `level` and `prefix` query filters.
+  deviceLogs: (
+    deviceId: string,
+    limitOrOpts: number | { limit?: number; level?: string; prefix?: string } = 200,
+  ) => {
+    const opts = typeof limitOrOpts === 'number' ? { limit: limitOrOpts } : limitOrOpts
+    const limit = opts.limit ?? 200
+    let path = `/v1/devices/${encodeURIComponent(deviceId)}/logs?limit=${limit}`
+    if (opts.level) {
+      path += `&level=${encodeURIComponent(opts.level)}`
+    }
+    if (opts.prefix) {
+      path += `&prefix=${encodeURIComponent(opts.prefix)}`
+    }
+    return request<DeviceLogList>(path)
+  },
+
+  deviceTelemetry: (deviceId: string, name = 'free_heap', limit = 500) =>
+    request<TelemetrySeries>(
+      `/v1/devices/${encodeURIComponent(deviceId)}/telemetry?name=${encodeURIComponent(name)}&limit=${limit}`,
+    ),
+
+  dockSync: (deviceId: string, bundle: DockSyncRequest) =>
+    request<DockSyncResponse>(`/v1/devices/${encodeURIComponent(deviceId)}/dock-sync`, {
+      method: 'POST',
+      body: JSON.stringify(bundle),
+    }),
 
   listEnrollmentTokens: (project?: string) =>
     request<{ tokens: EnrollmentTokenSummary[] }>(
@@ -739,6 +812,29 @@ export const api = {
         body: JSON.stringify({ group_id: groupId }),
       },
     ),
+
+  createEnrollmentToken: (
+    groupIdOrBody: string | null | { group_id?: string | null; project?: string } = null,
+    project?: string,
+  ) => {
+    const groupId =
+      groupIdOrBody !== null && typeof groupIdOrBody === 'object'
+        ? (groupIdOrBody.group_id ?? null)
+        : groupIdOrBody
+    const proj =
+      groupIdOrBody !== null && typeof groupIdOrBody === 'object'
+        ? (groupIdOrBody.project ?? project)
+        : project
+    return request<EnrollmentTokenIssued>(
+      proj && proj !== 'default'
+        ? `/v1/enrollment-tokens?project=${encodeURIComponent(proj)}`
+        : '/v1/enrollment-tokens',
+      {
+        method: 'POST',
+        body: JSON.stringify({ group_id: groupId }),
+      },
+    )
+  },
 
   revokeEnrollmentToken: (id: string) =>
     request<void>(`/v1/enrollment-tokens/${encodeURIComponent(id)}/revoke`, { method: 'POST' }),
@@ -846,6 +942,11 @@ export const api = {
 
   rebootDevice: (deviceId: string) =>
     request<CommandAccepted>(`/v1/devices/${encodeURIComponent(deviceId)}/reboot`, {
+      method: 'POST',
+    }),
+
+  rollbackDevice: (deviceId: string) =>
+    request<CommandAccepted>(`/v1/devices/${encodeURIComponent(deviceId)}/rollback`, {
       method: 'POST',
     }),
 
@@ -987,6 +1088,17 @@ export const api = {
   listAdminTokens: () => request<{ tokens: AdminTokenSummary[] }>('/v1/auth/tokens'),
 
   issueAdminToken: (body: {
+    name: string
+    project?: string | null
+    scopes?: string[]
+    expires_in_days?: number | null
+  }) =>
+    request<AdminTokenIssued>('/v1/auth/tokens', {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  createAdminToken: (body: {
     name: string
     project?: string | null
     scopes?: string[]

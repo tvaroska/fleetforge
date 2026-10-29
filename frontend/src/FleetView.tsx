@@ -25,6 +25,7 @@
 // reset is a boxed bold word, not a tint: the theme is monochrome and state is never
 // carried by colour alone.
 
+import { useRef, useState } from 'react'
 import {
   ApiError,
   api,
@@ -45,9 +46,17 @@ import {
   describeVitals,
   formatMetricValue,
 } from './deviceHealth'
-import { formatAgo, formatWhen } from './format'
+import { formatAgo, formatBytes, formatWhen } from './format'
 import { LAST_ON_TITLE, knowsNetworks, networkPlace } from './network'
+import {
+  ReleaseConvergenceRibbon,
+  isDeviceConvergedForTarget,
+  targetBaselineVersion,
+} from './ReleaseConvergenceRibbon'
 import { type VersionLine } from './statusStrip'
+
+export type QuickFilter = 'all' | 'attention' | 'updating' | 'drift' | 'rssi' | 'offline'
+export type FleetGroupBy = 'none' | 'ring' | 'parent'
 
 // The glyph differs by state, and that is a requirement rather than a flourish (S0-fe-2).
 // The theme is monochrome — one hue ramp — so green-vs-grey no longer says anything, and
@@ -89,16 +98,58 @@ function NetworkNote({ device }: { device: DeviceSummary }) {
   )
 }
 
+function PresenceBadges({ device }: { device: DeviceSummary }) {
+  const ext = device as DeviceSummary & {
+    offline_mode?: boolean
+    presence_reason?: string | null
+    expected_back_s?: number | null
+  }
+  const isEmcon = Boolean(ext.offline_mode)
+  const isDock = device.link_type === 'dock'
+  const isSortie = ext.presence_reason === 'sortie'
+  if (!isEmcon && !isDock && !isSortie) return null
+
+  return (
+    <div className="presence-badges" data-testid="presence-badges">
+      {isEmcon && (
+        <span className="emcon-badge badge" data-testid="presence-emcon">
+          ⊘ VENUE EMCON
+        </span>
+      )}
+      {isDock && (
+        <span className="badge" data-testid="presence-dock">
+          █ DOCK{device.parent_device_id ? ` (@${device.parent_device_id})` : ''}
+        </span>
+      )}
+      {isSortie && (
+        <span className="warn badge" data-testid="presence-sortie">
+          ◎ SORTIE{ext.expected_back_s != null ? ` (${ext.expected_back_s}s)` : ''}
+        </span>
+      )}
+    </div>
+  )
+}
+
 function HealthCell({ device }: { device: DeviceSummary }) {
+  const safeMode = Boolean((device as DeviceSummary & { safe_mode?: boolean }).safe_mode)
   const reset = describeReset(device.last_reset_reason)
   const boot = describeBoot(device.health)
   const faults = describeFaults(device.fault_resets)
   const vitals = describeVitals(device.health, device.online, formatWhen)
+  const freeHeap = device.health?.free_heap ?? null
   const metrics = device.metrics ?? []
   const inline = metrics.slice(0, METRICS_INLINE)
   const more = metrics.slice(METRICS_INLINE)
 
-  if (reset === null && boot === null && faults === null && vitals === null && metrics.length === 0) {
+  if (
+    !safeMode &&
+    reset === null &&
+    boot === null &&
+    faults === null &&
+    vitals === null &&
+    freeHeap === null &&
+    metrics.length === 0
+  ) {
     return (
       <td data-testid="health-cell" className="muted">
         —
@@ -115,6 +166,13 @@ function HealthCell({ device }: { device: DeviceSummary }) {
 
   return (
     <td data-testid="health-cell">
+      {safeMode && (
+        <div>
+          <strong className="bad emcon-badge badge" data-testid="safe-mode-badge">
+            !! SAFE MODE
+          </strong>
+        </div>
+      )}
       {reset !== null &&
         (reset.fault ? (
           <div>
@@ -157,7 +215,7 @@ function HealthCell({ device }: { device: DeviceSummary }) {
           {faults}
         </div>
       )}
-      {vitals !== null && (
+      {vitals !== null ? (
         <div
           data-testid="device-vitals"
           className={vitals.stale ? 'muted' : undefined}
@@ -165,7 +223,18 @@ function HealthCell({ device }: { device: DeviceSummary }) {
         >
           {vitals.stale && 'last reported '}
           {vitals.parts.join(' · ')}
+          {freeHeap !== null && ` · free ${formatBytes(freeHeap)}`}
         </div>
+      ) : (
+        freeHeap !== null && (
+          <div
+            data-testid="device-vitals"
+            className={!device.online ? 'muted' : undefined}
+          >
+            {!device.online && 'last reported '}
+            free {formatBytes(freeHeap)}
+          </div>
+        )
       )}
       {metrics.length > 0 && (
         <div data-testid="metrics">
@@ -194,6 +263,7 @@ function DeviceRow({
   versions = null,
   onGoToBuilds,
   groups,
+  groupByLabel = null,
 }: {
   device: DeviceSummary
   now: number
@@ -206,6 +276,7 @@ function DeviceRow({
   versions?: VersionLine | null
   onGoToBuilds?: () => void
   groups?: DeviceGroupSummary[]
+  groupByLabel?: string | null
 }) {
   // Why a sleepy board went offline is its wake interval, so put it where the pointer is.
   const power =
@@ -246,6 +317,7 @@ function DeviceRow({
       <td>
         <StatusCell device={device} />
         <NetworkNote device={device} />
+        <PresenceBadges device={device} />
       </td>
       <td>
         {/* The marker is a glyph, not a colour: the theme is monochrome. */}
@@ -268,6 +340,13 @@ function DeviceRow({
             <br />
             <code className="muted">{device.device_id}</code>
           </>
+        )}
+        {groupByLabel !== null && (
+          <div>
+            <span className="badge muted" data-testid="device-group-by-badge">
+              {groupByLabel}
+            </span>
+          </div>
         )}
         {onSelect !== undefined && (
           <div className="device-flags" data-testid="device-flags">
@@ -448,7 +527,13 @@ function computeKpisFromDevices(devices: DeviceSummary[]): DeployKpisSummary | n
   }
 }
 
-function DeployKpiStrip({ kpis }: { kpis: DeployKpisSummary | null }) {
+function DeployKpiStrip({
+  kpis,
+  onFilterRollback,
+}: {
+  kpis: DeployKpisSummary | null
+  onFilterRollback?: () => void
+}) {
   if (kpis === null || kpis.total_completed === 0) return null
   const deliveryMet = kpis.delivery_target_met ?? false
   const safetyMet = kpis.safety_target_met ?? false
@@ -473,7 +558,11 @@ function DeployKpiStrip({ kpis }: { kpis: DeployKpisSummary | null }) {
       {kpis.rolled_back > 0 && (
         <>
           {' · '}
-          <span data-testid="kpi-rollback-saves">
+          <span
+            data-testid="kpi-rollback-saves"
+            onClick={onFilterRollback}
+            style={onFilterRollback ? { cursor: 'pointer' } : undefined}
+          >
             Rollback saves: <strong>{kpis.rolled_back}</strong> (
             {kpis.safety_gap_pct?.toFixed(1)}% caught &amp; returned to previous slot)
           </span>
@@ -516,6 +605,7 @@ export function FleetTable({
   onGoToBuilds,
   kpis = null,
   groups,
+  onOpenCompare,
 }: {
   fleet: Fleet
   artifacts: Artifacts
@@ -528,9 +618,122 @@ export function FleetTable({
   onGoToBuilds?: () => void
   kpis?: DeployKpisSummary | null
   groups?: DeviceGroupSummary[]
+  onOpenCompare?: () => void
 }) {
   const { devices, arrivals, error, stream, now, refresh } = fleet
   const effectiveKpis = kpis ?? (devices !== null ? computeKpisFromDevices(devices) : null)
+
+  const [quickFilter, setQuickFilter] = useState<QuickFilter>('all')
+  const [searchQuery, setSearchQuery] = useState('')
+  const [groupBy, setGroupBy] = useState<FleetGroupBy>('none')
+  const [freezeSortOnHover, setFreezeSortOnHover] = useState(true)
+  const [hoveringTable, setHoveringTable] = useState(false)
+  const frozenOrderRef = useRef<string[] | null>(null)
+
+  const groupNameById = new Map<string, string>()
+  for (const g of groups ?? []) {
+    groupNameById.set(g.id, g.name)
+  }
+
+  // Target-scoped baselines so Maker projects with multiple platform targets never false-drift.
+  const baselinesByTarget = new Map<string, string | null>()
+  if (devices !== null) {
+    const byTarget = new Map<string, DeviceSummary[]>()
+    for (const d of devices) {
+      const list = byTarget.get(d.platform_type)
+      if (list) list.push(d)
+      else byTarget.set(d.platform_type, [d])
+    }
+    for (const [target, list] of byTarget.entries()) {
+      baselinesByTarget.set(target, targetBaselineVersion(target, list, artifacts))
+    }
+  }
+
+  const maxSecretsRev =
+    devices !== null
+      ? Math.max(
+          0,
+          ...devices
+            .map((d) => d.secrets_rev)
+            .filter((r): r is number => typeof r === 'number'),
+        )
+      : 0
+
+  function matchesQuickFilter(d: DeviceSummary, f: QuickFilter): boolean {
+    const safeMode = Boolean((d as DeviceSummary & { safe_mode?: boolean }).safe_mode)
+    if (f === 'attention') {
+      return (
+        safeMode ||
+        d.deploy?.state === 'rolled_back' ||
+        d.deploy?.state === 'failed' ||
+        d.health?.boot_ok === false
+      )
+    }
+    if (f === 'updating') {
+      return d.deploy !== null && !d.deploy.is_terminal
+    }
+    if (f === 'drift') {
+      const fwDrifted = !isDeviceConvergedForTarget(d, baselinesByTarget)
+      const secDrifted =
+        maxSecretsRev > 0 && d.secrets_rev != null && d.secrets_rev < maxSecretsRev
+      return fwDrifted || secDrifted
+    }
+    if (f === 'rssi') {
+      return d.health?.rssi != null && d.health.rssi < -75
+    }
+    if (f === 'offline') {
+      return !d.online
+    }
+    return true
+  }
+
+  const filteredDevices: DeviceSummary[] =
+    devices === null
+      ? []
+      : devices.filter((d) => {
+          if (!matchesQuickFilter(d, quickFilter)) return false
+          const q = searchQuery.trim().toLowerCase()
+          if (q === '') return true
+          const haystack = [
+            d.device_id,
+            d.name ?? '',
+            d.platform_type,
+            d.fw_version ?? '',
+            d.ssid ?? '',
+            d.deploy?.state ?? '',
+            d.deploy?.detail ?? '',
+            d.deploy?.selftest?.reason ?? '',
+            d.parent_device_id ?? '',
+          ]
+            .join(' ')
+            .toLowerCase()
+          return haystack.includes(q)
+        })
+
+  // Apply group-by ordering when selected, or preserve frozen order while hovering.
+  let displayedDevices = [...filteredDevices]
+  if (groupBy === 'ring') {
+    displayedDevices.sort((a, b) => {
+      const ga = a.group_id ? (groupNameById.get(a.group_id) ?? a.group_id) : 'zz-ungrouped'
+      const gb = b.group_id ? (groupNameById.get(b.group_id) ?? b.group_id) : 'zz-ungrouped'
+      return ga.localeCompare(gb)
+    })
+  } else if (groupBy === 'parent') {
+    displayedDevices.sort((a, b) => {
+      const pa = a.parent_device_id ?? 'zz-direct'
+      const pb = b.parent_device_id ?? 'zz-direct'
+      return pa.localeCompare(pb)
+    })
+  }
+
+  if (freezeSortOnHover && hoveringTable && frozenOrderRef.current !== null) {
+    const orderMap = new Map(frozenOrderRef.current.map((id, i) => [id, i]))
+    displayedDevices = [...displayedDevices].sort(
+      (a, b) => (orderMap.get(a.device_id) ?? 9999) - (orderMap.get(b.device_id) ?? 9999),
+    )
+  } else {
+    frozenOrderRef.current = displayedDevices.map((d) => d.device_id)
+  }
 
   return (
     <section className="console-card" aria-labelledby="fleet-heading">
@@ -636,41 +839,176 @@ export function FleetTable({
         </div>
       ) : (
         <>
-          <DeployKpiStrip kpis={effectiveKpis} />
+          <ReleaseConvergenceRibbon
+            devices={devices}
+            artifacts={artifacts}
+            groups={groups}
+            activeFilter={quickFilter}
+            onFilterChange={(f) => setQuickFilter(f as QuickFilter)}
+            onOpenCompare={onOpenCompare}
+            kpis={effectiveKpis}
+          />
+          <DeployKpiStrip
+            kpis={effectiveKpis}
+            onFilterRollback={
+              effectiveKpis && effectiveKpis.rolled_back > 0
+                ? () => setQuickFilter('attention')
+                : undefined
+            }
+          />
+
+          <div className="fleet-filter-bar" data-testid="fleet-filter-bar">
+            <div className="fleet-quick-filters" data-testid="fleet-quick-filters">
+              <button
+                type="button"
+                className={`flag-pill${quickFilter === 'all' ? ' active' : ''}`}
+                aria-pressed={quickFilter === 'all'}
+                data-testid="filter-all"
+                onClick={() => setQuickFilter('all')}
+              >
+                All ({devices.length})
+              </button>{' '}
+              <button
+                type="button"
+                className={`flag-pill${quickFilter === 'attention' ? ' active' : ''}`}
+                aria-pressed={quickFilter === 'attention'}
+                data-testid="filter-attention"
+                onClick={() => setQuickFilter('attention')}
+              >
+                ! Attention / Rolled Back
+              </button>{' '}
+              <button
+                type="button"
+                className={`flag-pill${quickFilter === 'updating' ? ' active' : ''}`}
+                aria-pressed={quickFilter === 'updating'}
+                data-testid="filter-updating"
+                onClick={() => setQuickFilter('updating')}
+              >
+                ↺ Updating
+              </button>{' '}
+              <button
+                type="button"
+                className={`flag-pill${quickFilter === 'drift' ? ' active' : ''}`}
+                aria-pressed={quickFilter === 'drift'}
+                data-testid="filter-drift"
+                onClick={() => setQuickFilter('drift')}
+              >
+                ≠ Drift
+              </button>{' '}
+              <button
+                type="button"
+                className={`flag-pill${quickFilter === 'rssi' ? ' active' : ''}`}
+                aria-pressed={quickFilter === 'rssi'}
+                data-testid="filter-weak-rssi"
+                onClick={() => setQuickFilter('rssi')}
+              >
+                ! Weak RSSI
+              </button>{' '}
+              <button
+                type="button"
+                className={`flag-pill${quickFilter === 'offline' ? ' active' : ''}`}
+                aria-pressed={quickFilter === 'offline'}
+                data-testid="filter-offline"
+                onClick={() => setQuickFilter('offline')}
+              >
+                ○ Offline
+              </button>
+            </div>
+
+            <div className="fleet-filter-controls">
+              <input
+                type="search"
+                data-testid="fleet-search-input"
+                aria-label="Search fleet"
+                placeholder="Search boards, chip, SSID, version…"
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+              />{' '}
+              <span className="fleet-group-by" data-testid="fleet-group-by">
+                <span className="muted">Group by: </span>
+                <button
+                  type="button"
+                  className={`flag-pill${groupBy === 'none' ? ' active' : ''}`}
+                  aria-pressed={groupBy === 'none'}
+                  onClick={() => setGroupBy('none')}
+                >
+                  None
+                </button>{' '}
+                <button
+                  type="button"
+                  className={`flag-pill${groupBy === 'ring' ? ' active' : ''}`}
+                  aria-pressed={groupBy === 'ring'}
+                  onClick={() => setGroupBy('ring')}
+                >
+                  Ring
+                </button>{' '}
+                <button
+                  type="button"
+                  className={`flag-pill${groupBy === 'parent' ? ' active' : ''}`}
+                  aria-pressed={groupBy === 'parent'}
+                  onClick={() => setGroupBy('parent')}
+                >
+                  Parent
+                </button>
+              </span>{' '}
+              <label className="muted">
+                <input
+                  type="checkbox"
+                  data-testid="freeze-sort-toggle"
+                  checked={freezeSortOnHover}
+                  onChange={(e) => setFreezeSortOnHover(e.target.checked)}
+                />{' '}
+                Freeze sort on hover
+              </label>
+            </div>
+          </div>
+
           <table>
-          <thead>
-            <tr>
-              <th scope="col">Status</th>
-              <th scope="col">Device</th>
-              <th scope="col">Platform</th>
-              <th scope="col">Firmware</th>
-              <th scope="col">Last seen</th>
-              <th scope="col">Health</th>
-              <th scope="col">Power</th>
-              <th scope="col">Deploy</th>
-            </tr>
-          </thead>
-          <tbody>
-            {devices.map((device) => (
-              <DeviceRow
-                key={device.device_id}
-                device={device}
-                now={now}
-                // Filtered by the board's own chip: the server refuses a mismatch
-                // (`_check_compatible`), so offering one would be offering a 409.
-                artifacts={artifacts.byTarget.get(device.platform_type) ?? []}
-                artifactsLoaded={artifacts.loaded}
-                onDeployed={refresh}
-                onSessionExpired={onSessionExpired}
-                selected={device.device_id === selectedDeviceId}
-                onSelect={onSelect}
-                versions={versions}
-                onGoToBuilds={onGoToBuilds}
-                groups={groups}
-              />
-            ))}
-          </tbody>
-        </table>
+            <thead>
+              <tr>
+                <th scope="col">Status</th>
+                <th scope="col">Device</th>
+                <th scope="col">Platform</th>
+                <th scope="col">Firmware</th>
+                <th scope="col">Last seen</th>
+                <th scope="col">Health</th>
+                <th scope="col">Power</th>
+                <th scope="col">Deploy</th>
+              </tr>
+            </thead>
+            <tbody
+              onMouseEnter={() => setHoveringTable(true)}
+              onMouseLeave={() => setHoveringTable(false)}
+            >
+              {displayedDevices.map((device) => {
+                const groupLabel =
+                  groupBy === 'ring'
+                    ? `Ring: ${device.group_id ? (groupNameById.get(device.group_id) ?? device.group_id) : 'ungrouped'}`
+                    : groupBy === 'parent'
+                      ? `Parent: ${device.parent_device_id ?? 'direct'}`
+                      : null
+                return (
+                  <DeviceRow
+                    key={device.device_id}
+                    device={device}
+                    now={now}
+                    // Filtered by the board's own chip: the server refuses a mismatch
+                    // (`_check_compatible`), so offering one would be offering a 409.
+                    artifacts={artifacts.byTarget.get(device.platform_type) ?? []}
+                    artifactsLoaded={artifacts.loaded}
+                    onDeployed={refresh}
+                    onSessionExpired={onSessionExpired}
+                    selected={device.device_id === selectedDeviceId}
+                    onSelect={onSelect}
+                    versions={versions}
+                    onGoToBuilds={onGoToBuilds}
+                    groups={groups}
+                    groupByLabel={groupLabel}
+                  />
+                )
+              })}
+            </tbody>
+          </table>
         </>
       )}
     </section>

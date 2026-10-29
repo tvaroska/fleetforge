@@ -175,4 +175,66 @@ describe('EnrollBoard', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent(/database is down/i)
     expect(onSessionExpired).not.toHaveBeenCalled()
   })
+
+  it('mints batch CLI tokens sequentially and renders CSV + flash-batch.sh without persisting tokens', async () => {
+    let seq = 0
+    vi.spyOn(globalThis, 'fetch').mockImplementation((input, init) => {
+      const url = String(input)
+      if (init?.method === 'POST' && url.startsWith('/v1/enrollment-tokens')) {
+        seq += 1
+        return Promise.resolve(
+          jsonResponse({
+            id: `${seq}0000000-0000-4000-8000-000000000000`,
+            token: `ffe_batch_${seq}_secret`,
+            group_id: 'grp-prod',
+            expires_at: '2026-10-26T12:00:00Z',
+            created_at: '2026-10-25T12:00:00Z',
+          }),
+        )
+      }
+      return Promise.resolve(emptyList())
+    })
+
+    render(
+      <EnrollBoard
+        onSessionExpired={vi.fn()}
+        groups={[
+          {
+            id: 'grp-prod',
+            project_id: 'p1',
+            name: '3. Prod Ring',
+            description: null,
+            created_at: '2026-10-01T00:00:00Z',
+            updated_at: '2026-10-01T00:00:00Z',
+          },
+        ]}
+      />,
+    )
+
+    const generator = await screen.findByTestId('batch-token-generator')
+    expect(generator).toBeInTheDocument()
+
+    await userEvent.selectOptions(screen.getByTestId('batch-group-select'), 'grp-prod')
+    const countInput = screen.getByTestId('batch-count-input')
+    await userEvent.clear(countInput)
+    await userEvent.type(countInput, '2')
+
+    const prefixInput = screen.getByTestId('batch-prefix-input')
+    await userEvent.clear(prefixInput)
+    await userEvent.type(prefixInput, 'factory-node-')
+
+    await userEvent.click(screen.getByTestId('mint-batch-tokens'))
+
+    const csvBox = await screen.findByTestId('batch-tokens-csv')
+    expect(csvBox).toHaveValue(
+      [
+        'token,suggested_name,group_id,expires_at',
+        'ffe_batch_1_secret,factory-node-01,grp-prod,2026-10-26T12:00:00Z',
+        'ffe_batch_2_secret,factory-node-02,grp-prod,2026-10-26T12:00:00Z',
+      ].join('\n'),
+    )
+    expect(screen.getByTestId('batch-flash-script')).toHaveTextContent('esptool.py')
+    expect(JSON.stringify(window.localStorage)).not.toContain('ffe_batch_')
+    expect(JSON.stringify(window.sessionStorage)).not.toContain('ffe_batch_')
+  })
 })

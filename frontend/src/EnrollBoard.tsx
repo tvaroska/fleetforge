@@ -55,6 +55,13 @@ function IssuedToken({ issued, onDismiss }: { issued: EnrollmentTokenIssued; onD
   )
 }
 
+export type BatchMintedRow = {
+  token: string
+  suggested_name: string
+  group_id: string
+  expires_at: string
+}
+
 export function EnrollBoard({
   onSessionExpired,
   project,
@@ -69,6 +76,12 @@ export function EnrollBoard({
   const [selectedGroupId, setSelectedGroupId] = useState<string>('')
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  // P2-3: Batch CLI Token & Factory Jig Generator state (in memory only, never persisted)
+  const [batchCount, setBatchCount] = useState<number>(5)
+  const [batchPrefix, setBatchPrefix] = useState<string>('gh-node-')
+  const [batchMinted, setBatchMinted] = useState<BatchMintedRow[] | null>(null)
+  const [batchCopied, setBatchCopied] = useState(false)
 
   // A dead cookie must bounce to the login screen rather than render as a page error.
   const handle = useCallback(
@@ -111,6 +124,72 @@ export function EnrollBoard({
       handle(err)
     } finally {
       setBusy(false)
+    }
+  }
+
+  async function generateBatch() {
+    setBusy(true)
+    setError(null)
+    setBatchCopied(false)
+    const groupId = selectedGroupId || null
+    const count = Math.max(1, Math.min(50, Math.trunc(batchCount) || 1))
+    const prefix = batchPrefix.trim() || 'board-'
+
+    try {
+      const mintedRows: BatchMintedRow[] = []
+      for (let i = 1; i <= count; i += 1) {
+        const res = await (project
+          ? api.createEnrollmentToken(groupId, project)
+          : api.createEnrollmentToken(groupId))
+        mintedRows.push({
+          token: res.token,
+          suggested_name: `${prefix}${String(i).padStart(2, '0')}`,
+          group_id: res.group_id ?? groupId ?? '',
+          expires_at: res.expires_at,
+        })
+      }
+      setBatchMinted(mintedRows)
+      await refresh()
+    } catch (err) {
+      handle(err)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const batchCsv =
+    batchMinted === null
+      ? ''
+      : [
+          'token,suggested_name,group_id,expires_at',
+          ...batchMinted.map(
+            (r) => `${r.token},${r.suggested_name},${r.group_id},${r.expires_at}`,
+          ),
+        ].join('\n')
+
+  const batchScript =
+    batchMinted === null
+      ? ''
+      : [
+          '#!/usr/bin/env bash',
+          '# flash-batch.sh — Headless Factory Jig Runner (esptool.py)',
+          'set -euo pipefail',
+          'CSV_FILE="${1:-tokens.csv}"',
+          'tail -n +2 "$CSV_FILE" | while IFS=, read -r TOKEN NAME GROUP_ID EXPIRES; do',
+          '  echo "=== Provisioning $NAME (group: ${GROUP_ID:-ungrouped}) ==="',
+          '  python -m fleetforge.cli build-ffcfg --token "$TOKEN" --out /tmp/ff_cfg.bin',
+          '  esptool.py --chip auto --baud 921600 write_flash 0x12000 /tmp/ff_cfg.bin',
+          '  rm -f /tmp/ff_cfg.bin',
+          'done',
+        ].join('\n')
+
+  async function copyBatchCsv() {
+    if (!batchCsv) return
+    try {
+      await navigator.clipboard.writeText(batchCsv)
+      setBatchCopied(true)
+    } catch {
+      setBatchCopied(false)
     }
   }
 
@@ -164,6 +243,103 @@ export function EnrollBoard({
       )}
 
       {issued !== null && <IssuedToken issued={issued} onDismiss={() => setIssued(null)} />}
+
+      <details className="batch-jig" data-testid="batch-token-generator">
+        <summary>Batch CLI Token &amp; Factory Jig Generator</summary>
+        <p className="muted">
+          Mint single-use tokens in bulk (1–50) for headless factory <code>esptool.py</code> benches
+          and export a ready-to-run <code>tokens.csv</code> + <code>flash-batch.sh</code> jig
+          script.
+        </p>
+        <div className="form-grid form-grid-3">
+          <label>
+            Batch count (1–50){' '}
+            <input
+              type="number"
+              min={1}
+              max={50}
+              aria-label="Batch count"
+              data-testid="batch-count-input"
+              value={batchCount}
+              onChange={(event) =>
+                setBatchCount(Math.max(1, Math.min(50, Number(event.target.value) || 1)))
+              }
+              disabled={busy}
+            />
+          </label>
+          <label>
+            Name prefix{' '}
+            <input
+              type="text"
+              aria-label="Batch name prefix"
+              data-testid="batch-prefix-input"
+              placeholder="e.g. gh-node-"
+              value={batchPrefix}
+              onChange={(event) => setBatchPrefix(event.target.value)}
+              disabled={busy}
+            />
+          </label>
+          {groups && groups.length > 0 && (
+            <label>
+              Cohort group{' '}
+              <select
+                aria-label="Batch group"
+                data-testid="batch-group-select"
+                value={selectedGroupId}
+                onChange={(event) => setSelectedGroupId(event.target.value)}
+                disabled={busy}
+              >
+                <option value="">Ungrouped</option>
+                {groups.map((g) => (
+                  <option key={g.id} value={g.id}>
+                    {g.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+          )}
+        </div>
+        <p>
+          <button
+            type="button"
+            data-testid="mint-batch-tokens"
+            onClick={() => void generateBatch()}
+            disabled={busy}
+          >
+            {busy ? 'Minting batch…' : `Mint ${batchCount} batch token${batchCount === 1 ? '' : 's'}`}
+          </button>
+        </p>
+
+        {batchMinted !== null && (
+          <div className="issued" data-testid="batch-minted-output">
+            <h4>Batch CSV (token,suggested_name,group_id,expires_at)</h4>
+            <textarea
+              className="log console"
+              rows={Math.min(10, batchMinted.length + 2)}
+              readOnly
+              aria-label="Batch tokens CSV"
+              data-testid="batch-tokens-csv"
+              value={batchCsv}
+            />
+            <p>
+              <button type="button" data-testid="copy-batch-csv" onClick={() => void copyBatchCsv()}>
+                {batchCopied ? 'Copied CSV' : 'Copy batch CSV'}
+              </button>{' '}
+              <button
+                type="button"
+                data-testid="clear-batch-tokens"
+                onClick={() => setBatchMinted(null)}
+              >
+                Clear batch
+              </button>
+            </p>
+            <h4>Headless Factory Jig Helper (flash-batch.sh)</h4>
+            <pre className="log" data-testid="batch-flash-script">
+              {batchScript}
+            </pre>
+          </div>
+        )}
+      </details>
 
       <h3>Issued tokens</h3>
       {tokens === null ? (

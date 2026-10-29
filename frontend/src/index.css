@@ -1,66 +1,44 @@
-/* Terminal-board theme (after cinetty, github.com/JosssphZhou/cinetty).
+/* Fleetforge Monochrome Pixel Theme (.stitch/DESIGN.md & docs/UX_RESEARCH.md §3.2 / P0-1).
  *
- * The page should read like an architecture board in a terminal: a near-black field,
- * one monospace face, thin single-line boxes whose title sits ON the top border, dashed
- * wires, gradient bars, a rainbow letter-spaced title with a white sweep, and a
- * `key [value]` status line. Three rules hold this file together:
- *
- * 1. ONE ACCENT PER SECTION. Each tab panel sets `--ff-accent` (fleet = blue, builds =
- *    orange, add board = green, access = purple) and every box, heading and button inside
- *    it draws from that one variable. The matching tab button carries the same colour, so
- *    the tab and its panel read as one system, like cinetty's `■ name` legend.
- *
- * 2. STATE IS STILL ENCODED TWICE. `.ok` / `.warn` / `.bad` are now green / gold / pink,
- *    but colour is never the only cue: each also moves weight, and `.bad` underlines, and
- *    the fleet table's online/offline pair keeps its distinct glyph (`FleetView.tsx`'s
- *    StatusCell). WCAG 1.4.1, not decoration.
- *
- * 3. ONE FACE. Everything is monospace. Device ids and log panels are read character by
- *    character; chrome (headings, th, legend, buttons) gets weight, letter-spacing and
- *    colour instead of a second font. `--ff-display` is kept as an alias so older rules
- *    and comments still resolve.
- *
- * Motion (title sweep, the light running round the active box) is switched off under
- * `prefers-reduced-motion`.
+ * Strict 7-step monochrome pixel palette:
+ *   --ff-bg:      #0c0c0c (Carbon Void)
+ *   --ff-panel:   #141414 (Obsidian Panel)
+ *   --ff-line:    #3a3a3a (Graphite Rule)
+ *   --ff-line-hi: #6a6a6a (Steel Highlight Rule)
+ *   --ff-dim:     #8a8a8a (Muted Ash)
+ *   --ff-fg:      #d8d8d8 (Phosphor Silver)
+ *   --ff-hi:      #ffffff (Pure Signal White)
  */
-
-@property --ff-spin {
-  syntax: '<angle>';
-  initial-value: 0deg;
-  inherits: false;
-}
 
 :root {
   color-scheme: dark;
 
-  /* Neutrals. Contrast against --ff-bg: dim 5.0:1, fg 14:1, hi 20:1 — all AA or better. */
-  --ff-bg: #0a0a0c;
-  --ff-panel: #101014;
-  --ff-sunk: #060608;
-  --ff-line: #26262e;
-  --ff-line-hi: #44444f;
-  --ff-dim: #80808c;
-  --ff-fg: #d6d6dc;
+  --ff-bg: #0c0c0c;
+  --ff-panel: #141414;
+  --ff-sunk: #141414;
+  --ff-line: #3a3a3a;
+  --ff-line-hi: #6a6a6a;
+  --ff-dim: #8a8a8a;
+  --ff-fg: #d8d8d8;
   --ff-hi: #ffffff;
 
-  /* cinetty's board palette. */
-  --ff-cyan: #00d7ff;
-  --ff-blue: #5ab0ff;
-  --ff-purple: #b48cff;
-  --ff-pink: #ff7aa8;
-  --ff-orange: #e8916b;
-  --ff-gold: #ffc457;
-  --ff-green: #4fd18b;
-  --ff-teal: #6ee0be;
+  /* Monochrome semantic aliases (achromatic r == g == b ramp). */
+  --ff-cyan: #ffffff;
+  --ff-blue: #d8d8d8;
+  --ff-purple: #d8d8d8;
+  --ff-pink: #ffffff;
+  --ff-orange: #d8d8d8;
+  --ff-gold: #d8d8d8;
+  --ff-green: #ffffff;
+  --ff-teal: #d8d8d8;
 
-  --ff-accent: var(--ff-cyan);
+  --ff-accent: var(--ff-hi);
 
-  --ff-mono: 'JetBrains Mono', 'SF Mono', ui-monospace, Menlo, 'DejaVu Sans Mono', Consolas,
-    monospace;
-  --ff-display: var(--ff-mono);
+  --ff-display: 'Press Start 2P', ui-monospace, monospace;
+  --ff-mono: ui-monospace, 'DejaVu Sans Mono', Menlo, Consolas, monospace;
 
   font-family: var(--ff-mono);
-  font-size: 15px;
+  font-size: 16px;
   line-height: 1.5;
   font-variant-ligatures: none;
   font-feature-settings: 'liga' 0, 'clig' 0;
@@ -68,109 +46,76 @@
   color: var(--ff-fg);
 }
 
+[data-theme='pit-contrast'],
+:root[data-theme='pit-contrast'] {
+  --ff-bg: #000000;
+  --ff-panel: #080808;
+  --ff-sunk: #080808;
+  --ff-line: #ffffff;
+  --ff-line-hi: #ffffff;
+  --ff-dim: #d8d8d8;
+  --ff-fg: #ffffff;
+  --ff-hi: #ffffff;
+}
+
 body {
   margin: 0;
   min-height: 100vh;
+  background: var(--ff-bg);
+  color: var(--ff-fg);
 }
 
 main {
-  /* Eight columns of fleet table and 2-column access cards need room to breathe. */
-  max-width: 72rem;
+  max-width: 84rem;
   margin: 0 auto;
-  padding: 1.5rem 1.5rem 4rem;
+  padding: 2rem 1.5rem 4rem;
 }
 
-/* ── Section accents ─────────────────────────────────────────────────────────── */
+/* ── Section accents (monochrome hierarchy) ──────────────────────────────────── */
 
-[data-testid='panel-fleet'] {
-  --ff-accent: var(--ff-blue);
-}
-
-[data-testid='panel-builds'] {
-  --ff-accent: var(--ff-orange);
-}
-
-[data-testid='panel-onboard'] {
-  --ff-accent: var(--ff-green);
-}
-
+[data-testid='panel-fleet'],
+[data-testid='panel-builds'],
+[data-testid='panel-onboard'],
 .access-grid,
 .project-drawer {
-  --ff-accent: var(--ff-purple);
+  --ff-accent: var(--ff-hi);
 }
 
-/* ── Title: rainbow, letter-spaced, with a white sweep every few seconds ──────── */
+/* ── Typography (.stitch/DESIGN.md) ──────────────────────────────────────────── */
 
 h1 {
-  font-family: var(--ff-mono);
-  font-size: 1.05rem;
+  font-family: var(--ff-display);
+  font-size: 1rem;
   line-height: 1.6;
-  font-weight: 700;
-  letter-spacing: 0.85em;
-  text-transform: uppercase;
+  font-weight: 400;
+  letter-spacing: 0;
   margin: 0 0 1.5rem;
-  color: var(--ff-cyan);
-  background-image:
-    linear-gradient(
-      100deg,
-      transparent 0 44%,
-      rgba(255, 255, 255, 0.95) 50%,
-      transparent 56% 100%
-    ),
-    linear-gradient(
-      90deg,
-      var(--ff-cyan),
-      var(--ff-blue),
-      var(--ff-purple),
-      var(--ff-pink),
-      var(--ff-orange),
-      var(--ff-gold),
-      var(--ff-green)
-    );
-  background-size: 300% 100%, 100% 100%;
-  background-repeat: no-repeat;
-  background-position: 100% 0, 0 0;
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
-  animation: ff-title-sweep 7s ease-in-out infinite;
-}
-
-@keyframes ff-title-sweep {
-  0%,
-  8% {
-    background-position: 100% 0, 0 0;
-  }
-  30%,
-  100% {
-    background-position: 0% 0, 0 0;
-  }
+  color: var(--ff-hi);
 }
 
 h2 {
-  font-family: var(--ff-mono);
-  font-size: 0.95rem;
-  line-height: 1.5;
-  font-weight: 600;
-  color: var(--ff-accent);
-  margin: 2.25rem 0 1rem;
+  font-family: var(--ff-display);
+  font-size: 0.8rem;
+  line-height: 1.6;
+  font-weight: 400;
+  color: var(--ff-hi);
+  margin: 2.5rem 0 1rem;
 }
 
-/* The flasher's step headings ("1 · The board" … "4 · Watch the board") and the two
-   panel titles. Dimmer than h2 so the section boundary stays the stronger one. */
+/* The flasher's step headings ("1 · The board" … "4 · Watch the board") and inline card titles. */
 h3 {
-  font-family: var(--ff-mono);
-  font-size: 0.85rem;
-  line-height: 1.5;
-  font-weight: 600;
+  font-family: var(--ff-display);
+  font-size: 0.65rem;
+  line-height: 1.7;
+  font-weight: 400;
   color: var(--ff-fg);
-  margin: 1.5rem 0 0.6rem;
+  margin: 1.75rem 0 0.6rem;
 }
 
 dl {
   display: grid;
   grid-template-columns: max-content 1fr;
-  gap: 0.35rem 1.5rem;
+  gap: 0.5rem 1.5rem;
   margin: 0;
 }
 
@@ -193,116 +138,130 @@ table {
 th,
 td {
   text-align: left;
-  padding: 0.45rem 0.75rem 0.45rem 0;
-  border-bottom: 1px dashed var(--ff-line);
+  padding: 0.6rem 0.85rem 0.6rem 0.4rem;
+  border-bottom: 2px solid var(--ff-line);
   vertical-align: top;
 }
 
-/* Chrome, and short: column labels are 1-2 words. */
+/* Chrome, and short: column labels in Press Start 2P. */
 th {
-  font-size: 0.72rem;
-  line-height: 1.6;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
+  font-family: var(--ff-display);
+  font-size: 0.55rem;
+  line-height: 1.8;
+  letter-spacing: 0;
   color: var(--ff-dim);
-  font-weight: 500;
-  border-bottom: 1px solid var(--ff-line-hi);
+  font-weight: 400;
+  border-bottom: 2px solid var(--ff-line-hi);
 }
 
-/* The selected fleet row: a faint wash of the section accent and a left rail. */
+[data-density='compact'] table tbody tr,
+table[data-density='compact'] tbody tr {
+  height: 32px;
+}
+
+[data-density='compact'] th,
+[data-density='compact'] td,
+table[data-density='compact'] th,
+table[data-density='compact'] td {
+  padding-top: 0.2rem;
+  padding-bottom: 0.2rem;
+  line-height: 1.25;
+}
+
+/* Selected fleet row: elevated #141414 panel surface and 3px solid #ffffff inset left bar. */
 tr[data-selected='true'] > td {
-  background: color-mix(in srgb, var(--ff-accent) 9%, transparent);
+  background: var(--ff-panel);
 }
 
 tr[data-selected='true'] > td:first-child {
-  box-shadow: inset 2px 0 0 var(--ff-accent);
-  padding-left: 0.5rem;
+  box-shadow: inset 3px 0 0 var(--ff-hi);
+  padding-left: 0.6rem;
 }
 
-/* Data, never chrome. A device id is read character by character — full-size mono, and
-   `break-all` so a 12-hex-digit id wraps rather than widening the column. */
 code {
   font-family: var(--ff-mono);
-  font-size: 0.9em;
+  font-size: 0.85em;
   color: var(--ff-hi);
   word-break: break-all;
 }
 
-/* ── State, encoded twice ─────────────────────────────────────────────────────
-   Colour plus weight; `.bad` additionally underlines: it is the only one that can
-   appear next to `.warn` (an alert paragraph above a console error). */
+/* ── Semantic State Hierarchy (Monochrome WCAG 1.4.1) ────────────────────────── */
 
 .ok {
-  color: var(--ff-green);
+  color: var(--ff-hi);
   font-weight: 700;
 }
 
 .bad {
-  color: var(--ff-pink);
+  color: var(--ff-hi);
   font-weight: 700;
   text-decoration: underline;
+  text-decoration-thickness: 3px;
   text-underline-offset: 3px;
 }
 
 .warn {
-  color: var(--ff-gold);
+  color: var(--ff-fg);
   font-weight: 700;
 }
 
-/* R4-fe-1. The fault-reset badge's second axis: a box, not only a tint. */
 .badge {
-  border: 1px solid currentColor;
-  padding: 0 0.35em;
+  border: 2px solid var(--ff-line-hi);
+  border-radius: 0;
+  padding: 0.05rem 0.4em;
   white-space: nowrap;
 }
 
-/* S0-fe-6. The recovery button lives INSIDE a `.bad` / `.warn` paragraph, and
-   `text-decoration` inherits into a nested button — so `.bad`'s underline would run
-   through the button's own label. */
+.emcon-badge,
+.safe-mode-badge {
+  display: inline-block;
+  background: var(--ff-hi);
+  color: var(--ff-bg);
+  font-weight: 700;
+  border: 2px solid var(--ff-hi);
+  border-radius: 0;
+  padding: 0.05rem 0.45rem;
+  white-space: nowrap;
+}
+
 .remedy {
   display: inline-block;
   margin-top: 0.5rem;
   text-decoration: none;
 }
 
-/* Referenced by App.tsx, EnrollBoard.tsx and FleetView.tsx. */
 .muted {
   color: var(--ff-dim);
   font-weight: 400;
 }
 
-/* The log panels are the exception: `event.raw` already begins with ESP-IDF's `E (…)` /
-   `W (…)` / `I (…)`, so the level is in the text. Underlining every error line there
-   would shred a monospace grid for no added information. */
 .log .bad {
   text-decoration: none;
 }
 
-/* ── Boxes ───────────────────────────────────────────────────────────────────
-   Single 1px lines, no radii, no shadows. The title sits on the top border. */
+/* ── Forms, Inputs & Tactile Pixel Buttons (.stitch/DESIGN.md) ───────────────── */
 
 fieldset {
-  border: 1px solid color-mix(in srgb, var(--ff-accent) 45%, var(--ff-line));
+  border: 2px solid var(--ff-line);
   border-radius: 0;
   margin: 1.5rem 0;
   padding: 0.5rem 1rem 1rem;
+  background: var(--ff-panel);
 }
 
 legend {
-  font-size: 0.8rem;
-  line-height: 1.6;
-  font-weight: 600;
-  color: var(--ff-accent);
+  font-family: var(--ff-display);
+  font-size: 0.55rem;
+  line-height: 1.8;
+  font-weight: 400;
+  color: var(--ff-dim);
   padding: 0 0.5rem;
 }
 
-/* R2b-fe-12. One `<form>` per known network (for the password manager); the form itself
-   has no box, its inner fieldset does. */
 .network-row {
   margin: 0.5rem 0;
 }
 
-/* Radios and checkboxes: the label is the hit target, one per line. */
 .choice {
   display: block;
   padding: 0.2rem 0;
@@ -310,7 +269,7 @@ legend {
 
 input[type='radio'],
 input[type='checkbox'] {
-  accent-color: var(--ff-accent);
+  accent-color: var(--ff-line-hi);
   margin-right: 0.4rem;
 }
 
@@ -322,12 +281,12 @@ input[type='url'],
 select {
   font-family: var(--ff-mono);
   font-size: 0.9rem;
-  color: var(--ff-hi);
-  background: var(--ff-sunk);
-  border: 1px solid var(--ff-line-hi);
+  color: var(--ff-fg);
+  background: var(--ff-panel);
+  border: 2px solid var(--ff-line);
   border-radius: 0;
   padding: 0.35rem 0.5rem;
-  caret-color: var(--ff-accent);
+  caret-color: var(--ff-hi);
 }
 
 input[type='text']:focus,
@@ -336,13 +295,9 @@ input[type='password']:focus,
 input[type='number']:focus,
 input[type='url']:focus,
 select:focus {
-  border-color: var(--ff-accent);
+  border-color: var(--ff-line-hi);
 }
 
-/* The login form is a bare `label` + `input` + `button` with no wrapper and no `{' '}`
-   between them, and JSX drops whitespace-only lines — so without these rules the
-   controls render flush against each other. `.choice` is excluded: those labels
-   are the hit target for a radio and are already `display: block`. */
 label:not(.choice) {
   margin-right: 0.6rem;
 }
@@ -365,79 +320,78 @@ input:focus-visible,
 select:focus-visible,
 button:focus-visible,
 a:focus-visible {
-  outline: 1px solid var(--ff-accent);
+  outline: 2px solid var(--ff-hi);
   outline-offset: 2px;
 }
 
 button {
-  font-family: var(--ff-mono);
-  font-size: 0.82rem;
-  line-height: 1.5;
-  font-weight: 600;
-  color: var(--ff-accent);
-  background: transparent;
-  border: 1px solid color-mix(in srgb, var(--ff-accent) 65%, transparent);
+  font-family: var(--ff-display);
+  font-size: 0.55rem;
+  line-height: 1.8;
+  font-weight: 400;
+  color: var(--ff-hi);
+  background: var(--ff-panel);
+  border: 2px solid var(--ff-line-hi);
   border-radius: 0;
-  padding: 0.3rem 0.8rem;
+  padding: 0.5rem 0.8rem;
+  box-shadow: 3px 3px 0 var(--ff-line);
   cursor: pointer;
-  transition:
-    background-color 120ms,
-    color 120ms;
 }
 
 button:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--ff-accent) 14%, transparent);
+  background: var(--ff-line);
   color: var(--ff-hi);
 }
 
-button:active:not(:disabled) {
-  background: color-mix(in srgb, var(--ff-accent) 28%, transparent);
+button:active:not(:disabled),
+button.active:not(:disabled) {
+  transform: translate(3px, 3px);
+  box-shadow: none;
+  background: var(--ff-line);
 }
 
 button:disabled {
   color: var(--ff-dim);
   border-color: var(--ff-line);
-  border-style: dashed;
+  box-shadow: none;
   cursor: not-allowed;
 }
 
 a {
-  color: var(--ff-cyan);
+  color: var(--ff-hi);
   text-underline-offset: 3px;
 }
 
-/* A gradient bar, like the bars on cinetty's boards. */
 progress {
   display: block;
   width: 100%;
-  height: 0.7rem;
+  height: 0.9rem;
   margin-top: 0.4rem;
-  border: 1px solid var(--ff-line);
+  border: 2px solid var(--ff-line);
   border-radius: 0;
-  background: var(--ff-sunk);
+  background: var(--ff-panel);
   appearance: none;
 }
 
 progress::-webkit-progress-bar {
-  background: var(--ff-sunk);
+  background: var(--ff-panel);
 }
 
 progress::-webkit-progress-value {
-  background: linear-gradient(90deg, #24407e, var(--ff-blue) 70%, #a8d6ff);
+  background: var(--ff-fg);
 }
 
 progress::-moz-progress-bar {
-  background: linear-gradient(90deg, #24407e, var(--ff-blue) 70%, #a8d6ff);
+  background: var(--ff-fg);
 }
 
-/* The esptool log. Capped at MAX_LOG_LINES in flash.ts; scrolls rather than grows. */
 .log {
   max-height: 16rem;
   overflow: auto;
   margin: 0.5rem 0 0;
   padding: 0.5rem 0.75rem;
-  background: var(--ff-sunk);
-  border: 1px solid var(--ff-line);
+  background: var(--ff-panel);
+  border: 2px solid var(--ff-line);
   border-radius: 0;
   font-family: var(--ff-mono);
   font-size: 0.8rem;
@@ -549,48 +503,45 @@ textarea.log {
 }
 
 .issued {
-  border: 1px solid var(--ff-gold);
+  border: 2px solid var(--ff-line-hi);
   border-radius: 0;
   padding: 0 1rem 1rem;
   margin: 1.5rem 0;
-  background: color-mix(in srgb, var(--ff-gold) 5%, transparent);
+  background: var(--ff-panel);
+  box-shadow: 4px 4px 0 var(--ff-line);
 }
 
-/* R2b-fe-8. The pre-check card inside a Deploy cell: boxed like `.issued`, but small,
-   because it sits in a table cell. */
-/* R2b-fe-10. The update result card is cell-sized like it. */
+/* R2b-fe-8 / R2b-fe-10. Pre-check and update-result cards. */
 .precheck,
 .deploy-result {
-  border: 1px solid var(--ff-line-hi);
-  border-left: 2px solid var(--ff-accent);
+  border: 2px solid var(--ff-line-hi);
   border-radius: 0;
   padding: 0 0.75rem 0.5rem;
   margin: 0.5rem 0;
+  background: var(--ff-panel);
 }
 
 .deploy-result dl {
   margin: 0.25rem 0;
 }
 
-/* R2b-fe-1. One strip, on screen through the whole flow. Data, so mono. Reads like
-   cinetty's bottom line: dim keys, bright `[values]`. */
 .status-strip {
   position: sticky;
   top: 0;
   z-index: 1;
-  background: color-mix(in srgb, var(--ff-bg) 92%, transparent);
-  backdrop-filter: blur(4px);
-  border-bottom: 1px dashed var(--ff-line-hi);
-  padding: 0.5rem 0;
+  background: var(--ff-panel);
+  border: 2px solid var(--ff-line);
+  box-shadow: 3px 3px 0 var(--ff-line);
+  padding: 0.55rem 0.85rem;
   margin-bottom: 1rem;
-  font-size: 0.82rem;
-  color: var(--ff-dim);
+  font-size: 0.85rem;
+  color: var(--ff-fg);
   font-family: var(--ff-mono);
   font-variant-numeric: tabular-nums;
 }
 
 .status-strip code:not(.muted) {
-  color: var(--ff-green);
+  color: var(--ff-hi);
 }
 
 .status-strip code:not(.muted)::before {
@@ -603,7 +554,7 @@ textarea.log {
   color: var(--ff-dim);
 }
 
-/* A device id in a button is still data: undo `button`'s frame and colour. */
+/* A device id in a button is still data: undo `button`'s frame and shadow. */
 .pick-board {
   font-family: var(--ff-mono);
   font-size: inherit;
@@ -612,6 +563,7 @@ textarea.log {
   color: inherit;
   background: none;
   border: none;
+  box-shadow: none;
   padding: 0;
   text-decoration: underline dotted;
   text-underline-offset: 3px;
@@ -619,11 +571,13 @@ textarea.log {
 
 .pick-board:hover:not(:disabled) {
   background: none;
-  color: var(--ff-accent);
+  color: var(--ff-hi);
 }
 
 .pick-board:active:not(:disabled) {
   background: none;
+  transform: none;
+  box-shadow: none;
 }
 
 /* ── Console chrome & 4-tab layout ─────────────────────────────────────────── */
@@ -635,6 +589,7 @@ textarea.log {
   gap: 1rem;
   padding: 0.5rem 0 0.75rem;
   margin-bottom: 1rem;
+  border-bottom: 2px solid var(--ff-line);
 }
 
 .console-topbar h1 {
@@ -649,18 +604,14 @@ textarea.log {
   font-size: 0.85rem;
 }
 
-.topbar-user button {
-  --ff-accent: var(--ff-dim);
-}
-
 .project-bar {
-  --ff-accent: var(--ff-purple);
   display: flex;
   align-items: center;
   justify-content: space-between;
   flex-wrap: wrap;
   gap: 0.75rem;
-  border: 1px solid color-mix(in srgb, var(--ff-purple) 45%, var(--ff-line));
+  background: var(--ff-panel);
+  border: 2px solid var(--ff-line);
   padding: 0.5rem 0.9rem;
   margin-bottom: 1rem;
 }
@@ -680,9 +631,9 @@ textarea.log {
 }
 
 .project-tag {
-  font-size: 0.72rem;
-  color: var(--ff-purple);
-  letter-spacing: 0.12em;
+  font-family: var(--ff-display);
+  font-size: 0.55rem;
+  color: var(--ff-dim);
   text-transform: uppercase;
 }
 
@@ -692,83 +643,55 @@ textarea.log {
   gap: 0.5rem;
   margin: 0 0 1.75rem;
   padding-bottom: 0.75rem;
-  border-bottom: 1px dashed var(--ff-line-hi);
-}
-
-/* Tab N wears panel N's accent. */
-.tab-btn:nth-child(1) {
-  --ff-accent: var(--ff-blue);
-}
-
-.tab-btn:nth-child(2) {
-  --ff-accent: var(--ff-orange);
-}
-
-.tab-btn:nth-child(3) {
-  --ff-accent: var(--ff-green);
-}
-
-.tab-btn:nth-child(4) {
-  --ff-accent: var(--ff-purple);
+  border-bottom: 2px solid var(--ff-line-hi);
 }
 
 .tab-btn {
-  font-size: 0.8rem;
-  letter-spacing: 0.08em;
-  padding: 0.4rem 0.9rem;
-  color: color-mix(in srgb, var(--ff-accent) 70%, var(--ff-dim));
-  background: transparent;
-  border: 1px solid var(--ff-line);
+  font-family: var(--ff-display);
+  font-size: 0.55rem;
+  padding: 0.5rem 0.9rem;
+  color: var(--ff-fg);
+  background: var(--ff-panel);
+  border: 2px solid var(--ff-line);
+  box-shadow: 3px 3px 0 var(--ff-line);
 }
 
 .tab-btn::before {
   content: '■ ';
-  content: '■ ' / '';
-  color: var(--ff-accent);
+  color: var(--ff-dim);
 }
 
 .tab-btn:hover:not(:disabled) {
   color: var(--ff-hi);
   border-color: var(--ff-line-hi);
-  background: color-mix(in srgb, var(--ff-accent) 8%, transparent);
+  background: var(--ff-line);
 }
 
-/* The active box has a light running round its border, as on cinetty's boards. */
 .tab-btn.active,
 .stepper-rail li.active {
-  color: var(--ff-hi);
-  border: 1px solid transparent;
-  background:
-    linear-gradient(var(--ff-bg), var(--ff-bg)) padding-box,
-    conic-gradient(
-        from var(--ff-spin),
-        var(--ff-hi) 0deg,
-        var(--ff-accent) 18deg,
-        color-mix(in srgb, var(--ff-accent) 55%, var(--ff-line)) 60deg 360deg
-      )
-      border-box;
-  animation: ff-border-run 2.6s linear infinite;
+  color: var(--ff-bg);
+  background: var(--ff-hi);
+  border: 2px solid var(--ff-hi);
+  box-shadow: 3px 3px 0 var(--ff-line-hi);
+}
+
+.tab-btn.active::before {
+  color: var(--ff-bg);
 }
 
 .tab-btn.active:hover:not(:disabled) {
-  color: var(--ff-hi);
-}
-
-@keyframes ff-border-run {
-  to {
-    --ff-spin: 360deg;
-  }
+  color: var(--ff-bg);
+  background: var(--ff-hi);
 }
 
 .tab-panel:not(.active) {
   display: none;
 }
 
-/* A board box: one thin line in the section accent, title notched into the top border. */
 .console-card {
   position: relative;
-  background: transparent;
-  border: 1px solid color-mix(in srgb, var(--ff-accent) 55%, var(--ff-line));
+  background: var(--ff-panel);
+  border: 2px solid var(--ff-line);
   padding: 1.4rem 1.5rem 1.25rem;
   margin: 1.75rem 0 1.5rem;
 }
@@ -782,7 +705,7 @@ textarea.log {
   margin: 0;
   padding: 0 0.5rem;
   background: var(--ff-bg);
-  color: var(--ff-accent);
+  color: var(--ff-hi);
   line-height: 1.2;
 }
 
@@ -794,7 +717,7 @@ textarea.log {
   gap: 0.75rem;
   margin-bottom: 0.75rem;
   padding-bottom: 0.6rem;
-  border-bottom: 1px dashed var(--ff-line);
+  border-bottom: 2px solid var(--ff-line);
 }
 
 /* The header's h2 is notched into the card border, so push what is left to the right. */
@@ -1018,11 +941,108 @@ textarea.log {
   margin: 0;
 }
 
+/* ── Converged H5 + H6 Layout & Component Classes (P1-1, P1-4, P2-1, P0-6) ─── */
+
+.workbench-split {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 1.25rem;
+  align-items: start;
+}
+
+@media (min-width: 1100px) {
+  .workbench-split {
+    grid-template-columns: minmax(0, 58fr) minmax(0, 42fr);
+  }
+}
+
+.device-inspector {
+  position: sticky;
+  top: 3.5rem;
+  background: var(--ff-panel);
+  border: 2px solid var(--ff-line-hi);
+  box-shadow: 4px 4px 0 var(--ff-line);
+  padding: 1rem 1.25rem;
+  max-height: calc(100vh - 5rem);
+  overflow-y: auto;
+}
+
+.release-ribbon {
+  background: var(--ff-panel);
+  border: 2px solid var(--ff-line-hi);
+  box-shadow: 3px 3px 0 var(--ff-line);
+  padding: 0.85rem 1rem;
+  margin-bottom: 1.25rem;
+}
+
+.matrix-drawer {
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 2px solid var(--ff-line);
+  overflow-x: auto;
+}
+
+.pit-cockpit {
+  background: var(--ff-panel);
+  border: 2px solid var(--ff-line-hi);
+  box-shadow: 4px 4px 0 var(--ff-line);
+  padding: 1rem 1.25rem;
+  margin-top: 1.5rem;
+}
+
+.mini-fleet-strip {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  gap: 0.75rem;
+  margin: 0.75rem 0 1rem;
+  padding: 0.65rem;
+  background: var(--ff-bg);
+  border: 2px solid var(--ff-line);
+}
+
+.pit-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(18rem, 1fr));
+  gap: 1rem;
+  align-items: start;
+}
+
+.prev-boot-box {
+  background: var(--ff-bg);
+  border: 2px solid var(--ff-hi);
+  box-shadow: 3px 3px 0 var(--ff-line-hi);
+  padding: 0.65rem 0.85rem;
+  margin: 0.5rem 0 0.75rem;
+  font-family: var(--ff-mono);
+  font-size: 0.82rem;
+}
+
+.prev-boot-box ul {
+  margin: 0.4rem 0 0;
+  padding-left: 1.1rem;
+}
+
+.compare-grid {
+  width: 100%;
+  overflow-x: auto;
+  border: 2px solid var(--ff-line);
+  background: var(--ff-bg);
+  margin: 0.5rem 0;
+}
+
+.quick-filter-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin: 0.5rem 0 0.75rem;
+}
+
 /* ── Scrollbars, selection, motion ──────────────────────────────────────────── */
 
 ::selection {
-  background: color-mix(in srgb, var(--ff-cyan) 35%, transparent);
-  color: var(--ff-hi);
+  background: var(--ff-hi);
+  color: var(--ff-bg);
 }
 
 * {
@@ -1031,9 +1051,6 @@ textarea.log {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  h1,
-  .tab-btn.active,
-  .stepper-rail li.active,
   .stream-pill .ok::before {
     animation: none;
   }

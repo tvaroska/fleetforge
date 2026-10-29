@@ -1,7 +1,7 @@
 // The device log tail: rows, gaps, untrusted text, and the read rules (switching boards,
 // the hint, 401, a failed re-read). The Dashboard wiring is in `Dashboard.test.tsx`.
 
-import { render, screen, waitFor, within } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { DeviceLog } from './DeviceLog'
 import { type DeviceLogLine, type DeviceSummary } from './api'
@@ -236,5 +236,32 @@ describe('DeviceLog', () => {
     mockFetch(() => json({}))
     renderLog({ hasBoards: false, deviceId: null, device: null })
     expect(screen.queryByTestId('device-log')).toBeNull()
+  })
+
+  it('pins [prev-boot] RTC_NOINIT_ATTR crash lines in a callout box while keeping them in the log table, and supports filtering/searching (P0-6)', async () => {
+    mockFetch(() =>
+      json({
+        device_id: ID,
+        lines: [
+          line({ id: 3, level: 'I', text: 'boot complete' }),
+          line({ id: 2, level: 'E', text: '[prev-boot] i2c 0x48 timeout' }),
+          line({ id: 1, level: 'W', text: '[prev-boot] rolled back to ota_1' }),
+        ],
+      }),
+    )
+    renderLog()
+    const crashBox = await screen.findByTestId('prev-boot-crash-box')
+    expect(crashBox).toHaveTextContent('Pinned [prev-boot] Crash Ring (RTC_NOINIT_ATTR) (2)')
+    expect(within(crashBox).getAllByTestId('prev-boot-crash-line')).toHaveLength(2)
+    expect(screen.getAllByTestId('log-line')).toHaveLength(3)
+
+    fireEvent.click(screen.getByTestId('device-log-filter-prev-boot'))
+    expect(screen.getAllByTestId('log-line')).toHaveLength(2)
+
+    fireEvent.click(screen.getByTestId('device-log-filter-all'))
+    expect(screen.getAllByTestId('log-line')).toHaveLength(3)
+
+    fireEvent.change(screen.getByTestId('device-log-search'), { target: { value: '0x48' } })
+    expect(screen.getAllByTestId('log-line')).toHaveLength(1)
   })
 })

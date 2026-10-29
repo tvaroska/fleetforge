@@ -2,13 +2,15 @@
 // Every row of the R2-fe-1 table is pinned here, without rendering.
 
 import { describe, expect, it } from 'vitest'
-import { type DeploySummary } from './api'
+import { type DeploySummary, type DeviceSummary } from './api'
 import {
   DEPLOY_BAD_STATES,
   DEPLOY_STATE_LABELS,
   ROLLBACK_WAIT_LABEL,
   deployOutcome,
   deployStateLabel,
+  describeDevicePresence,
+  devicePriorityScore,
   isCommandRollback,
   safeWindowWait,
 } from './deploy'
@@ -164,5 +166,160 @@ describe('isCommandRollback (R5-fe-1)', () => {
       '1.4.2',
     )
     expect(outcome).toEqual({ kind: 'verdict', word: 'rolled back', tone: 'bad', note: 'by an operator command' })
+  })
+
+  it('handles non-app companion cargo without false drift against fwVersion (P0-2)', () => {
+    const cargoDeploy = deploy({
+      artifact_type: 'model_weights',
+      artifact_version: 'yolo-v8',
+    })
+    expect(deployOutcome(cargoDeploy, '1.4.2', { model_weights: 'yolo-v8' })).toEqual({
+      kind: 'verdict',
+      word: 'good',
+      tone: 'ok',
+      note: 'running yolo-v8',
+    })
+    expect(deployOutcome(cargoDeploy, '1.4.2', null)).toEqual({
+      kind: 'verdict',
+      word: 'good',
+      tone: 'ok',
+      note: 'running yolo-v8',
+    })
+    expect(deployOutcome(cargoDeploy, '1.4.2', { model_weights: 'yolo-v7' })).toEqual({
+      kind: 'drift',
+      reported: 'yolo-v7',
+    })
+  })
+})
+
+function mockDevice(over: Partial<DeviceSummary> = {}): DeviceSummary {
+  return {
+    device_id: 'a4cf12b3de90',
+    name: 'node-01',
+    group_id: null,
+    platform_type: 'esp32s3',
+    fw_version: '1.5.0',
+    agent_version: '0.7.2',
+    link_type: 'wifi',
+    ssid: 'lab',
+    known_networks: 1,
+    power_class: 'always_on',
+    expected_wake_interval_s: null,
+    parent_device_id: null,
+    partition_layout: 'ab-4m-v1',
+    ota_slot_size: 1966080,
+    capabilities: ['apply', 'cancel', 'rollback', 'reboot'],
+    last_seen: '2026-10-25T12:00:00Z',
+    enrolled_at: '2026-10-20T12:00:00Z',
+    broker_provisioned_at: '2026-10-20T12:00:00Z',
+    online: true,
+    deploy: null,
+    ...over,
+  }
+}
+
+describe('devicePriorityScore & describeDevicePresence (P1-1, P2-2)', () => {
+  const nowMs = Date.parse('2026-10-25T12:10:00Z')
+
+  it('scores safe_mode as -1, rolled_back/failed/overdue as 0, in-flight as 1, drift/weak RSSI as 2, healthy as 3, offline as 4', () => {
+    expect(devicePriorityScore(mockDevice({ safe_mode: true }), '1.5.0', nowMs)).toBe(-1)
+    expect(
+      devicePriorityScore(
+        mockDevice({ deploy: deploy({ state: 'rolled_back', is_terminal: true }) }),
+        '1.5.0',
+        nowMs,
+      ),
+    ).toBe(0)
+    expect(
+      devicePriorityScore(
+        mockDevice({
+          online: false,
+          presence_reason: 'sortie',
+          expected_back_s: 300,
+          last_seen: '2026-10-25T12:00:00Z',
+        }),
+        '1.5.0',
+        nowMs,
+      ),
+    ).toBe(0)
+    expect(
+      devicePriorityScore(
+        mockDevice({ deploy: deploy({ state: 'downloading', is_terminal: false }) }),
+        '1.5.0',
+        nowMs,
+      ),
+    ).toBe(1)
+    expect(devicePriorityScore(mockDevice({ fw_version: '1.4.2' }), '1.5.0', nowMs)).toBe(2)
+    expect(
+      devicePriorityScore(
+        mockDevice({
+          health: {
+            at: '2026-10-25T12:00:00Z',
+            uptime_s: 100,
+            rssi: -82,
+            free_heap: 140000,
+            min_free_heap: 110000,
+            boot_ok: true,
+          },
+        }),
+        '1.5.0',
+        nowMs,
+      ),
+    ).toBe(2)
+    expect(devicePriorityScore(mockDevice(), '1.5.0', nowMs)).toBe(3)
+    expect(devicePriorityScore(mockDevice({ online: false, power_class: 'sleepy' }), '1.5.0', nowMs)).toBe(3)
+    expect(devicePriorityScore(mockDevice({ online: false }), '1.5.0', nowMs)).toBe(4)
+  })
+
+  it('describes all 6+ presence states with distinct glyphs', () => {
+    expect(describeDevicePresence(mockDevice(), nowMs)).toMatchObject({
+      code: 'wifi',
+      glyph: '█',
+    })
+    expect(
+      describeDevicePresence(mockDevice({ link_type: 'dock', parent_device_id: 'ugv-01' }), nowMs),
+    ).toMatchObject({
+      code: 'dock',
+      glyph: '█',
+      label: 'DOCK (@ugv-01)',
+    })
+    expect(
+      describeDevicePresence(mockDevice({ online: false, power_class: 'sleepy' }), nowMs),
+    ).toMatchObject({
+      code: 'asleep',
+      glyph: '◐',
+    })
+    expect(
+      describeDevicePresence(
+        mockDevice({ online: false, presence_reason: 'sortie', expected_back_s: 900 }),
+        nowMs,
+      ),
+    ).toMatchObject({
+      code: 'sortie',
+      glyph: '◎',
+    })
+    expect(describeDevicePresence(mockDevice({ offline_mode: true }), nowMs)).toMatchObject({
+      code: 'emcon',
+      glyph: '⊘',
+      className: 'emcon-badge',
+    })
+    expect(
+      describeDevicePresence(
+        mockDevice({
+          online: false,
+          presence_reason: 'sortie',
+          expected_back_s: 300,
+          last_seen: '2026-10-25T12:00:00Z',
+        }),
+        nowMs,
+      ),
+    ).toMatchObject({
+      code: 'overdue',
+      glyph: '!!',
+    })
+    expect(describeDevicePresence(mockDevice({ online: false }), nowMs)).toMatchObject({
+      code: 'offline',
+      glyph: '░',
+    })
   })
 })

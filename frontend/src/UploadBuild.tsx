@@ -22,12 +22,44 @@ import { useRef, useState, type FormEvent } from 'react'
 import {
   ApiError,
   api,
+  type ArtifactSummary,
   type ArtifactUploaded,
   type DeviceSummary,
   type PartitionProfileSummary,
 } from './api'
 import { APP_IMAGE_HEAD_BYTES, readAppImage, type AppImageInfo } from './appImage'
 import { adoptedNames, effectiveLayout } from './profiles'
+
+/**
+ * Given a version string and the set of versions already in use for that chip target,
+ * returns the next available patch version (`x.y.(z+1)`) when `version` collides, or `null`
+ * when `version` is unused or empty.
+ */
+export function suggestNextPatchVersion(
+  version: string,
+  existingVersions: Iterable<string>,
+): string | null {
+  const trimmed = version.trim()
+  if (trimmed === '') return null
+  const existing = new Set(existingVersions)
+  if (!existing.has(trimmed)) return null
+
+  const semverMatch = /^(.*?\d+\.\d+\.)(\d+)(.*)$/.exec(trimmed)
+  if (semverMatch) {
+    const [, prefix, patchStr, suffix] = semverMatch
+    let nextPatch = Number(patchStr) + 1
+    while (existing.has(`${prefix}${nextPatch}${suffix}`)) {
+      nextPatch += 1
+    }
+    return `${prefix}${nextPatch}${suffix}`
+  }
+
+  let suffixNum = 1
+  while (existing.has(`${trimmed}.${suffixNum}`)) {
+    suffixNum += 1
+  }
+  return `${trimmed}.${suffixNum}`
+}
 
 /** The agent's build targets (`justfile` `agent_targets`), offered even on an empty fleet. */
 const KNOWN_TARGETS = ['esp32', 'esp32c3', 'esp32c6', 'esp32s3']
@@ -69,6 +101,7 @@ export function uploadErrorMessage(err: unknown, fileSize: number): string {
 export function UploadBuild({
   devices,
   profiles,
+  artifacts,
   onUploaded,
   onSessionExpired,
   project,
@@ -78,6 +111,7 @@ export function UploadBuild({
   // The page's one profile list (`null` or absent until it loads): the options are its
   // adopted names, falling back to the prebuilt agent's layout.
   profiles?: PartitionProfileSummary[] | null
+  artifacts?: ArtifactSummary[] | { byTarget?: Map<string, ArtifactSummary[]> } | null
   onUploaded: () => void
   onSessionExpired: () => void
   project?: string
@@ -93,6 +127,7 @@ export function UploadBuild({
   const [busy, setBusy] = useState(false)
   const [result, setResult] = useState<ArtifactUploaded | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [conflictedVersions, setConflictedVersions] = useState<string[]>([])
   // A second pick before the first header read lands must win.
   const pickRef = useRef(0)
 
@@ -123,6 +158,42 @@ export function UploadBuild({
 
   const mismatch =
     artifactType === 'app' && info?.target != null && target !== '' && target !== info.target
+
+  const existingVersionsForTarget = new Set<string>(conflictedVersions)
+  for (const d of fleet) {
+    if (target === '' || d.platform_type === target) {
+      if (d.fw_version) existingVersionsForTarget.add(d.fw_version)
+      if (d.deploy?.artifact_version) existingVersionsForTarget.add(d.deploy.artifact_version)
+      if (d.deploy?.from_version) existingVersionsForTarget.add(d.deploy.from_version)
+      if (d.sub_versions) {
+        for (const subVer of Object.values(d.sub_versions)) {
+          if (subVer) existingVersionsForTarget.add(subVer)
+        }
+      }
+    }
+  }
+  if (artifacts) {
+    if (Array.isArray(artifacts)) {
+      for (const a of artifacts) {
+        if (target === '' || a.target === target) {
+          existingVersionsForTarget.add(a.version)
+        }
+      }
+    } else if ('byTarget' in artifacts && artifacts.byTarget instanceof Map) {
+      const list =
+        target !== ''
+          ? (artifacts.byTarget.get(target) ?? [])
+          : Array.from(artifacts.byTarget.values()).flat()
+      for (const a of list) {
+        existingVersionsForTarget.add(a.version)
+      }
+    }
+  }
+  if (result && (target === '' || result.target === target)) {
+    existingVersionsForTarget.add(result.version)
+  }
+
+  const nextPatchSuggestion = suggestNextPatchVersion(version, existingVersionsForTarget)
 
   async function pick(next: File | null) {
     const mine = ++pickRef.current
@@ -172,6 +243,11 @@ export function UploadBuild({
       if (err instanceof ApiError && err.isUnauthorized) {
         onSessionExpired()
         return
+      }
+      if (err instanceof ApiError && err.status === 409 && version.trim() !== '') {
+        setConflictedVersions((prev) =>
+          prev.includes(version.trim()) ? prev : [...prev, version.trim()],
+        )
       }
       setError(uploadErrorMessage(err, file.size))
     } finally {
@@ -283,6 +359,22 @@ export function UploadBuild({
           The version label is what the Deploy column shows. A label cannot be re-pointed at other
           bytes later.
         </p>
+        {nextPatchSuggestion !== null && (
+          <p className="warn" data-testid="version-conflict-hint">
+            Version <code>{version}</code> already exists for <code>{target || 'this target'}</code>.{' '}
+            <button
+              type="button"
+              data-testid="suggest-next-version"
+              onClick={() => {
+                setVersion(nextPatchSuggestion)
+                setError(null)
+              }}
+              disabled={busy}
+            >
+              Use next patch: {nextPatchSuggestion}
+            </button>
+          </p>
+        )}
         {mismatch && (
           <p className="bad" role="alert" data-testid="upload-target-mismatch">
             This file was built for {info.target} (its image header says so); a {target} board

@@ -10,6 +10,7 @@ import {
   type AdminTokenIssued,
   type AdminTokenSummary,
   type DeviceGroupSummary,
+  type DeviceSummary,
   type Me,
   type ProjectMemberSummary,
   type ProjectSecretSummary,
@@ -45,6 +46,7 @@ export function ProjectAccess({
   open: controlledOpen,
   onToggleOpen,
   tabs,
+  devices,
 }: {
   me: Me
   activeProject: string
@@ -53,6 +55,7 @@ export function ProjectAccess({
   open?: boolean
   onToggleOpen?: () => void
   tabs?: ReactNode
+  devices?: DeviceSummary[] | null
 }) {
   const [uncontrolledOpen, setUncontrolledOpen] = useState(false)
   const open = controlledOpen ?? uncontrolledOpen
@@ -72,6 +75,7 @@ export function ProjectAccess({
   const [tokens, setTokens] = useState<AdminTokenSummary[] | null>(null)
   const [users, setUsers] = useState<UserSummary[] | null>(null)
   const [issuedToken, setIssuedToken] = useState<AdminTokenIssued | null>(null)
+  const [copiedToken, setCopiedToken] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   // Destructive actions ask first; one pending question for the whole drawer.
@@ -97,6 +101,8 @@ export function ProjectAccess({
   const [tokenName, setTokenName] = useState('')
   const [tokenScope, setTokenScope] = useState('deploy')
   const [tokenPinned, setTokenPinned] = useState(true)
+  const [tokenTtlDays, setTokenTtlDays] = useState('')
+  const [tokenEnrollScope, setTokenEnrollScope] = useState(false)
 
   // Rotating Device Secrets (SEC-fe-1) & OTel (OTEL-be-1)
   const [secretsRev, setSecretsRev] = useState<number>(0)
@@ -105,6 +111,7 @@ export function ProjectAccess({
   const [secretValue, setSecretValue] = useState('')
   const [otelEndpoint, setOtelEndpoint] = useState('')
   const [otelHeaders, setOtelHeaders] = useState('')
+  const [clearOtelHeaders, setClearOtelHeaders] = useState(false)
   const [otelStatus, setOtelStatus] = useState<string | null>(null)
 
   // Device groups (cohorts)
@@ -276,18 +283,29 @@ export function ProjectAccess({
     setBusy(true)
     setError(null)
     try {
-      const scopes =
+      const baseScopes =
         tokenScope === 'admin'
           ? ['admin']
           : tokenScope === 'read'
             ? ['read']
             : ['read', 'write:artifacts', 'deploy']
-      const issued = await api.issueAdminToken({
+      const scopes =
+        tokenEnrollScope && !baseScopes.includes('enroll')
+          ? [...baseScopes, 'enroll']
+          : baseScopes
+      const payload: Parameters<typeof api.issueAdminToken>[0] = {
         name: tokenName.trim(),
         project: tokenPinned ? activeProject : null,
         scopes,
-      })
+      }
+      if (tokenTtlDays !== '') {
+        payload.expires_in_days = Number(tokenTtlDays)
+      }
+      const issued = await api.issueAdminToken(payload)
       setTokenName('')
+      setTokenTtlDays('')
+      setTokenEnrollScope(false)
+      setCopiedToken(false)
       setIssuedToken(issued)
       await refreshDrawer()
     } catch (err) {
@@ -354,11 +372,14 @@ export function ProjectAccess({
       const patch: { otel_endpoint?: string | null; otel_headers?: string | null } = {
         otel_endpoint: otelEndpoint.trim() || null,
       }
-      if (otelHeaders.trim() !== '') {
+      if (clearOtelHeaders) {
+        patch.otel_headers = ''
+      } else if (otelHeaders.trim() !== '') {
         patch.otel_headers = otelHeaders.trim()
       }
       const updated = await api.updateProject(activeProject, patch)
       setOtelHeaders('')
+      setClearOtelHeaders(false)
       setOtelStatus(
         updated.otel_endpoint
           ? `Forwarding device logs & metrics to ${updated.otel_endpoint}.`
@@ -409,7 +430,12 @@ export function ProjectAccess({
       ? projects
       : [{ id: 'default', slug: activeProject, name: activeProject, description: null, role: 'owner', created_at: '' }]
   const activeOption = options.find((p) => p.slug === activeProject) ?? options[0]
-  const canManage = me.is_superadmin || activeOption?.role === 'owner'
+  const activeRole = activeOption?.role ?? 'owner'
+  const canManage = me.is_superadmin || activeRole === 'owner'
+  const isViewer = !me.is_superadmin && activeRole === 'viewer'
+  const projectBoards = devices ?? []
+  const syncedBoards = projectBoards.filter((d) => (d.secrets_rev ?? 0) >= secretsRev)
+  const laggingBoards = projectBoards.filter((d) => (d.secrets_rev ?? 0) < secretsRev)
 
   return (
     <section aria-label="Project and access" data-testid="project-access">
@@ -430,7 +456,11 @@ export function ProjectAccess({
             </select>
           </label>
           {activeOption?.role && (
-            <span className="badge muted" title="Your role in this project">
+            <span
+              className="badge muted"
+              title="Your role in this project"
+              data-testid="active-project-role"
+            >
               role: {activeOption.role}
             </span>
           )}
@@ -447,6 +477,12 @@ export function ProjectAccess({
           {error !== null && (
             <p className="bad" role="alert">
               {error}
+            </p>
+          )}
+          {isViewer && (
+            <p className="warn" role="status" data-testid="rbac-viewer-notice">
+              Read-only viewer role in <code>{activeProject}</code> — owner or operator access is
+              required to modify settings or issue credentials.
             </p>
           )}
 
@@ -480,7 +516,7 @@ export function ProjectAccess({
                           <button
                             type="button"
                             aria-label={`Remove ${m.username}`}
-                            disabled={busy}
+                            disabled={busy || isViewer}
                             onClick={() => setPending({ kind: 'remove-member', username: m.username })}
                           >
                             Remove
@@ -516,7 +552,7 @@ export function ProjectAccess({
                       value={memberUsername}
                       onChange={(e) => setMemberUsername(e.target.value)}
                       placeholder="username"
-                      disabled={busy}
+                      disabled={busy || isViewer}
                       required
                     />
                   </label>
@@ -528,7 +564,7 @@ export function ProjectAccess({
                       onChange={(e) =>
                         setMemberRole(e.target.value as 'owner' | 'operator' | 'viewer')
                       }
-                      disabled={busy}
+                      disabled={busy || isViewer}
                     >
                       <option value="owner">owner</option>
                       <option value="operator">operator</option>
@@ -537,7 +573,7 @@ export function ProjectAccess({
                   </label>
                 </div>
                 <p>
-                  <button type="submit" disabled={busy || !memberUsername.trim()}>
+                  <button type="submit" disabled={busy || isViewer || !memberUsername.trim()}>
                     Save member
                   </button>
                 </p>
@@ -545,7 +581,7 @@ export function ProjectAccess({
 
               <h3>API tokens (CLI / CI)</h3>
               <form className="compact-form" onSubmit={(e) => void handleIssueToken(e)}>
-                <div className="form-grid">
+                <div className="form-grid form-grid-3">
                   <label>
                     Token label
                     <input
@@ -554,7 +590,7 @@ export function ProjectAccess({
                       value={tokenName}
                       onChange={(e) => setTokenName(e.target.value)}
                       placeholder="github-actions"
-                      disabled={busy}
+                      disabled={busy || isViewer}
                       required
                     />
                   </label>
@@ -564,11 +600,27 @@ export function ProjectAccess({
                       aria-label="Token preset"
                       value={tokenScope}
                       onChange={(e) => setTokenScope(e.target.value)}
-                      disabled={busy}
+                      disabled={busy || isViewer}
                     >
                       <option value="deploy">CI deploy (read + write:artifacts + deploy)</option>
                       <option value="read">Read-only (read)</option>
                       <option value="admin">Full access (admin)</option>
+                    </select>
+                  </label>
+                  <label>
+                    TTL (days)
+                    <select
+                      aria-label="TTL (days)"
+                      data-testid="token-ttl-select"
+                      value={tokenTtlDays}
+                      onChange={(e) => setTokenTtlDays(e.target.value)}
+                      disabled={busy || isViewer}
+                    >
+                      <option value="">Never</option>
+                      <option value="7">7d</option>
+                      <option value="30">30d</option>
+                      <option value="90">90d</option>
+                      <option value="365">365d</option>
                     </select>
                   </label>
                 </div>
@@ -578,13 +630,24 @@ export function ProjectAccess({
                       type="checkbox"
                       checked={tokenPinned}
                       onChange={(e) => setTokenPinned(e.target.checked)}
-                      disabled={busy}
+                      disabled={busy || isViewer}
                     />{' '}
                     Pin to <code>{activeProject}</code>
+                  </label>{' '}
+                  <label className="choice">
+                    <input
+                      type="checkbox"
+                      aria-label="Include enroll scope"
+                      data-testid="token-enroll-scope"
+                      checked={tokenEnrollScope}
+                      onChange={(e) => setTokenEnrollScope(e.target.checked)}
+                      disabled={busy || isViewer}
+                    />{' '}
+                    Include <code>enroll</code> scope
                   </label>
                 </p>
                 <p>
-                  <button type="submit" disabled={busy || !tokenName.trim()}>
+                  <button type="submit" disabled={busy || isViewer || !tokenName.trim()}>
                     Issue API token
                   </button>
                 </p>
@@ -594,7 +657,23 @@ export function ProjectAccess({
                 <div className="issued" role="alert">
                   <p className="warn">Copy this API token now — it is shown once:</p>
                   <code data-testid="issued-admin-token">{issuedToken.token}</code>{' '}
-                  <button type="button" onClick={() => setIssuedToken(null)}>
+                  <button
+                    type="button"
+                    data-testid="copy-issued-token"
+                    onClick={() => {
+                      void navigator.clipboard?.writeText?.(issuedToken.token)?.catch(() => {})
+                      setCopiedToken(true)
+                    }}
+                  >
+                    {copiedToken ? 'Copied' : 'Copy token'}
+                  </button>{' '}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIssuedToken(null)
+                      setCopiedToken(false)
+                    }}
+                  >
                     Done
                   </button>
                 </div>
@@ -608,12 +687,13 @@ export function ProjectAccess({
                       <th scope="col">Project</th>
                       <th scope="col">Scopes</th>
                       <th scope="col">Created</th>
+                      <th scope="col">Lifecycle</th>
                       <th scope="col" />
                     </tr>
                   </thead>
                   <tbody>
                     {tokens.map((t) => (
-                      <tr key={t.id}>
+                      <tr key={t.id} data-testid="admin-token-row">
                         <td>{t.name}</td>
                         <td>{t.project_slug ?? 'all'}</td>
                         <td>
@@ -621,11 +701,28 @@ export function ProjectAccess({
                         </td>
                         <td>{formatWhen(t.created_at)}</td>
                         <td>
+                          {t.last_used_at ? (
+                            <span data-testid="token-last-used">
+                              used {formatWhen(t.last_used_at)}
+                            </span>
+                          ) : (
+                            <span className="muted">unused</span>
+                          )}
+                          {t.expires_at ? (
+                            <>
+                              {' · '}
+                              <span data-testid="token-expires-at">
+                                exp {formatWhen(t.expires_at)}
+                              </span>
+                            </>
+                          ) : null}
+                        </td>
+                        <td>
                           {t.revoked_at === null ? (
                             <button
                               type="button"
                               aria-label={`Revoke ${t.name}`}
-                              disabled={busy}
+                              disabled={busy || isViewer}
                               onClick={() =>
                                 setPending({ kind: 'revoke-token', id: t.id, name: t.name })
                               }
@@ -668,6 +765,20 @@ export function ProjectAccess({
                 <code>{activeProject}</code> whenever <code>dn/cfg.secrets_rev</code> advances
                 (read on the board with <code>Fleetforge.getSecret(key, buf, len)</code>).
               </p>
+              <p className="muted" data-testid="secrets-convergence">
+                <strong>
+                  {syncedBoards.length}/{projectBoards.length} synced to rev {secretsRev}
+                </strong>
+                {laggingBoards.length > 0 && (
+                  <span data-testid="secrets-lagging-boards">
+                    {' '}
+                    · Pending sync:{' '}
+                    {laggingBoards
+                      .map((d) => `${d.name ?? d.device_id} (rev ${d.secrets_rev ?? 0})`)
+                      .join(', ')}
+                  </span>
+                )}
+              </p>
               {secrets.length > 0 && (
                 <table data-testid="project-secrets-table">
                   <thead>
@@ -688,7 +799,7 @@ export function ProjectAccess({
                           <button
                             type="button"
                             aria-label={`Delete secret ${s.key}`}
-                            disabled={busy}
+                            disabled={busy || isViewer}
                             onClick={() => void handleDeleteSecret(s.key)}
                           >
                             Delete
@@ -709,7 +820,7 @@ export function ProjectAccess({
                       value={secretKey}
                       onChange={(e) => setSecretKey(e.target.value)}
                       placeholder="API_KEY"
-                      disabled={busy}
+                      disabled={busy || isViewer}
                     />
                   </label>
                   <label>
@@ -720,14 +831,14 @@ export function ProjectAccess({
                       value={secretValue}
                       onChange={(e) => setSecretValue(e.target.value)}
                       placeholder="sk-live-..."
-                      disabled={busy}
+                      disabled={busy || isViewer}
                     />
                   </label>
                 </div>
                 <p>
                   <button
                     type="submit"
-                    disabled={busy || !secretKey.trim() || !secretValue}
+                    disabled={busy || isViewer || !secretKey.trim() || !secretValue}
                   >
                     Save / Rotate secret
                   </button>
@@ -750,7 +861,7 @@ export function ProjectAccess({
                       value={otelEndpoint}
                       onChange={(e) => setOtelEndpoint(e.target.value)}
                       placeholder="https://otlp.example.com"
-                      disabled={busy}
+                      disabled={busy || isViewer}
                     />
                   </label>
                   <label>
@@ -765,12 +876,25 @@ export function ProjectAccess({
                           ? '(configured — enter to replace)'
                           : 'Authorization=Bearer ...'
                       }
-                      disabled={busy}
+                      disabled={busy || isViewer || clearOtelHeaders}
                     />
                   </label>
                 </div>
                 <p>
-                  <button type="submit" disabled={busy}>
+                  <label className="choice">
+                    <input
+                      type="checkbox"
+                      aria-label="Clear saved headers"
+                      data-testid="clear-otel-headers"
+                      checked={clearOtelHeaders}
+                      onChange={(e) => setClearOtelHeaders(e.target.checked)}
+                      disabled={busy || isViewer}
+                    />{' '}
+                    Clear saved headers
+                  </label>
+                </p>
+                <p>
+                  <button type="submit" disabled={busy || isViewer}>
                     Save OTel settings
                   </button>
                 </p>

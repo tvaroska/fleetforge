@@ -170,6 +170,8 @@ export function FlashBoard({
 }) {
   const [form, setForm] = useState<FormState>(INITIAL_FORM)
   const [selectedGroupId, setSelectedGroupId] = useState<string>('')
+  const [batchPrefix, setBatchPrefix] = useState<string>('')
+  const [batchSeq, setBatchSeq] = useState<number>(1)
   const [board, setBoard] = useState<string>(OTHER_BOARD_ID)
   const [manifest, setManifest] = useState<AgentManifest | null>(null)
   const [manifestError, setManifestError] = useState<string | null>(null)
@@ -345,10 +347,26 @@ export function FlashBoard({
   const groupId = selectedGroupId || null
   const recoverByReflash = () => state.reflash({ config, baudRate: form.baudRate, groupId })
 
+  const trimmedBatchPrefix = batchPrefix.trim()
+  const formattedBatchSeq = String(batchSeq).padStart(2, '0')
+  const suggestedBatchName =
+    trimmedBatchPrefix !== '' ? `${trimmedBatchPrefix}${formattedBatchSeq}` : null
+  const targetDeviceId = (state.flashedDeviceId ?? predicted)?.toLowerCase() ?? null
+  const effectiveDevices =
+    fleet?.devices == null
+      ? null
+      : suggestedBatchName !== null && targetDeviceId !== null
+        ? fleet.devices.map((d) =>
+            d.device_id.toLowerCase() === targetDeviceId && (d.name === null || d.name === '')
+              ? { ...d, name: suggestedBatchName }
+              : d,
+          )
+        : fleet.devices
+
   // R2b-fe-3. What this page knows for the result card. A plain literal for the same
   // reason as `diagnostics` below.
   const resultContext: ResultContext = {
-    devices: fleet?.devices ?? null,
+    devices: effectiveDevices,
     versions: versions ?? null,
     flashed:
       state.flashedDeviceId !== null || state.build !== null
@@ -767,6 +785,28 @@ export function FlashBoard({
         </p>
       )}
       <p>
+        <label>
+          Auto-increment name prefix (batch mode){' '}
+          <input
+            type="text"
+            data-testid="batch-name-prefix"
+            placeholder="e.g. gh-node-"
+            value={batchPrefix}
+            onChange={(event) => setBatchPrefix(event.target.value)}
+            disabled={state.busy}
+          />
+        </label>
+        {suggestedBatchName !== null && (
+          <>
+            {' '}
+            <span className="muted" data-testid="batch-next-name">
+              Counter <code>#{formattedBatchSeq}</code> · Next board name:{' '}
+              <code>{suggestedBatchName}</code>
+            </span>
+          </>
+        )}
+      </p>
+      <p>
         <button
           type="button"
           onClick={() => void state.flash({ config, baudRate: form.baudRate, groupId })}
@@ -822,8 +862,21 @@ export function FlashBoard({
             Watch it come up below — the console opens by itself, resets the board once so the log
             starts at the top, and names the cause if it stops short of the fleet.
           </p>
+          {suggestedBatchName !== null && (
+            <p className="muted" data-testid="batch-flashed-name">
+              Batch name queued: <code>{suggestedBatchName}</code>
+            </p>
+          )}
           <p>
-            <button type="button" onClick={state.reset}>
+            <button
+              type="button"
+              onClick={() => {
+                if (trimmedBatchPrefix !== '') {
+                  setBatchSeq((n) => (n < 99 ? n + 1 : 1))
+                }
+                state.reset()
+              }}
+            >
               Flash another board
             </button>
             {onGoToFleet && (

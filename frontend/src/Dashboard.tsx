@@ -27,6 +27,7 @@ import {
 } from './api'
 import { buildInfo, type BuildInfo } from './buildInfo'
 import { useArtifacts, type Artifacts } from './deploy'
+import { DeviceInspector } from './DeviceInspector'
 import { DeviceLog } from './DeviceLog'
 import { EnrollBoard } from './EnrollBoard'
 import { type FlasherFactory } from './flasher'
@@ -36,6 +37,7 @@ import { useFleet, type EventSourceFactory } from './fleet'
 import { formatWhen } from './format'
 import { type HealthState } from './health'
 import { PartitionProfiles } from './PartitionProfiles'
+import { PitDockCockpit } from './PitDockCockpit'
 import { ProjectAccess } from './ProjectAccess'
 import { pendingProfiles, shortSha, useProfiles } from './profiles'
 import { StatusStrip } from './StatusStrip'
@@ -62,11 +64,13 @@ function ContinuousDeploymentCard({
   const [hasWebhookHeader, setHasWebhookHeader] = useState(false)
   const [busy, setBusy] = useState(false)
   const [statusMsg, setStatusMsg] = useState<string | null>(null)
+  const [webhookWarning, setWebhookWarning] = useState<string | null>(null)
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
     setStatusMsg(null)
+    setWebhookWarning(null)
     setErrorMsg(null)
     api
       .listProjects()
@@ -101,6 +105,7 @@ function ContinuousDeploymentCard({
     e.preventDefault()
     setBusy(true)
     setStatusMsg(null)
+    setWebhookWarning(null)
     setErrorMsg(null)
     try {
       const payload: Parameters<typeof api.updateProject>[1] = {
@@ -116,6 +121,11 @@ function ContinuousDeploymentCard({
       const updated = await api.updateProject(projectSlug, payload)
       setHasWebhookHeader(Boolean(updated.has_ci_webhook_header))
       setWebhookHeader('')
+      if (updated.ci_webhook_triggered === false && webhookUrl.trim() !== '') {
+        setWebhookWarning(
+          `CI webhook dispatch to ${webhookUrl.trim()} did not succeed. Check the webhook URL and Authorization header.`,
+        )
+      }
       const deployedCount = updated.auto_deployed_devices?.length ?? 0
       if (deployedCount > 0) {
         onDeployed()
@@ -255,6 +265,11 @@ function ContinuousDeploymentCard({
           {statusMsg}
         </p>
       )}
+      {webhookWarning !== null && (
+        <p className="warn" role="status" data-testid="cd-webhook-warning">
+          {webhookWarning}
+        </p>
+      )}
       {errorMsg !== null && (
         <p className="bad" role="alert" data-testid="cd-error">
           {errorMsg}
@@ -281,7 +296,7 @@ function UploadedBuilds({
   const [bulkStatus, setBulkStatus] = useState<string | null>(null)
   const [bulkError, setBulkError] = useState<string | null>(null)
   const [groups, setGroups] = useState<DeviceGroupSummary[]>([])
-  const [targetGroupId, setTargetGroupId] = useState<string>('')
+  const [targetGroupByRow, setTargetGroupByRow] = useState<Record<string, string>>({})
 
   useEffect(() => {
     let active = true
@@ -309,8 +324,8 @@ function UploadedBuilds({
     rows.push(...list)
   }
 
-  async function bulkDeploy(version: string, targetFilter: 'dev' | 'all') {
-    const key = `${version}:${targetFilter}:${targetGroupId}`
+  async function bulkDeploy(version: string, targetFilter: 'dev' | 'all', rowGroupId = '') {
+    const key = `${version}:${targetFilter}:${rowGroupId}`
     setDeployingKey(key)
     setBulkStatus(null)
     setBulkError(null)
@@ -319,15 +334,25 @@ function UploadedBuilds({
         version,
         target_filter: targetFilter,
         apply: 'auto',
-        ...(targetGroupId ? { group_id: targetGroupId } : {}),
+        ...(rowGroupId ? { group_id: rowGroupId } : {}),
       })
       onDeployed()
       const count = res.deployed.length
-      const skippedCount = Object.keys(res.skipped).length
+      const skippedEntries = Object.entries(res.skipped ?? {})
+      const skippedCount = skippedEntries.length
+      let skippedSummary = ''
+      if (skippedCount > 0) {
+        const countsByReason: Record<string, number> = {}
+        for (const [, reason] of skippedEntries) {
+          countsByReason[reason] = (countsByReason[reason] ?? 0) + 1
+        }
+        const reasonBreakdown = Object.entries(countsByReason)
+          .map(([reason, n]) => `${n} ${reason}`)
+          .join(', ')
+        skippedSummary = ` (${skippedCount} skipped: ${reasonBreakdown})`
+      }
       setBulkStatus(
-        `Staged ${version} to ${count} ${targetFilter} board(s)` +
-          (skippedCount > 0 ? ` (${skippedCount} skipped)` : '') +
-          '.',
+        `Staged ${version} to ${count} ${targetFilter} board(s)${skippedSummary}.`,
       )
     } catch (err) {
       if (err instanceof ApiError && err.isUnauthorized) {
@@ -340,8 +365,8 @@ function UploadedBuilds({
     }
   }
 
-  async function cancelBulkDeploy(version: string) {
-    const key = `${version}:cancel:${targetGroupId}`
+  async function cancelBulkDeploy(version: string, rowGroupId = '') {
+    const key = `${version}:cancel:${rowGroupId}`
     setDeployingKey(key)
     setBulkStatus(null)
     setBulkError(null)
@@ -349,7 +374,7 @@ function UploadedBuilds({
       const res = await api.cancelProjectDeploy(projectSlug, {
         version,
         target_filter: 'all',
-        ...(targetGroupId ? { group_id: targetGroupId } : {}),
+        ...(rowGroupId ? { group_id: rowGroupId } : {}),
       })
       onDeployed()
       const count = res.cancelled.length
@@ -370,6 +395,8 @@ function UploadedBuilds({
     }
   }
 
+  const cliSnippet = `python -m fleetforge.cli push --project ${projectSlug} --target esp32s3 --version 1.0.0 build/app.bin\n# Cloud Build / GitHub Actions step:\n# env: FLEETFORGE_TOKEN=ffa_...\npython -m fleetforge.cli push --project ${projectSlug} --target esp32s3 --version "$BUILD_VERSION" --commit "$COMMIT_SHA" build/app.bin`
+
   return (
     <section
       className="console-card"
@@ -389,6 +416,12 @@ function UploadedBuilds({
         its Deploy column on the Fleet tab, or you can stage a version across all dev/project
         boards here.
       </p>
+      <details data-testid="cli-snippet-drawer">
+        <summary>[📋 Copy CLI / CI Snippet]</summary>
+        <pre>
+          <code>{cliSnippet}</code>
+        </pre>
+      </details>
       {bulkStatus !== null && (
         <p className="ok" data-testid="bulk-deploy-status">
           {bulkStatus}
@@ -420,90 +453,120 @@ function UploadedBuilds({
             </tr>
           </thead>
           <tbody>
-            {rows.map((a) => (
-              <tr
-                key={`${a.target}:${a.version}`}
-                data-testid="uploaded-build-row"
-                data-target={a.target}
-                data-version={a.version}
-              >
-                <td>
-                  <code>{a.target}</code>
-                </td>
-                <td>
-                  <strong>{a.version}</strong>
-                  {((a.artifact_type && a.artifact_type !== 'app') ||
-                    a.sig ||
-                    a.branch ||
-                    a.tag ||
-                    a.commit_sha ||
-                    a.test_passed != null) && (
+            {rows.map((a) => {
+              const rowKey = `${a.target}:${a.version}`
+              const rowGroupId = targetGroupByRow[rowKey] ?? ''
+              return (
+                <tr
+                  key={rowKey}
+                  data-testid="uploaded-build-row"
+                  data-target={a.target}
+                  data-version={a.version}
+                >
+                  <td>
+                    <code>{a.target}</code>
+                  </td>
+                  <td>
+                    <strong>{a.version}</strong>
                     <div className="muted" data-testid="build-provenance">
                       {a.artifact_type && a.artifact_type !== 'app' && (
                         <code data-testid="build-artifact-type">{a.artifact_type} </code>
                       )}
-                      {a.sig && <span className="ok">✓ signed </span>}
+                      {a.sig ? (
+                        <span className="ok">✓ signed </span>
+                      ) : (
+                        <span className="warn" data-testid="build-unsigned-badge">
+                          [! unsigned]{' '}
+                        </span>
+                      )}
                       {a.branch && <code>{a.branch} </code>}
                       {a.tag && <code>tag:{a.tag} </code>}
                       {a.commit_sha && <code>@{a.commit_sha.slice(0, 7)} </code>}
-                      {a.test_passed === true && <span className="ok">✓ tests</span>}
-                      {a.test_passed === false && <span className="bad">✗ tests</span>}
+                      {a.test_passed === true && <span className="ok">✓ tests </span>}
+                      {a.test_passed === false && <span className="bad">✗ tests </span>}
+                      {a.build_url && (
+                        <>
+                          <a
+                            href={a.build_url}
+                            target="_blank"
+                            rel="noreferrer"
+                            data-testid="build-ci-link"
+                          >
+                            ↗ CI run
+                          </a>{' '}
+                        </>
+                      )}
+                      {a.repo_url && (
+                        <a
+                          href={a.repo_url}
+                          target="_blank"
+                          rel="noreferrer"
+                          data-testid="build-repo-link"
+                        >
+                          ↗ repo
+                        </a>
+                      )}
                     </div>
-                  )}
-                </td>
-                <td>
-                  <code>{a.partition_layout ?? 'ab-4m-v1'}</code>
-                </td>
-                <td>{a.size_bytes.toLocaleString('en-US')} bytes</td>
-                <td>
-                  <code title={a.sha256}>{shortSha(a.sha256)}</code>
-                </td>
-                <td>{formatWhen(a.created_at)}</td>
-                <td>
-                  {groups.length > 0 && (
-                    <>
-                      <select
-                        aria-label="Target group"
-                        value={targetGroupId}
-                        onChange={(e) => setTargetGroupId(e.target.value)}
-                        disabled={deployingKey !== null}
-                      >
-                        <option value="">All groups</option>
-                        {groups.map((g) => (
-                          <option key={g.id} value={g.id}>
-                            {g.name}
-                          </option>
-                        ))}
-                      </select>{' '}
-                    </>
-                  )}
-                  <button
-                    type="button"
-                    disabled={deployingKey !== null}
-                    onClick={() => void bulkDeploy(a.version, 'dev')}
-                    title="Stage this version onto all dev boards in this project"
-                  >
-                    Deploy dev
-                  </button>{' '}
-                  <button
-                    type="button"
-                    disabled={deployingKey !== null}
-                    onClick={() => void bulkDeploy(a.version, 'all')}
-                    title="Stage this version onto all compatible boards in this project"
-                  >
-                    Deploy all
-                  </button>{' '}
-                  <button
-                    type="button"
-                    disabled={deployingKey !== null}
-                    onClick={() => void cancelBulkDeploy(a.version)}
-                    title="Cancel in-flight deploys of this version across the selected cohort"
-                  >
-                    Cancel rollout
-                  </button>
-                </td>
-              </tr>
-            ))}
+                  </td>
+                  <td>
+                    <code>{a.partition_layout ?? 'ab-4m-v1'}</code>
+                  </td>
+                  <td>{a.size_bytes.toLocaleString('en-US')} bytes</td>
+                  <td>
+                    <code title={a.sha256}>{shortSha(a.sha256)}</code>
+                  </td>
+                  <td>{formatWhen(a.created_at)}</td>
+                  <td>
+                    {groups.length > 0 && (
+                      <>
+                        <select
+                          aria-label="Target group"
+                          value={rowGroupId}
+                          onChange={(e) =>
+                            setTargetGroupByRow((prev) => ({
+                              ...prev,
+                              [rowKey]: e.target.value,
+                            }))
+                          }
+                          disabled={deployingKey !== null}
+                        >
+                          <option value="">All groups</option>
+                          {groups.map((g) => (
+                            <option key={g.id} value={g.id}>
+                              {g.name}
+                            </option>
+                          ))}
+                        </select>{' '}
+                      </>
+                    )}
+                    <button
+                      type="button"
+                      disabled={deployingKey !== null}
+                      onClick={() => void bulkDeploy(a.version, 'dev', rowGroupId)}
+                      title="Stage this version onto all dev boards in this project"
+                    >
+                      Deploy dev
+                    </button>{' '}
+                    <button
+                      type="button"
+                      disabled={deployingKey !== null}
+                      onClick={() => void bulkDeploy(a.version, 'all', rowGroupId)}
+                      title="Stage this version onto all compatible boards in this project"
+                    >
+                      Deploy all
+                    </button>{' '}
+                    <button
+                      type="button"
+                      disabled={deployingKey !== null}
+                      onClick={() => void cancelBulkDeploy(a.version, rowGroupId)}
+                      title="Cancel in-flight deploys of this version across the selected cohort"
+                    >
+                      Cancel rollout
+                    </button>
+                  </td>
+                </tr>
+              )
+            })}
           </tbody>
         </table>
       )}
@@ -534,6 +597,27 @@ export function Dashboard({
     () => me.projects?.[0]?.slug ?? 'default',
   )
   const [activeTab, setActiveTab] = useState<DashboardTab>('fleet')
+  const [compactDensity, setCompactDensity] = useState(false)
+  const [pitContrast, setPitContrast] = useState(false)
+
+  useEffect(() => {
+    if (typeof document === 'undefined') return
+    if (compactDensity) {
+      document.documentElement.setAttribute('data-density', 'compact')
+    } else {
+      document.documentElement.removeAttribute('data-density')
+    }
+  }, [compactDensity])
+
+  useEffect(() => {
+    if (typeof document === 'undefined') return
+    if (pitContrast) {
+      document.documentElement.setAttribute('data-theme', 'pit-contrast')
+    } else {
+      document.documentElement.removeAttribute('data-theme')
+    }
+  }, [pitContrast])
+
   const projectParam = activeProject !== 'default' ? activeProject : undefined
   const fleet = useFleet({ onSessionExpired: expire, createEventSource, project: projectParam })
   const artifacts = useArtifacts({ onSessionExpired: expire, project: projectParam })
@@ -627,9 +711,29 @@ export function Dashboard({
         board={board}
         project={me.projects ? activeProject : undefined}
       />
-      <header className="console-topbar">
+      <header
+        className="console-topbar"
+        data-density={compactDensity ? 'compact' : undefined}
+        data-theme={pitContrast ? 'pit-contrast' : undefined}
+      >
         <h1>Fleetforge</h1>
         <p className="muted topbar-user">
+          <button
+            type="button"
+            aria-pressed={compactDensity}
+            data-testid="toggle-rack-density"
+            onClick={() => setCompactDensity((v) => !v)}
+          >
+            32px Rack
+          </button>{' '}
+          <button
+            type="button"
+            aria-pressed={pitContrast}
+            data-testid="toggle-pit-contrast"
+            onClick={() => setPitContrast((v) => !v)}
+          >
+            ☀ Pit Contrast
+          </button>{' '}
           <span>{me.subject}</span>{' '}
           <button type="button" onClick={() => void signOut()}>
             Sign out
@@ -648,6 +752,7 @@ export function Dashboard({
           open={activeTab === 'access'}
           onToggleOpen={() => setActiveTab((curr) => (curr === 'access' ? 'fleet' : 'access'))}
           tabs={tabNav}
+          devices={fleet.devices}
         />
       ) : (
         tabNav
@@ -658,24 +763,44 @@ export function Dashboard({
       <div
         className={`tab-panel${activeTab === 'fleet' ? ' active' : ''}`}
         data-testid="panel-fleet"
+        data-density={compactDensity ? 'compact' : undefined}
+        data-theme={pitContrast ? 'pit-contrast' : undefined}
       >
-        <FleetTable
-          fleet={fleet}
-          artifacts={artifacts}
-          onSessionExpired={expire}
-          selectedDeviceId={effective}
-          onSelect={setSelected}
-          versions={versions}
-          onGoToOnboard={() => setActiveTab('onboard')}
-          onGoToBuilds={() => setActiveTab('builds')}
-          groups={groups}
-        />
-        <DeviceLog
-          deviceId={effective}
-          device={logDevice}
-          hasBoards={(fleet.devices?.length ?? 0) > 0}
-          onSessionExpired={expire}
-        />
+        <div className="workbench-split" data-testid="workbench-split">
+          <div className="workbench-master">
+            <FleetTable
+              fleet={fleet}
+              artifacts={artifacts}
+              onSessionExpired={expire}
+              selectedDeviceId={effective}
+              onSelect={setSelected}
+              versions={versions}
+              onGoToOnboard={() => setActiveTab('onboard')}
+              onGoToBuilds={() => setActiveTab('builds')}
+              groups={groups}
+            />
+          </div>
+          <div className="workbench-inspector-col">
+            <DeviceInspector
+              device={logDevice}
+              selectedDeviceId={effective}
+              devices={fleet.devices ?? []}
+              artifacts={artifacts}
+              groups={groups}
+              project={activeProject}
+              now={fleet.now}
+              onUpdated={fleet.refresh}
+              onDeployed={fleet.refresh}
+              onSessionExpired={expire}
+            />
+            <DeviceLog
+              deviceId={effective}
+              device={logDevice}
+              hasBoards={(fleet.devices?.length ?? 0) > 0}
+              onSessionExpired={expire}
+            />
+          </div>
+        </div>
       </div>
 
       {/* Panel 2: BUILDS — Flow 2 step 1 ("Upload a build"), the uploaded builds catalog,
@@ -734,9 +859,19 @@ export function Dashboard({
           versions={versions}
           createFlasher={createFlasher}
           project={projectParam}
+          groups={groups}
           onGoToFleet={() => setActiveTab('fleet')}
         />
-        <EnrollBoard onSessionExpired={expire} project={projectParam} />
+        <EnrollBoard onSessionExpired={expire} project={projectParam} groups={groups} />
+        <PitDockCockpit
+          devices={fleet.devices}
+          artifacts={artifacts}
+          project={projectParam}
+          selectedDeviceId={effective}
+          onSelectDevice={setSelected}
+          onSynced={fleet.refresh}
+          onSessionExpired={expire}
+        />
       </div>
     </>
   )

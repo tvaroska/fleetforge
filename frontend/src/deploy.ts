@@ -20,7 +20,7 @@
 //    applies to `awaiting_safe_window`.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { ApiError, api, type ArtifactSummary, type DeploySummary } from './api'
+import { ApiError, api, type ArtifactSummary, type DeploySummary, type DeviceSummary } from './api'
 
 /**
  * Human wording for the states in `spec/device-protocol.md`, plus the server-authored
@@ -144,12 +144,32 @@ export type DeployOutcome =
 export function deployOutcome(
   deploy: DeploySummary,
   fwVersion: string | null,
+  subVersions?: Record<string, string> | null,
 ): DeployOutcome | null {
   if (!deploy.is_terminal) return null
   const entry = DEPLOY_OUTCOMES[deploy.state]
   if (entry === undefined) return null
   const v = deploy.artifact_version
+  const isCompanionCargo =
+    deploy.artifact_type !== undefined &&
+    deploy.artifact_type !== null &&
+    deploy.artifact_type !== 'app'
   if (deploy.state === 'confirmed') {
+    if (isCompanionCargo) {
+      if (v !== null && subVersions && Object.keys(subVersions).length > 0) {
+        const cargoKey = String(deploy.artifact_type)
+        const matchesKey = subVersions[cargoKey] === v
+        const matchesAny = Object.values(subVersions).includes(v)
+        if (!matchesKey && !matchesAny) {
+          return { kind: 'drift', reported: subVersions[cargoKey] ?? fwVersion }
+        }
+      }
+      return {
+        kind: 'verdict',
+        ...entry,
+        note: v !== null ? `running ${v}` : 'running the new version',
+      }
+    }
     if (v !== null && fwVersion !== v) return { kind: 'drift', reported: fwVersion }
     return {
       kind: 'verdict',
@@ -168,6 +188,156 @@ export function deployOutcome(
     return { kind: 'verdict', ...entry, note }
   }
   return null
+}
+
+export type DevicePresenceCode =
+  | 'wifi'
+  | 'dock'
+  | 'asleep'
+  | 'sortie'
+  | 'emcon'
+  | 'overdue'
+  | 'offline'
+
+export type DevicePresenceDescriptor = {
+  code: DevicePresenceCode
+  glyph: string
+  label: string
+  className: string
+}
+
+/**
+ * 6-State Presence, Sleep, Sortie & EMCON Descriptor (`P2-2`).
+ * Encodes state across glyph + weight + border class without relying on hue alone.
+ */
+export function describeDevicePresence(
+  device: DeviceSummary,
+  nowMs: number = Date.now(),
+): DevicePresenceDescriptor {
+  const isOverdueByLease =
+    !device.online &&
+    device.expected_back_s !== undefined &&
+    device.expected_back_s !== null &&
+    (device.expected_back_s <= 0 ||
+      (device.last_seen !== null &&
+        (nowMs - Date.parse(device.last_seen)) / 1000 > device.expected_back_s))
+
+  if (device.presence_reason === 'overdue' || isOverdueByLease) {
+    return {
+      code: 'overdue',
+      glyph: '!!',
+      label: 'OVERDUE',
+      className: 'bad',
+    }
+  }
+
+  if (device.offline_mode === true) {
+    return {
+      code: 'emcon',
+      glyph: '⊘',
+      label: 'VENUE EMCON',
+      className: 'emcon-badge',
+    }
+  }
+
+  if (device.link_type === 'dock' && device.online) {
+    return {
+      code: 'dock',
+      glyph: '█',
+      label: device.parent_device_id ? `DOCK (@${device.parent_device_id})` : 'DOCK',
+      className: 'ok',
+    }
+  }
+
+  if (
+    device.presence_reason === 'sortie' ||
+    (!device.online &&
+      device.expected_back_s !== undefined &&
+      device.expected_back_s !== null &&
+      device.expected_back_s > 0)
+  ) {
+    return {
+      code: 'sortie',
+      glyph: '◎',
+      label: 'SORTIE',
+      className: 'warn',
+    }
+  }
+
+  if (device.online) {
+    return {
+      code: 'wifi',
+      glyph: '█',
+      label: 'WIFI',
+      className: 'ok',
+    }
+  }
+
+  if (device.power_class === 'sleepy') {
+    return {
+      code: 'asleep',
+      glyph: '◐',
+      label: 'ASLEEP',
+      className: 'muted',
+    }
+  }
+
+  return {
+    code: 'offline',
+    glyph: '░',
+    label: 'OFFLINE',
+    className: 'muted',
+  }
+}
+
+/**
+ * Deterministic 7-Tier Priority Score (`P1-1`):
+ * - `-1`: `device.safe_mode === true` (3-crash emergency latch)
+ * - `0`: `rolled_back` / `failed` / overdue sortie lease
+ * - `1`: active in-flight deploy (`!deploy.is_terminal`)
+ * - `2`: version drift or weak RSSI (`< -75`)
+ * - `3`: healthy online / sleepy / planned sortie / venue EMCON
+ * - `4`: normal offline
+ */
+export function devicePriorityScore(
+  device: DeviceSummary,
+  targetVersion?: string | null,
+  nowMs: number = Date.now(),
+): number {
+  if (device.safe_mode === true) return -1
+
+  const presence = describeDevicePresence(device, nowMs)
+  if (presence.code === 'overdue') return 0
+
+  const d = device.deploy
+  if (d !== null && DEPLOY_BAD_STATES.has(d.state)) return 0
+
+  if (d !== null && !d.is_terminal) return 1
+
+  const hasDeployDrift =
+    d !== null && deployOutcome(d, device.fw_version, device.sub_versions)?.kind === 'drift'
+  const hasTargetDrift =
+    targetVersion !== undefined &&
+    targetVersion !== null &&
+    device.fw_version !== targetVersion
+  const hasWeakRssi =
+    device.health?.rssi !== undefined &&
+    device.health?.rssi !== null &&
+    device.health.rssi < -75
+
+  if (hasDeployDrift || hasTargetDrift || hasWeakRssi) return 2
+
+  if (
+    device.online ||
+    device.power_class === 'sleepy' ||
+    presence.code === 'sortie' ||
+    presence.code === 'emcon' ||
+    presence.code === 'dock'
+  ) {
+    return 3
+  }
+
+  return 4
 }
 
 /**

@@ -8,12 +8,15 @@
 //
 // The refresh rules themselves live in `fleet.test.tsx`; this file is rendering.
 
-import { render, screen, within } from '@testing-library/react'
+import { fireEvent, render, screen, within } from '@testing-library/react'
 import { act } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { DeviceInspector } from './DeviceInspector'
 import { FleetView } from './FleetView'
 import { LAST_ON_TITLE } from './network'
+import { ReleaseConvergenceRibbon } from './ReleaseConvergenceRibbon'
 import { COALESCE_MS, type EventSourceLike } from './fleet'
+import { type DeviceSummary } from './api'
 
 const NOW = new Date('2026-09-10T12:00:00Z')
 
@@ -529,5 +532,266 @@ describe('deploy KPIs (R6-fe-1)', () => {
     ])
 
     expect(screen.queryByTestId('deploy-kpis')).toBeNull()
+  })
+})
+
+describe('Fleet workbench controls, safe_mode & presence taxonomy (P0-3, P1-1, P2-2)', () => {
+  it('surfaces !! SAFE MODE in HealthCell, min/free heap, and presence badges alongside online/offline', async () => {
+    await renderFleet([
+      device({
+        device_id: 'a4cf12b3de01',
+        safe_mode: true,
+        offline_mode: true,
+        link_type: 'dock',
+        presence_reason: 'sortie',
+        expected_back_s: 600,
+        health: {
+          at: '2026-09-10T11:59:55Z',
+          uptime_s: 45,
+          rssi: -82,
+          free_heap: 64000,
+          min_free_heap: 14000,
+          boot_ok: true,
+        },
+      }),
+    ])
+
+    const row = screen.getAllByTestId('device-row')[0]!
+    expect(within(row).getByLabelText('online')).toBeInTheDocument()
+    expect(within(row).getByTestId('presence-emcon')).toHaveTextContent('⊘ VENUE EMCON')
+    expect(within(row).getByTestId('presence-dock')).toHaveTextContent('█ DOCK')
+    expect(within(row).getByTestId('presence-sortie')).toHaveTextContent('◎ SORTIE')
+    expect(within(row).getByTestId('safe-mode-badge')).toHaveTextContent('!! SAFE MODE')
+    expect(within(row).getByTestId('device-vitals')).toHaveTextContent('heap low 13.7 KiB')
+    expect(within(row).getByTestId('device-vitals')).toHaveTextContent('free 62.5 KiB')
+  })
+
+  it('filters devices via quick filter pills and search input without extra fetch calls', async () => {
+    await renderFleet([
+      device({
+        device_id: 'a4cf12b3de01',
+        name: 'healthy-node',
+        online: true,
+        health: {
+          at: '2026-09-10T11:59:55Z',
+          uptime_s: 45,
+          rssi: -55,
+          free_heap: 140000,
+          min_free_heap: 110000,
+          boot_ok: true,
+        },
+      }),
+      device({
+        device_id: 'b2000000dead',
+        name: 'weak-node',
+        online: false,
+        deploy: deploy({ state: 'rolled_back', is_terminal: true }),
+        health: {
+          at: '2026-09-10T11:59:55Z',
+          uptime_s: 45,
+          rssi: -84,
+          free_heap: 60000,
+          min_free_heap: 15000,
+          boot_ok: true,
+        },
+      }),
+    ])
+
+    expect(screen.getByTestId('fleet-quick-filters')).toBeInTheDocument()
+    expect(screen.getByTestId('fleet-group-by')).toBeInTheDocument()
+    expect(screen.getByTestId('freeze-sort-toggle')).toBeChecked()
+
+    fireEvent.click(screen.getByTestId('filter-weak-rssi'))
+    expect(screen.getAllByTestId('device-row')).toHaveLength(1)
+    expect(screen.getAllByTestId('device-row')[0]).toHaveTextContent('weak-node')
+
+    fireEvent.click(screen.getByTestId('filter-all'))
+    expect(screen.getAllByTestId('device-row')).toHaveLength(2)
+
+    fireEvent.change(screen.getByTestId('fleet-search-input'), {
+      target: { value: 'healthy-node' },
+    })
+    expect(screen.getAllByTestId('device-row')).toHaveLength(1)
+    expect(screen.getAllByTestId('device-row')[0]).toHaveTextContent('healthy-node')
+  })
+})
+
+describe('ReleaseConvergenceRibbon (P1-4 + H6 Matrix Drawer)', () => {
+  const emptyArtifacts = {
+    byTarget: new Map(),
+    loaded: true,
+    error: null,
+    reload: () => {},
+  }
+
+  it('scopes Tier 1 maker convergence per platform_type so heterogeneous boards do not trigger false drift', () => {
+    const makerDevices = [
+      device({ device_id: 'a4cf12b3de01', platform_type: 'esp32', fw_version: '1.2.0' }),
+      device({ device_id: 'a4cf12b3de02', platform_type: 'esp32c3', fw_version: '2.0.0' }),
+      device({ device_id: 'a4cf12b3de03', platform_type: 'esp32s3', fw_version: '1.0.0' }),
+    ] as unknown as DeviceSummary[]
+
+    render(<ReleaseConvergenceRibbon devices={makerDevices} artifacts={emptyArtifacts} />)
+    const bar = screen.getByTestId('maker-convergence-bar')
+    expect(bar).toHaveTextContent('3/3 converged')
+    expect(bar).toHaveTextContent('0 drift ✓')
+  })
+
+  it('renders Tier 2/3 4-stage pipeline rail, circuit-breaker halt banner, and expands H6 matrix drawer on click', () => {
+    const ringDevices = [
+      device({
+        device_id: 'a4cf12b3de01',
+        name: 'dev-01',
+        is_dev: true,
+        fw_version: '1.5.0',
+        secrets_rev: 4,
+        sub_versions: { mcu_fw: 'v3' },
+      }),
+      device({
+        device_id: 'a4cf12b3de02',
+        name: 'beta-s3-04',
+        group_id: 'grp-beta',
+        fw_version: '1.4.2',
+        secrets_rev: 3,
+        sub_versions: { mcu_fw: 'v2' },
+        deploy: deploy({
+          state: 'rolled_back',
+          is_terminal: true,
+          selftest: { outcome: 'failed', reason: 'i2c 0x48 timeout', returned_to: 'ota_1' },
+        }),
+      }),
+    ] as unknown as DeviceSummary[]
+
+    const groups = [
+      {
+        id: 'grp-beta',
+        project_id: 'p1',
+        name: 'beta',
+        description: null,
+        created_at: '2026-10-10T00:00:00Z',
+        updated_at: '2026-10-10T00:00:00Z',
+      },
+    ]
+
+    render(
+      <ReleaseConvergenceRibbon
+        devices={ringDevices}
+        artifacts={emptyArtifacts}
+        groups={groups}
+      />,
+    )
+
+    expect(screen.getByTestId('release-pipeline-rail')).toBeInTheDocument()
+    expect(screen.getByTestId('circuit-breaker-banner')).toHaveTextContent(
+      '[✗ HALTED — ROLLBACK DETECTED]',
+    )
+    expect(screen.getByTestId('secrets-drift-chip')).toHaveTextContent('[! 1 on older sec_rev ▸]')
+
+    expect(screen.queryByTestId('release-matrix-drawer')).toBeNull()
+    fireEvent.click(screen.getByTestId('toggle-release-matrix'))
+    expect(screen.getByTestId('release-matrix-drawer')).toBeInTheDocument()
+    expect(screen.getByTestId('matrix-row-secrets')).toHaveTextContent('Secrets rev 4')
+  })
+})
+
+describe('DeviceInspector (P1-1, P1-2, P1-3, P2-1)', () => {
+  it('switches across modes A..D and invokes rollback, telemetry sparklines, and dock-sync only on click', async () => {
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input?: unknown) => {
+      const url = String(input)
+      if (url.includes('/telemetry')) {
+        return new Response(
+          JSON.stringify({
+            device_id: 'a4cf12b3de01',
+            name: 'free_heap',
+            samples: [
+              { at: '2026-09-10T11:59:00Z', value: 140000 },
+              { at: '2026-09-10T11:58:00Z', value: 110000 },
+              { at: '2026-09-10T11:57:00Z', value: 80000 },
+            ],
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        )
+      }
+      if (url.endsWith('/rollback')) {
+        return new Response(
+          JSON.stringify({
+            command_id: 'cmd-rb-1',
+            device_id: 'a4cf12b3de01',
+            type: 'rollback',
+            cmd_id: null,
+            device_online: true,
+          }),
+          { status: 202, headers: { 'content-type': 'application/json' } },
+        )
+      }
+      if (url.endsWith('/dock-sync')) {
+        return new Response(
+          JSON.stringify({
+            device_id: 'a4cf12b3de01',
+            link_type: 'dock',
+            fw_version: '1.5.0',
+            statuses_recorded: 1,
+            telemetry_batches_recorded: 1,
+            log_batches_recorded: 1,
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        )
+      }
+      return new Response(JSON.stringify({}), { status: 200 })
+    })
+
+    const board = device({
+      device_id: 'a4cf12b3de01',
+      name: 'beta-s3-04',
+      safe_mode: true,
+      sub_versions: { data_partition: 'v15' },
+      deploy: deploy({
+        state: 'rolled_back',
+        is_terminal: true,
+        selftest: { outcome: 'failed', reason: 'i2c 0x48 timeout', returned_to: 'ota_1' },
+      }),
+    }) as unknown as DeviceSummary
+
+    render(<DeviceInspector device={board} devices={[board]} now={NOW.getTime()} />)
+
+    // Zero mount fetches!
+    expect(fetchSpy).not.toHaveBeenCalled()
+    expect(screen.getByTestId('inspector-safe-mode-alert')).toBeInTheDocument()
+
+    // Click to load 1-bit Telemetry Sparklines
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('load-telemetry-sparklines'))
+      await Promise.resolve()
+    })
+    expect(screen.getByTestId('telemetry-sparkline').textContent).toMatch(/[▁▂▃▄▅▆▇█]/)
+
+    // Rollback slot inline confirm
+    fireEvent.click(screen.getByTestId('inspector-rollback-btn'))
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('inspector-rollback-confirm-btn'))
+      await Promise.resolve()
+    })
+    expect(screen.getByTestId('inspector-status')).toHaveTextContent('Rollback command')
+
+    // Mode B: Dock
+    fireEvent.click(screen.getByTestId('inspector-mode-dock'))
+    expect(screen.getByTestId('dock-posture-badges')).toHaveTextContent('802.11 OFF')
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('dock-sync-btn'))
+      await Promise.resolve()
+    })
+    expect(screen.getByTestId('dock-sync-receipt')).toHaveTextContent('OTLP exported: 200 OK')
+
+    // Mode C: Compare / Diff
+    fireEvent.click(screen.getByTestId('inspector-mode-compare'))
+    expect(screen.getByTestId('compare-boards-table')).toHaveTextContent('beta-s3-04')
+    expect(screen.getByTestId('compare-boards-table')).toHaveTextContent('i2c 0x48 timeout')
+
+    // Mode D: Bulk / Config
+    fireEvent.click(screen.getByTestId('inspector-mode-bulk'))
+    expect(screen.getByTestId('bulk-hold-staged')).toBeChecked()
+    expect(screen.getByTestId('bulk-leapfrog')).toBeChecked()
+    fireEvent.click(screen.getByTestId('rma-step1-btn'))
+    expect(screen.getByTestId('rma-step2-confirm')).toBeInTheDocument()
   })
 })

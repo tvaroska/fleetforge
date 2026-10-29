@@ -266,6 +266,19 @@ describe('UploadBuild', () => {
     // One fleet chip: it is the default.
     expect(select).toHaveValue('esp32h2')
   })
+
+  it('auto-suggests the next patch version when the .bin header version already exists on a fleet board (P0-4)', async () => {
+    setup([board({ platform_type: 'esp32c6', fw_version: '1.6.0' })])
+    await pickFile(appBin(C6, '1.6.0'))
+
+    await waitFor(() => expect(screen.getByLabelText('Version')).toHaveValue('1.6.0'))
+    const suggestBtn = await screen.findByTestId('suggest-next-version')
+    expect(suggestBtn).toHaveTextContent('Use next patch: 1.6.1')
+
+    await userEvent.click(suggestBtn)
+    expect(screen.getByLabelText('Version')).toHaveValue('1.6.1')
+    expect(screen.queryByTestId('suggest-next-version')).toBeNull()
+  })
 })
 
 describe('uploadErrorMessage', () => {
