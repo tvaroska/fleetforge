@@ -285,26 +285,35 @@ function DeviceRow({
       : device.power_class
 
   const identity = device.name ?? <code>{device.device_id}</code>
+  const [confirmingDecommission, setConfirmingDecommission] = useState(false)
+  const [rowError, setRowError] = useState<string | null>(null)
 
   async function toggleFlag(patch: { is_dev?: boolean; stay_awake?: boolean; group_id?: string | null }) {
+    setRowError(null)
     try {
       await api.updateDevice(device.device_id, patch)
       onDeployed()
     } catch (err) {
       if (err instanceof ApiError && err.isUnauthorized) {
         onSessionExpired()
+        return
       }
+      setRowError(err instanceof Error ? err.message : 'Could not update board')
     }
   }
 
   async function decommission() {
+    setRowError(null)
     try {
       await api.decommissionDevice(device.device_id)
+      setConfirmingDecommission(false)
       onDeployed()
     } catch (err) {
       if (err instanceof ApiError && err.isUnauthorized) {
         onSessionExpired()
+        return
       }
+      setRowError(err instanceof Error ? err.message : 'Could not decommission board')
     }
   }
 
@@ -407,15 +416,44 @@ function DeviceRow({
                 </select>
               </>
             )}{' '}
-            <button
-              type="button"
-              className="flag-pill"
-              data-testid="decommission-device"
-              title="Decommission this board (revokes broker ACL, cancels in-flight deploys, and removes from fleet)"
-              onClick={() => void decommission()}
-            >
-              decommission
-            </button>
+            {!confirmingDecommission ? (
+              <button
+                type="button"
+                className="flag-pill"
+                data-testid="decommission-device"
+                title="Decommission this board (revokes broker ACL, cancels in-flight deploys, and removes from fleet)"
+                onClick={() => {
+                  setRowError(null)
+                  setConfirmingDecommission(true)
+                }}
+              >
+                decommission
+              </button>
+            ) : (
+              <span data-testid="decommission-device-confirm">
+                <button
+                  type="button"
+                  className="flag-pill bad"
+                  data-testid="decommission-device-confirm-btn"
+                  onClick={() => void decommission()}
+                >
+                  confirm decommission
+                </button>{' '}
+                <button
+                  type="button"
+                  className="flag-pill"
+                  data-testid="decommission-device-cancel-btn"
+                  onClick={() => setConfirmingDecommission(false)}
+                >
+                  cancel
+                </button>
+              </span>
+            )}
+            {rowError !== null && (
+              <div className="bad" role="alert" data-testid="device-row-error">
+                {rowError}
+              </div>
+            )}
           </div>
         )}
       </td>

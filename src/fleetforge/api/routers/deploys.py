@@ -975,6 +975,16 @@ async def advance_project_rollout_on_confirm(
     device_id: str | None = None,
 ) -> list[DeployAccepted]:
     """Advance a staged project cohort rollout when a board confirms its wave transaction."""
+    if (
+        isinstance(publisher, NullCommandPublisher)
+        or not settings.artifact_url_secret
+        or not settings.public_base_url
+    ):
+        logger.warning(
+            "cannot advance staged rollout for cmd_id=%s: command publisher or artifact URL config missing",
+            cmd_id,
+        )
+        return []
     resolved_device = device
     if resolved_device is None and device_id is not None:
         resolved_device = await session.get(Device, device_id)

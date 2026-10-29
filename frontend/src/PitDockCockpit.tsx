@@ -51,85 +51,17 @@ type MeshNode = {
   secrets_rev: number
 }
 
-const DEFAULT_COMPETITION_MESH: MeshNode[] = [
-  {
-    device_id: '94a9900009a4',
-    name: 'pit',
-    roleLabel: 'pit-node',
-    platform_type: 'esp32s3',
-    fw_version: '1.5.0',
-    link_type: 'dock',
-    offline_mode: true,
-    sub_versions: { batteries_csv: 'v15', mcu_fw: 'v3' },
-    secrets_rev: 4,
-  },
-  {
-    device_id: 'a4cf12b3ef01',
-    name: 'cart',
-    roleLabel: 'robot-cart-node',
-    platform_type: 'esp32s3',
-    fw_version: '1.5.0',
-    link_type: 'dock',
-    offline_mode: true,
-    sub_versions: { batteries_csv: 'v15', mcu_fw: 'v3' },
-    secrets_rev: 4,
-  },
-  {
-    device_id: '7b128800c309',
-    name: 'scouting-chief',
-    roleLabel: 'scouting-chief',
-    platform_type: 'esp32s3',
-    fw_version: '1.4.2',
-    link_type: 'lora',
-    offline_mode: true,
-    sub_versions: { batteries_csv: 'v14', mcu_fw: 'v3' },
-    secrets_rev: 4,
-  },
-]
-
-function buildDefaultDockBundle(deviceId: string, fwVersion = '1.5.0'): PitDockBundle {
+function buildEmptyDockBundle(deviceId: string, platformType = 'esp32s3', fwVersion = '1.0.0'): PitDockBundle {
   return {
     announce: {
       device_id: deviceId,
-      platform_type: 'esp32s3',
+      platform_type: platformType,
       link_type: 'dock',
       fw_version: fwVersion,
-      sub_versions: { batteries_csv: 'v15', mcu_fw: 'v3' },
     },
-    statuses: [
-      {
-        cmd_id: 'pit-dock-cmd-01',
-        state: 'confirmed',
-        detail: 'selftest: pass (sx1262_lora=ok, can_loopback=ok, nimble_gatt=ok)',
-      },
-    ],
-    telemetry: [
-      {
-        age_ms: 14200,
-        metrics: {
-          lora_rssi: -74,
-          can_vbat: 24.8,
-          free_heap: 156000,
-        },
-      },
-    ],
-    logs: [
-      {
-        age_ms: 18500,
-        lines: [
-          {
-            level: 'W',
-            msg: '[prev-boot] RTC_NOINIT_ATTR ring clean (0 unrecovered panics)',
-            age_ms: 18500,
-          },
-          {
-            level: 'I',
-            msg: 'ff_dock: RULE E301 EMCON active (802.11 OFF, Improv BLE OFF, NimBLE GATT LIVE)',
-            age_ms: 4200,
-          },
-        ],
-      },
-    ],
+    statuses: [],
+    telemetry: [],
+    logs: [],
   }
 }
 
@@ -150,7 +82,7 @@ function normalizeArtifacts(
 
 function toMeshNodes(devices?: DeviceSummary[] | null): MeshNode[] {
   if (!devices || devices.length === 0) {
-    return DEFAULT_COMPETITION_MESH
+    return []
   }
   return devices.map((d, idx) => ({
     device_id: d.device_id,
@@ -158,10 +90,10 @@ function toMeshNodes(devices?: DeviceSummary[] | null): MeshNode[] {
     roleLabel: d.name ?? `node-${idx + 1}`,
     platform_type: d.platform_type,
     fw_version: d.fw_version ?? 'unknown',
-    link_type: d.link_type || 'dock',
-    offline_mode: Boolean((d as { offline_mode?: boolean }).offline_mode ?? true),
+    link_type: d.link_type || 'wifi',
+    offline_mode: Boolean((d as { offline_mode?: boolean }).offline_mode ?? false),
     sub_versions: d.sub_versions ?? {},
-    secrets_rev: d.secrets_rev ?? 1,
+    secrets_rev: d.secrets_rev ?? 0,
   }))
 }
 
@@ -229,96 +161,56 @@ export function PitDockCockpit({
     chosenDeviceId ||
     (selectedDeviceId && meshNodes.some((n) => n.device_id === selectedDeviceId)
       ? selectedDeviceId
-      : (meshNodes[0]?.device_id ?? '94a9900009a4'))
+      : (meshNodes[0]?.device_id ?? ''))
 
   const activeNode =
-    meshNodes.find((n) => n.device_id === effectiveDeviceId) ?? meshNodes[0] ?? DEFAULT_COMPETITION_MESH[0]
+    meshNodes.find((n) => n.device_id === effectiveDeviceId) ?? meshNodes[0] ?? null
+  const activeDevice =
+    (devices ?? []).find((d) => d.device_id === effectiveDeviceId) ?? null
 
-  const [bundleText, setBundleText] = useState<string>(() =>
-    JSON.stringify(
-      buildDefaultDockBundle(
-        meshNodes[0]?.device_id ?? '94a9900009a4',
-        meshNodes[0]?.fw_version ?? '1.5.0',
-      ),
-      null,
-      2,
-    ),
-  )
-  const [queuedCount, setQueuedCount] = useState<number>(2)
+  const [bundleText, setBundleText] = useState<string>('')
   const [syncBusy, setSyncBusy] = useState<boolean>(false)
   const [syncError, setSyncError] = useState<string | null>(null)
   const [receipt, setReceipt] = useState<PitDockReceipt | null>(null)
 
   const artifactList = useMemo(() => normalizeArtifacts(artifacts), [artifacts])
-  const stageChoices = useMemo(() => {
-    const builtIn = [
-      {
-        id: 'data_partition:batteries-v15',
-        label: '[data_partition] batteries.csv (batteries-v15 · 14 KB · ✓ ECDSA sig K1)',
-        kind: 'data_partition',
-        version: 'batteries-v15',
-      },
-      {
-        id: 'app:1.5.1-pit-hotfix',
-        label: '[app] 1.5.1-pit-hotfix (1.12 MB · ✓ ECDSA sig K1)',
-        kind: 'app',
-        version: '1.5.1-pit-hotfix',
-      },
-    ]
-    const fromProps = artifactList.map((a) => ({
-      id: `${a.artifact_type ?? 'app'}:${a.version}:${a.target}`,
-      label: `[${a.artifact_type ?? 'app'}] ${a.version} (${a.target} · ${a.sig ? '✓ signed' : 'unsigned'})`,
-      kind: a.artifact_type ?? 'app',
-      version: a.version,
-    }))
-    return [...fromProps, ...builtIn]
-  }, [artifactList])
+  const stageChoices = useMemo(
+    () =>
+      artifactList.map((a) => ({
+        id: `${a.artifact_type ?? 'app'}:${a.version}:${a.target}`,
+        label: `[${a.artifact_type ?? 'app'}] ${a.version} (${a.target} · ${a.sig ? '✓ signed' : 'unsigned'})`,
+        kind: a.artifact_type ?? 'app',
+        version: a.version,
+      })),
+    [artifactList],
+  )
 
   const [selectedStageId, setSelectedStageId] = useState<string>('')
   const activeStageChoice =
-    stageChoices.find((c) => c.id === selectedStageId) ?? stageChoices[0]
-  const [stagedBanner, setStagedBanner] = useState<string | null>(null)
-
-  const [selftestChecks, setSelftestChecks] = useState([
-    {
-      id: 'lora_spi',
-      name: 'SX1262 915MHz LoRa SPI',
-      detail: 'v0x22 · RSSI -74 dBm · 0 CRC err',
-      passed: true,
-    },
-    {
-      id: 'can_loopback',
-      name: 'SN65HVD230 CAN Loopback',
-      detail: 'Bus OK · Pack 24.8V · 500 kbps',
-      passed: true,
-    },
-    {
-      id: 'nimble_gatt',
-      name: 'Shared NimBLE GATT ble_hs_synced()',
-      detail: 'ble_hs_synced() == 1 · GATT service 0xFFE0 LIVE',
-      passed: true,
-    },
-  ])
-  const [selftestRanAt, setSelftestRanAt] = useState<string>('just now')
+    stageChoices.find((c) => c.id === selectedStageId) ?? stageChoices[0] ?? null
 
   function selectBoard(deviceId: string) {
     setChosenDeviceId(deviceId)
     onSelectDevice?.(deviceId)
-    const node = meshNodes.find((n) => n.device_id === deviceId)
-    setBundleText(
-      JSON.stringify(buildDefaultDockBundle(deviceId, node?.fw_version ?? '1.5.0'), null, 2),
-    )
     setSyncError(null)
   }
 
-  function loadSampleBundle() {
-    const sample = buildDefaultDockBundle(effectiveDeviceId, activeNode.fw_version)
-    setBundleText(JSON.stringify(sample, null, 2))
+  function loadTemplateBundle() {
+    if (!activeNode) return
+    const template = buildEmptyDockBundle(
+      activeNode.device_id,
+      activeNode.platform_type,
+      activeNode.fw_version !== 'unknown' ? activeNode.fw_version : '1.0.0',
+    )
+    setBundleText(JSON.stringify(template, null, 2))
     setSyncError(null)
   }
 
   // Parse current bundle for live ring summary
   const parsedSummary = useMemo(() => {
+    if (!bundleText.trim()) {
+      return { valid: false, statuses: 0, telemetry: 0, logs: 0, prevBootLines: 0 }
+    }
     try {
       const parsed = JSON.parse(bundleText) as PitDockBundle
       const statuses = Array.isArray(parsed.statuses) ? parsed.statuses.length : 0
@@ -343,6 +235,10 @@ export function PitDockCockpit({
   }, [bundleText])
 
   async function submitDockSync() {
+    if (!effectiveDeviceId) {
+      setSyncError('Enroll or select a board before replaying a dock bundle.')
+      return
+    }
     setSyncBusy(true)
     setSyncError(null)
     let parsed: PitDockBundle
@@ -371,7 +267,6 @@ export function PitDockCockpit({
         ingested_logs: logsCount,
         corrupted_lines: corruptedCount,
       })
-      setQueuedCount((c) => Math.max(0, c - 1))
       onSynced?.()
     } catch (err) {
       if (err instanceof ApiError && err.isUnauthorized) {
@@ -382,18 +277,6 @@ export function PitDockCockpit({
     } finally {
       setSyncBusy(false)
     }
-  }
-
-  function handleStageOverDock() {
-    if (!activeStageChoice) return
-    setStagedBanner(
-      `Staged ${activeStageChoice.version} (${activeStageChoice.kind}) over USB-C Dock to ${activeNode.name} (${effectiveDeviceId}) — Safe Window IDLE / DISARMED verified.`,
-    )
-  }
-
-  function handleRerunSelftest() {
-    setSelftestRanAt('0s ago (verified)')
-    setSelftestChecks((prev) => prev.map((c) => ({ ...c, passed: true })))
   }
 
   return (
@@ -414,76 +297,80 @@ export function PitDockCockpit({
         <strong>⊘ VENUE OFFLINE / EMCON MODE (RULE E301)</strong>{' '}
         <span data-testid="emcon-wifi-pill">[⊘ 802.11 Wi-Fi: OFF]</span>{' '}
         <span data-testid="emcon-improv-pill">[⊘ Improv BLE: OFF]</span>{' '}
-        <span data-testid="emcon-nimble-pill">[✓ Shared NimBLE GATT: LIVE]</span>{' '}
-        <span data-testid="pit-cache-ready">[✓ Pit Cache Ready]</span>{' '}
-        <span data-testid="pit-queued-bundles">
-          [☁ {queuedCount} Dock Bundle{queuedCount === 1 ? '' : 's'} Queued]
-        </span>
+        <span data-testid="emcon-nimble-pill">[✓ Shared NimBLE GATT: LIVE]</span>
       </div>
 
       {/* H6 Pinned Live Mini-Fleet & Peer Mesh Strip */}
       <div className="mini-fleet-strip" data-testid="pit-mini-fleet-strip">
         <h3>
           Pinned Live Mini-Fleet &amp; Peer Mesh Strip{' '}
-          <span className="muted">
-            (Target: {targetFw ?? '1.5.0'}
-            {Object.keys(targetSubs).length > 0
-              ? ` · ${Object.entries(targetSubs)
-                  .map(([k, v]) => `${k}:${v}`)
-                  .join(' · ')}`
-              : ''}
-            )
-          </span>
+          {targetFw !== null && (
+            <span className="muted">
+              (Target: {targetFw}
+              {Object.keys(targetSubs).length > 0
+                ? ` · ${Object.entries(targetSubs)
+                    .map(([k, v]) => `${k}:${v}`)
+                    .join(' · ')}`
+                : ''}
+              )
+            </span>
+          )}
         </h3>
-        <div className="form-grid form-grid-3">
-          {meshNodes.map((node, index) => {
-            const skewReasons = skewByDevice[node.device_id] ?? []
-            const hasSkew = skewReasons.length > 0
-            const isSelected = node.device_id === effectiveDeviceId
-            return (
-              <div
-                key={node.device_id}
-                className={`console-card${isSelected ? ' active' : ''}`}
-                data-testid={`pit-mesh-node-${node.name}`}
-                data-device-id={node.device_id}
-              >
-                <div>
-                  <strong>
-                    {index + 1}. {node.name}
-                  </strong>{' '}
-                  <code>({node.device_id})</code>{' '}
-                  <button
-                    type="button"
-                    onClick={() => selectBoard(node.device_id)}
-                    aria-pressed={isSelected}
-                  >
-                    {isSelected ? '▶ Active on Dock' : 'Select'}
-                  </button>
+        {meshNodes.length === 0 ? (
+          <p className="muted" data-testid="pit-empty-fleet">
+            No enrolled boards in this project yet.
+          </p>
+        ) : (
+          <div className="form-grid form-grid-3">
+            {meshNodes.map((node, index) => {
+              const skewReasons = skewByDevice[node.device_id] ?? []
+              const hasSkew = skewReasons.length > 0
+              const isSelected = node.device_id === effectiveDeviceId
+              return (
+                <div
+                  key={node.device_id}
+                  className={`console-card${isSelected ? ' active' : ''}`}
+                  data-testid={`pit-mesh-node-${node.name}`}
+                  data-device-id={node.device_id}
+                >
+                  <div>
+                    <strong>
+                      {index + 1}. {node.name}
+                    </strong>{' '}
+                    <code>({node.device_id})</code>{' '}
+                    <button
+                      type="button"
+                      onClick={() => selectBoard(node.device_id)}
+                      aria-pressed={isSelected}
+                    >
+                      {isSelected ? '▶ Active on Dock' : 'Select'}
+                    </button>
+                  </div>
+                  <div className="muted">
+                    Link: <code>{node.link_type}</code> · FW: <code>{node.fw_version}</code> ·
+                    sec:r{node.secrets_rev}
+                  </div>
+                  <div>
+                    {Object.entries(node.sub_versions).map(([k, v]) => (
+                      <span key={k}>
+                        <code>
+                          {k}:{v}
+                        </code>{' '}
+                      </span>
+                    ))}
+                    {hasSkew ? (
+                      <span className="bad" data-testid="peer-mesh-skew">
+                        ! SKEW ({skewReasons.join(', ')})
+                      </span>
+                    ) : (
+                      <span className="ok">✓ mesh synced</span>
+                    )}
+                  </div>
                 </div>
-                <div className="muted">
-                  Link: <code>{node.link_type}</code> · FW: <code>{node.fw_version}</code> ·
-                  sec:r{node.secrets_rev}
-                </div>
-                <div>
-                  {Object.entries(node.sub_versions).map(([k, v]) => (
-                    <span key={k}>
-                      <code>
-                        {k}:{v}
-                      </code>{' '}
-                    </span>
-                  ))}
-                  {hasSkew ? (
-                    <span className="bad" data-testid="peer-mesh-skew">
-                      ! SKEW ({skewReasons.join(', ')})
-                    </span>
-                  ) : (
-                    <span className="ok">✓ mesh synced</span>
-                  )}
-                </div>
-              </div>
-            )
-          })}
-        </div>
+              )
+            })}
+          </div>
+        )}
       </div>
 
       {/* 3-Column Pit Turnaround Grid */}
@@ -494,7 +381,7 @@ export function PitDockCockpit({
           aria-labelledby="pit-panel-drain-heading"
           data-testid="pit-panel-drain"
         >
-          <h3 id="pit-panel-drain-heading">1 · Auto-Drained Field Rings &amp; Cloud Replay</h3>
+          <h3 id="pit-panel-drain-heading">1 · Drained Field Rings &amp; Cloud Replay</h3>
           <p>
             <label>
               Docked board{' '}
@@ -503,28 +390,32 @@ export function PitDockCockpit({
                 data-testid="dock-device-select"
                 value={effectiveDeviceId}
                 onChange={(e) => selectBoard(e.target.value)}
-                disabled={syncBusy}
+                disabled={syncBusy || meshNodes.length === 0}
               >
-                {meshNodes.map((node) => (
-                  <option key={node.device_id} value={node.device_id}>
-                    {node.name} ({node.device_id})
-                  </option>
-                ))}
+                {meshNodes.length === 0 ? (
+                  <option value="">(no boards)</option>
+                ) : (
+                  meshNodes.map((node) => (
+                    <option key={node.device_id} value={node.device_id}>
+                      {node.name} ({node.device_id})
+                    </option>
+                  ))
+                )}
               </select>
             </label>{' '}
             <button
               type="button"
               data-testid="dock-generate-sample"
-              onClick={loadSampleBundle}
-              disabled={syncBusy}
+              onClick={loadTemplateBundle}
+              disabled={syncBusy || !activeNode}
             >
-              Generate USB-C Drain Bundle
+              Insert Empty Skeleton
             </button>
           </p>
 
           <ul className="muted" data-testid="dock-drained-summary">
             <li>
-              <code>up/status</code>: {parsedSummary.statuses} transition(s) drained
+              <code>up/status</code>: {parsedSummary.statuses} transition(s) in bundle
             </li>
             <li>
               <code>up/telemetry</code>: {parsedSummary.telemetry} batch(es) with relative{' '}
@@ -544,6 +435,7 @@ export function PitDockCockpit({
                 rows={6}
                 aria-label="USB-C Dock Drain Bundle (JSON)"
                 data-testid="dock-bundle-input"
+                placeholder='{"announce": {...}, "statuses": [], "telemetry": [], "logs": []}'
                 value={bundleText}
                 onChange={(e) => setBundleText(e.target.value)}
                 disabled={syncBusy}
@@ -556,7 +448,7 @@ export function PitDockCockpit({
               type="button"
               data-testid="dock-sync-submit"
               onClick={() => void submitDockSync()}
-              disabled={syncBusy || !parsedSummary.valid}
+              disabled={syncBusy || !effectiveDeviceId || !parsedSummary.valid}
             >
               {syncBusy ? 'Replaying…' : 'Replay Dock Bundle to Server'}
             </button>
@@ -601,86 +493,68 @@ export function PitDockCockpit({
           aria-labelledby="pit-panel-stage-heading"
           data-testid="pit-panel-stage"
         >
-          <h3 id="pit-panel-stage-heading">2 · Stage Signed Bundle over USB-C Dock</h3>
-          <p data-testid="pit-safe-window">
-            Safe Window: <strong className="ok">[✓ IDLE / DISARMED]</strong>
-          </p>
+          <h3 id="pit-panel-stage-heading">2 · USB-C Dock CLI Stage Reference</h3>
           <p className="muted">
-            Select a cached ECDSA P-256 signed <code>app</code> image or{' '}
-            <code>data_partition</code> (<code>batteries.csv</code> / match schedule) to push over
-            the USB-C dock with zero RF emission.
+            When Wi-Fi is disabled under <code>RULE E301</code>, stream a signed{' '}
+            <code>app</code> or <code>data_partition</code> artifact to{' '}
+            <code>ff_ota_dock_stage</code> over USB-C and sync the drained bundle with the CLI:
           </p>
-          <p>
-            <label>
-              Signed artifact bundle{' '}
-              <select
-                aria-label="Signed artifact bundle"
-                data-testid="pit-stage-select"
-                value={activeStageChoice?.id ?? ''}
-                onChange={(e) => setSelectedStageId(e.target.value)}
-              >
-                {stageChoices.map((choice) => (
-                  <option key={choice.id} value={choice.id}>
-                    {choice.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-          </p>
-          <p>
-            <button
-              type="button"
-              data-testid="pit-stage-submit"
-              onClick={handleStageOverDock}
-            >
-              Push over USB-C Dock (1-Click)
-            </button>
-          </p>
-          {stagedBanner !== null && (
-            <p className="ok" data-testid="pit-stage-status">
-              {stagedBanner}
+          {stageChoices.length > 0 && (
+            <p>
+              <label>
+                Uploaded artifact{' '}
+                <select
+                  aria-label="Signed artifact bundle"
+                  data-testid="pit-stage-select"
+                  value={activeStageChoice?.id ?? ''}
+                  onChange={(e) => setSelectedStageId(e.target.value)}
+                >
+                  {stageChoices.map((choice) => (
+                    <option key={choice.id} value={choice.id}>
+                      {choice.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
             </p>
           )}
+          <pre className="log" data-testid="pit-cli-command">
+            {`fleetforge dock-sync ${effectiveDeviceId || '<device_id>'} dock_bundle.json`}
+          </pre>
         </section>
 
-        {/* Panel 3: Peripheral ff_selftest Verification */}
+        {/* Panel 3: Last Reported Self-Test Outcome */}
         <section
           className="console-card"
           aria-labelledby="pit-panel-selftest-heading"
           data-testid="pit-panel-selftest"
         >
-          <h3 id="pit-panel-selftest-heading">3 · Peripheral ff_selftest Verification</h3>
-          <p className="muted">Last local verification: {selftestRanAt}</p>
-          <ul data-testid="pit-selftest-checklist">
-            {selftestChecks.map((check) => (
-              <li key={check.id} data-testid={`selftest-${check.id}`}>
-                <span className={check.passed ? 'ok' : 'bad'}>
-                  {check.passed ? '[✓ PASS]' : '[✗ FAIL]'}
-                </span>{' '}
-                <strong>{check.name}</strong> — <span className="muted">{check.detail}</span>
-              </li>
-            ))}
-          </ul>
-          <p>
-            <button
-              type="button"
-              data-testid="pit-rerun-selftest"
-              onClick={handleRerunSelftest}
-            >
-              Re-Run Local Self-Test
-            </button>{' '}
-            <button
-              type="button"
-              data-testid="pit-factory-flash-locked"
-              disabled
-              title="Locked during match turnaround so pit crew never wipes ff_sec NVS keys"
-            >
-              Factory Full Flash (Locked 🔒)
-            </button>
-          </p>
+          <h3 id="pit-panel-selftest-heading">3 · Reported Self-Test Outcome</h3>
+          {activeDevice?.deploy?.selftest ? (
+            <p data-testid="pit-selftest-checklist">
+              Outcome: <strong>{activeDevice.deploy.selftest.outcome}</strong>
+              {activeDevice.deploy.selftest.reason && (
+                <>
+                  {' '}
+                  — <code>{activeDevice.deploy.selftest.reason}</code>
+                </>
+              )}
+              {activeDevice.deploy.selftest.returned_to && (
+                <>
+                  {' '}
+                  (returned to <code>{activeDevice.deploy.selftest.returned_to}</code>)
+                </>
+              )}
+            </p>
+          ) : (
+            <p className="muted" data-testid="pit-selftest-checklist">
+              No self-test result reported for the selected board yet.
+            </p>
+          )}
           <p className="muted">
-            Full factory flash is locked in Pit Mode to protect <code>ff_sec</code> NVS encryption
-            keys and RF calibration during a 90-second match turnaround.
+            In Venue Offline Mode, <code>ff_mqtt_confirm_offline()</code> requires a registered{' '}
+            <code>ff_selftest</code> callback to pass before marking a <code>PENDING_VERIFY</code>{' '}
+            OTA slot valid.
           </p>
         </section>
       </div>

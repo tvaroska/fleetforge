@@ -55,6 +55,7 @@ from fleetforge.api.deps import (
     SettingsDep,
     deploy_config_gaps,
     dynsec_configured,
+    get_command_publisher,
     mqtt_command_configured,
 )
 from fleetforge.api.eventstream import EventHub, PostgresEventListener
@@ -81,6 +82,7 @@ from fleetforge.auth.ratelimit import FixedWindowLimiter
 from fleetforge.buildinfo import build_info
 from fleetforge.config import Settings, get_settings
 from fleetforge.db.base import asyncpg_dsn, get_sessionmaker
+from fleetforge.events import DeviceEvent, EventType
 from fleetforge.firmware import DEFAULT_INDEX_KEY, CatalogCache
 from fleetforge.storage import SignedUrlCache
 from fleetforge.storage.factory import object_store_configured
@@ -145,12 +147,42 @@ def create_app() -> FastAPI:
         hub: EventHub = app.state.event_hub
         task: asyncio.Task[None] | None = None
         if settings is not None:
-            # The single ingestor owns rollout wave advancement on 'confirmed'
-            # (`ingestor/main.py`), so API workers only fan out `ff_events` to SSE.
+            sessionmaker = get_sessionmaker(settings)
+
+            async def _on_device_event(event: DeviceEvent) -> None:
+                # The API owns `MQTT_COMMAND_*`, `ARTIFACT_URL_SECRET`, and `PUBLIC_BASE_URL`
+                # (`design/production.md`: one privilege per service). Concurrent API workers
+                # receiving `ff_events` notifications are serialized by `SELECT ... FOR UPDATE`
+                # on `Project.id` inside `deploy_version_to_project_devices`.
+                if event.type == EventType.DEVICE_ANNOUNCE and event.online is not False:
+                    publisher = get_command_publisher(settings)
+                    async with sessionmaker() as session:
+                        await deploys.republish_open_requested_on_wake(
+                            session,
+                            device_id=event.device_id,
+                            settings=settings,
+                            publisher=publisher,
+                        )
+                elif (
+                    event.type == EventType.DEVICE_DEPLOY
+                    and event.state == "confirmed"
+                    and event.cmd_id is not None
+                ):
+                    publisher = get_command_publisher(settings)
+                    async with sessionmaker() as session:
+                        await deploys.advance_project_rollout_on_confirm(
+                            session,
+                            cmd_id=event.cmd_id,
+                            settings=settings,
+                            publisher=publisher,
+                            device_id=event.device_id,
+                        )
+
             listener = PostgresEventListener(
                 asyncpg_dsn(settings.database_url),
                 hub,
                 ping_s=settings.events_listener_ping_s,
+                on_event=_on_device_event,
             )
             app.state.event_listener = listener
             task = asyncio.create_task(listener.run(), name="ff-events-listener")

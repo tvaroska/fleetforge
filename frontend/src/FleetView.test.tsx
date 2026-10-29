@@ -773,19 +773,31 @@ describe('DeviceInspector (P1-1, P1-2, P1-3, P2-1)', () => {
     })
     expect(screen.getByTestId('inspector-status')).toHaveTextContent('Rollback command')
 
-    // Mode B: Dock
+    // Mode B: Dock (requires user-supplied drained JSON bundle)
     fireEvent.click(screen.getByTestId('inspector-mode-dock'))
     expect(screen.getByTestId('dock-posture-badges')).toHaveTextContent('802.11 OFF')
+    expect(screen.getByTestId('dock-sync-btn')).toBeDisabled()
+    fireEvent.change(screen.getByTestId('inspector-dock-bundle-input'), {
+      target: { value: JSON.stringify({ statuses: [], telemetry: [], logs: [] }) },
+    })
+    expect(screen.getByTestId('dock-sync-btn')).not.toBeDisabled()
     await act(async () => {
       fireEvent.click(screen.getByTestId('dock-sync-btn'))
       await Promise.resolve()
     })
-    expect(screen.getByTestId('dock-sync-receipt')).toHaveTextContent('OTLP exported: 200 OK')
+    expect(screen.getByTestId('dock-sync-receipt')).toHaveTextContent(
+      'statuses: 1 · telemetry batches: 1 · log batches: 1',
+    )
 
-    // Mode C: Compare / Diff
+    // Mode C: Compare / Diff (requires explicit selection + confirmation before bulk action)
     fireEvent.click(screen.getByTestId('inspector-mode-compare'))
     expect(screen.getByTestId('compare-boards-table')).toHaveTextContent('beta-s3-04')
     expect(screen.getByTestId('compare-boards-table')).toHaveTextContent('i2c 0x48 timeout')
+    expect(screen.getByTestId('compare-bulk-rollback')).toBeDisabled()
+    fireEvent.click(screen.getByTestId('compare-select-a4cf12b3de01'))
+    expect(screen.getByTestId('compare-bulk-rollback')).not.toBeDisabled()
+    fireEvent.click(screen.getByTestId('compare-bulk-rollback'))
+    expect(screen.getByTestId('compare-bulk-confirm')).toBeInTheDocument()
 
     // Mode D: Bulk / Config
     fireEvent.click(screen.getByTestId('inspector-mode-bulk'))

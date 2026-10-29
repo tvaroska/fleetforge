@@ -237,7 +237,7 @@ Copy `Basic.ino`, `partitions.csv` and `platformio.ini` from the example (see
 symlink described there, or, without a clone, this line in `platformio.ini`:
 
 ```ini
-lib_deps = Fleetforge=https://github.com/tvaroska/fleetforge.git#v0.5.0
+lib_deps = Fleetforge=https://github.com/tvaroska/fleetforge.git#v0.6.0
 ```
 
 PlatformIO finds the library in the repository's `agent/components/fleetforge` folder. Pin a

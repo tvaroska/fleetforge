@@ -38,15 +38,9 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from fleetforge import retention
-from fleetforge.api.deps import get_command_publisher
-from fleetforge.api.routers.deploys import (
-    advance_project_rollout_on_confirm,
-    republish_open_requested_on_wake,
-)
 from fleetforge.clock import now_utc
 from fleetforge.config import get_settings
 from fleetforge.db.base import get_engine, get_sessionmaker
-from fleetforge.events import EventType
 from fleetforge.ingestor import otel
 from fleetforge.ingestor.handlers import handle_up_message
 from fleetforge.storage.blobs import blob_key
@@ -165,44 +159,6 @@ async def handle_message(
             logger.info(
                 "ingested %s device=%s online=%s", event.type, event.device_id, event.online
             )
-            if not message.retain and event.type == EventType.DEVICE_ANNOUNCE:
-                try:
-                    settings = get_settings()
-                    publisher = get_command_publisher(settings)
-                    async with sessionmaker() as session:
-                        await republish_open_requested_on_wake(
-                            session,
-                            device_id=event.device_id,
-                            settings=settings,
-                            publisher=publisher,
-                        )
-                except Exception:
-                    logger.exception(
-                        "failed to republish open requested deploy on wake for device %s",
-                        event.device_id,
-                    )
-            if (
-                event.type == EventType.DEVICE_DEPLOY
-                and event.state == "confirmed"
-                and event.cmd_id is not None
-            ):
-                try:
-                    settings = get_settings()
-                    publisher = get_command_publisher(settings)
-                    async with sessionmaker() as session:
-                        await advance_project_rollout_on_confirm(
-                            session,
-                            cmd_id=event.cmd_id,
-                            settings=settings,
-                            publisher=publisher,
-                            device_id=event.device_id,
-                        )
-                except Exception:
-                    logger.exception(
-                        "failed to advance rollout for device %s cmd_id %s",
-                        event.device_id,
-                        event.cmd_id,
-                    )
     except (SQLAlchemyError, OSError, ValueError) as exc:
         logger.error("ingest failed for topic %s: %s", topic, exc)
 

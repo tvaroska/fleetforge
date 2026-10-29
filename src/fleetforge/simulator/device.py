@@ -1016,8 +1016,8 @@ class StageRunner:
         emit(pending.cmd_id, STATE_CONFIRMING)
         broken = self._is_broken(self.identity.fw_version)
         registered = self._selftest_registered
-        if self.confirm == CONFIRM_AUTO and not broken:
-            if registered and self._fails_selftest(self.identity.fw_version):
+        if self.confirm == CONFIRM_AUTO and not broken and registered:
+            if self._fails_selftest(self.identity.fw_version):
                 head = SELFTEST_FAILED + SELFTEST_FAIL_REASON
                 emit(pending.cmd_id, STATE_ROLLING_BACK)
                 self.identity = replace(pending.previous_identity, reset_reason=RESET_REASON_SW)
@@ -1036,7 +1036,7 @@ class StageRunner:
                 pending.cmd_id,
                 STATE_CONFIRMED,
                 pct=100,
-                detail=SELFTEST_PASSED if registered else None,
+                detail=SELFTEST_PASSED,
             )
             self.returnable = (pending.previous_identity, pending.previous_slot)
             self.pending = None

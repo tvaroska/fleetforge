@@ -3,6 +3,7 @@ name = "fleetforge"
 version = "0.8.0"
 description = "OTA firmware management for embedded fleets"
 readme = "README.md"
+license = { text = "MIT" }
 requires-python = ">=3.12"
 dependencies = [
     "sqlalchemy[asyncio]>=2.0.45,<3.0",
@@ -20,6 +21,9 @@ dependencies = [
     "httpx>=0.28,<1.0",
     "cryptography>=50.0",
 ]
+
+[project.scripts]
+fleetforge = "fleetforge.cli:main"
 
 [dependency-groups]
 dev = [

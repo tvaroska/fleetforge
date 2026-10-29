@@ -50,13 +50,13 @@ const SPARK_BLOCKS = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'] as
 /** Converts numeric telemetry samples into a 1-bit ASCII sparkline (`▁▂▃▄▅▆▇█`). */
 export function renderAsciiSparkline(values: readonly number[]): string {
   if (values.length === 0) {
-    return '▁▂▃▄▅▆▇█'
+    return '—'
   }
   const slice = values.slice(0, 16)
   const min = Math.min(...slice)
   const max = Math.max(...slice)
   if (max === min) {
-    return SPARK_BLOCKS.join('')
+    return '▄'.repeat(slice.length)
   }
   return slice
     .map((v) => {
@@ -123,11 +123,14 @@ export function DeviceInspector({
   const [sparklineText, setSparklineText] = useState<string | null>(null)
   const [sparklineSummary, setSparklineSummary] = useState<string | null>(null)
 
-  // Dock sync receipt state (Mode B)
+  // Dock sync receipt & input state (Mode B)
+  const [dockBundleJson, setDockBundleJson] = useState<string>('')
   const [dockReceipt, setDockReceipt] = useState<DockSyncReceipt | null>(null)
 
-  // Compare pattern filter state (Mode C)
+  // Compare pattern filter & explicit selection state (Mode C)
   const [comparePattern, setComparePattern] = useState<'all' | 'selftest' | 'safe_mode' | 'timeout'>('all')
+  const [selectedCompareIds, setSelectedCompareIds] = useState<string[]>([])
+  const [confirmingBulkAction, setConfirmingBulkAction] = useState<'reboot' | 'rollback' | null>(null)
 
   // Bulk & RMA state (Mode D)
   const [holdAtStaged, setHoldAtStaged] = useState(true)
@@ -157,7 +160,7 @@ export function DeviceInspector({
     setErrorMsg(err instanceof Error ? err.message : fallback)
   }
 
-  // Exception / compare candidates for Mode C
+  // Exception / compare candidates for Mode C — never fall back to healthy boards
   const problemBoards = devices.filter(
     (d) =>
       (d as DeviceSummary & { safe_mode?: boolean }).safe_mode === true ||
@@ -165,7 +168,7 @@ export function DeviceInspector({
       d.deploy?.state === 'failed' ||
       d.health?.boot_ok === false,
   )
-  const compareBase = problemBoards.length > 0 ? problemBoards : devices
+  const compareBase = problemBoards
   const filteredCompareBoards = compareBase.filter((d) => {
     const safeMode = Boolean((d as DeviceSummary & { safe_mode?: boolean }).safe_mode)
     const reasonText =
@@ -179,6 +182,28 @@ export function DeviceInspector({
     }
     return true
   })
+  const selectedCompareBoards = filteredCompareBoards.filter((d) =>
+    selectedCompareIds.includes(d.device_id),
+  )
+
+  function toggleCompareSelection(deviceId: string) {
+    setConfirmingBulkAction(null)
+    setSelectedCompareIds((prev) =>
+      prev.includes(deviceId) ? prev.filter((id) => id !== deviceId) : [...prev, deviceId],
+    )
+  }
+
+  function toggleSelectAllCompare() {
+    setConfirmingBulkAction(null)
+    if (
+      filteredCompareBoards.length > 0 &&
+      selectedCompareBoards.length === filteredCompareBoards.length
+    ) {
+      setSelectedCompareIds([])
+    } else {
+      setSelectedCompareIds(filteredCompareBoards.map((d) => d.device_id))
+    }
+  }
 
   async function toggleDeviceFlag(patch: { is_dev?: boolean; stay_awake?: boolean }) {
     if (!effectiveDevice) return
@@ -253,7 +278,7 @@ export function DeviceInspector({
           `${series.name}: ${values.length} samples · latest ${formatBytes(latest)} · low ${formatBytes(min)}`,
         )
       } else {
-        setSparklineSummary(`${series.name}: baseline sparkline`)
+        setSparklineSummary(`${series.name}: 0 samples recorded`)
       }
     } catch (err) {
       handleError(err, 'Could not load telemetry sparklines')
@@ -263,32 +288,29 @@ export function DeviceInspector({
   }
 
   async function handleDockReplay() {
-    const target = effectiveDevice ?? devices[0] ?? null
-    if (!target) return
+    if (!effectiveDevice) {
+      setErrorMsg('Select a board before replaying a dock bundle.')
+      return
+    }
+    const raw = dockBundleJson.trim()
+    if (!raw) {
+      setErrorMsg('Paste a drained USB-C dock JSON bundle before replaying.')
+      return
+    }
+    let parsed: DockSyncRequest
+    try {
+      parsed = JSON.parse(raw) as DockSyncRequest
+    } catch {
+      setErrorMsg('Dock bundle is not valid JSON.')
+      return
+    }
     setBusy(true)
     setErrorMsg(null)
     setStatusMsg(null)
     try {
-      const receipt = await callDockSync(target.device_id, {
-        announce: {
-          device_id: target.device_id,
-          platform_type: target.platform_type,
-          link_type: 'dock',
-          fw_version: target.fw_version ?? '1.5.0',
-          sub_versions: target.sub_versions ?? { data_partition: 'batteries-v15' },
-        },
-        statuses: [{ state: 'confirmed', version: target.fw_version ?? '1.5.0', age_ms: 4000 }],
-        telemetry: [
-          {
-            age_ms: 5000,
-            health: { free_heap: 148000, min_free_heap: 112000, rssi: -68, uptime_s: 120, boot_ok: true },
-            metrics: { can_vbat: 12.6 },
-          },
-        ],
-        logs: [{ age_ms: 4500, level: 'I', text: '[dock] ff_selftest pass over USB-C dock' }],
-      })
+      const receipt = await callDockSync(effectiveDevice.device_id, parsed)
       setDockReceipt(receipt)
-      setStatusMsg(`Replayed dock bundle for ${target.name ?? target.device_id}.`)
+      setStatusMsg(`Replayed dock bundle for ${effectiveDevice.name ?? effectiveDevice.device_id}.`)
       notifyUpdated()
     } catch (err) {
       handleError(err, 'Dock bundle replay failed')
@@ -298,20 +320,21 @@ export function DeviceInspector({
   }
 
   async function handleBulkAction(action: 'reboot' | 'rollback') {
-    if (filteredCompareBoards.length === 0) return
+    if (selectedCompareBoards.length === 0) return
     setBusy(true)
     setErrorMsg(null)
     setStatusMsg(null)
     try {
-      for (const b of filteredCompareBoards) {
+      for (const b of selectedCompareBoards) {
         if (action === 'reboot') {
           await api.rebootDevice(b.device_id)
         } else {
           await callRollbackDevice(b.device_id)
         }
       }
+      setConfirmingBulkAction(null)
       setStatusMsg(
-        `Sent ${action} to ${filteredCompareBoards.length} board(s): ${filteredCompareBoards
+        `Sent ${action} to ${selectedCompareBoards.length} board(s): ${selectedCompareBoards
           .map((b) => b.name ?? b.device_id)
           .join(', ')}.`,
       )
@@ -350,7 +373,7 @@ export function DeviceInspector({
   const returnedToSlot =
     effectiveDevice?.deploy?.selftest?.returned_to ??
     (effectiveDevice?.deploy as { returned_to?: string | null } | null | undefined)?.returned_to ??
-    'ota_0'
+    null
 
   return (
     <aside
@@ -435,7 +458,7 @@ export function DeviceInspector({
                 </h4>
                 <p className="muted">
                   Chip: <code>{effectiveDevice.platform_type}</code> · Map:{' '}
-                  <code>{effectiveDevice.partition_layout ?? 'ab-4m-v1'}</code> · FW:{' '}
+                  <code>{effectiveDevice.partition_layout ?? 'unknown'}</code> · FW:{' '}
                   <strong>{effectiveDevice.fw_version ?? '—'}</strong> · Link:{' '}
                   <code>{effectiveDevice.link_type}</code>
                 </p>
@@ -460,9 +483,7 @@ export function DeviceInspector({
                       void toggleDeviceFlag({ stay_awake: !effectiveDevice.stay_awake })
                     }
                   >
-                    {effectiveDevice.stay_awake
-                      ? '⚡ stay awake: 28m left (bounded lease)'
-                      : 'stay awake (30m lease)'}
+                    {effectiveDevice.stay_awake ? '⚡ stay awake' : 'stay awake'}
                   </button>
                 </div>
               </div>
@@ -488,7 +509,11 @@ export function DeviceInspector({
                         {effectiveDevice.deploy.selftest.reason && (
                           <> — <code>{effectiveDevice.deploy.selftest.reason}</code></>
                         )}
-                        {' · '}returned_to: <code>{returnedToSlot}</code>
+                        {returnedToSlot !== null && (
+                          <>
+                            {' · '}returned_to: <code>{returnedToSlot}</code>
+                          </>
+                        )}
                       </>
                     )}
                   </p>
@@ -502,7 +527,7 @@ export function DeviceInspector({
                       disabled={busy}
                       onClick={() => setConfirmingRollback(true)}
                     >
-                      ↶ Rollback slot ({returnedToSlot})
+                      ↶ Rollback slot{returnedToSlot ? ` (${returnedToSlot})` : ''}
                     </button>
                   ) : (
                     <span data-testid="inspector-rollback-confirm">
@@ -619,7 +644,7 @@ export function DeviceInspector({
             </thead>
             <tbody>
               {(devices.length > 0 ? devices : effectiveDevice ? [effectiveDevice] : []).map(
-                (node, idx, arr) => {
+                (node, _idx, arr) => {
                   const refFw = arr[0]?.fw_version ?? null
                   const refSub = JSON.stringify(arr[0]?.sub_versions ?? {})
                   const nodeSub = JSON.stringify(node.sub_versions ?? {})
@@ -656,13 +681,29 @@ export function DeviceInspector({
           </table>
 
           <p>
+            <label>
+              Drained USB-C Dock Bundle (JSON)
+              <textarea
+                className="log console"
+                rows={4}
+                aria-label="Drained USB-C Dock Bundle (JSON)"
+                data-testid="inspector-dock-bundle-input"
+                placeholder='{"statuses": [], "telemetry": [], "logs": []}'
+                value={dockBundleJson}
+                onChange={(e) => setDockBundleJson(e.target.value)}
+                disabled={busy}
+              />
+            </label>
+          </p>
+
+          <p>
             <button
               type="button"
               data-testid="dock-sync-btn"
-              disabled={busy || (effectiveDevice === null && devices.length === 0)}
+              disabled={busy || effectiveDevice === null || dockBundleJson.trim().length === 0}
               onClick={() => void handleDockReplay()}
             >
-              Stage &amp; Replay Dock Bundle
+              Replay Drained Dock Bundle
             </button>
           </p>
 
@@ -671,8 +712,7 @@ export function DeviceInspector({
               <strong>✓ Dock Replay Receipt ({dockReceipt.device_id}):</strong>{' '}
               statuses: {dockReceipt.statuses_recorded} · telemetry batches:{' '}
               {dockReceipt.telemetry_batches_recorded} · log batches:{' '}
-              {dockReceipt.log_batches_recorded} · Reconstructed timestamps via{' '}
-              <code>age_ms</code> · OTLP exported: 200 OK ✓
+              {dockReceipt.log_batches_recorded}
             </div>
           )}
         </div>
@@ -720,6 +760,19 @@ export function DeviceInspector({
           <table className="compare-grid" data-testid="compare-boards-table">
             <thead>
               <tr>
+                <th scope="col">
+                  <input
+                    type="checkbox"
+                    aria-label="Select all exception boards"
+                    data-testid="compare-select-all"
+                    checked={
+                      filteredCompareBoards.length > 0 &&
+                      selectedCompareBoards.length === filteredCompareBoards.length
+                    }
+                    disabled={filteredCompareBoards.length === 0}
+                    onChange={toggleSelectAllCompare}
+                  />
+                </th>
                 <th scope="col">BOARD ID</th>
                 <th scope="col">CHIP</th>
                 <th scope="col">VERDICT &amp; SLOT</th>
@@ -728,59 +781,106 @@ export function DeviceInspector({
               </tr>
             </thead>
             <tbody>
-              {filteredCompareBoards.map((b) => {
-                const bSafe = Boolean((b as DeviceSummary & { safe_mode?: boolean }).safe_mode)
-                const slot = b.deploy?.selftest?.returned_to ?? 'ota_0'
-                const verdict = bSafe
-                  ? `!! SAFE MODE (${slot})`
-                  : b.deploy
-                    ? `${b.deploy.state} → ${slot}`
-                    : 'idle'
-                const reason =
-                  b.deploy?.selftest?.reason ??
-                  b.deploy?.detail ??
-                  b.last_reset_reason ??
-                  '—'
-                const freeStr =
-                  b.health?.free_heap != null ? formatBytes(b.health.free_heap) : '—'
-                const minStr =
-                  b.health?.min_free_heap != null ? formatBytes(b.health.min_free_heap) : '—'
-                return (
-                  <tr key={b.device_id} data-testid="compare-board-row">
-                    <td>
-                      <strong>{b.name ?? b.device_id}</strong>
-                    </td>
-                    <td>
-                      <code>{b.platform_type}</code>
-                    </td>
-                    <td>{verdict}</td>
-                    <td>{reason}</td>
-                    <td>
-                      {freeStr} / {minStr}
-                    </td>
-                  </tr>
-                )
-              })}
+              {filteredCompareBoards.length === 0 ? (
+                <tr>
+                  <td colSpan={6} className="muted">
+                    No boards with active faults, rollbacks, or safe-mode alerts.
+                  </td>
+                </tr>
+              ) : (
+                filteredCompareBoards.map((b) => {
+                  const bSafe = Boolean((b as DeviceSummary & { safe_mode?: boolean }).safe_mode)
+                  const slot = b.deploy?.selftest?.returned_to ?? null
+                  const verdict = bSafe
+                    ? slot
+                      ? `!! SAFE MODE (${slot})`
+                      : '!! SAFE MODE'
+                    : b.deploy
+                      ? slot
+                        ? `${b.deploy.state} → ${slot}`
+                        : b.deploy.state
+                      : 'idle'
+                  const reason =
+                    b.deploy?.selftest?.reason ??
+                    b.deploy?.detail ??
+                    b.last_reset_reason ??
+                    '—'
+                  const freeStr =
+                    b.health?.free_heap != null ? formatBytes(b.health.free_heap) : '—'
+                  const minStr =
+                    b.health?.min_free_heap != null ? formatBytes(b.health.min_free_heap) : '—'
+                  const isChecked = selectedCompareIds.includes(b.device_id)
+                  return (
+                    <tr key={b.device_id} data-testid="compare-board-row">
+                      <td>
+                        <input
+                          type="checkbox"
+                          aria-label={`Select ${b.name ?? b.device_id}`}
+                          data-testid={`compare-select-${b.device_id}`}
+                          checked={isChecked}
+                          onChange={() => toggleCompareSelection(b.device_id)}
+                        />
+                      </td>
+                      <td>
+                        <strong>{b.name ?? b.device_id}</strong>
+                      </td>
+                      <td>
+                        <code>{b.platform_type}</code>
+                      </td>
+                      <td>{verdict}</td>
+                      <td>{reason}</td>
+                      <td>
+                        {freeStr} / {minStr}
+                      </td>
+                    </tr>
+                  )
+                })
+              )}
             </tbody>
           </table>
 
           <div className="compare-bulk-actions" data-testid="compare-bulk-actions">
-            <button
-              type="button"
-              data-testid="compare-bulk-reboot"
-              disabled={busy || filteredCompareBoards.length === 0}
-              onClick={() => void handleBulkAction('reboot')}
-            >
-              Reboot Selected ({filteredCompareBoards.length})
-            </button>{' '}
-            <button
-              type="button"
-              data-testid="compare-bulk-rollback"
-              disabled={busy || filteredCompareBoards.length === 0}
-              onClick={() => void handleBulkAction('rollback')}
-            >
-              Rollback Selected ({filteredCompareBoards.length})
-            </button>
+            {confirmingBulkAction === null ? (
+              <>
+                <button
+                  type="button"
+                  data-testid="compare-bulk-reboot"
+                  disabled={busy || selectedCompareBoards.length === 0}
+                  onClick={() => setConfirmingBulkAction('reboot')}
+                >
+                  Reboot Selected ({selectedCompareBoards.length})
+                </button>{' '}
+                <button
+                  type="button"
+                  data-testid="compare-bulk-rollback"
+                  disabled={busy || selectedCompareBoards.length === 0}
+                  onClick={() => setConfirmingBulkAction('rollback')}
+                >
+                  Rollback Selected ({selectedCompareBoards.length})
+                </button>
+              </>
+            ) : (
+              <span data-testid="compare-bulk-confirm">
+                Confirm bulk {confirmingBulkAction} on {selectedCompareBoards.length} selected
+                board(s)?{' '}
+                <button
+                  type="button"
+                  data-testid="compare-bulk-confirm-btn"
+                  disabled={busy}
+                  onClick={() => void handleBulkAction(confirmingBulkAction)}
+                >
+                  Confirm Bulk {confirmingBulkAction === 'reboot' ? 'Reboot' : 'Rollback'}
+                </button>{' '}
+                <button
+                  type="button"
+                  data-testid="compare-bulk-cancel-btn"
+                  disabled={busy}
+                  onClick={() => setConfirmingBulkAction(null)}
+                >
+                  Cancel
+                </button>
+              </span>
+            )}
           </div>
         </div>
       )}

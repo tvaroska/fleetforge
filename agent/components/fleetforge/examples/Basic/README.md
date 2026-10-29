@@ -169,7 +169,7 @@ pio run
 Without a clone, replace the `lib_deps` line with a pinned git dependency:
 
 ```ini
-lib_deps = Fleetforge=https://github.com/tvaroska/fleetforge.git#v0.5.0
+lib_deps = Fleetforge=https://github.com/tvaroska/fleetforge.git#v0.6.0
 ```
 
 PlatformIO fetches it from GitHub and the line names a release tag, so it works only once

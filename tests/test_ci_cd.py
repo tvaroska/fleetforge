@@ -1463,6 +1463,7 @@ class TestCuj3PitTetheredDockAndVenueOffline:
         assert "ff_net_wifi_set_offline_mode(" in ff_wifi_c
         assert "ff_net_wifi_set_improv_ble_enabled(" in ff_wifi_c
         assert "ff_mqtt_confirm_offline(" in ff_mqtt_c
+        assert "if (!s_selftest_registered)" in ff_mqtt_c
         assert "setOfflineMode(bool offline)" in arduino_h
         assert "FleetforgeClass::setOfflineMode(bool offline)" in arduino_cpp
         assert "ff_set_offline_mode(false);" in basic_idf
@@ -1472,6 +1473,16 @@ class TestCuj3PitTetheredDockAndVenueOffline:
         assert "ff_telemetry_drain_json(" in ff_telem_c
         assert "esp_err_t ff_ota_dock_stage(" in ff_ota_h
         assert "ff_ota_dock_stage(const ff_ota_cmd_t *cmd" in ff_ota_c
+
+        # Verify ingestor/main.py does not import from fleetforge.api (ARCH-1 / ARCH-5)
+        ingestor_main = (
+            Path(__file__).resolve().parents[1]
+            / "src"
+            / "fleetforge"
+            / "ingestor"
+            / "main.py"
+        ).read_text(encoding="utf-8")
+        assert "fleetforge.api" not in ingestor_main
 
     async def test_cuj3_end_to_end_venue_offline_dock_stage_selftest_and_sync(
         self, tmp_path: Path

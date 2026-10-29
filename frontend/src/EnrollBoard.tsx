@@ -78,10 +78,12 @@ export function EnrollBoard({
   const [error, setError] = useState<string | null>(null)
 
   // P2-3: Batch CLI Token & Factory Jig Generator state (in memory only, never persisted)
-  const [batchCount, setBatchCount] = useState<number>(5)
+  const [batchCount, setBatchCount] = useState<string>('5')
   const [batchPrefix, setBatchPrefix] = useState<string>('gh-node-')
   const [batchMinted, setBatchMinted] = useState<BatchMintedRow[] | null>(null)
   const [batchCopied, setBatchCopied] = useState(false)
+
+  const parsedBatchCount = Math.max(1, Math.min(50, Math.trunc(Number(batchCount)) || 1))
 
   // A dead cookie must bounce to the login screen rather than render as a page error.
   const handle = useCallback(
@@ -132,11 +134,11 @@ export function EnrollBoard({
     setError(null)
     setBatchCopied(false)
     const groupId = selectedGroupId || null
-    const count = Math.max(1, Math.min(50, Math.trunc(batchCount) || 1))
+    const count = parsedBatchCount
     const prefix = batchPrefix.trim() || 'board-'
+    const mintedRows: BatchMintedRow[] = []
 
     try {
-      const mintedRows: BatchMintedRow[] = []
       for (let i = 1; i <= count; i += 1) {
         const res = await (project
           ? api.createEnrollmentToken(groupId, project)
@@ -151,6 +153,9 @@ export function EnrollBoard({
       setBatchMinted(mintedRows)
       await refresh()
     } catch (err) {
+      if (mintedRows.length > 0) {
+        setBatchMinted(mintedRows)
+      }
       handle(err)
     } finally {
       setBusy(false)
@@ -175,9 +180,13 @@ export function EnrollBoard({
           '# flash-batch.sh — Headless Factory Jig Runner (esptool.py)',
           'set -euo pipefail',
           'CSV_FILE="${1:-tokens.csv}"',
+          ': "${FLEETFORGE_URL:?Set FLEETFORGE_URL (e.g. https://fleet.example.com)}"',
+          ': "${FLEETFORGE_MQTT_URI:?Set FLEETFORGE_MQTT_URI (e.g. mqtts://fleet.example.com:8883)}"',
+          ': "${WIFI_SSID:?Set WIFI_SSID}"',
+          ': "${WIFI_PSK:?Set WIFI_PSK}"',
           'tail -n +2 "$CSV_FILE" | while IFS=, read -r TOKEN NAME GROUP_ID EXPIRES; do',
           '  echo "=== Provisioning $NAME (group: ${GROUP_ID:-ungrouped}) ==="',
-          '  python -m fleetforge.cli build-ffcfg --token "$TOKEN" --out /tmp/ff_cfg.bin',
+          '  python3 agent/tools/ff_cfg.py --api-base "$FLEETFORGE_URL" --mqtt-uri "$FLEETFORGE_MQTT_URI" --ssid "$WIFI_SSID" --psk "$WIFI_PSK" --token "$TOKEN" --out /tmp/ff_cfg.bin',
           '  esptool.py --chip auto --baud 921600 write_flash 0x12000 /tmp/ff_cfg.bin',
           '  rm -f /tmp/ff_cfg.bin',
           'done',
@@ -261,9 +270,8 @@ export function EnrollBoard({
               aria-label="Batch count"
               data-testid="batch-count-input"
               value={batchCount}
-              onChange={(event) =>
-                setBatchCount(Math.max(1, Math.min(50, Number(event.target.value) || 1)))
-              }
+              onChange={(event) => setBatchCount(event.target.value)}
+              onBlur={() => setBatchCount(String(parsedBatchCount))}
               disabled={busy}
             />
           </label>
@@ -306,7 +314,7 @@ export function EnrollBoard({
             onClick={() => void generateBatch()}
             disabled={busy}
           >
-            {busy ? 'Minting batch…' : `Mint ${batchCount} batch token${batchCount === 1 ? '' : 's'}`}
+            {busy ? 'Minting batch…' : `Mint ${parsedBatchCount} batch token${parsedBatchCount === 1 ? '' : 's'}`}
           </button>
         </p>
 

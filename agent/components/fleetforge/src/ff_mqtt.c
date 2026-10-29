@@ -2372,19 +2372,11 @@ esp_err_t ff_mqtt_confirm_offline(void)
     if (s_rollback_decided) {
         return ESP_ERR_INVALID_STATE;
     }
-    if (s_selftest_registered) {
-        if (s_txn.kind == TXN_CONFIRMING) {
-            (void)(ff_txn_set_detail)(s_txn.cmd_id, DETAIL_SELFTEST_TIMED_OUT);
-        }
-        return (ff_selftest_run)(selftest_done);
+    if (!s_selftest_registered) {
+        return ESP_ERR_INVALID_STATE;
     }
-    if (confirm_this_image() && s_txn.kind == TXN_CONFIRMING) {
-        s_txn.kind = TXN_ALREADY_CONFIRMED;
-        return ESP_OK;
+    if (s_txn.kind == TXN_CONFIRMING) {
+        (void)(ff_txn_set_detail)(s_txn.cmd_id, DETAIL_SELFTEST_TIMED_OUT);
     }
-    if (s_txn.kind == TXN_BOOTED_NEW && accept_unverified_image()) {
-        s_txn.kind = TXN_ALREADY_CONFIRMED;
-        return ESP_OK;
-    }
-    return ESP_OK;
+    return (ff_selftest_run)(selftest_done);
 }

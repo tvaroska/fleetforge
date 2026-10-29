@@ -863,15 +863,26 @@ export function Dashboard({
           onGoToFleet={() => setActiveTab('fleet')}
         />
         <EnrollBoard onSessionExpired={expire} project={projectParam} groups={groups} />
-        <PitDockCockpit
-          devices={fleet.devices}
-          artifacts={artifacts}
-          project={projectParam}
-          selectedDeviceId={effective}
-          onSelectDevice={setSelected}
-          onSynced={fleet.refresh}
-          onSessionExpired={expire}
-        />
+        <details
+          className="console-card"
+          data-testid="pit-dock-drawer"
+          open={(fleet.devices ?? []).some(
+            (d) =>
+              d.link_type === 'dock' ||
+              Boolean((d as { offline_mode?: boolean }).offline_mode),
+          )}
+        >
+          <summary>Venue Offline &amp; USB-C Dock Sync (RULE E301)</summary>
+          <PitDockCockpit
+            devices={fleet.devices}
+            artifacts={artifacts}
+            project={projectParam}
+            selectedDeviceId={effective}
+            onSelectDevice={setSelected}
+            onSynced={fleet.refresh}
+            onSessionExpired={expire}
+          />
+        </details>
       </div>
     </>
   )
