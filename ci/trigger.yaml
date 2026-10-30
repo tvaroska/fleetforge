@@ -1,0 +1,24 @@
+# Cloud Build trigger definitions for FleetForge (S3-infra-33)
+#
+# Apply with:
+#   gcloud builds triggers import \
+#     --project=sites-470716 \
+#     --region=us-central1 \
+#     --source=ci/trigger.yaml
+name: fleetforge-tag
+description: Release test, build, and Artifact Registry push on vX.Y.Z tag
+filename: cloudbuild.yaml
+repositoryEventConfig:
+  repository: projects/sites-470716/locations/us-central1/connections/Github/repositories/tvaroska-fleetforge
+  push:
+    tag: ^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$
+serviceAccount: projects/sites-470716/serviceAccounts/1076807043236-compute@developer.gserviceaccount.com
+---
+name: fleetforge-main
+description: Continuous integration test and build verification on main branch (no release push)
+filename: cloudbuild.yaml
+repositoryEventConfig:
+  repository: projects/sites-470716/locations/us-central1/connections/Github/repositories/tvaroska-fleetforge
+  push:
+    branch: ^main$
+serviceAccount: projects/sites-470716/serviceAccounts/1076807043236-compute@developer.gserviceaccount.com

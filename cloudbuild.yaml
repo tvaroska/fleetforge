@@ -16,6 +16,7 @@ substitutions:
   _AR_REPO: containers
   _BACKEND_IMAGE: ""
   _FRONTEND_IMAGE: ""
+  _PUSH: "auto"
 
 options:
   logging: CLOUD_LOGGING_ONLY
@@ -91,7 +92,7 @@ steps:
         npm run build
 
   # ------------------------------------------------------------------------- #
-  # 4. Build Production Container Images (Gated on All Verification Tracks)   #
+  # 4. Build & Push Production Container Images (Gated on All Verification)   #
   # ------------------------------------------------------------------------- #
   - id: docker-build-images
     name: gcr.io/cloud-builders/docker
@@ -108,8 +109,10 @@ steps:
         set -euo pipefail
         SHA="$(cat /workspace/.resolved_sha)"
         BUILT_AT="$(cat /workspace/.built_at)"
-        BACKEND_TAG="${_BACKEND_IMAGE:-${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/fleetforge:${SHA}}"
-        FRONTEND_TAG="${_FRONTEND_IMAGE:-${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/fleetforge-frontend:${SHA}}"
+        BACKEND_REPO="${_BACKEND_IMAGE:-${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/fleetforge}"
+        FRONTEND_REPO="${_FRONTEND_IMAGE:-${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/fleetforge-frontend}"
+        BACKEND_TAG="${BACKEND_REPO}:${SHA}"
+        FRONTEND_TAG="${FRONTEND_REPO}:${SHA}"
         docker build \
           --target production \
           --build-arg SOURCE_COMMIT="${SHA}" \
@@ -124,3 +127,19 @@ steps:
           -t "${FRONTEND_TAG}" \
           -f frontend/Dockerfile \
           frontend
+        if [[ -n "${TAG_NAME:-}" || "${_PUSH}" == "true" ]]; then
+          if [[ -n "${TAG_NAME:-}" ]]; then
+            docker tag "${BACKEND_TAG}" "${BACKEND_REPO}:${TAG_NAME}"
+            docker tag "${FRONTEND_TAG}" "${FRONTEND_REPO}:${TAG_NAME}"
+            docker push "${BACKEND_REPO}:${TAG_NAME}"
+            docker push "${FRONTEND_REPO}:${TAG_NAME}"
+          fi
+          docker tag "${BACKEND_TAG}" "${BACKEND_REPO}:latest"
+          docker tag "${FRONTEND_TAG}" "${FRONTEND_REPO}:latest"
+          docker push "${BACKEND_TAG}"
+          docker push "${BACKEND_REPO}:latest"
+          docker push "${FRONTEND_TAG}"
+          docker push "${FRONTEND_REPO}:latest"
+        else
+          echo "Skipping Artifact Registry push (TAG_NAME is empty and _PUSH=${_PUSH})"
+        fi
