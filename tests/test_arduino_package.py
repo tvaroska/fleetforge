@@ -90,7 +90,9 @@ def _properties(package: Path) -> dict[str, str]:
 
 
 def _git_basenames(directory: Path) -> list[str]:
-    cmd = ["git", "ls-files", "--", str(directory.relative_to(REPO_ROOT))]
+    if not (REPO_ROOT / ".git").exists():
+        return [p.name for p in directory.iterdir() if p.is_file()]
+    cmd = ["git", "-c", "safe.directory=*", "ls-files", "--", str(directory.relative_to(REPO_ROOT))]
     proc = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True, check=True)  # noqa: S603,S607
     return [Path(line).name for line in proc.stdout.splitlines() if line]
 
