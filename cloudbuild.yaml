@@ -45,7 +45,7 @@ steps:
   # 2. Python Ruff Lint, Format, Mypy Typecheck & Firmware/Unit Pytest (t=0)  #
   # ------------------------------------------------------------------------- #
   - id: python-lint-typecheck-and-unit-tests
-    name: ghcr.io/astral-sh/uv:0.9.1-python3.12-bookworm-slim
+    name: ghcr.io/astral-sh/uv:0.9.1-python3.12-bookworm
     waitFor: ["-"]
     entrypoint: bash
     env:
