@@ -71,7 +71,7 @@ steps:
           tests/test_layout_detection.py \
           tests/test_selftest.py \
           tests/test_safe_window.py \
-          tests/test_sleep_helpers.py \
+          tests/test_sleep.py \
           -k "not (TestCiCdDatabaseAndApi or TestTrack1 and database)" \
           -q
 

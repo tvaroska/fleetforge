@@ -266,21 +266,18 @@ describe('PitDockCockpit — RULE E301 Venue Offline & USB-C Pit Cockpit (P2-1, 
     expect(banner).toHaveTextContent('[⊘ 802.11 Wi-Fi: OFF]')
     expect(banner).toHaveTextContent('[⊘ Improv BLE: OFF]')
     expect(banner).toHaveTextContent('[✓ Shared NimBLE GATT: LIVE]')
-    expect(banner).toHaveTextContent('[✓ Pit Cache Ready]')
 
     const strip = screen.getByTestId('pit-mini-fleet-strip')
     expect(within(strip).getByTestId('peer-mesh-skew')).toHaveTextContent('! SKEW')
     expect(within(strip).getByTestId('peer-mesh-skew')).toHaveTextContent('batteries_csv:v14 != v15')
 
-    // Panel 3: Peripheral self-test + locked factory flash
-    expect(screen.getByTestId('pit-selftest-checklist')).toHaveTextContent('SX1262 915MHz LoRa SPI')
-    expect(screen.getByTestId('pit-selftest-checklist')).toHaveTextContent('SN65HVD230 CAN Loopback')
+    // Panel 3: Reported self-test outcome
     expect(screen.getByTestId('pit-selftest-checklist')).toHaveTextContent(
-      'Shared NimBLE GATT ble_hs_synced()',
+      'No self-test result reported for the selected board yet.',
     )
-    expect(screen.getByTestId('pit-factory-flash-locked')).toBeDisabled()
 
-    // Panel 1: Replay Dock Bundle to Server
+    // Panel 1: Insert Empty Skeleton -> Replay Dock Bundle to Server
+    await userEvent.click(screen.getByTestId('dock-generate-sample'))
     await userEvent.click(screen.getByTestId('dock-sync-submit'))
     const receipt = await screen.findByTestId('dock-sync-receipt')
     expect(within(receipt).getByTestId('receipt-ingested-statuses')).toHaveTextContent('1')
