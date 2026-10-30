@@ -1082,6 +1082,7 @@ most 1966080 bytes, once per upload. The reference reader the spike used, in ful
 ```python
 MAGIC = bytes.fromhex("14a948d18f12cfdd46464f54414c4942")
 
+
 def find_marker(data: bytes) -> dict | None:
     pos = data.find(MAGIC)
     while pos != -1:
@@ -1089,8 +1090,11 @@ def find_marker(data: bytes) -> dict | None:
             raw = data[pos + 20 : pos + 52]
             end = raw.find(b"\0")
             if end > 0 and all(0x20 <= b <= 0x7E for b in raw[:end]):
-                return {"offset": pos, "format": data[pos + 16],
-                        "lib_version": raw[:end].decode("ascii")}
+                return {
+                    "offset": pos,
+                    "format": data[pos + 16],
+                    "lib_version": raw[:end].decode("ascii"),
+                }
         pos = data.find(MAGIC, pos + 1)
     return None
 ```
