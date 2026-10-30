@@ -6,7 +6,7 @@
 #   - Track C (t=0): frontend-typecheck-and-tests (npm ci + tsc -b + vitest + vite build)
 #   - Fan-in Gate  : docker-build-images builds both production container targets (`api`/`ingestor`
 #                    from `Dockerfile` and `frontend` from `frontend/Dockerfile`) only after all
-#                    verification tracks pass.
+#                    verification tracks pass, and pushes `:${TAG_NAME}` + `:latest` on tag releases.
 #
 # Usage:
 #   gcloud builds submit --config cloudbuild.yaml
@@ -34,11 +34,12 @@ steps:
       - -c
       - |
         set -euo pipefail
-        SHA="${COMMIT_SHA:-$(git rev-parse --short=12 HEAD 2>/dev/null || echo 'local')}"
-        BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-        printf '%s' "${SHA}" > /workspace/.resolved_sha
-        printf '%s' "${BUILT_AT}" > /workspace/.built_at
-        printf "Resolved commit=%s built_at=%s\n" "${SHA}" "${BUILT_AT}"
+        CB_COMMIT="${COMMIT_SHA}"
+        SHA="$${CB_COMMIT:-$$(git rev-parse --short=12 HEAD 2>/dev/null || echo 'local')}"
+        BUILT_AT="$$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf '%s' "$${SHA}" > /workspace/.resolved_sha
+        printf '%s' "$${BUILT_AT}" > /workspace/.built_at
+        printf "Resolved commit=%s built_at=%s\n" "$${SHA}" "$${BUILT_AT}"
 
   # ------------------------------------------------------------------------- #
   # 2. Python Ruff Lint, Format, Mypy Typecheck & Firmware/Unit Pytest (t=0)  #
@@ -107,39 +108,42 @@ steps:
       - -c
       - |
         set -euo pipefail
-        SHA="$(cat /workspace/.resolved_sha)"
-        BUILT_AT="$(cat /workspace/.built_at)"
-        BACKEND_REPO="${_BACKEND_IMAGE:-${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/fleetforge}"
-        FRONTEND_REPO="${_FRONTEND_IMAGE:-${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/fleetforge-frontend}"
-        BACKEND_TAG="${BACKEND_REPO}:${SHA}"
-        FRONTEND_TAG="${FRONTEND_REPO}:${SHA}"
+        SHA="$$(cat /workspace/.resolved_sha)"
+        BUILT_AT="$$(cat /workspace/.built_at)"
+        CB_TAG="${TAG_NAME}"
+        CB_BACKEND="${_BACKEND_IMAGE}"
+        CB_FRONTEND="${_FRONTEND_IMAGE}"
+        BACKEND_REPO="$${CB_BACKEND:-${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/fleetforge}"
+        FRONTEND_REPO="$${CB_FRONTEND:-${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/fleetforge-frontend}"
+        BACKEND_TAG="$${BACKEND_REPO}:$${SHA}"
+        FRONTEND_TAG="$${FRONTEND_REPO}:$${SHA}"
         docker build \
           --target production \
-          --build-arg SOURCE_COMMIT="${SHA}" \
-          --build-arg BUILT_AT="${BUILT_AT}" \
-          -t "${BACKEND_TAG}" \
+          --build-arg SOURCE_COMMIT="$${SHA}" \
+          --build-arg BUILT_AT="$${BUILT_AT}" \
+          -t "$${BACKEND_TAG}" \
           -f Dockerfile \
           .
         docker build \
           --target production \
-          --build-arg SOURCE_COMMIT="${SHA}" \
-          --build-arg BUILT_AT="${BUILT_AT}" \
-          -t "${FRONTEND_TAG}" \
+          --build-arg SOURCE_COMMIT="$${SHA}" \
+          --build-arg BUILT_AT="$${BUILT_AT}" \
+          -t "$${FRONTEND_TAG}" \
           -f frontend/Dockerfile \
           frontend
-        if [[ -n "${TAG_NAME:-}" || "${_PUSH}" == "true" ]]; then
-          if [[ -n "${TAG_NAME:-}" ]]; then
-            docker tag "${BACKEND_TAG}" "${BACKEND_REPO}:${TAG_NAME}"
-            docker tag "${FRONTEND_TAG}" "${FRONTEND_REPO}:${TAG_NAME}"
-            docker push "${BACKEND_REPO}:${TAG_NAME}"
-            docker push "${FRONTEND_REPO}:${TAG_NAME}"
+        if [[ -n "$${CB_TAG}" || "${_PUSH}" == "true" ]]; then
+          if [[ -n "$${CB_TAG}" ]]; then
+            docker tag "$${BACKEND_TAG}" "$${BACKEND_REPO}:$${CB_TAG}"
+            docker tag "$${FRONTEND_TAG}" "$${FRONTEND_REPO}:$${CB_TAG}"
+            docker push "$${BACKEND_REPO}:$${CB_TAG}"
+            docker push "$${FRONTEND_REPO}:$${CB_TAG}"
           fi
-          docker tag "${BACKEND_TAG}" "${BACKEND_REPO}:latest"
-          docker tag "${FRONTEND_TAG}" "${FRONTEND_REPO}:latest"
-          docker push "${BACKEND_TAG}"
-          docker push "${BACKEND_REPO}:latest"
-          docker push "${FRONTEND_TAG}"
-          docker push "${FRONTEND_REPO}:latest"
+          docker tag "$${BACKEND_TAG}" "$${BACKEND_REPO}:latest"
+          docker tag "$${FRONTEND_TAG}" "$${FRONTEND_REPO}:latest"
+          docker push "$${BACKEND_TAG}"
+          docker push "$${BACKEND_REPO}:latest"
+          docker push "$${FRONTEND_TAG}"
+          docker push "$${FRONTEND_REPO}:latest"
         else
           echo "Skipping Artifact Registry push (TAG_NAME is empty and _PUSH=${_PUSH})"
         fi
