@@ -5,7 +5,8 @@ iteration loop (`CI-CD-cli-1` / CUJ-2):
 
 * `new` — scaffold a new ESP-IDF board firmware repository from the public Fleetforge
   starter template (`templates/esp-idf/`), stamping `AGENTS.md` + `CLAUDE.md`, `justfile`,
-  `cloudbuild.yaml`, `partitions.csv` (`ab-4m-v1`), `sdkconfig.defaults`, and `main/`.
+  `.github/workflows/fleetforge.yml`, `partitions.csv` (`ab-4m-v1`), `sdkconfig.defaults`,
+  and `main/`.
 * `push` — upload a compiled `.bin` with Git/CI provenance (`repo_url`, `branch`,
   `commit_sha`, `tag`, `build_url`, `test_passed`) to `POST /v1/artifact`, optionally
   auto-detecting local `git` metadata and/or triggering an explicit project-wide deploy.
@@ -40,7 +41,6 @@ from fleetforge import __version__
 
 DEFAULT_PUBLIC_REPO_URL = "https://github.com/tvaroska/fleetforge"
 DEFAULT_FLEETFORGE_URL = "https://bingo.tvaroska.sk"
-DEFAULT_GCP_PROJECT = "sites-470716"
 SUPPORTED_IDF_TARGETS = ("esp32s3", "esp32c6", "esp32", "esp32c3")
 
 
@@ -244,7 +244,6 @@ def render_template_project(
     target: str,
     fleetforge_url: str,
     fleetforge_ref: str,
-    gcp_project: str = DEFAULT_GCP_PROJECT,
     repo_url: str = DEFAULT_PUBLIC_REPO_URL,
     prefer_remote: bool = False,
     force: bool = False,
@@ -266,7 +265,6 @@ def render_template_project(
         "{{TARGET}}": target,
         "{{FLEETFORGE_URL}}": fleetforge_url.rstrip("/"),
         "{{FLEETFORGE_REF}}": fleetforge_ref,
-        "{{GCP_PROJECT}}": gcp_project,
     }
 
     written: list[Path] = []
@@ -381,11 +379,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "--repo-url",
         default=DEFAULT_PUBLIC_REPO_URL,
         help=f"Fleetforge public git repository URL (default: {DEFAULT_PUBLIC_REPO_URL})",
-    )
-    new_p.add_argument(
-        "--gcp-project",
-        default=os.environ.get("GCP_PROJECT", DEFAULT_GCP_PROJECT),
-        help=f"GCP project ID for `just cloud-build` (default: {DEFAULT_GCP_PROJECT})",
     )
     new_p.add_argument(
         "--remote",
@@ -566,7 +559,6 @@ def main(argv: list[str] | None = None) -> int:
                 target=args.target,
                 fleetforge_url=effective_url,
                 fleetforge_ref=args.ref,
-                gcp_project=args.gcp_project,
                 repo_url=args.repo_url,
                 prefer_remote=args.remote,
                 force=args.force,

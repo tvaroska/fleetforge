@@ -10,17 +10,18 @@ ESP-IDF 5.5 firmware for `{{TARGET}}` managed over the air by [Fleetforge](https
    # Edit .env and set FLEETFORGE_TOKEN=ffa_...
    ```
 
-2. **Build firmware (`build/{{APP_NAME}}.bin`):**
+2. **Build firmware locally (`build/{{APP_NAME}}.bin`):**
    ```sh
-   just build        # local Docker (espressif/idf:v5.5.5)
-   # or:
-   just cloud-build  # remote Google Cloud Build (no local Docker required)
+   just build          # auto-detects host idf.py or falls back to local Docker (espressif/idf:v5.5.5)
+   just build-idf      # host idf.py explicitly
+   just build-docker   # Docker container explicitly
    ```
 
-3. **Upload & deploy over the air:**
+3. **Upload & deploy over the air (local or GitHub Actions):**
    ```sh
    just push --deploy dev
    ```
+   Or push to `main` / tag `v*` on GitHub (with repository secret `FLEETFORGE_TOKEN` set) to run [`.github/workflows/fleetforge.yml`](.github/workflows/fleetforge.yml).
 
 4. **Check fleet status, tail logs, and manage rotating secrets:**
    ```sh

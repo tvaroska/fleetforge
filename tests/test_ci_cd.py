@@ -435,6 +435,16 @@ class TestCli:
         assert out["target"] == "esp32c6"
         assert (dest / "AGENTS.md").is_file()
         assert (dest / "CLAUDE.md").exists()
+        assert not (dest / "cloudbuild.yaml").exists()
+        gh_wf = dest / ".github" / "workflows" / "fleetforge.yml"
+        assert gh_wf.is_file()
+        gh_text = gh_wf.read_text(encoding="utf-8")
+        assert "idf.py set-target esp32c6" in gh_text
+        assert "build/oled_status.bin" in gh_text
+        just_text = (dest / "justfile").read_text(encoding="utf-8")
+        assert "build-idf:" in just_text
+        assert "build-docker:" in just_text
+        assert "cloudbuild" not in just_text
         assert "project(oled_status)" in (dest / "CMakeLists.txt").read_text(encoding="utf-8")
         idf_yml = (dest / "main" / "idf_component.yml").read_text(encoding="utf-8")
         assert "https://github.com/tvaroska/fleetforge.git" in idf_yml

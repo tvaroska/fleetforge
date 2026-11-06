@@ -6,13 +6,36 @@ target := "{{TARGET}}"
 project := env_var_or_default("FLEETFORGE_PROJECT", "{{PROJECT_SLUG}}")
 fleetforge_url := env_var_or_default("FLEETFORGE_URL", "{{FLEETFORGE_URL}}")
 fleetforge_ref := "{{FLEETFORGE_REF}}"
-gcp_project := env_var_or_default("GCP_PROJECT", "{{GCP_PROJECT}}")
 ff_cli := "uv run -q --no-project --with 'fleetforge @ git+https://github.com/tvaroska/fleetforge@" + fleetforge_ref + "' python -m fleetforge.cli"
 
 version := `sed -n 's/^set(PROJECT_VER "\(.*\)")/\1/p' CMakeLists.txt`
 
-# Build build/{{APP_NAME}}.bin locally inside the pinned ESP-IDF 5.5.5 container
+# Build build/{{APP_NAME}}.bin (uses local idf.py if on PATH, otherwise local Docker)
 build:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if command -v idf.py >/dev/null 2>&1; then
+        idf.py set-target {{target}}
+        idf.py build
+    else
+        docker run --rm -u "$(id -u):$(id -g)" \
+            -v "{{justfile_directory()}}":/w -w /w \
+            -e HOME=/tmp \
+            {{idf_image}} \
+            bash -euo pipefail -c '. $IDF_PATH/export.sh && idf.py set-target {{target}} && idf.py build'
+    fi
+    ls -lh build/{{app_name}}.bin
+    echo "Built {{app_name}} {{version}} ({{target}}, layout ab-4m-v1)"
+
+# Build build/{{APP_NAME}}.bin explicitly with host ESP-IDF (`idf.py`)
+build-idf:
+    idf.py set-target {{target}}
+    idf.py build
+    @ls -lh build/{{app_name}}.bin
+    @echo "Built {{app_name}} {{version}} ({{target}}, layout ab-4m-v1)"
+
+# Build build/{{APP_NAME}}.bin explicitly inside the pinned ESP-IDF 5.5.5 Docker container
+build-docker:
     docker run --rm -u $(id -u):$(id -g) \
         -v "{{justfile_directory()}}":/w -w /w \
         -e HOME=/tmp \
@@ -20,17 +43,6 @@ build:
         bash -euo pipefail -c '. $IDF_PATH/export.sh && idf.py set-target {{target}} && idf.py build'
     @ls -lh build/{{app_name}}.bin
     @echo "Built {{app_name}} {{version}} ({{target}}, layout ab-4m-v1)"
-
-# Build build/{{APP_NAME}}.bin remotely on Google Cloud Build and download it to build/{{APP_NAME}}.bin
-cloud-build:
-    mkdir -p build
-    gcloud builds submit "{{justfile_directory()}}" \
-        --project={{gcp_project}} \
-        --config=cloudbuild.yaml \
-        --substitutions=_ARTIFACT_URI=gs://{{gcp_project}}_cloudbuild/{{app_name}}/{{version}}
-    gcloud storage cp gs://{{gcp_project}}_cloudbuild/{{app_name}}/{{version}}/{{app_name}}.bin build/{{app_name}}.bin
-    @ls -lh build/{{app_name}}.bin
-    @echo "Cloud-built {{app_name}} {{version}} ({{target}}, layout ab-4m-v1)"
 
 # Upload build/{{APP_NAME}}.bin with Git provenance to Fleetforge (pass --deploy dev or --deploy all)
 push *args:

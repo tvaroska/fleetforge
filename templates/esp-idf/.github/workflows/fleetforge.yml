@@ -1,0 +1,78 @@
+name: Build & Push Firmware to Fleetforge
+
+on:
+  push:
+    branches: ["main"]
+    tags: ["v*"]
+  repository_dispatch:
+    types: [fleetforge-build]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Git ref (branch, tag, or commit) to build and push"
+        required: false
+      deploy:
+        description: "Explicit deploy target after upload (off, dev, all)"
+        required: false
+        default: "off"
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    container:
+      image: espressif/idf:v5.5.5@sha256:a9231d0697ab8f7517cc072e93b7c83e04907bfbfba80b6440d7dbbf90665cf2
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.ref || github.event.client_payload.track_ref || github.ref }}
+
+      - name: Build ESP-IDF firmware ({{TARGET}})
+        shell: bash
+        run: |
+          set -euo pipefail
+          . "$IDF_PATH/export.sh"
+          idf.py set-target {{TARGET}}
+          idf.py build
+          ls -lh build/{{APP_NAME}}.bin
+
+      - name: Upload build/{{APP_NAME}}.bin artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: {{APP_NAME}}-{{TARGET}}-bin
+          path: build/{{APP_NAME}}.bin
+
+      - name: Push build/{{APP_NAME}}.bin to Fleetforge
+        if: ${{ secrets.FLEETFORGE_TOKEN != '' }}
+        shell: bash
+        env:
+          FLEETFORGE_URL: ${{ vars.FLEETFORGE_URL || '{{FLEETFORGE_URL}}' }}
+          FLEETFORGE_TOKEN: ${{ secrets.FLEETFORGE_TOKEN }}
+        run: |
+          set -euo pipefail
+          BASE_VER="$(sed -n 's/^set(PROJECT_VER "\(.*\)")/\1/p' CMakeLists.txt)"
+          SHORT_SHA="${GITHUB_SHA::7}"
+          BRANCH="${GITHUB_REF_NAME}"
+          TAG=""
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF_NAME}"
+            VERSION="${TAG#v}"
+          else
+            VERSION="${BASE_VER}-${SHORT_SHA}"
+          fi
+          BUILD_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+          curl --fail-with-body -X POST \
+            "${FLEETFORGE_URL%/}/v1/artifact?project={{PROJECT_SLUG}}&target={{TARGET}}&version=${VERSION}&partition_layout=ab-4m-v1&repo_url=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}&branch=${BRANCH}&commit_sha=${GITHUB_SHA}&tag=${TAG}&build_url=${BUILD_URL}&test_passed=true" \
+            -H "Authorization: Bearer ${FLEETFORGE_TOKEN}" \
+            -H "Content-Type: application/octet-stream" \
+            --data-binary "@build/{{APP_NAME}}.bin"
+
+          DEPLOY_TARGET="${{ github.event.inputs.deploy || 'off' }}"
+          if [[ "${DEPLOY_TARGET}" == "dev" || "${DEPLOY_TARGET}" == "all" ]]; then
+            curl --fail-with-body -X POST \
+              "${FLEETFORGE_URL%/}/v1/projects/{{PROJECT_SLUG}}/deploy" \
+              -H "Authorization: Bearer ${FLEETFORGE_TOKEN}" \
+              -H "Content-Type: application/json" \
+              -d "{\"version\":\"${VERSION}\",\"target_filter\":\"${DEPLOY_TARGET}\",\"apply\":\"auto\"}"
+          fi

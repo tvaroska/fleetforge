@@ -6,6 +6,7 @@
 - **ESP-IDF Target:** `{{TARGET}}` (`ESP-IDF >= 5.5`, partition layout `ab-4m-v1`)
 - **Fleetforge Project Slug:** `{{PROJECT_SLUG}}` (`{{FLEETFORGE_URL}}`)
 - **Fleetforge Component Dependency:** [`main/idf_component.yml`](main/idf_component.yml) (`https://github.com/tvaroska/fleetforge.git`, `path: agent/components/fleetforge`, `version: {{FLEETFORGE_REF}}`)
+- **CI/CD Pipeline:** [`.github/workflows/fleetforge.yml`](.github/workflows/fleetforge.yml) (compiles inside `espressif/idf:v5.5.5` on GitHub Actions and pushes `build/{{APP_NAME}}.bin` with Git provenance when `FLEETFORGE_TOKEN` is set)
 
 ---
 
@@ -14,8 +15,8 @@
 1. **Bump Firmware Version on Every Change:**
    - Update `set(PROJECT_VER "X.Y.Z")` in [`CMakeLists.txt`](CMakeLists.txt) before building. Fleetforge versions are immutable per `(project, target, version)`.
 2. **Compile Firmware:**
-   - With local Docker: `just build`
-   - Without local Docker (e.g. Cloudtop / remote workstation): `just cloud-build`
+   - Local build (uses host `idf.py` if on `PATH`, or falls back to Docker `espressif/idf:v5.5.5`): `just build` (or explicitly `just build-idf` / `just build-docker`)
+   - Remote CI build: push to `main` or tag `v*` to trigger [`.github/workflows/fleetforge.yml`](.github/workflows/fleetforge.yml) (or `gh workflow run fleetforge.yml -f deploy=dev`)
 3. **Upload & Deploy Over the Air:**
    - Upload and auto-deploy (if Continuous Deployment is configured on `{{PROJECT_SLUG}}`): `just push`
    - Or trigger an explicit deploy to `dev` / `all` boards: `just push --deploy dev`
