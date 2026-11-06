@@ -10,6 +10,14 @@ ff_cli := "uv run -q --no-project --with 'fleetforge @ git+https://github.com/tv
 
 version := `sed -n 's/^set(PROJECT_VER "\(.*\)")/\1/p' CMakeLists.txt`
 
+# Authenticate with Fleetforge (saves credentials in ~/.config/fleetforge/credentials.json)
+login *args:
+    {{ff_cli}} --url "{{fleetforge_url}}" login {{args}}
+
+# Show currently authenticated Fleetforge identity and visible projects
+whoami *args:
+    {{ff_cli}} --url "{{fleetforge_url}}" whoami {{args}}
+
 # Build build/{{APP_NAME}}.bin (uses local idf.py if on PATH, otherwise local Docker)
 build:
     #!/usr/bin/env bash

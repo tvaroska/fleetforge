@@ -559,6 +559,131 @@ class TestCli:
             sec_out = json.loads(capsys.readouterr().out)
             assert sec_out["secrets_rev"] == 3
 
+    def test_cli_login_whoami_logout_and_saved_credentials_fallback(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("FLEETFORGE_TOKEN", raising=False)
+        monkeypatch.delenv("FLEETFORGE_URL", raising=False)
+        creds_file = tmp_path / "creds" / "credentials.json"
+        env_file = tmp_path / ".env"
+
+        requests_seen: list[tuple[str, str, str]] = []
+
+        def fake_login(
+            base_url: str, username: str, password: str
+        ) -> tuple[int, dict[str, Any], str | None]:
+            assert base_url == "https://bingo.tvaroska.sk"
+            assert username == "boris"
+            assert password == "s3cret-pass"
+            return (
+                200,
+                {"expires_at": "2026-11-13T21:00:00Z"},
+                "ffa_00000000-0000-4000-8000-000000000099_sessionsecret",
+            )
+
+        def fake_request(
+            method: str,
+            url: str,
+            *,
+            token: str,
+            body: bytes | None = None,
+            content_type: str = "application/octet-stream",
+        ) -> tuple[int, dict[str, Any]]:
+            requests_seen.append((method, url, token))
+            if method == "POST" and url.endswith("/v1/auth/tokens"):
+                payload = json.loads((body or b"{}").decode("utf-8"))
+                assert payload["project"] == "eink-todo"
+                assert payload["scopes"] == ["read", "write:artifacts", "deploy"]
+                return 201, {
+                    "id": "00000000-0000-4000-8000-000000000100",
+                    "token": "ffa_00000000-0000-4000-8000-000000000100_mintedsecret",
+                    "name": payload["name"],
+                    "subject": "boris",
+                    "scopes": payload["scopes"],
+                    "project_slug": "eink-todo",
+                }
+            if method == "GET" and url.endswith("/v1/auth/me"):
+                return 200, {
+                    "token_id": "00000000-0000-4000-8000-000000000100",
+                    "subject": "boris",
+                    "email": "boris@tvaroska.com",
+                    "display_name": "Boris Tvaroska",
+                    "is_superadmin": True,
+                    "scopes": ["read", "write:artifacts", "deploy"],
+                    "expires_at": "2026-12-06T21:00:00Z",
+                    "projects": [{"slug": "eink-todo", "role": "owner"}],
+                }
+            if method == "GET" and "/v1/devices?" in url:
+                return 200, {"devices": [], "arrivals": []}
+            if method == "POST" and url.endswith("/v1/auth/logout"):
+                return 204, {}
+            return 200, {}
+
+        with (
+            patch("fleetforge.cli._login_with_password", side_effect=fake_login),
+            patch("fleetforge.cli._request_json", side_effect=fake_request),
+        ):
+            rc_login = main(
+                [
+                    "--credentials-file",
+                    str(creds_file),
+                    "login",
+                    "-u",
+                    "boris",
+                    "-p",
+                    "s3cret-pass",
+                    "--project",
+                    "eink-todo",
+                    "--write-env",
+                    str(env_file),
+                ]
+            )
+            assert rc_login == 0
+            login_out = json.loads(capsys.readouterr().out)
+            assert login_out["status"] == "authenticated"
+            assert login_out["subject"] == "boris"
+            assert creds_file.is_file()
+            assert (creds_file.stat().st_mode & 0o777) == 0o600
+            env_text = env_file.read_text(encoding="utf-8")
+            assert (
+                "FLEETFORGE_TOKEN=ffa_00000000-0000-4000-8000-000000000100_mintedsecret"
+                in env_text
+            )
+            assert "FLEETFORGE_PROJECT=eink-todo" in env_text
+
+            # Subsequent commands (`whoami`, `status`) work without --token or $FLEETFORGE_TOKEN
+            rc_whoami = main(["--credentials-file", str(creds_file), "whoami"])
+            assert rc_whoami == 0
+            whoami_out = capsys.readouterr().out
+            assert "boris (boris@tvaroska.com)" in whoami_out
+            assert "eink-todo (owner)" in whoami_out
+
+            rc_status = main(
+                [
+                    "--credentials-file",
+                    str(creds_file),
+                    "status",
+                    "--project",
+                    "eink-todo",
+                ]
+            )
+            assert rc_status == 0
+            assert "No enrolled devices found." in capsys.readouterr().out
+            assert (
+                requests_seen[-1][2]
+                == "ffa_00000000-0000-4000-8000-000000000100_mintedsecret"
+            )
+
+            # Logout revokes on server and clears saved profile
+            rc_logout = main(["--credentials-file", str(creds_file), "logout"])
+            assert rc_logout == 0
+            logout_out = json.loads(capsys.readouterr().out)
+            assert logout_out["removed_saved_profile"] is True
+
+            # After logout, status fails with exit code 2 (not authenticated)
+            rc_unauth = main(["--credentials-file", str(creds_file), "status"])
+            assert rc_unauth == 2
+
 
 class TestSecretsCryptoAndDeviceSecretsAuth:
     def test_encrypt_and_decrypt_secret_round_trip(self) -> None:

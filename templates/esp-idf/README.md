@@ -4,11 +4,12 @@ ESP-IDF 5.5 firmware for `{{TARGET}}` managed over the air by [Fleetforge](https
 
 ## Quickstart
 
-1. **Configure credentials (`.env`):**
+1. **Authenticate with Fleetforge (once per workstation):**
    ```sh
-   cp .env.example .env
-   # Edit .env and set FLEETFORGE_TOKEN=ffa_...
+   just login -u <username-or-email>
+   just whoami
    ```
+   *(Optional: for headless CI or per-repo overrides, copy `.env.example` to `.env` and set `FLEETFORGE_TOKEN=ffa_...`.)*
 
 2. **Build firmware locally (`build/{{APP_NAME}}.bin`):**
    ```sh
