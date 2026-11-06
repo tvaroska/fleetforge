@@ -149,7 +149,10 @@ static void recover_rtc_if_needed_locked(int64_t now_us)
         for (uint32_t i = 0; i < count; i++) {
             const ff_log_rtc_slot_t *saved = &s_rtc.slots[(start + i) % FF_LOG_RTC_LINES];
             if (saved->text[0] != '\0') {
-                char recovered[FF_LOG_TEXT_MAX + 1];
+                /* Room for the prefix plus a full 200-byte line: the line is never cut
+                 * (push_ring_locked bounds it again), and GCC 14's -Wformat-truncation
+                 * under -Werror has nothing to object to. */
+                char recovered[sizeof("[prev-boot] ") + FF_LOG_TEXT_MAX];
                 snprintf(recovered, sizeof(recovered), "[prev-boot] %s", saved->text);
                 push_ring_locked(normalize_level(saved->level), recovered, now_us);
             }
