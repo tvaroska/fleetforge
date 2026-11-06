@@ -99,6 +99,41 @@ class MeResponse(BaseModel):
     is_superadmin: bool = False
     project_id: uuid.UUID | None = None
     projects: list[UserProjectSummary] = Field(default_factory=list)
+    user_id: uuid.UUID | None = None
+    email: str | None = None
+    display_name: str | None = None
+    has_local_password: bool = False
+
+
+class SelfProfileUpdate(BaseModel):
+    """`PATCH /v1/auth/me`: update the signed-in human user's profile or password."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    email: str | None = Field(default=None, max_length=254)
+    display_name: str | None = Field(default=None, max_length=64)
+    current_password: str | None = Field(default=None, min_length=1, max_length=1024)
+    password: str | None = Field(default=None, min_length=8, max_length=1024)
+
+    @field_validator("email")
+    @classmethod
+    def _normalize_email(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        low = v.strip().lower()
+        if not low:
+            return None
+        if not re.match(EMAIL_PATTERN, low):
+            raise ValueError("email must be a valid email address")
+        return low
+
+    @field_validator("display_name")
+    @classmethod
+    def _normalize_display_name(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        stripped = v.strip()
+        return stripped or None
 
 
 def _default_scopes() -> list[AllowedScope]:
@@ -245,6 +280,8 @@ class ProjectMemberSummary(BaseModel):
     user_id: uuid.UUID
     username: str
     display_name: str | None
+    email: str | None = None
+    is_superadmin: bool = False
     role: str
     created_at: dt.datetime
 
@@ -289,6 +326,11 @@ class DeviceGroupList(BaseModel):
     groups: list[DeviceGroupSummary]
 
 
+class UserProjectRole(BaseModel):
+    project_slug: str
+    role: str
+
+
 class UserCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -298,6 +340,8 @@ class UserCreate(BaseModel):
     password: str | None = Field(default=None, min_length=1, max_length=1024)
     is_superadmin: bool = False
     send_invite_email: bool = False
+    project: str | None = Field(default=None, pattern=PROJECT_SLUG_PATTERN)
+    role: ProjectRole | None = None
 
     @field_validator("email")
     @classmethod
@@ -305,9 +349,19 @@ class UserCreate(BaseModel):
         if v is None:
             return None
         low = v.strip().lower()
+        if not low:
+            return None
         if not re.match(EMAIL_PATTERN, low):
             raise ValueError("email must be a valid email address")
         return low
+
+    @field_validator("display_name")
+    @classmethod
+    def _normalize_display_name(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        stripped = v.strip()
+        return stripped or None
 
     @model_validator(mode="after")
     def _require_email_or_password(self) -> Self:
@@ -332,9 +386,19 @@ class UserUpdate(BaseModel):
         if v is None:
             return None
         low = v.strip().lower()
+        if not low:
+            return None
         if not re.match(EMAIL_PATTERN, low):
             raise ValueError("email must be a valid email address")
         return low
+
+    @field_validator("display_name")
+    @classmethod
+    def _normalize_display_name(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        stripped = v.strip()
+        return stripped or None
 
 
 # Outcome of the invite / password-reset email: `None` when none was requested.
@@ -352,6 +416,7 @@ class UserSummary(BaseModel):
     disabled_at: dt.datetime | None
     created_at: dt.datetime
     email_delivery: EmailDelivery | None = None
+    projects: list[UserProjectRole] = Field(default_factory=list)
 
 
 class UserList(BaseModel):

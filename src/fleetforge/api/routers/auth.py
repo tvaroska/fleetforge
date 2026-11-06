@@ -17,8 +17,10 @@ import re
 import uuid
 from typing import Annotated, Any
 
+import anyio.to_thread
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from sqlalchemy import or_, select, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from fleetforge.api.deps import (
@@ -48,6 +50,7 @@ from fleetforge.api.schemas import (
     LoginResponse,
     MeResponse,
     PasswordResetRequest,
+    SelfProfileUpdate,
     UserProjectSummary,
 )
 from fleetforge.auth.cache import VerifiedSecretCache
@@ -56,7 +59,7 @@ from fleetforge.auth.firebase import (
     FirebaseIdentity,
     FirebaseInvalidCredentials,
 )
-from fleetforge.auth.hashing import averify_secret, dummy_verify
+from fleetforge.auth.hashing import ARGON2_LIMITER, averify_secret, dummy_verify, hash_secret
 from fleetforge.auth.ratelimit import FixedWindowLimiter
 from fleetforge.auth.tokens import ADMIN_TOKEN_PREFIX, aissue_token
 from fleetforge.db.models import (
@@ -546,6 +549,8 @@ async def reset_password(
             detail="Firebase authentication service is unavailable",
         ) from None
 
+    pw_hash = await anyio.to_thread.run_sync(hash_secret, body.new_password, limiter=ARGON2_LIMITER)
+
     async with sessionmaker() as session:
         resolved = await _resolve_invited_firebase_user(
             session,
@@ -554,6 +559,8 @@ async def reset_password(
             key,
             limiter,
         )
+        resolved.password_hash = pw_hash
+        resolved.updated_at = now_utc()
         user_id = resolved.id
         subject = resolved.username
         await session.commit()
@@ -620,8 +627,13 @@ async def logout(
 )
 async def me(admin: AdminDep, sessionmaker: SessionMakerDep) -> MeResponse:
     """Echo the authenticated context and visible projects."""
+    user: User | None = None
     async with sessionmaker() as session:
         projects = await visible_projects_for(session, admin)
+        if admin.user_id is not None:
+            user = await session.get(User, admin.user_id)
+        elif admin.project_id is None:
+            user = await session.scalar(select(User).where(User.username == admin.subject))
     return MeResponse(
         token_id=admin.token_id,
         subject=admin.subject,
@@ -630,6 +642,111 @@ async def me(admin: AdminDep, sessionmaker: SessionMakerDep) -> MeResponse:
         is_superadmin=admin.is_superadmin,
         project_id=admin.project_id,
         projects=projects,
+        user_id=user.id if user is not None else admin.user_id,
+        email=user.email if user is not None else None,
+        display_name=user.display_name if user is not None else None,
+        has_local_password=bool(user is not None and user.password_hash is not None),
+    )
+
+
+@router.patch(
+    "/me",
+    response_model=MeResponse,
+    summary="Update the signed-in user's display name, email, or local password",
+    dependencies=[Depends(bearer_scheme), Depends(cookie_scheme)],
+)
+async def update_me(
+    body: SelfProfileUpdate,
+    admin: AdminDep,
+    settings: SettingsDep,
+    sessionmaker: SessionMakerDep,
+) -> MeResponse:
+    """Update the caller's own `User` record (or bootstrap one for `admin`)."""
+    if "admin" not in admin.scopes or admin.project_id is not None:
+        raise FORBIDDEN
+
+    pw_hash = (
+        await anyio.to_thread.run_sync(hash_secret, body.password, limiter=ARGON2_LIMITER)
+        if body.password is not None
+        else None
+    )
+
+    async with sessionmaker() as session:
+        user: User | None = None
+        if admin.user_id is not None:
+            user = await session.get(User, admin.user_id)
+        if user is None:
+            user = await session.scalar(select(User).where(User.username == admin.subject))
+
+        if user is None:
+            if not admin.is_superadmin:
+                raise FORBIDDEN
+            if body.current_password is not None and settings.admin_password_hash is not None:
+                if not await averify_secret(body.current_password, settings.admin_password_hash):
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="current password is incorrect",
+                        headers={"WWW-Authenticate": "Bearer"},
+                    )
+            now = now_utc()
+            user = User(
+                username=admin.subject,
+                email=body.email,
+                display_name=body.display_name,
+                password_hash=pw_hash or settings.admin_password_hash,
+                is_superadmin=True,
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(user)
+            await session.flush()
+            tok = await session.get(AdminToken, admin.token_id)
+            if tok is not None and tok.user_id is None:
+                tok.user_id = user.id
+        else:
+            if body.password is not None and body.current_password is not None:
+                expected_hash = user.password_hash or (
+                    settings.admin_password_hash if user.username == "admin" else None
+                )
+                if expected_hash is not None and not await averify_secret(
+                    body.current_password, expected_hash
+                ):
+                    raise HTTPException(
+                        status_code=status.HTTP_401_UNAUTHORIZED,
+                        detail="current password is incorrect",
+                        headers={"WWW-Authenticate": "Bearer"},
+                    )
+            if "email" in body.model_fields_set:
+                user.email = body.email
+            if "display_name" in body.model_fields_set:
+                user.display_name = body.display_name
+            if pw_hash is not None:
+                user.password_hash = pw_hash
+            user.updated_at = now_utc()
+
+        try:
+            await session.commit()
+        except IntegrityError as exc:
+            await session.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"email {body.email!r} is already in use",
+            ) from exc
+
+        projects = await visible_projects_for(session, admin)
+
+    return MeResponse(
+        token_id=admin.token_id,
+        subject=user.username,
+        scopes=list(admin.scopes),
+        expires_at=admin.expires_at,
+        is_superadmin=bool(user.is_superadmin or admin.is_superadmin),
+        project_id=admin.project_id,
+        projects=projects,
+        user_id=user.id,
+        email=user.email,
+        display_name=user.display_name,
+        has_local_password=user.password_hash is not None,
     )
 
 

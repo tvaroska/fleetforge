@@ -495,4 +495,114 @@ describe('ProjectAccess', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Keep' }))
     expect(screen.queryByTestId('confirm-delete-secret')).not.toBeInTheDocument()
   })
+
+  it('supports editing a user (name, email, password, superadmin), deleting a user, and self-service My account updates', async () => {
+    let userPatchBody: Record<string, unknown> | null = null
+    let mePatchBody: Record<string, unknown> | null = null
+    let userDeleted = false
+
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input?: unknown, init?: RequestInit) => {
+      const url = String(input)
+      const method = init?.method ?? 'GET'
+      if (url === '/v1/projects' && method === 'GET') return json({ projects: [] })
+      if (url === '/v1/projects/default/members' && method === 'GET') return json({ members: [] })
+      if (url === '/v1/projects/default/secrets' && method === 'GET')
+        return json({ secrets_rev: 0, secrets: [] })
+      if (url === '/v1/auth/tokens' && method === 'GET') return json({ tokens: [] })
+      if (url === '/v1/users' && method === 'GET') {
+        return json({
+          users: userDeleted
+            ? []
+            : [
+                {
+                  id: 'u-boris',
+                  username: 'boris',
+                  email: 'boris@tvaroska.com',
+                  firebase_uid: 'fb-boris',
+                  has_local_password: false,
+                  display_name: 'Boris',
+                  is_superadmin: false,
+                  disabled_at: null,
+                  created_at: '2026-10-19T00:00:00Z',
+                  projects: [{ project_slug: 'default', role: 'owner' }],
+                },
+              ],
+        })
+      }
+      if (url === '/v1/users/boris' && method === 'PATCH') {
+        userPatchBody = JSON.parse(String(init?.body)) as Record<string, unknown>
+        return json({
+          id: 'u-boris',
+          username: 'boris',
+          email: userPatchBody.email ?? 'boris@tvaroska.com',
+          firebase_uid: 'fb-boris',
+          has_local_password: true,
+          display_name: userPatchBody.display_name ?? 'Boris Tvaroska',
+          is_superadmin: Boolean(userPatchBody.is_superadmin),
+          disabled_at: null,
+          created_at: '2026-10-19T00:00:00Z',
+          projects: [{ project_slug: 'default', role: 'owner' }],
+        })
+      }
+      if (url === '/v1/users/boris' && method === 'DELETE') {
+        userDeleted = true
+        return new Response(null, { status: 204 })
+      }
+      if (url === '/v1/auth/me' && method === 'PATCH') {
+        mePatchBody = JSON.parse(String(init?.body)) as Record<string, unknown>
+        return json({
+          ...me,
+          display_name: mePatchBody.display_name ?? null,
+          email: mePatchBody.email ?? null,
+          has_local_password: true,
+        })
+      }
+      return json({})
+    })
+
+    await openDrawer()
+    expect(await screen.findByTestId('my-account-card')).toBeInTheDocument()
+
+    // Edit user inline
+    await userEvent.click(await screen.findByRole('button', { name: 'Edit boris' }))
+    const editForm = screen.getByTestId('edit-user-boris')
+    const nameInput = within(editForm).getByLabelText('Edit user display name')
+    await userEvent.clear(nameInput)
+    await userEvent.type(nameInput, 'Boris Tvaroska')
+    await userEvent.type(within(editForm).getByLabelText('Edit user password'), 'new-secret-pw-123')
+    await userEvent.click(within(editForm).getByLabelText('Edit user superadmin'))
+    await userEvent.click(within(editForm).getByRole('button', { name: 'Save user' }))
+
+    await waitFor(() => expect(userPatchBody).not.toBeNull())
+    expect(userPatchBody).toEqual({
+      display_name: 'Boris Tvaroska',
+      email: 'boris@tvaroska.com',
+      is_superadmin: true,
+      password: 'new-secret-pw-123',
+    })
+
+    // Self-service profile & password update
+    await userEvent.type(screen.getByLabelText('My display name'), 'Admin Operator')
+    await userEvent.type(screen.getByLabelText('My email'), 'admin@example.com')
+    await userEvent.type(screen.getByLabelText('New password'), 'updated-admin-pw-99')
+    await userEvent.click(screen.getByRole('button', { name: 'Save my account' }))
+
+    await waitFor(() => expect(mePatchBody).not.toBeNull())
+    expect(mePatchBody).toEqual({
+      display_name: 'Admin Operator',
+      email: 'admin@example.com',
+      password: 'updated-admin-pw-99',
+    })
+    expect(await screen.findByTestId('self-status')).toHaveTextContent(
+      'Account profile and password updated.',
+    )
+
+    // Delete user with confirmation
+    await userEvent.click(screen.getByRole('button', { name: 'Delete boris' }))
+    expect(screen.getByTestId('confirm-delete-user')).toHaveTextContent(
+      'Delete user boris permanently?',
+    )
+    await userEvent.click(screen.getByRole('button', { name: 'Yes, delete boris' }))
+    await waitFor(() => expect(userDeleted).toBe(true))
+  })
 })

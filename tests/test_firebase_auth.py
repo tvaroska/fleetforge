@@ -575,3 +575,36 @@ def test_unreachable_is_upstream_error(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(FirebaseAuthError) as excinfo:
         fb._post_identity_toolkit("accounts:lookup", API_KEY, {})
     assert type(excinfo.value) is FirebaseAuthError
+
+
+def test_user_and_self_profile_schemas_normalize_fields() -> None:
+    from fleetforge.api.schemas import SelfProfileUpdate, UserCreate, UserUpdate
+    from fleetforge.db.models import ProjectRole
+
+    created = UserCreate(
+        username="boris",
+        email="  Boris@Tvaroska.com ",
+        display_name="  Boris Tvaroska  ",
+        password="secret-password",
+        is_superadmin=True,
+        project="eink-todo",
+        role=ProjectRole.OWNER,
+    )
+    assert created.email == "boris@tvaroska.com"
+    assert created.display_name == "Boris Tvaroska"
+    assert created.project == "eink-todo"
+    assert created.role == ProjectRole.OWNER
+
+    updated = UserUpdate(email="   ", display_name="   ", is_superadmin=True)
+    assert updated.email is None
+    assert updated.display_name is None
+    assert updated.is_superadmin is True
+
+    self_patch = SelfProfileUpdate(
+        email="  Boris@Tvaroska.com ",
+        display_name="  Boris Tvaroska ",
+        password="new-password-123",
+    )
+    assert self_patch.email == "boris@tvaroska.com"
+    assert self_patch.display_name == "Boris Tvaroska"
+    assert self_patch.password == "new-password-123"

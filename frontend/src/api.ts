@@ -33,6 +33,17 @@ export type Me = {
   is_superadmin?: boolean
   project_id?: string | null
   projects?: UserProjectSummary[]
+  user_id?: string | null
+  email?: string | null
+  display_name?: string | null
+  has_local_password?: boolean
+}
+
+export type SelfProfileUpdate = {
+  email?: string | null
+  display_name?: string | null
+  current_password?: string | null
+  password?: string | null
 }
 
 export type TrackMode = 'off' | 'branch' | 'tag' | 'commit'
@@ -101,6 +112,8 @@ export type ProjectMemberSummary = {
   user_id: string
   username: string
   display_name: string | null
+  email?: string | null
+  is_superadmin?: boolean
   role: 'owner' | 'operator' | 'viewer'
   created_at: string
 }
@@ -112,6 +125,11 @@ export type DeviceGroupSummary = {
   description: string | null
   created_at: string
   updated_at: string
+}
+
+export type UserProjectRole = {
+  project_slug: string
+  role: string
 }
 
 export type UserSummary = {
@@ -126,6 +144,7 @@ export type UserSummary = {
   created_at: string
   /** Outcome of the invite / password-reset email; null when none was requested. */
   email_delivery?: 'sent' | 'failed' | 'not_configured' | null
+  projects?: UserProjectRole[]
 }
 
 export type AdminTokenSummary = {
@@ -724,6 +743,12 @@ export const api = {
 
   me: () => request<Me>('/v1/auth/me'),
 
+  updateMe: (body: SelfProfileUpdate) =>
+    request<Me>('/v1/auth/me', {
+      method: 'PATCH',
+      body: JSON.stringify(body),
+    }),
+
   // The password goes in the body of a POST and nowhere else. The response
   // deliberately does not carry the token — it arrives as a Set-Cookie.
   login: (password: string, username = 'admin') =>
@@ -1131,6 +1156,8 @@ export const api = {
     password?: string | null
     is_superadmin?: boolean
     send_invite_email?: boolean
+    project?: string | null
+    role?: 'owner' | 'operator' | 'viewer' | null
   }) =>
     request<UserSummary>('/v1/users', {
       method: 'POST',
@@ -1151,5 +1178,10 @@ export const api = {
     request<UserSummary>(`/v1/users/${encodeURIComponent(username)}`, {
       method: 'PATCH',
       body: JSON.stringify(body),
+    }),
+
+  deleteUser: (username: string) =>
+    request<void>(`/v1/users/${encodeURIComponent(username)}`, {
+      method: 'DELETE',
     }),
 }

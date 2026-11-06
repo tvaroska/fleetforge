@@ -37,6 +37,7 @@ type PendingConfirm =
   | { kind: 'remove-member'; username: string }
   | { kind: 'revoke-token'; id: string; name: string }
   | { kind: 'disable-user'; username: string }
+  | { kind: 'delete-user'; username: string }
   | { kind: 'delete-secret'; key: string }
   | { kind: 'delete-group'; id: string; name: string }
 
@@ -94,6 +95,23 @@ export function ProjectAccess({
   const [invitePassword, setInvitePassword] = useState('')
   const [inviteSendEmail, setInviteSendEmail] = useState(true)
   const [inviteSuperadmin, setInviteSuperadmin] = useState(false)
+  const [inviteProjectRole, setInviteProjectRole] = useState<'' | 'owner' | 'operator' | 'viewer'>('')
+
+  // Edit existing user state (superadmin only)
+  const [editingUser, setEditingUser] = useState<string | null>(null)
+  const [editDisplayName, setEditDisplayName] = useState('')
+  const [editEmail, setEditEmail] = useState('')
+  const [editPassword, setEditPassword] = useState('')
+  const [editSuperadmin, setEditSuperadmin] = useState(false)
+  const [userNotice, setUserNotice] = useState<string | null>(null)
+
+  // Self-service profile & password ("My account")
+  const [selfDisplayName, setSelfDisplayName] = useState(me.display_name ?? '')
+  const [selfEmail, setSelfEmail] = useState(me.email ?? '')
+  const [selfCurrentPassword, setSelfCurrentPassword] = useState('')
+  const [selfNewPassword, setSelfNewPassword] = useState('')
+  const [selfHasPassword, setSelfHasPassword] = useState(Boolean(me.has_local_password))
+  const [selfStatus, setSelfStatus] = useState<string | null>(null)
 
   // Add member form
   const [memberUsername, setMemberUsername] = useState('')
@@ -125,7 +143,15 @@ export function ProjectAccess({
   useEffect(() => {
     setPending(null)
     setOtelStatus(null)
+    setUserNotice(null)
+    setSelfStatus(null)
   }, [activeProject, open])
+
+  useEffect(() => {
+    setSelfDisplayName(me.display_name ?? '')
+    setSelfEmail(me.email ?? '')
+    setSelfHasPassword(Boolean(me.has_local_password))
+  }, [me.display_name, me.email, me.has_local_password])
 
   const handle = useCallback(
     (err: unknown) => {
@@ -196,20 +222,27 @@ export function ProjectAccess({
     event.preventDefault()
     setBusy(true)
     setError(null)
+    setUserNotice(null)
     try {
-      const created = await api.createUser({
+      const payload: Parameters<typeof api.createUser>[0] = {
         username: inviteUsername.trim(),
         email: inviteEmail.trim() || null,
         display_name: inviteDisplayName.trim() || null,
         password: invitePassword !== '' ? invitePassword : null,
         is_superadmin: inviteSuperadmin,
         send_invite_email: inviteEmail.trim() !== '' && inviteSendEmail,
-      })
+      }
+      if (inviteProjectRole !== '') {
+        payload.project = activeProject
+        payload.role = inviteProjectRole
+      }
+      const created = await api.createUser(payload)
       setInviteUsername('')
       setInviteEmail('')
       setInviteDisplayName('')
       setInvitePassword('')
       setInviteSuperadmin(false)
+      setInviteProjectRole('')
       await refreshDrawer()
       const deliveryError = emailDeliveryError(
         created.email_delivery,
@@ -217,6 +250,105 @@ export function ProjectAccess({
       )
       if (deliveryError !== null) {
         setError(deliveryError)
+      } else {
+        setUserNotice(`Saved user ${created.username}.`)
+      }
+    } catch (err) {
+      handle(err)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  function startEditUser(user: UserSummary) {
+    setEditingUser(user.username)
+    setEditDisplayName(user.display_name ?? '')
+    setEditEmail(user.email ?? '')
+    setEditPassword('')
+    setEditSuperadmin(user.is_superadmin)
+    setError(null)
+    setUserNotice(null)
+  }
+
+  async function handleSaveUserEdit(event: FormEvent) {
+    event.preventDefault()
+    if (!editingUser) {
+      return
+    }
+    setBusy(true)
+    setError(null)
+    setUserNotice(null)
+    try {
+      const patch: Parameters<typeof api.updateUser>[1] = {
+        display_name: editDisplayName.trim() || null,
+        email: editEmail.trim() || null,
+        is_superadmin: editSuperadmin,
+      }
+      if (editPassword !== '') {
+        patch.password = editPassword
+      }
+      const updated = await api.updateUser(editingUser, patch)
+      setEditingUser(null)
+      setEditPassword('')
+      await refreshDrawer()
+      setUserNotice(
+        `Updated ${updated.username}${editPassword !== '' ? ' (password updated)' : ''}.`,
+      )
+    } catch (err) {
+      handle(err)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function handleDeleteUser(username: string) {
+    setBusy(true)
+    setError(null)
+    setUserNotice(null)
+    try {
+      await api.deleteUser(username)
+      if (editingUser === username) {
+        setEditingUser(null)
+      }
+      await refreshDrawer()
+      setUserNotice(`Deleted user ${username}.`)
+    } catch (err) {
+      handle(err)
+    } finally {
+      setBusy(false)
+      setPending(null)
+    }
+  }
+
+  async function handleSaveSelfProfile(event: FormEvent) {
+    event.preventDefault()
+    setBusy(true)
+    setError(null)
+    setSelfStatus(null)
+    try {
+      const body: Parameters<typeof api.updateMe>[0] = {
+        display_name: selfDisplayName.trim() || null,
+        email: selfEmail.trim() || null,
+      }
+      if (selfNewPassword !== '') {
+        body.password = selfNewPassword
+        if (selfCurrentPassword !== '') {
+          body.current_password = selfCurrentPassword
+        }
+      }
+      const updated = await api.updateMe(body)
+      setSelfDisplayName(updated.display_name ?? '')
+      setSelfEmail(updated.email ?? '')
+      setSelfHasPassword(Boolean(updated.has_local_password))
+      setSelfCurrentPassword('')
+      setSelfNewPassword('')
+      setSelfStatus(
+        selfNewPassword !== ''
+          ? 'Account profile and password updated.'
+          : 'Account profile updated.',
+      )
+      if (me.is_superadmin) {
+        await refreshDrawer()
       }
     } catch (err) {
       handle(err)
@@ -554,12 +686,24 @@ export function ProjectAccess({
                     <input
                       type="text"
                       aria-label="Member username"
+                      list="fleetforge-known-users"
                       value={memberUsername}
                       onChange={(e) => setMemberUsername(e.target.value)}
                       placeholder="username"
                       disabled={busy || isViewer}
                       required
                     />
+                    {users !== null && users.length > 0 && (
+                      <datalist id="fleetforge-known-users">
+                        {users.map((u) => (
+                          <option key={u.username} value={u.username}>
+                            {u.display_name
+                              ? `${u.display_name}${u.email ? ` <${u.email}>` : ''}`
+                              : (u.email ?? u.username)}
+                          </option>
+                        ))}
+                      </datalist>
+                    )}
                   </label>
                   <label>
                     Role
@@ -1014,6 +1158,78 @@ export function ProjectAccess({
                   </p>
                 </form>
               )}
+
+              {!me.project_id && (
+                <div data-testid="my-account-card">
+                  <h3>
+                    My account · <code>{me.subject}</code>{' '}
+                    <span className="badge muted">
+                      {me.is_superadmin ? 'superadmin (full capability)' : activeRole}
+                    </span>{' '}
+                    <span className="badge muted">
+                      {selfHasPassword ? 'local password set' : 'Firebase / env login'}
+                    </span>
+                  </h3>
+                  <form className="compact-form" onSubmit={(e) => void handleSaveSelfProfile(e)}>
+                    <div className="form-grid">
+                      <label>
+                        Display name
+                        <input
+                          type="text"
+                          aria-label="My display name"
+                          value={selfDisplayName}
+                          onChange={(e) => setSelfDisplayName(e.target.value)}
+                          placeholder="Your name"
+                          disabled={busy}
+                        />
+                      </label>
+                      <label>
+                        Email
+                        <input
+                          type="email"
+                          aria-label="My email"
+                          value={selfEmail}
+                          onChange={(e) => setSelfEmail(e.target.value)}
+                          placeholder="you@example.com"
+                          disabled={busy}
+                        />
+                      </label>
+                      <label>
+                        Current password (optional)
+                        <input
+                          type="password"
+                          aria-label="Current password"
+                          value={selfCurrentPassword}
+                          onChange={(e) => setSelfCurrentPassword(e.target.value)}
+                          placeholder="Current password"
+                          disabled={busy}
+                        />
+                      </label>
+                      <label>
+                        New password (min 8 chars)
+                        <input
+                          type="password"
+                          aria-label="New password"
+                          value={selfNewPassword}
+                          onChange={(e) => setSelfNewPassword(e.target.value)}
+                          placeholder="Leave blank to keep current"
+                          disabled={busy}
+                        />
+                      </label>
+                    </div>
+                    <p>
+                      <button type="submit" disabled={busy}>
+                        Save my account
+                      </button>
+                    </p>
+                  </form>
+                  {selfStatus !== null && (
+                    <p className="ok" data-testid="self-status">
+                      {selfStatus}
+                    </p>
+                  )}
+                </div>
+              )}
             </div>
 
             {me.is_superadmin && (
@@ -1055,6 +1271,11 @@ export function ProjectAccess({
                 </form>
 
                 <h3>Invited users (Firebase &amp; local)</h3>
+                {userNotice !== null && (
+                  <p className="ok" data-testid="user-notice">
+                    {userNotice}
+                  </p>
+                )}
                 <form className="compact-form" onSubmit={(e) => void handleInviteUser(e)}>
                   <div className="form-grid">
                     <label>
@@ -1100,6 +1321,24 @@ export function ProjectAccess({
                         onChange={(e) => setInvitePassword(e.target.value)}
                         disabled={busy}
                       />
+                    </label>
+                    <label>
+                      Initial role in {activeProject}
+                      <select
+                        aria-label="Invite project role"
+                        value={inviteProjectRole}
+                        onChange={(e) =>
+                          setInviteProjectRole(
+                            e.target.value as '' | 'owner' | 'operator' | 'viewer',
+                          )
+                        }
+                        disabled={busy}
+                      >
+                        <option value="">None (grant later)</option>
+                        <option value="owner">owner</option>
+                        <option value="operator">operator</option>
+                        <option value="viewer">viewer</option>
+                      </select>
                     </label>
                   </div>
                   <p>
@@ -1154,25 +1393,49 @@ export function ProjectAccess({
                             <code>{u.username}</code>
                             {u.display_name ? ` (${u.display_name})` : ''}
                             {u.is_superadmin ? ' · superadmin' : ''}
+                            {u.projects && u.projects.length > 0 ? (
+                              <span className="muted">
+                                {' · '}
+                                {u.projects.map((p) => `${p.project_slug}:${p.role}`).join(', ')}
+                              </span>
+                            ) : null}
                           </td>
                           <td>{u.email ?? '—'}</td>
                           <td>
-                            {u.firebase_uid
-                              ? 'firebase linked'
-                              : u.email
-                                ? 'firebase invited'
-                                : 'local'}
+                            {u.firebase_uid && u.has_local_password
+                              ? 'firebase + password'
+                              : u.firebase_uid
+                                ? 'firebase linked'
+                                : u.email
+                                  ? u.has_local_password
+                                    ? 'invited + password'
+                                    : 'firebase invited'
+                                  : 'local'}
                           </td>
                           <td>{u.disabled_at ? 'disabled' : 'active'}</td>
                           <td>
+                            <button
+                              type="button"
+                              aria-label={`Edit ${u.username}`}
+                              disabled={busy}
+                              onClick={() =>
+                                editingUser === u.username
+                                  ? setEditingUser(null)
+                                  : startEditUser(u)
+                              }
+                            >
+                              {editingUser === u.username ? 'Close' : 'Edit'}
+                            </button>{' '}
                             {u.email && (
-                              <button
-                                type="button"
-                                onClick={() => void handleSendPasswordReset(u)}
-                              >
-                                Send reset email
-                              </button>
-                            )}{' '}
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={() => void handleSendPasswordReset(u)}
+                                >
+                                  Send reset email
+                                </button>{' '}
+                              </>
+                            )}
                             <button
                               type="button"
                               aria-label={`${u.disabled_at ? 'Enable' : 'Disable'} ${u.username}`}
@@ -1184,12 +1447,92 @@ export function ProjectAccess({
                               }
                             >
                               {u.disabled_at ? 'Enable' : 'Disable'}
+                            </button>{' '}
+                            <button
+                              type="button"
+                              aria-label={`Delete ${u.username}`}
+                              disabled={busy || u.username === me.subject}
+                              onClick={() =>
+                                setPending({ kind: 'delete-user', username: u.username })
+                              }
+                            >
+                              Delete
                             </button>
                           </td>
                         </tr>
                       ))}
                     </tbody>
                   </table>
+                )}
+                {editingUser !== null && (
+                  <form
+                    className="compact-form"
+                    data-testid={`edit-user-${editingUser}`}
+                    onSubmit={(e) => void handleSaveUserEdit(e)}
+                  >
+                    <h4>
+                      Edit user <code>{editingUser}</code>
+                    </h4>
+                    <div className="form-grid">
+                      <label>
+                        Display name
+                        <input
+                          type="text"
+                          aria-label="Edit user display name"
+                          value={editDisplayName}
+                          onChange={(e) => setEditDisplayName(e.target.value)}
+                          placeholder="Full name"
+                          disabled={busy}
+                        />
+                      </label>
+                      <label>
+                        Email
+                        <input
+                          type="email"
+                          aria-label="Edit user email"
+                          value={editEmail}
+                          onChange={(e) => setEditEmail(e.target.value)}
+                          placeholder="user@example.com"
+                          disabled={busy}
+                        />
+                      </label>
+                      <label>
+                        Set / reset password
+                        <input
+                          type="password"
+                          aria-label="Edit user password"
+                          value={editPassword}
+                          onChange={(e) => setEditPassword(e.target.value)}
+                          placeholder="Leave blank to keep existing"
+                          disabled={busy}
+                        />
+                      </label>
+                    </div>
+                    <p>
+                      <label className="choice">
+                        <input
+                          type="checkbox"
+                          aria-label="Edit user superadmin"
+                          checked={editSuperadmin}
+                          onChange={(e) => setEditSuperadmin(e.target.checked)}
+                          disabled={busy}
+                        />{' '}
+                        Superadmin (full capability across all projects &amp; users)
+                      </label>
+                    </p>
+                    <p>
+                      <button type="submit" disabled={busy}>
+                        Save user
+                      </button>{' '}
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => setEditingUser(null)}
+                      >
+                        Cancel
+                      </button>
+                    </p>
+                  </form>
                 )}
                 {pending?.kind === 'disable-user' && (
                   <p data-testid="confirm-disable-user">
@@ -1207,6 +1550,22 @@ export function ProjectAccess({
                       }}
                     >
                       Yes, disable {pending.username}
+                    </button>{' '}
+                    <button type="button" onClick={() => setPending(null)}>
+                      Keep
+                    </button>
+                  </p>
+                )}
+                {pending?.kind === 'delete-user' && (
+                  <p data-testid="confirm-delete-user">
+                    Delete user <code>{pending.username}</code> permanently? All their sessions and
+                    project memberships are removed at once.{' '}
+                    <button
+                      type="button"
+                      disabled={busy}
+                      onClick={() => void handleDeleteUser(pending.username)}
+                    >
+                      Yes, delete {pending.username}
                     </button>{' '}
                     <button type="button" onClick={() => setPending(null)}>
                       Keep

@@ -20,15 +20,16 @@ import argparse
 import asyncio
 import datetime as dt
 import getpass
+import json
 import sys
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 
 from fleetforge.auth.hashing import hash_secret
 from fleetforge.auth.tokens import ADMIN_TOKEN_PREFIX, issue_token
 from fleetforge.clock import now_utc
 from fleetforge.db.base import get_engine, get_sessionmaker
-from fleetforge.db.models import AdminToken, Project, User
+from fleetforge.db.models import AdminToken, Project, ProjectMember, ProjectRole, User
 
 ENV_HINT = (
     "\nPaste this into .env / .env.example, SINGLE-QUOTED exactly as shown "
@@ -91,11 +92,20 @@ async def _create_user_db(
     display_name: str | None,
     password_hash: str | None,
     is_superadmin: bool,
+    project_slug: str | None = None,
+    role: str = ProjectRole.OPERATOR.value,
 ) -> str:
     now = now_utc()
     sessionmaker = get_sessionmaker()
     try:
         async with sessionmaker() as session:
+            target_proj: Project | None = None
+            if project_slug is not None:
+                target_proj = await session.scalar(
+                    select(Project).where(Project.slug == project_slug)
+                )
+                if target_proj is None:
+                    raise SystemExit(f"project {project_slug!r} not found")
             user = User(
                 username=username,
                 email=email.strip().lower() if email else None,
@@ -106,14 +116,126 @@ async def _create_user_db(
                 updated_at=now,
             )
             session.add(user)
+            await session.flush()
+            if target_proj is not None:
+                session.add(
+                    ProjectMember(
+                        project_id=target_proj.id,
+                        user_id=user.id,
+                        role=role,
+                        created_at=now,
+                    )
+                )
             await session.commit()
             return str(user.id)
     finally:
         await get_engine().dispose()
 
 
+async def _update_user_db(
+    *,
+    username: str,
+    email: str | None,
+    display_name: str | None,
+    password_hash: str | None,
+    is_superadmin: bool | None,
+    disabled: bool | None,
+    project_slugs: list[str],
+    role: str,
+) -> dict[str, object]:
+    now = now_utc()
+    sessionmaker = get_sessionmaker()
+    try:
+        async with sessionmaker() as session:
+            user = await session.scalar(select(User).where(User.username == username))
+            if user is None:
+                raise SystemExit(f"user {username!r} not found")
+            if email is not None:
+                user.email = email.strip().lower() or None
+            if display_name is not None:
+                user.display_name = display_name.strip() or None
+            if password_hash is not None:
+                user.password_hash = password_hash
+            if is_superadmin is not None:
+                user.is_superadmin = is_superadmin
+            if disabled is not None:
+                if disabled:
+                    user.disabled_at = now
+                    await session.execute(
+                        text(
+                            "UPDATE admin_tokens SET revoked_at = now() "
+                            "WHERE user_id = :user_id AND revoked_at IS NULL"
+                        ),
+                        {"user_id": user.id},
+                    )
+                else:
+                    user.disabled_at = None
+            user.updated_at = now
+            for slug in project_slugs:
+                proj = await session.scalar(select(Project).where(Project.slug == slug))
+                if proj is None:
+                    raise SystemExit(f"project {slug!r} not found")
+                existing = await session.get(ProjectMember, (proj.id, user.id))
+                if existing is not None:
+                    existing.role = role
+                else:
+                    session.add(
+                        ProjectMember(
+                            project_id=proj.id,
+                            user_id=user.id,
+                            role=role,
+                            created_at=now,
+                        )
+                    )
+            await session.commit()
+            return {
+                "id": str(user.id),
+                "username": user.username,
+                "email": user.email,
+                "display_name": user.display_name,
+                "has_local_password": user.password_hash is not None,
+                "is_superadmin": user.is_superadmin,
+                "disabled_at": user.disabled_at.isoformat() if user.disabled_at else None,
+            }
+    finally:
+        await get_engine().dispose()
+
+
+async def _list_users_db() -> list[dict[str, object]]:
+    sessionmaker = get_sessionmaker()
+    try:
+        async with sessionmaker() as session:
+            users = (await session.scalars(select(User).order_by(User.username))).all()
+            members = (
+                await session.execute(
+                    select(ProjectMember.user_id, Project.slug, ProjectMember.role)
+                    .join(Project, Project.id == ProjectMember.project_id)
+                    .order_by(Project.slug)
+                )
+            ).all()
+            proj_by_user: dict[object, list[dict[str, str]]] = {}
+            for uid, slug, role in members:
+                proj_by_user.setdefault(uid, []).append({"project": slug, "role": role})
+            return [
+                {
+                    "id": str(u.id),
+                    "username": u.username,
+                    "email": u.email,
+                    "display_name": u.display_name,
+                    "firebase_uid": u.firebase_uid,
+                    "has_local_password": u.password_hash is not None,
+                    "is_superadmin": u.is_superadmin,
+                    "disabled_at": u.disabled_at.isoformat() if u.disabled_at else None,
+                    "projects": proj_by_user.get(u.id, []),
+                }
+                for u in users
+            ]
+    finally:
+        await get_engine().dispose()
+
+
 def main(argv: list[str] | None = None) -> int:
-    """Run auth CLI subcommands (`hash-password`, `issue-token`, `create-user`)."""
+    """Run auth CLI subcommands (`hash-password`, `issue-token`, `create-user`, `update-user`, `list-users`)."""
     parser = argparse.ArgumentParser(prog="python -m fleetforge.auth")
     subparsers = parser.add_subparsers(dest="command", required=True)
     hash_parser = subparsers.add_parser(
@@ -147,6 +269,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     user_parser.add_argument("--display-name", default=None, help="human name")
     user_parser.add_argument("--superadmin", action="store_true", help="grant superadmin access")
+    user_parser.add_argument("--project", default=None, help="optional project slug to grant")
+    user_parser.add_argument(
+        "--role",
+        default=ProjectRole.OPERATOR.value,
+        choices=[r.value for r in ProjectRole],
+        help="project role when --project is specified (default: operator)",
+    )
     user_parser.add_argument(
         "--no-password",
         action="store_true",
@@ -155,6 +284,67 @@ def main(argv: list[str] | None = None) -> int:
     user_parser.add_argument(
         "--stdin", action="store_true", help="read the password from stdin instead of prompting"
     )
+
+    update_parser = subparsers.add_parser(
+        "update-user",
+        help="reset password, set display name/email, grant superadmin, or assign project roles",
+    )
+    update_parser.add_argument("--username", required=True, help="lowercase handle to update")
+    update_parser.add_argument("--email", default=None, help="update email address")
+    update_parser.add_argument("--display-name", default=None, help="update human display name")
+    super_group = update_parser.add_mutually_exclusive_group()
+    super_group.add_argument(
+        "--superadmin",
+        dest="is_superadmin",
+        action="store_true",
+        default=None,
+        help="grant superadmin access (full capability across all projects and users)",
+    )
+    super_group.add_argument(
+        "--no-superadmin",
+        dest="is_superadmin",
+        action="store_false",
+        help="revoke superadmin access",
+    )
+    disable_group = update_parser.add_mutually_exclusive_group()
+    disable_group.add_argument(
+        "--disable",
+        dest="disabled",
+        action="store_true",
+        default=None,
+        help="disable the user and revoke active tokens",
+    )
+    disable_group.add_argument(
+        "--enable",
+        dest="disabled",
+        action="store_false",
+        help="re-enable a disabled user",
+    )
+    update_parser.add_argument(
+        "--set-password",
+        action="store_true",
+        help="prompt for (or read with --stdin) a new local password",
+    )
+    update_parser.add_argument(
+        "--stdin",
+        action="store_true",
+        help="read the new password from stdin (implies --set-password)",
+    )
+    update_parser.add_argument(
+        "--project",
+        dest="projects",
+        action="append",
+        default=[],
+        help="assign user to project slug (repeatable)",
+    )
+    update_parser.add_argument(
+        "--role",
+        default=ProjectRole.OWNER.value,
+        choices=[r.value for r in ProjectRole],
+        help="project role when --project is specified (default: owner)",
+    )
+
+    subparsers.add_parser("list-users", help="list all human users and their project roles as JSON")
 
     args = parser.parse_args(argv)
 
@@ -198,9 +388,38 @@ def main(argv: list[str] | None = None) -> int:
                 display_name=args.display_name,
                 password_hash=phc_opt,
                 is_superadmin=bool(args.superadmin),
+                project_slug=args.project,
+                role=args.role,
             )
         )
         print(uid)
+        return 0
+
+    if args.command == "update-user":
+        update_phc: str | None = None
+        if args.set_password or args.stdin:
+            password = _read_password(args.stdin)
+            if not password:
+                raise SystemExit("empty password")
+            update_phc = hash_secret(password)
+        updated = asyncio.run(
+            _update_user_db(
+                username=args.username,
+                email=args.email,
+                display_name=args.display_name,
+                password_hash=update_phc,
+                is_superadmin=args.is_superadmin,
+                disabled=args.disabled,
+                project_slugs=list(args.projects),
+                role=args.role,
+            )
+        )
+        print(json.dumps(updated))
+        return 0
+
+    if args.command == "list-users":
+        users = asyncio.run(_list_users_db())
+        print(json.dumps(users, indent=2))
         return 0
 
     return 1

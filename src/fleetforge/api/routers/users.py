@@ -7,12 +7,15 @@ next request.
 """
 
 import logging
+import uuid
+from collections import defaultdict
 from typing import Annotated
 
 import anyio.to_thread
 from fastapi import APIRouter, Depends, HTTPException, Path, status
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from fleetforge.api.deps import (
     FORBIDDEN,
@@ -30,6 +33,7 @@ from fleetforge.api.schemas import (
     EmailDelivery,
     UserCreate,
     UserList,
+    UserProjectRole,
     UserSummary,
     UserUpdate,
 )
@@ -37,7 +41,7 @@ from fleetforge.auth.cache import VerifiedSecretCache
 from fleetforge.auth.firebase import FirebaseAuthClient, FirebaseAuthError
 from fleetforge.auth.hashing import ARGON2_LIMITER, hash_secret
 from fleetforge.config import Settings
-from fleetforge.db.models import AdminToken, User
+from fleetforge.db.models import AdminToken, Project, ProjectMember, ProjectRole, User
 
 logger = logging.getLogger(__name__)
 
@@ -55,7 +59,7 @@ _REVOKE_USER_TOKENS_SQL = text(
 )
 
 
-def _user_summary(user: User) -> UserSummary:
+def _user_summary(user: User, projects: list[UserProjectRole] | None = None) -> UserSummary:
     return UserSummary(
         id=user.id,
         username=user.username,
@@ -66,7 +70,27 @@ def _user_summary(user: User) -> UserSummary:
         is_superadmin=user.is_superadmin,
         disabled_at=user.disabled_at,
         created_at=user.created_at,
+        projects=list(projects) if projects is not None else [],
     )
+
+
+async def _user_projects_map(
+    session: AsyncSession, user_ids: list[uuid.UUID] | None = None
+) -> dict[uuid.UUID, list[UserProjectRole]]:
+    stmt = (
+        select(ProjectMember.user_id, Project.slug, ProjectMember.role)
+        .join(Project, Project.id == ProjectMember.project_id)
+        .order_by(Project.slug)
+    )
+    if user_ids is not None:
+        if not user_ids:
+            return {}
+        stmt = stmt.where(ProjectMember.user_id.in_(user_ids))
+    rows = (await session.execute(stmt)).all()
+    out: dict[uuid.UUID, list[UserProjectRole]] = defaultdict(list)
+    for uid, slug, role in rows:
+        out[uid].append(UserProjectRole(project_slug=slug, role=role))
+    return out
 
 
 async def _send_setup_email(
@@ -108,7 +132,8 @@ async def list_users(admin: AdminDep, sessionmaker: SessionMakerDep) -> UserList
 
     async with sessionmaker() as session:
         rows = (await session.scalars(select(User).order_by(User.username))).all()
-    return UserList(users=[_user_summary(u) for u in rows])
+        proj_map = await _user_projects_map(session, [u.id for u in rows])
+    return UserList(users=[_user_summary(u, proj_map.get(u.id, [])) for u in rows])
 
 
 @router.post(
@@ -138,9 +163,32 @@ async def create_user(
         created_at=now,
         updated_at=now,
     )
+    initial_projects: list[UserProjectRole] = []
     async with sessionmaker() as session:
+        target_proj: Project | None = None
+        if body.project is not None:
+            target_proj = await session.scalar(select(Project).where(Project.slug == body.project))
+            if target_proj is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"project {body.project!r} not found",
+                )
         session.add(user)
         try:
+            await session.flush()
+            if target_proj is not None:
+                role_val = (body.role or ProjectRole.OPERATOR).value
+                session.add(
+                    ProjectMember(
+                        project_id=target_proj.id,
+                        user_id=user.id,
+                        role=role_val,
+                        created_at=now,
+                    )
+                )
+                initial_projects.append(
+                    UserProjectRole(project_slug=target_proj.slug, role=role_val)
+                )
             await session.commit()
         except IntegrityError as exc:
             await session.rollback()
@@ -161,7 +209,7 @@ async def create_user(
         delivery,
         admin.subject,
     )
-    return _user_summary(user).model_copy(update={"email_delivery": delivery})
+    return _user_summary(user, initial_projects).model_copy(update={"email_delivery": delivery})
 
 
 @router.patch(
@@ -222,7 +270,8 @@ async def update_user(
                 detail=f"email {body.email!r} is already in use",
             ) from exc
         target_email = user.email
-        summary = _user_summary(user)
+        user_projects = (await _user_projects_map(session, [user.id])).get(user.id, [])
+        summary = _user_summary(user, user_projects)
 
     for tid in revoked_ids:
         if isinstance(tid, AdminToken.id.type.python_type):
@@ -233,3 +282,42 @@ async def update_user(
         summary = summary.model_copy(update={"email_delivery": delivery})
 
     return summary
+
+
+@router.delete(
+    "/{username}",
+    status_code=status.HTTP_204_NO_CONTENT,
+    summary="Delete a human user account and revoke all of their sessions (superadmin only)",
+)
+async def delete_user(
+    username: str = Path(pattern=USERNAME_PATTERN),
+    *,
+    admin: AdminDep,
+    sessionmaker: SessionMakerDep,
+    cache: CacheDep,
+) -> None:
+    if not admin.is_superadmin or "admin" not in admin.scopes:
+        raise FORBIDDEN
+
+    revoked_ids: list[object] = []
+    async with sessionmaker() as session:
+        user = await session.scalar(select(User).where(User.username == username))
+        if user is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"user {username!r} not found",
+            )
+        if admin.subject == username or (admin.user_id is not None and user.id == admin.user_id):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="cannot delete your own user account",
+            )
+        res = await session.execute(_REVOKE_USER_TOKENS_SQL, {"user_id": user.id})
+        revoked_ids = list(res.scalars().all())
+        await session.delete(user)
+        await session.commit()
+
+    for tid in revoked_ids:
+        if isinstance(tid, AdminToken.id.type.python_type):
+            cache.forget(tid)
+    logger.info("user deleted: %s by %s", username, admin.subject)

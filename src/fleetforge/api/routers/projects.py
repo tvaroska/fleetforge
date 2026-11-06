@@ -548,6 +548,8 @@ async def list_project_members(
                 user_id=user.id,
                 username=user.username,
                 display_name=user.display_name,
+                email=user.email,
+                is_superadmin=user.is_superadmin,
                 role=member.role,
                 created_at=member.created_at,
             )
@@ -613,6 +615,8 @@ async def upsert_project_member(
         user_id=user.id,
         username=user.username,
         display_name=user.display_name,
+        email=user.email,
+        is_superadmin=user.is_superadmin,
         role=member.role,
         created_at=member.created_at,
     )

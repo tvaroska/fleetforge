@@ -1402,3 +1402,85 @@ async def test_a_member_added_with_put_is_listed_and_post_is_not_a_route(
             "/v1/projects/default/members/nobody", headers=admin_headers, json={"role": "viewer"}
         )
         assert r.status_code == 404, r.text
+
+
+async def test_user_lifecycle_edit_delete_and_self_profile(
+    admin_app: FastAPI, clean_tables: None
+) -> None:
+    """Superadmin can invite with project role, edit name/email/password/superadmin, and delete; users can PATCH /v1/auth/me."""
+    admin_headers = _bearer(await login_admin(admin_app))
+
+    async with client_for(admin_app, base_url="https://testserver") as client:
+        # Create user with initial project role
+        r = await client.post(
+            "/v1/users",
+            headers=admin_headers,
+            json={
+                "username": "boris",
+                "email": "boris@tvaroska.com",
+                "display_name": "Boris",
+                "password": "initial-password-123",
+                "is_superadmin": False,
+                "project": "default",
+                "role": "owner",
+            },
+        )
+        assert r.status_code == 201, r.text
+        created = r.json()
+        assert created["display_name"] == "Boris"
+        assert created["has_local_password"] is True
+        assert created["projects"] == [{"project_slug": "default", "role": "owner"}]
+
+        # Upgrade user to superadmin, update display_name and reset password
+        r = await client.patch(
+            "/v1/users/boris",
+            headers=admin_headers,
+            json={
+                "display_name": "Boris Tvaroska",
+                "password": "reset-password-456",
+                "is_superadmin": True,
+            },
+        )
+        assert r.status_code == 200, r.text
+        patched = r.json()
+        assert patched["display_name"] == "Boris Tvaroska"
+        assert patched["is_superadmin"] is True
+
+        # Boris can log in with the reset password and use PATCH /v1/auth/me
+        r = await client.post(
+            "/v1/auth/login",
+            json={"username": "boris", "password": "reset-password-456"},
+        )
+        assert r.status_code == 200, r.text
+        boris_cookie = r.cookies.get("ff_session")
+        assert boris_cookie
+        boris_headers = _bearer(boris_cookie)
+
+        me_res = await client.get("/v1/auth/me", headers=boris_headers)
+        assert me_res.status_code == 200
+        assert me_res.json()["display_name"] == "Boris Tvaroska"
+        assert me_res.json()["email"] == "boris@tvaroska.com"
+        assert me_res.json()["has_local_password"] is True
+        assert me_res.json()["is_superadmin"] is True
+
+        # Self-service update via PATCH /v1/auth/me
+        me_patch = await client.patch(
+            "/v1/auth/me",
+            headers=boris_headers,
+            json={
+                "display_name": "Boris T.",
+                "current_password": "reset-password-456",
+                "password": "self-changed-password-789",
+            },
+        )
+        assert me_patch.status_code == 200, me_patch.text
+        assert me_patch.json()["display_name"] == "Boris T."
+
+        # Self-delete is refused with 409
+        self_del = await client.delete("/v1/users/boris", headers=boris_headers)
+        assert self_del.status_code == 409, self_del.text
+
+        # Superadmin (admin) can delete boris and boris's token is immediately revoked
+        del_res = await client.delete("/v1/users/boris", headers=admin_headers)
+        assert del_res.status_code == 204, del_res.text
+        assert (await client.get("/v1/auth/me", headers=boris_headers)).status_code == 401

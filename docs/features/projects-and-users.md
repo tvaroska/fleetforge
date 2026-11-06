@@ -207,12 +207,13 @@ A token's effective permission on a target `project_id` is checked by a small de
 | `/v1/auth/login` | `POST` | Public (rate-limited) | Body: `{"username": "admin" \| "alice@example.com", "password": "..."}`. Verifies local `password_hash` or (when `FIREBASE_WEB_API_KEY` is configured) Firebase Email + Password (`accounts:signInWithPassword`, then `accounts:lookup`) for invited users. A Firebase identity whose email is not verified gets `403` "this email address has not been verified". Sets `ff_session` cookie. |
 | `/v1/auth/firebase` | `POST` | Public (rate-limited) | Body: `{"id_token": "<firebase_jwt>"}`. Needs both `FIREBASE_PROJECT_ID` and `FIREBASE_WEB_API_KEY` (else `503`). Verifies the RS256 Firebase ID token (signature, `aud`, `iss`, `sub`, `auth_time`), checks revocation via `accounts:lookup` (disabled account or `auth_time < validSince` -> `401`), refuses an unverified email (`403`), enforces invite-only membership in `users` (or bootstrap `FIREBASE_SUPERADMIN_EMAILS`), binds `firebase_uid` (looked up by uid first, then email), and sets `ff_session` cookie. |
 | `/v1/auth/logout` | `POST` | Any token | Revokes presenting token, clears cookie. |
-| `/v1/auth/me` | `GET` | Any token | Returns `token_id`, `subject`, `scopes`, `expires_at`, plus `is_superadmin`, `project_id`, and `projects: [{slug, name, role}]`. |
+| `/v1/auth/me` | `GET` | Any token | Returns `token_id`, `subject`, `scopes`, `expires_at`, plus `is_superadmin`, `project_id`, `projects: [{slug, name, role}]`, `user_id`, `email`, `display_name`, and `has_local_password`. |
+| `/v1/auth/me` | `PATCH` | Unpinned human session | Self-service update of the caller's own `display_name`, `email`, or local `password` (with optional `current_password` verification). Bootstraps a `User` row when signed in via `ADMIN_PASSWORD_HASH`. |
 | `/v1/auth/tokens` | `POST` | User session / `owner` | Issues a named `ffa_...` token (optional `project` slug, `scopes`, `expires_in_days`). Plaintext returned **once**. From an unpinned session only; a project-pinned token cannot mint (S0-sec-2). |
 | `/v1/auth/tokens` | `GET` | User session / `owner` | Lists active/revoked tokens for the caller (or project). Never returns secret hashes. |
 | `/v1/auth/tokens/{id}/revoke` | `POST` | User session / `owner` | Conditional `UPDATE ... SET revoked_at = now()`, evicts from `token_cache`, returns `204`. |
 
-**CLI counterpart:** `python -m fleetforge.auth issue-token --name "github-actions" --project caelus --scope read --scope write:artifacts --scope deploy` prints the `ffa_...` token to stdout.
+**CLI counterpart:** `python -m fleetforge.auth issue-token --name "github-actions" --project caelus --scope read --scope write:artifacts --scope deploy` prints the `ffa_...` token to stdout; `python -m fleetforge.auth update-user --username boris --display-name "Boris Tvaroska" --email boris@tvaroska.com --superadmin --enable --project default --project eink-todo --role owner --stdin` resets password/profile/roles; `python -m fleetforge.auth list-users` dumps all users and project roles as JSON.
 
 ### 2. Projects & Members (`/v1/projects` & `/v1/users`)
 
@@ -221,11 +222,12 @@ A token's effective permission on a target `project_id` is checked by a small de
 | `/v1/projects` | `GET` | Any token | Lists projects visible to the caller (all for superadmin, member projects for users, single pinned project for project-scoped token). |
 | `/v1/projects` | `POST` | Superadmin | Creates a project (`slug`, `name`, `description`). `201 Created`. |
 | `/v1/projects/{slug}` | `PATCH` | Project `owner` / Superadmin | Updates `name` or `description` (`slug` is immutable once created). |
-| `/v1/projects/{slug}/members` | `GET` | Project `viewer`+ | Lists members (`username`, `display_name`, `role`). |
+| `/v1/projects/{slug}/members` | `GET` | Project `viewer`+ | Lists members (`username`, `display_name`, `email`, `is_superadmin`, `role`). |
 | `/v1/projects/{slug}/members/{username}` | `PUT` | Project `owner` / Superadmin | Adds or updates a member's `role` (`owner`, `operator`, `viewer`). |
 | `/v1/projects/{slug}/members/{username}` | `DELETE` | Project `owner` / Superadmin | Removes member from project (refuses removing the last `owner`). |
-| `/v1/users` | `GET`, `POST` | Superadmin | Lists or creates human users (`username`, `email`, `display_name`, `password`, `is_superadmin`, `send_invite_email`). With `send_invite_email`, creates the Firebase account server-side (`accounts:signUp`, random discarded password) and sends the `PASSWORD_RESET` setup email; the `201` body's `email_delivery` is `sent`, `failed`, `not_configured` (no `FIREBASE_WEB_API_KEY`) or `null` (none requested). |
-| `/v1/users/{username}` | `PATCH` | Superadmin (or self for password) | Rotates password, toggles `disabled_at` or `is_superadmin`. Revokes user's active tokens on disable. `send_password_reset` uses the same account-then-email path and reports `email_delivery`. |
+| `/v1/users` | `GET`, `POST` | Superadmin | Lists or creates human users (`username`, `email`, `display_name`, `password`, `is_superadmin`, `send_invite_email`, optional `project` + `role`, returning `projects: [{project_slug, role}]`). With `send_invite_email`, creates the Firebase account server-side (`accounts:signUp`, random discarded password) and sends the `PASSWORD_RESET` setup email; the `201` body's `email_delivery` is `sent`, `failed`, `not_configured` (no `FIREBASE_WEB_API_KEY`) or `null` (none requested). |
+| `/v1/users/{username}` | `PATCH` | Superadmin (or self for profile/password) | Updates `display_name`, `email`, rotates `password`, toggles `disabled` or `is_superadmin`. Revokes user's active tokens on disable. `send_password_reset` uses the same account-then-email path and reports `email_delivery`. |
+| `/v1/users/{username}` | `DELETE` | Superadmin | Deletes a human user account (`204 No Content`, refuses self-deletion with `409`), revoking and evicting all active sessions immediately. |
 
 ### 3. Project Scoping on Existing Endpoints
 
