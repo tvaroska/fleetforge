@@ -137,6 +137,7 @@ async def download_artifact(
     digest: Annotated[str, Depends(_authorized_digest)],
     request: Request,
     store: ObjectStoreDep,
+    proto: Annotated[str | None, Query(description="Optional transport scheme hint (http)")] = None,
 ) -> RedirectResponse:
     """Redirect a device to the bytes, on a store URL cached for its own lifetime.
 
@@ -153,6 +154,9 @@ async def download_artifact(
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=STORE_UNAVAILABLE
         ) from None
+
+    if proto == "http" and url.startswith("https://storage.googleapis.com/"):
+        url = "http://" + url.removeprefix("https://")
 
     logger.info("artifact %s authorized; redirecting to the store", digest)
     return RedirectResponse(

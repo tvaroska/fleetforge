@@ -138,6 +138,18 @@ class TestTheHappyPath:
         assert response.status_code == 307
         assert "content-range" not in response.headers
 
+    async def test_proto_http_rewrites_gcs_signed_url_for_low_heap_boards(
+        self, app: FastAPI, store: MemoryObjectStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async def gcs_signed_url(key: str, *, ttl_s: int) -> str:
+            return f"https://storage.googleapis.com/btvaroska/{key}?X-Goog-Expires={ttl_s}"
+
+        monkeypatch.setattr(store, "signed_url", gcs_signed_url)
+        response = await get(app, f"{path_and_query(url_for())}&proto=http")
+
+        assert response.status_code == 307
+        assert response.headers["location"].startswith("http://storage.googleapis.com/")
+
 
 class TestRefusals:
     """Every one of these must be a 403/404 that cost the store nothing."""

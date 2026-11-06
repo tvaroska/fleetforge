@@ -519,7 +519,7 @@ async def update_device(
                     status.HTTP_404_NOT_FOUND, f"no such group: {body.group_id}"
                 ) from None
 
-            if "stay_awake" in changed:
+            if "stay_awake" in changed or "project" in changed:
                 proj = await session.get(Project, device.project_id)
                 secrets_rev = proj.secrets_rev if proj is not None else 0
                 try:

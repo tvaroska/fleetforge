@@ -178,7 +178,16 @@ def effective_url_ttl_s(device: Device, settings: Settings) -> int:
     return base_ttl
 
 
-def _artifact_url(sha256: str, settings: Settings, *, ttl_s: int | None = None) -> str:
+LOW_HEAP_HTTP_FALLBACK_BYTES = 65536
+
+
+def _artifact_url(
+    sha256: str,
+    settings: Settings,
+    *,
+    ttl_s: int | None = None,
+    device: Device | None = None,
+) -> str:
     """Mint the public download URL for this artifact. **The only mint site.**
 
     Local HMAC, no I/O and nothing to fail transiently (R1-be-3): the URL points at this
@@ -186,14 +195,32 @@ def _artifact_url(sha256: str, settings: Settings, *, ttl_s: int | None = None) 
     device redeems it. `artifact_urls.py` owns the shape and the signing rules; nothing
     here builds a path or a query string by hand.
 
+    When a board reports a low free heap (`0 < free_heap < 65536`), opening a second TLS
+    session alongside the active `mqtts://` control connection can exhaust 8-bit DRAM on
+    mbedTLS's 16 KB RX buffer (`MBEDTLS_ERR_SSL_ALLOC_FAILED`). Downgrading the transport
+    URL to `http://` (with `&proto=http` so `/v1/artifact/{sha256}/bin` redirects to
+    `http://storage.googleapis.com/...`) lets the board stage the image without a second
+    TLS allocation while still verifying the full SHA-256 (and optional ECDSA signature)
+    received over TLS-authenticated `mqtts://` before switching the boot slot.
+
     The return value is a credential. It goes into the command payload and nowhere else.
     """
-    return mint_artifact_url(
-        _public_base_url(settings),
+    base_url = _public_base_url(settings)
+    use_http = (
+        device is not None
+        and device.free_heap is not None
+        and 0 < device.free_heap < LOW_HEAP_HTTP_FALLBACK_BYTES
+        and base_url.startswith("https://")
+    )
+    if use_http:
+        base_url = "http://" + base_url.removeprefix("https://")
+    url = mint_artifact_url(
+        base_url,
         sha256,
         secret=_url_secret(settings),
         ttl_s=ttl_s if ttl_s is not None else settings.signed_url_ttl_s,
     )
+    return f"{url}&proto=http" if use_http else url
 
 
 def _url_secret(settings: Settings) -> str:
@@ -325,7 +352,7 @@ async def deploy_device(
         cmd_id = open_transaction.cmd_id if reused and open_transaction else new_command_id()
 
         # Before any row exists: a deploy that could not mint a URL never happened.
-        url = _artifact_url(artifact.sha256, settings, ttl_s=ttl_s)
+        url = _artifact_url(artifact.sha256, settings, ttl_s=ttl_s, device=device)
 
         if not reused:
             sent_by = await _sender(session, admin)
@@ -881,7 +908,7 @@ async def deploy_version_to_project_devices(
         )
         reused = open_transaction is not None and open_transaction.sha256 == found_artifact.sha256
         cmd_id = open_transaction.cmd_id if reused and open_transaction else new_command_id()
-        url = _artifact_url(found_artifact.sha256, settings, ttl_s=ttl_s)
+        url = _artifact_url(found_artifact.sha256, settings, ttl_s=ttl_s, device=device)
 
         if not reused:
             await record_requested(
@@ -1094,6 +1121,7 @@ async def republish_open_requested_on_wake(
         found_artifact.sha256,
         settings,
         ttl_s=effective_url_ttl_s(device, settings),
+        device=device,
     )
     payload = stage_payload(
         cmd_id=snap.cmd_id,
