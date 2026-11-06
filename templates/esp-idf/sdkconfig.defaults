@@ -1,0 +1,29 @@
+# Fleetforge ESP-IDF starter — FLASH-TIME IMMUTABLES & DRAM BUDGET.
+#
+# The partition table and bootloader rollback options below cannot be changed over the air.
+# Never add anti-rollback, secure boot, or flash encryption here unless intentionally burning eFuses.
+
+# The A/B table in partitions.csv (layout ab-4m-v1).
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_PARTITION_TABLE_FILENAME="partitions.csv"
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+
+# Automatic rollback: an OTA'd image that never reaches the fleet rolls back to the previous slot.
+# fleetforge_start.c refuses to compile without it.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+CONFIG_APP_PROJECT_VER_FROM_CONFIG=n
+
+# TLS certificate bundle + SNTP time verification for HTTPS and mqtts.
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+CONFIG_MBEDTLS_HAVE_TIME_DATE=y
+
+# Dynamic mbedTLS buffers: frees the 16 KB RX/TX TLS buffers between records and after handshake
+# so an OTA download can open a second TLS session while mqtts is active without exhausting 8-bit DRAM.
+CONFIG_MBEDTLS_DYNAMIC_BUFFER=y
+CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA=y
+CONFIG_MBEDTLS_DYNAMIC_FREE_CA_CERT=y
+
+# Size optimization (-Os) and 8 KB main stack for cJSON + HTTPS calls inside app_main.
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192

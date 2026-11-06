@@ -1,0 +1,6 @@
+dependencies:
+  idf: ">=5.5"
+  fleetforge:
+    git: https://github.com/tvaroska/fleetforge.git
+    path: agent/components/fleetforge
+    version: {{FLEETFORGE_REF}}

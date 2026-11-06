@@ -399,6 +399,156 @@ class TestCli:
         assert "commit_sha" in meta
         assert meta["commit_sha"] is None or len(meta["commit_sha"]) >= 7
 
+    def test_cli_new_scaffolds_project_and_keeps_immutables_in_sync(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        tpl_dir = repo_root / "templates" / "esp-idf"
+        basic_idf = repo_root / "agent" / "components" / "fleetforge" / "examples" / "basic_idf"
+        assert (tpl_dir / "partitions.csv").read_bytes() == (
+            repo_root / "agent" / "partitions.csv"
+        ).read_bytes()
+        assert (tpl_dir / "main" / "fleetforge_start.c").read_bytes() == (
+            basic_idf / "main" / "fleetforge_start.c"
+        ).read_bytes()
+        assert (tpl_dir / "main" / "fleetforge_start.h").read_bytes() == (
+            basic_idf / "main" / "fleetforge_start.h"
+        ).read_bytes()
+
+        dest = tmp_path / "oled-status"
+        rc = main(
+            [
+                "new",
+                str(dest),
+                "--target",
+                "esp32c6",
+                "--project",
+                "oled-status",
+                "--ref",
+                "v0.8.4",
+            ]
+        )
+        assert rc == 0
+        out = json.loads(capsys.readouterr().out)
+        assert out["app_name"] == "oled_status"
+        assert out["project"] == "oled-status"
+        assert out["target"] == "esp32c6"
+        assert (dest / "AGENTS.md").is_file()
+        assert (dest / "CLAUDE.md").exists()
+        assert "project(oled_status)" in (dest / "CMakeLists.txt").read_text(encoding="utf-8")
+        idf_yml = (dest / "main" / "idf_component.yml").read_text(encoding="utf-8")
+        assert "https://github.com/tvaroska/fleetforge.git" in idf_yml
+        assert "path: agent/components/fleetforge" in idf_yml
+        assert "version: v0.8.4" in idf_yml
+        sdk = (dest / "sdkconfig.defaults").read_text(encoding="utf-8")
+        assert "CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y" in sdk
+        assert "CONFIG_MBEDTLS_DYNAMIC_BUFFER=y" in sdk
+
+        # Refuses non-empty directory without --force
+        rc_exists = main(["new", str(dest)])
+        assert rc_exists == 1
+
+    def test_cli_status_logs_and_secrets_subcommands(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        def fake_request(
+            method: str,
+            url: str,
+            *,
+            token: str,
+            body: bytes | None = None,
+            content_type: str = "application/octet-stream",
+        ) -> tuple[int, dict[str, Any]]:
+            if method == "GET" and "/v1/devices?" in url:
+                return 200, {
+                    "devices": [
+                        {
+                            "device_id": DEVICE_ID,
+                            "name": "kitchen-eink",
+                            "platform_type": "esp32s3",
+                            "fw_version": "2.0.1",
+                            "online": True,
+                            "power_class": "always_on",
+                            "secrets_rev": 2,
+                            "health": {"free_heap": 65572, "rssi": -59},
+                            "deploy": {"state": "confirmed", "artifact_version": "2.0.1"},
+                        }
+                    ],
+                    "arrivals": [],
+                }
+            if method == "GET" and f"/v1/devices/{DEVICE_ID}/logs" in url:
+                return 200, {
+                    "device_id": DEVICE_ID,
+                    "lines": [
+                        {
+                            "id": 1,
+                            "logged_at": "2026-11-06T12:00:00Z",
+                            "level": "I",
+                            "text": "list 6 items in 1808 ms",
+                            "context": {
+                                "firmware.version": "2.0.1",
+                                "device.free_heap_bytes": 65572,
+                                "device.rssi_dbm": -59,
+                            },
+                        }
+                    ],
+                }
+            if "/secrets" in url:
+                return 200, {"secrets_rev": 3, "secrets": [{"key": "api_url"}]}
+            return 200, {}
+
+        with patch("fleetforge.cli._request_json", side_effect=fake_request):
+            assert (
+                main(
+                    [
+                        "--token",
+                        "ffa_test.token",
+                        "status",
+                        "--project",
+                        "eink-todo",
+                    ]
+                )
+                == 0
+            )
+            status_out = capsys.readouterr().out
+            assert "kitchen-eink" in status_out
+            assert "64 KB" in status_out
+            assert "confirmed (2.0.1)" in status_out
+
+            assert (
+                main(
+                    [
+                        "--token",
+                        "ffa_test.token",
+                        "logs",
+                        "--project",
+                        "eink-todo",
+                    ]
+                )
+                == 0
+            )
+            logs_out = capsys.readouterr().out
+            assert "list 6 items in 1808 ms" in logs_out
+            assert "fw=2.0.1 heap=65572 rssi=-59" in logs_out
+
+            assert (
+                main(
+                    [
+                        "--token",
+                        "ffa_test.token",
+                        "secrets",
+                        "set",
+                        "api_url",
+                        "https://boris.tvaroska.sk/todo/v1/list",
+                        "--project",
+                        "eink-todo",
+                    ]
+                )
+                == 0
+            )
+            sec_out = json.loads(capsys.readouterr().out)
+            assert sec_out["secrets_rev"] == 3
+
 
 class TestSecretsCryptoAndDeviceSecretsAuth:
     def test_encrypt_and_decrypt_secret_round_trip(self) -> None:

@@ -1,0 +1,60 @@
+set dotenv-load := true
+
+idf_image := "espressif/idf:v5.5.5@sha256:a9231d0697ab8f7517cc072e93b7c83e04907bfbfba80b6440d7dbbf90665cf2"
+app_name := "{{APP_NAME}}"
+target := "{{TARGET}}"
+project := env_var_or_default("FLEETFORGE_PROJECT", "{{PROJECT_SLUG}}")
+fleetforge_url := env_var_or_default("FLEETFORGE_URL", "{{FLEETFORGE_URL}}")
+fleetforge_ref := "{{FLEETFORGE_REF}}"
+gcp_project := env_var_or_default("GCP_PROJECT", "{{GCP_PROJECT}}")
+ff_cli := "uv run -q --no-project --with 'fleetforge @ git+https://github.com/tvaroska/fleetforge@" + fleetforge_ref + "' python -m fleetforge.cli"
+
+version := `sed -n 's/^set(PROJECT_VER "\(.*\)")/\1/p' CMakeLists.txt`
+
+# Build build/{{APP_NAME}}.bin locally inside the pinned ESP-IDF 5.5.5 container
+build:
+    docker run --rm -u $(id -u):$(id -g) \
+        -v "{{justfile_directory()}}":/w -w /w \
+        -e HOME=/tmp \
+        {{idf_image}} \
+        bash -euo pipefail -c '. $IDF_PATH/export.sh && idf.py set-target {{target}} && idf.py build'
+    @ls -lh build/{{app_name}}.bin
+    @echo "Built {{app_name}} {{version}} ({{target}}, layout ab-4m-v1)"
+
+# Build build/{{APP_NAME}}.bin remotely on Google Cloud Build and download it to build/{{APP_NAME}}.bin
+cloud-build:
+    mkdir -p build
+    gcloud builds submit "{{justfile_directory()}}" \
+        --project={{gcp_project}} \
+        --config=cloudbuild.yaml \
+        --substitutions=_ARTIFACT_URI=gs://{{gcp_project}}_cloudbuild/{{app_name}}/{{version}}
+    gcloud storage cp gs://{{gcp_project}}_cloudbuild/{{app_name}}/{{version}}/{{app_name}}.bin build/{{app_name}}.bin
+    @ls -lh build/{{app_name}}.bin
+    @echo "Cloud-built {{app_name}} {{version}} ({{target}}, layout ab-4m-v1)"
+
+# Upload build/{{APP_NAME}}.bin with Git provenance to Fleetforge (pass --deploy dev or --deploy all)
+push *args:
+    {{ff_cli}} \
+        --url "{{fleetforge_url}}" \
+        push build/{{app_name}}.bin \
+        --project "{{project}}" \
+        --target "{{target}}" \
+        --version "{{version}}" \
+        --layout ab-4m-v1 \
+        --test-passed \
+        {{args}}
+
+# Show enrolled boards, online/sleepy state, fw_version, free_heap, and active OTA deploy status
+status *args:
+    {{ff_cli}} --url "{{fleetforge_url}}" status --project "{{project}}" {{args}}
+
+# Tail remote up/log + [prev-boot] crash lines and heartbeat context from a board
+logs *args:
+    {{ff_cli}} --url "{{fleetforge_url}}" logs --project "{{project}}" {{args}}
+
+# Manage encrypted rotating project secrets (list | set KEY VALUE | delete KEY)
+secrets *args:
+    {{ff_cli}} --url "{{fleetforge_url}}" secrets --project "{{project}}" {{args}}
+
+clean:
+    rm -rf build sdkconfig sdkconfig.old managed_components dependencies.lock
