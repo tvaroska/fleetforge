@@ -419,7 +419,11 @@ async def _store_log(
     )
     async with _savepoint(session, device_id, "log storage", "liveness"):
         await device_logs.record_log_batch(
-            session, device_id=device_id, payload=batch, received_at=received_at
+            session,
+            device_id=device_id,
+            payload=batch,
+            received_at=received_at,
+            context=otel.device_snapshot(device),
         )
     if device is not None and batch.lines:
         await otel.enqueue_logs_to_otel(

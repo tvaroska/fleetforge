@@ -66,7 +66,7 @@ TRIM_SQL = text(
 
 TAIL_SQL = text(
     """
-    SELECT id, logged_at, received_at, level, text, dropped
+    SELECT id, logged_at, received_at, level, text, dropped, context
       FROM device_logs
      WHERE device_id = :device_id
        AND logged_at > :since
@@ -108,9 +108,15 @@ class StoredLogLine:
     level: str
     text: str | None
     dropped: int
+    context: dict[str, Any] | None
 
 
-def _rows(device_id: str, batch: LogBatch, received_at: dt.datetime) -> list[dict[str, Any]]:
+def _rows(
+    device_id: str,
+    batch: LogBatch,
+    received_at: dt.datetime,
+    context: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
     gap = min((batch.dropped or 0) + batch.unusable, MAX_DROPPED)
     if not batch.lines:
         if not gap:
@@ -123,6 +129,7 @@ def _rows(device_id: str, batch: LogBatch, received_at: dt.datetime) -> list[dic
                 "level": GAP_MARKER_LEVEL,
                 "text": None,
                 "dropped": gap,
+                "context": context,
             }
         ]
     return [
@@ -133,6 +140,7 @@ def _rows(device_id: str, batch: LogBatch, received_at: dt.datetime) -> list[dic
             "level": line.level,
             "text": sanitise_device_text(line.text),
             "dropped": gap if index == 0 else 0,
+            "context": context,
         }
         for index, line in enumerate(batch.lines)
     ]
@@ -145,9 +153,14 @@ async def record_log_batch(
     payload: LogBatch,
     received_at: dt.datetime,
     max_lines: int = LOG_MAX_LINES_PER_DEVICE,
+    context: dict[str, Any] | None = None,
 ) -> int:
-    """Store one batch (oldest first, so ids ascend with time) and trim; return rows stored."""
-    rows = _rows(device_id, payload, received_at)
+    """Store one batch (oldest first, so ids ascend with time) and trim; return rows stored.
+
+    `context` is the board's latest heartbeat snapshot (`ingestor.otel.device_snapshot`),
+    server-derived, written unchanged on every row of the batch; `None` stores NULL.
+    """
+    rows = _rows(device_id, payload, received_at, context or None)
     if not rows:
         return 0
     await session.execute(insert(DeviceLog), rows)
@@ -176,6 +189,7 @@ async def read_tail(
             level=row.level,
             text=row.text,
             dropped=row.dropped,
+            context=row.context,
         )
         for row in rows
     ]

@@ -521,6 +521,48 @@ async def test_the_example_batch_is_stored_oldest_first(session: AsyncSession) -
     assert log_summaries(records) == [f"device {DEVICE_ID} log lines=2 dropped=0 unusable=0"]
 
 
+async def test_a_log_line_keeps_the_boards_heartbeat_context(session: AsyncSession) -> None:
+    """OTEL-be-2: `device_logs.context` is the latest heartbeat at receipt, by OTel name.
+
+    It is server-derived (never device text), stored on every row of the batch, and
+    survives the next heartbeat overwriting the `devices` row. A board that has not sent
+    a heartbeat yet stores NULL, not `{}`.
+    """
+    await seed_device(session, fw_version="2.0.1", secrets_rev=2)
+    await publish(session, "log", {"lines": [{"text": "cold"}]})
+    await publish(
+        session,
+        "hb",
+        {"fw_version": "2.0.1", "uptime_s": 77, "rssi": -61, "free_heap": 41000},
+        at=NOW + dt.timedelta(seconds=1),
+    )
+    await publish(
+        session,
+        "log",
+        {"lines": [{"text": "warm", "level": "W"}]},
+        at=NOW + dt.timedelta(seconds=2),
+    )
+    await publish(
+        session,
+        "hb",
+        {"fw_version": "2.0.1", "uptime_s": 137, "rssi": -70, "free_heap": 30000},
+        at=NOW + dt.timedelta(seconds=61),
+    )
+    cold, warm = await log_rows(session)
+    assert cold.context is None or "device.rssi_dbm" not in cold.context
+    assert warm.context is not None
+    assert warm.context["device.rssi_dbm"] == -61
+    assert warm.context["device.free_heap_bytes"] == 41000
+    assert warm.context["device.uptime_s"] == 77
+    assert warm.context["firmware.version"] == "2.0.1"
+    assert warm.context["fleetforge.secrets_rev"] == 2
+    assert all(isinstance(v, (str, int, float, bool)) for v in warm.context.values())
+    tail = await device_logs.read_tail(
+        session, device_id=DEVICE_ID, now=NOW + dt.timedelta(seconds=90), limit=10
+    )
+    assert tail[0].text == "warm" and tail[0].context == warm.context
+
+
 async def test_log_text_is_sanitised_bounded_and_never_logged(session: AsyncSession) -> None:
     secret = "a\nb\x1b[31m https://x.y/sig?=s"
     body = {"lines": [{"text": secret, "level": "E"}, {"text": "Z" * 300}]}

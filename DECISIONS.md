@@ -1,4 +1,4 @@
-# Decisions — Architectural Decision Index (`~/projects/fleetforge`)
+# Decisions — Architectural Decision Index (`DECISIONS.md`)
 
 Compact architectural decision index and recent decision log for **FleetForge** (`<= 12 KB`).
 - **Full Historical Decision Log (`6,022` lines, `R0–R11`, `P1`, `S0`): [`docs/archive/DECISIONS-history.md`](docs/archive/DECISIONS-history.md)**
@@ -24,6 +24,13 @@ Append new decisions newest-first below. Keep this root file under `25 KB` (`< 1
 ---
 
 ## 2. Recent Architectural Decisions (2026-10)
+
+### 2026-11-06 — `OTEL-be-2`: board identity on the OTel resource, heartbeat snapshot on each log record (`device_logs.context`)
+
+- **Context:** `up/log` lines are text-only and every record reached the collector with one attribute (`fleetforge.age_ms`) and a 5-field resource. Operators wanted firmware/library/layout/reset-reason and the heap/RSSI at the moment of a line without the board repeating constants over the radio.
+- **Decision:** Keep the wire untouched. The ingestor enriches server-side from the `devices` row: stable announce facts become typed OTel **resource** attributes (`service.*`, `host.arch`, `firmware.*` incl. `firmware.sub_versions.<name>`, `device.*`, `fleetforge.*`); the latest heartbeat (`device.rssi_dbm`, `device.free_heap_bytes`, `device.min_free_heap_bytes`, `device.uptime_s`, `firmware.version`, `fleetforge.secrets_rev`, `fleetforge.health_at`) becomes per-**record** attributes and is stored as `device_logs.context` JSONB (migration `0014`, nullable, server-derived, never device text) and returned as `context` on `GET /v1/devices/{id}/logs`. Absent values are omitted, never empty.
+- **Rejected for now:** per-event typed `attrs` on `up/log` (`ff_log_event()`) — additive `proto: 1` extension kept as a proposal until `[event]`-style grouping proves insufficient.
+- **Details:** [`docs/features/health-telemetry.md`](docs/features/health-telemetry.md), `src/fleetforge/ingestor/otel.py` (`_resource_attributes`, `device_snapshot`), `src/fleetforge/device_logs.py`, `alembic/versions/0014_device_log_context.py`.
 
 ### 2026-10-24 — CUJ-3 Competition Pit & Contested-Venue Telemetry ("Chloe" / `FLUX-10413-Hub`): Venue Offline Mode (`ff_set_offline_mode`), shared NimBLE coexistence, local `PENDING_VERIFY` self-test confirm, and USB-C dock (`link_type: "dock"`) stage & ring drain
 

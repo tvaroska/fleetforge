@@ -234,19 +234,76 @@ def _resolve_endpoint(base_url: str, signal_suffix: str) -> str:
     return f"{stripped}{signal_suffix}"
 
 
+def _attr(key: str, value: Any) -> dict[str, Any] | None:
+    """One OTLP KeyValue, typed from the Python value; None for None/empty."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return {"key": key, "value": {"boolValue": value}}
+    if isinstance(value, int):
+        return {"key": key, "value": {"intValue": str(value)}}
+    if isinstance(value, float):
+        return {"key": key, "value": {"doubleValue": value}}
+    text = str(value)
+    if not text:
+        return None
+    return {"key": key, "value": {"stringValue": text}}
+
+
 def _resource_attributes(device: Device, project_slug: str) -> list[dict[str, Any]]:
-    attrs: list[dict[str, Any]] = [
-        {"key": "service.name", "value": {"stringValue": project_slug}},
-        {"key": "fleetforge.project", "value": {"stringValue": project_slug}},
-        {"key": "device.id", "value": {"stringValue": device.device_id}},
-        {"key": "hardware.platform", "value": {"stringValue": device.platform_type}},
+    """The board's identity, once per batch (OTel resource): what the announce said.
+
+    Everything here is already in the `devices` row, so a firmware line never has to
+    repeat it. Semantic-convention names where one exists (`service.*`, `host.arch`,
+    `device.*`), `firmware.*` / `fleetforge.*` for the rest.
+    """
+    candidates: list[tuple[str, Any]] = [
+        ("service.name", project_slug),
+        ("service.version", device.fw_version),
+        ("service.instance.id", device.device_id),
+        ("fleetforge.project", project_slug),
+        ("device.id", device.device_id),
+        ("device.name", device.name),
+        ("hardware.platform", device.platform_type),
+        ("host.arch", device.platform_type),
+        ("firmware.version", device.fw_version),
+        ("firmware.library.version", device.agent_version),
+        ("firmware.partition_layout", device.partition_layout),
+        ("firmware.boot_ok", device.boot_ok),
+        ("firmware.rollback_capable", device.rollback_capable),
+        ("device.flash_chip_size", device.flash_chip_size),
+        ("device.link_type", device.link_type),
+        ("device.power_class", device.power_class),
+        ("device.reset_reason", device.last_reset_reason),
+        ("device.is_dev", device.is_dev),
+        ("device.group_id", str(device.group_id) if device.group_id else None),
+        ("fleetforge.secrets_rev", device.secrets_rev),
     ]
-    if device.fw_version:
-        attrs.append({"key": "service.version", "value": {"stringValue": device.fw_version}})
-        attrs.append({"key": "firmware.version", "value": {"stringValue": device.fw_version}})
-    if device.name:
-        attrs.append({"key": "device.name", "value": {"stringValue": device.name}})
+    for name, version in sorted((device.sub_versions or {}).items()):
+        candidates.append((f"firmware.sub_versions.{name}", version))
+    attrs = [a for key, value in candidates if (a := _attr(key, value)) is not None]
     return attrs
+
+
+def device_snapshot(device: Device | None) -> dict[str, Any]:
+    """What was true on the board around the time of a line: the latest heartbeat.
+
+    Stored on each `device_logs` row as `context` and attached to each OTLP record, so
+    "heap was 41 KB when this W fired" survives the next heartbeat overwriting the row.
+    Keys are the OTel attribute names; values are plain JSON scalars.
+    """
+    if device is None:
+        return {}
+    candidates: list[tuple[str, Any]] = [
+        ("firmware.version", device.fw_version),
+        ("device.rssi_dbm", device.rssi),
+        ("device.free_heap_bytes", device.free_heap),
+        ("device.min_free_heap_bytes", device.min_free_heap),
+        ("device.uptime_s", device.uptime_s),
+        ("fleetforge.secrets_rev", device.secrets_rev),
+        ("fleetforge.health_at", device.health_at.isoformat() if device.health_at else None),
+    ]
+    return {key: value for key, value in candidates if value is not None and value != ""}
 
 
 def build_otlp_logs_payload(
@@ -259,6 +316,9 @@ def build_otlp_logs_payload(
 ) -> dict[str, Any]:
     """Construct an OTLP/HTTP JSON `ExportLogsServiceRequest` payload."""
     observed_ns = str(int(received_at.timestamp() * 1_000_000_000))
+    snapshot_attrs = [
+        a for key, value in device_snapshot(device).items() if (a := _attr(key, value)) is not None
+    ]
     log_records: list[dict[str, Any]] = []
     for idx, line in enumerate(lines):
         logged_at = device_time(received_at, line.age_ms)
@@ -267,6 +327,7 @@ def build_otlp_logs_payload(
         clean_text = sanitise_device_text(line.text) or ""
         attrs: list[dict[str, Any]] = [
             {"key": "fleetforge.age_ms", "value": {"intValue": str(line.age_ms)}},
+            *snapshot_attrs,
         ]
         if idx == 0 and dropped > 0:
             attrs.append({"key": "fleetforge.dropped_before", "value": {"intValue": str(dropped)}})

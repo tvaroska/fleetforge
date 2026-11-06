@@ -177,7 +177,7 @@ token or signed URL.
 
 The server treats `text` as untrusted: it strips control characters, redacts URLs and
 bounds the length. It drops a payload over 8192 bytes, or one it cannot decode, whole and
-without refusing the device. It keeps lines as [prd.md](prd.md) → *Retention* says. Like
+without refusing the device. It keeps lines as [prd.md](../../spec/prd.md) → *Retention* says. Like
 every live `up/` message, an `up/log` moves `last_seen`. The fields are additive under
 *Evolution rules*, rule 2, and `proto` stays `1`.
 ````
@@ -368,7 +368,7 @@ a sample is not worth a retransmit or a persistent-session slot.
 
 The server skips a sample it cannot read (a name outside the rule, a value that is not a finite
 number) without losing the rest of the payload, and drops a payload over 8192 bytes, or one it
-cannot decode, whole and without refusing the device. It keeps samples as [prd.md](prd.md) →
+cannot decode, whole and without refusing the device. It keeps samples as [prd.md](../../spec/prd.md) →
 *Retention* says. Like every live `up/` message, an `up/telemetry` moves `last_seen`. The fields
 are additive under *Evolution rules*, rule 2, and `proto` stays `1`.
 ````
@@ -557,6 +557,10 @@ PASS traps: as expected
 - **Backend OTLP/HTTP exporter (`src/fleetforge/ingestor/otel.py`, `OTEL-be-1`)**:
   - Configured per project (`projects.otel_endpoint`, `projects.otel_headers` via `PATCH /v1/projects/{slug}` and the `4. ACCESS` tab's Observability card) or globally via `FF_OTEL_EXPORTER_OTLP_ENDPOINT` and `FF_OTEL_EXPORTER_OTLP_HEADERS`.
   - When configured, `fleetforge-ingestor` asynchronously POSTs OTLP/HTTP JSON payloads (`export_logs_otlp` -> `<endpoint>/v1/logs`, `export_metrics_otlp` -> `<endpoint>/v1/metrics`) with resource attributes `service.name = <project_slug>`, `service.version = <fw_version>`, and `device.id = <device_id>`, computing nanosecond timestamps from `received_at - age_ms`. Collector timeouts or HTTP errors are logged at `WARNING` and never block database writes or MQTT ack handling.
+- **Board identity on the resource, heartbeat on the record (`OTEL-be-2`, 2026-11-06)**:
+  - A firmware line never repeats what the announce already said. `_resource_attributes` emits, once per batch and typed (`intValue`/`boolValue`/`stringValue`), everything stable from the `devices` row: `service.name`/`service.version`/`service.instance.id`, `device.id`/`device.name`, `hardware.platform` + `host.arch`, `firmware.version`, `firmware.library.version` (`agent_version`), `firmware.partition_layout`, `firmware.boot_ok`, `firmware.rollback_capable`, `firmware.sub_versions.<name>`, `device.flash_chip_size`, `device.link_type`, `device.power_class`, `device.reset_reason`, `device.is_dev`, `device.group_id`, `fleetforge.project`, `fleetforge.secrets_rev`. Absent fields are omitted, never empty.
+  - What changes between batches rides on each log record instead: `device_snapshot(device)` attaches the latest heartbeat (`firmware.version`, `device.rssi_dbm`, `device.free_heap_bytes`, `device.min_free_heap_bytes`, `device.uptime_s`, `fleetforge.secrets_rev`, `fleetforge.health_at`) next to `fleetforge.age_ms`. The same snapshot is stored as `device_logs.context` (JSONB, migration `0014`) and returned on `GET /v1/devices/{id}/logs` as `context`, so "heap was 41 KB when this `W` fired" survives the next heartbeat overwriting the `devices` row. It is server-derived — never device text — and NULL for rows written before `0014`.
+  - Still text-only on the wire: `up/log` lines carry no per-event attributes. Structured per-event fields (`attrs` on `up/log`, `ff_log_event()`) remain a proposed additive `proto: 1` extension.
 - **Tethered USB-C dock ring drains & delayed ingest (`CUJ-3`, 2026-10-24)**:
   - When `ff_set_offline_mode(true)` locks out `802.11` Wi-Fi at a competition venue, `ff_log_drain_json(char *buf, size_t cap)` (`src/ff_log.c`) and `ff_telemetry_drain_json(char *buf, size_t cap)` (`src/ff_telemetry.c`) drain the board's RAM + `[prev-boot]` `RTC_NOINIT_ATTR` log lines and `age_ms` telemetry rings into `proto: 1` `up/log` and `up/telemetry` JSON envelopes over USB-C (`link_type: "dock"`).
   - Replaying the bundle via `POST /v1/devices/{device_id}/dock-sync` or `fleetforge dock-sync <device_id> <bundle.json>` feeds those envelopes through `ingestor/handlers.py::handle_up_message`, reconstructing original sample/log timestamps (`received_at - age_ms`) and exporting them to OTLP/HTTP (`<endpoint>/v1/logs` and `/v1/metrics`).

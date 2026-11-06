@@ -715,6 +715,7 @@ async def device_log_tail(
                 level=line.level,
                 text=line.text,
                 dropped=line.dropped,
+                context=line.context,
             )
             for line in lines
         ],

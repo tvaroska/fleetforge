@@ -736,6 +736,12 @@ class DeviceLogLine(BaseModel):
     level: str
     text: str | None
     dropped: int
+    # Board state around the line (latest heartbeat at receipt), keyed by OTel attribute
+    # name: `firmware.version`, `device.rssi_dbm`, `device.free_heap_bytes`,
+    # `device.min_free_heap_bytes`, `device.uptime_s`, `fleetforge.secrets_rev`,
+    # `fleetforge.health_at`. Server-derived scalars, never device text. `null` for
+    # rows older than migration 0014.
+    context: dict[str, str | int | float | bool] | None = None
 
 
 class DeviceLogTail(BaseModel):

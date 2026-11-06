@@ -45,6 +45,7 @@ tables with app-side retention (`fleetforge.retention`), see DECISIONS 2026-10-1
 import datetime as dt
 import uuid
 from enum import StrEnum
+from typing import Any
 
 from sqlalchemy import (
     BigInteger,
@@ -1122,6 +1123,10 @@ class DeviceLog(Base):
     received_at: Mapped[dt.datetime] = mapped_column(TimestampTZ, nullable=False)
     level: Mapped[str] = mapped_column(Text, nullable=False)
     dropped: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    # Board state around the line (latest heartbeat: fw_version, rssi, free_heap,
+    # uptime_s, secrets_rev), keyed by OTel attribute name (`ingestor.otel.device_snapshot`).
+    # Server-derived, never device text. NULL on rows written before 0014.
+    context: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     # Declared last: the attribute shadows `sqlalchemy.text` inside this class body.
     text: Mapped[str | None] = mapped_column(Text, nullable=True)
 

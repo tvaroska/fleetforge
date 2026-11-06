@@ -479,7 +479,11 @@ class TestOtelExporter:
             received_at=now,
         )
         res_logs = logs_payload["resourceLogs"][0]
-        attrs = {a["key"]: a["value"]["stringValue"] for a in res_logs["resource"]["attributes"]}
+        attrs = {
+            a["key"]: a["value"]["stringValue"]
+            for a in res_logs["resource"]["attributes"]
+            if "stringValue" in a["value"]
+        }
         assert attrs["service.name"] == "eink-frame"
         assert attrs["service.version"] == "1.2.0"
         assert attrs["device.id"] == DEVICE_ID
@@ -491,6 +495,11 @@ class TestOtelExporter:
         assert records[0]["body"]["stringValue"] == "morse: ---...--- (cycle 1)"
         assert records[1]["severityNumber"] == 17
         assert records[1]["severityText"] == "ERROR"
+        # No heartbeat yet: the announce-known fw_version rides along, nothing empty.
+        keys = [a["key"] for a in records[0]["attributes"]]
+        assert keys[0] == "fleetforge.age_ms"
+        assert "firmware.version" in keys
+        assert "device.rssi_dbm" not in keys and "device.free_heap_bytes" not in keys
 
         samples = [
             TelemetrySample(age_ms=1000, name="battery_v", value=3.92),
@@ -506,6 +515,100 @@ class TestOtelExporter:
         assert len(metrics) == 1
         assert metrics[0]["name"] == "battery_v"
         assert len(metrics[0]["gauge"]["dataPoints"]) == 2
+
+    def test_resource_carries_the_announce_and_records_carry_the_heartbeat(self) -> None:
+        """OTEL-be-2: board identity once per batch (resource), latest heartbeat per record.
+
+        A firmware line never has to repeat fw/library/layout/reset reason; the server has
+        them from the announce. Snapshot values are typed, and absent fields are absent
+        (no empty strings, no nulls) so the collector sees a stable schema.
+        """
+        import datetime as dt
+        import uuid
+
+        from fleetforge.ingestor.otel import device_snapshot
+
+        group = uuid.uuid4()
+        dev = Device(
+            device_id=DEVICE_ID,
+            name="kitchen-eink",
+            platform_type="esp32s3",
+            fw_version="2.0.1",
+            agent_version="0.6.0",
+            partition_layout="ab-4m-v1",
+            flash_chip_size=4_194_304,
+            rollback_capable=True,
+            boot_ok=True,
+            link_type="wifi",
+            power_class="sleepy",
+            expected_wake_interval_s=900,
+            capabilities=["ota"],
+            last_reset_reason="deepsleep",
+            is_dev=True,
+            group_id=group,
+            secrets_rev=2,
+            sub_versions={"display_fw": "1.4"},
+            rssi=-61,
+            free_heap=41_000,
+            min_free_heap=38_200,
+            uptime_s=77,
+            health_at=dt.datetime(2026, 11, 6, 2, 0, 0, tzinfo=dt.UTC),
+        )
+        now = dt.datetime(2026, 11, 6, 2, 0, 10, tzinfo=dt.UTC)
+        payload = build_otlp_logs_payload(
+            device=dev,
+            project_slug="eink-todo",
+            lines=[LogLine(age_ms=100, level="W", text="list fetch http 502")],
+            dropped=0,
+            received_at=now,
+        )
+        res = payload["resourceLogs"][0]
+        attrs = {a["key"]: a["value"] for a in res["resource"]["attributes"]}
+        assert attrs["service.name"] == {"stringValue": "eink-todo"}
+        assert attrs["service.version"] == {"stringValue": "2.0.1"}
+        assert attrs["service.instance.id"] == {"stringValue": DEVICE_ID}
+        assert attrs["host.arch"] == {"stringValue": "esp32s3"}
+        assert attrs["firmware.library.version"] == {"stringValue": "0.6.0"}
+        assert attrs["firmware.partition_layout"] == {"stringValue": "ab-4m-v1"}
+        assert attrs["firmware.boot_ok"] == {"boolValue": True}
+        assert attrs["firmware.rollback_capable"] == {"boolValue": True}
+        assert attrs["firmware.sub_versions.display_fw"] == {"stringValue": "1.4"}
+        assert attrs["device.flash_chip_size"] == {"intValue": "4194304"}
+        assert attrs["device.reset_reason"] == {"stringValue": "deepsleep"}
+        assert attrs["device.power_class"] == {"stringValue": "sleepy"}
+        assert attrs["device.is_dev"] == {"boolValue": True}
+        assert attrs["device.group_id"] == {"stringValue": str(group)}
+        assert attrs["fleetforge.secrets_rev"] == {"intValue": "2"}
+        # Heartbeat values are per record, not per resource: they change between batches.
+        assert "device.rssi_dbm" not in attrs
+
+        record = res["scopeLogs"][0]["logRecords"][0]
+        rec = {a["key"]: a["value"] for a in record["attributes"]}
+        assert rec["fleetforge.age_ms"] == {"intValue": "100"}
+        assert rec["device.rssi_dbm"] == {"intValue": "-61"}
+        assert rec["device.free_heap_bytes"] == {"intValue": "41000"}
+        assert rec["device.min_free_heap_bytes"] == {"intValue": "38200"}
+        assert rec["device.uptime_s"] == {"intValue": "77"}
+        assert rec["firmware.version"] == {"stringValue": "2.0.1"}
+        assert rec["fleetforge.health_at"] == {"stringValue": "2026-11-06T02:00:00+00:00"}
+
+        # The same snapshot is what `device_logs.context` stores: plain JSON scalars.
+        snap = device_snapshot(dev)
+        assert snap["device.rssi_dbm"] == -61
+        assert snap["firmware.version"] == "2.0.1"
+        assert json.dumps(snap)  # JSONB-serialisable
+        assert device_snapshot(None) == {}
+        bare = Device(device_id="x", platform_type="esp32", capabilities=[])
+        assert device_snapshot(bare) == {}
+        bare_keys = {a["key"] for a in _resource_attrs_of(bare)}
+        assert "firmware.version" not in bare_keys
+        assert "device.name" not in bare_keys
+
+
+def _resource_attrs_of(device: Device) -> list[dict[str, Any]]:
+    from fleetforge.ingestor.otel import _resource_attributes
+
+    return _resource_attributes(device, "p")
 
 
 class TestCuj2FirmwareAndTemplates:

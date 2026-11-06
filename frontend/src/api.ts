@@ -406,6 +406,10 @@ export type DeviceLogLine = {
   level: string
   text: string | null
   dropped: number
+  // Board state around the line (latest heartbeat at receipt), keyed by OTel attribute
+  // name (`firmware.version`, `device.rssi_dbm`, `device.free_heap_bytes`, ...).
+  // Server-derived scalars; `null` for rows older than migration 0014.
+  context?: Record<string, string | number | boolean> | null
 }
 export type DeviceLogTail = { device_id: string; lines: DeviceLogLine[] }
 export type DeviceLogList = DeviceLogTail
