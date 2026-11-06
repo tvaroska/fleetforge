@@ -147,7 +147,7 @@ def create_app() -> FastAPI:
         hub: EventHub = app.state.event_hub
         task: asyncio.Task[None] | None = None
         if settings is not None:
-            sessionmaker = get_sessionmaker(settings)
+            sessionmaker = get_sessionmaker()
 
             async def _on_device_event(event: DeviceEvent) -> None:
                 # The API owns `MQTT_COMMAND_*`, `ARTIFACT_URL_SECRET`, and `PUBLIC_BASE_URL`
