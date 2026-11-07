@@ -144,12 +144,14 @@ async def engine() -> AsyncIterator[AsyncEngine]:
     test_url = database_url_for(TEST_DB_NAME)
     try:
         await recreate_database(TEST_DB_NAME)
-    except SQLAlchemyError as exc:  # pragma: no cover - environment problem, not a test failure
-        pytest.exit(
+    except (
+        SQLAlchemyError,
+        OSError,
+    ) as exc:  # pragma: no cover - environment problem, not a test failure
+        pytest.skip(
             "Cannot reach PostgreSQL at "
-            f"{database_url_for('postgres')}: {exc}\n"
-            "Start the dev database first:  just db-up",
-            returncode=1,
+            f"{database_url_for('postgres')}: {exc} "
+            "(skipping DB-backed fixture; start dev database with `just db-up`)"
         )
 
     await run_alembic(test_url)

@@ -16,6 +16,7 @@ substitutions:
   _AR_REPO: containers
   _BACKEND_IMAGE: ""
   _FRONTEND_IMAGE: ""
+  _TAG: ""
   _PUSH: "auto"
 
 options:
@@ -62,16 +63,6 @@ steps:
         /workspace/.venv/bin/ruff format --check .
         /workspace/.venv/bin/mypy src/
         /workspace/.venv/bin/pytest \
-          tests/test_ci_cd.py \
-          tests/test_agent_partitions.py \
-          tests/test_arduino_library.py \
-          tests/test_arduino_package.py \
-          tests/test_worked_example.py \
-          tests/test_ota_component.py \
-          tests/test_layout_detection.py \
-          tests/test_selftest.py \
-          tests/test_safe_window.py \
-          tests/test_sleep.py \
           -k "not (TestCiCdDatabaseAndApi or TestTrack1 and database)" \
           -q
 
@@ -110,7 +101,7 @@ steps:
         set -euo pipefail
         SHA="$$(cat /workspace/.resolved_sha)"
         BUILT_AT="$$(cat /workspace/.built_at)"
-        CB_TAG="${TAG_NAME}"
+        CB_TAG="${TAG_NAME:-${_TAG}}"
         CB_BACKEND="${_BACKEND_IMAGE}"
         CB_FRONTEND="${_FRONTEND_IMAGE}"
         BACKEND_REPO="$${CB_BACKEND:-${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/fleetforge}"
@@ -138,12 +129,23 @@ steps:
             docker push "$${BACKEND_REPO}:$${CB_TAG}"
             docker push "$${FRONTEND_REPO}:$${CB_TAG}"
           fi
-          docker tag "$${BACKEND_TAG}" "$${BACKEND_REPO}:latest"
-          docker tag "$${FRONTEND_TAG}" "$${FRONTEND_REPO}:latest"
           docker push "$${BACKEND_TAG}"
-          docker push "$${BACKEND_REPO}:latest"
           docker push "$${FRONTEND_TAG}"
-          docker push "$${FRONTEND_REPO}:latest"
+          if [[ ! "$${CB_TAG}" =~ -rc\. ]]; then
+            docker tag "$${BACKEND_TAG}" "$${BACKEND_REPO}:latest"
+            docker tag "$${FRONTEND_TAG}" "$${FRONTEND_REPO}:latest"
+            docker push "$${BACKEND_REPO}:latest"
+            docker push "$${FRONTEND_REPO}:latest"
+          fi
         else
-          echo "Skipping Artifact Registry push (TAG_NAME is empty and _PUSH=${_PUSH})"
+          echo "Skipping Artifact Registry push (TAG_NAME and _TAG are empty and _PUSH=${_PUSH})"
         fi
+
+  - id: flux-reconcile
+    name: ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/ops-flux-cli:v2.4.0
+    waitFor:
+      - docker-build-images
+    args:
+      - "${TAG_NAME:-${_TAG}}"
+      - "fleetforge,fleetforge-frontend"
+      - "fleetforge-api,fleetforge-ingestor,fleetforge-frontend"

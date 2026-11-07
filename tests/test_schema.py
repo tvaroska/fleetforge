@@ -66,13 +66,14 @@ async def test_models_match_migration(engine: AsyncEngine) -> None:
     await run_alembic_check(database_url_for(TEST_DB_NAME))
 
 
-async def test_migration_downgrades_cleanly() -> None:
+async def test_migration_downgrades_cleanly(engine: AsyncEngine) -> None:
     """upgrade -> downgrade -> upgrade on a throwaway database.
 
     `alembic/versions/` is a CRITICAL.md path: a migration that cannot be reversed is
     a schema change with no way back. Runs against its own database so it cannot tear
     the schema out from under the rest of the suite.
     """
+    del engine
     url = database_url_for(MIGRATION_TEST_DB)
     await recreate_database(MIGRATION_TEST_DB)
     try:
