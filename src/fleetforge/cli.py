@@ -154,18 +154,18 @@ def resolve_project(
     norm_url = base_url.rstrip("/")
 
     prof = profiles.get(norm_url)
-    if isinstance(prof, dict) and isinstance(prof.get("project"), str) and prof["project"]:
-        return prof["project"]
+    if isinstance(prof, dict):
+        proj_val = prof.get("project")
+        if isinstance(proj_val, str) and proj_val:
+            return proj_val
 
     default_prof_url = creds.get("default_url")
     if isinstance(default_prof_url, str):
         default_prof = profiles.get(default_prof_url.rstrip("/"))
-        if (
-            isinstance(default_prof, dict)
-            and isinstance(default_prof.get("project"), str)
-            and default_prof["project"]
-        ):
-            return default_prof["project"]
+        if isinstance(default_prof, dict):
+            def_proj_val = default_prof.get("project")
+            if isinstance(def_proj_val, str) and def_proj_val:
+                return def_proj_val
 
     if query_server and token:
         me_status, me_resp = _request_json("GET", f"{norm_url}/v1/auth/me", token=token)
@@ -705,7 +705,9 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Also create the project on the Fleetforge server (uses saved login or --token)",
     )
 
-    push_p = sub.add_parser("push", parents=[common], help="Upload a firmware .bin with Git provenance")
+    push_p = sub.add_parser(
+        "push", parents=[common], help="Upload a firmware .bin with Git provenance"
+    )
     push_p.add_argument("binary", type=Path, help="Path to compiled app .bin")
     push_p.add_argument(
         "--project",
@@ -756,7 +758,9 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Explicitly trigger a project-wide deploy after upload",
     )
 
-    track_p = sub.add_parser("track", parents=[common], help="Configure project continuous deployment tracking")
+    track_p = sub.add_parser(
+        "track", parents=[common], help="Configure project continuous deployment tracking"
+    )
     track_p.add_argument(
         "--project",
         default=None,
@@ -919,11 +923,7 @@ def main(argv: list[str] | None = None) -> int:
                 scopes_list = (
                     [s.strip() for s in args.scopes.split(",") if s.strip()]
                     if args.scopes
-                    else (
-                        ["read", "write:artifacts", "deploy"]
-                        if args.project
-                        else ["admin"]
-                    )
+                    else (["read", "write:artifacts", "deploy"] if args.project else ["admin"])
                 )
                 mint_payload: dict[str, Any] = {
                     "name": tok_name[:64],

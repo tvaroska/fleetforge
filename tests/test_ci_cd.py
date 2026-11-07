@@ -646,8 +646,7 @@ class TestCli:
             assert (creds_file.stat().st_mode & 0o777) == 0o600
             env_text = env_file.read_text(encoding="utf-8")
             assert (
-                "FLEETFORGE_TOKEN=ffa_00000000-0000-4000-8000-000000000100_mintedsecret"
-                in env_text
+                "FLEETFORGE_TOKEN=ffa_00000000-0000-4000-8000-000000000100_mintedsecret" in env_text
             )
             assert "FLEETFORGE_PROJECT=eink-todo" in env_text
 
@@ -669,10 +668,7 @@ class TestCli:
             )
             assert rc_status == 0
             assert "No enrolled devices found." in capsys.readouterr().out
-            assert (
-                requests_seen[-1][2]
-                == "ffa_00000000-0000-4000-8000-000000000100_mintedsecret"
-            )
+            assert requests_seen[-1][2] == "ffa_00000000-0000-4000-8000-000000000100_mintedsecret"
 
             # Logout revokes on server and clears saved profile
             rc_logout = main(["--credentials-file", str(creds_file), "logout"])
@@ -757,7 +753,10 @@ class TestCli:
             )
             assert rc_push == 0
             assert "project=eink-todo" in seen_urls[0][1]
-            assert seen_urls[1] == ("POST", "https://bingo.tvaroska.sk/v1/projects/eink-todo/deploy")
+            assert seen_urls[1] == (
+                "POST",
+                "https://bingo.tvaroska.sk/v1/projects/eink-todo/deploy",
+            )
 
             rc_track = main(
                 [
