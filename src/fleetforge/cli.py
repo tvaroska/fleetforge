@@ -133,6 +133,52 @@ def resolve_url_and_token(
     return base_url, ""
 
 
+def resolve_project(
+    explicit_project: str | None,
+    *,
+    base_url: str,
+    token: str | None = None,
+    creds_path: Path | None = None,
+    query_server: bool = False,
+) -> str | None:
+    """Resolve project slug from flag/env -> saved CLI profile -> `/v1/auth/me`."""
+    if explicit_project:
+        return explicit_project
+    env_proj = os.environ.get("FLEETFORGE_PROJECT")
+    if env_proj:
+        return env_proj
+
+    creds = load_credentials(creds_path)
+    raw_profiles = creds.get("profiles")
+    profiles: dict[str, Any] = dict(raw_profiles) if isinstance(raw_profiles, dict) else {}
+    norm_url = base_url.rstrip("/")
+
+    prof = profiles.get(norm_url)
+    if isinstance(prof, dict) and isinstance(prof.get("project"), str) and prof["project"]:
+        return prof["project"]
+
+    default_prof_url = creds.get("default_url")
+    if isinstance(default_prof_url, str):
+        default_prof = profiles.get(default_prof_url.rstrip("/"))
+        if (
+            isinstance(default_prof, dict)
+            and isinstance(default_prof.get("project"), str)
+            and default_prof["project"]
+        ):
+            return default_prof["project"]
+
+    if query_server and token:
+        me_status, me_resp = _request_json("GET", f"{norm_url}/v1/auth/me", token=token)
+        if me_status == 200:
+            projs = me_resp.get("projects")
+            if isinstance(projs, list) and len(projs) == 1 and isinstance(projs[0], dict):
+                slug = projs[0].get("slug")
+                if isinstance(slug, str) and slug:
+                    return slug
+
+    return None
+
+
 def _extract_session_cookie(set_cookie_headers: list[str]) -> str | None:
     """Extract the `ff_session` `ffa_...` token from `Set-Cookie` response headers."""
     for header in set_cookie_headers:
@@ -662,7 +708,9 @@ def _build_parser() -> argparse.ArgumentParser:
     push_p = sub.add_parser("push", parents=[common], help="Upload a firmware .bin with Git provenance")
     push_p.add_argument("binary", type=Path, help="Path to compiled app .bin")
     push_p.add_argument(
-        "--project", default=os.environ.get("FLEETFORGE_PROJECT"), help="Project slug"
+        "--project",
+        default=None,
+        help="Project slug (default: $FLEETFORGE_PROJECT, saved login project, or 'default')",
     )
     push_p.add_argument(
         "--target", required=True, help="Chip target (e.g. esp32c6, esp32s3, esp32)"
@@ -711,8 +759,8 @@ def _build_parser() -> argparse.ArgumentParser:
     track_p = sub.add_parser("track", parents=[common], help="Configure project continuous deployment tracking")
     track_p.add_argument(
         "--project",
-        default=os.environ.get("FLEETFORGE_PROJECT", "default"),
-        help="Project slug (default: $FLEETFORGE_PROJECT or 'default')",
+        default=None,
+        help="Project slug (default: $FLEETFORGE_PROJECT, saved login project, or 'default')",
     )
     track_p.add_argument(
         "--mode",
@@ -737,8 +785,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     status_p.add_argument(
         "--project",
-        default=os.environ.get("FLEETFORGE_PROJECT", "default"),
-        help="Project slug (default: $FLEETFORGE_PROJECT or 'default')",
+        default=None,
+        help="Project slug (default: $FLEETFORGE_PROJECT, saved login project, or 'default')",
     )
     status_p.add_argument("--device", default=None, help="Filter to a single 12-hex device ID")
     status_p.add_argument("--json", action="store_true", help="Output raw JSON")
@@ -756,8 +804,8 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     logs_p.add_argument(
         "--project",
-        default=os.environ.get("FLEETFORGE_PROJECT", "default"),
-        help="Project slug (default: $FLEETFORGE_PROJECT or 'default')",
+        default=None,
+        help="Project slug (default: $FLEETFORGE_PROJECT, saved login project, or 'default')",
     )
     logs_p.add_argument("--limit", type=int, default=50, help="Max log lines (default: 50)")
     logs_p.add_argument(
@@ -782,8 +830,8 @@ def _build_parser() -> argparse.ArgumentParser:
     sec_p.add_argument("value", nargs="?", default=None, help="Secret value (for 'set')")
     sec_p.add_argument(
         "--project",
-        default=os.environ.get("FLEETFORGE_PROJECT", "default"),
-        help="Project slug (default: $FLEETFORGE_PROJECT or 'default')",
+        default=None,
+        help="Project slug (default: $FLEETFORGE_PROJECT, saved login project, or 'default')",
     )
 
     dock_p = sub.add_parser(
@@ -1095,12 +1143,17 @@ def main(argv: list[str] | None = None) -> int:
             if args.no_git
             else detect_git_metadata(bin_path.parent)
         )
+        resolved_proj = resolve_project(
+            args.project,
+            base_url=args.url,
+            creds_path=creds_path,
+        )
         url = build_artifact_upload_url(
             args.url,
             target=args.target,
             version=args.version,
             partition_layout=args.layout,
-            project=args.project,
+            project=resolved_proj,
             repo_url=args.repo if args.repo is not None else git_meta["repo_url"],
             branch=args.branch if args.branch is not None else git_meta["branch"],
             commit_sha=args.commit if args.commit is not None else git_meta["commit_sha"],
@@ -1118,7 +1171,16 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(resp, indent=2))
 
         if args.deploy:
-            proj_slug = args.project or "default"
+            proj_slug = (
+                resolve_project(
+                    args.project,
+                    base_url=args.url,
+                    token=args.token,
+                    creds_path=creds_path,
+                    query_server=True,
+                )
+                or "default"
+            )
             deploy_url = f"{args.url.rstrip('/')}/v1/projects/{proj_slug}/deploy"
             deploy_body = json.dumps(
                 {
@@ -1144,7 +1206,17 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "track":
-        patch_url = f"{args.url.rstrip('/')}/v1/projects/{args.project}"
+        proj_slug = (
+            resolve_project(
+                args.project,
+                base_url=args.url,
+                token=args.token,
+                creds_path=creds_path,
+                query_server=True,
+            )
+            or "default"
+        )
+        patch_url = f"{args.url.rstrip('/')}/v1/projects/{proj_slug}"
         payload: dict[str, Any] = {"track_mode": args.mode}
         if args.ref is not None:
             payload["track_ref"] = args.ref
@@ -1166,8 +1238,14 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command in ("status", "devices"):
-        query = urllib.parse.urlencode({"project": args.project})
-        url = f"{args.url.rstrip('/')}/v1/devices?{query}"
+        opt_proj = resolve_project(
+            args.project,
+            base_url=args.url,
+            creds_path=creds_path,
+        )
+        url = f"{args.url.rstrip('/')}/v1/devices"
+        if opt_proj:
+            url = f"{url}?{urllib.parse.urlencode({'project': opt_proj})}"
         status_code, resp = _request_json("GET", url, token=args.token)
         if status_code != 200:
             print(f"error ({status_code}): {resp.get('detail', resp)}", file=sys.stderr)
@@ -1184,8 +1262,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "logs":
         device_id: str | None = args.device_id
         if not device_id:
-            query = urllib.parse.urlencode({"project": args.project})
-            dev_url = f"{args.url.rstrip('/')}/v1/devices?{query}"
+            opt_proj = resolve_project(
+                args.project,
+                base_url=args.url,
+                creds_path=creds_path,
+            )
+            dev_url = f"{args.url.rstrip('/')}/v1/devices"
+            if opt_proj:
+                dev_url = f"{dev_url}?{urllib.parse.urlencode({'project': opt_proj})}"
             d_status, d_resp = _request_json("GET", dev_url, token=args.token)
             if d_status != 200:
                 print(
@@ -1196,7 +1280,7 @@ def main(argv: list[str] | None = None) -> int:
             devs = list(d_resp.get("devices") or [])
             if not devs:
                 print(
-                    f"error: no devices enrolled in project '{args.project}'",
+                    f"error: no devices enrolled in project '{opt_proj or 'default'}'",
                     file=sys.stderr,
                 )
                 return 1
@@ -1232,7 +1316,17 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.command == "secrets":
-        base_sec_url = f"{args.url.rstrip('/')}/v1/projects/{args.project}/secrets"
+        proj_slug = (
+            resolve_project(
+                args.project,
+                base_url=args.url,
+                token=args.token,
+                creds_path=creds_path,
+                query_server=True,
+            )
+            or "default"
+        )
+        base_sec_url = f"{args.url.rstrip('/')}/v1/projects/{proj_slug}/secrets"
         if args.action == "list":
             status_code, resp = _request_json("GET", base_sec_url, token=args.token)
         elif args.action == "set":

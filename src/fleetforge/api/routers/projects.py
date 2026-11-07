@@ -245,15 +245,23 @@ async def update_project(
     sessionmaker: SessionMakerDep,
     publisher: CommandPublisherDep,
 ) -> ProjectSummary:
-    """Update metadata or CD settings on `slug` (requires project `owner` or superadmin)."""
-    if "admin" not in admin.scopes:
+    """Update metadata or CD settings on `slug` (`deploy` scope + `operator` for CD tracking fields; `admin` scope + `owner` for metadata/webhooks/OTEL)."""
+    fields = body.model_fields_set
+    cd_fields = {"repo_url", "track_mode", "track_ref", "auto_deploy_target"}
+    cd_changed = bool(fields & cd_fields)
+    admin_fields_changed = not fields or bool(fields - cd_fields)
+
+    if admin_fields_changed and "admin" not in admin.scopes:
         raise FORBIDDEN
 
-    fields = body.model_fields_set
-    cd_changed = bool(fields & {"repo_url", "track_mode", "track_ref", "auto_deploy_target"})
-
     async with sessionmaker() as session:
-        proj = await resolve_project_for_request(session, admin, slug, min_role=ProjectRole.OWNER)
+        proj = await resolve_project_for_request(
+            session,
+            admin,
+            slug,
+            min_role=ProjectRole.OWNER if admin_fields_changed else ProjectRole.OPERATOR,
+            required_scope="admin" if admin_fields_changed else "deploy",
+        )
         if "name" in fields and body.name is not None:
             proj.name = body.name
         if "description" in fields:

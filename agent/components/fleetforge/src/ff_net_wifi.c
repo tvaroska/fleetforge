@@ -85,8 +85,10 @@ static const char *TAG = "ff-wifi";
 #define IMPROV_STATE_PROVISIONED 0x04
 #define IMPROV_ERR_NONE 0x00
 #define IMPROV_ERR_INVALID_RPC 0x01
+#define IMPROV_ERR_UNKNOWN_RPC 0x02
 #define IMPROV_ERR_UNABLE_TO_CONNECT 0x03
 #define IMPROV_CMD_WIFI_SETTINGS 0x01
+#define IMPROV_CMD_IDENTIFY 0x02
 
 /* Internal event IDs posted to WIFI_EVENT on the default event loop by one-shot timers
  * and Improv BLE provisioning so the system event task never sleeps or blocks and
@@ -169,6 +171,8 @@ static bool s_wifi_started;
 static esp_timer_handle_t s_improv_timer;
 static uint8_t s_improv_state = IMPROV_STATE_AUTHORIZED;
 static uint8_t s_improv_error = IMPROV_ERR_NONE;
+static uint8_t s_improv_rpc_res_buf[16];
+static size_t s_improv_rpc_res_len;
 static char s_improv_ssid[FF_CFG_MAX_SSID];
 static char s_improv_sec[FF_CFG_MAX_PSK];
 
@@ -263,20 +267,33 @@ static void retry_timer_disarm(void)
 }
 
 static void improv_ble_notify_status(void);
+static void improv_ble_notify_rpc_result(void);
+
+static void improv_set_rpc_result(uint8_t cmd)
+{
+    /* Improv RPC Result packet (`00467768-6228-2272-4663-277478268004`):
+     * `[cmd, data_len=0x00, checksum=cmd]` (0 redirect URLs). */
+    s_improv_rpc_res_buf[0] = cmd;
+    s_improv_rpc_res_buf[1] = 0x00;
+    s_improv_rpc_res_buf[2] = cmd;
+    s_improv_rpc_res_len = 3;
+    improv_ble_notify_rpc_result();
+}
 
 /* Parse an Improv Wi-Fi RPC command (`00467768-6228-2272-4663-277478268003`, cmd `0x01`:
- * `[0x01, data_len, ssid_len, ssid..., passphrase_len, passphrase..., checksum]`), persist
- * the credential to the NVS `ff_net` overlay, and trigger an immediate reconnect cycle on
- * the default event loop without blocking the BLE host or event task. */
+ * `[0x01, data_len, ssid_len, ssid..., passphrase_len, passphrase..., checksum]`, or cmd `0x02`:
+ * Identify `[0x02, 0x00, 0x02]`), persist the credential to the NVS `ff_net` overlay, and trigger
+ * an immediate reconnect cycle on the default event loop without blocking the BLE host or event task. */
 static esp_err_t improv_handle_rpc_command(const uint8_t *buf, size_t len)
 {
-    if (buf == NULL || len < 4 || buf[0] != IMPROV_CMD_WIFI_SETTINGS) {
+    if (buf == NULL || len < 2) {
         s_improv_error = IMPROV_ERR_INVALID_RPC;
         improv_ble_notify_status();
         return ESP_ERR_INVALID_ARG;
     }
+    uint8_t cmd = buf[0];
     size_t data_len = buf[1];
-    if (2 + data_len > len || data_len < 2) {
+    if (2 + data_len > len) {
         s_improv_error = IMPROV_ERR_INVALID_RPC;
         improv_ble_notify_status();
         return ESP_ERR_INVALID_ARG;
@@ -291,6 +308,22 @@ static esp_err_t improv_handle_rpc_command(const uint8_t *buf, size_t len)
             improv_ble_notify_status();
             return ESP_ERR_INVALID_CRC;
         }
+    }
+    if (cmd == IMPROV_CMD_IDENTIFY) {
+        ESP_LOGI(TAG, "Improv BLE identify requested");
+        s_improv_error = IMPROV_ERR_NONE;
+        improv_ble_notify_status();
+        return ESP_OK;
+    }
+    if (cmd != IMPROV_CMD_WIFI_SETTINGS) {
+        s_improv_error = IMPROV_ERR_UNKNOWN_RPC;
+        improv_ble_notify_status();
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+    if (data_len < 2) {
+        s_improv_error = IMPROV_ERR_INVALID_RPC;
+        improv_ble_notify_status();
+        return ESP_ERR_INVALID_ARG;
     }
     size_t ssid_len = buf[2];
     if (ssid_len == 0 || ssid_len >= sizeof(s_improv_ssid) || 1 + ssid_len + 1 > data_len) {
@@ -359,6 +392,16 @@ static void improv_ble_notify_status(void)
     }
 }
 
+static void improv_ble_notify_rpc_result(void)
+{
+    if (!s_nimble_started) {
+        return;
+    }
+    if (s_improv_rpc_res_val_handle != 0) {
+        ble_gatts_chr_updated(s_improv_rpc_res_val_handle);
+    }
+}
+
 static int improv_gatt_access(uint16_t conn_handle, uint16_t attr_handle,
                               struct ble_gatt_access_ctxt *ctxt, void *arg)
 {
@@ -366,6 +409,11 @@ static int improv_gatt_access(uint16_t conn_handle, uint16_t attr_handle,
     (void)attr_handle;
     uintptr_t ch = (uintptr_t)arg;
     if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
+        if (ch == 4 && s_improv_rpc_res_len > 0) {
+            return os_mbuf_append(ctxt->om, s_improv_rpc_res_buf, s_improv_rpc_res_len) == 0
+                       ? 0
+                       : BLE_ATT_ERR_INSUFFICIENT_RES;
+        }
         uint8_t val = (ch == 1) ? s_improv_state : ((ch == 2) ? s_improv_error : 0);
         return os_mbuf_append(ctxt->om, &val, sizeof(val)) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
     }
@@ -420,6 +468,27 @@ static const struct ble_gatt_svc_def s_improv_gatt_svcs[] = {
     {0},
 };
 
+static void improv_ble_advertise_start(void);
+
+static int improv_ble_gap_event(struct ble_gap_event *event, void *arg)
+{
+    (void)arg;
+    if (event == NULL) {
+        return 0;
+    }
+    switch (event->type) {
+    case BLE_GAP_EVENT_DISCONNECT:
+    case BLE_GAP_EVENT_ADV_COMPLETE:
+        if (s_improv_active && !s_have_ip && !s_venue_offline && s_improv_ble_enabled) {
+            improv_ble_advertise_start();
+        }
+        break;
+    default:
+        break;
+    }
+    return 0;
+}
+
 static void improv_ble_advertise_start(void)
 {
     struct ble_hs_adv_fields fields = {0};
@@ -432,7 +501,8 @@ static void improv_ble_advertise_start(void)
     struct ble_gap_adv_params adv_params = {0};
     adv_params.conn_mode = BLE_GAP_CONN_MODE_UND;
     adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;
-    (void)ble_gap_adv_start(BLE_OWN_ADDR_PUBLIC, NULL, BLE_HS_FOREVER, &adv_params, NULL, NULL);
+    (void)ble_gap_adv_start(BLE_OWN_ADDR_PUBLIC, NULL, BLE_HS_FOREVER, &adv_params,
+                            improv_ble_gap_event, NULL);
 }
 
 static void improv_nimble_host_task(void *param)
@@ -476,6 +546,7 @@ static void improv_ble_gatt_stop(void)
 }
 #else
 static void improv_ble_notify_status(void) {}
+static void improv_ble_notify_rpc_result(void) {}
 
 static void improv_ble_gatt_start(void)
 {
@@ -939,6 +1010,7 @@ static void on_got_ip(void *arg, esp_event_base_t base, int32_t id, void *data)
     if (s_improv_state == IMPROV_STATE_PROVISIONING || s_improv_active) {
         s_improv_state = IMPROV_STATE_PROVISIONED;
         s_improv_error = IMPROV_ERR_NONE;
+        improv_set_rpc_result(IMPROV_CMD_WIFI_SETTINGS);
         improv_ble_notify_status();
     }
     improv_ble_window_stop();

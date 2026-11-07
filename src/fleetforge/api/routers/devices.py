@@ -420,6 +420,7 @@ async def update_device(
             admin,
             device.project_id,
             min_role=ProjectRole.OPERATOR,
+            required_scope="deploy",
             not_found=_no_such_device(device_id),
         )
 

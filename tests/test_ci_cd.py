@@ -684,6 +684,95 @@ class TestCli:
             rc_unauth = main(["--credentials-file", str(creds_file), "status"])
             assert rc_unauth == 2
 
+    def test_cli_push_deploy_and_track_resolve_saved_or_pinned_project_without_flag(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("FLEETFORGE_PROJECT", raising=False)
+        bin_file = tmp_path / "app.bin"
+        bin_file.write_bytes(b"\xe9\x00" + b"z" * 128)
+        creds_file = tmp_path / "credentials.json"
+        creds_file.write_text(
+            json.dumps(
+                {
+                    "default_url": "https://bingo.tvaroska.sk",
+                    "profiles": {
+                        "https://bingo.tvaroska.sk": {
+                            "url": "https://bingo.tvaroska.sk",
+                            "token": "ffa_00000000-0000-4000-8000-000000000100_mintedsecret",
+                            "project": "eink-todo",
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        seen_urls: list[tuple[str, str]] = []
+
+        def fake_request(
+            method: str,
+            url: str,
+            *,
+            token: str,
+            body: bytes | None = None,
+            content_type: str = "application/octet-stream",
+        ) -> tuple[int, dict[str, Any]]:
+            seen_urls.append((method, url))
+            if method == "POST" and "/v1/artifact?" in url:
+                return 201, {
+                    "sha256": "b" * 64,
+                    "size_bytes": len(body or b""),
+                    "target": "esp32s3",
+                    "version": "2.0.2",
+                    "partition_layout": "ab-4m-v1",
+                    "created": True,
+                }
+            if method == "POST" and url.endswith("/deploy"):
+                return 202, {
+                    "project": "eink-todo",
+                    "version": "2.0.2",
+                    "target_filter": "all",
+                    "deployed": [DEVICE_ID],
+                    "skipped": {},
+                }
+            if method == "PATCH":
+                return 200, {"slug": "eink-todo", "track_mode": "branch", "track_ref": "main"}
+            return 200, {}
+
+        with patch("fleetforge.cli._request_json", side_effect=fake_request):
+            rc_push = main(
+                [
+                    "--credentials-file",
+                    str(creds_file),
+                    "push",
+                    str(bin_file),
+                    "--target",
+                    "esp32s3",
+                    "--version",
+                    "2.0.2",
+                    "--no-git",
+                    "--deploy",
+                    "all",
+                ]
+            )
+            assert rc_push == 0
+            assert "project=eink-todo" in seen_urls[0][1]
+            assert seen_urls[1] == ("POST", "https://bingo.tvaroska.sk/v1/projects/eink-todo/deploy")
+
+            rc_track = main(
+                [
+                    "--credentials-file",
+                    str(creds_file),
+                    "track",
+                    "--mode",
+                    "branch",
+                    "--ref",
+                    "main",
+                ]
+            )
+            assert rc_track == 0
+            assert seen_urls[2] == ("PATCH", "https://bingo.tvaroska.sk/v1/projects/eink-todo")
+
 
 class TestSecretsCryptoAndDeviceSecretsAuth:
     def test_encrypt_and_decrypt_secret_round_trip(self) -> None:
@@ -2511,3 +2600,91 @@ class TestTrack2ShowcaseAndUxHygiene:
         project_access_tsx = (repo_root / "frontend" / "src" / "ProjectAccess.tsx").read_text()
         assert 'data-testid="confirm-delete-secret"' in project_access_tsx
         assert 'data-testid="confirm-delete-group"' in project_access_tsx
+
+    @pytest.mark.asyncio
+    async def test_update_project_allows_deploy_scope_for_cd_tracking_and_blocks_admin_fields(
+        self,
+    ) -> None:
+        import uuid
+        from contextlib import asynccontextmanager
+        from datetime import UTC, datetime
+        from unittest.mock import AsyncMock, MagicMock
+
+        from fastapi import HTTPException
+
+        from fleetforge.api.deps import AuthContext
+        from fleetforge.api.routers.projects import update_project
+        from fleetforge.db.models import ProjectRole
+
+        proj = Project(
+            id=uuid.uuid4(),
+            slug="eink-todo",
+            name="E-Ink Todo",
+            track_mode="off",
+            auto_deploy_target="off",
+            secrets_rev=0,
+            created_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        )
+        session = MagicMock()
+        session.commit = AsyncMock()
+        session.scalar = AsyncMock(return_value=0)
+        session.scalars = AsyncMock(return_value=MagicMock(all=MagicMock(return_value=[])))
+
+        @asynccontextmanager
+        async def fake_sessionmaker() -> Any:
+            yield session
+
+        deploy_admin = AuthContext(
+            token_id=uuid.uuid4(),
+            subject="boris",
+            scopes=("read", "write:artifacts", "deploy"),
+            expires_at=None,
+            project_id=proj.id,
+        )
+
+        with patch(
+            "fleetforge.api.routers.projects.resolve_project_for_request",
+            new=AsyncMock(return_value=proj),
+        ) as mock_resolve:
+            summary = await update_project(
+                slug="eink-todo",
+                body=ProjectUpdate(track_mode="branch", track_ref="main", auto_deploy_target="all"),
+                admin=deploy_admin,
+                settings=MagicMock(),
+                sessionmaker=fake_sessionmaker,  # type: ignore[arg-type]
+                publisher=NullCommandPublisher(),
+            )
+            assert summary.track_mode == "branch"
+            assert summary.track_ref == "main"
+            assert summary.auto_deploy_target == "all"
+            mock_resolve.assert_awaited_once_with(
+                session,
+                deploy_admin,
+                "eink-todo",
+                min_role=ProjectRole.OPERATOR,
+                required_scope="deploy",
+            )
+
+        with pytest.raises(HTTPException) as exc_info:
+            await update_project(
+                slug="eink-todo",
+                body=ProjectUpdate(name="Renamed by Deploy Token"),
+                admin=deploy_admin,
+                settings=MagicMock(),
+                sessionmaker=fake_sessionmaker,  # type: ignore[arg-type]
+                publisher=NullCommandPublisher(),
+            )
+        assert exc_info.value.status_code == 403
+
+    def test_improv_ble_rpc_result_identify_and_disconnect_advertising(self) -> None:
+        repo_root = Path(__file__).resolve().parent.parent
+        wifi_c = (
+            repo_root / "agent" / "components" / "fleetforge" / "src" / "ff_net_wifi.c"
+        ).read_text(encoding="utf-8")
+        assert "#define IMPROV_ERR_UNKNOWN_RPC 0x02" in wifi_c
+        assert "#define IMPROV_CMD_IDENTIFY 0x02" in wifi_c
+        assert "improv_set_rpc_result(IMPROV_CMD_WIFI_SETTINGS)" in wifi_c
+        assert "ble_gatts_chr_updated(s_improv_rpc_res_val_handle)" in wifi_c
+        assert "BLE_GAP_EVENT_DISCONNECT" in wifi_c
+        assert "improv_ble_gap_event" in wifi_c
