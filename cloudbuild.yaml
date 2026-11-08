@@ -144,7 +144,7 @@ steps:
         test "$${FE_UID}" != "0"
         echo "Starting fleetforge-api-smoke and fleetforge-frontend-smoke containers..."
         docker run -d --name fleetforge-api-smoke fleetforge-api:ci
-        docker run -d --name fleetforge-frontend-smoke fleetforge-frontend:ci
+        docker run -d --name fleetforge-frontend-smoke --add-host api:127.0.0.1 fleetforge-frontend:ci
         trap "docker rm -f fleetforge-api-smoke fleetforge-frontend-smoke >/dev/null 2>&1 || true" EXIT
         for i in $$(seq 1 20); do
           if docker exec fleetforge-api-smoke curl -fsS http://127.0.0.1:8000/v1/healthz >/dev/null \
