@@ -20,6 +20,7 @@ substitutions:
   _PUSH: "auto"
 
 options:
+  dynamicSubstitutions: true
   logging: CLOUD_LOGGING_ONLY
   machineType: E2_HIGHCPU_8
 
@@ -101,7 +102,9 @@ steps:
         set -euo pipefail
         SHA="$$(cat /workspace/.resolved_sha)"
         BUILT_AT="$$(cat /workspace/.built_at)"
-        CB_TAG="${TAG_NAME:-${_TAG}}"
+        CB_TAG_NAME="${TAG_NAME}"
+        CB_MANUAL_TAG="${_TAG}"
+        CB_TAG="$${CB_TAG_NAME:-$${CB_MANUAL_TAG}}"
         CB_BACKEND="${_BACKEND_IMAGE}"
         CB_FRONTEND="${_FRONTEND_IMAGE}"
         BACKEND_REPO="$${CB_BACKEND:-${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/fleetforge}"
@@ -131,7 +134,7 @@ steps:
           fi
           docker push "$${BACKEND_TAG}"
           docker push "$${FRONTEND_TAG}"
-          if [[ ! "$${CB_TAG}" =~ -rc\. ]]; then
+          if [[ "$${CB_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
             docker tag "$${BACKEND_TAG}" "$${BACKEND_REPO}:latest"
             docker tag "$${FRONTEND_TAG}" "$${FRONTEND_REPO}:latest"
             docker push "$${BACKEND_REPO}:latest"
@@ -146,6 +149,7 @@ steps:
     waitFor:
       - docker-build-images
     args:
-      - "${TAG_NAME:-${_TAG}}"
+      - "${TAG_NAME}"
+      - "${_TAG}"
       - "fleetforge,fleetforge-frontend"
       - "fleetforge-api,fleetforge-ingestor,fleetforge-frontend"

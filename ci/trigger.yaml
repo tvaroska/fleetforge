@@ -12,7 +12,7 @@ repositoryEventConfig:
   repository: projects/sites-470716/locations/us-central1/connections/Github/repositories/tvaroska-fleetforge
   push:
     tag: ^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$
-serviceAccount: projects/sites-470716/serviceAccounts/1076807043236-compute@developer.gserviceaccount.com
+serviceAccount: projects/sites-470716/serviceAccounts/cloudbuild-gitops-sa@sites-470716.iam.gserviceaccount.com
 ---
 name: fleetforge-main
 description: Continuous integration test and build verification on main branch (no release push)
