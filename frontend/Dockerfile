@@ -39,7 +39,8 @@ RUN SOURCE_COMMIT="$SOURCE_COMMIT" BUILT_AT="$BUILT_AT" npm run build
 FROM nginx:alpine AS production
 
 # Writable temp/cache dirs so nginx can run unprivileged.
-RUN mkdir -p /tmp/nginx && \
+RUN apk upgrade --no-cache && \
+    mkdir -p /tmp/nginx && \
     chown -R nginx:nginx /tmp/nginx /var/log/nginx /var/cache/nginx && \
     chmod -R 755 /var/log/nginx
 

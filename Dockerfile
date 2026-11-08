@@ -31,7 +31,7 @@ ENV UV_COMPILE_BYTECODE=1 \
     PYTHONPATH="/app/src"
 
 # curl is the healthcheck client for the api service in both stages.
-RUN apt-get update && apt-get install -y --no-install-recommends \
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
         curl \
     && rm -rf /var/lib/apt/lists/*
 
@@ -61,7 +61,8 @@ FROM base AS production
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=uv.lock,target=uv.lock \
     --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
-    uv sync --frozen --no-dev --no-install-project
+    uv sync --frozen --no-dev --no-install-project \
+    && rm -f /bin/uv /bin/uvx /usr/local/bin/uv /usr/local/bin/uvx
 
 COPY src /app/src
 # NOTHING FROM agent/dist IS COPIED HERE, and nothing should be (S0-infra-6). The

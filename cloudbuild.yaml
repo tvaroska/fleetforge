@@ -115,6 +115,7 @@ steps:
           --target production \
           --build-arg SOURCE_COMMIT="$${SHA}" \
           --build-arg BUILT_AT="$${BUILT_AT}" \
+          -t "fleetforge-api:ci" \
           -t "$${BACKEND_TAG}" \
           -f Dockerfile \
           .
@@ -122,9 +123,82 @@ steps:
           --target production \
           --build-arg SOURCE_COMMIT="$${SHA}" \
           --build-arg BUILT_AT="$${BUILT_AT}" \
+          -t "fleetforge-frontend:ci" \
           -t "$${FRONTEND_TAG}" \
           -f frontend/Dockerfile \
           frontend
+
+  - id: verify-nonroot-and-healthcheck
+    name: gcr.io/cloud-builders/docker
+    waitFor:
+      - docker-build-images
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        echo "Verifying non-root users on fleetforge-api:ci and fleetforge-frontend:ci..."
+        API_UID="$$(docker run --rm --entrypoint id fleetforge-api:ci -u)"
+        FE_UID="$$(docker run --rm --entrypoint id fleetforge-frontend:ci -u)"
+        test "$${API_UID}" != "0"
+        test "$${FE_UID}" != "0"
+        echo "Starting fleetforge-api-smoke and fleetforge-frontend-smoke containers..."
+        docker run -d --name fleetforge-api-smoke fleetforge-api:ci
+        docker run -d --name fleetforge-frontend-smoke fleetforge-frontend:ci
+        trap "docker rm -f fleetforge-api-smoke fleetforge-frontend-smoke >/dev/null 2>&1 || true" EXIT
+        for i in $$(seq 1 20); do
+          if docker exec fleetforge-api-smoke curl -fsS http://127.0.0.1:8000/v1/healthz >/dev/null \
+            && docker exec fleetforge-frontend-smoke wget -qO- http://127.0.0.1:8080/nginx-health >/dev/null; then
+            echo "Health probes (/v1/healthz and /nginx-health) passed on attempt $$i"
+            exit 0
+          fi
+          sleep 1
+        done
+        docker logs fleetforge-api-smoke || true
+        docker logs fleetforge-frontend-smoke || true
+        exit 1
+
+  - id: trivy-vulnerability-scan
+    name: gcr.io/cloud-builders/docker
+    waitFor:
+      - docker-build-images
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        for IMG in fleetforge-api:ci fleetforge-frontend:ci; do
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:0.58.1 image \
+            --scanners vuln \
+            --pkg-types os \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed \
+            --exit-code 1 \
+            "$${IMG}"
+        done
+
+  - id: push-release-images
+    name: gcr.io/cloud-builders/docker
+    waitFor:
+      - verify-nonroot-and-healthcheck
+      - trivy-vulnerability-scan
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        SHA="$$(cat /workspace/.resolved_sha)"
+        CB_TAG_NAME="${TAG_NAME}"
+        CB_MANUAL_TAG="${_TAG}"
+        CB_TAG="$${CB_TAG_NAME:-$${CB_MANUAL_TAG}}"
+        CB_BACKEND="${_BACKEND_IMAGE}"
+        CB_FRONTEND="${_FRONTEND_IMAGE}"
+        BACKEND_REPO="$${CB_BACKEND:-${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/fleetforge}"
+        FRONTEND_REPO="$${CB_FRONTEND:-${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/fleetforge-frontend}"
+        BACKEND_TAG="$${BACKEND_REPO}:$${SHA}"
+        FRONTEND_TAG="$${FRONTEND_REPO}:$${SHA}"
         if [[ -n "$${CB_TAG}" || "${_PUSH}" == "true" ]]; then
           if [[ -n "$${CB_TAG}" ]]; then
             docker tag "$${BACKEND_TAG}" "$${BACKEND_REPO}:$${CB_TAG}"
@@ -147,7 +221,7 @@ steps:
   - id: flux-reconcile
     name: ${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/ops-flux-cli:v2.4.0
     waitFor:
-      - docker-build-images
+      - push-release-images
     args:
       - "${TAG_NAME}"
       - "${_TAG}"
