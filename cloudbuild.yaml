@@ -227,3 +227,59 @@ steps:
       - "${_TAG}"
       - "fleetforge,fleetforge-frontend"
       - "fleetforge-api,fleetforge-ingestor,fleetforge-frontend"
+
+  # Mirror vX.Y.Z release images to GHCR for the k3s cluster; both steps
+  # skip cleanly (exit 0) until the ghcr-push-token secret exists.
+  - id: ghcr-token
+    name: gcr.io/google.com/cloudsdktool/google-cloud-cli:slim
+    waitFor:
+      - push-release-images
+    allowFailure: true
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        CB_TAG_NAME="${TAG_NAME}"
+        CB_MANUAL_TAG="${_TAG}"
+        CB_TAG="$${CB_TAG_NAME:-$${CB_MANUAL_TAG}}"
+        if [[ ! "$${CB_TAG}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          echo "Skipping GHCR mirror (release tag '$${CB_TAG}' is not vX.Y.Z)"
+          exit 0
+        fi
+        if ! gcloud secrets versions access latest --secret=ghcr-push-token --project=${PROJECT_ID} > /workspace/.ghcr-token; then
+          rm -f /workspace/.ghcr-token
+          echo "ghcr-push-token not available; skipping GHCR mirror"
+          exit 0
+        fi
+
+  - id: mirror-to-ghcr
+    name: gcr.io/cloud-builders/docker
+    waitFor:
+      - ghcr-token
+    allowFailure: true
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        if [[ ! -s /workspace/.ghcr-token ]]; then
+          rm -f /workspace/.ghcr-token
+          echo "No GHCR token resolved; skipping GHCR mirror"
+          exit 0
+        fi
+        CB_TAG_NAME="${TAG_NAME}"
+        CB_MANUAL_TAG="${_TAG}"
+        CB_TAG="$${CB_TAG_NAME:-$${CB_MANUAL_TAG}}"
+        CB_BACKEND="${_BACKEND_IMAGE}"
+        CB_FRONTEND="${_FRONTEND_IMAGE}"
+        BACKEND_REPO="$${CB_BACKEND:-${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/fleetforge}"
+        FRONTEND_REPO="$${CB_FRONTEND:-${_REGION}-docker.pkg.dev/${PROJECT_ID}/${_AR_REPO}/fleetforge-frontend}"
+        docker login ghcr.io -u tvaroska --password-stdin < /workspace/.ghcr-token
+        rm -f /workspace/.ghcr-token
+        docker pull "$${BACKEND_REPO}:$${CB_TAG}"
+        docker tag "$${BACKEND_REPO}:$${CB_TAG}" "ghcr.io/tvaroska/fleetforge:$${CB_TAG}"
+        docker push "ghcr.io/tvaroska/fleetforge:$${CB_TAG}"
+        docker pull "$${FRONTEND_REPO}:$${CB_TAG}"
+        docker tag "$${FRONTEND_REPO}:$${CB_TAG}" "ghcr.io/tvaroska/fleetforge-frontend:$${CB_TAG}"
+        docker push "ghcr.io/tvaroska/fleetforge-frontend:$${CB_TAG}"

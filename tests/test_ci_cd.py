@@ -2583,6 +2583,8 @@ class TestTrack2ShowcaseAndUxHygiene:
         assert "python-lint-typecheck-and-unit-tests" in cb_text
         assert "frontend-typecheck-and-tests" in cb_text
         assert "docker-build-images" in cb_text
+        assert "mirror-to-ghcr" in cb_text
+        assert "ghcr-push-token" in cb_text
         assert not (repo_root / ".github" / "workflows").exists()
 
     def test_frontend_ux4_ux5_ux6_confirmations_queued_breakdown_and_copy_snippet(self) -> None:
