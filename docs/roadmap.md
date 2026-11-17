@@ -80,7 +80,8 @@ airtime-aware scheduling, delta updates. Full treatment in
 
 Canary / staged rollout (unlocks *safe* auto-deploy) · gateway-mediated non-IP radios
 (Zigbee / BLE / LoRa) · Secure Boot v2 (new devices only) · Raspberry Pi adapter ·
-SoftAP provisioning · per-device mTLS · Grafana/Prometheus telemetry export.
+SoftAP provisioning · per-device mTLS · Grafana/Prometheus telemetry export ·
+MCP `2026-07-28` operator adapter (read-only status/crash-ring resources + `SEP-2663` Tasks for cohort rollouts + `MRTR` confirmation).
 
 ### The scale question — Thread
 
