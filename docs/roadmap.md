@@ -1,119 +1,48 @@
-# Fleetforge — Roadmap
+# Roadmap (`fleetforge`)
 
-**Purpose:** Index of the release ladder and capability areas, plus the growth-stage
-questions that are deliberately not v1's problem.
-**Source specs:** [prd.md](../spec/prd.md) · [design/architecture.md](../design/architecture.md) · [architecture.md](../design/production.md) · [flows.md](../spec/flows.md) · [device-protocol.md](../spec/device-protocol.md) · [releases.md](releases.md)
+Source specs: [prd.md](../spec/prd.md) · [design/architecture.md](../design/architecture.md) · [production.md](../design/production.md) · [flows.md](../spec/flows.md) · [device-protocol.md](../spec/device-protocol.md) · [releases.md](releases.md) · [DECISIONS.md](../DECISIONS.md). There is no `TODO.md`; all upcoming milestones and tasks live here.
 
-> This file is an **index**. Requirements and targets live in [prd.md](../spec/prd.md).
-> Release contents in [releases.md](releases.md). Task history in `features/*.md`.
-> Architectural decisions live in [DECISIONS.md](../DECISIONS.md) (and [archive/DECISIONS-history.md](archive/DECISIONS-history.md)). An ephemeral root `TODO.md` can be created when an active sprint requires granular task tracking.
+## Where we are
 
-## Strategic vision
+`V1` (`R0`–`R6`) and `V2` `R7`–`R8` are shipped: Web Serial enrollment, A/B auto-rollback (`ab-4m-v1`), embeddable ESP-IDF/Arduino OTA library, live health & crash-ring telemetry, custom self-test confirmation (`ff_set_selftest`), ECDSA P-256 firmware signing with resumable HTTP `Range` downloads, artifact provenance API, `fleetforge push` CLI + CI workflow templates, and multi-project RBAC with scoped `ffa_...` tokens. Next up: complete `V2` (`R9` advisory simulation gate, `R10` server-side container build pipeline, `R11` staged cohort deploy policy), then `V3` robotic swarm hierarchy and delta OTA.
 
-**Safe remote firmware updates for a fleet of ESP32 devices** — where "safe" means a bad
-build triggers a catch *before* the fleet. Any device that does get a bad update recovers
-itself. Architected around **two thin waists**:
+## Milestones at a glance
 
-1. **Device-facing:** opaque, versioned artifact + a 4-verb update contract
-   (`stage → apply → confirm → rollback`). Lets ESP32 → Pi → FPGA reuse one core.
-2. **User-facing:** headless, API-first core (stable public API + SSE event stream).
-   Every UI (including the built-in dashboard) is just a client.
+| # | Milestone | Done when | Target |
+| :--- | :--- | :--- | :--- |
+| **R9** | Advisory Simulation Gate (`V2`) | `pytest-embedded` + Espressif QEMU boots uploaded artifacts, executes the `R5` self-test behind the pluggable `sim-runner` contract, and surfaces warn/override in the UI. | `V2` (`P1`, Medium) |
+| **R10** | Server-Side Build Pipeline (`V2`) | Server clones a repo ref, compiles in pinned ESP-IDF toolchain containers (`esp32`/`S3`/`C3`/`C6`) with queued builds, streamed logs, and build cache. | `V2` (`P1`, Large) |
+| **R11** | Staged Cohort Rollout & Deploy Policy (`V2`) | Cohort-based staged rollout policies gate automatic promotions from canary to fleet, closing `V2`. | `V2` (`P1`, Medium) |
+| **V3** | Robotic Swarm Hierarchy & Delta OTA | UGV edge-relay gateway (`parent_device_id`), groups & bulk deploy, airtime-aware scheduling, and delta OTA updates work end-to-end. | `V3` (`P2`, Large) |
 
----
+## Milestone R9 — Advisory Simulation Gate (`V2`)
 
-## Release ladder
+- [ ] **R9-1: Pluggable `sim-runner` contract & Espressif QEMU worker** — Implement the `sim-runner` contract ([design/architecture.md](../design/architecture.md), [features/simulation.md](features/simulation.md)) using `pytest-embedded` + Espressif QEMU to boot uploaded firmware artifacts and run the `R5` self-test before deploy (`done when`: a deliberately broken test build fails the sim gate while a valid build passes in automated tests).
+- [ ] **R9-2: Advisory warn & operator override in API and dashboard** — Persist simulation verdicts on artifacts and surface advisory warnings with explicit operator override in `src/fleetforge/` and `frontend/` (`done when`: UI shows pass/warn status and records operator override in audit logs).
 
-Each release is a functioning, demoable app that does one more thing end-to-end,
-ordered to retire the biggest risk (bricking) first. Contents in [releases.md](releases.md).
+## Milestone R10 — Server-Side Build Pipeline (`V2`)
 
-### V1 — safe OTA on a handful of boards
+- [ ] **R10-1: Pinned ESP-IDF toolchain containers & queued build worker** — Clone a configured repo ref and compile artifacts in pinned single-tenant ESP-IDF containers per target (`esp32`, `esp32s3`, `esp32c3`, `esp32c6`) with build caching ([features/build-pipeline.md](features/build-pipeline.md)) (`done when`: a queued build produces a signed, provenance-tagged `.bin` stored in `ObjectStore`).
+- [ ] **R10-2: Streamed build logs & dashboard trigger** — Stream live build logs over SSE and expose build status/retry controls in the API and dashboard (`done when`: end-to-end test verifies queued → running → succeeded/failed transitions and streamed log delivery).
 
-| Release | Theme | Risk retired | Feature area |
-|---------|-------|--------------|--------------|
-| **R0** ⭐ | Enroll a board (UI + recognition + flash + connect) | Onboarding, recognition, device↔server connection | [enrollment](features/enrollment.md) |
-| R1 | Upload new code (OTA deploy) | OTA transport works end-to-end | [ota-deploy](features/ota-deploy.md) |
-| R2 ⭐ | Safe deploy: check + auto-rollback | **Bricking** (the whole gamble) | [ota-deploy](features/ota-deploy.md) |
-| R3 | Thin OTA library + first CUJ | Hobbyists can only update the demo agent, not their own firmware | [ota-library](features/ota-library.md) |
-| R4 | Health & telemetry view | Fleet visibility | [health-telemetry](features/health-telemetry.md) |
-| R5 | Custom self-test confirm | "boots but app logic broken" | [self-test](features/self-test.md) |
-| R6 | Signed OTA + resumable hardening → **v1** | Production-grade safety + security | [security-hardening](features/security-hardening.md) |
+## Milestone R11 — Staged Cohort Rollout & Deploy Policy (`V2`)
 
-### V2 — source to artifact: build & pre-flight verification
+- [ ] **R11-1: Staged cohort deploy policy engine** — Add branch/tag-to-cohort deploy rules with health/rollback promotion gates ([features/vcs-integration.md](features/vcs-integration.md)) (`done when`: a failing canary cohort halts promotion to the next wave automatically).
 
-| Release | Theme | Feature area |
-|---------|-------|--------------|
-| R7 | Artifact API + provenance | [vcs-integration](features/vcs-integration.md) |
-| R8 | Push ingestion (GitHub Action + templates) | [vcs-integration](features/vcs-integration.md) |
-| R9 | Advisory simulation gate *(moved out of v1)* | [simulation](features/simulation.md) |
-| R10 | Build from source (server-side compile) | [build-pipeline](features/build-pipeline.md) |
-| R11 | Deploy policy → **v2** | [vcs-integration](features/vcs-integration.md) |
+## Milestone V3 — Robotic Swarm Hierarchy & Delta OTA
 
-### V3 — robotic swarm
+- [ ] **V3-1: UGV edge-relay gateway & device hierarchy (`parent_device_id`)** — Support parent/child device topology and local edge artifact caching on a UGV gateway ([features/groups-deploy.md](features/groups-deploy.md)) (`done when`: child nodes fetch staged artifacts through their gateway parent).
+- [ ] **V3-2: Groups, bulk deploy, airtime-aware scheduling & delta OTA** — Add group-targeted waves, airtime-aware scheduling, and binary delta updates for constrained links (`done when`: group rollout and delta patch verification pass integration tests).
 
-One ground vehicle as gateway + many flying drones — the first homogeneous fleet and the
-first hierarchy. Gateway as edge relay, `parent_device_id`, groups & bulk deploy,
-airtime-aware scheduling, delta updates. Full treatment in
-[groups-deploy.md](features/groups-deploy.md).
+## Unscheduled backlog
 
----
+- **MCP `2026-07-28` operator adapter:** Read-only status/crash-ring resources + `SEP-2663` Tasks for cohort rollouts + `MRTR` confirmation.
+- **Thread (802.15.4) mesh support:** IPv6-native MQTT/HTTPS over Thread for 100+ node low-power swarms (ESP32-C6/H2 hardware path).
+- **Gateway-mediated non-IP radios:** Zigbee, BLE, and LoRa relay adapters behind the device-facing waist.
+- **Security & provisioning extensions:** Secure Boot v2 (new devices only), SoftAP provisioning, per-device mTLS, and self-host TLS onboarding without public DNS.
+- **Platform & observability extensions:** Raspberry Pi adapter and Grafana/Prometheus telemetry export.
 
-## Capability areas
+## Shipped
 
-| Area | Feature file | Spans releases |
-|------|--------------|----------------|
-| Enrollment & provisioning | [enrollment.md](features/enrollment.md) | R0 |
-| Dashboard (cross-cutting UI: theme, typography, a11y) | [dashboard.md](features/dashboard.md) | R0 → |
-| OTA deploy & auto-rollback | [ota-deploy.md](features/ota-deploy.md) | R1, R2 |
-| Board profiles (layout catalog + measured attestation) | [board-profiles.md](features/board-profiles.md) | R2, R3 |
-| Health & telemetry | [health-telemetry.md](features/health-telemetry.md) | R4 |
-| Self-test (sim gate + device confirm) | [self-test.md](features/self-test.md) | R5 (defined R0) |
-| Signing & resumable hardening | [security-hardening.md](features/security-hardening.md) | R6 → **v1** |
-| VCS integration & deploy policy | [vcs-integration.md](features/vcs-integration.md) | R7, R8, R11 |
-| Simulation backend | [simulation.md](features/simulation.md) | R9 (V2) |
-| Build pipeline (server-side compile) | [build-pipeline.md](features/build-pipeline.md) | R10 (V2) |
-| Groups, gateway, hierarchy, delta | [groups-deploy.md](features/groups-deploy.md) | V3 (swarm) |
-| Projects, multi-user auth & scoped tokens | [projects-and-users.md](features/projects-and-users.md) | V2 / Multi-Project Scale (Option A) |
-
----
-
-## Beyond V3
-
-Canary / staged rollout (unlocks *safe* auto-deploy) · gateway-mediated non-IP radios
-(Zigbee / BLE / LoRa) · Secure Boot v2 (new devices only) · Raspberry Pi adapter ·
-SoftAP provisioning · per-device mTLS · Grafana/Prometheus telemetry export ·
-MCP `2026-07-28` operator adapter (read-only status/crash-ring resources + `SEP-2663` Tasks for cohort rollouts + `MRTR` confirmation).
-
-### The scale question — Thread
-
-A 100+ node low-power swarm reaches past Wi-Fi: AP association limits, ~1–5 mA merely to
-stay associated, and 2.4 GHz contention. **Thread** answers it — 802.15.4 mesh, hundreds
-of nodes, Sleepy End Devices in µA, and **IPv6-native, so MQTT and HTTPS run unchanged**.
-That last property is why v1's IP-bearing link contract is worth its (near-zero) cost.
-
-Two constraints bite regardless of radio: ~10–50 kbps in practice makes a 1.5 MB image
-10–30 minutes of radio-on time *per device*, and N devices on one mesh multiply it.
-**Delta updates**, **airtime-aware scheduling** and the **V3 edge cache** are the three
-answers.
-
-Hardware note: ESP32-C6 has Wi-Fi 6 + 802.15.4. ESP32-H2 is 802.15.4-only. Classic ESP32
-and S3 have no 802.15.4 at all. A Thread path is a new-hardware path.
-
----
-
-## Growth-stage risks
-
-*v1's own risks are in [prd.md](../spec/prd.md) → Key risks. These become real later*.
-
-1. **Scale ceiling** — Wi-Fi will not reach a 100+ low-power swarm, and 802.15.4
-   bandwidth makes full-image OTA energetically expensive. Mitigated in advance by
-   keeping the link abstract (`esp_netif`, `link_type`) so Thread and delta updates stay
-   additive rather than a rewrite.
-2. **Sim ≠ reality** *(V2/R9)* — simulation reduces logic and boot bugs but not
-   hardware, RF or timing bugs. Hence advisory-only, with canary as the next layer.
-3. **Sim-engine lock-in / licensing** *(V2/R9)* — mitigate by keeping simulation
-   pluggable behind the `sim-runner` contract. See [design/architecture.md](../design/architecture.md).
-4. **Server-side build is arbitrary code execution** *(V2/R10)* — single-tenant keeps the
-   blast radius to your own code. Multi-tenant hosting would change the threat model
-   entirely. See [build-pipeline.md](features/build-pipeline.md).
-5. **Self-host onboarding returns at V2** — TLS without public DNS is the unsolved part,
-   deferred rather than answered.
+- **`V1` (`R0`–`R6`)** — Web Serial enrollment, OTA deploy, A/B auto-rollback, embeddable ESP-IDF/Arduino OTA library, live health & crash-ring telemetry, custom self-test confirm, and ECDSA P-256 signing + resumable HTTP `Range` downloads — [archive](archive/roadmap-history.md#v1-r0-to-r6-safe-ota-on-a-handful-of-boards)
+- **`V2` (`R7`–`R8`)** — Artifact provenance API, `fleetforge push` CLI, CI workflow templates, multi-project RBAC, and scoped `ffa_...` tokens — [archive](archive/roadmap-history.md#v2-r7-and-r8-artifact-provenance-and-push-ingestion)

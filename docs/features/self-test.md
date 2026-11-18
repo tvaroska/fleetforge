@@ -300,7 +300,7 @@ other transaction, so a late `apply` never releases an image nobody chose.
 **The confirm deadline.** The image that boots into a transaction has `confirm_timeout_s`
 seconds from the moment it starts to confirm. It must reach the broker, have its retained
 announce acknowledged, and pass its custom self-test if it has one. The device keeps the
-value from the `stage` with the transaction, uses 300 s when it is absent ([prd.md](prd.md)
+value from the `stage` with the transaction, uses 300 s when it is absent ([prd.md](../../spec/prd.md)
 → *Timing*), and holds it within 30-3600 s. Agents that predate R5 always use 300 s.
 
 **Custom self-test.** An image may register one self-test. The device runs it after the
@@ -398,7 +398,7 @@ Its semantics: `device-protocol.md` → `up/status` → *Custom self-test* (R5-s
 **D, `spec/flows.md`** (append to the end of the bullet "**Open, recorded not decided:** how a sleepy battery node avoids a false rollback from the confirm timer (beyond surfacing its sleepy wake window at pre-check).", on the same line after one space; that file keeps one bullet per line):
 
 ```markdown
-Answered (R5-spec-1): it stays awake from `staging` until `confirmed` or `rolled_back` ([device-protocol.md](device-protocol.md) → `up/status`).
+Answered (R5-spec-1): it stays awake from `staging` until `confirmed` or `rolled_back` ([device-protocol.md](../../spec/device-protocol.md) → `up/status`).
 ```
 
 ### R5-fw-1 as built

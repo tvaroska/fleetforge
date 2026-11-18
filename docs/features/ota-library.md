@@ -1285,7 +1285,7 @@ the image. Not that the firmware starts the library, not that its flash layout i
 works.
 
 An image without the marker gets a warning with an explicit override at pre-check
-([flows.md](flows.md) Flow 2, step 2), never a refusal.
+([flows.md](../../spec/flows.md) Flow 2, step 2), never a refusal.
 ```
 
 *(c) Patch A. `spec/device-protocol.md` → `up/announce` prose.* Anchor: insert as a new
@@ -1329,7 +1329,7 @@ holds it in `PENDING_VERIFY`, and it is rolled back only if the board resets; ot
 runs unconfirmed and offline, the deploy stays at `rebooting`, and no remote action
 reaches it. The pre-check refuses a merged binary and a wrong layout or slot size. Two
 candidates. (1) Decided for detection (R3-spec-3): the library marker read from the image
-at upload ([device-protocol.md](device-protocol.md) → *Library marker*), shown at
+at upload ([device-protocol.md](../../spec/device-protocol.md) → *Library marker*), shown at
 pre-check as the gating warning `no_library_marker`. It catches the plain-sketch mistake,
 not a library that is linked but never started, and not broken logic. (2) Open: a watchdog
 the bootloader arms before it enters a `PENDING_VERIFY` image and only the agent's confirm

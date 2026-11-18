@@ -1,4 +1,4 @@
-# FleetForge Agent Instructions (`~/projects/fleetforge/AGENTS.md`)
+# FleetForge Agent Instructions (`AGENTS.md`)
 
 ## 1. Purpose & Overview
 
@@ -22,11 +22,15 @@ FleetForge is built around **two thin waists** (MQTT control plane + HTTPS artif
 - **Architecture & Wire Specs:** [`design/architecture.md`](design/architecture.md) · [`design/production.md`](design/production.md) · [`spec/prd.md`](spec/prd.md) · [`spec/device-protocol.md`](spec/device-protocol.md) · [`spec/flows.md`](spec/flows.md)
 - **Roadmap & Decision Log:** [`docs/roadmap.md`](docs/roadmap.md) · [`docs/releases.md`](docs/releases.md) · [`DECISIONS.md`](DECISIONS.md)
 - **Embeddable Firmware Component:** [`agent/components/fleetforge/README.md`](agent/components/fleetforge/README.md)
+- **CI/CD & Public Starter Templates (`cloudbuild.yaml` vs `templates/esp-idf/`):**
+  - The `fleetforge` repository is public (`github.com/tvaroska/fleetforge`) and keeps its root [`cloudbuild.yaml`](cloudbuild.yaml) (with zero root `.github/workflows/`) for its own container CI/CD pipeline.
+  - [`templates/esp-idf/`](templates/esp-idf/AGENTS.md) scaffolds standalone board firmware repositories via `fleetforge new`: keep starter templates portable with local builds (`just build-idf`, `just build-docker`) and `.github/workflows/fleetforge.yml` (no `cloudbuild.yaml` inside `templates/`), and keep `templates/esp-idf/partitions.csv` and `templates/esp-idf/main/fleetforge_start.{c,h}` byte-identical to `agent/partitions.csv` and `agent/components/fleetforge/examples/basic_idf/main/fleetforge_start.{c,h}` (enforced by `tests/test_ci_cd.py`).
 
 ## 4. Verification Gate
 
 ```bash
-/usr/local/google/home/tvaroska/projects/bin/proj-test fleetforge
-# or directly inside ~/projects/fleetforge:
-uv run pytest
+.venv/bin/ruff check .
+.venv/bin/ruff format --check .
+.venv/bin/mypy --config-file pyproject.toml src/
+.venv/bin/pytest -q -k "not (TestCiCdDatabaseAndApi or TestTrack1 and database)"
 ```

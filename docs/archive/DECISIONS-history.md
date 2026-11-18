@@ -2925,7 +2925,7 @@ with nobody touching it. That is `confirm_timeout_cb()` →
 `esp_ota_mark_app_invalid_rollback_and_reboot()` running on real hardware for the first
 time in the product's life. CRITICAL.md calls this path *"the whole bricking gamble... the
 one failure the product must never have"*. It is no longer untested.
-Procedure: [`docs/runbooks/rollback-test.md`](docs/runbooks/rollback-test.md).
+Procedure: [`docs/runbooks/rollback-test.md`](../runbooks/rollback-test.md).
 
 **Decided: test it with a build flag, not a throwaway patch**. `FF_ROLLBACK_TEST` is off
 by default and compiled out of normal builds entirely. It injects exactly one fault (the
@@ -3017,7 +3017,7 @@ split in both directions.
 **OTA works on metal**. `R1-test-1` passed: device `94a990dd09a4` (ESP32-S3) went
 `0.3.2 → 0.3.1` on a deploy driven from the dashboard API — `downloading` → `rebooting` →
 back online on the new version in ~25 s. R1 is complete. Write-up in
-[`docs/features/ota-deploy.md`](docs/features/ota-deploy.md).
+[`docs/features/ota-deploy.md`](../features/ota-deploy.md).
 
 **Reaching that took three production fixes, and the pattern in them matters more than
 any one of them**. Full detail in `../docs/ops-log.md` F-2026-09-23-001/002/003.
@@ -3074,7 +3074,7 @@ flashed from `bingo.tvaroska.sk` with the v0.2.0 agent (`d705652`) ran the full 
 13 s (`link_up → time_synced → enrolling → enrolled → mqtt_connected`) and stayed live
 66 s past enrollment. That is R0's "Done when" verbatim. It retires the release's
 stated risk. Confirmed against the prod database on 2026-09-22. Write-up in
-[`docs/features/enrollment.md`](docs/features/enrollment.md) → *E2E on real hardware*.
+[`docs/features/enrollment.md`](../features/enrollment.md) → *E2E on real hardware*.
 
 **Decided: prove the release on the new board rather than wait for the stuck one to
 recover**. `R0-test-2` waited on `S0-fw-3` since we wrote it, on the
@@ -3100,7 +3100,7 @@ board.
    never ran that experiment. "This supply carries a cold calibration and our startup
    draws more than it needs to" thus still stands, and the single-variable test —
    v0.2.0 onto the stuck DevKit v1 — is still untried in the bench order in
-   [`TODO.md`](TODO.md).
+   `TODO.md`.
 3. **R1 has no blockers**. `R1-test-1` depended on `R0-test-2` in practice. An enrollable
    board now exists. R1's other seven tasks landed 2026-09-17, so one bench run closes the
    release. Caveat: `presence_reported = f` and `last_seen` is 2026-09-19. We unplugged the board since then. Thus, it must be re-plugged first.
@@ -3116,9 +3116,9 @@ the on-ramp. R0 closes when someone who did not see the code onboards a board.
 ## 2026-09-22 — The Arduino library gets its own layout id. Config stays in flash
 
 **R3-fw-1**, a spike. Details in
-[`design/decisions/arduino-gets-its-own-layout-id.md`](design/decisions/arduino-gets-its-own-layout-id.md).
+[`design/decisions/arduino-gets-its-own-layout-id.md`](../../design/decisions/arduino-gets-its-own-layout-id.md).
 Evidence in `spec/open-questions.md` → *ota-library*. Reproduction in
-[`docs/runbooks/arduino-partition-measurement.md`](docs/runbooks/arduino-partition-measurement.md).
+[`docs/runbooks/arduino-partition-measurement.md`](../runbooks/arduino-partition-measurement.md).
 
 **Decided: (a), a packaged partition table shipped as a sketch-local `partitions.csv`,
 under a new layout id `ab-4m-arduino-v1` — not `ab-4m-v1`, and not NVS**. Same
@@ -3230,7 +3230,7 @@ Details and T2 evidence: `docs/features/ota-library.md` → *The project's first
 
 ## 2026-09-22 — The thin OTA library becomes R3, and the v1 ladder shifts by one
 
-**`/new-feature`, from [docs/HOBBYIST.md](docs/HOBBYIST.md) §4.1**. `prd.md` has always
+**`/new-feature`, from [docs/HOBBYIST.md](../HOBBYIST.md) §4.1**. `prd.md` has always
 promised two device-side deliverables — a prebuilt agent *and* a thin OTA library to
 embed in custom firmware. Only the agent was ever planned. The library now has a feature
 file, requirements and a release.
@@ -3240,7 +3240,7 @@ deploy currently is, and today's Deploy button has no checksum, no device-armed 
 and no rollback until R2. Shipping the four verbs into other people's `setup()`/`loop()`
 first would put the unsafe path inside custom firmware on boards chosen. This is because they are
 hard to reach. Full reasoning:
-[design/decisions/ota-library-ships-after-safe-deploy.md](design/decisions/ota-library-ships-after-safe-deploy.md).
+[design/decisions/ota-library-ships-after-safe-deploy.md](../../design/decisions/ota-library-ships-after-safe-deploy.md).
 
 **The renumber**. Library = R3. Health & telemetry R3→R4, self-test R4→R5, signed OTA
 R5→R6, V2 R6–R10 → R7–R11. Affordable because **no R3+ task IDs existed** — R0 and R1 are
@@ -3252,7 +3252,7 @@ pre-2026-09-22 entry saying "R5" means what is now R6.
 
 **The release opens with a spike**. Where a library user's config lives remains open. The
 agent uses the `ff_cfg` flash partition, which an Arduino IDE build does not have. OTA cannot add a partition. Recorded in
-[spec/open-questions.md](spec/open-questions.md). `R3-fw-1` measures what an Arduino build
+[spec/open-questions.md](../../spec/open-questions.md). `R3-fw-1` measures what an Arduino build
 actually does to the table before anything else is estimated.
 
 **`spec/cujs.md` gets written here too.** *Unaided onboarding* has had acceptance criteria
@@ -3743,14 +3743,14 @@ back through `ObjectStore`. A firmware fix now reaches boards with no app-image 
 - **Prod appears as a proposal, not applied**. `services/prod/docker-compose.yml` still sets
   `AGENT_IMAGES_DIR` and carries the now-false "no object store on purpose" comment. The
   replacement (`OBJECT_STORE_BACKEND: gcs` + bucket/prefix/impersonation) is written out in
-  [docs/features/infrastructure.md](docs/features/infrastructure.md) → *Production hand-off*
+  [docs/features/infrastructure.md](../features/infrastructure.md) → *Production hand-off*
   and root `CLAUDE.md` requires asking before touching production config. **Ordering is
   load-bearing: publish the bundles to GCS before deploying an image that no longer carries
   them**, or prod's flasher answers 503 in between.
 
-Details: [docs/features/infrastructure.md](docs/features/infrastructure.md) → *Agent bundles
-come from the store*, [docs/runbooks/agent-build.md](docs/runbooks/agent-build.md),
-[docs/runbooks/artifact-storage.md](docs/runbooks/artifact-storage.md).
+Details: [docs/features/infrastructure.md](../features/infrastructure.md) → *Agent bundles
+come from the store*, [docs/runbooks/agent-build.md](../runbooks/agent-build.md),
+[docs/runbooks/artifact-storage.md](../runbooks/artifact-storage.md).
 
 ## 2026-09-15 — the GCS credential is an impersonation, and signing is no longer local (S0-infra-5)
 
@@ -4077,7 +4077,7 @@ Asked whether growing image count means moving from fixed artifacts to dynamic b
 with caching. It does not: **prebuilt-and-cached is the steady state and a build is what
 happens on a cache miss**. Onboarding must never wait on a compile. There is always a
 pinned known-good bundle set that needs no builder running. Design in
-[design/artifacts.md](design/artifacts.md). Tasks S0-infra-3 … S0-infra-7.
+[design/artifacts.md](../../design/artifacts.md). Tasks S0-infra-3 … S0-infra-7.
 
 **Extends, does not supersede, `design/decisions/infrastructure-agent-bundles-are-artifacts.md`**
 (2026-09-11). That ADR decided agent bundles move behind `ObjectStore` and rejected a
@@ -4504,8 +4504,8 @@ stale bundles shipped in v0.3.0. A baked fallback tier was not our choice as
 preserving the defect with an extra branch. Accepted cost, stated: onboarding comes to
 depend on a store that today cannot be credentialled, making the GCS blocker in
 `docs/runbooks/artifact-storage.md` a hard prerequisite rather than a caveat. Details:
-[design/decisions/infrastructure-agent-bundles-are-artifacts.md](design/decisions/infrastructure-agent-bundles-are-artifacts.md),
-[docs/features/infrastructure.md](docs/features/infrastructure.md) → *Agent bundles served from the object store*.
+[design/decisions/infrastructure-agent-bundles-are-artifacts.md](../../design/decisions/infrastructure-agent-bundles-are-artifacts.md),
+[docs/features/infrastructure.md](../features/infrastructure.md) → *Agent bundles served from the object store*.
 
 ## 2026-09-11 — the panel does the fix it names (S0-fe-6)
 
@@ -4961,7 +4961,7 @@ Details: TODO.md → S0-fw-1 (`- [!]`) and S0-infra-1.
   contract with `agent/main/*.c` that nothing else enforces: reword an `ESP_LOGW` and the
   panel would silently stop diagnosing. The tests fail instead.
 
-Details: [docs/features/enrollment.md](docs/features/enrollment.md) →
+Details: [docs/features/enrollment.md](../features/enrollment.md) →
 *Serial console after flashing (S0-fe-1)*.
 
 ## 2026-09-10 — fleetforge goes live on prod: an alias network, an infra ingestor, a TLS simulator (R0-infra-5)
@@ -5857,7 +5857,7 @@ The first code in the repo, so these are settled for everything after it.
   Traefik route 404, database/role dropped with backup checked restorable, full deploy
   pipeline green, other services unaffected.
 - **Task:** R0-infra-0 completed 2026-09-08. Details in
-  [docs/features/infrastructure.md](docs/features/infrastructure.md).
+  [docs/features/infrastructure.md](../features/infrastructure.md).
 
 ---
 
@@ -5891,7 +5891,7 @@ The first code in the repo, so these are settled for everything after it.
 - **Cost, accepted:** v1 has a cloud dependency for artifact storage. The adapter
   boundary is what keeps deleting it a configuration change. Recorded honestly in
   `spec/prd.md` → *Security & data posture*.
-- **Details:** [design/production.md](design/production.md) → *Artifact storage*.
+- **Details:** [design/production.md](../../design/production.md) → *Artifact storage*.
 
 ---
 
@@ -5918,7 +5918,7 @@ The first code in the repo, so these are settled for everything after it.
 - **Why not Redis:** Postgres `LISTEN/NOTIFY` is sufficient at this scale and the
   database is already there. Mirrors the `content-api` / `content-worker` split already
   running on the same host.
-- **Details:** [design/production.md](design/production.md) → *The single-subscriber rule*.
+- **Details:** [design/production.md](../../design/production.md) → *The single-subscriber rule*.
 
 ---
 
@@ -5949,7 +5949,7 @@ The first code in the repo, so these are settled for everything after it.
 - **Single-use:** a group-scoped token surviving in flash would let anyone with physical
   access to one board enroll arbitrary devices, and on a public-facing broker there is no
   LAN perimeter to hide behind.
-- **Details:** [spec/device-protocol.md](spec/device-protocol.md).
+- **Details:** [spec/device-protocol.md](../../spec/device-protocol.md).
 
 ---
 
@@ -5990,7 +5990,7 @@ The first code in the repo, so these are settled for everything after it.
 - **Consequence:** R5 ships **app-level signature verification**, not Secure Boot v2.
   Secure Boot v2 burns a key digest to eFuse and needs a re-signed bootloader. Thus, it can never work on an already-deployed board. It is post-v1 and new-devices-only.
   The two are not interchangeable.
-- **Details:** [design/architecture.md](design/architecture.md) → *Flash-time immutables*.
+- **Details:** [design/architecture.md](../../design/architecture.md) → *Flash-time immutables*.
 
 ---
 

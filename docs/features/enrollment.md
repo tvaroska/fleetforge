@@ -34,7 +34,7 @@ the first client of a headless core, not privileged over future clients (HA/CLI/
 
 ## Phase 1: R0 — Enroll a board
 
-**Open tasks live in [TODO.md](../../TODO.md) → R0**, which is the single source for
+**Open tasks live in [roadmap.md](../roadmap.md) → R0**, which is the single source for
 status. Completed R0 work is archived in the sections below. This file holds the
 decisions behind all of it. No counts here — they go stale the moment a task lands.
 
@@ -1669,7 +1669,7 @@ index 6417b52..241e108 100644
  - **Passphrases stay out of the server and out of browser storage.** Only the SSID is ever reported.
  - **The board's own code must keep the list.** A maker's firmware (R3) has to read the same network list and, later, carry the Improv handler; otherwise the OTA that made the board useful would strand it on its current network.
 -- **Open, not decided:** how many networks, and the selection rule (a fixed priority order, or the strongest of those in range); the `ff_cfg` format change that carries a list (a proposal to `spec/device-protocol.md`, which is protected); how a board reports "no known network in range" (the announce cannot be sent without a link); whether a network list or credentials belong in NVS or `ff_cfg` once the agent can write them.
-+- **Decided (R2b-spec-1):** up to four networks, in the operator's order; the first one in range wins, and a board that has joined one stays on it until the link drops; with none in range the board keeps trying and says so on its console. Format and selection rule: [device-protocol.md](device-protocol.md) → *Known networks*.
++- **Decided (R2b-spec-1):** up to four networks, in the operator's order; the first one in range wins, and a board that has joined one stays on it until the link drops; with none in range the board keeps trying and says so on its console. Format and selection rule: [device-protocol.md](../../spec/device-protocol.md) → *Known networks*.
 +- **Still open:** whether a network list or credentials belong in NVS or `ff_cfg` once the agent can write them (R2b-spec-3); and how "no known network in range" could ever reach the server, since the board has no link to send it over.
  
  ## Where the pieces line up
@@ -1687,7 +1687,7 @@ index 1bfa1db..eb00ac9 100644
 -question above. Candidate: copy `ssid`/`psk` from `ff_cfg` to NVS on enrolment and
 -let `dn/cmd` `set_cfg` rewrite them. Not decided.
 +**Field Wi-Fi change.** Partly answered (R2b-spec-1). A board flashed with a list of
-+known networks moves between them with no re-flash ([device-protocol.md](device-protocol.md)
++known networks moves between them with no re-flash ([device-protocol.md](../../spec/device-protocol.md)
 +→ *Known networks*, `flows.md` Flow 3). A network not on the list still needs a re-flash,
 +and whether that holds once boards are sealed in boxes (CUJ-1) is open; see the *repeat
 +path* question above. The writable store (NVS or `ff_cfg`), and `dn/cmd` `set_cfg` versus

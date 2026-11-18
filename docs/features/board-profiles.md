@@ -799,7 +799,7 @@ whose bootloader predates rollback support never transitions
 itself valid to keep the OTA state consistent, *without* any rollback protection. Such a
 board can never gain the safety net from us at any version, and it reports identically to a
 protected one — image confirms, announce lands, dashboard green. The three failure modes
-enumerated in [`TODO.md`](../../TODO.md) all assume the net is there: mode 1 (*image fails
+enumerated in `TODO.md` all assume the net is there: mode 1 (*image fails
 to boot*) is delegated to the bootloader, and mode 2 (*boots, joins, never confirms*) is
 the one we proved on metal. On such a board **both** silently degrade to mode 3's
 no-automatic-recovery, and nothing distinguishes it. `esp_ota_get_state_partition()`

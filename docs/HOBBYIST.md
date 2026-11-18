@@ -1,6 +1,6 @@
 # Fleetforge for the electronic hobbyist
 
-> **ARCHIVED (Historical R1 Snapshot — 2026-09-21):** The R1-era gaps and recommendations in this document have been closed across R2 (auto-rollback), R2b (pre-check, known networks, operator flows), R3 (thin OTA library & partition profiles), R4 (health, `up/log`, `up/telemetry`), R5 (self-test, safe windows, 3-crash safe mode, `isReadyForSleep`), R6 (ECDSA P-256 signing, HTTP Range resume, KPIs), and CUJ-2 (Git CI/CD, rotating secrets, OTel, Improv BLE Wi-Fi). See [`TODO.md`](../TODO.md) and [`spec/prd.md`](../spec/prd.md) for current status.
+> **ARCHIVED (Historical R1 Snapshot — 2026-09-21):** The R1-era gaps and recommendations in this document have been closed across R2 (auto-rollback), R2b (pre-check, known networks, operator flows), R3 (thin OTA library & partition profiles), R4 (health, `up/log`, `up/telemetry`), R5 (self-test, safe windows, 3-crash safe mode, `isReadyForSleep`), R6 (ECDSA P-256 signing, HTTP Range resume, KPIs), and CUJ-2 (Git CI/CD, rotating secrets, OTel, Improv BLE Wi-Fi). See [`roadmap.md`](roadmap.md) and [`spec/prd.md`](../spec/prd.md) for current status.
 
 **Date:** 2026-09-21
 **Status:** product review and recommendation — not a spec, not a plan.
@@ -204,7 +204,7 @@ hobbyist-shaped hole.
 ESPHome owns the **build**. Fleetforge refuses the build in v1 and treats the
 builder as one more producer in V2. That is the wedge: N devices per artifact,
 target-version-per-group, no “update all recompiles 377 nodes for 10 hours.”
-The comparison is in [`products/docs/esphome-review.md`](../../docs/esphome-review.md).
+The comparison is in `products/docs/esphome-review.md`.
 
 ESPHome is stronger on: onboarding UX, a decade of ESP32 OTA edge cases,
 `safe_mode` (both slots bad), Improv, HA, sleepy-device confirm. Fleetforge has
@@ -440,7 +440,7 @@ other room can pick up.
 - [`docs/releases.md`](releases.md) — what each release adds
 - [`docs/features/ota-deploy.md`](features/ota-deploy.md) — R1/R2
 - [`docs/features/enrollment.md`](features/enrollment.md) — R0 onboarding
-- [`products/docs/esphome-review.md`](../../docs/esphome-review.md) — adjacent
+- `products/docs/esphome-review.md` — adjacent
   product, reuse / copy / refuse
 - [`spec/open-questions.md`](../spec/open-questions.md) — CUJs, repeat-path
   enrollment, artifact-size double cap
