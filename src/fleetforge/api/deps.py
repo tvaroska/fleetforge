@@ -46,6 +46,7 @@ from fleetforge.db.models import (
     ProjectRole,
     User,
 )
+from fleetforge.simulation import SimRunner, create_sim_runner
 from fleetforge.storage import ObjectStore, ObjectStoreConfigError
 
 logger = logging.getLogger(__name__)
@@ -585,3 +586,11 @@ def get_firebase_auth() -> FirebaseAuthClient:
 
 
 FirebaseAuthDep = Annotated[FirebaseAuthClient, Depends(get_firebase_auth)]
+
+
+def get_sim_runner() -> SimRunner:
+    """Return the configured pre-flight `SimRunner` Port (`R9-1`, overridable in tests)."""
+    return create_sim_runner()
+
+
+SimRunnerDep = Annotated[SimRunner, Depends(get_sim_runner)]

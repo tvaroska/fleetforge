@@ -94,7 +94,7 @@ it. SQL about `deploy_events` belongs to this module, not to a router.
 import datetime as dt
 import logging
 import re
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -376,6 +376,7 @@ async def record_requested(
     apply: str,
     sent_by: DeploySender,
     rollout: dict[str, Any] | None = None,
+    override: Collection[str] = (),
 ) -> DeployEvent:
     """Record the intent to deploy: one `requested` row, never terminal.
 
@@ -400,6 +401,8 @@ async def record_requested(
             "credential": sent_by.credential,
         },
     }
+    if override:
+        detail_blob["overrides"] = list(override)
     if rollout is not None:
         detail_blob["rollout"] = rollout
     row = DeployEvent(

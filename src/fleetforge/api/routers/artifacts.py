@@ -68,13 +68,16 @@ from fleetforge.api.deps import (
     ObjectStoreDep,
     SessionMakerDep,
     SettingsDep,
+    SimRunnerDep,
     bearer_scheme,
     cookie_scheme,
     resolve_project_for_request,
+    visible_project_ids,
 )
 from fleetforge.api.schemas import (
     PROJECT_SLUG_PATTERN,
     ArtifactList,
+    ArtifactSimulateResponse,
     ArtifactSummary,
     ArtifactUploaded,
 )
@@ -89,8 +92,8 @@ from fleetforge.partition_profiles import (
     load_layout_catalog,
 )
 from fleetforge.signing import SigningKeyRing, is_valid_sig_format
-from fleetforge.storage.blobs import digest_bytes, put_blob
-from fleetforge.storage.objectstore import ObjectStoreError
+from fleetforge.storage.blobs import SHA256_HEX, blob_key, digest_bytes, put_blob
+from fleetforge.storage.objectstore import ObjectNotFound, ObjectStoreError
 
 logger = logging.getLogger(__name__)
 
@@ -125,7 +128,8 @@ _LIST_SQL = text(
     """
     SELECT v.target, v.version, v.sha256, v.created_at,
            v.repo_url, v.branch, v.commit_sha, v.tag, v.build_url, v.test_passed,
-           a.size_bytes, a.partition_layout, a.kind, a.artifact_type, a.sig
+           a.size_bytes, a.partition_layout, a.kind, a.artifact_type, a.sig,
+           a.sim_status, a.sim_detail, a.sim_ran_at
       FROM artifact_versions AS v
       JOIN artifacts AS a ON a.sha256 = v.sha256
      WHERE v.project_id = :project_id
@@ -194,8 +198,19 @@ _LABEL_SELECT_SQL = text(
 )
 
 _ARTIFACT_SELECT_SQL = text(
-    "SELECT sha256, size_bytes, target, partition_layout, artifact_type, has_lib_marker, sig "
+    "SELECT sha256, size_bytes, target, partition_layout, artifact_type, has_lib_marker, sig, "
+    "sim_status, sim_detail, sim_ran_at "
     "FROM artifacts WHERE sha256 = :sha256"
+)
+
+_ARTIFACT_SIM_UPDATE_SQL = text(
+    """
+    UPDATE artifacts
+       SET sim_status = :sim_status,
+           sim_detail = :sim_detail,
+           sim_ran_at = :sim_ran_at
+     WHERE sha256 = :sha256
+    """
 )
 
 
@@ -306,6 +321,7 @@ async def upload_artifact(
     sessionmaker: SessionMakerDep,
     settings: SettingsDep,
     publisher: CommandPublisherDep,
+    sim_runner: SimRunnerDep,
     target: Annotated[SafeSegment, Query(description="Chip target, e.g. esp32s3")],
     version: Annotated[str, Query(description="The version label, e.g. 1.5.0")],
     partition_layout: Annotated[
@@ -357,6 +373,10 @@ async def upload_artifact(
             ),
         ),
     ] = None,
+    simulate: Annotated[
+        bool,
+        Query(description="Run pre-flight R9 simulation immediately on upload"),
+    ] = False,
 ) -> ArtifactUploaded:
     """Store an opaque firmware blob and label it `(target, version)`.
 
@@ -563,6 +583,26 @@ async def upload_artifact(
                     "test_passed": test_passed,
                 },
             )
+
+        if simulate and sim_runner is not None:
+            sim_res = await sim_runner.simulate(
+                sha256=digest,
+                target=target,
+                image=data,
+                partition_layout=stored_layout,
+                artifact_type=artifact_type,
+            )
+            await session.execute(
+                _ARTIFACT_SIM_UPDATE_SQL,
+                {
+                    "sha256": digest,
+                    "sim_status": sim_res.status.value,
+                    "sim_detail": sim_res.detail,
+                    "sim_ran_at": sim_res.ran_at,
+                },
+            )
+            stored_blob = (await session.execute(_ARTIFACT_SELECT_SQL, {"sha256": digest})).one()
+
         await session.commit()
 
         auto_deployed: list[str] | None = None
@@ -632,6 +672,9 @@ async def upload_artifact(
         build_url=build_url,
         test_passed=test_passed,
         auto_deployed_devices=auto_deployed,
+        sim_status=getattr(stored_blob, "sim_status", None),
+        sim_detail=getattr(stored_blob, "sim_detail", None),
+        sim_ran_at=getattr(stored_blob, "sim_ran_at", None),
     )
 
 
@@ -685,9 +728,131 @@ async def list_artifacts(
                 tag=row.tag,
                 build_url=row.build_url,
                 test_passed=row.test_passed,
+                sim_status=getattr(row, "sim_status", None),
+                sim_detail=getattr(row, "sim_detail", None),
+                sim_ran_at=getattr(row, "sim_ran_at", None),
             )
             for row in rows
         ]
+    )
+
+
+@router.post(
+    "/{sha256}/simulate",
+    response_model=ArtifactSimulateResponse,
+    summary="Boot an artifact in the pre-flight simulator and persist its R5 self-test verdict",
+)
+async def simulate_artifact(
+    sha256: str,
+    admin: AdminDep,
+    store: ObjectStoreDep,
+    sessionmaker: SessionMakerDep,
+    sim_runner: SimRunnerDep,
+    project: Annotated[
+        str | None,
+        Query(pattern=PROJECT_SLUG_PATTERN, description="Project slug (defaults to token/default)"),
+    ] = None,
+) -> ArtifactSimulateResponse:
+    """Execute `SimRunner.simulate` against `sha256` and store `(sim_status, sim_detail, sim_ran_at)` (`R9-2`)."""
+    if not SHA256_HEX.match(sha256):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="sha256 must be 64 lowercase hex characters",
+        )
+    if not ({"admin", "write:artifacts", "deploy"} & set(admin.scopes)):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="insufficient permissions",
+        )
+
+    async with sessionmaker() as session:
+        if project is not None or admin.project_id is not None:
+            target_project = await resolve_project_for_request(
+                session,
+                admin,
+                project_slug=project,
+                min_role=ProjectRole.OPERATOR,
+            )
+            visible_link = await session.scalar(
+                text(
+                    "SELECT 1 FROM artifact_versions "
+                    "WHERE project_id = :pid AND sha256 = :sha256 LIMIT 1"
+                ),
+                {"pid": target_project.id, "sha256": sha256},
+            )
+            if visible_link is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"no such artifact: {sha256}",
+                )
+        else:
+            allowed_pids = await visible_project_ids(session, admin)
+            if allowed_pids is not None:
+                if not allowed_pids:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail=f"no such artifact: {sha256}",
+                    )
+                visible_link = await session.scalar(
+                    text(
+                        "SELECT 1 FROM artifact_versions "
+                        "WHERE project_id = ANY(:pids) AND sha256 = :sha256 LIMIT 1"
+                    ),
+                    {"pids": list(allowed_pids), "sha256": sha256},
+                )
+                if visible_link is None:
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail=f"no such artifact: {sha256}",
+                    )
+
+        row = (await session.execute(_ARTIFACT_SELECT_SQL, {"sha256": sha256})).first()
+        if row is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"no such artifact: {sha256}",
+            )
+
+    try:
+        image = await store.get(blob_key(sha256))
+    except ObjectNotFound:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"artifact bytes missing from store: {sha256}",
+        ) from None
+    except ObjectStoreError:
+        logger.exception("artifact simulation failed: object store unavailable")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=STORE_UNAVAILABLE,
+        ) from None
+
+    sim_res = await sim_runner.simulate(
+        sha256=sha256,
+        target=str(row.target or "esp32"),
+        image=image,
+        partition_layout=row.partition_layout,
+        artifact_type=str(row.artifact_type or "app"),
+    )
+
+    async with sessionmaker() as session:
+        await session.execute(
+            _ARTIFACT_SIM_UPDATE_SQL,
+            {
+                "sha256": sha256,
+                "sim_status": sim_res.status.value,
+                "sim_detail": sim_res.detail,
+                "sim_ran_at": sim_res.ran_at,
+            },
+        )
+        await session.commit()
+
+    return ArtifactSimulateResponse(
+        sha256=sha256,
+        target=row.target,
+        sim_status=sim_res.status.value,
+        sim_detail=sim_res.detail,
+        sim_ran_at=sim_res.ran_at,
     )
 
 

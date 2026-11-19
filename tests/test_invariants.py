@@ -334,7 +334,7 @@ def test_the_writer_module_exists_and_is_the_one_named() -> None:
 # `device_commands` has exactly one writer (R5-be-2)
 # ---------------------------------------------------------------------------
 
-DEVICE_COMMAND_WRITERS = {"device_commands.py", "db/models.py"}
+DEVICE_COMMAND_WRITERS = {"device_commands.py", "db/models.py", "db/models_telemetry.py"}
 
 
 def test_only_device_commands_py_writes_device_commands() -> None:

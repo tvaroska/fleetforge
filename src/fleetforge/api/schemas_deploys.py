@@ -28,8 +28,21 @@ _CI_OPTIONAL_FIELDS = frozenset(
         "build_url",
         "test_passed",
         "auto_deployed_devices",
+        "sim_status",
+        "sim_detail",
+        "sim_ran_at",
     }
 )
+
+
+class ArtifactSimulateResponse(BaseModel):
+    """What `POST /v1/artifact/{sha256}/simulate` returns (`R9-2`)."""
+
+    sha256: str
+    target: str | None
+    sim_status: Literal["pending", "running", "passed", "failed", "skipped"]
+    sim_detail: str | None
+    sim_ran_at: dt.datetime
 
 
 class ArtifactUploaded(BaseModel):
@@ -51,6 +64,9 @@ class ArtifactUploaded(BaseModel):
     build_url: str | None = None
     test_passed: bool | None = None
     auto_deployed_devices: list[str] | None = None
+    sim_status: str | None = None
+    sim_detail: str | None = None
+    sim_ran_at: dt.datetime | None = None
 
     @model_serializer(mode="wrap")
     def _omit_unset_ci_fields(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
@@ -89,6 +105,9 @@ class ArtifactSummary(BaseModel):
     tag: str | None = None
     build_url: str | None = None
     test_passed: bool | None = None
+    sim_status: str | None = None
+    sim_detail: str | None = None
+    sim_ran_at: dt.datetime | None = None
 
     @model_serializer(mode="wrap")
     def _omit_unset_ci_fields(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
@@ -123,6 +142,7 @@ OverrideCode = Literal[
     "no_library_marker",
     "unsigned_artifact",
     "dev_key_ring",
+    "sim_failed",
 ]
 
 

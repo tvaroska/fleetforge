@@ -80,6 +80,7 @@ ROLLBACK_INCAPABLE = "rollback_incapable"
 NO_LIBRARY_MARKER = "no_library_marker"
 UNSIGNED_ARTIFACT = "unsigned_artifact"
 DEV_KEY_RING = "dev_key_ring"
+SIM_FAILED = "sim_failed"
 NO_APPLY_CAPABILITY = "no_apply_capability"
 NO_CARGO_CAPABILITY = "no_cargo_capability"
 SIGNATURE_REQUIRED_BY_DEVICE = "signature_required_by_device"
@@ -92,6 +93,7 @@ GATING_CODES: tuple[str, ...] = (
     NO_LIBRARY_MARKER,
     UNSIGNED_ARTIFACT,
     DEV_KEY_RING,
+    SIM_FAILED,
 )
 
 # Where a library user finds the partitions.csv for each builtin layout: the fix named by
@@ -126,6 +128,8 @@ class ResolvedArtifact:
     # `None` = legacy/untracked) and whether the signature relies on a committed dev key.
     is_signed: bool | None = None
     uses_dev_key_ring: bool = False
+    sim_status: str | None = None
+    sim_detail: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -466,6 +470,18 @@ def gating_warnings(device: Device, *, artifact: ResolvedArtifact | None) -> lis
                 "whose test private keys are public. Configure a dedicated release key ring in "
                 "ARTIFACT_SIGNING_KEY and ARTIFACT_SIGNING_PUBLIC_KEYS, or override only on a "
                 "non-production bench.",
+                needs_override=True,
+            )
+        )
+    if artifact is not None and artifact.sim_status == "failed":
+        sim_reason = artifact.sim_detail or "R5 self-test did not confirm in simulation"
+        found.append(
+            Finding(
+                SIM_FAILED,
+                f"pre-flight simulation failed for this build ({sim_reason}). Deploying it risks "
+                "an immediate boot crash or rollback across target boards; fix the build and "
+                "re-run simulation, or override explicitly if this failure is a known emulator "
+                "limitation.",
                 needs_override=True,
             )
         )

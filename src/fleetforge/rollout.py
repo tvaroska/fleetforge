@@ -58,7 +58,8 @@ _ROLLOUT_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}\Z")
 
 _ARTIFACT_FOR_TARGET_SQL = text(
     """
-    SELECT a.sha256, a.size_bytes, a.partition_layout, a.has_lib_marker, a.sig, a.artifact_type
+    SELECT a.sha256, a.size_bytes, a.partition_layout, a.has_lib_marker, a.sig, a.artifact_type,
+           a.sim_status, a.sim_detail
       FROM artifact_versions AS v
       JOIN artifacts AS a ON a.sha256 = v.sha256
      WHERE v.project_id = :project_id AND v.target = :target AND v.version = :version
@@ -180,6 +181,8 @@ async def resolve_artifact_for_target(
         artifact_type=getattr(row, "artifact_type", "app"),
         is_signed=(row.sig is not None),
         uses_dev_key_ring=uses_dev,
+        sim_status=getattr(row, "sim_status", None),
+        sim_detail=getattr(row, "sim_detail", None),
     )
 
 
@@ -494,6 +497,7 @@ async def deploy_version_to_project_devices(
                 apply=apply,
                 sent_by=sent_by,
                 rollout=rollout_meta,
+                override=override,
             )
 
         payload = stage_payload(

@@ -37,6 +37,19 @@ self-test → pass/fail`) so no single engine locks us in across the platform la
 
 **Done when:** you can catch bad builds before any device receives it.
 
+## As built (`R9-1` & `R9-2`, 2026-11-19)
+
+- **Pluggable `SimRunner` Port (`src/fleetforge/simulation.py`):**
+  - Defines `SimStatus` (`pending`, `running`, `passed`, `failed`, `skipped`), `SimResult`, and the `SimRunner` `Protocol` (`simulate(*, sha256, target, image, partition_layout, artifact_type) -> SimResult`).
+  - `EspressifQemuSimRunner` builds a 4 MiB raw flash image placing the app at `0x10000`, invokes Espressif QEMU (`qemu-system-xtensa` for `esp32`/`esp32s3`, `qemu-system-riscv32` for `esp32c3`/`esp32c6`) or a `pytest-embedded-qemu` harness under a wall-clock timeout, and classifies serial output (`selftest passed` / `marked app valid` / `confirmed` vs Guru Meditation panic / `selftest failed` / `rolled_back`).
+  - `HostPreflightSimRunner` provides deterministic host-side ESP-IDF boot header (`0xE9`), `FFOTALIB` marker, and fault-vector (`FF_SIM_BOOT_CRASH`, `FF_SIM_SELFTEST_FAIL`) verification when QEMU binaries are absent on the worker.
+- **External Worker (`src/fleetforge/sim_worker.py`):**
+  - `python -m fleetforge.sim_worker [--once] [--interval 5.0] [--backend auto|qemu|host]` claims `sim_status = 'pending'` rows with `FOR UPDATE SKIP LOCKED`, downloads artifact bytes from `ObjectStore`, and persists verdicts outside the 256 MiB `fleetforge-api` container.
+- **Schema, API, Advisory Gate & Audit Trail (`alembic/versions/0016_artifact_simulation.py`):**
+  - Adds reversible `sim_status`, `sim_detail`, and `sim_ran_at` columns on `artifacts`, surfaced on `POST /v1/artifact?simulate=true`, `POST /v1/artifact/{sha256}/simulate`, and `GET /v1/artifact`.
+  - `deploy_precheck.py` raises the gating warning `sim_failed` (`needs_override=True`) when `sim_status == 'failed'`; `POST /v1/devices/{id}/deploy` answers `409` unless `override` includes `"sim_failed"`, and `deploys.py::record_requested` records `"overrides": [...]` in `deploy_events.detail`.
+  - React dashboard (`SimulationBadge.tsx`, `Dashboard.tsx`, `PrecheckCard.tsx`) displays `✓ sim passed` / `[! sim failed]` badges, `[Run sim]` triggers, and explicit override checkboxes.
+
 ## Post-v1 (fidelity layer)
 
 Real-hardware canary via `pytest-embedded` serial, automated at scale with **LAVA**

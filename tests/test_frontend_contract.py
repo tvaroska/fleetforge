@@ -15,7 +15,10 @@ from typing import Any
 from fleetforge.api.main import create_app
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-API_TS_PATH = REPO_ROOT / "frontend" / "src" / "api.ts"
+API_TS_PATHS = (
+    REPO_ROOT / "frontend" / "src" / "api.ts",
+    REPO_ROOT / "frontend" / "src" / "apiTypes.ts",
+)
 
 _TS_OBJECT_OPEN_RE = re.compile(
     r"^export\s+type\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\{",
@@ -100,11 +103,14 @@ def _schema_properties(components: dict[str, Any], schema_name: str) -> set[str]
 
 
 def test_api_ts_fields_exist_in_openapi() -> None:
-    """Every field of every exported object type in `frontend/src/api.ts` exists in OpenAPI."""
+    """Every field of every exported object type in `frontend/src/api*.ts` exists in OpenAPI."""
     openapi = create_app().openapi()
     components: dict[str, Any] = openapi.get("components", {}).get("schemas", {})
-    ts_types = _parse_api_ts_object_types(API_TS_PATH.read_text(encoding="utf-8"))
-    assert ts_types, "failed to parse any exported object types from frontend/src/api.ts"
+    ts_types: dict[str, set[str]] = {}
+    for ts_path in API_TS_PATHS:
+        if ts_path.exists():
+            ts_types.update(_parse_api_ts_object_types(ts_path.read_text(encoding="utf-8")))
+    assert ts_types, "failed to parse any exported object types from frontend/src/api*.ts"
 
     missing_types: list[str] = []
     phantom_fields: dict[str, list[str]] = {}

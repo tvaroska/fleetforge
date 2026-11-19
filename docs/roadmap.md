@@ -4,21 +4,15 @@ Source specs: [prd.md](../spec/prd.md) · [design/architecture.md](../design/arc
 
 ## Where we are
 
-`V1` (`R0`–`R6`) and `V2` `R7`–`R8` are shipped: Web Serial enrollment, A/B auto-rollback (`ab-4m-v1`), embeddable ESP-IDF/Arduino OTA library, live health & crash-ring telemetry, custom self-test confirmation (`ff_set_selftest`), ECDSA P-256 firmware signing with resumable HTTP `Range` downloads, artifact provenance API, `fleetforge push` CLI + CI workflow templates, and multi-project RBAC with scoped `ffa_...` tokens. `v0.8.6` (gate and P0 security fixes) and `v0.8.7` (fifteen P1 rollout, secrets, and contract fixes) are implemented locally (pending release). Next up: complete `V2` (`R9` advisory simulation gate, `R10` server-side container build pipeline, `R11` staged cohort deploy policy), then `V3` robotic swarm hierarchy and delta OTA.
+`V1` (`R0`–`R6`) and `V2` `R7`–`R8` are shipped: Web Serial enrollment, A/B auto-rollback (`ab-4m-v1`), embeddable ESP-IDF/Arduino OTA library, live health & crash-ring telemetry, custom self-test confirmation (`ff_set_selftest`), ECDSA P-256 firmware signing with resumable HTTP `Range` downloads, artifact provenance API, `fleetforge push` CLI + CI workflow templates, and multi-project RBAC with scoped `ffa_...` tokens. `v0.8.6` (gate and P0 security fixes), `v0.8.7` (fifteen P1 rollout, secrets, and contract fixes), and `R9` (advisory simulation gate) are implemented locally (pending release). Next up: complete `V2` (`R10` server-side container build pipeline, `R11` staged cohort deploy policy), then `V3` robotic swarm hierarchy and delta OTA.
 
 ## Milestones at a glance
 
 | # | Milestone | Done when | Target |
 | :--- | :--- | :--- | :--- |
-| **R9** | Advisory Simulation Gate (`V2`) | `pytest-embedded` + Espressif QEMU boots uploaded artifacts, executes the `R5` self-test behind the pluggable `sim-runner` contract, and surfaces warn/override in the UI. | `V2` (`P1`, Medium) |
 | **R10** | Server-Side Build Pipeline (`V2`) | Server clones a repo ref, compiles in pinned ESP-IDF toolchain containers (`esp32`/`S3`/`C3`/`C6`) with queued builds, streamed logs, and build cache. | `V2` (`P1`, Large) |
 | **R11** | Staged Cohort Rollout & Deploy Policy (`V2`) | Cohort-based staged rollout policies gate automatic promotions from canary to fleet, closing `V2`. | `V2` (`P1`, Medium) |
 | **V3** | Robotic Swarm Hierarchy & Delta OTA | UGV edge-relay gateway (`parent_device_id`), groups & bulk deploy, airtime-aware scheduling, and delta OTA updates work end-to-end. | `V3` (`P2`, Large) |
-
-## Milestone R9 — Advisory Simulation Gate (`V2`)
-
-- [ ] **R9-1: Pluggable `sim-runner` contract & Espressif QEMU worker** — Implement the `sim-runner` contract ([design/architecture.md](../design/architecture.md), [features/simulation.md](features/simulation.md)) using `pytest-embedded` + Espressif QEMU to boot uploaded firmware artifacts and run the `R5` self-test before deploy (`done when`: a deliberately broken test build fails the sim gate while a valid build passes in automated tests).
-- [ ] **R9-2: Advisory warn & operator override in API and dashboard** — Persist simulation verdicts on artifacts and surface advisory warnings with explicit operator override in `src/fleetforge/` and `frontend/` (`done when`: UI shows pass/warn status and records operator override in audit logs).
 
 ## Milestone R10 — Server-Side Build Pipeline (`V2`)
 
@@ -90,4 +84,5 @@ Gate at review time: ruff, format and mypy clean; pytest 1832 passed, 764 skippe
 - **`V2` (`R7`–`R8`)** — Artifact provenance API, `fleetforge push` CLI, CI workflow templates, multi-project RBAC, and scoped `ffa_...` tokens — [archive](archive/roadmap-history.md#v2-r7-and-r8-artifact-provenance-and-push-ingestion)
 - **v0.8.6 (implemented locally, pending v0.8.6 release):** The gate fails when the database-backed tests cannot run; `T-1`, `A-2`, `A-1` and `D-1`/`A-8` are fixed with regression tests that run in it; the `D-2` checks are run and recorded. — [archive](archive/roadmap-history.md#v086-implemented-locally-pending-v086-release)
 - **v0.8.7 (implemented locally, pending v0.8.7 release):** The fifteen P1 review findings in its section are fixed, each with its named test passing with PostgreSQL up and 0 skipped. — [archive](archive/roadmap-history.md#v087-implemented-locally-pending-v087-release)
+- **R9 Advisory Simulation Gate (implemented locally, pending V2 release):** `pytest-embedded` + Espressif QEMU boots uploaded artifacts, executes the `R5` self-test behind the pluggable `sim-runner` contract, and surfaces warn/override in the UI. — [archive](archive/roadmap-history.md#r9-advisory-simulation-gate-implemented-locally-pending-v2-release)
 

@@ -25,6 +25,12 @@ Append new decisions newest-first below. Keep this root file under `25 KB` (`< 1
 
 ## 2. Recent Architectural Decisions (2026-10)
 
+### 2026-11-19 — `R9` Advisory Simulation Gate: external `SimRunner` Port, QEMU + host pre-flight adapters, and audited `sim_failed` override
+
+- **Context:** Operators needed pre-flight verification that boots uploaded firmware and evaluates its `R5` self-test before staging onto physical boards, without bloating the 256 MiB non-root `fleetforge-api` container with multi-GB QEMU toolchains or turning emulator false negatives into un-overridable blockers.
+- **Decision:** Introduce the `SimRunner` `Protocol` Port (`src/fleetforge/simulation.py`) with `EspressifQemuSimRunner` (`qemu-system-xtensa` / `qemu-system-riscv32` / `pytest-embedded-qemu` under a strict wall-clock timeout) and `HostPreflightSimRunner`, plus an external CLI worker (`python -m fleetforge.sim_worker`) and `POST /v1/artifact/{sha256}/simulate`. Verdicts persist on `artifacts.{sim_status, sim_detail, sim_ran_at}` (migration `0016`). `sim_status = 'failed'` raises gating warning `sim_failed` (`needs_override=True`), and any explicit operator `override` is recorded permanently in `deploy_events.detail.overrides`.
+- **Details:** [`docs/features/simulation.md`](docs/features/simulation.md), `src/fleetforge/simulation.py`, `src/fleetforge/sim_worker.py`, `alembic/versions/0016_artifact_simulation.py`, `frontend/src/SimulationBadge.tsx`.
+
 ### 2026-11-06 — `OTEL-be-2`: board identity on the OTel resource, heartbeat snapshot on each log record (`device_logs.context`)
 
 - **Context:** `up/log` lines are text-only and every record reached the collector with one attribute (`fleetforge.age_ms`) and a 5-field resource. Operators wanted firmware/library/layout/reset-reason and the heap/RSSI at the moment of a line without the board repeating constants over the radio.

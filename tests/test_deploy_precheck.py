@@ -568,6 +568,7 @@ class TestNoLibraryMarker:
             "no_library_marker",
             "unsigned_artifact",
             "dev_key_ring",
+            "sim_failed",
         )
         assert (
             refusals(

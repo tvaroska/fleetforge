@@ -3,633 +3,45 @@
 // Every path here is **relative**. The API shares this page's origin (nginx in the
 // `frontend` container proxies `/v1/*` to `api:8000`; `vite.config.ts` does the same
 // in dev), so there is no base URL to configure and no CORS preflight to satisfy.
-// An absolute URL anywhere in this file breaks the one-origin invariant
-// (design/production.md -> "Same origin, two backends") and the repair someone
-// reaches for is CORS middleware on the API, which is the wrong repair.
 
-// `commit` and `built_at` are additive (R1: build provenance in the footer) and an
-// older API omits them — optional, not defaulted, so the footer can say "unknown"
-// rather than assert something it was not told.
-export type Health = {
-  status: string
-  version: string
-  commit?: string
-  built_at?: string
-}
+import type {
+  AdminTokenIssued,
+  AdminTokenSummary,
+  AgentManifest,
+  ArtifactList,
+  ArtifactSimulateResponse,
+  ArtifactUploaded,
+  CommandAccepted,
+  DeployAccepted,
+  DeployKpisSummary,
+  DeployPrecheck,
+  DeviceGroupSummary,
+  DeviceList,
+  DeviceLogList,
+  DeviceSummary,
+  DeviceUpdate,
+  DockSyncRequest,
+  DockSyncResponse,
+  EnrollmentTokenIssued,
+  EnrollmentTokenSummary,
+  Health,
+  LoginResult,
+  Me,
+  PartitionProfileAdopt,
+  PartitionProfileList,
+  PartitionProfileSummary,
+  ProjectDeployAccepted,
+  ProjectDeployCancelAccepted,
+  ProjectMemberSummary,
+  ProjectSecretList,
+  ProjectSummary,
+  ProjectUpdate,
+  SelfProfileUpdate,
+  TelemetrySeries,
+  UserSummary,
+} from './apiTypes'
 
-export type UserProjectSummary = {
-  id: string
-  slug: string
-  name: string
-  description: string | null
-  role: string
-}
-
-export type Me = {
-  token_id: string
-  subject: string
-  scopes: string[]
-  expires_at: string | null
-  is_superadmin?: boolean
-  project_id?: string | null
-  projects?: UserProjectSummary[]
-  user_id?: string | null
-  email?: string | null
-  display_name?: string | null
-  has_local_password?: boolean
-}
-
-export type SelfProfileUpdate = {
-  email?: string | null
-  display_name?: string | null
-  current_password?: string | null
-  password?: string | null
-}
-
-export type TrackMode = 'off' | 'branch' | 'tag' | 'commit'
-export type AutoDeployTarget = 'off' | 'dev' | 'all'
-
-export type ProjectSummary = {
-  id: string
-  slug: string
-  name: string
-  description: string | null
-  role: string | null
-  repo_url?: string | null
-  track_mode?: TrackMode
-  track_ref?: string | null
-  auto_deploy_target?: AutoDeployTarget
-  ci_webhook_url?: string | null
-  has_ci_webhook_header?: boolean
-  secrets_rev?: number
-  otel_endpoint?: string | null
-  has_otel_headers?: boolean
-  auto_deployed_devices?: string[] | null
-  ci_webhook_triggered?: boolean | null
-  created_at: string
-  updated_at?: string
-}
-
-export type ProjectUpdate = {
-  name?: string
-  description?: string | null
-  repo_url?: string | null
-  track_mode?: TrackMode
-  track_ref?: string | null
-  auto_deploy_target?: AutoDeployTarget
-  ci_webhook_url?: string | null
-  ci_webhook_header?: string | null
-  otel_endpoint?: string | null
-  otel_headers?: string | null
-}
-
-export type ProjectSecretSummary = {
-  key: string
-  updated_at: string
-}
-
-export type ProjectSecretList = {
-  secrets_rev: number
-  secrets: ProjectSecretSummary[]
-}
-
-export type ProjectDeployAccepted = {
-  project: string
-  version: string
-  target_filter: 'all' | 'dev'
-  deployed: DeployAccepted[]
-  skipped: Record<string, string>
-}
-
-export type ProjectDeployCancelAccepted = {
-  project: string
-  cancelled: CommandAccepted[]
-  skipped: Record<string, string>
-}
-
-export type ProjectMemberSummary = {
-  user_id: string
-  username: string
-  display_name: string | null
-  email?: string | null
-  is_superadmin?: boolean
-  role: 'owner' | 'operator' | 'viewer'
-  created_at: string
-}
-
-export type DeviceGroupSummary = {
-  id: string
-  project_id: string
-  name: string
-  description: string | null
-  created_at: string
-  updated_at: string
-}
-
-export type UserProjectRole = {
-  project_slug: string
-  role: string
-}
-
-export type UserSummary = {
-  id: string
-  username: string
-  email: string | null
-  firebase_uid: string | null
-  has_local_password: boolean
-  display_name: string | null
-  is_superadmin: boolean
-  disabled_at: string | null
-  created_at: string
-  /** Outcome of the invite / password-reset email; null when none was requested. */
-  email_delivery?: 'sent' | 'failed' | 'not_configured' | null
-  projects?: UserProjectRole[]
-}
-
-export type AdminTokenSummary = {
-  id: string
-  name: string
-  subject: string
-  scopes: string[]
-  project_id: string | null
-  project_slug: string | null
-  created_at: string
-  last_used_at: string | null
-  expires_at: string | null
-  revoked_at: string | null
-}
-
-export type AdminTokenIssued = {
-  id: string
-  token: string
-  name: string
-  subject: string
-  scopes: string[]
-  project_id: string | null
-  project_slug: string | null
-  created_at: string
-  expires_at: string | null
-}
-
-export type ArtifactType =
-  | 'app'
-  | 'data_partition'
-  | 'mcu_fw'
-  | 'model_weights'
-  | 'fpga_bitstream'
-  | string
-
-export type LoginResult = { expires_at: string }
-
-// Mirrors `EnrollmentTokenStatus` in api/schemas.py. The server derives this from the
-// burn predicate itself, so the dashboard never says "active" about a token that
-// would not enroll — do not recompute it here from the timestamps.
-export type TokenStatus = 'active' | 'used' | 'revoked' | 'expired'
-
-export type EnrollmentTokenSummary = {
-  id: string
-  group_id: string | null
-  status: TokenStatus
-  created_at: string
-  expires_at: string
-  used_at: string | null
-  used_by_device_id: string | null
-  revoked_at: string | null
-}
-
-// The plaintext `token` exists in this object and nowhere else in the system: not in
-// Postgres, not in a log line, not retrievable from any endpoint. It must never be
-// written to localStorage, a URL, or an error message.
-export type EnrollmentTokenIssued = {
-  id: string
-  token: string
-  group_id: string | null
-  expires_at: string
-  created_at: string
-}
-
-// R4-be-1: the newest live heartbeat's health group. `at` is the RECEIPT time of that
-// heartbeat, so for an offline board it is what the board said last, not now. Every inner
-// field is nullable (a malformed value is stored as NULL). `boot_ok` false = the running
-// image has not confirmed yet and rolls back if it never does; null = not reported.
-export type HealthSnapshot = {
-  at: string
-  uptime_s: number | null
-  rssi: number | null
-  free_heap: number | null
-  min_free_heap: number | null
-  boot_ok: boolean | null
-}
-
-// R4-be-1: the server's own count of fault announces inside `window_s`. Never re-derived
-// here: the window and the reconnect de-duplication live in `faults.py`.
-export type FaultResets = { window_s: number; panic: number; task_wdt: number; brownout: number }
-
-// R4-be-1: the latest value of one device metric. `name` is device-controlled (server
-// validated, still render it as text); `at` is receipt time minus the sample's age.
-export type MetricValue = { name: string; value: number; at: string }
-
-// Mirrors `DeviceSummary` in api/schemas.py, field for field and in its order.
-//
-// `online` is computed SERVER-SIDE on every read, by `fleetforge.presence.is_online`.
-// It must never be re-derived here from `last_seen`: the 2.5x tolerance lives in one
-// place (`config.presence_tolerance`), and `presence_reported` — the other ingredient
-// — is deliberately not in this payload precisely so that no client can try.
-export type DeviceSummary = {
-  device_id: string
-  name: string | null
-  group_id: string | null
-  platform_type: string
-  fw_version: string | null
-  agent_version: string | null
-  link_type: string
-  // Device-reported (R2b-be-5), the last value the board announced; agent >= 0.4.6 only.
-  // null = not reported (old agent, ethernet, malformed). For an offline board this is
-  // where it WAS, not where it is.
-  ssid: string | null
-  known_networks: number | null
-  power_class: string
-  expected_wake_interval_s: number | null
-  parent_device_id: string | null
-  partition_layout: string | null
-  ota_slot_size: number | null
-  // R2b-be-6 measurements, OPTIONAL: a dashboard served against an older API, and every
-  // fixture written before R3-fe-1, must keep working (the `steps?` precedent). Absent and
-  // null both mean "not reported".
-  flash_chip_size?: number | null
-  partition_table_sha256?: string | null
-  rollback_capable?: boolean | null
-  capabilities: string[]
-  last_seen: string | null
-  enrolled_at: string
-  broker_provisioned_at: string | null
-  online: boolean
-  // R4-be-1, OPTIONAL like the R2b-be-6 block above: a dashboard served against an older
-  // API, and every fixture written before R4-fe-1, must keep working. Absent and null both
-  // mean "not reported". `last_reset_reason` is an OPEN vocabulary (the newest announce's
-  // normalised name, agents >= 0.5.0): render an unknown name as itself. `fault_resets` is
-  // the server's count, `health.at` a receipt time, `metrics` sorted by name by the server.
-  last_reset_reason?: string | null
-  fault_resets?: FaultResets | null
-  health?: HealthSnapshot | null
-  metrics?: MetricValue[]
-  // R5-be-2, OPTIONAL like the blocks above: a dashboard served against an older API, and
-  // every fixture written before R5-fe-1, must keep working. Absent and null both mean "no
-  // verb has been sent to this board". Sits directly before `deploy`, as on the server.
-  last_command?: CommandSummary | null
-  is_dev?: boolean
-  stay_awake?: boolean
-  secrets_rev?: number | null
-  sub_versions?: Record<string, string> | null
-  safe_mode?: boolean
-  deploy: DeploySummary | null
-}
-
-// Mirrors `CommandSummary` in api/schemas.py (R5-be-2): the newest verb sent to a board and
-// its first answer. `type` is an OPEN vocabulary (`apply` / `cancel` / `rollback` /
-// `reboot` today; a REST or CI caller may send any of them). `cmd_id` names the
-// transaction for apply / cancel, null otherwise.
-//
-// **`result: null` means "no answer yet" — and possibly never** (an agent older than R5
-// ignores verbs; an answer queued while the board was offline dies with a reboot). Nothing
-// here expires it. Otherwise `result` is the DEVICE's word (`accepted`, `deferred`,
-// `refused`, or a newer agent's value) and `detail` is device-controlled text: render both
-// as text, never parse them. What the verb did to a transaction shows on `deploy`.
-export type CommandSummary = {
-  command_id: string
-  type: string
-  cmd_id: string | null
-  sent_at: string
-  sent_by: DeploySender | null
-  result: string | null
-  detail: string | null
-  answered_at: string | null
-}
-
-// Mirrors `CommandAccepted` in api/schemas.py — the 202 body of the verb routes (R5-be-2).
-// 202 means recorded and handed to the broker, nothing more; the board's answer arrives on
-// `DeviceSummary.last_command`. `device_online` is REPORTED, never blocking: `false` is
-// "queued in the board's persistent session", not "failed".
-export type CommandAccepted = {
-  command_id: string
-  device_id: string
-  type: string
-  cmd_id: string | null
-  device_online: boolean
-}
-
-// Mirrors `DeviceUpdate` in api/schemas.py (R2b-be-1). MERGE-PATCH: an absent key leaves the
-// field alone and an explicit `null` CLEARS it, so `group_id: null` ungroups a board. Send
-// only the keys you mean to change.
-export type DeviceUpdate = {
-  name?: string | null
-  group_id?: string | null
-  project?: string
-  is_dev?: boolean
-  stay_awake?: boolean
-}
-
-// Mirrors `DeploySummary` in api/schemas.py. The newest deploy transaction's current
-// state, or `null` for a board that has never been deployed to.
-//
-// `state` and `detail` are DEVICE-CONTROLLED strings. The server's `DeployState` is
-// advisory (`deploy_events.state` is TEXT with no CHECK), so render them as text and
-// never switch exhaustively on `state` — an agent newer than this dashboard must show
-// its state as itself rather than vanish. `deploy.ts::DEPLOY_STATE_LABELS` is the
-// lookup-with-a-fallback that does it.
-//
-// `is_terminal` is the SERVER's answer, from `TERMINAL_DEPLOY_STATES`. Never re-derive
-// it here from a hardcoded list of states: two definitions of "terminal" is exactly the
-// failure `deploys.py` warns about, and the second one would disagree with the KPIs.
-//
-// `pct` is NOT a progress feed — `deploy_events` is a log of transitions and the writer
-// keeps the first `pct` per state, so our agent reports one number for a whole download.
-// Render it as text. A bar driven by it sits still and reads as a hang.
-// Who opened a deploy transaction (api/schemas.py `DeploySender`, R2b-be-4). The token id
-// is stored server-side and deliberately not sent.
-export type DeploySender = { subject: string; credential: string | null }
-
-export type DeploySummary = {
-  cmd_id: string | null
-  state: string
-  at: string
-  is_terminal: boolean
-  artifact_version: string | null
-  from_version: string | null
-  pct: number | null
-  detail: string | null
-  // R2b-fe-9, both OPTIONAL: a dashboard served against an older API, and every fixture
-  // written before this, must keep working (the `?? []` posture of `arrivals`). Absent
-  // `steps` → the timeline falls back to the one summary row. Absent `confirm_timeout_s`
-  // → no rollback deadline at all; the client never invents that number.
-  steps?: DeployStep[]
-  confirm_timeout_s?: number
-  // Optional for the same reason as `steps`; null for transactions recorded before R2b-be-4.
-  sent_by?: DeploySender | null
-  // R5-be-1, OPTIONAL for the same reason. The SERVER is the one parser of the self-test
-  // grammar in `detail`; this client never re-parses it (no regex for `selftest …`).
-  // Non-null only on a terminal `confirmed` (passed) or `rolled_back` (failed, timed_out).
-  selftest?: DeploySelfTest | null
-}
-
-// Mirrors `DeploySelfTest` in api/schemas.py (R5-be-1). `reason` (failed only) and
-// `returned_to` (a slot label) are DEVICE-CONTROLLED text: render them as text.
-export type DeploySelfTest = {
-  outcome: 'passed' | 'failed' | 'timed_out'
-  reason: string | null
-  returned_to: string | null
-}
-
-// Mirrors `DeployStep` in api/schemas.py: one recorded transition of the current
-// transaction, oldest first. `state` is DEVICE-CONTROLLED text; `at` is the server's
-// receipt time, never the board's clock. Exactly two keys — no detail, no sha256.
-export type DeployStep = { state: string; at: string }
-
-// Mirrors `ArrivalSummary` in api/schemas.py. A board that has reported a boot stage and
-// is NOT yet in the fleet — so `device_id` here may name a board with no row in `devices`
-// at all. That is the point: it is what fills the gap between "flashed" and "online".
-//
-// `stalled` is computed SERVER-SIDE from the age of `at`, the same rule and the same
-// reason as `DeviceSummary.online`: the threshold lives once, in `config.progress_stall_s`,
-// and is deliberately not in this payload so that no client can try to re-derive it.
-//
-// `stage` and `detail` are DEVICE-CONTROLLED strings, bounded only in length and charset.
-// Render them as text, and never switch on `stage` in a way that breaks on a value this
-// file has not heard of — the server does not whitelist the vocabulary either.
-export type ArrivalSummary = {
-  device_id: string
-  stage: string
-  detail: string | null
-  at: string
-  stalled: boolean
-}
-
-export type DeviceList = { devices: DeviceSummary[]; arrivals: ArrivalSummary[] }
-
-// R4-be-1. Mirrors `DeviceLogLine` / `DeviceLogTail` in api/schemas.py, field for field and
-// in order. `text` is sanitised server-side (no control characters, URLs replaced by
-// `<url>`, 200 characters) but still DEVICE-CONTROLLED: render it as text only.
-// `text: null` is a gap marker (a batch that lost lines and had none usable). `dropped` is
-// the number of lines lost IMMEDIATELY BEFORE this one. `level` is an open vocabulary.
-export type DeviceLogLine = {
-  id: number
-  logged_at: string
-  received_at: string
-  level: string
-  text: string | null
-  dropped: number
-  // Board state around the line (latest heartbeat at receipt), keyed by OTel attribute
-  // name (`firmware.version`, `device.rssi_dbm`, `device.free_heap_bytes`, ...).
-  // Server-derived scalars; `null` for rows older than migration 0014.
-  context?: Record<string, string | number | boolean> | null
-}
-export type DeviceLogTail = { device_id: string; lines: DeviceLogLine[] }
-export type DeviceLogList = DeviceLogTail
-
-export type TelemetryPoint = {
-  at: string
-  value: number
-}
-
-export type TelemetrySeries = {
-  device_id: string
-  name: string
-  samples: TelemetryPoint[]
-}
-
-export type DockSyncRequest = {
-  announce?: Record<string, unknown> | null
-  statuses?: Record<string, unknown>[]
-  telemetry?: Record<string, unknown>[]
-  logs?: Record<string, unknown>[]
-}
-
-export type DockSyncResponse = {
-  device_id: string
-  link_type: string
-  fw_version: string | null
-  sub_versions?: Record<string, string> | null
-  statuses_recorded: number
-  telemetry_batches_recorded: number
-  log_batches_recorded: number
-  device: DeviceSummary
-}
-
-// Mirrors `firmware/manifest.py::ConfigPartition`. Optional in the schema ON PURPOSE:
-// bundles built before R0-fw-1 have nowhere to write a board's config, and the flasher
-// must refuse those rather than silently flash a board that can never enroll.
-export type ConfigPartition = { label: string; offset: number; size: number }
-
-// Mirrors `AgentPartInfo` in api/schemas.py. `offset` is where this part is written —
-// NEVER derive one: the bootloader sits at 0x1000 on ESP32 and 0x0 on the RISC-V parts,
-// and a hardcoded offset flashes cleanly and never boots on half the fleet.
-export type AgentPartInfo = { name: string; offset: number; size: number; sha256: string }
-
-// Mirrors `AgentBuildInfo` in api/schemas.py, field for field and in its order.
-// `chip_family` is exactly `ESPLoader.chip.CHIP_NAME` ('ESP32', 'ESP32-C3', 'ESP32-C6',
-// 'ESP32-S3') — compare it with `===`, never through a translation table.
-export type AgentBuildInfo = {
-  target: string
-  chip_family: string
-  agent_version: string
-  idf_version: string
-  idf_image: string
-  source_commit: string
-  built_at: string
-  partition_layout: string
-  ota_slot_size: number
-  flash_size: string
-  // S0-infra-3 build identity: the sha256 of the build's `sdkconfig.resolved`, and one
-  // digest over the parts plus the provenance fields. `null` for a bundle built before
-  // the field existed. Printed verbatim in the diagnostic bundle (`diagnostics.ts`) and
-  // compared as strings — never truncated, never parsed.
-  config_sha256: string | null
-  build_digest: string | null
-  config_partition: ConfigPartition | null
-  parts: AgentPartInfo[]
-}
-
-export type AgentManifest = { agent_version: string; builds: AgentBuildInfo[] }
-
-// Mirrors `ArtifactSummary` in api/schemas.py, field for field and in its order. One
-// deployable label over one digest — two labels for byte-identical firmware are two of
-// these with one `sha256`, which is ordinary and which the picker offers as two choices.
-//
-// There is deliberately NO `url`: a download link is a short-lived bearer credential
-// minted per deploy, and the server never puts one in a list.
-export type ArtifactSummary = {
-  target: string
-  version: string
-  sha256: string
-  size_bytes: number
-  partition_layout: string | null
-  kind: string
-  artifact_type?: string
-  created_at: string
-  sig?: string | null
-  repo_url?: string | null
-  branch?: string | null
-  commit_sha?: string | null
-  tag?: string | null
-  build_url?: string | null
-  test_passed?: boolean | null
-}
-
-export type ArtifactList = { artifacts: ArtifactSummary[] }
-
-// Mirrors `ArtifactUploaded` in api/schemas.py, field for field and in its order. `created`
-// is `false` for an idempotent re-upload of the same bytes under the same label (HTTP 200).
-export type ArtifactUploaded = {
-  sha256: string
-  size_bytes: number
-  target: string
-  version: string
-  partition_layout: string
-  artifact_type?: string
-  created: boolean
-  has_lib_marker?: boolean
-  sig?: string | null
-  repo_url?: string | null
-  branch?: string | null
-  commit_sha?: string | null
-  tag?: string | null
-  build_url?: string | null
-  test_passed?: boolean | null
-  auto_deployed_devices?: string[] | null
-}
-
-// Mirrors `DeployKpisSummary` in api/schemas.py (R6-BE-1 / R6-FE-1): delivery success
-// (>= 90%) vs. fleet safety (= 100%) and the rollback saves gap.
-export type DeployKpisSummary = {
-  total_completed: number
-  confirmed: number
-  rolled_back: number
-  failed: number
-  cancelled: number
-  in_flight: number
-  delivery_success_pct: number | null
-  fleet_safety_pct: number | null
-  safety_gap_pct: number | null
-  delivery_target_pct: number
-  safety_target_pct: number
-  delivery_target_met: boolean | null
-  safety_target_met: boolean | null
-}
-
-// Mirrors `DeployAccepted` in api/schemas.py — the 202 body of a deploy POST.
-//
-// `reused: true` means this POST re-published an in-flight intent under the same
-// `cmd_id`, so the board deduplicates and does not download twice. `device_online` is
-// REPORTED, never blocking: the broker queues the QoS-1 command in the board's
-// persistent session, so a `false` here is "queued", not "failed".
-export type DeployAccepted = {
-  cmd_id: string
-  device_id: string
-  version: string
-  sha256: string
-  size_bytes: number
-  apply: string
-  reused: boolean
-  device_online: boolean
-}
-
-// Mirrors `PrecheckFinding` in api/schemas.py. `message` is lifted VERBATIM into the card,
-// the way `detail` is (`detailOf`). `needs_override` is R2b-be-7 and does not exist on the
-// server yet: absent means `false`. When it is true the warning gates the send and the
-// deploy body must carry `override: [code]`.
-export type PrecheckFinding = { code: string; message: string; needs_override?: boolean }
-
-// Mirrors `DeployPrecheck` in api/schemas.py — the 200 body of the dry run. Every refusal
-// travels in this body; only a bad version (400) and an unknown device (404) are errors.
-export type DeployPrecheck = {
-  device_id: string
-  target: string
-  version: string
-  from_version: string | null
-  sha256: string | null
-  size_bytes: number | null
-  artifact_partition_layout: string | null
-  device_partition_layout: string | null
-  // R3-be-2, OPTIONAL: the effective ADOPTED profile the gate resolved for this board. A
-  // board on an adopted map still announces `unknown` in `device_partition_layout`, so this
-  // is the name to show. Absent/null = the board's own announced id stands.
-  device_partition_profile?: string | null
-  ota_slot_size: number | null
-  power_class: string
-  expected_wake_interval_s: number | null
-  device_online: boolean
-  confirm_timeout_s: number
-  deployable: boolean
-  refusals: PrecheckFinding[]
-  warnings: PrecheckFinding[]
-}
-
-// Mirrors `PartitionProfileSummary.origin` in api/schemas.py: provenance, never changed after
-// insert. Rendered through a lookup with a fallback (`profiles.ts::ORIGIN_LABELS`) and never
-// switched on exhaustively, so a value this file has not heard of shows as itself.
-export type PartitionProfileOrigin = 'builtin' | 'user' | 'detected'
-
-// Mirrors `PartitionProfileSummary` in api/schemas.py, field for field and in its order.
-// `layout_id` is null while a detected map is pending; `deployable` is the SERVER's
-// "adopted = named" (R3-be-2 D3), never re-derived from `adopted_at` here.
-export type PartitionProfileSummary = {
-  partition_table_sha256: string
-  layout_id: string | null
-  origin: PartitionProfileOrigin
-  deployable: boolean
-  ota_slot_size: number | null
-  flash_chip_size: number | null
-  detected_device_id: string | null
-  device_ids: string[]
-  created_at: string
-  adopted_at: string | null
-}
-
-export type PartitionProfileList = { profiles: PartitionProfileSummary[] }
-
-// Mirrors `PartitionProfileAdopt` in api/schemas.py. `ota_slot_size` is needed only when the
-// detected row has none measured (the server answers 422 without it, 409 to a differing one).
-export type PartitionProfileAdopt = { layout_id: string; ota_slot_size?: number }
+export * from './apiTypes'
 
 export class ApiError extends Error {
   readonly status: number
@@ -651,15 +63,11 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   try {
     response = await fetch(path, {
       ...init,
-      // The session is an HttpOnly cookie; there is no header to attach and no token
-      // JavaScript can read. Same-origin (not 'include') because cross-origin is the
-      // thing this app does not do.
       credentials: 'same-origin',
       headers:
         init.body === undefined ? init.headers : { 'content-type': 'application/json', ...init.headers },
     })
   } catch {
-    // fetch() rejects only on a transport failure; there is no status to report.
     throw new ApiError(0, 'the API is unreachable')
   }
 
@@ -678,11 +86,6 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
 
 /**
  * `request<T>()`'s byte-returning sibling, for the megabyte-scale agent images.
- *
- * Same `credentials: 'same-origin'` and the same `ApiError` mapping, so a session that
- * dies mid-flash still bounces to the login gate instead of writing a 401 page into a
- * board's flash. A separate function rather than a flag on `request` because the two
- * differ in their whole body handling and `T` would be a lie.
  */
 async function requestBytes(path: string): Promise<Uint8Array> {
   let response: Response
@@ -699,10 +102,7 @@ async function requestBytes(path: string): Promise<Uint8Array> {
 
 /**
  * FastAPI puts the human-readable reason in `detail`: a string from an `HTTPException`, or
- * (422, request validation) an array of `{msg, ...}` items. A string is returned as it is,
- * byte for byte, because callers render it verbatim on purpose. An array becomes its
- * messages joined by `; `, minus pydantic's `Value error, ` prefix. Anything else falls
- * back to the raw body.
+ * (422, request validation) an array of `{msg, ...}` items.
  */
 function detailOf(body: string): string | null {
   try {
@@ -738,8 +138,6 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
-  // The password goes in the body of a POST and nowhere else. The response
-  // deliberately does not carry the token — it arrives as a Set-Cookie.
   login: (password: string, username = 'admin') =>
     request<LoginResult>('/v1/auth/login', {
       method: 'POST',
@@ -754,8 +152,6 @@ export const api = {
 
   logout: () => request<void>('/v1/auth/logout', { method: 'POST' }),
 
-  // The fleet read model, and the ONLY source of device state in this app. A frame on
-  // `/v1/events` is a hint that says "go re-read"; this is the re-read.
   listDevices: (project?: string) =>
     request<DeviceList>(
       project && project !== 'default'
@@ -763,9 +159,6 @@ export const api = {
         : '/v1/devices',
     ),
 
-  // R2b-fe-6. Set a board's operator-set facts; returns the updated row as the list shows
-  // it. `PATCH` must be upper-case: fetch normalises GET/POST/PUT/DELETE/HEAD/OPTIONS but
-  // NOT `patch`, and a lower-case method goes on the wire as-is.
   updateDevice: (deviceId: string, patch: DeviceUpdate) =>
     request<DeviceSummary>(`/v1/devices/${encodeURIComponent(deviceId)}`, {
       method: 'PATCH',
@@ -782,8 +175,6 @@ export const api = {
       method: 'DELETE',
     }),
 
-  // R4-fe-2 / P0-6. A board's log tail: admin-only, newest first, the last 7 days, at most `limit`
-  // lines (server range 1..5000), with optional `level` and `prefix` query filters.
   deviceLogs: (
     deviceId: string,
     limitOrOpts: number | { limit?: number; level?: string; prefix?: string } = 200,
@@ -818,8 +209,6 @@ export const api = {
         : '/v1/enrollment-tokens',
     ),
 
-  // R0 has no group CRUD, so every token is ungrouped. The parameter exists because
-  // the API takes it, not because the UI can populate it yet.
   issueEnrollmentToken: (groupId: string | null = null, project?: string) =>
     request<EnrollmentTokenIssued>(
       project && project !== 'default'
@@ -857,9 +246,6 @@ export const api = {
   revokeEnrollmentToken: (id: string) =>
     request<void>(`/v1/enrollment-tokens/${encodeURIComponent(id)}/revoke`, { method: 'POST' }),
 
-  // Everything that can be deployed, grouped by chip target server-side. Admin-only —
-  // the same `/v1/artifact` path is ALSO a public download route, but only with a
-  // signature and a `/{sha256}/bin` suffix (`api/routers/artifact_download.py`).
   listArtifacts: (project?: string) =>
     request<ArtifactList>(
       project && project !== 'default'
@@ -867,12 +253,6 @@ export const api = {
         : '/v1/artifact',
     ),
 
-  // Upload one firmware image (R2b-fe-7). The body is the RAW file with
-  // `application/octet-stream`, never multipart: the server has no form parser and would
-  // store the boundary lines as "firmware". The browser sets `Content-Length` from the
-  // Blob, which the server requires (411 without it). Only target/version/layout are in
-  // the URL; the session is the HttpOnly cookie, so no credential ever is. The lowercase
-  // `content-type` key is what overrides `request()`'s JSON default.
   uploadArtifact: (
     file: Blob,
     meta: {
@@ -881,6 +261,7 @@ export const api = {
       partitionLayout: string
       artifactType?: string
       project?: string
+      simulate?: boolean
     },
   ) => {
     const params: Record<string, string> = {
@@ -894,6 +275,9 @@ export const api = {
     if (meta.project && meta.project !== 'default') {
       params.project = meta.project
     }
+    if (meta.simulate) {
+      params.simulate = 'true'
+    }
     const query = new URLSearchParams(params)
     return request<ArtifactUploaded>(`/v1/artifact?${query}`, {
       method: 'POST',
@@ -902,17 +286,14 @@ export const api = {
     })
   },
 
-  // Deploy one labelled version to one board. 202 means the command reached the broker,
-  // and nothing more; the states that follow arrive on `up/status` and ride back to this
-  // page on `GET /v1/devices` (`DeviceSummary.deploy`).
-  //
-  // There is no `target` and no `sha256` in the body on purpose: the server resolves the
-  // artifact from the device's own `platform_type`, so this call cannot flash an esp32
-  // image onto an esp32c6.
-  //
-  // `override` names the gating warnings the operator ticked (R2b-be-7). It is sent ONLY
-  // when non-empty: `DeployRequest` forbids extra keys today, so even `override: []` is a
-  // 422 from a server that predates it.
+  simulateArtifact: (sha256: string, project?: string) =>
+    request<ArtifactSimulateResponse>(
+      project && project !== 'default'
+        ? `/v1/artifact/${encodeURIComponent(sha256)}/simulate?project=${encodeURIComponent(project)}`
+        : `/v1/artifact/${encodeURIComponent(sha256)}/simulate`,
+      { method: 'POST' },
+    ),
+
   deployDevice: (
     deviceId: string,
     version: string,
@@ -926,15 +307,12 @@ export const api = {
       ),
     }),
 
-  // The dry run of `deployDevice` (R2b-be-2): same body, no side effects, every refusal
-  // and warning in the 200 response.
   precheckDeploy: (deviceId: string, version: string, apply: 'auto' | 'on_command' = 'auto') =>
     request<DeployPrecheck>(`/v1/devices/${encodeURIComponent(deviceId)}/deploy/precheck`, {
       method: 'POST',
       body: JSON.stringify({ version, apply }),
     }),
 
-  // R6-BE-1 / R6-FE-1: Delivery success (>= 90%) and fleet safety (= 100%) KPIs over deploy history.
   deployKpis: (project?: string) =>
     request<DeployKpisSummary>(
       project && project !== 'default'
@@ -942,10 +320,6 @@ export const api = {
         : '/v1/devices/kpis',
     ),
 
-  // R5-be-2 verbs. Admin cookie, NO body (so no content-type), 202 `CommandAccepted`. The
-  // errors are plain sentences in `detail` (404 unknown device or deploy, 409 a capability
-  // the board does not announce or a deploy already ended, 400 a bad cmd_id, 503 publish
-  // failed) and surface verbatim as `ApiError.message`. Both path segments are encoded.
   applyDeploy: (deviceId: string, cmdId: string) =>
     request<CommandAccepted>(
       `/v1/devices/${encodeURIComponent(deviceId)}/deploys/${encodeURIComponent(cmdId)}/apply`,
@@ -968,26 +342,16 @@ export const api = {
       method: 'POST',
     }),
 
-  // R3-fe-1. Every flash map this server knows: builtin, user and detected (pending ones
-  // have `deployable: false` and no name). Admin-only.
   listPartitionProfiles: () => request<PartitionProfileList>('/v1/partition-profiles'),
 
-  // R3-fe-1. Adopt a detected map by naming it. `PATCH` must be upper-case, for the same
-  // reason as `updateDevice`. 409/422 `detail`s are plain sentences the banner shows as-is.
   adoptPartitionProfile: (sha256: string, body: PartitionProfileAdopt) =>
     request<PartitionProfileSummary>(`/v1/partition-profiles/${encodeURIComponent(sha256)}`, {
       method: 'PATCH',
       body: JSON.stringify(body),
     }),
 
-  // The prebuilt agent images the Web Serial flasher writes (R0-fe-3). Every offset the
-  // flasher uses comes out of this manifest.
   agentManifest: () => request<AgentManifest>('/v1/agent/manifest'),
 
-  // `target`/`part`/`layout` are manifest-supplied logical ids, not operator input — but
-  // encode them anyway, the same rule `revokeEnrollmentToken` follows. The layout selects
-  // which partition_layout when more than one exists for a target; omit it when exactly
-  // one exists, or the server returns 409 naming the ambiguity.
   agentPart: (target: string, part: string, layout?: string | null) => {
     let path = `/v1/agent/${encodeURIComponent(target)}/${encodeURIComponent(part)}`
     if (layout) {
@@ -996,7 +360,6 @@ export const api = {
     return requestBytes(path)
   },
 
-  // P1-fe-1: Projects, project members, and scoped API tokens.
   listProjects: () => request<{ projects: ProjectSummary[] }>('/v1/projects'),
 
   listGroups: (project?: string) =>
@@ -1071,7 +434,6 @@ export const api = {
       `/v1/projects/${encodeURIComponent(slug)}/members`,
     ),
 
-  // PUT upsert keyed by username; the body is `{role}` only (the server schema forbids extra keys).
   upsertProjectMember: (
     slug: string,
     username: string,
