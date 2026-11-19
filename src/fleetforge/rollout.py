@@ -50,10 +50,19 @@ from fleetforge.deploys import (
 from fleetforge.partition_profiles import load_layout_catalog
 from fleetforge.presence import is_online
 from fleetforge.signing import SigningKeyRing
+from fleetforge.swarm_gateway import build_stage_urls_and_delta
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_ROLLOUT_MAX_PARALLEL = 5
+LINK_AIRTIME_MAX_PARALLEL: dict[str, int] = {
+    "lora": 1,
+    "ble": 1,
+    "zigbee": 1,
+    "thread": 2,
+    "cellular": 2,
+}
+PARENT_GATEWAY_MAX_PARALLEL = 3
 _ROLLOUT_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}\Z")
 
 _ARTIFACT_FOR_TARGET_SQL = text(
@@ -223,10 +232,17 @@ def _default_mint_url(
     *,
     ttl_s: int | None = None,
     device: Device | None = None,
+    relay_base_url: str | None = None,
 ) -> str:
     from fleetforge.api.routers.deploys import _artifact_url
 
-    return _artifact_url(sha256, settings, ttl_s=ttl_s, device=device)
+    return _artifact_url(
+        sha256,
+        settings,
+        ttl_s=ttl_s,
+        device=device,
+        relay_base_url=relay_base_url,
+    )
 
 
 async def deploy_version_to_project_devices(
@@ -433,25 +449,60 @@ async def deploy_version_to_project_devices(
         return [], skipped
 
     eligible_ids = {dev.device_id for dev, _, _ in post_canary}
-    active_in_flight = sum(
-        1
-        for d in all_project_devices
-        if d.device_id not in eligible_ids
-        and (snap := snapshots.get(d.device_id)) is not None
-        and snap.artifact_version == version
-        and not snap.is_terminal
-        and not _is_stalled_in_flight(d, snap)
-        and (
-            snap.state != "requested"
-            or is_online(d, now=now, tolerance=settings.presence_tolerance)
-        )
-    )
+    active_in_flight = 0
+    in_flight_by_link: dict[str, int] = {}
+    in_flight_by_parent: dict[str, int] = {}
+    for d in all_project_devices:
+        if d.device_id in eligible_ids:
+            continue
+        snap = snapshots.get(d.device_id)
+        if (
+            snap is not None
+            and snap.artifact_version == version
+            and not snap.is_terminal
+            and not _is_stalled_in_flight(d, snap)
+            and (
+                snap.state != "requested"
+                or is_online(d, now=now, tolerance=settings.presence_tolerance)
+            )
+        ):
+            active_in_flight += 1
+            in_flight_by_link[d.link_type] = in_flight_by_link.get(d.link_type, 0) + 1
+            if d.parent_device_id:
+                in_flight_by_parent[d.parent_device_id] = (
+                    in_flight_by_parent.get(d.parent_device_id, 0) + 1
+                )
+
     effective_cap = max(1, max_parallel)
-    available_slots = max(0, effective_cap - active_in_flight)
     ordered = sorted(post_canary, key=_canary_priority)
-    wave_items = ordered[:available_slots]
-    for dev, _, _ in ordered[available_slots:]:
-        skipped[dev.device_id] = f"queued for next wave (max_parallel={effective_cap})"
+    wave_items: list[tuple[Device, ResolvedArtifact, bool]] = []
+    for dev, found_art, online in ordered:
+        if active_in_flight >= effective_cap:
+            skipped[dev.device_id] = f"queued for next wave (max_parallel={effective_cap})"
+            continue
+        link_cap = min(
+            effective_cap,
+            LINK_AIRTIME_MAX_PARALLEL.get(dev.link_type, effective_cap),
+        )
+        if in_flight_by_link.get(dev.link_type, 0) >= link_cap:
+            skipped[dev.device_id] = (
+                f"queued for next wave (airtime cap={link_cap} on {dev.link_type} link)"
+            )
+            continue
+        if dev.parent_device_id:
+            gw_cap = min(effective_cap, PARENT_GATEWAY_MAX_PARALLEL)
+            if in_flight_by_parent.get(dev.parent_device_id, 0) >= gw_cap:
+                skipped[dev.device_id] = (
+                    f"queued for next wave (gateway {dev.parent_device_id} airtime cap={gw_cap})"
+                )
+                continue
+        wave_items.append((dev, found_art, online))
+        active_in_flight += 1
+        in_flight_by_link[dev.link_type] = in_flight_by_link.get(dev.link_type, 0) + 1
+        if dev.parent_device_id:
+            in_flight_by_parent[dev.parent_device_id] = (
+                in_flight_by_parent.get(dev.parent_device_id, 0) + 1
+            )
 
     if not wave_items:
         return [], skipped
@@ -482,7 +533,16 @@ async def deploy_version_to_project_devices(
         )
         reused = open_transaction is not None and open_transaction.sha256 == found_artifact.sha256
         cmd_id = open_transaction.cmd_id if reused and open_transaction else new_command_id()
-        url = url_builder(found_artifact.sha256, settings, ttl_s=ttl_s, device=device)
+        url, delta_payload = await build_stage_urls_and_delta(
+            session,
+            device=device,
+            project_id=project_id,
+            sha256=found_artifact.sha256,
+            ttl_s=ttl_s,
+            settings=settings,
+            mint_url=url_builder,
+            supports_relay_kwarg=(url_builder is _default_mint_url),
+        )
 
         if not reused:
             await record_requested(
@@ -510,6 +570,7 @@ async def deploy_version_to_project_devices(
             confirm_timeout_s=settings.confirm_timeout_s,
             sig=found_artifact.sig,
             artifact_type=found_artifact.artifact_type,
+            delta=delta_payload,
         )
         stage_tasks.append((device, found_artifact, cmd_id, reused, online, payload))
 
@@ -752,11 +813,14 @@ async def republish_open_requested_on_wake(
 
     tx = await deploy_transaction(session, device_id=device_id, cmd_id=snap.cmd_id)
     apply_mode = tx.apply if tx is not None and tx.apply else "auto"
-    url = _default_mint_url(
-        found_artifact.sha256,
-        settings,
-        ttl_s=ttl_s,
+    url, delta_payload = await build_stage_urls_and_delta(
+        session,
         device=device,
+        project_id=device.project_id,
+        sha256=found_artifact.sha256,
+        ttl_s=ttl_s,
+        settings=settings,
+        mint_url=_default_mint_url,
     )
     payload = stage_payload(
         cmd_id=snap.cmd_id,
@@ -768,6 +832,7 @@ async def republish_open_requested_on_wake(
         confirm_timeout_s=settings.confirm_timeout_s,
         sig=found_artifact.sig,
         artifact_type=found_artifact.artifact_type,
+        delta=delta_payload,
     )
     await publisher.publish(device_id, payload)
     return True

@@ -113,3 +113,47 @@ class DeployPolicy(Base):
     updated_at: Mapped[dt.datetime] = mapped_column(
         TimestampTZ, nullable=False, server_default=text("now()")
     )
+
+
+class GatewayRelayState(Base):
+    """Edge artifact cache state for a parent UGV gateway device (`V3-1`)."""
+
+    __tablename__ = "gateway_relays"
+
+    gateway_id: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey("devices.device_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    relay_base_url: Mapped[str] = mapped_column(Text, nullable=False)
+    cached_artifacts: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, server_default=text("'{}'::text[]")
+    )
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        TimestampTZ, nullable=False, server_default=text("now()")
+    )
+
+
+class ArtifactDelta(Base):
+    """Content-addressed `ffdelta-v1` binary patch between two firmware digests (`V3-2`)."""
+
+    __tablename__ = "artifact_deltas"
+
+    from_sha256: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey("artifacts.sha256", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    to_sha256: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey("artifacts.sha256", ondelete="CASCADE"),
+        primary_key=True,
+        index=True,
+    )
+    patch_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    patch_size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    target_size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    format: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'ffdelta-v1'"))
+    created_at: Mapped[dt.datetime] = mapped_column(
+        TimestampTZ, nullable=False, server_default=text("now()")
+    )

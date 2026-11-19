@@ -8,6 +8,8 @@ import type {
   AdminTokenIssued,
   AdminTokenSummary,
   AgentManifest,
+  ArtifactDeltaList,
+  ArtifactDeltaSummary,
   ArtifactList,
   ArtifactSimulateResponse,
   ArtifactUploaded,
@@ -33,6 +35,8 @@ import type {
   DockSyncResponse,
   EnrollmentTokenIssued,
   EnrollmentTokenSummary,
+  GatewayRelayConfigRequest,
+  GatewayRelaySummary,
   Health,
   LoginResult,
   Me,
@@ -46,6 +50,7 @@ import type {
   ProjectSummary,
   ProjectUpdate,
   SelfProfileUpdate,
+  SwarmTopologyResponse,
   TelemetrySeries,
   UserSummary,
 } from './apiTypes'
@@ -539,6 +544,32 @@ export const api = {
         body: JSON.stringify({ version }),
       },
     ),
+
+  getSwarmTopology: (slug: string) =>
+    request<SwarmTopologyResponse>(`/v1/projects/${encodeURIComponent(slug)}/swarm`),
+
+  upsertGatewayRelay: (gatewayId: string, body: GatewayRelayConfigRequest) =>
+    request<GatewayRelaySummary>(
+      `/v1/devices/${encodeURIComponent(gatewayId)}/relay`,
+      {
+        method: 'PUT',
+        body: JSON.stringify(body),
+      },
+    ),
+
+  createArtifactDelta: (toSha256: string, fromSha256: string, project?: string) =>
+    request<ArtifactDeltaSummary>(
+      project && project !== 'default'
+        ? `/v1/artifact/${encodeURIComponent(toSha256)}/deltas?project=${encodeURIComponent(project)}`
+        : `/v1/artifact/${encodeURIComponent(toSha256)}/deltas`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ from_sha256: fromSha256 }),
+      },
+    ),
+
+  listProjectDeltas: (slug: string) =>
+    request<ArtifactDeltaList>(`/v1/projects/${encodeURIComponent(slug)}/deltas`),
 
   listAdminTokens: () => request<{ tokens: AdminTokenSummary[] }>('/v1/auth/tokens'),
 

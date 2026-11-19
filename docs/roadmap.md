@@ -4,18 +4,12 @@ Source specs: [prd.md](../spec/prd.md) · [design/architecture.md](../design/arc
 
 ## Where we are
 
-`V1` (`R0`–`R6`) and `V2` `R7`–`R8` are shipped: Web Serial enrollment, A/B auto-rollback (`ab-4m-v1`), embeddable ESP-IDF/Arduino OTA library, live health & crash-ring telemetry, custom self-test confirmation (`ff_set_selftest`), ECDSA P-256 firmware signing with resumable HTTP `Range` downloads, artifact provenance API, `fleetforge push` CLI + CI workflow templates, and multi-project RBAC with scoped `ffa_...` tokens. `v0.8.6` (gate and P0 security fixes), `v0.8.7` (fifteen P1 rollout, secrets, and contract fixes), and `V2` `R9`–`R11` (advisory simulation gate, server-side container build pipeline, and multi-ring cohort deploy policy engine) are implemented locally (pending release). Next up: `V3` robotic swarm hierarchy and delta OTA.
+`V1` (`R0`–`R6`) and `V2` `R7`–`R8` are shipped: Web Serial enrollment, A/B auto-rollback (`ab-4m-v1`), embeddable ESP-IDF/Arduino OTA library, live health & crash-ring telemetry, custom self-test confirmation (`ff_set_selftest`), ECDSA P-256 firmware signing with resumable HTTP `Range` downloads, artifact provenance API, `fleetforge push` CLI + CI workflow templates, and multi-project RBAC with scoped `ffa_...` tokens. `v0.8.6` (gate and P0 security fixes), `v0.8.7` (fifteen P1 rollout, secrets, and contract fixes), `V2` `R9`–`R11` (advisory simulation gate, server-side container build pipeline, and multi-ring cohort deploy policy engine), and `V3` (UGV edge-relay gateway hierarchy, airtime-aware scheduling, and `ffdelta-v1` binary delta OTA) are implemented locally (pending release review).
 
 ## Milestones at a glance
 
 | # | Milestone | Done when | Target |
 | :--- | :--- | :--- | :--- |
-| **V3** | Robotic Swarm Hierarchy & Delta OTA | UGV edge-relay gateway (`parent_device_id`), groups & bulk deploy, airtime-aware scheduling, and delta OTA updates work end-to-end. | `V3` (`P2`, Large) |
-
-## Milestone V3 — Robotic Swarm Hierarchy & Delta OTA
-
-- [ ] **V3-1: UGV edge-relay gateway & device hierarchy (`parent_device_id`)** — Support parent/child device topology and local edge artifact caching on a UGV gateway ([features/groups-deploy.md](features/groups-deploy.md)) (`done when`: child nodes fetch staged artifacts through their gateway parent).
-- [ ] **V3-2: Groups, bulk deploy, airtime-aware scheduling & delta OTA** — Add group-targeted waves, airtime-aware scheduling, and binary delta updates for constrained links (`done when`: group rollout and delta patch verification pass integration tests).
 
 ## Unscheduled backlog
 
@@ -76,4 +70,5 @@ Gate at review time: ruff, format and mypy clean; pytest 1832 passed, 764 skippe
 - **R9 Advisory Simulation Gate (implemented locally, pending V2 release):** `pytest-embedded` + Espressif QEMU boots uploaded artifacts, executes the `R5` self-test behind the pluggable `sim-runner` contract, and surfaces warn/override in the UI. — [archive](archive/roadmap-history.md#r9-advisory-simulation-gate-implemented-locally-pending-v2-release)
 - **R10 Server-Side Build Pipeline (implemented locally, pending V2 release):** Server clones a repo ref, compiles in pinned ESP-IDF toolchain containers (`esp32`/`S3`/`C3`/`C6`) with queued builds, streamed logs, and build cache. — [archive](archive/roadmap-history.md#r10-server-side-build-pipeline-implemented-locally-pending-v2-release)
 - **R11 Staged Cohort Rollout & Deploy Policy (implemented locally, pending V2 release):** Cohort-based staged rollout policies gate automatic promotions from canary to fleet, closing `V2`. — [archive](archive/roadmap-history.md#r11-staged-cohort-rollout-deploy-policy-implemented-locally-pending-v2-release)
+- **V3 Robotic Swarm Hierarchy & Delta OTA (implemented locally, pending V3 release):** UGV edge-relay gateway (`parent_device_id`), groups & bulk deploy, airtime-aware scheduling, and delta OTA updates work end-to-end. — [archive](archive/roadmap-history.md#v3-robotic-swarm-hierarchy-delta-ota-implemented-locally-pending-v3-release)
 

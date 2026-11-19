@@ -625,3 +625,70 @@ export type DeployPolicyEvaluation = {
   rings: PolicyRingStatus[]
   deployed: DeployAccepted[]
 }
+
+export type GatewayRelayConfigRequest = {
+  relay_base_url: string
+  cached_artifacts?: string[]
+}
+
+export type GatewayArtifactPull = {
+  sha256: string
+  size_bytes: number
+  url: string
+}
+
+export type GatewayRelaySummary = {
+  gateway_id: string
+  relay_base_url: string
+  cached_artifacts: string[]
+  child_device_ids: string[]
+  needed_artifacts: GatewayArtifactPull[]
+  updated_at: string
+}
+
+export type CreateDeltaRequest = {
+  from_sha256: string
+}
+
+export type ArtifactDeltaSummary = {
+  from_sha256: string
+  to_sha256: string
+  patch_sha256: string
+  patch_size_bytes: number
+  target_size_bytes: number
+  savings_pct: number
+  format: string
+  created_at: string
+}
+
+export type ArtifactDeltaList = {
+  deltas: ArtifactDeltaSummary[]
+}
+
+export type SwarmChildNode = {
+  device_id: string
+  name: string | null
+  platform_type: string
+  fw_version: string | null
+  link_type: string
+  online: boolean
+  has_delta_capability: boolean
+}
+
+export type SwarmGatewayNode = {
+  gateway_id: string
+  name: string | null
+  platform_type: string
+  fw_version: string | null
+  online: boolean
+  relay_base_url: string | null
+  cached_artifacts: string[]
+  children: SwarmChildNode[]
+}
+
+export type SwarmTopologyResponse = {
+  project: string
+  gateways: SwarmGatewayNode[]
+  direct_device_count: number
+  deltas: ArtifactDeltaSummary[]
+}

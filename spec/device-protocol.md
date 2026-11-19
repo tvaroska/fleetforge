@@ -141,8 +141,12 @@ flashed with a superseded layout.
 implements, `selftest` means the running image has registered a custom self-test, and
 `safe_window` means it has registered a safe-window rule. From R6, `sig` means the running
 image enforces ECDSA P-256 signature verification (`artifact.sig` is mandatory on every
-`stage`). The server stores a capability it does not know as-is. A device lists only what
-is true of the image it runs.
+`stage`). From V3, `delta` means the running image can reconstruct its inactive OTA slot
+from an `artifact.delta` binary patch (`ffdelta-v1`) verified against its active slot
+`from_sha256` and full target `sha256` + `sig`, and `edge_relay` means the device serves a
+local HTTP artifact cache for child nodes whose `parent_device_id` names it. The server
+stores a capability it does not know as-is. A device lists only what is true of the image
+it runs.
 
 `safe_mode` is `true` while the device holds itself in recovery after repeated crashes:
 three `panic`, `int_wdt`, `task_wdt` or `wdt` resets within 60 s on a confirmed image. In
@@ -387,6 +391,16 @@ Types: `stage` · `apply` · `cancel` · `rollback` · `identify` · `reboot` ·
   would treat any artifact as an app, so a server sends a type other than `app` only to a
   device whose `capabilities` names a handler for it. It is unrelated to the command's own
   `type`.
+- **`artifact.delta` is optional (V3)** and sent only when the target device announces
+  `"delta"` in `capabilities` and its running `fw_version` maps to a precomputed binary
+  patch (`ffdelta-v1`) whose `patch_size_bytes < size`:
+  `{"url": "…", "from_sha256": "…", "patch_sha256": "…", "size": 4128, "format": "ffdelta-v1"}`.
+  `artifact.url`, `artifact.sha256`, `artifact.size` and `artifact.sig` continue to name
+  the full reconstructed target image: the device verifies the active slot against
+  `from_sha256`, applies the patch into its inactive slot, and verifies the reconstructed
+  inactive slot against `artifact.sha256` (and `artifact.sig` when present) before moving
+  the boot pointer. Any device that ignores `artifact.delta` fetches `artifact.url` as
+  usual. Additive under *Evolution rules*, rule 2, with `proto` remaining `1`.
 
 **`apply`, `cancel`, `rollback` and `reboot` (R5).** Each carries its own `id`, like every
 command, and the device deduplicates on it. `apply` and `cancel` also carry `cmd_id`, the
@@ -584,8 +598,17 @@ companion CPU.
 The one place the flat namespace needs help is authz: the `%u` pattern ACL grants a
 gateway access only to *its own* subtree. A gateway therefore receives explicit
 additional ACL entries for each child, granted when that child enrols with a
-`parent_device_id`. That is a V3 concern; nothing in v1 needs to anticipate it beyond
-keeping the namespace flat and reserving the field.
+`parent_device_id`.
+
+For data-plane artifact delivery (`V3-1`), a gateway registered with a local edge cache
+origin (`PUT /v1/devices/{gateway_id}/relay`) pulls each staged `sha256` (or `patch_sha256`)
+once over the uplink and caches it locally. When the server stages firmware onto a child
+whose `parent_device_id` names that gateway, `artifact.url` (and `artifact.delta.url` when
+present) points at the gateway's edge origin (`<relay_base_url>/v1/artifact/{sha256}/bin?exp=…&sig=…`),
+collapsing swarm airtime while preserving end-to-end SHA-256 and ECDSA P-256 signature
+verification on every child node. When reconnecting after disconnected field operation,
+`POST /v1/devices/{gateway_id}/relay-sync` replays buffered `up/*` envelopes for children
+attached to `gateway_id`.
 
 ## Library marker
 

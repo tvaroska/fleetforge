@@ -29,6 +29,7 @@
 # freertos/FreeRTOS.h, which every component already has, so nothing here leaks into a
 # consumer's include path.
 idf_component_register(SRCS "src/ff_cfg.c"
+                            "src/ff_delta.c"
                             "src/ff_enroll.c"
                             "src/ff_identity.c"
                             "src/ff_log.c"

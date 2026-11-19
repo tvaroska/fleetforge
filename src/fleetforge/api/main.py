@@ -79,6 +79,7 @@ from fleetforge.api.routers import (
     policies,
     progress,
     projects,
+    swarm,
     users,
 )
 from fleetforge.auth.cache import VerifiedSecretCache
@@ -342,6 +343,7 @@ def create_app(
     app.include_router(progress.router)
     app.include_router(artifacts.router)
     app.include_router(artifact_sim.router)
+    app.include_router(swarm.router)
     # Admin-only, like `artifacts.router`: the profiles an upload's partition_layout names.
     app.include_router(partition_profiles.router)
     # Public, unauthenticated, signature-as-authorization. Registered after

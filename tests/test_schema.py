@@ -17,6 +17,7 @@ from tests.conftest import (
 EXPECTED_TABLES = {
     "admin_tokens",
     "alembic_version",
+    "artifact_deltas",
     "artifact_versions",
     "artifacts",
     "build_jobs",
@@ -32,6 +33,7 @@ EXPECTED_TABLES = {
     "device_telemetry",
     "devices",
     "enrollment_tokens",
+    "gateway_relays",
     "partition_profiles",
     "project_members",
     "project_secrets",

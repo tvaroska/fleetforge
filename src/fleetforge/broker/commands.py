@@ -114,6 +114,7 @@ def stage_payload(
     confirm_timeout_s: int,
     sig: str | None = None,
     artifact_type: str | None = None,
+    delta: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The `stage` command body, key for key as `spec/device-protocol.md` prints it.
 
@@ -149,6 +150,8 @@ def stage_payload(
         artifact["sig"] = sig
     if artifact_type is not None and artifact_type != "app":
         artifact["type"] = artifact_type
+    if delta is not None:
+        artifact["delta"] = delta
     return {
         "id": cmd_id,
         "type": COMMAND_STAGE,

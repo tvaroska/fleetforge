@@ -102,3 +102,10 @@ From the same review, all P1. A database-backed test named below counts only whe
 *Archived from [`../roadmap.md`](../roadmap.md) on 2026-11-19.*
 
 - [x] **R11-1: Staged cohort deploy policy engine** — Add branch/tag-to-cohort deploy rules with health/rollback promotion gates ([features/vcs-integration.md](../features/vcs-integration.md)) (`done when`: a failing canary cohort halts promotion to the next wave automatically).
+
+## V3 Robotic Swarm Hierarchy & Delta OTA (implemented locally, pending V3 release)
+
+*Archived from [`../roadmap.md`](../roadmap.md) on 2026-11-19.*
+
+- [x] **V3-1: UGV edge-relay gateway & device hierarchy (`parent_device_id`)** — Support parent/child device topology and local edge artifact caching on a UGV gateway ([features/groups-deploy.md](../features/groups-deploy.md)) (`done when`: child nodes fetch staged artifacts through their gateway parent).
+- [x] **V3-2: Groups, bulk deploy, airtime-aware scheduling & delta OTA** — Add group-targeted waves, airtime-aware scheduling, and binary delta updates for constrained links (`done when`: group rollout and delta patch verification pass integration tests).

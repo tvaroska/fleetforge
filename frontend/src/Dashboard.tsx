@@ -44,6 +44,7 @@ import { pendingProfiles, shortSha, useProfiles } from './profiles'
 import { SimulationBadge } from './SimulationBadge'
 import { StatusStrip } from './StatusStrip'
 import { describeBoard, describeVersions } from './statusStrip'
+import { SwarmTopologyCard } from './SwarmTopologyCard'
 import { UploadBuild } from './UploadBuild'
 
 export type DashboardTab = 'fleet' | 'builds' | 'onboard' | 'access'
@@ -770,6 +771,12 @@ export function Dashboard({
           profiles={profiles}
           devices={fleet.devices}
           now={fleet.now}
+          onSessionExpired={expire}
+        />
+        <SwarmTopologyCard
+          projectSlug={activeProject}
+          active={activeTab === 'builds'}
+          artifacts={artifacts}
           onSessionExpired={expire}
         />
       </div>

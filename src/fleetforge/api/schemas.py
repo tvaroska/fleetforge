@@ -233,6 +233,12 @@ from fleetforge.api.schemas_iam import (
     UserUpdate as UserUpdate,
 )
 from fleetforge.api.schemas_v2 import (
+    ArtifactDeltaList as ArtifactDeltaList,
+)
+from fleetforge.api.schemas_v2 import (
+    ArtifactDeltaSummary as ArtifactDeltaSummary,
+)
+from fleetforge.api.schemas_v2 import (
     BuildJobCreate as BuildJobCreate,
 )
 from fleetforge.api.schemas_v2 import (
@@ -264,6 +270,15 @@ from fleetforge.api.schemas_v2 import (
 )
 from fleetforge.api.schemas_v2 import (
     PolicyRingStatus as PolicyRingStatus,
+)
+from fleetforge.api.schemas_v2 import (
+    SwarmChildNode as SwarmChildNode,
+)
+from fleetforge.api.schemas_v2 import (
+    SwarmGatewayNode as SwarmGatewayNode,
+)
+from fleetforge.api.schemas_v2 import (
+    SwarmTopologyResponse as SwarmTopologyResponse,
 )
 from fleetforge.auth.tokens import MAX_TOKEN_LENGTH
 from fleetforge.db.models import PowerClass

@@ -464,10 +464,22 @@ async def advance_project_policies_for_version(
 ) -> list[DeployAccepted]:
     """Promote any enabled `DeployPolicy` whose active ring just finished confirming `version`."""
     if (
-        isinstance(publisher, NullCommandPublisher)
+        not isinstance(session, AsyncSession)
+        or isinstance(publisher, NullCommandPublisher)
         or not settings.artifact_url_secret
         or not settings.public_base_url
     ):
+        return []
+
+    raw_policies = (
+        await session.scalars(
+            select(DeployPolicy)
+            .where(DeployPolicy.project_id == project_id, DeployPolicy.enabled.is_(True))
+            .order_by(DeployPolicy.created_at.asc(), DeployPolicy.id.asc())
+        )
+    ).all()
+    policies = [p for p in raw_policies if isinstance(p, DeployPolicy)]
+    if not policies:
         return []
 
     target_rows = (
@@ -478,16 +490,6 @@ async def advance_project_policies_for_version(
     ).all()
     if not target_rows:
         return []
-
-    policies = list(
-        (
-            await session.scalars(
-                select(DeployPolicy)
-                .where(DeployPolicy.project_id == project_id, DeployPolicy.enabled.is_(True))
-                .order_by(DeployPolicy.created_at.asc(), DeployPolicy.id.asc())
-            )
-        ).all()
-    )
     advanced: list[DeployAccepted] = []
     for policy in policies:
         matched_any = any(

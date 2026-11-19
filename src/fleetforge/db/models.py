@@ -794,8 +794,14 @@ from fleetforge.db.models_telemetry import (  # noqa: E402
     DeviceTelemetry as DeviceTelemetry,
 )
 from fleetforge.db.models_v2 import (  # noqa: E402
+    ArtifactDelta as ArtifactDelta,
+)
+from fleetforge.db.models_v2 import (  # noqa: E402
     BuildJob as BuildJob,
 )
 from fleetforge.db.models_v2 import (  # noqa: E402
     DeployPolicy as DeployPolicy,
+)
+from fleetforge.db.models_v2 import (  # noqa: E402
+    GatewayRelayState as GatewayRelayState,
 )

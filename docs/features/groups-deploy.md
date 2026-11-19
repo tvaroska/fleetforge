@@ -72,3 +72,13 @@ device in the registry and the parent of its drones.
   write-inactive-slot. Thus, the A/B layout frozen at R0 is a prerequisite.
 - **Safe-window deferral at scale** — drones must not apply mid-flight. The
   device-owned-reboot rule (design/architecture.md principle 5) is load-bearing here.
+
+## As built (`V3` — Edge-Relay Hierarchy, Airtime Scheduler & Binary Delta OTA)
+
+- **UGV Edge-Relay Gateway & `parent_device_id` (`alembic/versions/0019_swarm_and_delta_ota.py`, `src/fleetforge/swarm_gateway.py`, `src/fleetforge/api/routers/swarm.py`, `src/fleetforge/simulator/gateway.py`):**
+  - `gateway_relays` registers a parent UGV's local HTTP cache origin (`PUT /v1/devices/{gateway_id}/relay`) and cached `sha256` digests.
+  - Deploying onto child nodes with `parent_device_id` mints signed download URLs (`_artifact_url`) targeting `<relay_base_url>/v1/artifact/{sha256}/bin?exp=...&sig=...`, pulling once over uplink to serve all attached children locally.
+  - `POST /v1/devices/{gateway_id}/relay-sync` replays buffered child `up/*` envelopes after disconnected field operation (enforcing `child.parent_device_id == gateway_id`).
+- **Airtime-Aware Concurrency & `ffdelta-v1` Binary Delta OTA (`src/fleetforge/rollout.py`, `src/fleetforge/delta_ota.py`, `agent/components/fleetforge/src/ff_delta.c`, `frontend/src/SwarmTopologyCard.tsx`):**
+  - `rollout.py` enforces per-link concurrency caps (`lora`/`ble`/`zigbee`: `1`, `thread`/`cellular`: `2`) and per-parent-gateway sub-fleet caps (`3`) alongside `max_parallel`.
+  - `POST /v1/artifact/{to_sha256}/deltas` encodes deterministic `ffdelta-v1` copy/insert patches stored in `ObjectStore` (`artifact_deltas`). Boards announcing `"delta"` receive `artifact.delta` on `stage` and verify both `from_sha256` (active slot) and `to_sha256` + ECDSA `sig` (reconstructed inactive slot) before switching `otadata`.

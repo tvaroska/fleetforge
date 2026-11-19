@@ -25,6 +25,12 @@ Append new decisions newest-first below. Keep this root file under `25 KB` (`< 1
 
 ## 2. Recent Architectural Decisions (2026-10)
 
+### 2026-11-19 — `V3` Robotic Swarm Hierarchy & Binary Delta OTA: UGV edge-relay artifact cache (`parent_device_id`), per-link airtime caps, and `ffdelta-v1` patches
+
+- **Context:** Updating a mobile UGV + multi-drone swarm or a constrained-link (`lora` / `ble` / `thread`) sensor fleet over a single uplink wastes airtime when every child pulls the full ~1.5 MB image directly from cloud storage or downloads concurrently over narrowband radios.
+- **Decision:** Add `gateway_relays` and `artifact_deltas` (`0019_swarm_and_delta_ota.py`), `swarm_gateway.py`, `delta_ota.py`, C decoder `agent/components/fleetforge/src/ff_delta.{c,h}`, `simulator/gateway.py` (`EdgeRelayGateway`), `/v1/projects/{slug}/swarm` + `/v1/devices/{id}/relay[-sync]` + `/v1/artifact/{sha}/deltas` (`routers/swarm.py`), and `SwarmTopologyCard.tsx`. Child nodes with `parent_device_id` receive HMAC-signed URLs rooted at their parent UGV's `relay_base_url` (pull once over uplink, serve N children locally). `rollout.py` enforces per-link (`lora`/`ble`/`zigbee=1`, `thread`/`cellular=2`) and per-gateway (`3`) airtime caps. Boards announcing `"delta"` receive additive `artifact.delta` (`ffdelta-v1`) on `stage`, verifying active-slot `from_sha256` and reconstructed inactive-slot `to_sha256` + ECDSA P-256 `sig` before switching `otadata`.
+- **Details:** [`spec/device-protocol.md`](spec/device-protocol.md), [`docs/features/groups-deploy.md`](docs/features/groups-deploy.md), `src/fleetforge/delta_ota.py`, `agent/components/fleetforge/src/ff_delta.c`, `tests/test_v3_swarm_and_delta.py`.
+
 ### 2026-11-19 — `R11` Staged Cohort Rollout & Deploy Policy Engine (closing `V2`): ordered group rings with rollback, safe-mode, fault, soak, and heap promotion gates
 
 - **Context:** Project-level auto-deploy (`CUJ-2`) targeted only `dev` or `all` boards in one flat cohort. Closing `V2` required multi-ring cohort policies (`canary -> staging -> prod`) triggered by branch or tag globs that automatically halt promotion before staging downstream rings whenever a canary cohort degrades.
