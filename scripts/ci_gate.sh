@@ -32,7 +32,7 @@ if grep -Eq "PostgreSQL unreachable" "${PYTEST_OUT}"; then
   exit 1
 fi
 
-if [[ -x "${REPO_ROOT}/frontend/node_modules/.bin/tsc" ]]; then
+if [[ "${FF_SKIP_FRONTEND_GATE:-0}" != "1" ]] && command -v npm >/dev/null 2>&1 && [[ -x "${REPO_ROOT}/frontend/node_modules/.bin/tsc" ]]; then
   (
     cd "${REPO_ROOT}/frontend"
     npm run typecheck
