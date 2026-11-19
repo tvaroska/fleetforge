@@ -80,7 +80,7 @@ steps:
   #    (Note: release firmware bundles require FF_OTA_PRODUCTION_BUILD=1)     #
   # ------------------------------------------------------------------------- #
   - id: python-lint-typecheck-and-unit-tests
-    name: ghcr.io/astral-sh/uv:0.12.24-python3.12-bookworm
+    name: ghcr.io/astral-sh/uv:0.12.24-python3.12-trixie
     waitFor:
       - start-test-services
     entrypoint: bash

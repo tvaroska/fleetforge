@@ -11,7 +11,7 @@
 # source is put on PYTHONPATH. That mirrors pytest's `pythonpath = ["src", "."]`.
 # =============================================================================
 
-FROM ghcr.io/astral-sh/uv:0.12.24-python3.12-bookworm-slim AS base
+FROM ghcr.io/astral-sh/uv:0.12.24-python3.12-trixie-slim AS base
 
 WORKDIR /app
 
@@ -62,6 +62,11 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=uv.lock,target=uv.lock \
     --mount=type=bind,source=pyproject.toml,target=pyproject.toml \
     uv sync --frozen --no-dev --no-install-project \
+    && rm -rf /usr/local/lib/python3.12/site-packages/pip* \
+              /usr/local/lib/python3.12/site-packages/setuptools* \
+              /usr/local/lib/python3.12/site-packages/wheel* \
+              /usr/local/lib/python3.12/ensurepip \
+              /usr/local/bin/pip* \
     && rm -f /bin/uv /bin/uvx /usr/local/bin/uv /usr/local/bin/uvx
 
 COPY src /app/src
