@@ -10,8 +10,18 @@ from __future__ import annotations
 import datetime as dt
 import uuid
 
-from sqlalchemy import Boolean, ForeignKey, Index, Text, Uuid, text
-from sqlalchemy.dialects.postgresql import TIMESTAMP
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    ForeignKey,
+    Index,
+    Integer,
+    Text,
+    UniqueConstraint,
+    Uuid,
+    text,
+)
+from sqlalchemy.dialects.postgresql import ARRAY, TIMESTAMP
 from sqlalchemy.orm import Mapped, mapped_column
 
 from fleetforge.db.base import Base
@@ -62,3 +72,44 @@ class BuildJob(Base):
     )
     started_at: Mapped[dt.datetime | None] = mapped_column(TimestampTZ, nullable=True)
     finished_at: Mapped[dt.datetime | None] = mapped_column(TimestampTZ, nullable=True)
+
+
+class DeployPolicy(Base):
+    """Multi-ring cohort deploy policy (`R11-1`).
+
+    Maps a Git branch or tag glob (`match_mode`, `match_ref`) to an ordered list of
+    `device_groups.id` cohorts (`ring_group_ids`, e.g. `[canary, staging, prod]`) gated
+    by rollback/failure absence, `safe_mode` absence, post-confirm fault absence, optional
+    simulation pass (`require_sim_passed`), soak window (`min_soak_s`), and minimum free
+    heap (`min_free_heap_bytes`).
+    """
+
+    __tablename__ = "deploy_policies"
+    __table_args__ = (UniqueConstraint("project_id", "name"),)
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    match_mode: Mapped[str] = mapped_column(Text, nullable=False)
+    match_ref: Mapped[str] = mapped_column(Text, nullable=False)
+    ring_group_ids: Mapped[list[uuid.UUID]] = mapped_column(ARRAY(Uuid), nullable=False)
+    max_parallel: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("5"))
+    require_sim_passed: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    min_soak_s: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    min_free_heap_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    created_at: Mapped[dt.datetime] = mapped_column(
+        TimestampTZ, nullable=False, server_default=text("now()")
+    )
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        TimestampTZ, nullable=False, server_default=text("now()")
+    )

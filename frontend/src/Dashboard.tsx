@@ -27,6 +27,7 @@ import { buildInfo, type BuildInfo } from './buildInfo'
 import { BuildPipelineCard } from './BuildPipelineCard'
 import { ContinuousDeploymentCard } from './ContinuousDeploymentCard'
 import { useArtifacts, type Artifacts } from './deploy'
+import { DeployPolicyCard } from './DeployPolicyCard'
 import { DeviceInspector } from './DeviceInspector'
 import { DeviceLog } from './DeviceLog'
 import { EnrollBoard } from './EnrollBoard'
@@ -732,6 +733,13 @@ export function Dashboard({
         </div>
         <ContinuousDeploymentCard
           projectSlug={activeProject}
+          onDeployed={fleet.refresh}
+          onSessionExpired={expire}
+        />
+        <DeployPolicyCard
+          projectSlug={activeProject}
+          active={activeTab === 'builds'}
+          groups={groups}
           onDeployed={fleet.refresh}
           onSessionExpired={expire}
         />

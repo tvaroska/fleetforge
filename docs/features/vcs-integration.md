@@ -75,3 +75,8 @@ Pulled forward for the e-ink workflow (`CUJ-2`) across migration `0011_ci_cd_and
 - **Dashboard (`ContinuousDeploymentCard` + `UploadedBuilds` + `FleetView`)**:
   - The `2. BUILDS` tab renders `ContinuousDeploymentCard` (`repo_url`, `track_mode`, `track_ref`, `auto_deploy_target`, `ci_webhook_url`, and `Deploy tracked ref now`) and provenance badges (`commit@branch`, `#tag`, `build` link, `CI PASS`/`CI FAIL`) in `UploadedBuilds`.
   - The `1. FLEET` tab exposes `DEV` (`is_dev`) and `AWAKE` (`stay_awake`) toggles on each device row.
+
+## As built (`R11` — Multi-Ring Staged Cohort Deploy Policy Engine, closing `V2`)
+
+- **Schema & CRUD (`alembic/versions/0018_deploy_policies.py`, `src/fleetforge/api/routers/policies.py`):** `deploy_policies` maps `match_mode` (`branch` | `tag` glob) + `match_ref` to an ordered list of `device_groups.id` rings (`ring_group_ids`, e.g. `canary -> staging -> prod`) with `max_parallel`, `require_sim_passed`, `min_soak_s`, and `min_free_heap_bytes` gates under `/v1/projects/{slug}/policies`.
+- **Automatic Ring Promotion & Health/Rollback Halt (`src/fleetforge/deploy_policies.py`, `src/fleetforge/rollout.py`, `frontend/src/DeployPolicyCard.tsx`):** Uploading a matching build stages Ring 0 (`canary`) first. As rings confirm (and pass `min_soak_s`), `advance_project_rollout_on_confirm` and `reconcile_open_rollouts` promote sequentially to Ring `i+1`. Any `rolled_back`, `cancelled`, non-`publish_failed` `failed`, `safe_mode` entry, post-confirm fault reset (`panic`/`task_wdt`/`brownout`), or `free_heap < min_free_heap_bytes` immediately halts promotion to subsequent waves.

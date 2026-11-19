@@ -25,6 +25,12 @@ Append new decisions newest-first below. Keep this root file under `25 KB` (`< 1
 
 ## 2. Recent Architectural Decisions (2026-10)
 
+### 2026-11-19 — `R11` Staged Cohort Rollout & Deploy Policy Engine (closing `V2`): ordered group rings with rollback, safe-mode, fault, soak, and heap promotion gates
+
+- **Context:** Project-level auto-deploy (`CUJ-2`) targeted only `dev` or `all` boards in one flat cohort. Closing `V2` required multi-ring cohort policies (`canary -> staging -> prod`) triggered by branch or tag globs that automatically halt promotion before staging downstream rings whenever a canary cohort degrades.
+- **Decision:** Add `deploy_policies` (`0018_deploy_policies.py`), `src/fleetforge/deploy_policies.py`, `/v1/projects/{slug}/policies` (`policies.py`), and `DeployPolicyCard.tsx`. Each policy binds `match_mode` (`branch` | `tag`) + `match_ref` to ordered `ring_group_ids` (`ARRAY(UUID)`). On matching artifact upload, Ring 0 stages first; `advance_project_rollout_on_confirm` and `reconcile_open_rollouts` promote Ring `i -> i+1` only after 100% of compatible boards in Ring `i` confirm and clear `min_soak_s`. Any `rolled_back`, `cancelled`, device `failed` (excluding `publish_failed`), `safe_mode`, post-confirm fault reset, or `free_heap < min_free_heap_bytes` immediately halts promotion.
+- **Details:** [`docs/features/vcs-integration.md`](docs/features/vcs-integration.md), `src/fleetforge/deploy_policies.py`, `src/fleetforge/api/routers/policies.py`, `frontend/src/DeployPolicyCard.tsx`, `tests/test_deploy_policy.py`.
+
 ### 2026-11-19 — `R10` Server-Side Build Pipeline: credential-stripped shallow clone, networkless single-tenant ESP-IDF containers, Tier 1 cache, and SSE log stream
 
 - **Context:** Completing `V2`'s source-to-deploy pipeline required compiling repositories at a branch/tag/SHA on the server for `esp32`, `esp32s3`, `esp32c3`, and `esp32c6` without mounting a Docker socket or multi-GB toolchains into `fleetforge-api` (`256 MiB`, non-root) or exposing secrets/network to untrusted `CMakeLists.txt` build scripts.

@@ -549,3 +549,79 @@ export type BuildJobDetail = {
 export type BuildJobList = {
   builds: BuildJobSummary[]
 }
+
+export type PolicyMatchMode = 'branch' | 'tag'
+export type PolicyEvalStatus = 'in_progress' | 'soaking' | 'halted' | 'completed' | 'skipped'
+export type PolicyRingState =
+  | 'pending'
+  | 'in_progress'
+  | 'soaking'
+  | 'promoted'
+  | 'halted'
+  | 'empty'
+
+export type DeployPolicyCreate = {
+  name: string
+  match_mode: PolicyMatchMode
+  match_ref: string
+  ring_group_ids: string[]
+  max_parallel?: number
+  require_sim_passed?: boolean
+  min_soak_s?: number
+  min_free_heap_bytes?: number | null
+  enabled?: boolean
+}
+
+export type DeployPolicyUpdate = {
+  name?: string | null
+  match_mode?: PolicyMatchMode | null
+  match_ref?: string | null
+  ring_group_ids?: string[] | null
+  max_parallel?: number | null
+  require_sim_passed?: boolean | null
+  min_soak_s?: number | null
+  min_free_heap_bytes?: number | null
+  enabled?: boolean | null
+}
+
+export type DeployPolicySummary = {
+  id: string
+  project_id: string
+  name: string
+  match_mode: PolicyMatchMode
+  match_ref: string
+  ring_group_ids: string[]
+  max_parallel: number
+  require_sim_passed: boolean
+  min_soak_s: number
+  min_free_heap_bytes: number | null
+  enabled: boolean
+  created_at: string
+  updated_at: string
+}
+
+export type DeployPolicyList = {
+  policies: DeployPolicySummary[]
+}
+
+export type DeployPolicyEvaluateRequest = {
+  version: string
+}
+
+export type PolicyRingStatus = {
+  ring_index: number
+  group_id: string
+  status: PolicyRingState
+  total_devices: number
+  confirmed_devices: number
+  in_flight_devices: number
+}
+
+export type DeployPolicyEvaluation = {
+  policy_id: string
+  version: string
+  status: PolicyEvalStatus
+  halt_reason: string | null
+  rings: PolicyRingStatus[]
+  deployed: DeployAccepted[]
+}

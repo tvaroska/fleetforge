@@ -96,3 +96,9 @@ From the same review, all P1. A database-backed test named below counts only whe
 
 - [x] **R10-1: Pinned ESP-IDF toolchain containers & queued build worker** — Clone a configured repo ref and compile artifacts in pinned single-tenant ESP-IDF containers per target (`esp32`, `esp32s3`, `esp32c3`, `esp32c6`) with build caching ([features/build-pipeline.md](../features/build-pipeline.md)) (`done when`: a queued build produces a signed, provenance-tagged `.bin` stored in `ObjectStore`).
 - [x] **R10-2: Streamed build logs & dashboard trigger** — Stream live build logs over SSE and expose build status/retry controls in the API and dashboard (`done when`: end-to-end test verifies queued → running → succeeded/failed transitions and streamed log delivery).
+
+## R11 Staged Cohort Rollout & Deploy Policy (implemented locally, pending V2 release)
+
+*Archived from [`../roadmap.md`](../roadmap.md) on 2026-11-19.*
+
+- [x] **R11-1: Staged cohort deploy policy engine** — Add branch/tag-to-cohort deploy rules with health/rollback promotion gates ([features/vcs-integration.md](../features/vcs-integration.md)) (`done when`: a failing canary cohort halts promotion to the next wave automatically).

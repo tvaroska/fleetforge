@@ -244,6 +244,27 @@ from fleetforge.api.schemas_v2 import (
 from fleetforge.api.schemas_v2 import (
     BuildJobSummary as BuildJobSummary,
 )
+from fleetforge.api.schemas_v2 import (
+    DeployPolicyCreate as DeployPolicyCreate,
+)
+from fleetforge.api.schemas_v2 import (
+    DeployPolicyEvaluateRequest as DeployPolicyEvaluateRequest,
+)
+from fleetforge.api.schemas_v2 import (
+    DeployPolicyEvaluation as DeployPolicyEvaluation,
+)
+from fleetforge.api.schemas_v2 import (
+    DeployPolicyList as DeployPolicyList,
+)
+from fleetforge.api.schemas_v2 import (
+    DeployPolicySummary as DeployPolicySummary,
+)
+from fleetforge.api.schemas_v2 import (
+    DeployPolicyUpdate as DeployPolicyUpdate,
+)
+from fleetforge.api.schemas_v2 import (
+    PolicyRingStatus as PolicyRingStatus,
+)
 from fleetforge.auth.tokens import MAX_TOKEN_LENGTH
 from fleetforge.db.models import PowerClass
 from fleetforge.identity import is_valid_device_id

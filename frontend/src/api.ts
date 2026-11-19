@@ -18,6 +18,11 @@ import type {
   CommandAccepted,
   DeployAccepted,
   DeployKpisSummary,
+  DeployPolicyCreate,
+  DeployPolicyEvaluation,
+  DeployPolicyList,
+  DeployPolicySummary,
+  DeployPolicyUpdate,
   DeployPrecheck,
   DeviceGroupSummary,
   DeviceList,
@@ -500,6 +505,39 @@ export const api = {
         ? `/v1/projects/${encodeURIComponent(slug)}/builds/${encodeURIComponent(buildId)}/retry?run_inline=true`
         : `/v1/projects/${encodeURIComponent(slug)}/builds/${encodeURIComponent(buildId)}/retry`,
       { method: 'POST' },
+    ),
+
+  listPolicies: (slug: string) =>
+    request<DeployPolicyList>(`/v1/projects/${encodeURIComponent(slug)}/policies`),
+
+  createPolicy: (slug: string, body: DeployPolicyCreate) =>
+    request<DeployPolicySummary>(`/v1/projects/${encodeURIComponent(slug)}/policies`, {
+      method: 'POST',
+      body: JSON.stringify(body),
+    }),
+
+  updatePolicy: (slug: string, policyId: string, patch: DeployPolicyUpdate) =>
+    request<DeployPolicySummary>(
+      `/v1/projects/${encodeURIComponent(slug)}/policies/${encodeURIComponent(policyId)}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify(patch),
+      },
+    ),
+
+  deletePolicy: (slug: string, policyId: string) =>
+    request<void>(
+      `/v1/projects/${encodeURIComponent(slug)}/policies/${encodeURIComponent(policyId)}`,
+      { method: 'DELETE' },
+    ),
+
+  evaluatePolicy: (slug: string, policyId: string, version: string) =>
+    request<DeployPolicyEvaluation>(
+      `/v1/projects/${encodeURIComponent(slug)}/policies/${encodeURIComponent(policyId)}/evaluate`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ version }),
+      },
     ),
 
   listAdminTokens: () => request<{ tokens: AdminTokenSummary[] }>('/v1/auth/tokens'),

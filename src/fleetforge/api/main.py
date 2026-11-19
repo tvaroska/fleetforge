@@ -62,6 +62,7 @@ from fleetforge.api.eventstream import EventHub, PostgresEventListener
 from fleetforge.api.routers import (
     agent,
     artifact_download,
+    artifact_sim,
     artifacts,
     auth,
     auth_tokens,
@@ -75,6 +76,7 @@ from fleetforge.api.routers import (
     events,
     groups,
     partition_profiles,
+    policies,
     progress,
     projects,
     users,
@@ -328,6 +330,7 @@ def create_app(
     app.include_router(auth_tokens.router)
     app.include_router(projects.router)
     app.include_router(builds.router)
+    app.include_router(policies.router)
     app.include_router(groups.router)
     app.include_router(users.router)
     app.include_router(enrollment.router)
@@ -338,6 +341,7 @@ def create_app(
     app.include_router(agent.router)
     app.include_router(progress.router)
     app.include_router(artifacts.router)
+    app.include_router(artifact_sim.router)
     # Admin-only, like `artifacts.router`: the profiles an upload's partition_layout names.
     app.include_router(partition_profiles.router)
     # Public, unauthenticated, signature-as-authorization. Registered after

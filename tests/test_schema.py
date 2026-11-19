@@ -22,6 +22,7 @@ EXPECTED_TABLES = {
     "build_jobs",
     "builds",
     "deploy_events",
+    "deploy_policies",
     "device_commands",
     "device_faults",
     "device_groups",

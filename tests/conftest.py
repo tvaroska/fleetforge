@@ -174,6 +174,7 @@ async def clean_tables(engine: AsyncEngine) -> AsyncIterator[None]:
 
     cleanup_sql = (
         "DELETE FROM partition_profiles WHERE origin <> 'builtin'",
+        "DELETE FROM deploy_policies",
         "DELETE FROM deploy_events",
         "DELETE FROM enrollment_tokens",
         "DELETE FROM devices",

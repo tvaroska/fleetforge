@@ -661,6 +661,20 @@ async def advance_project_rollout_on_confirm(
         sent_by_override=req.sent_by,
         republish_in_flight=False,
     )
+    from fleetforge.deploy_policies import advance_project_policies_for_version
+
+    policy_promoted = await advance_project_policies_for_version(
+        session,
+        project_id=resolved_device.project_id,
+        version=req.artifact_version,
+        settings=settings,
+        publisher=publisher,
+    )
+    seen_ids = {item.device_id for item in deployed}
+    for item in policy_promoted:
+        if item.device_id not in seen_ids:
+            deployed.append(item)
+            seen_ids.add(item.device_id)
     return deployed
 
 

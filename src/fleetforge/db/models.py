@@ -796,3 +796,6 @@ from fleetforge.db.models_telemetry import (  # noqa: E402
 from fleetforge.db.models_v2 import (  # noqa: E402
     BuildJob as BuildJob,
 )
+from fleetforge.db.models_v2 import (  # noqa: E402
+    DeployPolicy as DeployPolicy,
+)
