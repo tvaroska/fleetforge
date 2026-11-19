@@ -24,6 +24,7 @@ import {
   type Me,
 } from './api'
 import { buildInfo, type BuildInfo } from './buildInfo'
+import { BuildPipelineCard } from './BuildPipelineCard'
 import { ContinuousDeploymentCard } from './ContinuousDeploymentCard'
 import { useArtifacts, type Artifacts } from './deploy'
 import { DeviceInspector } from './DeviceInspector'
@@ -733,6 +734,14 @@ export function Dashboard({
           projectSlug={activeProject}
           onDeployed={fleet.refresh}
           onSessionExpired={expire}
+        />
+        <BuildPipelineCard
+          projectSlug={activeProject}
+          active={activeTab === 'builds'}
+          profiles={profiles.profiles}
+          onArtifactsChanged={artifacts.reload}
+          onSessionExpired={expire}
+          createEventSource={createEventSource}
         />
         <UploadBuild
           devices={fleet.devices}

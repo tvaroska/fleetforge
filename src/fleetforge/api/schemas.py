@@ -232,6 +232,18 @@ from fleetforge.api.schemas_iam import (
 from fleetforge.api.schemas_iam import (
     UserUpdate as UserUpdate,
 )
+from fleetforge.api.schemas_v2 import (
+    BuildJobCreate as BuildJobCreate,
+)
+from fleetforge.api.schemas_v2 import (
+    BuildJobDetail as BuildJobDetail,
+)
+from fleetforge.api.schemas_v2 import (
+    BuildJobList as BuildJobList,
+)
+from fleetforge.api.schemas_v2 import (
+    BuildJobSummary as BuildJobSummary,
+)
 from fleetforge.auth.tokens import MAX_TOKEN_LENGTH
 from fleetforge.db.models import PowerClass
 from fleetforge.identity import is_valid_device_id

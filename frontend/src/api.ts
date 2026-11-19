@@ -11,6 +11,10 @@ import type {
   ArtifactList,
   ArtifactSimulateResponse,
   ArtifactUploaded,
+  BuildJobCreate,
+  BuildJobDetail,
+  BuildJobList,
+  BuildJobSummary,
   CommandAccepted,
   DeployAccepted,
   DeployKpisSummary,
@@ -463,6 +467,39 @@ export const api = {
     request<ProjectSecretList>(
       `/v1/projects/${encodeURIComponent(slug)}/secrets/${encodeURIComponent(key)}`,
       { method: 'DELETE' },
+    ),
+
+  listBuilds: (slug: string) =>
+    request<BuildJobList>(`/v1/projects/${encodeURIComponent(slug)}/builds`),
+
+  createBuild: (slug: string, body: BuildJobCreate, runInline = false) =>
+    request<BuildJobSummary>(
+      runInline
+        ? `/v1/projects/${encodeURIComponent(slug)}/builds?run_inline=true`
+        : `/v1/projects/${encodeURIComponent(slug)}/builds`,
+      {
+        method: 'POST',
+        body: JSON.stringify(body),
+      },
+    ),
+
+  getBuild: (slug: string, buildId: string) =>
+    request<BuildJobDetail>(
+      `/v1/projects/${encodeURIComponent(slug)}/builds/${encodeURIComponent(buildId)}`,
+    ),
+
+  cancelBuild: (slug: string, buildId: string) =>
+    request<BuildJobSummary>(
+      `/v1/projects/${encodeURIComponent(slug)}/builds/${encodeURIComponent(buildId)}/cancel`,
+      { method: 'POST' },
+    ),
+
+  retryBuild: (slug: string, buildId: string, runInline = false) =>
+    request<BuildJobSummary>(
+      runInline
+        ? `/v1/projects/${encodeURIComponent(slug)}/builds/${encodeURIComponent(buildId)}/retry?run_inline=true`
+        : `/v1/projects/${encodeURIComponent(slug)}/builds/${encodeURIComponent(buildId)}/retry`,
+      { method: 'POST' },
     ),
 
   listAdminTokens: () => request<{ tokens: AdminTokenSummary[] }>('/v1/auth/tokens'),

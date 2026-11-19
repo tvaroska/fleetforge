@@ -25,6 +25,12 @@ Append new decisions newest-first below. Keep this root file under `25 KB` (`< 1
 
 ## 2. Recent Architectural Decisions (2026-10)
 
+### 2026-11-19 — `R10` Server-Side Build Pipeline: credential-stripped shallow clone, networkless single-tenant ESP-IDF containers, Tier 1 cache, and SSE log stream
+
+- **Context:** Completing `V2`'s source-to-deploy pipeline required compiling repositories at a branch/tag/SHA on the server for `esp32`, `esp32s3`, `esp32c3`, and `esp32c6` without mounting a Docker socket or multi-GB toolchains into `fleetforge-api` (`256 MiB`, non-root) or exposing secrets/network to untrusted `CMakeLists.txt` build scripts.
+- **Decision:** Define `SourceFetcher` and `BuildRunner` `Protocol` Ports (`src/fleetforge/builds.py`) executed by an external worker (`python -m fleetforge.builder`) polling `build_jobs` (`0017_build_jobs.py`). `GitShallowSourceFetcher` clones on the host and deletes `.git/` before `SandboxedIdfContainerRunner` invokes `docker run --rm --network=none --cap-drop=ALL --security-opt=no-new-privileges --pids-limit=256 --memory=2g --cpus=2 --user=65534:65534 --read-only` against digest-pinned `espressif/idf` images. Cache lookups check `H(idf_image_digest, target, partition_layout, source_tree_digest, config_digest)` in `builds` before compiling; outputs are signed, stored in `ObjectStore`, recorded in `artifacts.provenance` + `artifact_versions`, and streamed live via `GET /v1/projects/{slug}/builds/{id}/logs/stream` (`BuildPipelineCard.tsx`).
+- **Details:** [`docs/features/build-pipeline.md`](docs/features/build-pipeline.md), `src/fleetforge/builds.py`, `src/fleetforge/builder.py`, `src/fleetforge/api/routers/builds.py`, `frontend/src/BuildPipelineCard.tsx`.
+
 ### 2026-11-19 — `R9` Advisory Simulation Gate: external `SimRunner` Port, QEMU + host pre-flight adapters, and audited `sim_failed` override
 
 - **Context:** Operators needed pre-flight verification that boots uploaded firmware and evaluates its `R5` self-test before staging onto physical boards, without bloating the 256 MiB non-root `fleetforge-api` container with multi-GB QEMU toolchains or turning emulator false negatives into un-overridable blockers.

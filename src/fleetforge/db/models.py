@@ -793,3 +793,6 @@ from fleetforge.db.models_telemetry import (  # noqa: E402
 from fleetforge.db.models_telemetry import (  # noqa: E402
     DeviceTelemetry as DeviceTelemetry,
 )
+from fleetforge.db.models_v2 import (  # noqa: E402
+    BuildJob as BuildJob,
+)

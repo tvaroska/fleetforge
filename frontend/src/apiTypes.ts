@@ -490,3 +490,62 @@ export type PartitionProfileSummary = {
 export type PartitionProfileList = { profiles: PartitionProfileSummary[] }
 
 export type PartitionProfileAdopt = { layout_id: string; ota_slot_size?: number }
+
+export type BuildJobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled'
+
+export type BuildTarget = 'esp32' | 'esp32s3' | 'esp32c3' | 'esp32c6'
+
+export type BuildJobCreate = {
+  repo_url?: string | null
+  git_ref: string
+  target: BuildTarget
+  version: string
+  partition_layout?: string
+}
+
+export type BuildJobSummary = {
+  id: string
+  project_id: string
+  repo_url: string
+  git_ref: string
+  commit_sha: string | null
+  target: string
+  version: string
+  partition_layout: string
+  idf_image: string
+  cache_key: string | null
+  status: BuildJobStatus
+  cache_hit: boolean
+  artifact_sha256: string | null
+  error_detail: string | null
+  triggered_by: string | null
+  created_at: string
+  started_at: string | null
+  finished_at: string | null
+}
+
+export type BuildJobDetail = {
+  id: string
+  project_id: string
+  repo_url: string
+  git_ref: string
+  commit_sha: string | null
+  target: string
+  version: string
+  partition_layout: string
+  idf_image: string
+  cache_key: string | null
+  status: BuildJobStatus
+  cache_hit: boolean
+  artifact_sha256: string | null
+  error_detail: string | null
+  triggered_by: string | null
+  created_at: string
+  started_at: string | null
+  finished_at: string | null
+  log_text: string
+}
+
+export type BuildJobList = {
+  builds: BuildJobSummary[]
+}

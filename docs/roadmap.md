@@ -4,20 +4,14 @@ Source specs: [prd.md](../spec/prd.md) · [design/architecture.md](../design/arc
 
 ## Where we are
 
-`V1` (`R0`–`R6`) and `V2` `R7`–`R8` are shipped: Web Serial enrollment, A/B auto-rollback (`ab-4m-v1`), embeddable ESP-IDF/Arduino OTA library, live health & crash-ring telemetry, custom self-test confirmation (`ff_set_selftest`), ECDSA P-256 firmware signing with resumable HTTP `Range` downloads, artifact provenance API, `fleetforge push` CLI + CI workflow templates, and multi-project RBAC with scoped `ffa_...` tokens. `v0.8.6` (gate and P0 security fixes), `v0.8.7` (fifteen P1 rollout, secrets, and contract fixes), and `R9` (advisory simulation gate) are implemented locally (pending release). Next up: complete `V2` (`R10` server-side container build pipeline, `R11` staged cohort deploy policy), then `V3` robotic swarm hierarchy and delta OTA.
+`V1` (`R0`–`R6`) and `V2` `R7`–`R8` are shipped: Web Serial enrollment, A/B auto-rollback (`ab-4m-v1`), embeddable ESP-IDF/Arduino OTA library, live health & crash-ring telemetry, custom self-test confirmation (`ff_set_selftest`), ECDSA P-256 firmware signing with resumable HTTP `Range` downloads, artifact provenance API, `fleetforge push` CLI + CI workflow templates, and multi-project RBAC with scoped `ffa_...` tokens. `v0.8.6` (gate and P0 security fixes), `v0.8.7` (fifteen P1 rollout, secrets, and contract fixes), `R9` (advisory simulation gate), and `R10` (server-side container build pipeline) are implemented locally (pending release). Next up: complete `V2` (`R11` staged cohort deploy policy), then `V3` robotic swarm hierarchy and delta OTA.
 
 ## Milestones at a glance
 
 | # | Milestone | Done when | Target |
 | :--- | :--- | :--- | :--- |
-| **R10** | Server-Side Build Pipeline (`V2`) | Server clones a repo ref, compiles in pinned ESP-IDF toolchain containers (`esp32`/`S3`/`C3`/`C6`) with queued builds, streamed logs, and build cache. | `V2` (`P1`, Large) |
 | **R11** | Staged Cohort Rollout & Deploy Policy (`V2`) | Cohort-based staged rollout policies gate automatic promotions from canary to fleet, closing `V2`. | `V2` (`P1`, Medium) |
 | **V3** | Robotic Swarm Hierarchy & Delta OTA | UGV edge-relay gateway (`parent_device_id`), groups & bulk deploy, airtime-aware scheduling, and delta OTA updates work end-to-end. | `V3` (`P2`, Large) |
-
-## Milestone R10 — Server-Side Build Pipeline (`V2`)
-
-- [ ] **R10-1: Pinned ESP-IDF toolchain containers & queued build worker** — Clone a configured repo ref and compile artifacts in pinned single-tenant ESP-IDF containers per target (`esp32`, `esp32s3`, `esp32c3`, `esp32c6`) with build caching ([features/build-pipeline.md](features/build-pipeline.md)) (`done when`: a queued build produces a signed, provenance-tagged `.bin` stored in `ObjectStore`).
-- [ ] **R10-2: Streamed build logs & dashboard trigger** — Stream live build logs over SSE and expose build status/retry controls in the API and dashboard (`done when`: end-to-end test verifies queued → running → succeeded/failed transitions and streamed log delivery).
 
 ## Milestone R11 — Staged Cohort Rollout & Deploy Policy (`V2`)
 
@@ -85,4 +79,5 @@ Gate at review time: ruff, format and mypy clean; pytest 1832 passed, 764 skippe
 - **v0.8.6 (implemented locally, pending v0.8.6 release):** The gate fails when the database-backed tests cannot run; `T-1`, `A-2`, `A-1` and `D-1`/`A-8` are fixed with regression tests that run in it; the `D-2` checks are run and recorded. — [archive](archive/roadmap-history.md#v086-implemented-locally-pending-v086-release)
 - **v0.8.7 (implemented locally, pending v0.8.7 release):** The fifteen P1 review findings in its section are fixed, each with its named test passing with PostgreSQL up and 0 skipped. — [archive](archive/roadmap-history.md#v087-implemented-locally-pending-v087-release)
 - **R9 Advisory Simulation Gate (implemented locally, pending V2 release):** `pytest-embedded` + Espressif QEMU boots uploaded artifacts, executes the `R5` self-test behind the pluggable `sim-runner` contract, and surfaces warn/override in the UI. — [archive](archive/roadmap-history.md#r9-advisory-simulation-gate-implemented-locally-pending-v2-release)
+- **R10 Server-Side Build Pipeline (implemented locally, pending V2 release):** Server clones a repo ref, compiles in pinned ESP-IDF toolchain containers (`esp32`/`S3`/`C3`/`C6`) with queued builds, streamed logs, and build cache. — [archive](archive/roadmap-history.md#r10-server-side-build-pipeline-implemented-locally-pending-v2-release)
 

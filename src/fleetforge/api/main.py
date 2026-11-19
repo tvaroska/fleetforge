@@ -65,6 +65,7 @@ from fleetforge.api.routers import (
     artifacts,
     auth,
     auth_tokens,
+    builds,
     commands,
     deploys,
     device_secrets,
@@ -326,6 +327,7 @@ def create_app(
     app.include_router(auth.router)
     app.include_router(auth_tokens.router)
     app.include_router(projects.router)
+    app.include_router(builds.router)
     app.include_router(groups.router)
     app.include_router(users.router)
     app.include_router(enrollment.router)

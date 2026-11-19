@@ -79,6 +79,15 @@ producer of design/architecture.md principle 2). Arduino CLI later, if asked for
 **Done when:** you point Fleetforge at a repo and a tag, and a deployable, fully
 attributed artifact appears — with no toolchain on your machine.
 
+## As built (`R10`)
+
+- **Schema & Queue (`alembic/versions/0017_build_jobs.py`, `src/fleetforge/db/models_v2.py`):** `build_jobs` tracks `queued -> running -> succeeded | failed | cancelled`, `idf_image`, `commit_sha`, `cache_key`, `cache_hit`, `artifact_sha256`, `error_detail`, and bounded `log_text` (`256 KiB`), alongside Tier 1 content-addressed `builds` (`cache_key = H(idf_image_digest, target, partition_layout, source_tree_digest, config_digest)`).
+- **Ports, Adapters, and Hardened Sandbox (`src/fleetforge/builds.py`, `src/fleetforge/builder.py`):**
+  - `SourceFetcher` (`GitShallowSourceFetcher`) clones on the host worker with `GIT_TERMINAL_PROMPT=0` and strips `.git/` completely before compilation so zero clone credentials or VCS metadata enter the build container.
+  - `BuildRunner` (`SandboxedIdfContainerRunner` + `DeterministicLocalBuildRunner` for host CI) runs pinned `espressif/idf:v5.3.2@sha256:...` images per target (`esp32`, `esp32s3`, `esp32c3`, `esp32c6`) with `--network=none`, `--cap-drop=ALL`, `--security-opt=no-new-privileges`, `--pids-limit=256`, `--memory=2g`, `--cpus=2`, `--user=65534:65534`, `--read-only`, and a wall-clock timeout outside the 256 MiB `fleetforge-api` pod (`python -m fleetforge.builder`).
+  - Built binaries are ECDSA P-256 signed via `SigningKeyRing`, uploaded to `ObjectStore`, and registered in `artifacts.provenance` + `artifact_versions`.
+- **API & Dashboard (`src/fleetforge/api/routers/builds.py`, `frontend/src/BuildPipelineCard.tsx`):** `GET/POST /v1/projects/{slug}/builds`, `GET .../builds/{id}`, `POST .../cancel`, `POST .../retry`, and `GET .../logs/stream` (`text/event-stream` SSE).
+
 ## Post-V2
 
 Build matrix (one repo → several targets in one job) · PR preview builds ·

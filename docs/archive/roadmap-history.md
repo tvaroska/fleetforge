@@ -89,3 +89,10 @@ From the same review, all P1. A database-backed test named below counts only whe
 
 - [x] **R9-1: Pluggable `sim-runner` contract & Espressif QEMU worker** — Implement the `sim-runner` contract ([design/architecture.md](../../design/architecture.md), [features/simulation.md](../features/simulation.md)) using `pytest-embedded` + Espressif QEMU to boot uploaded firmware artifacts and run the `R5` self-test before deploy (`done when`: a deliberately broken test build fails the sim gate while a valid build passes in automated tests).
 - [x] **R9-2: Advisory warn & operator override in API and dashboard** — Persist simulation verdicts on artifacts and surface advisory warnings with explicit operator override in `src/fleetforge/` and `frontend/` (`done when`: UI shows pass/warn status and records operator override in audit logs).
+
+## R10 Server-Side Build Pipeline (implemented locally, pending V2 release)
+
+*Archived from [`../roadmap.md`](../roadmap.md) on 2026-11-19.*
+
+- [x] **R10-1: Pinned ESP-IDF toolchain containers & queued build worker** — Clone a configured repo ref and compile artifacts in pinned single-tenant ESP-IDF containers per target (`esp32`, `esp32s3`, `esp32c3`, `esp32c6`) with build caching ([features/build-pipeline.md](../features/build-pipeline.md)) (`done when`: a queued build produces a signed, provenance-tagged `.bin` stored in `ObjectStore`).
+- [x] **R10-2: Streamed build logs & dashboard trigger** — Stream live build logs over SSE and expose build status/retry controls in the API and dashboard (`done when`: end-to-end test verifies queued → running → succeeded/failed transitions and streamed log delivery).

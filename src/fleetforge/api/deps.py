@@ -35,6 +35,12 @@ from fleetforge.broker import (
     NullCommandPublisher,
     NullProvisioner,
 )
+from fleetforge.builds import (
+    BuildRunner,
+    GitShallowSourceFetcher,
+    SourceFetcher,
+    create_build_runner,
+)
 from fleetforge.clock import now_utc
 from fleetforge.config import Settings, get_settings
 from fleetforge.db.base import get_sessionmaker
@@ -594,3 +600,19 @@ def get_sim_runner() -> SimRunner:
 
 
 SimRunnerDep = Annotated[SimRunner, Depends(get_sim_runner)]
+
+
+def get_build_runner() -> BuildRunner:
+    """Return the configured server-side `BuildRunner` Port (`R10-1`, overridable in tests)."""
+    return create_build_runner()
+
+
+BuildRunnerDep = Annotated[BuildRunner, Depends(get_build_runner)]
+
+
+def get_source_fetcher() -> SourceFetcher:
+    """Return the configured host-side `SourceFetcher` Port (`R10-1`, overridable in tests)."""
+    return GitShallowSourceFetcher()
+
+
+SourceFetcherDep = Annotated[SourceFetcher, Depends(get_source_fetcher)]

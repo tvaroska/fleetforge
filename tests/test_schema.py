@@ -19,6 +19,7 @@ EXPECTED_TABLES = {
     "alembic_version",
     "artifact_versions",
     "artifacts",
+    "build_jobs",
     "builds",
     "deploy_events",
     "device_commands",

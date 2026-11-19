@@ -178,6 +178,8 @@ async def clean_tables(engine: AsyncEngine) -> AsyncIterator[None]:
         "DELETE FROM enrollment_tokens",
         "DELETE FROM devices",
         "DELETE FROM device_groups",
+        "DELETE FROM build_jobs",
+        "DELETE FROM builds",
         "DELETE FROM artifact_versions",
         "DELETE FROM artifacts",
         "DELETE FROM project_members",
