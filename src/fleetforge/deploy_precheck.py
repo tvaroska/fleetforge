@@ -63,6 +63,7 @@ logger = logging.getLogger(__name__)
 OTA_CAPABILITY = "ota"
 # R5-spec-1 D9: a board that announces `apply` implements the `apply` verb (R5-fw-4).
 APPLY_CAPABILITY = "apply"
+SIG_CAPABILITY = "sig"
 
 # Stable codes: clients branch on these, never on the message.
 NO_ARTIFACT_FOR_TARGET = "no_artifact_for_target"
@@ -77,13 +78,21 @@ SLEEPY = "sleepy"
 MERGED_BINARY = "merged_binary"  # refused at upload, not by refusals()
 ROLLBACK_INCAPABLE = "rollback_incapable"
 NO_LIBRARY_MARKER = "no_library_marker"
+UNSIGNED_ARTIFACT = "unsigned_artifact"
+DEV_KEY_RING = "dev_key_ring"
 NO_APPLY_CAPABILITY = "no_apply_capability"
 NO_CARGO_CAPABILITY = "no_cargo_capability"
+SIGNATURE_REQUIRED_BY_DEVICE = "signature_required_by_device"
 
 # The warnings `/deploy` enforces unless `override` names them, in the order they are
 # raised. `api/schemas.py`'s `OverrideCode` literal is kept equal to this by
 # `tests/test_deploy_precheck.py`.
-GATING_CODES: tuple[str, ...] = (ROLLBACK_INCAPABLE, NO_LIBRARY_MARKER)
+GATING_CODES: tuple[str, ...] = (
+    ROLLBACK_INCAPABLE,
+    NO_LIBRARY_MARKER,
+    UNSIGNED_ARTIFACT,
+    DEV_KEY_RING,
+)
 
 # Where a library user finds the partitions.csv for each builtin layout: the fix named by
 # `unsupported_layout` and `partition_table_mismatch`. `tests/test_deploy_precheck.py` keeps
@@ -113,6 +122,10 @@ class ResolvedArtifact:
     # H5 / R7-cargo-1: payload cargo type (`app`, `mcu_fw`, `model_weights`, `fpga_bitstream`,
     # `data_partition`, ...). Default `"app"` preserves every existing constructor.
     artifact_type: str = "app"
+    # D-1 / A-8: whether signature status was evaluated (`False` = uploaded without signature;
+    # `None` = legacy/untracked) and whether the signature relies on a committed dev key.
+    is_signed: bool | None = None
+    uses_dev_key_ring: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -315,6 +328,15 @@ def refusals(
                 f"{', '.join(device.capabilities) or 'nothing'}.",
             )
         )
+    if artifact is not None and artifact.sig is None and SIG_CAPABILITY in device.capabilities:
+        found.append(
+            Finding(
+                SIGNATURE_REQUIRED_BY_DEVICE,
+                f"this device enforces ECDSA P-256 signature verification (announces {SIG_CAPABILITY}) "
+                f"and {version} has no signature. Sign the image or configure ARTIFACT_SIGNING_KEY, "
+                "re-upload, and deploy again.",
+            )
+        )
     return found
 
 
@@ -417,6 +439,33 @@ def gating_warnings(device: Device, *, artifact: ResolvedArtifact | None) -> lis
                 "started (Fleetforge.begin() in setup(), or fleetforge_start() in ESP-IDF), "
                 "or send it only if losing this board until someone reaches it is "
                 "acceptable.",
+                needs_override=True,
+            )
+        )
+    if (
+        artifact is not None
+        and artifact.is_signed is False
+        and SIG_CAPABILITY not in device.capabilities
+    ):
+        found.append(
+            Finding(
+                UNSIGNED_ARTIFACT,
+                "this build has no ECDSA P-256 signature. Any board with signature enforcement "
+                "enabled will reject it before apply, and a board without enforcement accepts "
+                "unverified bytes over an unauthenticated link. Configure ARTIFACT_SIGNING_KEY "
+                "or upload with a detached signature, or override only if deploying an unsigned "
+                "build is intentional.",
+                needs_override=True,
+            )
+        )
+    if artifact is not None and artifact.sig is not None and artifact.uses_dev_key_ring:
+        found.append(
+            Finding(
+                DEV_KEY_RING,
+                "this build's signature relies on the built-in development ECDSA P-256 key ring, "
+                "whose test private keys are public. Configure a dedicated release key ring in "
+                "ARTIFACT_SIGNING_KEY and ARTIFACT_SIGNING_PUBLIC_KEYS, or override only on a "
+                "non-production bench.",
                 needs_override=True,
             )
         )

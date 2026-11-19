@@ -285,6 +285,18 @@ class StatusPayload(_TolerantPayload):
     pct: int | None = None
     detail: str | None = None
 
+    @field_validator("cmd_id", "state", mode="before")
+    @classmethod
+    def _bounded_token(cls, value: object) -> str | None:
+        """Bound `cmd_id` and `state` so unbounded strings cannot bloat `deploy_events`."""
+        if not isinstance(value, str):
+            return None
+        if not (1 <= len(value) <= STATUS_TOKEN_MAX_CHARS) or not value.strip():
+            return None
+        if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+            return None
+        return value
+
     @field_validator("pct", mode="before")
     @classmethod
     def _plausible_pct(cls, value: object) -> int | None:
@@ -491,6 +503,8 @@ class LogPayload(_TolerantPayload):
 # `up/ack` (R5-be-2, R5-spec-1 Patch A5). The agent's answers are well under 256 B (every
 # `detail` is at most 63 B); one over this is dropped whole, liveness kept.
 ACK_MAX_BYTES = 1024
+MAX_PAYLOAD_BYTES = 8192
+STATUS_TOKEN_MAX_CHARS = 128
 
 
 class AckPayload(_TolerantPayload):
@@ -521,15 +535,31 @@ class AckPayload(_TolerantPayload):
 def decode[T: _TolerantPayload](model: type[T], topic: str, payload: bytes) -> T | None:
     """Decode `payload` into `model`, or return `None` if it is not usable.
 
-    Malformed JSON, non-UTF-8 bytes, a JSON array where an object belongs and a
-    wrong-typed field all land here — none of them may reach the caller as an
-    exception. Only the topic and the payload **length** are logged: logs are not a
-    data store, and R4 telemetry bodies get large.
+    Malformed JSON, non-UTF-8 bytes, deeply nested brackets (`RecursionError`), oversized
+    bodies, a JSON array where an object belongs and a wrong-typed field all land here —
+    none of them may reach the caller as an exception. Only the topic and the payload
+    **length** are logged: logs are not a data store, and R4 telemetry bodies get large.
     """
+    if len(payload) > MAX_PAYLOAD_BYTES:
+        logger.info(
+            "oversized %s payload on %s (%d bytes, max %d): dropped",
+            model.__name__,
+            topic,
+            len(payload),
+            MAX_PAYLOAD_BYTES,
+        )
+        return None
     try:
         data = json.loads(payload)
         return model.model_validate(data)
-    except (json.JSONDecodeError, UnicodeDecodeError, ValidationError, TypeError) as exc:
+    except (
+        json.JSONDecodeError,
+        UnicodeDecodeError,
+        ValidationError,
+        TypeError,
+        RecursionError,
+        ValueError,
+    ) as exc:
         logger.info(
             "undecodable %s payload on %s (%d bytes): %s",
             model.__name__,

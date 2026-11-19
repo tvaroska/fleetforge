@@ -139,8 +139,10 @@ flashed with a superseded layout.
 `capabilities` lists what the device can be asked to do. `ota` means it carries out
 `stage`. From R5, `apply`, `cancel`, `rollback` and `reboot` name the commands it
 implements, `selftest` means the running image has registered a custom self-test, and
-`safe_window` means it has registered a safe-window rule. The server stores a capability it
-does not know as-is. A device lists only what is true of the image it runs.
+`safe_window` means it has registered a safe-window rule. From R6, `sig` means the running
+image enforces ECDSA P-256 signature verification (`artifact.sig` is mandatory on every
+`stage`). The server stores a capability it does not know as-is. A device lists only what
+is true of the image it runs.
 
 `safe_mode` is `true` while the device holds itself in recovery after repeated crashes:
 three `panic`, `int_wdt`, `task_wdt` or `wdt` resets within 60 s on a confirmed image. In

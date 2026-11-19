@@ -161,6 +161,10 @@ async def handle_message(
             )
     except (SQLAlchemyError, OSError, ValueError) as exc:
         logger.error("ingest failed for topic %s: %s", topic, exc)
+    except Exception as exc:  # noqa: BLE001 - one bad message must never kill the sole ingestor
+        logger.error(
+            "unexpected ingest error for topic %s (%s): %s", topic, type(exc).__name__, exc
+        )
 
 
 async def run_once(

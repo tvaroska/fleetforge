@@ -24,7 +24,6 @@
     "scripts/selftest_window_e2e.py": 858,
     "src/fleetforge/cli.py": 1277,
     "src/fleetforge/deploys.py": 864,
-    "src/fleetforge/api/schemas.py": 1169,
     "src/fleetforge/api/routers/auth.py": 864,
     "src/fleetforge/api/routers/deploys.py": 1027,
     "src/fleetforge/api/routers/devices.py": 817,

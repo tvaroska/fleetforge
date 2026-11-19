@@ -149,6 +149,12 @@ esp_err_t ff_ota_cancel(const char *cmd_id, bool *reported);
  * pointer on another slot says that one (ff_sleep.c checks it). */
 bool ff_ota_in_flight(void);
 
+/* D-1: True when this firmware enforces ECDSA P-256 signatures on every `stage` command. */
+bool ff_ota_requires_signature(void);
+
+/* D-1: True when either slot of `s_signing_pubkey_ring` contains a committed dev key. */
+bool ff_ota_uses_dev_signing_key(void);
+
 /* H5 / R7-cargo-1: Pluggable non-app cargo handler (`artifact.type` != "app").
  * Streams downloaded chunks to `write_cb(offset, data, len, ctx)` and invokes
  * `finish_cb(total_bytes, sha256_hex, version, ctx)` only AFTER the full stream's

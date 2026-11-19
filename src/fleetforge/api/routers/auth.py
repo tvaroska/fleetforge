@@ -31,6 +31,7 @@ from fleetforge.api.deps import (
     FirebaseAuthDep,
     SessionMakerDep,
     SettingsDep,
+    UnpinnedAdminDep,
     bearer_scheme,
     client_key,
     cookie_scheme,
@@ -657,14 +658,11 @@ async def me(admin: AdminDep, sessionmaker: SessionMakerDep) -> MeResponse:
 )
 async def update_me(
     body: SelfProfileUpdate,
-    admin: AdminDep,
+    admin: UnpinnedAdminDep,
     settings: SettingsDep,
     sessionmaker: SessionMakerDep,
 ) -> MeResponse:
     """Update the caller's own `User` record (or bootstrap one for `admin`)."""
-    if "admin" not in admin.scopes or admin.project_id is not None:
-        raise FORBIDDEN
-
     pw_hash = (
         await anyio.to_thread.run_sync(hash_secret, body.password, limiter=ARGON2_LIMITER)
         if body.password is not None
@@ -759,7 +757,7 @@ async def update_me(
 )
 async def create_admin_token(
     body: AdminTokenCreate,
-    admin: AdminDep,
+    admin: UnpinnedAdminDep,
     sessionmaker: SessionMakerDep,
 ) -> AdminTokenIssued:
     """Mint a new `ffa_...` API token. Three rules:
@@ -772,11 +770,6 @@ async def create_admin_token(
 
     A scoped (non-`admin`) machine token cannot mint at all.
     """
-    if "admin" not in admin.scopes:
-        raise FORBIDDEN
-    if admin.project_id is not None:
-        raise FORBIDDEN
-
     now = now_utc()
     expires_at = (
         now + dt.timedelta(days=body.expires_in_days) if body.expires_in_days is not None else None

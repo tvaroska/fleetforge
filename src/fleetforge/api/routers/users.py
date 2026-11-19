@@ -19,10 +19,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from fleetforge.api.deps import (
     FORBIDDEN,
-    AdminDep,
     FirebaseAuthDep,
     SessionMakerDep,
     SettingsDep,
+    UnpinnedAdminDep,
     bearer_scheme,
     cookie_scheme,
     now_utc,
@@ -126,8 +126,8 @@ async def _ahash_password(password: str) -> str:
     response_model=UserList,
     summary="List human user accounts (superadmin only)",
 )
-async def list_users(admin: AdminDep, sessionmaker: SessionMakerDep) -> UserList:
-    if not admin.is_superadmin or "admin" not in admin.scopes:
+async def list_users(admin: UnpinnedAdminDep, sessionmaker: SessionMakerDep) -> UserList:
+    if not admin.is_superadmin:
         raise FORBIDDEN
 
     async with sessionmaker() as session:
@@ -144,12 +144,12 @@ async def list_users(admin: AdminDep, sessionmaker: SessionMakerDep) -> UserList
 )
 async def create_user(
     body: UserCreate,
-    admin: AdminDep,
+    admin: UnpinnedAdminDep,
     sessionmaker: SessionMakerDep,
     settings: SettingsDep,
     firebase: FirebaseAuthDep,
 ) -> UserSummary:
-    if not admin.is_superadmin or "admin" not in admin.scopes:
+    if not admin.is_superadmin:
         raise FORBIDDEN
 
     pw_hash = await _ahash_password(body.password) if body.password is not None else None
@@ -221,30 +221,32 @@ async def update_user(
     username: str = Path(pattern=USERNAME_PATTERN),
     *,
     body: UserUpdate,
-    admin: AdminDep,
+    admin: UnpinnedAdminDep,
     sessionmaker: SessionMakerDep,
     settings: SettingsDep,
     firebase: FirebaseAuthDep,
     cache: CacheDep,
 ) -> UserSummary:
-    if "admin" not in admin.scopes:
+    if not admin.is_superadmin and (
+        admin.user_id is None or body.is_superadmin is not None or body.disabled is not None
+    ):
         raise FORBIDDEN
 
-    is_self = admin.subject == username and admin.user_id is not None
-    if not admin.is_superadmin:
-        if not is_self or body.is_superadmin is not None or body.disabled is not None:
-            raise FORBIDDEN
-
-    pw_hash = await _ahash_password(body.password) if body.password is not None else None
     revoked_ids: list[object] = []
 
     async with sessionmaker() as session:
         user = await session.scalar(select(User).where(User.username == username))
         if user is None:
+            if not admin.is_superadmin:
+                raise FORBIDDEN
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"user {username!r} not found",
             )
+        is_self = admin.user_id is not None and user.id == admin.user_id
+        if not admin.is_superadmin and not is_self:
+            raise FORBIDDEN
+        pw_hash = await _ahash_password(body.password) if body.password is not None else None
         if "email" in body.model_fields_set:
             user.email = body.email
         if "display_name" in body.model_fields_set:
@@ -292,11 +294,11 @@ async def update_user(
 async def delete_user(
     username: str = Path(pattern=USERNAME_PATTERN),
     *,
-    admin: AdminDep,
+    admin: UnpinnedAdminDep,
     sessionmaker: SessionMakerDep,
     cache: CacheDep,
 ) -> None:
-    if not admin.is_superadmin or "admin" not in admin.scopes:
+    if not admin.is_superadmin:
         raise FORBIDDEN
 
     revoked_ids: list[object] = []

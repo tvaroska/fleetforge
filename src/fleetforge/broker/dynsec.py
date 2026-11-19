@@ -64,7 +64,7 @@ DELETE_CLIENT = "deleteClient"
 # namespace* and `db/models.py` → `decommissioned_at`). Cleared with a zero-byte
 # retained payload when decommissioning a board so a future ingestor reconnect does not
 # replay stale retained messages.
-RETAINED_UP_CHANNELS = ("announce", "presence", "status")
+RETAINED_UP_CHANNELS = ("announce", "presence", "status", "hb")
 
 # Mosquitto's wording for "that username is taken". Version-fragile on purpose: if an
 # upgrade changes the phrasing, `ensure_client` raises `BrokerProvisioningError` and

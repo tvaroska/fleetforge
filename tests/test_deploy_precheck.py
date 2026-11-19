@@ -70,10 +70,21 @@ def device(**overrides: object) -> Device:
 
 
 def artifact(
-    size: int = 500, layout: str | None = LAYOUT, has_lib_marker: bool | None = None
+    size: int = 500,
+    layout: str | None = LAYOUT,
+    has_lib_marker: bool | None = None,
+    sig: str | None = "ecdsa-p256-sha256:test",
+    is_signed: bool | None = True,
+    uses_dev_key_ring: bool = False,
 ) -> ResolvedArtifact:
     return ResolvedArtifact(
-        sha256="ab" * 32, size_bytes=size, partition_layout=layout, has_lib_marker=has_lib_marker
+        sha256="ab" * 32,
+        size_bytes=size,
+        partition_layout=layout,
+        has_lib_marker=has_lib_marker,
+        sig=sig,
+        is_signed=is_signed,
+        uses_dev_key_ring=uses_dev_key_ring,
     )
 
 
@@ -526,10 +537,47 @@ class TestNoLibraryMarker:
 
     def test_both_gates_in_order_and_last(self) -> None:
         d = device(power_class="sleepy", expected_wake_interval_s=60, rollback_capable=False)
-        found = warnings(d, online=False, artifact=artifact(has_lib_marker=False))
-        assert codes(found) == ["offline", "sleepy", "rollback_incapable", "no_library_marker"]
-        assert [f.needs_override for f in found] == [False, False, True, True]
-        assert tuple(codes(found[2:])) == GATING_CODES
+        found = warnings(
+            d,
+            online=False,
+            artifact=artifact(has_lib_marker=False, sig=None, is_signed=False),
+        )
+        assert codes(found) == [
+            "offline",
+            "sleepy",
+            "rollback_incapable",
+            "no_library_marker",
+            "unsigned_artifact",
+        ]
+        assert [f.needs_override for f in found] == [False, False, True, True, True]
+
+    def test_all_four_gating_codes_order(self) -> None:
+        d = device(rollback_capable=False)
+        unsigned_w = warnings(
+            d, online=True, artifact=artifact(has_lib_marker=False, sig=None, is_signed=False)
+        )
+        dev_ring_w = warnings(
+            d,
+            online=True,
+            artifact=artifact(has_lib_marker=False, uses_dev_key_ring=True),
+        )
+        assert codes(unsigned_w) == ["rollback_incapable", "no_library_marker", "unsigned_artifact"]
+        assert codes(dev_ring_w) == ["rollback_incapable", "no_library_marker", "dev_key_ring"]
+        assert GATING_CODES == (
+            "rollback_incapable",
+            "no_library_marker",
+            "unsigned_artifact",
+            "dev_key_ring",
+        )
+        assert (
+            refusals(
+                device(capabilities=["ota", "sig"]),
+                artifact(sig=None, is_signed=False),
+                version="1.5.0",
+                catalog=BUILTIN,
+            )[0].code
+            == "signature_required_by_device"
+        )
 
     def test_unmet_gates_is_cleared_only_by_naming_the_code(self) -> None:
         a = artifact(has_lib_marker=False)

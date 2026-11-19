@@ -35,6 +35,7 @@
 #include "esp_timer.h"
 #include "ff_marker.h"
 #include "ff_net_internal.h"
+#include "ff_ota.h"
 #include "ff_safe_mode_internal.h"
 #include "ff_sec_internal.h"
 #include "ff_sleep_internal.h"
@@ -653,6 +654,9 @@ static cJSON *announce_object(const ff_cfg_t *cfg)
      * `deferred`", which ff_mqtt.c and ff_ota.c make true. The stock agent has none. */
     if (s_safe_window_registered) {
         cJSON_AddItemToArray(capabilities, cJSON_CreateString("safe_window"));
+    }
+    if (ff_ota_requires_signature()) {
+        cJSON_AddItemToArray(capabilities, cJSON_CreateString("sig"));
     }
     for (size_t i = 0; i < s_cargo_count; i++) {
         cJSON_AddItemToArray(capabilities, cJSON_CreateString(s_cargo_slots[i].type));

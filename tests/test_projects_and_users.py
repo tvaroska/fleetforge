@@ -264,7 +264,11 @@ async def test_project_isolation_for_artifacts_enrollment_devices_and_deploys(
         dep = await client.post(
             "/v1/devices/a4cf12b3de90/deploy",
             headers=headers,
-            json={"version": "1.5.0", "apply": "auto", "override": ["no_library_marker"]},
+            json={
+                "version": "1.5.0",
+                "apply": "auto",
+                "override": ["no_library_marker", "unsigned_artifact"],
+            },
         )
         assert dep.status_code == 202, dep.text
         assert dep.json()["sha256"] == SHA_B
@@ -1484,3 +1488,59 @@ async def test_user_lifecycle_edit_delete_and_self_profile(
         del_res = await client.delete("/v1/users/boris", headers=admin_headers)
         assert del_res.status_code == 204, del_res.text
         assert (await client.get("/v1/auth/me", headers=boris_headers)).status_code == 401
+
+
+async def test_pinned_admin_token_cannot_patch_its_own_user(
+    admin_app: FastAPI, engine: AsyncEngine, clean_tables: None
+) -> None:
+    """A-2: a project-pinned token with `admin` scope cannot PATCH `/v1/users/{username}`."""
+    admin_headers = _bearer(await login_admin(admin_app))
+
+    async with client_for(admin_app, base_url="https://testserver") as client:
+        r = await client.post(
+            "/v1/users",
+            headers=admin_headers,
+            json={
+                "username": "alice",
+                "email": "alice@example.com",
+                "password": "alice-initial-password-123",
+                "is_superadmin": True,
+                "project": "default",
+                "role": "owner",
+            },
+        )
+        assert r.status_code == 201, r.text
+
+        login_res = await client.post(
+            "/v1/auth/login",
+            json={"username": "alice", "password": "alice-initial-password-123"},
+        )
+        assert login_res.status_code == 200, login_res.text
+        alice_session = _bearer(login_res.cookies["ff_session"])
+
+        tok_res = await client.post(
+            "/v1/auth/tokens",
+            headers=alice_session,
+            json={"name": "alice-ci-default", "project": "default", "scopes": ["admin"]},
+        )
+        assert tok_res.status_code == 201, tok_res.text
+        pinned_headers = _bearer(tok_res.json()["token"])
+
+        async with AsyncSession(engine) as session:
+            before = await session.scalar(select(User).where(User.username == "alice"))
+            assert before is not None
+            before_hash = before.password_hash
+            before_email = before.email
+
+        patch_res = await client.patch(
+            "/v1/users/alice",
+            headers=pinned_headers,
+            json={"password": "attacker-password-999", "email": "attacker@evil.example"},
+        )
+        assert patch_res.status_code == 403, patch_res.text
+
+        async with AsyncSession(engine) as session:
+            after = await session.scalar(select(User).where(User.username == "alice"))
+            assert after is not None
+            assert after.password_hash == before_hash
+            assert after.email == before_email

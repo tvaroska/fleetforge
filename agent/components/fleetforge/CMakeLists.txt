@@ -81,3 +81,7 @@ target_compile_options(${COMPONENT_LIB} PRIVATE -Wall -Wextra -Werror -Wframe-la
 if(FF_ROLLBACK_TEST)
     target_compile_definitions(${COMPONENT_LIB} PRIVATE FF_ROLLBACK_TEST=1)
 endif()
+
+if(FF_OTA_PRODUCTION_BUILD)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE FF_OTA_PRODUCTION_BUILD=1)
+endif()

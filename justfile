@@ -311,9 +311,9 @@ lint:
 typecheck:
     uv run mypy src/ scripts/
 
-# The T1 gate: lint + types + the full suite against a real Postgres.
+# The T1 gate: lint + types + the full suite against a real Postgres (fails unless Postgres is up).
 test: lint typecheck
-    uv run pytest tests/ -x -v
+    uv run pytest tests/ -x -v -rs
 
 # The frontend's own type check + production build.
 frontend-build:
@@ -454,7 +454,7 @@ qemu_sha256 := "50813d894756c1448b8742e1d8db21e3cce0f4e85b56fe53e36760b941cb7f17
 #
 # `--output type=local` rather than a bind-mounted `docker run`: BuildKit writes the
 # result as the invoking user, and nothing root-owned lands in the repo.
-agent-build target="esp32":
+agent-build target="esp32" production="0":
     @echo "Building agent firmware for {{ target }} (this takes a few minutes)…"
     mkdir -p agent/dist/{{ target }}
     DOCKER_BUILDKIT=1 docker build \
@@ -462,9 +462,10 @@ agent-build target="esp32":
         --output type=local,dest=agent/dist/{{ target }} \
         --build-arg IDF_IMAGE={{ idf_image }} \
         --build-arg IDF_TARGET={{ target }} \
+        --build-arg FF_OTA_PRODUCTION_BUILD={{ production }} \
         --build-arg SOURCE_COMMIT=$(git rev-parse HEAD) \
         agent
-    @just agent-verify {{ target }}
+    @just agent-verify {{ target }} {{ if production == "1" { "--production" } else { "" } }}
 
 agent-build-all:
     #!/usr/bin/env bash
@@ -479,8 +480,8 @@ agent-build-all:
 # Prove a bundle is what its manifest says: every part re-hashed, the partition
 # table decoded from the BINARY (not read off the CSV), the bootloader posture
 # greped out of the RESOLVED config. This is the T2 gate for a firmware build.
-agent-verify target="esp32":
-    python3 agent/tools/verify_bundle.py agent/dist/{{ target }}
+agent-verify target="esp32" flags="":
+    python3 agent/tools/verify_bundle.py {{ flags }} agent/dist/{{ target }}
     # The table the bootloader will actually read, decoded from the BINARY by IDF's
     # own tool — not read off partitions.csv, which is the input, not the artifact.
     docker run --rm -v "$PWD/agent/dist/{{ target }}:/d:ro" --entrypoint bash {{ idf_image }} -c \

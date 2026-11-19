@@ -1137,7 +1137,7 @@ class TestOtelQueueAndRateLimiterAndStagedRollout:
             size_bytes=2048,
             partition_layout="ab-4m-v1",
             has_lib_marker=True,
-            sig=None,
+            sig="ecdsa-p256-sha256:AA==",
         )
         session.execute = AsyncMock(return_value=SimpleNamespace(first=lambda: art_row))
 
@@ -1309,7 +1309,7 @@ class TestOtelQueueAndRateLimiterAndStagedRollout:
             size_bytes=2048,
             partition_layout="ab-4m-v1",
             has_lib_marker=True,
-            sig=None,
+            sig="ecdsa-p256-sha256:AA==",
         )
         session.execute = AsyncMock(return_value=SimpleNamespace(first=lambda: art_row))
 
@@ -1719,7 +1719,7 @@ class TestOtelQueueAndRateLimiterAndStagedRollout:
             size_bytes=2048,
             partition_layout="ab-4m-v1",
             has_lib_marker=True,
-            sig=None,
+            sig="ecdsa-p256-sha256:AA==",
             artifact_type="app",
         )
         session.execute = AsyncMock(return_value=SimpleNamespace(first=lambda: art_row))
@@ -1979,6 +1979,7 @@ class TestCuj3PitTetheredDockAndVenueOffline:
             LinkProfile,
             StageRunner,
         )
+        from tests.fixtures.dev_signing_keys import DEV_PRIMARY_PRIVATE_KEY_PEM
 
         # 1. Chloe's FLUX-10413-Hub node enters Venue Offline Mode at the competition venue
         fake_now = [1000.0]
@@ -2012,7 +2013,7 @@ class TestCuj3PitTetheredDockAndVenueOffline:
         # 3. Pit dock stage while safe_window="hold" (active BLE sync) parks in awaiting_safe_window
         lut_bytes = b"BAT01,12.8V\nBAT02,12.6V\n"
         lut_sha = hashlib.sha256(lut_bytes).hexdigest()
-        lut_sig = sign_digest(lut_sha)
+        lut_sig = sign_digest(lut_sha, DEV_PRIMARY_PRIVATE_KEY_PEM)
         cargo_steps = runner.dock_stage(
             "cmd-dock-lut-1",
             lut_bytes,
@@ -2037,7 +2038,7 @@ class TestCuj3PitTetheredDockAndVenueOffline:
         # Unsigned or tampered app binary over USB-C dock is rejected before flashing
         good_bin = b"\xe9\x00" + b"FFOTALIB:2026.2.2-qual12" * 16
         good_sha = hashlib.sha256(good_bin).hexdigest()
-        good_sig = sign_digest(good_sha)
+        good_sig = sign_digest(good_sha, DEV_PRIMARY_PRIVATE_KEY_PEM)
 
         unsigned_steps = runner.dock_stage(
             "cmd-dock-unsigned",
@@ -2092,7 +2093,7 @@ class TestCuj3PitTetheredDockAndVenueOffline:
         # 5. A broken build whose CAN/LoRa self-test fails rolls back offline to 2026.2.2-qual12
         bad_bin = b"\xe9\x00" + b"FFOTALIB:2026.2.3-badcan" * 16
         bad_sha = hashlib.sha256(bad_bin).hexdigest()
-        bad_sig = sign_digest(bad_sha)
+        bad_sig = sign_digest(bad_sha, DEV_PRIMARY_PRIVATE_KEY_PEM)
         runner.dock_stage(
             "cmd-dock-app-bad",
             bad_bin,
@@ -2410,7 +2411,7 @@ class TestTrack1InfrastructureAndSecurityHardening:
             size_bytes=2048,
             partition_layout="ab-4m-v1",
             has_lib_marker=True,
-            sig=None,
+            sig="ecdsa-p256-sha256:AA==",
             artifact_type="app",
         )
         session.execute = AsyncMock(return_value=SimpleNamespace(first=lambda: art_row))

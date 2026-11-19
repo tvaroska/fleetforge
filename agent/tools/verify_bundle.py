@@ -66,11 +66,14 @@ FORBIDDEN_RESOLVED = re.compile(
     r"^(" + "|".join(FORBIDDEN_RESOLVED_OPTIONS) + r")=y$", re.MULTILINE
 )
 
-# Default development public key fragment from ff_ota.c (R6-SEC-1). Production bundles
-# verified with `--production` must replace the default dev key ring with real release keys.
-DEFAULT_DEV_SIGNING_PUBKEY_MARKER = (
-    b"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEbHg1tVC28a9y8SbZY0jis7OKKWxr"
+# Default development public key fragments from ff_ota.c (R6-SEC-1 / R6-SEC-2). Production
+# bundles verified with `--production` must replace BOTH slots of the default dev key ring
+# with real release keys (`D-1 / A-8`).
+DEFAULT_DEV_SIGNING_PUBKEY_MARKERS: tuple[bytes, bytes] = (
+    b"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEbHg1tVC28a9y8SbZY0jis7OKKWxr",
+    b"MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEwJct9NbOiOIbnB/ToYTvq02EBrzs",
 )
+DEFAULT_DEV_SIGNING_PUBKEY_MARKER = DEFAULT_DEV_SIGNING_PUBKEY_MARKERS[0]
 
 
 class BundleError(RuntimeError):
@@ -152,12 +155,15 @@ def verify(bundle_dir: Path, *, production: bool = False) -> dict[str, Any]:
         raise BundleError(f"the BUILT config enables an irreversible eFuse option: {burned}")
 
     app_bytes = (bundle_dir / app["path"]).read_bytes()
-    if DEFAULT_DEV_SIGNING_PUBKEY_MARKER in app_bytes:
+    found_dev_slots = [
+        idx for idx, marker in enumerate(DEFAULT_DEV_SIGNING_PUBKEY_MARKERS) if marker in app_bytes
+    ]
+    if found_dev_slots:
         if production:
             raise BundleError(
-                "app.bin embeds the default development OTA signing public key; "
-                "build production bundles with FF_OTA_PRODUCTION_BUILD=1 and custom "
-                "FF_OTA_SIGNING_PUBKEY_PRIMARY_PEM"
+                f"app.bin embeds default development OTA signing public key(s) in slot(s) "
+                f"{found_dev_slots}; build production bundles with FF_OTA_PRODUCTION_BUILD=1 and "
+                "custom FF_OTA_SIGNING_PUBKEY_PRIMARY_PEM and FF_OTA_SIGNING_PUBKEY_SECONDARY_PEM"
             )
         print("  signing key:  default dev P-256 ring (pass --production to require release keys)")
 

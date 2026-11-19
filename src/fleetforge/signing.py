@@ -52,31 +52,16 @@ MAX_SIG_LEN = 159
 _SIG_RE = re.compile(r"\Aecdsa-p256-sha256:[A-Za-z0-9+/]{80,120}={0,2}\Z")
 _SHA256_RE = re.compile(r"\A[0-9a-f]{64}\Z")
 
-# Built-in development/test 2-key rotation ring. Shared with `ff_ota.c` and
-# `simulator/device.py` so development and E2E runs verify out of the box, while production
-# deployments supply their own `ARTIFACT_SIGNING_KEY` and `ARTIFACT_SIGNING_PUBLIC_KEYS`
-# (and compile-time `FF_OTA_SIGNING_PUBKEY_PRIMARY_PEM` / `FF_OTA_SIGNING_PUBKEY_SECONDARY_PEM`).
-DEFAULT_PRIMARY_PRIVATE_KEY_PEM = (
-    "-----BEGIN PRIVATE KEY-----\n"
-    "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgYXch2r9SqzagXXyK\n"
-    "3samj7Q09s4gZK77KcYQ/vz1qouhRANCAARseDW1ULbxr3LxJtljSOKzs4opbGtf\n"
-    "b5LmDQ2js0zJXycj69QcdDww1Cc1INI8RJQBP2baIvI0L+czbpG/FhXV\n"
-    "-----END PRIVATE KEY-----\n"
-)
-
+# Built-in development/test 2-key PUBLIC rotation ring. Private signing keys never live in
+# `src/` (`D-1 / A-8`; test private keys live in `tests/fixtures/dev_signing_keys.py`).
+# Production deployments supply their own `ARTIFACT_SIGNING_KEY` and
+# `ARTIFACT_SIGNING_PUBLIC_KEYS` (and compile-time `FF_OTA_SIGNING_PUBKEY_PRIMARY_PEM` /
+# `FF_OTA_SIGNING_PUBKEY_SECONDARY_PEM`).
 DEFAULT_PRIMARY_PUBLIC_KEY_PEM = (
     "-----BEGIN PUBLIC KEY-----\n"
     "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEbHg1tVC28a9y8SbZY0jis7OKKWxr\n"
     "X2+S5g0No7NMyV8nI+vUHHQ8MNQnNSDSPESUAT9m2iLyNC/nM26RvxYV1Q==\n"
     "-----END PUBLIC KEY-----\n"
-)
-
-DEFAULT_SECONDARY_PRIVATE_KEY_PEM = (
-    "-----BEGIN PRIVATE KEY-----\n"
-    "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgDxHmzFRHCcsZT1Jz\n"
-    "fAbiiWc2Eck90QgEbcBy5d2iNhyhRANCAATAly301s6I4hucH9OhhO+rTYQGvOxQ\n"
-    "ARPGwUABYcVaHF+kvfHQ5wgfrJb2roSFgDerq80YgTALso8lBd3U40Sp\n"
-    "-----END PRIVATE KEY-----\n"
 )
 
 DEFAULT_SECONDARY_PUBLIC_KEY_PEM = (
@@ -218,7 +203,7 @@ def is_valid_sig_format(sig: str) -> bool:
     return 8 <= len(der) <= 80 and der[0] == 0x30
 
 
-def sign_digest(sha256_hex: str, private_key_pem: str = DEFAULT_PRIMARY_PRIVATE_KEY_PEM) -> str:
+def sign_digest(sha256_hex: str, private_key_pem: str) -> str:
     """Sign a 64-char lowercase hex SHA-256 digest and return `ecdsa-p256-sha256:<base64>`."""
     if not _SHA256_RE.match(sha256_hex):
         raise ValueError("sha256_hex must be 64 lowercase hex characters")
@@ -228,7 +213,7 @@ def sign_digest(sha256_hex: str, private_key_pem: str = DEFAULT_PRIMARY_PRIVATE_
     return f"{SIG_PREFIX}{base64.b64encode(der_sig).decode('ascii')}"
 
 
-def sign_bytes(data: bytes, private_key_pem: str = DEFAULT_PRIMARY_PRIVATE_KEY_PEM) -> str:
+def sign_bytes(data: bytes, private_key_pem: str) -> str:
     """Hash `data` with SHA-256 and sign the digest."""
     return sign_digest(hashlib.sha256(data).hexdigest(), private_key_pem)
 
@@ -295,6 +280,16 @@ class SigningKeyRing:
     def can_sign(self) -> bool:
         return self.private_key_pem is not None
 
+    @property
+    def uses_dev_keys(self) -> bool:
+        """True when any key in `public_keys_pem` is one of the committed dev public keys."""
+        dev_set = frozenset(DEFAULT_PUBLIC_KEY_RING)
+        return self.uses_default_ring or any(pub in dev_set for pub in self.public_keys_pem)
+
+    def signed_by_dev_key(self, sha256_hex: str, sig: str) -> bool:
+        """True when `sig` verifies against one of the committed development public keys."""
+        return verify_digest(sha256_hex, sig, DEFAULT_PUBLIC_KEY_RING)
+
     def sign_digest(self, sha256_hex: str) -> str:
         if self.private_key_pem is None:
             raise RuntimeError("no active private signing key configured")
@@ -324,8 +319,8 @@ def _cli(argv: Sequence[str] | None = None) -> int:
     p_sign.add_argument(
         "--key",
         type=Path,
-        default=None,
-        help="Path to PEM private key (defaults to built-in primary dev key)",
+        required=True,
+        help="Path to ECDSA P-256 PEM private key",
     )
 
     p_verify = sub.add_parser("verify", help="Verify an ecdsa-p256-sha256 signature")
@@ -362,11 +357,7 @@ def _cli(argv: Sequence[str] | None = None) -> int:
         digest_hex = hashlib.sha256(Path(target_str).read_bytes()).hexdigest()
 
     if args.cmd == "sign":
-        priv_pem = (
-            args.key.read_text(encoding="utf-8")
-            if args.key is not None
-            else DEFAULT_PRIMARY_PRIVATE_KEY_PEM
-        )
+        priv_pem = args.key.read_text(encoding="utf-8")
         sys.stdout.write(sign_digest(digest_hex, priv_pem) + "\n")
         return 0
 

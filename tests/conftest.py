@@ -148,11 +148,14 @@ async def engine() -> AsyncIterator[AsyncEngine]:
         SQLAlchemyError,
         OSError,
     ) as exc:  # pragma: no cover - environment problem, not a test failure
-        pytest.skip(
+        msg = (
             "Cannot reach PostgreSQL at "
             f"{database_url_for('postgres')}: {exc} "
-            "(skipping DB-backed fixture; start dev database with `just db-up`)"
+            "(start dev database with `just db-up`, or set FF_ALLOW_DB_SKIP=1 to skip)"
         )
+        if os.environ.get("FF_ALLOW_DB_SKIP") == "1":
+            pytest.skip(msg)
+        pytest.fail(msg)
 
     await run_alembic(test_url)
 

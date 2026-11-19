@@ -1,72 +1,8 @@
 """`POST /v1/devices/{device_id}/deploy` — stage a version onto one board. R1-be-2.
 
-`spec/flows.md` Flow 2 in one endpoint: resolve the label against the *device's* chip,
-mint a short-lived URL for the bytes, record the intent, publish one `stage` command.
-Everything after that belongs to the device.
-
-**The server orchestrates; it never knows how or when.** There is no scheduler here, no
-retry loop, no `BackgroundTasks`, no timeout on `awaiting_safe_window` — a vehicle in
-motion sits there for a week and the record stays honest (`design/architecture.md`
-principle 5; `deploys.py` spells out the invariant). The only server-authored terminal
-state is a publish that failed, and `tests/test_api_deploy.py` has a source tripwire
-that keeps it that way.
-
-**Write order: mint → INSERT `requested` + commit → publish.** Record the intent, then
-act — the same posture as enrolment's "commit, then provision". A crash between the two
-leaves an honest "requested, never observed" transaction; the reverse would leave a board
-downloading firmware nothing recorded.
-
-**The URL in the command is ours now, and it is minted locally (R1-be-3).** It points at
-`GET /v1/artifact/{sha256}/bin?exp=…&sig=…` on this server — the shape
-`spec/device-protocol.md` already fixed — and carries an HMAC from
-`fleetforge/artifact_urls.py`, no object store involved. Signing an *upstream* store URL
-(an IAM `signBlob` network call on GCS) moved to the download path, where it is cached
-per artifact instead of paid per deploy.
-
-*Consequence, deliberate:* a deploy no longer fails fast when the object store is
-unreachable. Nothing in the four-verb seam can check existence cheaply (`get` downloads
-the whole artifact), the `artifacts` row is the evidence the bytes were stored, and the
-download endpoint answers a store outage honestly and retriably. A deploy with no URL
-*configuration* is still refused — see the 503 below — because answering 202 with a URL
-no board can redeem is the same lie `NullCommandPublisher` refuses to tell.
-
-**The minted URL is a bearer credential.** It exists in exactly one place — the command
-payload on the wire — and is never persisted, never logged, never in the response body.
-`_artifact_url()` is the single mint site.
-
-**`detail` is lifted verbatim into the dashboard banner** (`api.ts::detailOf`), so every
-rejection below names the number or the value that failed and none of them contains a
-bucket, a key, a URL or a traceback.
-
-Validation order is deliberate: cheap and caller-fixable first (bad version), then
-existence (device, artifact), then compatibility (layout, size, capability). A board
-that cannot take this image must be refused before anything is minted or recorded.
-
-**The pre-check (R2b-be-2)** is `POST /{device_id}/deploy/precheck`: the same body, the
-same reasons, answered 200 with all of them at once and nothing sent. Every sentence lives
-in `fleetforge/deploy_precheck.py`, which this endpoint turns into its first HTTP error.
-The pre-check has no side effects, and its plain warnings (offline, sleepy) are never
-enforced.
-
-**The gate (R2b-be-7).** A gating warning (`needs_override`: `rollback_incapable`, and from
-R3-be-1 `no_library_marker`) is the one warning `/deploy` enforces: after the refusals (a refusal
-always wins, and `override` never clears one), `_accept` answers 409 with the warning's
-own sentence unless the body names its code in `override`. It runs before the reuse
-lookup, the mint and the INSERT, so a gated deploy writes no row and publishes nothing.
-The pre-check ignores `override` and always reports the warning, so the card can render
-the tick. `no_library_marker` reads the verdict `POST /v1/artifact` stored at upload
-(`artifacts.has_lib_marker`), never the bytes; a NULL verdict (uploaded before R3-be-1)
-never warns.
-
-**The supported layouts are the `partition_profiles` table (R3-be-2).** Both routes load a
-`LayoutCatalog` in their own session, right after resolving the device and the artifact,
-and hand it to `deploy_precheck.refusals`, which stays pure. The pre-check also reports
-`device_partition_profile`, the board's effective layout (`catalog.resolve`), beside the
-layout it announces: a board on an adopted map still announces `unknown`.
-
-**Who sent it (R2b-be-4)** is recorded on the `requested` row (`detail.sent_by`): the
-subject, the token id and a snapshot of the token's label. The sender is whoever opened
-the transaction; a reuse writes no row, so the original sender stands.
+`spec/flows.md` Flow 2: resolve the label against the device's chip, run pure pre-checks
+(`deploy_precheck.py`), mint a short-lived local HMAC URL (`_artifact_url` is the sole
+`mint_artifact_url` call site), record `requested`, commit, and publish `stage`.
 """
 
 import fnmatch
@@ -132,6 +68,7 @@ from fleetforge.deploys import (
 )
 from fleetforge.partition_profiles import LayoutCatalog, load_layout_catalog
 from fleetforge.presence import is_online
+from fleetforge.signing import SigningKeyRing
 
 logger = logging.getLogger(__name__)
 
@@ -322,7 +259,7 @@ async def deploy_device(
     _require_valid_version(body.version)
 
     async with sessionmaker() as session:
-        device, found_artifact = await _resolve(session, device_id, body.version)
+        device, found_artifact = await _resolve(session, device_id, body.version, settings=settings)
         await check_project_access(
             session,
             admin,
@@ -445,6 +382,7 @@ async def _resolve_artifact_for_target(
     project_id: uuid.UUID,
     target: str,
     version: str,
+    settings: Settings | None = None,
 ) -> ResolvedArtifact | None:
     """Resolve the artifact behind `(project_id, target, version)`, if any."""
     row = (
@@ -459,6 +397,16 @@ async def _resolve_artifact_for_target(
     ).first()
     if row is None:
         return None
+    uses_dev = False
+    if row.sig is not None:
+        try:
+            ring = SigningKeyRing.from_config(
+                private_key=settings.artifact_signing_key if settings else None,
+                public_keys=settings.artifact_signing_public_keys if settings else None,
+            )
+            uses_dev = ring.uses_dev_keys and ring.signed_by_dev_key(row.sha256, row.sig)
+        except ValueError:
+            uses_dev = False
     return ResolvedArtifact(
         sha256=row.sha256,
         size_bytes=row.size_bytes,
@@ -466,11 +414,17 @@ async def _resolve_artifact_for_target(
         has_lib_marker=row.has_lib_marker,
         sig=row.sig,
         artifact_type=getattr(row, "artifact_type", "app"),
+        is_signed=(row.sig is not None),
+        uses_dev_key_ring=uses_dev,
     )
 
 
 async def _resolve(
-    session: AsyncSession, device_id: str, version: str
+    session: AsyncSession,
+    device_id: str,
+    version: str,
+    *,
+    settings: Settings | None = None,
 ) -> tuple[Device, ResolvedArtifact | None]:
     """The device (404 if gone) and the artifact its chip has under `version`, if any."""
     device = await session.get(Device, device_id)
@@ -484,6 +438,7 @@ async def _resolve(
         project_id=device.project_id,
         target=device.platform_type,
         version=version,
+        settings=settings,
     )
 
 
@@ -545,7 +500,7 @@ async def precheck_deploy(
     _require_valid_version(body.version)
 
     async with sessionmaker() as session:
-        device, artifact = await _resolve(session, device_id, body.version)
+        device, artifact = await _resolve(session, device_id, body.version, settings=settings)
         await check_project_access(
             session,
             admin,
@@ -796,6 +751,7 @@ async def deploy_version_to_project_devices(
                 project_id=project_id,
                 target=device.platform_type,
                 version=version,
+                settings=settings,
             )
         found_artifact = artifacts_by_target[device.platform_type]
         found_refusals: list[Finding] = [

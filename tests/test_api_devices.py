@@ -1562,7 +1562,15 @@ async def test_the_log_tail_is_newest_first_limited_and_unexpired(
         "line 0",
     ]
     assert body["lines"][0]["dropped"] == 4 and body["lines"][-1]["dropped"] == 3
-    assert set(body["lines"][0]) == {"id", "logged_at", "received_at", "level", "text", "dropped"}
+    assert set(body["lines"][0]) == {
+        "id",
+        "logged_at",
+        "received_at",
+        "level",
+        "text",
+        "dropped",
+        "context",
+    }
 
     limited = await get_sub(admin_app, f"/v1/devices/{DEVICE_ID}/logs?limit=2", token)
     assert [line["text"] for line in limited.json()["lines"]] == [None, "line 4"]

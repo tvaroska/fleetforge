@@ -44,28 +44,69 @@ steps:
         printf "Resolved commit=%s built_at=%s\n" "$${SHA}" "$${BUILT_AT}"
 
   # ------------------------------------------------------------------------- #
-  # 2. Python Ruff Lint, Format, Mypy Typecheck & Firmware/Unit Pytest (t=0)  #
+  # 2. Start Ephemeral PostgreSQL 17 & MinIO Services on Cloud Build Network  #
+  # ------------------------------------------------------------------------- #
+  - id: start-test-services
+    name: gcr.io/cloud-builders/docker
+    waitFor: ["-"]
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        docker run -d --network=cloudbuild --name=ci-postgres \
+          -e POSTGRES_USER=fleetforge \
+          -e POSTGRES_PASSWORD=fleetforge \
+          -e POSTGRES_DB=fleetforge \
+          postgres:17-alpine -c fsync=off
+        docker run -d --network=cloudbuild --name=ci-minio \
+          -e MINIO_ROOT_USER=fleetforge \
+          -e MINIO_ROOT_PASSWORD=fleetforge-dev-only \
+          minio/minio:RELEASE.2025-02-18T16-25-55Z server /data
+        for i in $$(seq 1 30); do
+          if docker exec ci-postgres pg_isready -U fleetforge -d fleetforge >/dev/null 2>&1; then
+            break
+          fi
+          sleep 1
+        done
+        docker exec ci-postgres pg_isready -U fleetforge -d fleetforge
+
+  # ------------------------------------------------------------------------- #
+  # 3. Python Ruff Lint, Format, Mypy Typecheck & Full DB/Unit Pytest         #
+  #    (Note: release firmware bundles require FF_OTA_PRODUCTION_BUILD=1)     #
   # ------------------------------------------------------------------------- #
   - id: python-lint-typecheck-and-unit-tests
     name: ghcr.io/astral-sh/uv:0.9.1-python3.12-bookworm
-    waitFor: ["-"]
+    waitFor:
+      - start-test-services
     entrypoint: bash
     env:
       - UV_COMPILE_BYTECODE=1
       - UV_LINK_MODE=copy
       - UV_PROJECT_ENVIRONMENT=/workspace/.venv
       - PYTHONPATH=/workspace/src:/workspace
+      - TEST_DATABASE_URL=postgresql+asyncpg://fleetforge:fleetforge@ci-postgres:5432/fleetforge_test
+      - S3_ENDPOINT_URL=http://ci-minio:9000
+      - S3_PUBLIC_ENDPOINT_URL=http://ci-minio:9000
+      - S3_ACCESS_KEY=fleetforge
+      - S3_SECRET_KEY=fleetforge-dev-only
+      - S3_BUCKET=fleetforge
     args:
       - -c
       - |
         set -euo pipefail
         uv sync --frozen --no-install-project
+        /workspace/.venv/bin/python -c "import boto3; boto3.client('s3', endpoint_url='http://ci-minio:9000', aws_access_key_id='fleetforge', aws_secret_access_key='fleetforge-dev-only', region_name='us-east-1').create_bucket(Bucket='fleetforge')"
         /workspace/.venv/bin/ruff check .
         /workspace/.venv/bin/ruff format --check .
         /workspace/.venv/bin/mypy src/
-        /workspace/.venv/bin/pytest \
-          -k "not (TestCiCdDatabaseAndApi or TestTrack1 and database)" \
-          -q
+        /workspace/.venv/bin/pytest -q -rs | tee /tmp/pytest-gate.out
+        SKIPPED="$$(grep -Eo '[0-9]+ skipped' /tmp/pytest-gate.out | tail -1 | awk '{print $$1}' || echo 0)"
+        SKIPPED="$${SKIPPED:-0}"
+        if [[ "$${SKIPPED}" -gt 12 ]]; then
+          echo "ERROR: pytest skipped $${SKIPPED} tests (database-backed tests must run in CI)" >&2
+          exit 1
+        fi
 
   # ------------------------------------------------------------------------- #
   # 3. Frontend TypeScript Check, Vitest Suite & Production Bundle Build (t=0)#

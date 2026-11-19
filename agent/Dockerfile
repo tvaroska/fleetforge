@@ -43,6 +43,7 @@ ARG FF_ROLLBACK_TEST=0
 # CMakeLists.txt. It renames itself to <version>-bltest / -hangtest and, like -rbtest, is
 # an ARTIFACT only: `just agent-publish` refuses it.
 ARG FF_FAULT_TEST=
+ARG FF_OTA_PRODUCTION_BUILD=0
 
 WORKDIR /project
 COPY . /project
@@ -54,6 +55,7 @@ RUN . $IDF_PATH/export.sh \
       -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.${IDF_TARGET}" \
       -DFF_ROLLBACK_TEST=${FF_ROLLBACK_TEST} \
       -DFF_FAULT_TEST=${FF_FAULT_TEST} \
+      -DFF_OTA_PRODUCTION_BUILD=${FF_OTA_PRODUCTION_BUILD} \
       build \
  && python3 tools/make_manifest.py \
       --build-dir build --out /out --partitions partitions.csv \

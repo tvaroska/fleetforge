@@ -39,6 +39,7 @@ from fleetforge.auth.tokens import ADMIN_TOKEN_PREFIX, parse_token
 from fleetforge.broker import CommandPublishError
 from fleetforge.clock import now_utc
 from fleetforge.db.models import TERMINAL_DEPLOY_STATES, DeployEvent, DeployState, Device
+from fleetforge.signing import generate_keypair, sign_digest
 from fleetforge.storage.blobs import blob_key
 from fleetforge.storage.objectstore import ObjectStoreError
 from tests.conftest import (
@@ -57,6 +58,11 @@ IMAGE = b"\xe9\x06\x02\x20" + b"firmware bytes, opaque to the server" * 37
 OTHER_IMAGE = IMAGE + b"!"
 SHA256 = hashlib.sha256(IMAGE).hexdigest()
 OTHER_SHA256 = hashlib.sha256(OTHER_IMAGE).hexdigest()
+_RELEASE_PRIV_1, _RELEASE_PUB_1 = generate_keypair()
+_RELEASE_PRIV_2, _RELEASE_PUB_2 = generate_keypair()
+TEST_RELEASE_PUBLIC_RING = f"{_RELEASE_PUB_1};{_RELEASE_PUB_2}"
+TEST_SIG = sign_digest(SHA256, _RELEASE_PRIV_1)
+OTHER_TEST_SIG = sign_digest(OTHER_SHA256, _RELEASE_PRIV_1)
 VERSION = "1.5.0"
 TARGET = "esp32"
 LAYOUT = "ab-4m-v1"
@@ -78,6 +84,11 @@ def store(admin_app: FastAPI) -> Iterator[MemoryObjectStore]:
     store = MemoryObjectStore()
     store.objects[blob_key(SHA256)] = IMAGE
     store.objects[blob_key(OTHER_SHA256)] = OTHER_IMAGE
+    release_settings = settings_for_tests(
+        artifact_signing_key=_RELEASE_PRIV_1,
+        artifact_signing_public_keys=TEST_RELEASE_PUBLIC_RING,
+    )
+    admin_app.dependency_overrides[get_settings] = lambda: release_settings
     admin_app.dependency_overrides[get_object_store] = lambda: store
     yield store
     admin_app.dependency_overrides.pop(get_object_store, None)
@@ -132,6 +143,9 @@ async def add_device(session: AsyncSession, device_id: str = DEVICE_ID, **overri
     return device
 
 
+_DEFAULT_SIG = object()
+
+
 async def add_artifact(
     session: AsyncSession,
     *,
@@ -141,16 +155,29 @@ async def add_artifact(
     version: str = VERSION,
     layout: str | None = LAYOUT,
     has_lib_marker: bool | None = None,
+    sig: str | None | object = _DEFAULT_SIG,
 ) -> None:
     """Insert the artifact and its label directly — `test_api_artifact_upload.py` owns POST.
 
     `has_lib_marker` defaults to NULL, an artifact uploaded before R3-be-1: never warns.
+    `sig` defaults to a release-ring ECDSA P-256 signature for `sha256`; pass `sig=None`
+    explicitly to exercise `unsigned_artifact` / `signature_required_by_device`.
     """
+    resolved_sig: str | None
+    if sig is _DEFAULT_SIG:
+        if sha256 == SHA256:
+            resolved_sig = TEST_SIG
+        elif sha256 == OTHER_SHA256:
+            resolved_sig = OTHER_TEST_SIG
+        else:
+            resolved_sig = sign_digest(sha256, _RELEASE_PRIV_1)
+    else:
+        resolved_sig = sig  # type: ignore[assignment]
     await session.execute(
         text(
             "INSERT INTO artifacts (sha256, size_bytes, kind, target, partition_layout, "
-            "has_lib_marker) "
-            "VALUES (:sha256, :size_bytes, 'user_firmware', :target, :layout, :marker) "
+            "has_lib_marker, sig) "
+            "VALUES (:sha256, :size_bytes, 'user_firmware', :target, :layout, :marker, :sig) "
             "ON CONFLICT (sha256) DO NOTHING"
         ),
         {
@@ -159,6 +186,7 @@ async def add_artifact(
             "target": target,
             "layout": layout,
             "marker": has_lib_marker,
+            "sig": resolved_sig,
         },
     )
     await session.execute(
@@ -268,6 +296,7 @@ class TestTheCommandOnTheWire:
                 "sha256": SHA256,
                 "size": len(IMAGE),
                 "version": VERSION,
+                "sig": TEST_SIG,
             },
             "apply": "auto",
             "confirm_timeout_s": CONFIRM_TIMEOUT_S,
@@ -1496,6 +1525,39 @@ class TestTheLibraryMarkerGate:
         assert half.status_code == 409
         assert half.json()["detail"] == warned[1]["message"]
         assert both.status_code == 202
+
+    async def test_unsigned_artifact_needs_an_override(
+        self,
+        admin_app: FastAPI,
+        db: AsyncSession,
+        store: MemoryObjectStore,
+        publisher: FakeCommandPublisher,
+    ) -> None:
+        """D-1 / A-8: an unsigned image triggers `unsigned_artifact` (409 unless overridden),
+        and is hard-refused (`signature_required_by_device`) on a board announcing `sig`."""
+        await add_device(db)
+        await add_artifact(db, sig=None)
+        token = await login_admin(admin_app)
+
+        checked = (await precheck(admin_app, token)).json()
+        assert [w["code"] for w in checked["warnings"]] == ["unsigned_artifact"]
+        assert checked["warnings"][0]["needs_override"] is True
+
+        blocked = await deploy(admin_app, token)
+        assert blocked.status_code == 409
+        assert blocked.json()["detail"] == checked["warnings"][0]["message"]
+        assert publisher.published == []
+
+        allowed = await deploy(admin_app, token, override=["unsigned_artifact"])
+        assert allowed.status_code == 202
+
+        # On a board that announces `"sig"`, an unsigned image is a non-overridable refusal.
+        await add_device(db, device_id=OTHER_DEVICE_ID, capabilities=["ota", "sig"])
+        enforced = await deploy(
+            admin_app, token, device_id=OTHER_DEVICE_ID, override=["unsigned_artifact"]
+        )
+        assert enforced.status_code == 409
+        assert "announces sig" in enforced.json()["detail"]
 
 
 class TestPrecheckSendsNothing:

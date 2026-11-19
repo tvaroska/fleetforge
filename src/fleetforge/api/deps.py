@@ -442,6 +442,16 @@ async def require_admin(
 AdminDep = Annotated[AuthContext, Depends(require_admin)]
 
 
+def require_unpinned_admin(admin: AdminDep) -> AuthContext:
+    """Require `admin` scope on an unpinned credential (rejects project-pinned tokens)."""
+    if "admin" not in admin.scopes or admin.project_id is not None:
+        raise FORBIDDEN
+    return admin
+
+
+UnpinnedAdminDep = Annotated[AuthContext, Depends(require_unpinned_admin)]
+
+
 async def check_project_access(
     session: AsyncSession,
     admin: AuthContext,

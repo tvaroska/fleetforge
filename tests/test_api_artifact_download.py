@@ -374,3 +374,70 @@ class TestTheSigningBudget:
         store.fail_with = None
         recovered = await get(app, path_and_query(url_for()))
         assert recovered.status_code == 307
+
+
+async def test_device_request_sequence_is_accepted_by_the_store(
+    app: FastAPI, store: MemoryObjectStore
+) -> None:
+    """D-2: a GET-presigned S3/GCS URL rejects HEAD with 403, while the firmware's GET +
+    ranged-GET sequence (`resolve_artifact_url` -> initial GET -> mid-stream resume GET with
+    `Range: bytes=<offset>-`) succeeds end-to-end."""
+    payload = b"\xe9\x06\x02\x20" + b"resumable-ota-segment-" * 4096
+    store.objects[KEY] = payload
+    observed_methods: list[tuple[str, str | None]] = []
+
+    def _store_handler(request: httpx.Request) -> httpx.Response:
+        observed_methods.append((request.method, request.headers.get("range")))
+        if request.url.params.get("X-Method") != "GET" or request.method != "GET":
+            # Mirrors AWS SigV4 (`get_object`) and GCS V4 (`method="GET"`): HEAD -> 403.
+            return httpx.Response(403, text="SignatureDoesNotMatch")
+        range_hdr = request.headers.get("range")
+        if range_hdr is None:
+            return httpx.Response(
+                200,
+                content=payload,
+                headers={"Content-Length": str(len(payload)), "Accept-Ranges": "bytes"},
+            )
+        assert range_hdr.startswith("bytes=")
+        spec = range_hdr.removeprefix("bytes=")
+        start_s, _, end_s = spec.partition("-")
+        start = int(start_s)
+        end = int(end_s) if end_s else len(payload) - 1
+        end = min(end, len(payload) - 1)
+        chunk = payload[start : end + 1]
+        return httpx.Response(
+            206,
+            content=chunk,
+            headers={
+                "Content-Length": str(len(chunk)),
+                "Content-Range": f"bytes {start}-{end}/{len(payload)}",
+            },
+        )
+
+    async def _method_bound_signed_url(key: str, *, ttl_s: int | None = None) -> str:
+        store.signed_urls.append((key, ttl_s))
+        return f"https://s3-presigned.test/{key}?X-Method=GET&X-Expires={ttl_s}"
+
+    store.signed_url = _method_bound_signed_url  # type: ignore[method-assign]
+    store_client = httpx.MockTransport(_store_handler)
+
+    # Hop 1 (`resolve_artifact_url`): GET to FleetForge `/v1/artifact/{sha}/bin` -> 307 Location.
+    hop1 = await get(app, path_and_query(url_for()))
+    assert hop1.status_code == 307
+    resolved_url = hop1.headers["location"]
+
+    async with httpx.AsyncClient(transport=store_client) as http_store:
+        # Confirm D-2 root cause: a HEAD pre-request (what `.partial_http_download = true` did) 403s.
+        head_probe = await http_store.head(resolved_url)
+        assert head_probe.status_code == 403
+
+        # Firmware sequence: initial GET (interrupted after 30,000 bytes), then resumed ranged GET.
+        initial = await http_store.get(resolved_url)
+        assert initial.status_code == 200
+        first_half = initial.content[:30_000]
+
+        resumed = await http_store.get(resolved_url, headers={"Range": f"bytes={len(first_half)}-"})
+        assert resumed.status_code == 206
+        assert first_half + resumed.content == payload
+
+    assert observed_methods[1:] == [("GET", None), ("GET", "bytes=30000-")]

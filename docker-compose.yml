@@ -335,6 +335,8 @@ services:
       # on every install, and a stack that starts unconfigured just answers 503s nobody
       # diagnoses. Mint one with `just artifact-secret`.
       ARTIFACT_URL_SECRET: ${ARTIFACT_URL_SECRET:?set ARTIFACT_URL_SECRET in .env — see `just artifact-secret`}
+      ARTIFACT_SIGNING_KEY: ${ARTIFACT_SIGNING_KEY:-}
+      ARTIFACT_SIGNING_PUBLIC_KEYS: ${ARTIFACT_SIGNING_PUBLIC_KEYS:-}
       # The origin a DEVICE must be able to reach, which is what the link in a `stage`
       # command is built on — the same trap as S3_PUBLIC_ENDPOINT_URL below: a board
       # cannot resolve `api:8000`. Defaults to the host's published port, which is right

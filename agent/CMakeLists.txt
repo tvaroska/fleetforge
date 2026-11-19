@@ -71,5 +71,9 @@ if(DEFINED FF_FAULT_TEST AND NOT FF_FAULT_TEST STREQUAL "")
         "a serially flashed fault image has no rollback armed.")
 endif()
 
+if(FF_OTA_PRODUCTION_BUILD)
+    message(STATUS "FF_OTA_PRODUCTION_BUILD is ON: enforcing non-dev ECDSA P-256 signing ring")
+endif()
+
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(fleetforge-agent)

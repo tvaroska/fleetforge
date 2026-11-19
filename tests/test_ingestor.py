@@ -1616,3 +1616,50 @@ async def test_a_rollback_commands_own_transaction_is_recorded_and_out_of_the_kp
 )
 def test_counts_in_deploy_kpis(state: str, has_requested: bool, counts: bool) -> None:
     assert counts_in_deploy_kpis(terminal_state=state, has_requested_row=has_requested) is counts
+
+
+async def test_deeply_nested_payload_is_dropped_not_raised(
+    engine: AsyncEngine, session: AsyncSession
+) -> None:
+    """A-1: 20 KB or deeply nested retained payloads return None and never exit `handle_message`."""
+    from types import SimpleNamespace
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from fleetforge.ingestor.main import handle_message
+    from fleetforge.ingestor.protocol import (
+        AnnouncePayload,
+        HeartbeatPayload,
+        PresencePayload,
+        StatusPayload,
+        decode,
+    )
+
+    await seed_device(session)
+    await session.commit()
+    sm = async_sessionmaker(engine, expire_on_commit=False)
+
+    channels_and_models = (
+        ("announce", AnnouncePayload),
+        ("status", StatusPayload),
+        ("presence", PresencePayload),
+        ("hb", HeartbeatPayload),
+    )
+    for raw_payload in (b"[" * 20000, b"[" * 2000, b"{" + b'"a":{' * 1500 + b"}" * 1501):
+        for channel, model in channels_and_models:
+            topic = f"ff/v1/d/{DEVICE_ID}/up/{channel}"
+            assert decode(model, topic, raw_payload) is None
+            fake_msg = SimpleNamespace(
+                topic=SimpleNamespace(value=topic),
+                payload=raw_payload,
+                qos=1,
+                retain=True,
+            )
+            await handle_message(fake_msg, sm, 2.5)  # type: ignore[arg-type]
+
+    # Overlong cmd_id / state strings are bounded and coerced to None instead of bloating rows.
+    overlong_status = json.dumps({"cmd_id": "x" * 500, "state": "y" * 500}).encode("utf-8")
+    parsed = decode(StatusPayload, f"ff/v1/d/{DEVICE_ID}/up/status", overlong_status)
+    assert parsed is not None
+    assert parsed.cmd_id is None
+    assert parsed.state is None

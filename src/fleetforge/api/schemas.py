@@ -14,10 +14,8 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
-    SerializerFunctionWrapHandler,
     ValidationInfo,
     field_validator,
-    model_serializer,
     model_validator,
 )
 
@@ -29,460 +27,210 @@ from fleetforge.announce_fields import (
     normalize_ssid,
     normalize_sub_versions,
 )
-from fleetforge.auth.enrollment import EnrollmentTokenStatus
-from fleetforge.auth.tokens import MAX_TOKEN_LENGTH
-from fleetforge.db.models import PowerClass, ProjectRole
-from fleetforge.identity import is_valid_device_id
-from fleetforge.partition_profiles import MAX_PROFILE_SLOT_SIZE
-
-USERNAME_PATTERN = r"^[a-z0-9][a-z0-9._-]{1,31}$"
-EMAIL_PATTERN = r"^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$"
-LOGIN_IDENTIFIER_PATTERN = (
-    r"^([a-z0-9][a-z0-9._-]{1,31}|[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})$"
+from fleetforge.api.schemas_deploys import (
+    PROFILE_LAYOUT_ID_PATTERN as PROFILE_LAYOUT_ID_PATTERN,
 )
-PROJECT_SLUG_PATTERN = r"^[a-z0-9][a-z0-9-]{0,31}$"
-AllowedScope = Literal["admin", "read", "write:artifacts", "deploy", "enroll"]
-
-
-class LoginRequest(BaseModel):
-    """The operator username/email and password. Password is never logged, never echoed."""
-
-    username: str = Field(default="admin", pattern=LOGIN_IDENTIFIER_PATTERN)
-    password: str = Field(min_length=1, max_length=1024)
-
-
-class FirebaseLoginRequest(BaseModel):
-    """Exchange a verified Firebase ID token for an HttpOnly `ff_session` cookie."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    id_token: str = Field(min_length=16, max_length=8192)
-
-
-class PasswordResetRequest(BaseModel):
-    """Redeem a Firebase `PASSWORD_RESET` `oobCode`, set a new password, and sign in."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    oob_code: str = Field(min_length=8, max_length=2048)
-    new_password: str = Field(min_length=8, max_length=1024)
-
-
-class LoginResponse(BaseModel):
-    """What login returns — deliberately **not** the token.
-
-    `design/architecture.md`: the token is "returned in an HttpOnly / Secure /
-    SameSite=Strict cookie *instead of the response body*", so browser XSS cannot
-    read it. The expiry is here so the dashboard can schedule a re-login.
-    """
-
-    expires_at: dt.datetime
-
-
-class UserProjectSummary(BaseModel):
-    """A project visible to the caller, as returned on `GET /v1/auth/me`."""
-
-    id: uuid.UUID
-    slug: str
-    name: str
-    description: str | None = None
-    role: str
-
-
-class MeResponse(BaseModel):
-    """The identity behind the presented credential."""
-
-    token_id: uuid.UUID
-    subject: str
-    scopes: list[str]
-    expires_at: dt.datetime | None
-    is_superadmin: bool = False
-    project_id: uuid.UUID | None = None
-    projects: list[UserProjectSummary] = Field(default_factory=list)
-    user_id: uuid.UUID | None = None
-    email: str | None = None
-    display_name: str | None = None
-    has_local_password: bool = False
-
-
-class SelfProfileUpdate(BaseModel):
-    """`PATCH /v1/auth/me`: update the signed-in human user's profile or password."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    email: str | None = Field(default=None, max_length=254)
-    display_name: str | None = Field(default=None, max_length=64)
-    current_password: str | None = Field(default=None, min_length=1, max_length=1024)
-    password: str | None = Field(default=None, min_length=8, max_length=1024)
-
-    @field_validator("email")
-    @classmethod
-    def _normalize_email(cls, v: str | None) -> str | None:
-        if v is None:
-            return None
-        low = v.strip().lower()
-        if not low:
-            return None
-        if not re.match(EMAIL_PATTERN, low):
-            raise ValueError("email must be a valid email address")
-        return low
-
-    @field_validator("display_name")
-    @classmethod
-    def _normalize_display_name(cls, v: str | None) -> str | None:
-        if v is None:
-            return None
-        stripped = v.strip()
-        return stripped or None
-
-
-def _default_scopes() -> list[AllowedScope]:
-    return ["admin"]
-
-
-class AdminTokenCreate(BaseModel):
-    """`POST /v1/auth/tokens`: mint a named `ffa_...` token (optionally pinned to a project)."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    name: str = Field(min_length=1, max_length=64)
-    project: str | None = Field(default=None, pattern=PROJECT_SLUG_PATTERN)
-    scopes: list[AllowedScope] = Field(default_factory=_default_scopes, min_length=1, max_length=8)
-    expires_in_days: int | None = Field(default=None, ge=1, le=3650)
-
-
-class AdminTokenIssued(BaseModel):
-    """The issuance response — the **only** place the plaintext `token` ever exists."""
-
-    id: uuid.UUID
-    token: str
-    name: str
-    subject: str
-    scopes: list[str]
-    project_id: uuid.UUID | None = None
-    project_slug: str | None = None
-    created_at: dt.datetime
-    expires_at: dt.datetime | None
-
-
-class AdminTokenSummary(BaseModel):
-    """One row of `GET /v1/auth/tokens` — never contains `token` or `secret_hash`."""
-
-    id: uuid.UUID
-    name: str
-    subject: str
-    scopes: list[str]
-    project_id: uuid.UUID | None = None
-    project_slug: str | None = None
-    created_at: dt.datetime
-    last_used_at: dt.datetime | None
-    expires_at: dt.datetime | None
-    revoked_at: dt.datetime | None
-
-
-class AdminTokenList(BaseModel):
-    tokens: list[AdminTokenSummary]
-
-
-TrackMode = Literal["off", "branch", "tag", "commit"]
-AutoDeployTarget = Literal["off", "dev", "all"]
-SECRET_KEY_PATTERN = r"^[a-zA-Z0-9_.-]{1,15}$"  # noqa: S105 — regex pattern, not a secret
-
-
-class ProjectCreate(BaseModel):
-    """`POST /v1/projects`: create a new project."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    slug: str = Field(pattern=PROJECT_SLUG_PATTERN)
-    name: str = Field(min_length=1, max_length=64)
-    description: str | None = Field(default=None, max_length=256)
-    repo_url: str | None = Field(default=None, max_length=512)
-    track_mode: TrackMode = "off"
-    track_ref: str | None = Field(default=None, max_length=128)
-    auto_deploy_target: AutoDeployTarget = "off"
-    ci_webhook_url: str | None = Field(default=None, max_length=512)
-    ci_webhook_header: str | None = Field(default=None, max_length=512)
-    otel_endpoint: str | None = Field(default=None, max_length=512)
-    otel_headers: str | None = Field(default=None, max_length=2048)
-
-
-class ProjectUpdate(BaseModel):
-    """`PATCH /v1/projects/{slug}`: update display name, description, CD, or OTel settings."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    name: str | None = Field(default=None, min_length=1, max_length=64)
-    description: str | None = Field(default=None, max_length=256)
-    repo_url: str | None = Field(default=None, max_length=512)
-    track_mode: TrackMode | None = None
-    track_ref: str | None = Field(default=None, max_length=128)
-    auto_deploy_target: AutoDeployTarget | None = None
-    ci_webhook_url: str | None = Field(default=None, max_length=512)
-    ci_webhook_header: str | None = Field(default=None, max_length=512)
-    otel_endpoint: str | None = Field(default=None, max_length=512)
-    otel_headers: str | None = Field(default=None, max_length=2048)
-
-
-class ProjectSummary(BaseModel):
-    id: uuid.UUID
-    slug: str
-    name: str
-    description: str | None
-    role: str = "owner"
-    repo_url: str | None = None
-    track_mode: str = "off"
-    track_ref: str | None = None
-    auto_deploy_target: str = "off"
-    ci_webhook_url: str | None = None
-    has_ci_webhook_header: bool = False
-    secrets_rev: int = 0
-    otel_endpoint: str | None = None
-    has_otel_headers: bool = False
-    auto_deployed_devices: list[str] | None = None
-    ci_webhook_triggered: bool | None = None
-    created_at: dt.datetime
-    updated_at: dt.datetime
-
-
-class ProjectSecretUpsert(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    value: str = Field(min_length=1, max_length=512)
-
-
-class ProjectSecretSummary(BaseModel):
-    key: str
-    updated_at: dt.datetime
-
-
-class ProjectSecretList(BaseModel):
-    secrets_rev: int
-    secrets: list[ProjectSecretSummary]
-
-
-class DeviceSecretsResponse(BaseModel):
-    secrets_rev: int
-    secrets: dict[str, str]
-
-
-class ProjectList(BaseModel):
-    projects: list[ProjectSummary]
-
-
-class ProjectMemberUpsert(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    role: ProjectRole
-
-
-class ProjectMemberSummary(BaseModel):
-    user_id: uuid.UUID
-    username: str
-    display_name: str | None
-    email: str | None = None
-    is_superadmin: bool = False
-    role: str
-    created_at: dt.datetime
-
-
-class ProjectMemberList(BaseModel):
-    members: list[ProjectMemberSummary]
-
-
-GROUP_NAME_PATTERN = r"^[a-zA-Z0-9][a-zA-Z0-9 _.-]{0,63}$"
-
-
-class DeviceGroupCreate(BaseModel):
-    """`POST /v1/groups`: create a named device group within a project."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    name: str = Field(pattern=GROUP_NAME_PATTERN)
-    description: str | None = Field(default=None, max_length=256)
-
-
-class DeviceGroupUpdate(BaseModel):
-    """`PATCH /v1/groups/{group_id}`: rename or update description of a device group."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    name: str | None = Field(default=None, pattern=GROUP_NAME_PATTERN)
-    description: str | None = Field(default=None, max_length=256)
-
-
-class DeviceGroupSummary(BaseModel):
-    """One row of `GET /v1/groups`."""
-
-    id: uuid.UUID
-    project_id: uuid.UUID
-    name: str
-    description: str | None = None
-    created_at: dt.datetime
-    updated_at: dt.datetime
-
-
-class DeviceGroupList(BaseModel):
-    groups: list[DeviceGroupSummary]
-
-
-class UserProjectRole(BaseModel):
-    project_slug: str
-    role: str
-
-
-class UserCreate(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    username: str = Field(pattern=USERNAME_PATTERN)
-    email: str | None = Field(default=None, max_length=254)
-    display_name: str | None = Field(default=None, max_length=64)
-    password: str | None = Field(default=None, min_length=1, max_length=1024)
-    is_superadmin: bool = False
-    send_invite_email: bool = False
-    project: str | None = Field(default=None, pattern=PROJECT_SLUG_PATTERN)
-    role: ProjectRole | None = None
-
-    @field_validator("email")
-    @classmethod
-    def _normalize_email(cls, v: str | None) -> str | None:
-        if v is None:
-            return None
-        low = v.strip().lower()
-        if not low:
-            return None
-        if not re.match(EMAIL_PATTERN, low):
-            raise ValueError("email must be a valid email address")
-        return low
-
-    @field_validator("display_name")
-    @classmethod
-    def _normalize_display_name(cls, v: str | None) -> str | None:
-        if v is None:
-            return None
-        stripped = v.strip()
-        return stripped or None
-
-    @model_validator(mode="after")
-    def _require_email_or_password(self) -> Self:
-        if self.email is None and self.password is None:
-            raise ValueError("either email (for Firebase invite) or password must be provided")
-        return self
-
-
-class UserUpdate(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    email: str | None = Field(default=None, max_length=254)
-    display_name: str | None = Field(default=None, max_length=64)
-    password: str | None = Field(default=None, min_length=1, max_length=1024)
-    is_superadmin: bool | None = None
-    disabled: bool | None = None
-    send_password_reset: bool = False
-
-    @field_validator("email")
-    @classmethod
-    def _normalize_email(cls, v: str | None) -> str | None:
-        if v is None:
-            return None
-        low = v.strip().lower()
-        if not low:
-            return None
-        if not re.match(EMAIL_PATTERN, low):
-            raise ValueError("email must be a valid email address")
-        return low
-
-    @field_validator("display_name")
-    @classmethod
-    def _normalize_display_name(cls, v: str | None) -> str | None:
-        if v is None:
-            return None
-        stripped = v.strip()
-        return stripped or None
-
-
-# Outcome of the invite / password-reset email: `None` when none was requested.
-EmailDelivery = Literal["sent", "failed", "not_configured"]
-
-
-class UserSummary(BaseModel):
-    id: uuid.UUID
-    username: str
-    email: str | None = None
-    firebase_uid: str | None = None
-    has_local_password: bool = False
-    display_name: str | None
-    is_superadmin: bool
-    disabled_at: dt.datetime | None
-    created_at: dt.datetime
-    email_delivery: EmailDelivery | None = None
-    projects: list[UserProjectRole] = Field(default_factory=list)
-
-
-class UserList(BaseModel):
-    users: list[UserSummary]
-
-
-# ---------------------------------------------------------------------------
-# Enrollment tokens (R0-be-2)
-# ---------------------------------------------------------------------------
-
-
-class EnrollmentTokenCreate(BaseModel):
-    """What an operator may choose when issuing a token.
-
-    Only the group. The 24 h lifetime is a spec number applied from
-    `config.enrollment_token_ttl_hours` and is deliberately not overridable per
-    request — two places to violate one rule is one too many.
-    """
-
-    group_id: uuid.UUID | None = None  # None = ungrouped, the normal R0 case
-
-
-class EnrollmentTokenIssued(BaseModel):
-    """The issuance response — the **only** place the plaintext ever exists.
-
-    Unlike the admin login token (which stays out of the body because it is a browser
-    credential), this one must be in the body: a human copies it into the flasher's
-    baked config (`spec/flows.md` Flow 1, steps 1 → 4). It is not stored, not logged
-    and not re-derivable, so there is no endpoint that can ever show it again.
-    """
-
-    id: uuid.UUID
-    token: str
-    group_id: uuid.UUID | None
-    expires_at: dt.datetime
-    created_at: dt.datetime
-
-
-class EnrollmentTokenSummary(BaseModel):
-    """One row of the issuance history.
-
-    **No `token` field and no `secret_hash` field, ever.** This response model is the
-    last line of defence against a future `from_attributes=True` sweep that would
-    happily serialize the hash straight out of the ORM row — which is why summaries
-    are constructed field by field and `from_attributes` stays off.
-    """
-
-    id: uuid.UUID
-    group_id: uuid.UUID | None
-    status: EnrollmentTokenStatus
-    created_at: dt.datetime
-    expires_at: dt.datetime
-    used_at: dt.datetime | None
-    used_by_device_id: str | None
-    revoked_at: dt.datetime | None
-
-
-class EnrollmentTokenList(BaseModel):
-    """An envelope, not a bare array, so a cursor can be added without a break."""
-
-    tokens: list[EnrollmentTokenSummary]
-
-
-# ---------------------------------------------------------------------------
-# Device enrollment (R0-be-4)
-# ---------------------------------------------------------------------------
+from fleetforge.api.schemas_deploys import (
+    PROFILE_SHA256_PATTERN as PROFILE_SHA256_PATTERN,
+)
+from fleetforge.api.schemas_deploys import (
+    RESERVED_LAYOUT_ID as RESERVED_LAYOUT_ID,
+)
+from fleetforge.api.schemas_deploys import (
+    ArtifactList as ArtifactList,
+)
+from fleetforge.api.schemas_deploys import (
+    ArtifactSummary as ArtifactSummary,
+)
+from fleetforge.api.schemas_deploys import (
+    ArtifactUploaded as ArtifactUploaded,
+)
+from fleetforge.api.schemas_deploys import (
+    CommandAccepted as CommandAccepted,
+)
+from fleetforge.api.schemas_deploys import (
+    DeployAccepted as DeployAccepted,
+)
+from fleetforge.api.schemas_deploys import (
+    DeployKpisSummary as DeployKpisSummary,
+)
+from fleetforge.api.schemas_deploys import (
+    DeployPrecheck as DeployPrecheck,
+)
+from fleetforge.api.schemas_deploys import (
+    DeployRequest as DeployRequest,
+)
+from fleetforge.api.schemas_deploys import (
+    OverrideCode as OverrideCode,
+)
+from fleetforge.api.schemas_deploys import (
+    PartitionProfileAdopt as PartitionProfileAdopt,
+)
+from fleetforge.api.schemas_deploys import (
+    PartitionProfileCreate as PartitionProfileCreate,
+)
+from fleetforge.api.schemas_deploys import (
+    PartitionProfileList as PartitionProfileList,
+)
+from fleetforge.api.schemas_deploys import (
+    PartitionProfileSummary as PartitionProfileSummary,
+)
+from fleetforge.api.schemas_deploys import (
+    PrecheckFinding as PrecheckFinding,
+)
+from fleetforge.api.schemas_deploys import (
+    ProfileOrigin as ProfileOrigin,
+)
+from fleetforge.api.schemas_deploys import (
+    ProjectDeployAccepted as ProjectDeployAccepted,
+)
+from fleetforge.api.schemas_deploys import (
+    ProjectDeployCancelAccepted as ProjectDeployCancelAccepted,
+)
+from fleetforge.api.schemas_deploys import (
+    ProjectDeployCancelRequest as ProjectDeployCancelRequest,
+)
+from fleetforge.api.schemas_deploys import (
+    ProjectDeployRequest as ProjectDeployRequest,
+)
+from fleetforge.api.schemas_iam import (
+    EMAIL_PATTERN as EMAIL_PATTERN,
+)
+from fleetforge.api.schemas_iam import (
+    GROUP_NAME_PATTERN as GROUP_NAME_PATTERN,
+)
+from fleetforge.api.schemas_iam import (
+    LOGIN_IDENTIFIER_PATTERN as LOGIN_IDENTIFIER_PATTERN,
+)
+from fleetforge.api.schemas_iam import (
+    PROJECT_SLUG_PATTERN as PROJECT_SLUG_PATTERN,
+)
+from fleetforge.api.schemas_iam import (
+    SECRET_KEY_PATTERN as SECRET_KEY_PATTERN,
+)
+from fleetforge.api.schemas_iam import (
+    USERNAME_PATTERN as USERNAME_PATTERN,
+)
+from fleetforge.api.schemas_iam import (
+    AdminTokenCreate as AdminTokenCreate,
+)
+from fleetforge.api.schemas_iam import (
+    AdminTokenIssued as AdminTokenIssued,
+)
+from fleetforge.api.schemas_iam import (
+    AdminTokenList as AdminTokenList,
+)
+from fleetforge.api.schemas_iam import (
+    AdminTokenSummary as AdminTokenSummary,
+)
+from fleetforge.api.schemas_iam import (
+    AllowedScope as AllowedScope,
+)
+from fleetforge.api.schemas_iam import (
+    AutoDeployTarget as AutoDeployTarget,
+)
+from fleetforge.api.schemas_iam import (
+    DeviceGroupCreate as DeviceGroupCreate,
+)
+from fleetforge.api.schemas_iam import (
+    DeviceGroupList as DeviceGroupList,
+)
+from fleetforge.api.schemas_iam import (
+    DeviceGroupSummary as DeviceGroupSummary,
+)
+from fleetforge.api.schemas_iam import (
+    DeviceGroupUpdate as DeviceGroupUpdate,
+)
+from fleetforge.api.schemas_iam import (
+    DeviceSecretsResponse as DeviceSecretsResponse,
+)
+from fleetforge.api.schemas_iam import (
+    EmailDelivery as EmailDelivery,
+)
+from fleetforge.api.schemas_iam import (
+    EnrollmentTokenCreate as EnrollmentTokenCreate,
+)
+from fleetforge.api.schemas_iam import (
+    EnrollmentTokenIssued as EnrollmentTokenIssued,
+)
+from fleetforge.api.schemas_iam import (
+    EnrollmentTokenList as EnrollmentTokenList,
+)
+from fleetforge.api.schemas_iam import (
+    EnrollmentTokenSummary as EnrollmentTokenSummary,
+)
+from fleetforge.api.schemas_iam import (
+    FirebaseLoginRequest as FirebaseLoginRequest,
+)
+from fleetforge.api.schemas_iam import (
+    LoginRequest as LoginRequest,
+)
+from fleetforge.api.schemas_iam import (
+    LoginResponse as LoginResponse,
+)
+from fleetforge.api.schemas_iam import (
+    MeResponse as MeResponse,
+)
+from fleetforge.api.schemas_iam import (
+    PasswordResetRequest as PasswordResetRequest,
+)
+from fleetforge.api.schemas_iam import (
+    ProjectCreate as ProjectCreate,
+)
+from fleetforge.api.schemas_iam import (
+    ProjectList as ProjectList,
+)
+from fleetforge.api.schemas_iam import (
+    ProjectMemberList as ProjectMemberList,
+)
+from fleetforge.api.schemas_iam import (
+    ProjectMemberSummary as ProjectMemberSummary,
+)
+from fleetforge.api.schemas_iam import (
+    ProjectMemberUpsert as ProjectMemberUpsert,
+)
+from fleetforge.api.schemas_iam import (
+    ProjectSecretList as ProjectSecretList,
+)
+from fleetforge.api.schemas_iam import (
+    ProjectSecretSummary as ProjectSecretSummary,
+)
+from fleetforge.api.schemas_iam import (
+    ProjectSecretUpsert as ProjectSecretUpsert,
+)
+from fleetforge.api.schemas_iam import (
+    ProjectSummary as ProjectSummary,
+)
+from fleetforge.api.schemas_iam import (
+    ProjectUpdate as ProjectUpdate,
+)
+from fleetforge.api.schemas_iam import (
+    SelfProfileUpdate as SelfProfileUpdate,
+)
+from fleetforge.api.schemas_iam import (
+    TrackMode as TrackMode,
+)
+from fleetforge.api.schemas_iam import (
+    UserCreate as UserCreate,
+)
+from fleetforge.api.schemas_iam import (
+    UserList as UserList,
+)
+from fleetforge.api.schemas_iam import (
+    UserProjectRole as UserProjectRole,
+)
+from fleetforge.api.schemas_iam import (
+    UserProjectSummary as UserProjectSummary,
+)
+from fleetforge.api.schemas_iam import (
+    UserSummary as UserSummary,
+)
+from fleetforge.api.schemas_iam import (
+    UserUpdate as UserUpdate,
+)
+from fleetforge.auth.tokens import MAX_TOKEN_LENGTH
+from fleetforge.db.models import PowerClass
+from fleetforge.identity import is_valid_device_id
 
 
 def _logged_device_id(info: ValidationInfo) -> str | None:
@@ -496,24 +244,7 @@ def _logged_device_id(info: ValidationInfo) -> str | None:
 
 
 class EnrollRequest(BaseModel):
-    """The device-facing enrollment body. **Flat, and it stays flat forever.**
-
-    `spec/device-protocol.md` → *Enrolment happens over HTTPS, not MQTT*, step 2:
-    `POST https://…/v1/enroll { token, <the announce identity payload> }` — so
-    `{"token": "ffe_…", "device_id": "…", "platform_type": "…", …}`, **not**
-    `{"token": …, "identity": {…}}`. The R0 agent is flash-baked and speaks this
-    until someone physically retrieves the board; a nested body is a recall.
-
-    `extra="ignore"` and **no field added later may ever be required**
-    (*Evolution rules*: additive changes only, both sides ignore what they do not
-    know).
-
-    Every check here runs *before* anything touches the database, which is the point:
-    `db/models.py::PowerClass` — "R0-be-4 rejects an unknown `power_class` with 400
-    before burning the enrollment token." A burn followed by a CHECK violation is a
-    token destroyed by a firmware typo, and the board then needs a re-flash to get a
-    new one. The DB CHECKs stay the backstop, never the gate.
-    """
+    """The device-facing enrollment body. **Flat, and it stays flat forever.**"""
 
     model_config = ConfigDict(extra="ignore")
 
@@ -521,14 +252,10 @@ class EnrollRequest(BaseModel):
 
     device_id: str
     platform_type: str = Field(min_length=1, max_length=64)
-    # TEXT column, no PG enum: a board on a link nobody has invented yet still enrolls.
     link_type: str = Field(min_length=1, max_length=32)
-    # Agent 0.4.6. Stored, never rejected (spec: "the server stores a malformed value as
-    # null rather than refusing the request") — the validators below coerce, never raise.
     ssid: str | None = None
     known_networks: int | None = None
     power_class: str
-    # Stored, never rejected — "the server must tolerate agents it cannot update".
     proto: int = 1
     fw_version: str | None = Field(default=None, max_length=64)
     agent_version: str | None = Field(default=None, max_length=64)
@@ -536,9 +263,6 @@ class EnrollRequest(BaseModel):
     parent_device_id: str | None = None
     partition_layout: str | None = Field(default=None, max_length=64)
     ota_slot_size: int | None = Field(default=None, gt=0)
-    # The board measurements (R2b-be-6). Stored, never rejected, like `ssid` — a 422
-    # here would come after the token was read, and the spec forbids it. The validators
-    # below coerce, never raise. Declared after `device_id`, which the log line needs.
     flash_chip_size: int | None = None
     partition_table_sha256: str | None = None
     rollback_capable: bool | None = None
@@ -548,12 +272,6 @@ class EnrollRequest(BaseModel):
     @field_validator("device_id", "parent_device_id")
     @classmethod
     def _canonical_device_id(cls, value: str | None) -> str | None:
-        """Reject a non-canonical id; never normalise one.
-
-        `mqtt_username` **is** `device_id`, and the two `%u` pattern ACLs are the
-        entire fleet authz. Lowercasing here would mean the string the caller sent and
-        the string the ACL binds to are not obviously the same string.
-        """
         if value is None or is_valid_device_id(value):
             return value
         raise ValueError("device_id must be 12 lowercase hex digits (the eFuse MAC)")
@@ -561,99 +279,65 @@ class EnrollRequest(BaseModel):
     @field_validator("ssid", mode="before")
     @classmethod
     def _usable_ssid(cls, value: object, info: ValidationInfo) -> str | None:
-        """The SSID as reported, or `None` — never a 422 (`fleetforge.announce_fields`)."""
         return normalize_ssid(value, device_id=_logged_device_id(info))
 
     @field_validator("known_networks", mode="before")
     @classmethod
     def _usable_known_networks(cls, value: object, info: ValidationInfo) -> int | None:
-        """A plausible count, or `None` — never a 422."""
         return normalize_known_networks(value, device_id=_logged_device_id(info))
 
     @field_validator("flash_chip_size", mode="before")
     @classmethod
     def _usable_flash_chip_size(cls, value: object, info: ValidationInfo) -> int | None:
-        """A positive size that fits the agent's `uint32_t`, or `None` — never a 422."""
         return normalize_flash_chip_size(value, device_id=_logged_device_id(info))
 
     @field_validator("partition_table_sha256", mode="before")
     @classmethod
     def _usable_partition_table_sha256(cls, value: object, info: ValidationInfo) -> str | None:
-        """64 lowercase hex characters, or `None` — never a 422."""
         return normalize_partition_table_sha256(value, device_id=_logged_device_id(info))
 
     @field_validator("rollback_capable", mode="before")
     @classmethod
     def _usable_rollback_capable(cls, value: object, info: ValidationInfo) -> bool | None:
-        """A real JSON boolean, or `None` — never a 422, and `"true"` is not coerced."""
         return normalize_rollback_capable(value, device_id=_logged_device_id(info))
 
     @field_validator("sub_versions", mode="before")
     @classmethod
     def _usable_sub_versions(cls, value: object, info: ValidationInfo) -> dict[str, str] | None:
-        """A 1-level `{component: version}` map, or `None` — never a 422."""
         return normalize_sub_versions(value, device_id=_logged_device_id(info))
 
     @field_validator("power_class")
     @classmethod
     def _known_power_class(cls, value: str) -> str:
-        """Derived presence is only *defined* for `always_on` / `sleepy` (DB CHECK)."""
         if value not in set(PowerClass):
             raise ValueError(f"power_class must be one of {sorted(PowerClass)}")
         return value
 
     @model_validator(mode="after")
     def _sleepy_needs_an_interval(self) -> Self:
-        """The `sleepy_wake_interval` CHECK, applied before the burn rather than after.
-
-        A sleepy board with no wake interval makes `2.5 × expected_wake_interval_s`
-        undefined, so it would never appear offline in the dashboard.
-        """
         if self.power_class == PowerClass.SLEEPY and self.expected_wake_interval_s is None:
             raise ValueError("power_class=sleepy requires a positive expected_wake_interval_s")
         return self
 
 
 class EnrollResponse(BaseModel):
-    """Exactly the three fields `spec/device-protocol.md` step 4 promises.
-
-    `mqtt_password` exists in this object and nowhere else: not in Postgres, not in a
-    log line, not in the dynsec store (which keeps a hash). Losing it means
-    re-enrolling — see `config.enroll_retry_window_s`.
-
-    Broker host and port are deliberately absent: they are baked at flash time
-    (`spec/flows.md` Flow 1 step 4). Adding them later would be additive.
-    """
+    """Exactly the three fields `spec/device-protocol.md` step 4 promises."""
 
     device_id: str
-    # == device_id. The `%u` pattern ACLs bind to the MQTT username, so this is a
-    # security control and not a convenience — see `broker/provisioner.py`.
     mqtt_username: str
     mqtt_password: str
-
-
-# ---------------------------------------------------------------------------
-# Devices (R0-be-5)
-# ---------------------------------------------------------------------------
 
 
 NAME_MAX_LENGTH = 64
 
 
 class DeviceUpdate(BaseModel):
-    """`PATCH /v1/devices/{device_id}`: the operator-set facts, and nothing else.
-
-    Merge-patch: an absent key leaves the field alone, an explicit `null` clears it
-    (`model_fields_set` tells the two apart). `extra="forbid"`: this is an operator API,
-    unlike the device-facing bodies, and a typo such as `nmae` must be a 422, not a
-    silent no-op. No device claim (`fw_version`, `platform_type`, ...) is settable
-    here: the board announces those.
-    """
+    """`PATCH /v1/devices/{device_id}`: the operator-set facts, and nothing else."""
 
     model_config = ConfigDict(extra="forbid")
 
     name: str | None = None
-    group_id: uuid.UUID | None = None  # the "group/tag" of spec/flows.md
+    group_id: uuid.UUID | None = None
     project: str | None = Field(default=None, pattern=PROJECT_SLUG_PATTERN)
     is_dev: bool | None = None
     stay_awake: bool | None = None
@@ -663,8 +347,6 @@ class DeviceUpdate(BaseModel):
     def _normalize_name(cls, value: str | None) -> str | None:
         if value is None:
             return None
-        # The length check lives here, after stripping: `Field(max_length=)` would
-        # measure the unstripped string.
         stripped = value.strip()
         if not stripped:
             return None
@@ -678,16 +360,7 @@ class DeviceUpdate(BaseModel):
 
 
 class DeviceSummary(BaseModel):
-    """One enrolled board, as the fleet view sees it.
-
-    **`online` is computed on read** by `fleetforge.presence.is_online`, never stored
-    and never sent as ingredients: `presence_reported` is deliberately absent, so no
-    client can re-derive the rule and disagree with the server about a sleepy board
-    that has simply stopped waking up.
-
-    Built field by field with `from_attributes` off, same as `EnrollmentTokenSummary`
-    — the guard that stops a future ORM column leaking into a response.
-    """
+    """One enrolled board, as the fleet view sees it."""
 
     device_id: str
     name: str | None
@@ -696,10 +369,6 @@ class DeviceSummary(BaseModel):
     fw_version: str | None
     agent_version: str | None
     link_type: str
-    # Device-reported, the last value seen (agent 0.4.6; NULL = not reported). For an
-    # offline board this is where it *was*, not a claim that it is out of range — the
-    # server cannot tell out of range from powered off (R2b-spec-1). Defaulted only so
-    # no other constructor breaks; `_device_summary` always sets both.
     ssid: str | None = None
     known_networks: int | None = None
     power_class: str
@@ -707,56 +376,28 @@ class DeviceSummary(BaseModel):
     parent_device_id: str | None
     partition_layout: str | None
     ota_slot_size: int | None
-    # The board measurements (R2b-be-6), device-reported, the last value seen; NULL =
-    # unknown. That includes `rollback_capable` on every board before its first OTA,
-    # which a dashboard may show as "rollback unverified". Defaulted only so no other
-    # constructor breaks; `_device_summary` always sets all three.
     flash_chip_size: int | None = None
     partition_table_sha256: str | None = None
     rollback_capable: bool | None = None
     capabilities: list[str]
     last_seen: dt.datetime | None
     enrolled_at: dt.datetime
-    # NULL until the broker credential exists — the honest reconcile list R0-sec-1
-    # works from (`WHERE broker_provisioned_at IS NULL`).
     broker_provisioned_at: dt.datetime | None
     online: bool
-    # R4-be-1, all defaulted so no other constructor breaks and placed before `deploy`.
-    # The normalised `reset_reason` of the newest announce; NULL = not reported (agents
-    # before 0.5.0). An open vocabulary: render unknown names as text.
     last_reset_reason: str | None = None
-    # Fault resets inside the server's window, derived on read from `device_faults`.
     fault_resets: "FaultResets | None" = None
-    # The latest live heartbeat's health, or `None` when the board never sent one.
     health: "HealthSnapshot | None" = None
-    # The latest value of each metric (`up/telemetry`), newest 32 by update, sorted by name.
     metrics: list["MetricValue"] = Field(default_factory=list)
-    # R5-be-2: the newest verb the server published to this board and its first answer,
-    # or `None` for a board never commanded. Defaulted and placed before `deploy`.
     last_command: "CommandSummary | None" = None
-    # CI-CD-be-1 / CUJ-2: dev target flag (`auto_deploy_target='dev'`), sleepy-board
-    # `stay_awake` flag (`dn/cfg`), and last announced `secrets_rev`.
     is_dev: bool = False
     stay_awake: bool = False
     secrets_rev: int | None = None
     sub_versions: dict[str, str] | None = None
-    # The newest deploy transaction's current state, or `None` for a board that has
-    # never been deployed to. Rides on this response for the same reason `arrivals`
-    # does — see `DeploySummary` and `routers/devices.py`.
-    #
-    # **Last, and defaulted**: `frontend/src/api.ts` mirrors this model "field for field
-    # and in its order", and *Evolution rules* say an added field must not break a
-    # client built before it existed.
     deploy: "DeploySummary | None" = None
 
 
 class HealthSnapshot(BaseModel):
-    """The latest live heartbeat's health (R4-be-1). Device-reported; NULL = not reported.
-
-    `at` is that heartbeat's receipt time: for an offline board this is what it said
-    last, not a claim about now. `boot_ok` is false only while the running image is
-    pending verification (R4-fw-1).
-    """
+    """The latest live heartbeat's health (R4-be-1). Device-reported; NULL = not reported."""
 
     at: dt.datetime
     uptime_s: int | None
@@ -767,11 +408,7 @@ class HealthSnapshot(BaseModel):
 
 
 class FaultResets(BaseModel):
-    """Boots that ended in a fault reset inside the last `window_s` seconds (R4-be-1).
-
-    Derived on read from `device_faults`, one row per boot: a board that only
-    reconnected is not counted twice once its next heartbeat dates the boot.
-    """
+    """Boots that ended in a fault reset inside the last `window_s` seconds (R4-be-1)."""
 
     window_s: int
     panic: int = 0
@@ -788,12 +425,7 @@ class MetricValue(BaseModel):
 
 
 class DeviceLogLine(BaseModel):
-    """One stored `up/log` line (R4-be-1).
-
-    `text` is device-controlled, stored sanitised (no control characters, URLs as
-    `<url>`, at most 200 characters); `null` marks a gap with no line. `dropped` is the
-    number of lines lost immediately before this one. `logged_at` = receipt - `age_ms`.
-    """
+    """One stored `up/log` line (R4-be-1)."""
 
     id: int
     logged_at: dt.datetime
@@ -801,11 +433,6 @@ class DeviceLogLine(BaseModel):
     level: str
     text: str | None
     dropped: int
-    # Board state around the line (latest heartbeat at receipt), keyed by OTel attribute
-    # name: `firmware.version`, `device.rssi_dbm`, `device.free_heap_bytes`,
-    # `device.min_free_heap_bytes`, `device.uptime_s`, `fleetforge.secrets_rev`,
-    # `fleetforge.health_at`. Server-derived scalars, never device text. `null` for
-    # rows older than migration 0014.
     context: dict[str, str | int | float | bool] | None = None
 
 
@@ -830,12 +457,7 @@ class TelemetrySeries(BaseModel):
 
 
 class DockSyncRequest(BaseModel):
-    """`POST /v1/devices/{device_id}/dock-sync` (CUJ-3): USB-C dock offline bundle sync.
-
-    Carries the pit-docked device's `announce` snapshot (`link_type: "dock"`), any offline
-    `up/status` deploy transitions (`confirming` -> `confirmed`, `rolling_back` -> `rolled_back`),
-    and the drained `up/telemetry` and `up/log` ring-buffer batches with relative `age_ms`.
-    """
+    """`POST /v1/devices/{device_id}/dock-sync` (CUJ-3): USB-C dock offline bundle sync."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -859,34 +481,21 @@ class DockSyncResponse(BaseModel):
 
 
 class DeployStep(BaseModel):
-    """One transition of a board's current deploy transaction. R2b-fe-9.
-
-    Two keys only. `state` is device-controlled text; `at` is the server's receipt
-    time. No detail: a `requested` row's blob holds the artifact's sha256 and size.
-    """
+    """One transition of a board's current deploy transaction. R2b-fe-9."""
 
     state: str
     at: dt.datetime
 
 
 class DeploySender(BaseModel):
-    """Who opened this deploy transaction (R2b-be-4). Server-authored, from the `requested`
-    row's snapshot of the admin credential's label. `credential` is that label as it was at
-    send time (today `dashboard session (<client ip>)`), or null if it was not recorded.
-    The token id is stored but deliberately not sent."""
+    """Who opened this deploy transaction (R2b-be-4)."""
 
     subject: str
     credential: str | None
 
 
 class DeploySelfTest(BaseModel):
-    """The custom self-test's outcome (R5-be-1), parsed by the server from the device's
-    `detail` (the R5-spec-1 D11 grammar), so no client keeps a second copy of the regex.
-
-    `DeploySummary.selftest` is null when the detail is not a self-test outcome: no
-    self-test was registered, a pre-R5 agent, a never-armed image's `confirmed` (it keeps
-    its own detail), a command rollback or a legacy timeout. `reason` (failed only) and
-    `returned_to` (the slot label) are device-controlled text: render them as text."""
+    """The custom self-test's outcome (R5-be-1), parsed by the server from `detail`."""
 
     outcome: Literal["passed", "failed", "timed_out"]
     reason: str | None
@@ -894,78 +503,24 @@ class DeploySelfTest(BaseModel):
 
 
 class DeploySummary(BaseModel):
-    """A board's newest deploy state, as the fleet view sees it. R1-fe-1.
+    """A board's newest deploy state, as the fleet view sees it. R1-fe-1."""
 
-    Built from `fleetforge.deploys.latest_deploys` — the module that owns
-    `deploy_events` — and carried on `GET /v1/devices` rather than on an endpoint of
-    its own, because the dashboard already re-reads that envelope on every `ff_events`
-    hint (`DeviceList.arrivals`, same argument).
-
-    `state` and `detail` are **device-controlled strings**. `DeployState` is advisory —
-    `deploy_events.state` is TEXT with no CHECK, so an agent newer than this server can
-    report a state nobody here has heard of and it is recorded and returned as itself.
-    A renderer treats both as text and never switches exhaustively on `state`.
-
-    `is_terminal` is the **server's** answer, stored at write time from
-    `TERMINAL_DEPLOY_STATES`. It is sent precisely so no client keeps a second copy of
-    that vocabulary; two definitions of "terminal" is the failure `deploys.py` warns
-    about, and it would surface as a KPI that disagrees with the dashboard.
-
-    `pct` is **not a progress feed.** `deploy_events` is a log of transitions and the
-    writer keeps the first `pct` it saw for a repeated state, so an agent that publishes
-    `downloading` once (ours does) reports one number for the whole download. Render it
-    as text; a bar driven by it would sit still and read as a hang.
-
-    `steps` and `confirm_timeout_s` (R2b-fe-9) feed the update timeline: the transitions
-    of this same transaction, and the confirm window the server tells the board, so the
-    dashboard can state the board's own deadlines without inventing a number.
-
-    `sent_by` (R2b-be-4) is who opened this transaction; null when it was recorded before
-    that existed or has no `requested` row.
-
-    `selftest` (R5-be-1) is the self-test outcome the server parsed from `detail`, on a
-    terminal `confirmed` / `rolled_back` row only; null otherwise (`DeploySelfTest`).
-    """
-
-    # NULL only for a row written before `cmd_id` was known — the column is nullable, so
-    # the field is too rather than the API pretending otherwise.
     cmd_id: str | None
     state: str
     at: dt.datetime
     is_terminal: bool
-    # The version this transaction intends to install, and the one it replaces. Copied
-    # off the `requested` row by the writer; both NULL for a transaction this server has
-    # no `requested` row for (a board replaying a command from before a DB rebuild).
     artifact_version: str | None
     from_version: str | None
     pct: int | None
     detail: str | None
-    # Every recorded transition of this transaction, oldest first, capped at the newest
-    # `deploys.MAX_DEPLOY_STEPS`; never empty, the last one is `(state, at)`.
     steps: list[DeployStep]
-    # `Settings.confirm_timeout_s` — the same number the pre-check shows. The board's
-    # compiled rollback timer is authoritative and equal to it in a production build.
     confirm_timeout_s: int
     sent_by: DeploySender | None = None
     selftest: DeploySelfTest | None = None
 
 
 class CommandSummary(BaseModel):
-    """The newest verb sent to a board and its first answer (R5-be-2), on `GET /v1/devices`.
-
-    `type` is `apply` / `cancel` / `rollback` / `reboot`; `cmd_id` is the transaction an
-    `apply` / `cancel` named, null for the other two. `sent_by` is who sent it (the token
-    id is stored, never sent).
-
-    **`result: null` means "no answer yet" — and possibly never.** An agent that predates
-    R5 ignores a verb and never answers; an answer queued while the board was disconnected
-    dies with a reboot (R5-fw-4 gap (e)). The server never waits for one and never expires
-    a command. Otherwise `result` is the device's word — `accepted`, `deferred`, `refused`,
-    or a newer agent's value, rendered as text — with `answered_at` its receipt time.
-    `detail` is device-controlled text (stored sanitised: no control characters, URLs as
-    `<url>`, at most 200 characters), the reason for a refusal or a wait; render it as text,
-    never parse it. What the verb did to a transaction shows on `deploy`, not here.
-    """
+    """The newest verb sent to a board and its first answer (R5-be-2), on `GET /v1/devices`."""
 
     command_id: str
     type: str
@@ -978,50 +533,14 @@ class CommandSummary(BaseModel):
 
 
 class CommandRecord(CommandSummary):
-    """`GET /v1/devices/{device_id}/commands/{command_id}` (R5-be-2): one command, publish
-    failures included, for scripts and CI. `publish_failed: true` means the broker refused
-    the publish, so the board never saw it and no answer will come."""
+    """`GET /v1/devices/{device_id}/commands/{command_id}` (R5-be-2)."""
 
     device_id: str
     publish_failed: bool
 
 
-class CommandAccepted(BaseModel):
-    """What the four verb routes return with 202 (R5-be-2).
-
-    202, not 201: the verb was recorded and handed to the broker, and under MQTT 3.1.1 that
-    is the most the server can claim (`broker/commands.py`). The board's answer arrives
-    later on `up/ack` (`GET /v1/devices` → `last_command`, the `device.command` SSE frame, or
-    `GET …/commands/{command_id}`), and an old agent may never answer.
-
-    `cmd_id` is the transaction named (apply / cancel), null for rollback / reboot. A
-    rollback of a confirmed image becomes its own transaction under `command_id` (its
-    states arrive on `deploy` with `deploy.cmd_id == command_id`). `device_online` is
-    reported and **never** blocking: the QoS-1 command waits in the board's persistent
-    session. No URL anywhere: a verb carries none.
-    """
-
-    command_id: str
-    device_id: str
-    type: str
-    cmd_id: str | None
-    device_online: bool
-
-
 class ArrivalSummary(BaseModel):
-    """A board that is *arriving* — it has reported a boot stage but is not in the fleet yet.
-
-    `device_id` here may name a board that has no `devices` row at all, which is the
-    whole point: this is what the dashboard shows instead of a gap between "flashed"
-    and "online" (S0-fw-1).
-
-    `stalled` is derived on read by `fleetforge.progress.latest_progress` from the age
-    of `at`, exactly as `DeviceSummary.online` is derived by `presence.is_online` — and
-    for the same reason, `progress_stall_s` is not sent so no client can re-derive it.
-
-    `stage` and `detail` are **device-controlled strings**, bounded in length by
-    `ProgressReport` and by nothing else. A renderer must treat them as text.
-    """
+    """A board that is *arriving* — it has reported a boot stage but is not in the fleet yet."""
 
     device_id: str
     stage: str
@@ -1034,34 +553,15 @@ class DeviceList(BaseModel):
     """An envelope, not a bare array, so a cursor can be added without a break."""
 
     devices: list[DeviceSummary]
-    # Rides on the fleet read rather than getting its own endpoint: the dashboard's
-    # hint→re-read engine already re-reads this on every `ff_events` frame, so
-    # arrivals need no second fetch and no poll of their own. Defaulted, because a
-    # client built against R0 must not break on the added field (*Evolution rules*).
     arrivals: list[ArrivalSummary] = Field(default_factory=list)
 
 
-# ---------------------------------------------------------------------------
-# Device boot/enrol progress (S0-fw-1)
-# ---------------------------------------------------------------------------
-
-# Device-controlled free text. Long enough for a real reason ("esp-tls handshake
-# failed: 0x8010"), short enough that 20 rows per board is not a storage question.
 MAX_PROGRESS_DETAIL = 200
-
-# The shape of a stage, and deliberately NOT its vocabulary: `ProgressStage` is
-# advisory and the column has no CHECK, because a flash-baked agent the server can
-# never update must still be able to say something the server has not heard of.
 STAGE_PATTERN = re.compile(r"\A[a-z][a-z0-9_]{0,31}\Z")
 
 
 class ProgressReport(BaseModel):
-    """The body of `POST /v1/device-progress`. Flat, and it stays flat, like `EnrollRequest`.
-
-    The credential is the `ffe_` enrollment token the board already holds — a
-    pre-enrolment board has no MQTT credential and nothing else to prove itself with.
-    The endpoint **verifies it and never burns it** (`routers/progress.py`).
-    """
+    """The body of `POST /v1/device-progress`. Flat, and it stays flat, like `EnrollRequest`."""
 
     model_config = ConfigDict(extra="ignore")
 
@@ -1073,7 +573,6 @@ class ProgressReport(BaseModel):
     @field_validator("device_id")
     @classmethod
     def _canonical_device_id(cls, value: str) -> str:
-        """Same rule as `EnrollRequest`: reject, never normalise."""
         if is_valid_device_id(value):
             return value
         raise ValueError("device_id must be 12 lowercase hex digits (the eFuse MAC)")
@@ -1081,7 +580,6 @@ class ProgressReport(BaseModel):
     @field_validator("stage")
     @classmethod
     def _stage_shape(cls, value: str) -> str:
-        """Bound the shape so an unknown stage is storable but a hostile one is not."""
         if STAGE_PATTERN.match(value):
             return value
         raise ValueError("stage must match [a-z][a-z0-9_]{0,31}")
@@ -1089,427 +587,8 @@ class ProgressReport(BaseModel):
     @field_validator("detail")
     @classmethod
     def _printable_detail(cls, value: str | None) -> str | None:
-        """No control characters.
-
-        This string is written to the API log and rendered in the dashboard. A device
-        that can inject a newline can forge a log line, and this is the one field on
-        the endpoint that an unauthenticated-until-verified caller fully controls.
-        """
         if value is None:
             return value
         if any(ch < " " or ch == "\x7f" for ch in value):
             raise ValueError("detail must not contain control characters")
         return value
-
-
-# ---------------------------------------------------------------------------
-# Artifact upload (R1-be-1)
-# ---------------------------------------------------------------------------
-
-
-_CI_OPTIONAL_FIELDS = frozenset(
-    {
-        "sig",
-        "repo_url",
-        "branch",
-        "commit_sha",
-        "tag",
-        "build_url",
-        "test_passed",
-        "auto_deployed_devices",
-    }
-)
-
-
-class ArtifactUploaded(BaseModel):
-    """What `POST /v1/artifact` returns — the digest is the artifact's identity.
-
-    `sha256` is what the caller needs and the one field it cannot compute a second
-    spelling of: R1-be-2 puts it in the `stage` payload and R1-be-3 serves the bytes
-    from it. There is deliberately **no `url` and no `storage_key`** here. The key is
-    `blob_key(sha256)`, a pure function of this field (`storage/blobs.py`), and a URL
-    is a short-lived signed credential that belongs to the deploy that needs it, not
-    to a successful upload.
-
-    `created` distinguishes the two success cases a content-addressed store collapses:
-    `True` is a new label, `False` is an idempotent re-upload of bytes already stored
-    under this exact `(target, version)`. The status code says the same thing (201 vs
-    200); the field is here so a client does not have to parse it out of one.
-
-    `has_lib_marker` (R3-be-1) is whether the server found the Fleetforge OTA library
-    marker in the bytes (`fleetforge.lib_marker`). Always a bool here: every upload is
-    scanned. `False` is never a refusal; a deploy of it is gated as `no_library_marker`.
-    """
-
-    sha256: str
-    size_bytes: int
-    target: str
-    version: str
-    partition_layout: str | None = None
-    created: bool
-    has_lib_marker: bool | None = None
-    artifact_type: str = "app"
-    sig: str | None = None
-    repo_url: str | None = None
-    branch: str | None = None
-    commit_sha: str | None = None
-    tag: str | None = None
-    build_url: str | None = None
-    test_passed: bool | None = None
-    auto_deployed_devices: list[str] | None = None
-
-    @model_serializer(mode="wrap")
-    def _omit_unset_ci_fields(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
-        data = handler(self)
-        return {
-            k: v
-            for k, v in data.items()
-            if (k not in _CI_OPTIONAL_FIELDS or v is not None)
-            and not (k == "artifact_type" and v in (None, "app"))
-        }
-
-
-class ArtifactSummary(BaseModel):
-    """One deployable label — a row of `GET /v1/artifact`. R1-fe-1.
-
-    A label over a digest, joined to the digest's metadata: `(target, version)` comes
-    from `artifact_versions`, `size_bytes`/`partition_layout`/`kind` from `artifacts`.
-    Two labels over one blob are two rows with one `sha256`, which is the shape a
-    content-addressed store makes ordinary and a `version` column would have made a
-    primary-key collision (`db/models.py::ArtifactVersion`).
-
-    **There is no `url`, for the same reason `ArtifactUploaded` has none.** A download
-    link is a short-lived bearer credential minted per deploy, and a list endpoint that
-    handed one out would mint credentials nobody asked for.
-
-    `created_at` is the label's, not the blob's: re-tagging old bytes under a new
-    version is a new thing to deploy, and the list is ordered by it.
-    """
-
-    target: str
-    version: str
-    sha256: str
-    size_bytes: int
-    # Both NULL-able on `artifacts`: bytes can be target-independent, and an old row
-    # may predate the layout column. A user upload always has both.
-    partition_layout: str | None
-    kind: str
-    created_at: dt.datetime
-    artifact_type: str = "app"
-    sig: str | None = None
-    repo_url: str | None = None
-    branch: str | None = None
-    commit_sha: str | None = None
-    tag: str | None = None
-    build_url: str | None = None
-    test_passed: bool | None = None
-
-    @model_serializer(mode="wrap")
-    def _omit_unset_ci_fields(self, handler: SerializerFunctionWrapHandler) -> dict[str, Any]:
-        data = handler(self)
-        return {
-            k: v
-            for k, v in data.items()
-            if (k not in _CI_OPTIONAL_FIELDS or v is not None)
-            and not (k == "artifact_type" and v in (None, "app"))
-        }
-
-
-class ArtifactList(BaseModel):
-    """An envelope, not a bare array — the `DeviceList` rule, so a cursor can be added."""
-
-    artifacts: list[ArtifactSummary]
-
-
-# ---------------------------------------------------------------------------
-# Deploy orchestration (R1-be-2)
-# ---------------------------------------------------------------------------
-
-
-# The gating warnings an operator may override, one by one (R2b-be-7). A literal, so it
-# cannot reference `deploy_precheck.GATING_CODES`; `tests/test_deploy_precheck.py` keeps
-# the two equal. An unknown code is a 422.
-OverrideCode = Literal["rollback_incapable", "no_library_marker"]
-
-
-class DeployRequest(BaseModel):
-    """Deploy one labelled version to one device. Every field is a choice.
-
-    There is deliberately **no `target`**: the chip is the device's own
-    `platform_type` (`spec/flows.md` Flow 2 → "reject on chip mismatch"). Making it a
-    request field would let an operator flash an esp32 image onto an esp32c6, which is
-    a brick, not a typo.
-
-    There is also no `url`, no `sha256` and no `force`. The artifact is resolved from
-    `(platform_type, version)` server-side, so the command can never carry bytes the
-    server has not stored and checked.
-
-    `override` (R2b-be-7) names gating warnings one by one, never a blanket force: an
-    unknown code is a 422, a listed code that is not raised is a no-op, and refusals
-    ignore it entirely. The pre-check accepts the same body and ignores `override`.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    version: str = Field(min_length=1, max_length=64, description="the label, e.g. 1.5.0")
-    # `spec/device-protocol.md`: `auto` lets the device apply as soon as *it* judges the
-    # window safe; `on_command` stages and waits for the `apply` verb
-    # (`POST /v1/devices/{id}/deploys/{cmd_id}/apply`, R5-be-2). Since R5-be-2 an
-    # `on_command` deploy to a board that does not announce `apply` is refused
-    # (`no_apply_capability`): it would wait at `staged` until the board restarts.
-    apply: Literal["auto", "on_command"] = "auto"
-    override: list[OverrideCode] = Field(
-        default_factory=list,
-        max_length=8,
-        description=(
-            "gating warning codes the operator explicitly overrides; refusals are never overridable"
-        ),
-    )
-
-
-class DeployAccepted(BaseModel):
-    """What `POST /v1/devices/{device_id}/deploy` returns with 202.
-
-    202 and not 201: the command was handed to the broker, and under MQTT 3.1.1 that is
-    the *most* the server can honestly claim (`broker/commands.py` — a denied publish is
-    invisible). Whether the device staged it arrives later, as `up/status`.
-
-    **No URL here, ever.** The signed URL is a bearer credential; it goes to the device
-    in the command and nowhere else — not into this body, not into the log, not into
-    `deploy_events.detail`.
-
-    `reused` is `True` when this POST re-published an in-flight intent instead of
-    minting a new one, which is how a caller can tell a retry from a fresh deploy: the
-    device deduplicates on `cmd_id`, so a reused id means "no second download".
-
-    `device_online` is reported and **never** blocking: the broker queues the QoS-1
-    command in the device's persistent session, which is the entire point of
-    `clean_session=false` for a sleepy board.
-    """
-
-    cmd_id: str
-    device_id: str
-    version: str
-    sha256: str
-    size_bytes: int
-    apply: str
-    reused: bool
-    device_online: bool
-
-
-class ProjectDeployRequest(BaseModel):
-    """`POST /v1/projects/{slug}/deploy`: deploy one version across compatible project boards."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    version: str = Field(min_length=1, max_length=64, description="the label, e.g. 1.5.0")
-    target_filter: Literal["all", "dev"] = "all"
-    group_id: uuid.UUID | None = Field(
-        default=None,
-        description="Optional device_groups.id cohort filter within the project",
-    )
-    apply: Literal["auto", "on_command"] = "auto"
-    override: list[OverrideCode] = Field(default_factory=list, max_length=8)
-    canary: bool = Field(
-        default=True,
-        description="Stage onto 1 canary board first until a board in the cohort confirms the version",
-    )
-    max_parallel: int = Field(
-        default=5,
-        ge=1,
-        le=100,
-        description="Maximum concurrent in-flight OTA downloads per wave after canary confirmation",
-    )
-
-
-class ProjectDeployAccepted(BaseModel):
-    """What `POST /v1/projects/{slug}/deploy` returns with 202."""
-
-    project: str
-    version: str
-    target_filter: str
-    deployed: list[DeployAccepted]
-    skipped: dict[str, str] = Field(default_factory=dict)
-
-
-class ProjectDeployCancelRequest(BaseModel):
-    """`POST /v1/projects/{slug}/deploy/cancel`: cancel in-flight pre-apply deploys in a cohort."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    version: str | None = Field(
-        default=None,
-        min_length=1,
-        max_length=64,
-        description="Optional version filter; when omitted, cancels any in-flight pre-apply deploy",
-    )
-    target_filter: Literal["all", "dev"] = "all"
-    group_id: uuid.UUID | None = Field(
-        default=None,
-        description="Optional device_groups.id cohort filter within the project",
-    )
-
-
-class ProjectDeployCancelAccepted(BaseModel):
-    """What `POST /v1/projects/{slug}/deploy/cancel` returns with 202."""
-
-    project: str
-    cancelled: list[CommandAccepted]
-    skipped: dict[str, str] = Field(default_factory=dict)
-
-
-class DeployKpisSummary(BaseModel):
-    """`GET /v1/devices/kpis` (R6-BE-1): Delivery success vs. fleet safety over `deploy_events`.
-
-    * `delivery_success_pct`: `confirmed / total_completed * 100` (target `>= 90%`).
-    * `fleet_safety_pct`: `(confirmed + rolled_back) / total_completed * 100` (target `= 100%`).
-    * `safety_gap_pct`: `rolled_back / total_completed * 100` — the fraction of updates where
-      an unconfirmed image was caught and automatically rolled back to the previous working slot.
-    * `cancelled` and `in_flight` transactions are reported alongside the counts and excluded
-      from the denominator (`deploys.counts_in_deploy_kpis`).
-    """
-
-    total_completed: int
-    confirmed: int
-    rolled_back: int
-    failed: int
-    cancelled: int
-    in_flight: int
-    delivery_success_pct: float | None
-    fleet_safety_pct: float | None
-    safety_gap_pct: float | None
-    delivery_target_pct: float
-    safety_target_pct: float
-    delivery_target_met: bool | None
-    safety_target_met: bool | None
-
-
-class PrecheckFinding(BaseModel):
-    code: str
-    message: str
-    # A gating warning: `/deploy` answers 409 with `message` unless `override` lists `code`.
-    needs_override: bool = False
-
-
-class DeployPrecheck(BaseModel):
-    """What `POST /v1/devices/{device_id}/deploy/precheck` returns: a dry run of a deploy.
-
-    200 always for a resolved check. `refusals` cannot be overridden and match
-    `POST /deploy`'s `detail` word for word. `warnings` are reported; the ones with
-    `needs_override` are enforced by `/deploy` (409, the same sentence) unless the body
-    names their code in `override`, and the rest are never enforced. `deployable` is still
-    "no refusals": a gating warning does not clear it.
-    No URL and no `cmd_id`: nothing was minted, recorded or published.
-
-    `code` is the stable field a client branches on; `message` is lifted verbatim into the
-    UI the way `detail` is (`api.ts::detailOf`).
-    """
-
-    device_id: str
-    target: str
-    version: str
-    from_version: str | None
-    sha256: str | None
-    size_bytes: int | None
-    artifact_partition_layout: str | None
-    device_partition_layout: str | None
-    # R3-be-2: the board's effective layout, the adopted profile the gate resolved it to
-    # (`LayoutCatalog.resolve`), or `None`. A board on an adopted map still announces
-    # `unknown` in `device_partition_layout`. Defaulted so no other constructor breaks.
-    device_partition_profile: str | None = None
-    ota_slot_size: int | None
-    power_class: str
-    expected_wake_interval_s: int | None
-    device_online: bool
-    confirm_timeout_s: int
-    deployable: bool
-    refusals: list[PrecheckFinding]
-    warnings: list[PrecheckFinding]
-
-
-# ---------------------------------------------------------------------------
-# Partition profiles (R3-be-2)
-# ---------------------------------------------------------------------------
-
-# A profile's name must be uploadable: the upload's `partition_layout` is `SafeSegment`
-# (the same shape), and the DB CHECK `layout_id_format` agrees. pydantic's regex engine
-# reads `$` as the end of the input, so a trailing newline is refused, never stripped.
-PROFILE_LAYOUT_ID_PATTERN = r"^[a-z0-9][a-z0-9-]{0,31}$"
-# Rejected, never lowercased: uppercase is a second spelling of a fingerprint.
-PROFILE_SHA256_PATTERN = r"^[0-9a-f]{64}$"
-RESERVED_LAYOUT_ID = "unknown"  # firmware.manifest.UNKNOWN_PARTITION_LAYOUT (R3-fw-5)
-ProfileOrigin = Literal["builtin", "user", "detected"]
-
-
-def _not_reserved(value: str) -> str:
-    if value == RESERVED_LAYOUT_ID:
-        raise ValueError(
-            "unknown is reserved: it is what a board announces when its map has no name"
-        )
-    return value
-
-
-class PartitionProfileSummary(BaseModel):
-    """One flash map the server knows, as `GET /v1/partition-profiles` lists it.
-
-    `deployable` is "adopted": builtin and user rows always are, a `detected` row only once
-    an operator has named it. `device_ids` are the live boards announcing this fingerprint
-    now (sorted, capped at 500), which is what an operator needs to decide whether to name
-    a detected map. Built field by field with `from_attributes` off (the `DeviceSummary`
-    convention).
-    """
-
-    partition_table_sha256: str
-    layout_id: str | None
-    origin: ProfileOrigin
-    deployable: bool
-    ota_slot_size: int | None
-    flash_chip_size: int | None
-    detected_device_id: str | None
-    device_ids: list[str]
-    created_at: dt.datetime
-    adopted_at: dt.datetime | None
-
-
-class PartitionProfileList(BaseModel):
-    """An envelope, not a bare array — the `DeviceList` rule."""
-
-    profiles: list[PartitionProfileSummary]
-
-
-class PartitionProfileCreate(BaseModel):
-    """`POST /v1/partition-profiles`: an operator profile, named and deployable at once.
-
-    The fingerprint is the geometry-only SHA-256 of the table (`spec/device-protocol.md` →
-    *Partition layouts*); a board on that map announces it. The slot is the ceiling for
-    uploads under this name, at most `MAX_PROFILE_SLOT_SIZE` (nginx's body limit).
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    layout_id: str = Field(pattern=PROFILE_LAYOUT_ID_PATTERN)
-    partition_table_sha256: str = Field(pattern=PROFILE_SHA256_PATTERN)
-    ota_slot_size: int = Field(gt=0, le=MAX_PROFILE_SLOT_SIZE)
-
-    @field_validator("layout_id")
-    @classmethod
-    def _layout_id_not_reserved(cls, value: str) -> str:
-        return _not_reserved(value)
-
-
-class PartitionProfileAdopt(BaseModel):
-    """`PATCH /v1/partition-profiles/{sha}`: name a detected profile, which adopts it.
-
-    `ota_slot_size` is needed only when the detecting board did not report its slot; a
-    reported slot is a measurement and wins (a different value is a 409).
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    layout_id: str = Field(pattern=PROFILE_LAYOUT_ID_PATTERN)
-    ota_slot_size: int | None = Field(default=None, gt=0, le=MAX_PROFILE_SLOT_SIZE)
-
-    @field_validator("layout_id")
-    @classmethod
-    def _layout_id_not_reserved(cls, value: str) -> str:
-        return _not_reserved(value)

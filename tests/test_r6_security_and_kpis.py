@@ -57,10 +57,8 @@ from fleetforge.events import EventType
 from fleetforge.ingestor.handlers import handle_up_message
 from fleetforge.ingestor.protocol import LogPayload, TelemetryPayload, decode
 from fleetforge.signing import (
-    DEFAULT_PRIMARY_PRIVATE_KEY_PEM,
     DEFAULT_PRIMARY_PUBLIC_KEY_PEM,
     DEFAULT_PUBLIC_KEY_RING,
-    DEFAULT_SECONDARY_PRIVATE_KEY_PEM,
     DEFAULT_SECONDARY_PUBLIC_KEY_PEM,
     SigningKeyRing,
     _cli,
@@ -93,6 +91,10 @@ from tests.conftest import (
     client_for,
     login_admin,
     settings_for_tests,
+)
+from tests.fixtures.dev_signing_keys import (
+    DEFAULT_PRIMARY_PRIVATE_KEY_PEM,
+    DEFAULT_SECONDARY_PRIVATE_KEY_PEM,
 )
 from tests.test_simulator import FakeClient, FakeMessage, transcript
 
@@ -204,7 +206,7 @@ class TestSigningAndKeyRotationPure:
         )
 
     def test_stage_payload_includes_sig_only_when_present(self) -> None:
-        sig = sign_digest(IMAGE_SHA256)
+        sig = sign_digest(IMAGE_SHA256, DEFAULT_PRIMARY_PRIVATE_KEY_PEM)
         unsigned = stage_payload(
             cmd_id="c1",
             url=SIGNED_URL,
@@ -263,7 +265,9 @@ class TestCFirmwareSecurityAndRangeResumeTripwires:
     def test_ff_ota_uses_partial_http_range_download_and_resume_backoff(self) -> None:
         ota_c = FF_OTA_C.read_text(encoding="utf-8")
 
-        assert ".partial_http_download = true" in ota_c
+        # D-2: `.partial_http_download = true` sends a HEAD pre-request that GET-presigned S3/GCS
+        # URLs refuse with 403; initial download must stay a standard GET and resume via Range GET.
+        assert ".partial_http_download = true," not in ota_c
         assert ".max_http_request_size = OTA_RANGE_CHUNK_BYTES" in ota_c
         assert ".http_client_init_cb = ota_http_client_init_cb" in ota_c
         assert 'esp_http_client_set_header(s_ota_http_client, "Range", s_resume_range_hdr)' in ota_c
@@ -274,6 +278,7 @@ class TestCFirmwareSecurityAndRangeResumeTripwires:
         assert "FF_OTA_PRODUCTION_BUILD" in ota_c
         assert "resume_range_perform" in ota_c
         assert '"bytes=%d-"' in ota_c
+        assert '"bytes=%u-"' in ota_c
         assert "OTA_MAX_RETRIES" in ota_c
         assert "OTA_RETRY_BASE_MS" in ota_c
 
@@ -807,11 +812,17 @@ class TestR6ApiArtifactSigningAndDeploy:
             assert list_res.status_code == 200
             assert list_res.json()["artifacts"][0]["sig"] == sig
 
+            dep_blocked = await client.post(
+                f"/v1/devices/{DEVICE_ID}/deploy",
+                json={"version": "2.0.0", "override": ["no_library_marker"]},
+                headers=headers,
+            )
+            assert dep_blocked.status_code == 409
+            assert "development ECDSA P-256 key ring" in dep_blocked.json()["detail"]
+
             dep_res = await client.post(
                 f"/v1/devices/{DEVICE_ID}/deploy",
-                json={"version": "2.0.0", " override": ["no_library_marker"]}.copy()
-                if False
-                else {"version": "2.0.0", "override": ["no_library_marker"]},
+                json={"version": "2.0.0", "override": ["no_library_marker", "dev_key_ring"]},
                 headers=headers,
             )
             assert dep_res.status_code == 202, dep_res.text
@@ -1068,3 +1079,72 @@ class TestR6DeployKpis:
         assert after_fail.failed == 1
         assert after_fail.delivery_target_met is False
         assert after_fail.safety_target_met is False
+
+
+def test_production_ring_rejects_both_committed_dev_keys(tmp_path: Path) -> None:
+    """D-1 / A-8: `src/` contains zero private signing keys, `SigningKeyRing.uses_dev_keys`
+    detects either committed dev public key, and `verify_bundle.py --production` rejects
+    bundles embedding either slot's committed dev public key."""
+    import sys
+
+    signing_src = (REPO_ROOT / "src" / "fleetforge" / "signing.py").read_text(encoding="utf-8")
+    assert "BEGIN PRIVATE KEY" not in signing_src
+    assert "PRIVATE_KEY_PEM =" not in signing_src
+
+    _, custom_pub_a = generate_keypair()
+    _, custom_pub_b = generate_keypair()
+    assert SigningKeyRing.from_config(
+        public_keys=f"{custom_pub_a};{DEFAULT_SECONDARY_PUBLIC_KEY_PEM}"
+    ).uses_dev_keys
+    assert SigningKeyRing.from_config(
+        public_keys=f"{DEFAULT_PRIMARY_PUBLIC_KEY_PEM};{custom_pub_b}"
+    ).uses_dev_keys
+    assert not SigningKeyRing.from_config(
+        public_keys=f"{custom_pub_a};{custom_pub_b}"
+    ).uses_dev_keys
+
+    tools_dir = str(REPO_ROOT / "agent" / "tools")
+    if tools_dir not in sys.path:
+        sys.path.insert(0, tools_dir)
+    import make_manifest
+    import verify_bundle
+
+    for slot_idx, dev_pub_pem in enumerate(DEFAULT_PUBLIC_KEY_RING):
+        bdir = tmp_path / f"bundle-slot-{slot_idx}"
+        bdir.mkdir()
+        app_bytes = b"\xe9\x00" + dev_pub_pem.encode("utf-8") + b"\x00" * 256
+        (bdir / "app.bin").write_bytes(app_bytes)
+        resolved_cfg = (
+            b"CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y\n"
+            b"CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y\n"
+            b"CONFIG_MBEDTLS_HAVE_TIME_DATE=y\n"
+        )
+        (bdir / "sdkconfig.resolved").write_bytes(resolved_cfg)
+        manifest: dict[str, Any] = {
+            "target": "esp32",
+            "chip_family": "ESP32",
+            "agent_version": "0.8.6",
+            "idf_version": "v5.5.5",
+            "idf_image": "espressif/idf:v5.5.5",
+            "source_commit": "0" * 40,
+            "partition_layout": "ab-4m-v1",
+            "ota_slot_size": 1966080,
+            "config_partition": {"label": "ff_cfg", "offset": 0x12000, "size": 4096},
+            "parts": [
+                {
+                    "name": "app",
+                    "path": "app.bin",
+                    "offset": 0x20000,
+                    "size": len(app_bytes),
+                    "sha256": hashlib.sha256(app_bytes).hexdigest(),
+                }
+            ],
+            "config_sha256": hashlib.sha256(resolved_cfg).hexdigest(),
+        }
+        manifest["build_digest"] = make_manifest.build_identity(manifest)
+        (bdir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+        # Dev check passes; `--production` rejects either committed dev key slot!
+        verify_bundle.verify(bdir, production=False)
+        with pytest.raises(verify_bundle.BundleError, match="default development OTA signing"):
+            verify_bundle.verify(bdir, production=True)

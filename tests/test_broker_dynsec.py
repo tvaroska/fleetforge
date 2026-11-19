@@ -287,6 +287,7 @@ def test_delete_client_command_and_retained_up_topics() -> None:
         f"ff/v1/d/{DEVICE_ID}/up/announce",
         f"ff/v1/d/{DEVICE_ID}/up/presence",
         f"ff/v1/d/{DEVICE_ID}/up/status",
+        f"ff/v1/d/{DEVICE_ID}/up/hb",
     )
     assert is_not_found("Client not found")
     assert not is_not_found("Permission denied")

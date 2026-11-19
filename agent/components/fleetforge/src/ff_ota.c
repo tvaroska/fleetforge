@@ -1,84 +1,16 @@
 /*
  * ff_ota — download, write the inactive slot, verify, apply. See ff_ota.h.
  *
- * The wire behaviour is not invented here either: `src/fleetforge/simulator/device.py`
- * already walks `staging → downloading → verifying → staged → applying → rebooting`, the
- * ingestor parses what it publishes, and this file repeats that walk on real flash. What
- * happens after the reboot (`confirming` → `confirmed` | `rolling_back` → `rolled_back`) is
- * reported by ff_mqtt.c from the record this file writes at `staged` (ff_txn.h). Eight
- * properties are worth stating out loud, because each one is a silent wrong answer rather
- * than an error:
- *
- * 1. **`downloading` is published exactly once**, not per chunk. `deploy_events` is a log
- *    of transitions, not a progress feed — `deploys.record_observed_status` dedups on
- *    `(device_id, cmd_id, state)`, so a per-chunk publish writes nothing and costs the
- *    broker a message per 4 KB. Progress goes to the serial console instead.
- * 2. **The digest is checked by reading the slot BACK after the last write, and BEFORE
- *    esp_https_ota_finish() moves the boot pointer.** Hashing the stream as it arrives looks
- *    equivalent and is not: it is a hash of what we meant to write, and reading the slot
- *    back is the only check that covers the flash write itself, which is the part that can
- *    fail. Reading back BEFORE finish() is possible because, without flash encryption,
- *    `esp_ota_write()` writes every byte it is handed straight to the partition
- *    (IDF v5.5.5 `app_update/esp_ota_ops.c`: the `partial_data[16]` buffer exists only inside
- *    `if (esp_flash_encryption_enabled())`, and what it holds back is the TRAILING partial
- *    16-byte block, not the header), and `esp_https_ota.c::_ota_write()` hands every chunk to
- *    it unbuffered. R1-fw-1 believed `esp_ota_write` withheld the first 16 bytes of the
- *    header until the end; that is not what v5.5.5 does (DECISIONS 2026-10-03, R2-fw-1).
- *    The #error below makes flash encryption a build failure, so the premise cannot rot.
- *    A second #error makes a build without CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE fail too
- *    (R3-fw-5): this OTA path is never built with a config whose bootloader cannot roll back.
- * 3. **A mismatch never moves the boot pointer.** It is caught before finish(), so the
- *    image is abandoned with esp_https_ota_abort() and otadata is never written. Before
- *    R2-fw-1 the switch came first and was undone afterwards, and in between — the whole
- *    read-back of up to 1.9 MB — a power cut or a watchdog booted an unverified image. The
- *    only paths that can still need restore_boot_partition() are a failed finish() and a
- *    `cancel` that arrives after it (property 8).
- * 4. **The URL is never logged.** It is the authorization (R1-be-3: "signed URL never
- *    persisted, never logged"), so it does not appear in a log line, in a `detail`, or
- *    truncated "just for debugging". Everything else about a failure is said plainly.
- * 5. **One slot, chosen once, and never one the boot pointer names** (R2-fw-2).
- *    choose_target_slot() picks the slot, and the same pointer is handed to esp_https_ota
- *    (`.partition.staging`), hashed, switched to and recorded. Before any I/O it refuses a
- *    stage while the running image is still PENDING_VERIFY, and while an earlier staged
- *    image waits for a reboot (boot != running). The second refusal is the one that matters.
- *    IDF's esp_rewrite_ota_data() picks the new seq with `while (seq > id+1 + i*N) i++`,
- *    and equality stops that loop. So switching to the slot the active entry ALREADY names
- *    rewrites the same seq into the other otadata sector, which is the running image's
- *    entry. Both sectors then name the staged slot, and a rollback has nowhere to go
- *    (DECISIONS 2026-10-03, R2-fw-2).
- * 6. **A download that stops making progress ends** (R2-fw-5). IDF turns a read timeout
- *    with nothing read into ESP_ERR_HTTPS_OTA_IN_PROGRESS, so a peer that stays connected
- *    and silent would keep the perform loop, and `s_running`, alive for ever. If the image
- *    length read has not grown for OTA_STALL_MS (wall clock, from `downloading`), the
- *    download is abandoned with esp_https_ota_abort() and reported `failed` /
- *    `download stalled`; the slot is free for the next `stage`. On metal TCP keepalive
- *    usually ends a dead radio first (`download failed`). Known residual: IDF's
- *    read_header() loops inside the FIRST perform() until it has 1 KB of body, so a peer
- *    silent before that is not seen here (DECISIONS 2026-10-03, R2-fw-5).
- * 7. **A re-delivered stage is not a second update** (R2-fw-6). The broker and a re-POST
- *    (`reused: true`) can hand the board the same cmd_id again after other commands, past
- *    ff_mqtt's one-id dedupe. ff_ota_is_handling() answers whether that id is the download
- *    in flight or the image staged and waiting, and the command seam drops it without a
- *    status. Before, it was refused against itself (`failed`), which ended the server's row
- *    while the update carried on (DECISIONS 2026-10-03, R2-fw-6).
- * 8. **A `cancel` stops the transfer or puts the boot pointer back, never both orders**
- *    (R5-fw-4, R5-spec-1 D4). ff_ota_cancel() decides under `s_cancel_lock`; ota_task looks at
- *    the request at six checkpoints (before the fetch, every perform() pass, before finish(),
- *    after finish() and before the record, at the staged exit, and R5-fw-5's at the end of an
- *    apply:auto's safe-window wait, before `applying`). Before finish() a cancel
- *    is an esp_https_ota_abort(): otadata never moved. After finish() it is
- *    restore_boot_partition() FIRST and only then the record cleared, so a power cut in
- *    between leaves a record no otadata evidence backs (discarded as stale at boot), never the
- *    cancelled image booting with no record. A cancel is never accepted once the walk is
- *    `applying`, never accepted and dropped, and never carried out twice: whoever reads the
- *    request under the lock acts on it. Only ota_task publishes `cancelled` for a transaction
- *    it still runs; for a staged image that waits, the command seam does (it enqueues).
- * 9. **apply:auto waits for the safe window, and the confirm path is not touched** (R5-fw-5,
- *    R5-spec-1 D7). After `staged`, while the firmware's rule (ff_safe_window.h) says unsafe,
- *    the task reports `awaiting_safe_window` once and polls every FF_SAFE_WINDOW_POLL_MS; the
- *    phase is FF_OTA_TXN_AWAITING, which a `cancel` still reaches (D4). Checkpoint 6 commits
- *    `applying` under the lock; from there it is the old walk, plus one more look at the rule
- *    after the drain, immediately before esp_restart(). No rule = no wait, the R5-fw-4 walk.
+ * Core invariants (`CRITICAL.md`, `DECISIONS.md` R2-fw-1..6, R5-fw-4..5, R6-SEC-1..2):
+ * 1. `downloading` is published once per transfer; chunk progress goes to serial console.
+ * 2. Read-back SHA-256 and ECDSA P-256 verification run BEFORE `esp_https_ota_finish()`
+ *    switches `otadata`. Flash encryption is refused at compile time (`#error`) and
+ *    `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE` is required (`#error`).
+ * 3. Download URLs are bearer credentials and are never logged or echoed in `detail`.
+ * 4. `choose_target_slot()` selects the inactive slot once and refuses while `PENDING_VERIFY`
+ *    or while a previously staged slot already differs from the running slot.
+ * 5. `OTA_STALL_MS` bounds silent connections; `ff_ota_is_handling()` deduplicates redelivered
+ *    `stage` commands; `s_cancel_lock` serializes `cancel` checkpoints against `applying`.
  */
 
 #include "ff_ota.h"
@@ -150,55 +82,89 @@ _Static_assert(OTA_STALL_MS >= 2 * OTA_HTTP_TIMEOUT_MS,
 
 #define OTA_READBACK_CHUNK 4096
 
-/* R6-FW-1: Resumable HTTP Range download + exponential-backoff retry.
- * `esp_https_ota` fetches in `OTA_RANGE_CHUNK_BYTES` windows (`Range: bytes=<offset>-<end>`),
- * and when a transient socket/link error drops `esp_https_ota_perform()` mid-stream,
- * `resume_range_download()` retries from the exact byte offset (`Range: bytes=<so_far>-`)
+/* R6-FW-1 / D-2: Resumable HTTP Range download + exponential-backoff retry.
+ * Initial transfer opens a standard GET (no HEAD pre-request, which S3/GCS GET-presigned URLs
+ * reject with 403), and when a transient socket/link/5xx error drops mid-stream,
+ * `resume_range_perform()` retries from the exact byte offset (`Range: bytes=<so_far>-`)
  * with exponential backoff (1 s, 2 s, 4 s) before declaring `download failed`. */
 #define OTA_RANGE_CHUNK_BYTES 65536
 #define OTA_MAX_RETRIES 3
 #define OTA_RETRY_BASE_MS 1000
 
-/* R6-SEC-1 / R6-SEC-2: Trusted ECDSA P-256 public key rotation ring (>= 2 keys).
- * A signature in `cmd->sig` (`ecdsa-p256-sha256:<base64_der>`) is verified against the 32-byte
- * SHA-256 digest read back from the flash slot BEFORE `esp_https_ota_finish()` switches the
- * boot pointer. Accepting any key in the 2-key ring allows zero-downtime key rotation.
- *
- * When `FF_OTA_PRODUCTION_BUILD` is defined, signature verification defaults to mandatory
- * (`FF_OTA_REQUIRE_SIGNATURE=1`) and building with the committed dev public key fails at
- * compile time unless `FF_OTA_SIGNING_PUBKEY_PRIMARY_PEM` is supplied. */
-#if defined(FF_OTA_PRODUCTION_BUILD) && !defined(FF_OTA_SIGNING_PUBKEY_PRIMARY_PEM)
-#error "FF_OTA_PRODUCTION_BUILD requires overriding FF_OTA_SIGNING_PUBKEY_PRIMARY_PEM"
+#define FF_OTA_DEV_PRIMARY_PUBKEY_PEM \
+    "-----BEGIN PUBLIC KEY-----\n" \
+    "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEbHg1tVC28a9y8SbZY0jis7OKKWxr\n" \
+    "X2+S5g0No7NMyV8nI+vUHHQ8MNQnNSDSPESUAT9m2iLyNC/nM26RvxYV1Q==\n" \
+    "-----END PUBLIC KEY-----\n"
+
+#define FF_OTA_DEV_SECONDARY_PUBKEY_PEM \
+    "-----BEGIN PUBLIC KEY-----\n" \
+    "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEwJct9NbOiOIbnB/ToYTvq02EBrzs\n" \
+    "UAETxsFAAWHFWhxfpL3x0OcIH6yW9q6EhYA3q6vNGIEwC7KPJQXd1ONEqQ==\n" \
+    "-----END PUBLIC KEY-----\n"
+
+#if defined(CONFIG_FF_OTA_PRODUCTION_BUILD) && CONFIG_FF_OTA_PRODUCTION_BUILD && !defined(FF_OTA_PRODUCTION_BUILD)
+#define FF_OTA_PRODUCTION_BUILD 1
+#endif
+
+#if defined(FF_OTA_PRODUCTION_BUILD) && !defined(CONFIG_FF_OTA_SIGNING_PUBKEY_PRIMARY_PEM) && (!defined(FF_OTA_SIGNING_PUBKEY_PRIMARY_PEM) || !defined(FF_OTA_SIGNING_PUBKEY_SECONDARY_PEM))
+#error "FF_OTA_PRODUCTION_BUILD requires overriding both FF_OTA_SIGNING_PUBKEY_PRIMARY_PEM and FF_OTA_SIGNING_PUBKEY_SECONDARY_PEM"
 #endif
 
 #ifndef FF_OTA_REQUIRE_SIGNATURE
 #if defined(FF_OTA_PRODUCTION_BUILD)
 #define FF_OTA_REQUIRE_SIGNATURE 1
+#elif defined(CONFIG_FF_OTA_REQUIRE_SIGNATURE)
+#define FF_OTA_REQUIRE_SIGNATURE CONFIG_FF_OTA_REQUIRE_SIGNATURE
 #else
-#define FF_OTA_REQUIRE_SIGNATURE 0
+#define FF_OTA_REQUIRE_SIGNATURE 1
 #endif
 #endif
 
 #ifndef FF_OTA_SIGNING_PUBKEY_PRIMARY_PEM
-#define FF_OTA_SIGNING_PUBKEY_PRIMARY_PEM \
-    "-----BEGIN PUBLIC KEY-----\n" \
-    "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEbHg1tVC28a9y8SbZY0jis7OKKWxr\n" \
-    "X2+S5g0No7NMyV8nI+vUHHQ8MNQnNSDSPESUAT9m2iLyNC/nM26RvxYV1Q==\n" \
-    "-----END PUBLIC KEY-----\n"
+#define FF_OTA_SIGNING_PUBKEY_PRIMARY_PEM FF_OTA_DEV_PRIMARY_PUBKEY_PEM
 #endif
 
 #ifndef FF_OTA_SIGNING_PUBKEY_SECONDARY_PEM
-#define FF_OTA_SIGNING_PUBKEY_SECONDARY_PEM \
-    "-----BEGIN PUBLIC KEY-----\n" \
-    "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEwJct9NbOiOIbnB/ToYTvq02EBrzs\n" \
-    "UAETxsFAAWHFWhxfpL3x0OcIH6yW9q6EhYA3q6vNGIEwC7KPJQXd1ONEqQ==\n" \
-    "-----END PUBLIC KEY-----\n"
+#define FF_OTA_SIGNING_PUBKEY_SECONDARY_PEM FF_OTA_DEV_SECONDARY_PUBKEY_PEM
 #endif
 
 static const char *const s_signing_pubkey_ring[] = {
     FF_OTA_SIGNING_PUBKEY_PRIMARY_PEM,
     FF_OTA_SIGNING_PUBKEY_SECONDARY_PEM,
 };
+
+static const char *signing_pubkey_slot(size_t idx)
+{
+#if defined(CONFIG_FF_OTA_SIGNING_PUBKEY_PRIMARY_PEM)
+    if (idx == 0 && CONFIG_FF_OTA_SIGNING_PUBKEY_PRIMARY_PEM[0] != '\0') {
+        return CONFIG_FF_OTA_SIGNING_PUBKEY_PRIMARY_PEM;
+    }
+#endif
+#if defined(CONFIG_FF_OTA_SIGNING_PUBKEY_SECONDARY_PEM)
+    if (idx == 1 && CONFIG_FF_OTA_SIGNING_PUBKEY_SECONDARY_PEM[0] != '\0') {
+        return CONFIG_FF_OTA_SIGNING_PUBKEY_SECONDARY_PEM;
+    }
+#endif
+    return s_signing_pubkey_ring[idx];
+}
+
+bool ff_ota_requires_signature(void)
+{
+    return FF_OTA_REQUIRE_SIGNATURE != 0;
+}
+
+bool ff_ota_uses_dev_signing_key(void)
+{
+    for (size_t i = 0; i < sizeof(s_signing_pubkey_ring) / sizeof(s_signing_pubkey_ring[0]); i++) {
+        const char *pem = signing_pubkey_slot(i);
+        if (strstr(pem, "bHg1tVC28a9y8SbZY0jis7OKKWxr") != NULL ||
+            strstr(pem, "wJct9NbOiOIbnB/ToYTvq02EBrzs") != NULL) {
+            return true;
+        }
+    }
+    return false;
+}
 
 /* The URL the artifact link redirects to. Twice `ff_ota_cmd_t.url` because a presigned S3
  * link is the long one: host + key + ~7 X-Amz-* query parameters. Heap, not stack — the OTA
@@ -321,6 +287,12 @@ static esp_err_t partition_digest(const esp_partition_t *part, size_t length, ch
 static bool verify_artifact_signature(const uint8_t digest_raw[32], const char *sig_str,
                                       const char **detail_out)
 {
+#if defined(FF_OTA_PRODUCTION_BUILD)
+    if (ff_ota_uses_dev_signing_key()) {
+        *detail_out = "production ring carries dev key";
+        return false;
+    }
+#endif
     if (sig_str == NULL || sig_str[0] == '\0') {
 #if FF_OTA_REQUIRE_SIGNATURE
         *detail_out = "signature missing";
@@ -348,7 +320,7 @@ static bool verify_artifact_signature(const uint8_t digest_raw[32], const char *
     }
 
     for (size_t i = 0; i < sizeof(s_signing_pubkey_ring) / sizeof(s_signing_pubkey_ring[0]); i++) {
-        const char *pem = s_signing_pubkey_ring[i];
+        const char *pem = signing_pubkey_slot(i);
         mbedtls_pk_context pk;
         mbedtls_pk_init(&pk);
         int rc = mbedtls_pk_parse_public_key(&pk, (const unsigned char *)pem, strlen(pem) + 1);
@@ -429,6 +401,10 @@ static esp_err_t resume_range_perform(esp_https_ota_handle_t handle, const ff_ot
                 continue;
             }
             int status = esp_http_client_get_status_code(s_ota_http_client);
+            if (status >= 400 && status < 500 && status != 408 && status != 429) {
+                (void)esp_http_client_close(s_ota_http_client);
+                return ESP_ERR_INVALID_RESPONSE;
+            }
             if (status != 206 && !(offset <= 0 && status == 200)) {
                 (void)esp_http_client_close(s_ota_http_client);
                 err = ESP_ERR_INVALID_RESPONSE;
@@ -858,23 +834,47 @@ static void run_cargo_ota(const ff_ota_cmd_t *cmd)
     size_t total = 0;
     bool download_failed = false;
     bool cancelled = false;
+    int retry_attempt = 0;
     for (;;) {
         if (cancel_requested()) {
             cancelled = true;
             break;
         }
         int r = esp_http_client_read(client, (char *)buf, OTA_READBACK_CHUNK);
-        if (r < 0) {
-            download_failed = true;
+        if (r == 0 && esp_http_client_is_complete_data_received(client)) {
             break;
         }
-        if (r == 0) {
-            if (esp_http_client_is_complete_data_received(client)) {
+        if (r <= 0) {
+            if (retry_attempt >= OTA_MAX_RETRIES) {
+                download_failed = true;
                 break;
             }
-            download_failed = true;
-            break;
+            uint32_t delay_ms = (uint32_t)OTA_RETRY_BASE_MS << retry_attempt;
+            retry_attempt++;
+            char range_hdr[48];
+            snprintf(range_hdr, sizeof(range_hdr), "bytes=%u-", (unsigned)total);
+            esp_http_client_close(client);
+            vTaskDelay(pdMS_TO_TICKS(delay_ms));
+            if (cancel_requested()) {
+                cancelled = true;
+                break;
+            }
+            (void)esp_http_client_set_header(client, "Range", range_hdr);
+            if (esp_http_client_open(client, 0) != ESP_OK ||
+                esp_http_client_fetch_headers(client) < 0) {
+                continue;
+            }
+            int st = esp_http_client_get_status_code(client);
+            if (st != 206 && !(total == 0 && st == 200)) {
+                if (st >= 400 && st < 500 && st != 408 && st != 429) {
+                    download_failed = true;
+                    break;
+                }
+                continue;
+            }
+            continue;
         }
+        retry_attempt = 0;
         if (mbedtls_sha256_update(&sha, buf, (size_t)r) != 0 ||
             handler->write_cb(total, buf, (size_t)r, handler->ctx) != ESP_OK) {
             download_failed = true;
@@ -1005,14 +1005,10 @@ static void ota_task(void *arg)
     esp_https_ota_config_t ota_config = {
         .http_config = &http,
         .http_client_init_cb = ota_http_client_init_cb,
-        /* R6-FW-1: fetch in bounded HTTP `Range: bytes=<offset>-<end>` windows so flaky links
-         * resume from the last written byte rather than restarting from byte 0. */
-        .partial_http_download = true,
+        /* D-2: Never set `.partial_http_download = true`: IDF sends an unsigned HEAD
+         * pre-request that S3/GCS GET-presigned URLs refuse with 403. Instead, open a
+         * standard GET and resume interrupted transfers via `Range: bytes=<offset>-`. */
         .max_http_request_size = OTA_RANGE_CHUNK_BYTES,
-        /* THE slot, not esp_https_ota's own pick. Left NULL it calls
-         * esp_ota_get_next_update_partition() again, independently, and nothing would
-         * hold that equal to the `target` hashed and recorded here. `.final` stays NULL,
-         * which IDF reads as "same as staging". */
         .partition = {.staging = target},
     };
 

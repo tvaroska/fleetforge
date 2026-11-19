@@ -1,0 +1,31 @@
+menu "FleetForge OTA Agent"
+
+    config FF_OTA_REQUIRE_SIGNATURE
+        bool "Require ECDSA P-256 signature verification on OTA artifacts"
+        default y
+        help
+            Refuse unsigned stage commands (`artifact.sig` absent) and announce
+            the `"sig"` capability on `up/announce`. Keep enabled in production;
+            disable only for unsigned local bench experiments.
+
+    config FF_OTA_PRODUCTION_BUILD
+        bool "Enforce production signing key ring (forbid committed dev keys)"
+        default n
+        select FF_OTA_REQUIRE_SIGNATURE
+        help
+            Fail builds or verification if either slot of the 2-key ECDSA P-256
+            public rotation ring uses a committed development key.
+
+    config FF_OTA_SIGNING_PUBKEY_PRIMARY_PEM
+        string "Primary ECDSA P-256 SubjectPublicKeyInfo PEM"
+        default ""
+        help
+            Optional PEM override for slot 0 of the OTA verification key ring.
+
+    config FF_OTA_SIGNING_PUBKEY_SECONDARY_PEM
+        string "Secondary ECDSA P-256 SubjectPublicKeyInfo PEM"
+        default ""
+        help
+            Optional PEM override for slot 1 of the OTA verification key ring.
+
+endmenu
