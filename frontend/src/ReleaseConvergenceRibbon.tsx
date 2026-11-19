@@ -178,7 +178,7 @@ export function ReleaseConvergenceRibbon({
   // Circuit-breaker detection: any board in `rolled_back`, `failed`, or `safe_mode`.
   const haltedBoards = devices.filter(
     (d) =>
-      (d as DeviceSummary & { safe_mode?: boolean }).safe_mode === true ||
+      d.safe_mode === true ||
       d.deploy?.state === 'rolled_back' ||
       d.deploy?.state === 'failed',
   )
@@ -202,7 +202,7 @@ export function ReleaseConvergenceRibbon({
     ).length
     const halted = stageDevices.some(
       (d) =>
-        (d as DeviceSummary & { safe_mode?: boolean }).safe_mode === true ||
+        d.safe_mode === true ||
         d.deploy?.state === 'rolled_back' ||
         d.deploy?.state === 'failed',
     )

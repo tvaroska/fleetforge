@@ -46,7 +46,8 @@ type MeshNode = {
   platform_type: string
   fw_version: string
   link_type: string
-  offline_mode: boolean
+  online: boolean
+  safe_mode: boolean
   sub_versions: Record<string, string>
   secrets_rev: number
 }
@@ -91,7 +92,8 @@ function toMeshNodes(devices?: DeviceSummary[] | null): MeshNode[] {
     platform_type: d.platform_type,
     fw_version: d.fw_version ?? 'unknown',
     link_type: d.link_type || 'wifi',
-    offline_mode: Boolean((d as { offline_mode?: boolean }).offline_mode ?? false),
+    online: d.online,
+    safe_mode: Boolean(d.safe_mode),
     sub_versions: d.sub_versions ?? {},
     secrets_rev: d.secrets_rev ?? 0,
   }))
@@ -252,21 +254,7 @@ export function PitDockCockpit({
 
     try {
       const res = await api.dockSync(effectiveDeviceId, parsed)
-      const statusesCount = res.ingested_statuses ?? res.statuses_recorded ?? 0
-      const telemetryCount = res.ingested_telemetry ?? res.telemetry_batches_recorded ?? 0
-      const logsCount = res.ingested_logs ?? res.log_batches_recorded ?? 0
-      const corruptedCount = res.corrupted_lines ?? 0
-
-      setReceipt({
-        ...res,
-        statuses_recorded: statusesCount,
-        telemetry_batches_recorded: telemetryCount,
-        log_batches_recorded: logsCount,
-        ingested_statuses: statusesCount,
-        ingested_telemetry: telemetryCount,
-        ingested_logs: logsCount,
-        corrupted_lines: corruptedCount,
-      })
+      setReceipt(res)
       onSynced?.()
     } catch (err) {
       if (err instanceof ApiError && err.isUnauthorized) {
@@ -287,17 +275,30 @@ export function PitDockCockpit({
     >
       <h2 id="pit-dock-heading">Pit &amp; Carrier Dock Cockpit (RULE E301)</h2>
 
-      {/* Top EMCON Posture Banner */}
+      {/* Live Dock & Radio Link Posture Banner (derived from fleet state) */}
       <div
         className="emcon-badge"
         data-testid="emcon-posture-banner"
         role="status"
-        aria-label="EMCON radio posture"
+        aria-label="Dock and radio link posture"
       >
-        <strong>⊘ VENUE OFFLINE / EMCON MODE (RULE E301)</strong>{' '}
-        <span data-testid="emcon-wifi-pill">[⊘ 802.11 Wi-Fi: OFF]</span>{' '}
-        <span data-testid="emcon-improv-pill">[⊘ Improv BLE: OFF]</span>{' '}
-        <span data-testid="emcon-nimble-pill">[✓ Shared NimBLE GATT: LIVE]</span>
+        <strong>
+          {meshNodes.length === 0
+            ? 'USB-C Dock Sync (no enrolled boards)'
+            : meshNodes.some((n) => n.link_type === 'dock')
+              ? '█ TETHERED USB-C DOCK ACTIVE'
+              : 'RADIO FLEET LINK SUMMARY'}
+        </strong>{' '}
+        <span data-testid="emcon-dock-pill">
+          [Docked: {meshNodes.filter((n) => n.link_type === 'dock').length}/{meshNodes.length}]
+        </span>{' '}
+        <span data-testid="emcon-wifi-pill">
+          [Online radio: {meshNodes.filter((n) => n.online && n.link_type !== 'dock').length}/
+          {meshNodes.length}]
+        </span>{' '}
+        <span data-testid="emcon-safemode-pill">
+          [Safe mode: {meshNodes.filter((n) => n.safe_mode).length}]
+        </span>
       </div>
 
       {/* H6 Pinned Live Mini-Fleet & Peer Mesh Strip */}
@@ -468,20 +469,14 @@ export function PitDockCockpit({
                 <code>{receipt.fw_version ?? 'unchanged'}</code>)
               </p>
               <dl>
-                <dt>ingested_statuses</dt>
-                <dd data-testid="receipt-ingested-statuses">
-                  {receipt.ingested_statuses ?? receipt.statuses_recorded ?? 0}
-                </dd>
-                <dt>ingested_telemetry</dt>
+                <dt>statuses_recorded</dt>
+                <dd data-testid="receipt-ingested-statuses">{receipt.statuses_recorded}</dd>
+                <dt>telemetry_batches_recorded</dt>
                 <dd data-testid="receipt-ingested-telemetry">
-                  {receipt.ingested_telemetry ?? receipt.telemetry_batches_recorded ?? 0}
+                  {receipt.telemetry_batches_recorded}
                 </dd>
-                <dt>ingested_logs</dt>
-                <dd data-testid="receipt-ingested-logs">
-                  {receipt.ingested_logs ?? receipt.log_batches_recorded ?? 0}
-                </dd>
-                <dt>corrupted_lines</dt>
-                <dd data-testid="receipt-corrupted-lines">{receipt.corrupted_lines ?? 0}</dd>
+                <dt>log_batches_recorded</dt>
+                <dd data-testid="receipt-ingested-logs">{receipt.log_batches_recorded}</dd>
               </dl>
             </div>
           )}

@@ -133,7 +133,7 @@ def check_bundle(repo: Path, bundle_dir: Path, newest: str) -> str:
         )
 
     # Success
-    return source_commit
+    return str(source_commit)
 
 
 def main(argv: list[str] | None = None) -> int:

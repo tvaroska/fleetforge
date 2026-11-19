@@ -37,6 +37,7 @@ from fleetforge.db.models import Device, Project
 from fleetforge.deploys import sanitise_device_text
 from fleetforge.ingestor.protocol import LogLine, TelemetrySample
 from fleetforge.secrets_crypto import decrypt_secret
+from fleetforge.url_safety import validate_public_https_url
 
 logger = logging.getLogger(__name__)
 
@@ -415,7 +416,10 @@ def _safe_settings() -> Settings | None:
 
 
 async def _resolve_project_otel(
-    session: AsyncSession, device: Device
+    session: AsyncSession,
+    device: Device,
+    *,
+    settings: Settings | None = None,
 ) -> tuple[str, str, dict[str, str]] | None:
     """Return `(project_slug, base_endpoint, headers)` if OTel export is enabled, else `None`.
 
@@ -423,15 +427,15 @@ async def _resolve_project_otel(
     `OTEL_PROJECT_CACHE_TTL_S` seconds so high-frequency `up/log` and `up/telemetry` packets
     do not open a DB SAVEPOINT, query `projects`, or run AES-GCM decryption on every message.
     """
-    settings = _safe_settings()
+    cfg = settings if settings is not None else _safe_settings()
     env_endpoint = (
-        settings.otel_exporter_otlp_endpoint
-        if settings and settings.otel_exporter_otlp_endpoint
+        cfg.otel_exporter_otlp_endpoint
+        if cfg and cfg.otel_exporter_otlp_endpoint
         else os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT")
     )
     env_headers = (
-        settings.otel_exporter_otlp_headers
-        if settings and settings.otel_exporter_otlp_headers
+        cfg.otel_exporter_otlp_headers
+        if cfg and cfg.otel_exporter_otlp_headers
         else os.environ.get("OTEL_EXPORTER_OTLP_HEADERS")
     )
 
@@ -445,7 +449,7 @@ async def _resolve_project_otel(
         and hasattr(identity_map, "values")
         and any(isinstance(obj, Project) and obj.id == project_id for obj in identity_map.values())
     )
-    if not in_identity_map and cache_key in _project_otel_cache:
+    if settings is None and not in_identity_map and cache_key in _project_otel_cache:
         expires_at, cached_result = _project_otel_cache[cache_key]
         if now_mono < expires_at:
             return cached_result
@@ -467,12 +471,17 @@ async def _resolve_project_otel(
     raw_headers: str | None = None
 
     if project is not None and project.otel_endpoint:
-        endpoint = project.otel_endpoint
-        if project.otel_headers:
-            try:
-                raw_headers = decrypt_secret(project.otel_headers, settings)
-            except ValueError:
-                raw_headers = project.otel_headers
+        try:
+            endpoint = validate_public_https_url(project.otel_endpoint, field_name="otel_endpoint")
+            if project.otel_headers:
+                raw_headers = decrypt_secret(project.otel_headers, cfg)
+        except ValueError as exc:
+            logger.error(
+                "device %s: invalid or undecryptable project OTel config (%s); skipping OTel export",
+                device.device_id,
+                exc,
+            )
+            return None
     else:
         endpoint = env_endpoint
         raw_headers = env_headers
@@ -480,7 +489,7 @@ async def _resolve_project_otel(
     result: _ProjectOtelResolved | None = (
         (project_slug, endpoint, parse_otel_headers(raw_headers)) if endpoint else None
     )
-    if not in_identity_map:
+    if settings is None and not in_identity_map:
         _project_otel_cache[cache_key] = (now_mono + OTEL_PROJECT_CACHE_TTL_S, result)
     return result
 

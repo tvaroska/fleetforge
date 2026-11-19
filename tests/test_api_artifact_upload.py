@@ -485,9 +485,40 @@ class TestTheLibraryMarkerVerdict:
         token = await login_admin(admin_app)
         assert (await upload(admin_app, token, data)).status_code == 200
         assert await rows(engine, "SELECT has_lib_marker FROM artifacts") == [(True,)]
-        response = await upload(admin_app, token, data, layout="ab-4m-arduino-v1", version="2")
+        response = await upload(admin_app, token, data, layout="ab-4m-v1", version="2")
 
         assert response.status_code == 201, response.text
         assert await rows(
             engine, "SELECT sha256, partition_layout, has_lib_marker FROM artifacts"
         ) == [(digest, "ab-4m-v1", True)]
+
+
+async def test_reupload_with_a_different_partition_layout_is_a_conflict(
+    admin_app: FastAPI, store: MemoryObjectStore, engine: AsyncEngine
+) -> None:
+    """A-5: re-uploading identical bytes with differing `partition_layout`, `target`, or
+    `artifact_type` returns `409 Conflict` rather than echoing metadata the DB ignored."""
+    data = (FIXTURES / "esp32.basic.app.head.bin").read_bytes()
+    digest = hashlib.sha256(data).hexdigest()
+    token = await login_admin(admin_app)
+
+    first = await upload(admin_app, token, data, layout="ab-4m-v1", version="1.0.0")
+    assert first.status_code == 201, first.text
+    assert first.json()["partition_layout"] == "ab-4m-v1"
+
+    diff_layout = await upload(admin_app, token, data, layout="ab-4m-arduino-v1", version="1.0.1")
+    assert diff_layout.status_code == 409, diff_layout.text
+    assert "partition_layout" in diff_layout.json()["detail"]
+
+    diff_target = await upload(
+        admin_app, token, data, target="esp32s3", layout="ab-4m-v1", version="1.0.1"
+    )
+    assert diff_target.status_code == 409, diff_target.text
+    assert "target" in diff_target.json()["detail"]
+
+    same_meta = await upload(admin_app, token, data, layout="ab-4m-v1", version="1.0.1")
+    assert same_meta.status_code == 201, same_meta.text
+    assert same_meta.json()["partition_layout"] == "ab-4m-v1"
+    assert await rows(engine, "SELECT sha256, target, partition_layout FROM artifacts") == [
+        (digest, "esp32", "ab-4m-v1")
+    ]

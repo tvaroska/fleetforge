@@ -57,7 +57,7 @@ re-`put`-able; the reverse order would leave a row naming bytes that do not exis
 
 import logging
 import re
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from sqlalchemy import text
@@ -192,6 +192,31 @@ _LABEL_SELECT_SQL = text(
     "SELECT sha256 FROM artifact_versions "
     "WHERE project_id = :project_id AND target = :target AND version = :version"
 )
+
+_ARTIFACT_SELECT_SQL = text(
+    "SELECT sha256, size_bytes, target, partition_layout, artifact_type, has_lib_marker, sig "
+    "FROM artifacts WHERE sha256 = :sha256"
+)
+
+
+def _metadata_conflict(
+    digest: str,
+    stored_row: Any,
+    *,
+    target: str,
+    partition_layout: str | None,
+    artifact_type: str,
+) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail=(
+            f"artifact {digest[:12]} is already stored with "
+            f"(target={stored_row.target!r}, partition_layout={stored_row.partition_layout!r}, "
+            f"artifact_type={stored_row.artifact_type!r}); cannot re-upload the same bytes with "
+            f"(target={target!r}, partition_layout={partition_layout!r}, "
+            f"artifact_type={artifact_type!r})"
+        ),
+    )
 
 
 def _slot_size(partition_layout: str, catalog: LayoutCatalog) -> int:
@@ -446,6 +471,20 @@ async def upload_artifact(
         if existing is not None and existing != digest:
             raise _version_conflict(target, version, existing)
 
+        existing_blob = (await session.execute(_ARTIFACT_SELECT_SQL, {"sha256": digest})).first()
+        if existing_blob is not None and (
+            existing_blob.target != target
+            or existing_blob.partition_layout != stored_layout
+            or existing_blob.artifact_type != artifact_type
+        ):
+            raise _metadata_conflict(
+                digest,
+                existing_blob,
+                target=target,
+                partition_layout=stored_layout,
+                artifact_type=artifact_type,
+            )
+
         try:
             await put_blob(store, data)
         except ObjectStoreError:
@@ -470,11 +509,21 @@ async def upload_artifact(
                 "sig": verified_sig,
             },
         )
-        if verified_sig is None:
-            verified_sig = await session.scalar(
-                text("SELECT sig FROM artifacts WHERE sha256 = :sha256"),
-                {"sha256": digest},
+        stored_blob = (await session.execute(_ARTIFACT_SELECT_SQL, {"sha256": digest})).one()
+        if (
+            stored_blob.target != target
+            or stored_blob.partition_layout != stored_layout
+            or stored_blob.artifact_type != artifact_type
+        ):
+            await session.rollback()
+            raise _metadata_conflict(
+                digest,
+                stored_blob,
+                target=target,
+                partition_layout=stored_layout,
+                artifact_type=artifact_type,
             )
+        verified_sig = stored_blob.sig
         labelled = await session.scalar(
             _LABEL_INSERT_SQL,
             {
@@ -517,7 +566,7 @@ async def upload_artifact(
         await session.commit()
 
         auto_deployed: list[str] | None = None
-        from fleetforge.api.routers.deploys import (
+        from fleetforge.rollout import (
             deploy_version_to_project_devices,
             matches_project_tracking,
         )
@@ -567,15 +616,15 @@ async def upload_artifact(
         admin.token_id,
     )
     return ArtifactUploaded(
-        sha256=digest,
-        size_bytes=len(data),
-        target=target,
+        sha256=stored_blob.sha256,
+        size_bytes=stored_blob.size_bytes,
+        target=stored_blob.target,
         version=version,
-        partition_layout=stored_layout,
+        partition_layout=stored_blob.partition_layout,
         created=created,
-        has_lib_marker=has_lib_marker,
-        artifact_type=artifact_type,
-        sig=verified_sig,
+        has_lib_marker=stored_blob.has_lib_marker,
+        artifact_type=stored_blob.artifact_type,
+        sig=stored_blob.sig,
         repo_url=repo_url,
         branch=branch,
         commit_sha=commit_sha,

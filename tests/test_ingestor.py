@@ -1618,6 +1618,70 @@ def test_counts_in_deploy_kpis(state: str, has_requested: bool, counts: bool) ->
     assert counts_in_deploy_kpis(terminal_state=state, has_requested_row=has_requested) is counts
 
 
+async def test_announce_safe_mode_is_stored_and_cleared_when_absent(
+    session: AsyncSession,
+) -> None:
+    """D-3: `up/announce.safe_mode` persists on `devices.safe_mode`, clears to `False` when
+    absent on a later announce, and ignores non-boolean values without dropping the announce."""
+    await seed_device(session)
+
+    await publish(
+        session,
+        "announce",
+        {
+            "device_id": DEVICE_ID,
+            "platform_type": "esp32",
+            "fw_version": "1.4.0",
+            "safe_mode": True,
+        },
+    )
+    dev = await session.get(Device, DEVICE_ID)
+    assert dev is not None
+    assert dev.safe_mode is True
+
+    # Malformed `safe_mode` (string `"true"`) normalises to `False` (absent/invalid -> False)
+    await publish(
+        session,
+        "announce",
+        {
+            "device_id": DEVICE_ID,
+            "platform_type": "esp32",
+            "fw_version": "1.4.1",
+            "safe_mode": "true",
+        },
+    )
+    await session.refresh(dev)
+    assert dev.fw_version == "1.4.1"
+    assert dev.safe_mode is False
+
+    # Re-enter safe mode, then send normal announce omitting `safe_mode` -> cleared to `False`
+    await publish(
+        session,
+        "announce",
+        {
+            "device_id": DEVICE_ID,
+            "platform_type": "esp32",
+            "fw_version": "1.4.1",
+            "safe_mode": True,
+        },
+    )
+    await session.refresh(dev)
+    assert dev.safe_mode is True
+
+    await publish(
+        session,
+        "announce",
+        {
+            "device_id": DEVICE_ID,
+            "platform_type": "esp32",
+            "fw_version": "1.4.2",
+        },
+    )
+    await session.refresh(dev)
+    assert dev.fw_version == "1.4.2"
+    assert dev.safe_mode is False
+
+
 async def test_deeply_nested_payload_is_dropped_not_raised(
     engine: AsyncEngine, session: AsyncSession
 ) -> None:

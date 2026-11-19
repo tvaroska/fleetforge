@@ -356,13 +356,11 @@ static volatile uint32_t s_confirm_deadline_s = CONFIRM_TIMEOUT_S;
 static volatile bool s_rollback_decided;
 
 /* R5-fw-2. Whether this image registered a custom self-test: ff_selftest_freeze()'s answer,
- * written ONCE in ff_mqtt_run() before the first connect, so it is already true by the time
- * the announce ack can set s_ctx.session_confirmed. Set at the ack instead, there would be a
- * window where session_confirmed is true, this is still false, confirm_timeout_cb() returns,
- * and the image runs unconfirmed with no deadline. Outside s_ctx, which ff_mqtt_run() memsets.
- * (Not named ff_selftest_*: that prefix is the self-test API, and none of it belongs in the
- * timer context that reads this.) */
+ * written at most once per boot (`s_boot_classified`) in ff_mqtt_run() or ff_mqtt_confirm_offline()
+ * before the first connect, so it is already true before any announce ack sets session_confirmed.
+ * Outside s_ctx, which ff_mqtt_run() memsets; never named ff_selftest_* (read by timer context). */
 static volatile bool s_selftest_registered;
+static volatile bool s_boot_classified;
 
 /* R5-fw-2. Two parties can decide a held image's fate and they race: the self-test result
  * (selftest_done(), in the ff_selftest task, possibly on the other core) and the confirm
@@ -1245,6 +1243,12 @@ static bool is_valid_artifact_sig(const char *s)
     return len >= 80 && len <= 120;
 }
 
+/* The id this boot's own transaction holds, or NULL. */
+static const char *held_txn_id(void)
+{
+    return s_txn.kind != TXN_NONE && s_txn.cmd_id[0] != '\0' ? s_txn.cmd_id : NULL;
+}
+
 /* Parse a `stage` and hand it to ff_ota. This function is the command seam: it is the only
  * place the `dn/cmd` JSON is interpreted, and what leaves it is a plain C struct — ff_ota.c
  * never sees a cJSON object and never builds a topic string. */
@@ -1254,23 +1258,22 @@ static void on_stage(const cJSON *root, const char *id)
     memset(&cmd, 0, sizeof(cmd));
 
     if (strlcpy(cmd.cmd_id, id, sizeof(cmd.cmd_id)) >= sizeof(cmd.cmd_id)) {
-        /* No `failed` publish: it could only carry the TRUNCATED id, which maps to no
-         * transaction the server knows about, and the ingestor would file an outcome
-         * against a command nobody issued. */
         ESP_LOGE(TAG, "stage command id is longer than this firmware's %u-byte buffer — "
                       "ignored; no status can be reported against an id we cannot echo",
                  (unsigned)sizeof(cmd.cmd_id));
         return;
     }
 
-    /* A re-delivery of the transaction this board already has (R2-fw-6). on_command()'s
-     * dedupe remembers one id, so after any other command the broker's redelivery or the
-     * server's re-POST (`reused: true`, same id) gets here. Refusing it would publish
-     * `failed` against the update that is running or staged, and the server would end the
-     * row and drop the real outcome. Nothing in it is parsed or acted on. */
+    /* Drop re-deliveries of an in-flight/staged update (R2-fw-6) or the transaction this boot
+     * already holds (D-6) before parsing or publishing `failed` against it. */
     if (ff_ota_is_handling(cmd.cmd_id)) {
         ESP_LOGW(TAG, "stage id=%s is the update this board is already carrying out — "
                       "ignored (re-delivery); its outcome is reported when it ends",
+                 cmd.cmd_id);
+        return;
+    }
+    if (held_txn_id() != NULL && strcmp(held_txn_id(), cmd.cmd_id) == 0) {
+        ESP_LOGW(TAG, "stage id=%s is the transaction this boot already holds — ignored",
                  cmd.cmd_id);
         return;
     }
@@ -1676,12 +1679,6 @@ static bool open_rollback_txn(const char *id)
     return true;
 }
 
-/* The id this boot's own transaction holds, or NULL. */
-static const char *held_txn_id(void)
-{
-    return s_txn.kind != TXN_NONE && s_txn.cmd_id[0] != '\0' ? s_txn.cmd_id : NULL;
-}
-
 /* D3. Release a transaction staged under `apply: "on_command"`. The boot pointer already names
  * the staged slot and the record was saved at `staged`, so the reboot IS the apply, and the
  * new image reports `confirming`/`confirmed` exactly as after `apply: "auto"`. */
@@ -2061,8 +2058,11 @@ static void on_cfg(ff_mqtt_ctx_t *ctx, const char *data, int data_len)
         ESP_LOGI(TAG, "dn/cfg: stay_awake=%s", s_stay_awake ? "true" : "false");
     }
     const cJSON *secrets_rev = cJSON_GetObjectItemCaseSensitive(root, "secrets_rev");
-    if (cJSON_IsNumber(secrets_rev) && secrets_rev->valuedouble >= 0) {
-        ff_sec_on_cfg((uint32_t)secrets_rev->valuedouble, ctx->client, ctx->topic_announce);
+    if (cJSON_IsNumber(secrets_rev) && secrets_rev->valuedouble >= 0.0) {
+        uint32_t clamped = secrets_rev->valuedouble >= (double)UINT32_MAX
+                               ? UINT32_MAX
+                               : (uint32_t)secrets_rev->valuedouble;
+        ff_sec_on_cfg(clamped, ctx->client, ctx->topic_announce);
     }
     cJSON_Delete(root);
 }
@@ -2242,32 +2242,22 @@ esp_err_t ff_mqtt_run(const ff_cfg_t *cfg, const ff_cred_t *cred)
     ESP_ERROR_CHECK(esp_mqtt_client_register_event(s_ctx.client, ESP_EVENT_ANY_ID,
                                                    mqtt_event_handler, &s_ctx));
 
-    /* R5-fw-1: the firmware's self-test registration is fixed from here, before the first
-     * connect builds an announce. R5-fw-2: the answer gates the confirm (the hold in
-     * mqtt_event_handler, the deadline guard in confirm_timeout_cb) and becomes the `selftest`
-     * capability — set here, before the first connect and before the ack can set
-     * session_confirmed, never at the ack. */
-    s_selftest_registered = ff_selftest_freeze();
-    ff_identity_note_selftest(s_selftest_registered);
-    /* R5-fw-5: the safe-window rule is fixed here too, before the first connect builds an
-     * announce (the `safe_window` capability) and before classify_txn(). */
-    ff_identity_note_safe_window(ff_safe_window_freeze());
-    /* R5-fw-7: the declared power class is fixed here too, before the first connect builds an
-     * announce (the `power_class` it carries). */
+    /* R5-fw-1 / R5-fw-2 / R5-fw-5 / R5-fw-7: freeze self-test, safe-window, and power class
+     * before the first connect builds an announce, and classify the boot transaction once. */
+    if (!s_boot_classified) {
+        s_selftest_registered = ff_selftest_freeze();
+        ff_identity_note_selftest(s_selftest_registered);
+        ff_identity_note_safe_window(ff_safe_window_freeze());
+    }
     ff_sleep_freeze(cfg);
     ff_sec_init(cfg, cred);
 
-    /* What the last reboot left to report. The confirm timer is NOT armed here: it was
-     * armed first thing in app_main (R2-fw-4, ff_mqtt_arm_confirm_timer), so it may fire
-     * before, during or after this classification. That is safe: s_txn.kind starts
-     * TXN_NONE, so a timeout before classification rolls back immediately and unreported;
-     * kind becomes TXN_CONFIRMING only after cmd_id is written; and the report task copes
-     * with no client (s_ctx.connected, enqueue_status). */
-    ff_txn_init();
-    /* R5-fw-4, D8: the command the last boot rebooted for, BEFORE the first connect drains the
-     * persistent session, so its redelivery is a duplicate and not a second reboot. */
-    (void)ff_txn_last_reboot_cmd(s_reboot_cmd_id, sizeof(s_reboot_cmd_id));
-    classify_txn();
+    if (!s_boot_classified) {
+        ff_txn_init();
+        (void)ff_txn_last_reboot_cmd(s_reboot_cmd_id, sizeof(s_reboot_cmd_id));
+        classify_txn();
+        s_boot_classified = true;
+    }
 
     ESP_LOGI(TAG, "connecting to %s as %s", cfg->mqtt_uri, id);
     esp_err_t err = esp_mqtt_client_start(s_ctx.client);
@@ -2359,12 +2349,15 @@ void ff_mqtt_set_offline_mode(bool offline)
 
 esp_err_t ff_mqtt_confirm_offline(void)
 {
-    const bool selftest_reg = (ff_selftest_freeze)();
-    (&s_selftest_registered)[0] = selftest_reg;
-    (ff_identity_note_selftest)(selftest_reg);
-    (ff_identity_note_safe_window)((ff_safe_window_freeze)());
-    ff_txn_init();
-    classify_txn();
+    if (!s_boot_classified) {
+        s_selftest_registered = ff_selftest_freeze();
+        ff_identity_note_selftest(s_selftest_registered);
+        ff_identity_note_safe_window(ff_safe_window_freeze());
+        ff_txn_init();
+        (void)ff_txn_last_reboot_cmd(s_reboot_cmd_id, sizeof(s_reboot_cmd_id));
+        classify_txn();
+        s_boot_classified = true;
+    }
 
     if (!pending_verify() && s_txn.kind != TXN_BOOTED_NEW) {
         return ESP_OK;
@@ -2376,7 +2369,7 @@ esp_err_t ff_mqtt_confirm_offline(void)
         return ESP_ERR_INVALID_STATE;
     }
     if (s_txn.kind == TXN_CONFIRMING) {
-        (void)(ff_txn_set_detail)(s_txn.cmd_id, DETAIL_SELFTEST_TIMED_OUT);
+        (void)ff_txn_set_detail(s_txn.cmd_id, DETAIL_SELFTEST_TIMED_OUT);
     }
-    return (ff_selftest_run)(selftest_done);
+    return ff_selftest_run(selftest_done);
 }

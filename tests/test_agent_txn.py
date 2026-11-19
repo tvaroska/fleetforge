@@ -123,8 +123,13 @@ def test_a_late_ack_cannot_confirm_an_image_already_rolling_back() -> None:
 def test_the_transaction_is_recorded_after_verification_and_before_staged() -> None:
     """R2-fw-1 put the digest check before finish() (the boot switch); the record still
     follows finish(), because it is only true once the new slot is bootable."""
+    from tests.agent_src import c_call_sites
+
     ota = _code(FF_OTA_C)
-    assert ota.count("ff_txn_save(") == 1, "recorded on more than one path"
+    assert c_call_sites(FF_OTA_C.read_text(encoding="utf-8"), "ff_txn_save") == [
+        "ff_ota_dock_stage",
+        "ota_task",
+    ]
     task = _function_body(ota, "ota_task")
     verified = task.index("strcmp(digest, cmd->sha256)")
     finish = task.index("esp_https_ota_finish(")

@@ -5,26 +5,21 @@ password endpoint on the public internet."
 
 Two design notes:
 
-* **Only failures are counted.** A successful login already required the password,
-  so it is not the attack being limited; counting successes would only lock out the
-  one legitimate operator. Both buckets are consulted *before* any argon2 work, so a
-  flood costs no CPU.
+* **Only failures stay counted.** A successful login releases its reserved slot so
+  legitimate logins never lock out the operator, while concurrent bursts are gated
+  synchronously via `acquire(key)` *before* any Argon2 or upstream Firebase work runs.
 * **Two buckets.** A per-client bucket keyed on the client IP, plus a global
   backstop, because the client key comes from `X-Forwarded-For` and Traefik
   *appends* to that header rather than replacing it — so the key is spoofable and
   the per-client bucket alone is bypassable.
-
-**Per-process, therefore per-uvicorn-worker:** with N workers the effective limit is
-N x `per_key`. v1 runs one worker per container (`Dockerfile` `CMD`, no `--workers`).
-A shared limiter means Redis or a Postgres table, which nobody has asked for.
 """
 
 import time
 from collections import OrderedDict, deque
+from collections.abc import Callable
 
 GLOBAL_KEY = "*"
 
-# Bounded so a spoofed X-Forwarded-For cannot grow this dictionary without limit.
 DEFAULT_MAX_KEYS = 1024
 
 
@@ -37,11 +32,13 @@ class FixedWindowLimiter:
         per_global: int = 30,
         window_s: float = 60.0,
         max_keys: int = DEFAULT_MAX_KEYS,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._per_key = per_key
         self._per_global = per_global
         self._window_s = window_s
         self._max_keys = max_keys
+        self._clock = clock
         self._global_failures: deque[float] = deque()
         self._failures: OrderedDict[str, deque[float]] = OrderedDict()
 
@@ -66,7 +63,7 @@ class FixedWindowLimiter:
 
     def allow(self, key: str) -> bool:
         """Is another login attempt from `key` permitted right now?"""
-        now = time.monotonic()
+        now = self._clock()
         for bucket_key in (key, GLOBAL_KEY):
             bucket = self._bucket(bucket_key)
             self._prune(bucket, now)
@@ -74,9 +71,35 @@ class FixedWindowLimiter:
                 return False
         return True
 
+    def acquire(self, key: str) -> float | None:
+        """Atomically check and reserve an attempt slot before awaiting password work.
+
+        Returns the reservation timestamp if allowed, or `None` when rate-limited.
+        Call `release(key, stamp)` on successful authentication (or pure upstream
+        unavailability when no local password check failed).
+        """
+        now = self._clock()
+        for bucket_key in (key, GLOBAL_KEY):
+            bucket = self._bucket(bucket_key)
+            self._prune(bucket, now)
+            if len(bucket) >= self._limit_for(bucket_key):
+                return None
+        for bucket_key in (key, GLOBAL_KEY):
+            self._bucket(bucket_key).append(now)
+        return now
+
+    def release(self, key: str, stamp: float) -> None:
+        """Release a previously acquired slot after successful login."""
+        for bucket_key in (key, GLOBAL_KEY):
+            bucket = self._bucket(bucket_key)
+            try:
+                bucket.remove(stamp)
+            except ValueError:
+                pass
+
     def record_failure(self, key: str) -> None:
         """Count one failed attempt against both the client bucket and the global one."""
-        now = time.monotonic()
+        now = self._clock()
         for bucket_key in (key, GLOBAL_KEY):
             bucket = self._bucket(bucket_key)
             self._prune(bucket, now)
@@ -84,12 +107,11 @@ class FixedWindowLimiter:
 
     def retry_after(self, key: str) -> int:
         """Whole seconds until `key` is allowed again; at least 1."""
-        now = time.monotonic()
+        now = self._clock()
         wait = 0.0
         for bucket_key in (key, GLOBAL_KEY):
             bucket = self._bucket(bucket_key)
             self._prune(bucket, now)
             if len(bucket) >= self._limit_for(bucket_key):
-                # The oldest failure in the bucket is the one that has to age out.
                 wait = max(wait, bucket[0] + self._window_s - now)
         return max(1, int(wait) + 1)

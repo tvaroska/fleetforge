@@ -19,7 +19,6 @@ the scenarios lean on is held here against a local echo server:
 import asyncio
 import importlib.util
 import sys
-import time
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -267,17 +266,24 @@ async def test_reset_during_a_blackhole_ends_the_held_pairs() -> None:
         await echo.close()
 
 
-async def test_throttle_slows_the_stream() -> None:
+async def test_throttle_slows_the_stream(monkeypatch: pytest.MonkeyPatch) -> None:
+    recorded_sleeps: list[float] = []
+    real_sleep = asyncio.sleep
+
+    async def spy_sleep(delay: float) -> None:
+        recorded_sleeps.append(delay)
+        await real_sleep(0)
+
     echo, link = await _setup(fl.Mode("throttle", 20000))
+    monkeypatch.setattr(fl.asyncio, "sleep", spy_sleep)
     try:
         reader, writer = await _connect(link)
         payload = b"t" * 20000
-        started = time.monotonic()
         writer.write(payload)
         await writer.drain()
         assert await _read_exactly(reader, len(payload), 5.0) == payload
-        elapsed = time.monotonic() - started
-        assert 0.7 <= elapsed < 3.0, elapsed
+        # Echo traverses both directions (`up` + `down` = 2 * 20,000 B at 20,000 B/s).
+        assert sum(recorded_sleeps) == pytest.approx(2.0, rel=0.05)
         writer.close()
     finally:
         await link.close()

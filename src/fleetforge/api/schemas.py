@@ -24,6 +24,7 @@ from fleetforge.announce_fields import (
     normalize_known_networks,
     normalize_partition_table_sha256,
     normalize_rollback_capable,
+    normalize_safe_mode,
     normalize_ssid,
     normalize_sub_versions,
 )
@@ -268,6 +269,7 @@ class EnrollRequest(BaseModel):
     rollback_capable: bool | None = None
     capabilities: list[str] = Field(default_factory=list, max_length=32)
     sub_versions: dict[str, str] | None = None
+    safe_mode: bool | None = None
 
     @field_validator("device_id", "parent_device_id")
     @classmethod
@@ -305,6 +307,11 @@ class EnrollRequest(BaseModel):
     @classmethod
     def _usable_sub_versions(cls, value: object, info: ValidationInfo) -> dict[str, str] | None:
         return normalize_sub_versions(value, device_id=_logged_device_id(info))
+
+    @field_validator("safe_mode", mode="before")
+    @classmethod
+    def _usable_safe_mode(cls, value: object, info: ValidationInfo) -> bool | None:
+        return normalize_safe_mode(value, device_id=_logged_device_id(info))
 
     @field_validator("power_class")
     @classmethod
@@ -393,6 +400,7 @@ class DeviceSummary(BaseModel):
     stay_awake: bool = False
     secrets_rev: int | None = None
     sub_versions: dict[str, str] | None = None
+    safe_mode: bool = False
     deploy: "DeploySummary | None" = None
 
 

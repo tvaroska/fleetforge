@@ -335,6 +335,7 @@ services:
       # on every install, and a stack that starts unconfigured just answers 503s nobody
       # diagnoses. Mint one with `just artifact-secret`.
       ARTIFACT_URL_SECRET: ${ARTIFACT_URL_SECRET:?set ARTIFACT_URL_SECRET in .env — see `just artifact-secret`}
+      SECRETS_ENCRYPTION_KEY: ${SECRETS_ENCRYPTION_KEY:?set SECRETS_ENCRYPTION_KEY in .env}
       ARTIFACT_SIGNING_KEY: ${ARTIFACT_SIGNING_KEY:-}
       ARTIFACT_SIGNING_PUBLIC_KEYS: ${ARTIFACT_SIGNING_PUBLIC_KEYS:-}
       # The origin a DEVICE must be able to reach, which is what the link in a `stage`
@@ -444,6 +445,12 @@ services:
       # reconnect-loop with "Not authorized" and go unhealthy after 120 s.
       MQTT_USERNAME: ${MQTT_INGESTOR_USERNAME:?set MQTT_INGESTOR_USERNAME in .env}
       MQTT_PASSWORD: ${MQTT_INGESTOR_PASSWORD:?set MQTT_INGESTOR_PASSWORD in .env}
+      SECRETS_ENCRYPTION_KEY: ${SECRETS_ENCRYPTION_KEY:?set SECRETS_ENCRYPTION_KEY in .env}
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_BUCKET: ${S3_BUCKET:-fleetforge}
+      S3_ACCESS_KEY: ${MINIO_ROOT_USER:-fleetforge}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-fleetforge-dev-only}
+      S3_PUBLIC_ENDPOINT_URL: ${FF_S3_PUBLIC_ENDPOINT_URL:-http://localhost:${FF_MINIO_PORT:-9000}}
       # RUN_MIGRATIONS deliberately unset: two processes racing `alembic upgrade
       # head` on restart is a deadlock waiting for a slow migration.
     networks:

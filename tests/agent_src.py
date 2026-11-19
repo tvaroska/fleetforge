@@ -8,6 +8,7 @@ see one file and pass on nothing, so every glob over the sources goes through
 `agent_sources()`, which refuses to come back empty.
 """
 
+import re
 from pathlib import Path
 
 AGENT_DIR = Path(__file__).resolve().parent.parent / "agent"
@@ -79,3 +80,148 @@ def agent_sources() -> list[Path]:
     assert sources, "no agent sources found"
     assert {"agent_main.c", "ff_mqtt.c", "ff_ota.c"} <= names, sorted(names)
     return sources
+
+
+def strip_c_comments_and_literals(source: str) -> str:
+    """Strip C comments (`/*...*/`, `//...`) and replace string/char contents with spaces."""
+    out: list[str] = []
+    i = 0
+    n = len(source)
+    while i < n:
+        if source.startswith("/*", i):
+            end = source.find("*/", i + 2)
+            if end == -1:
+                break
+            chunk = source[i : end + 2]
+            out.append("\n" * chunk.count("\n"))
+            i = end + 2
+        elif source.startswith("//", i):
+            end = source.find("\n", i + 2)
+            if end == -1:
+                break
+            out.append("\n")
+            i = end + 1
+        elif source[i] in ('"', "'"):
+            quote = source[i]
+            out.append(quote)
+            i += 1
+            while i < n and source[i] != quote:
+                if source[i] == "\\" and i + 1 < n:
+                    i += 2
+                else:
+                    if source[i] == "\n":
+                        out.append("\n")
+                    i += 1
+            if i < n:
+                out.append(quote)
+                i += 1
+        else:
+            out.append(source[i])
+            i += 1
+    return "".join(out)
+
+
+_C_FUNC_HEADER_RE = re.compile(
+    r"(?:^|\n)[ \t]*(?:[A-Za-z_][A-Za-z0-9_\s\*]*?\s+\*?)([A-Za-z_][A-Za-z0-9_]*)\s*\([^;{}]*\)\s*\{",
+)
+_C_CONTROL_KEYWORDS = frozenset({"if", "for", "while", "switch", "sizeof"})
+
+
+def c_functions(source: str) -> dict[str, str]:
+    """Return `{function_name: body_without_outer_braces}` over comment/literal-stripped C."""
+    cleaned = strip_c_comments_and_literals(source)
+    funcs: dict[str, str] = {}
+    for match in _C_FUNC_HEADER_RE.finditer(cleaned):
+        name = match.group(1)
+        if name in _C_CONTROL_KEYWORDS:
+            continue
+        pos = match.end()
+        depth = 1
+        while pos < len(cleaned) and depth > 0:
+            if cleaned[pos] == "{":
+                depth += 1
+            elif cleaned[pos] == "}":
+                depth -= 1
+            pos += 1
+        funcs[name] = cleaned[match.end() : pos - 1]
+    return funcs
+
+
+def c_call_sites(source: str, fn_name: str) -> list[str]:
+    """Return sorted enclosing C function names for every call (plain or parenthesised) to `fn_name`."""
+    call_re = re.compile(
+        rf"(?<![A-Za-z0-9_])(?:{re.escape(fn_name)}|\(+\s*{re.escape(fn_name)}\s*\)+)\s*\("
+    )
+    ident_re = re.compile(rf"\b{re.escape(fn_name)}\b")
+    funcs = c_functions(source)
+    sites: list[str] = []
+    for enclosing, body in funcs.items():
+        calls = list(call_re.finditer(body))
+        all_refs = list(ident_re.finditer(body))
+        if len(all_refs) != len(calls):
+            raise AssertionError(
+                f"{fn_name} referenced without a direct call inside {enclosing}() "
+                f"(possible function-pointer alias)"
+            )
+        sites.extend([enclosing] * len(calls))
+    return sorted(sites)
+
+
+def _blank_c_comments_and_literals_preserving_offsets(source: str) -> str:
+    """Replace C comments and string/char contents with spaces of identical length."""
+    chars = list(source)
+    i = 0
+    n = len(chars)
+    while i < n:
+        if source.startswith("/*", i):
+            end = source.find("*/", i + 2)
+            stop = n if end == -1 else end + 2
+            for j in range(i, stop):
+                if chars[j] != "\n":
+                    chars[j] = " "
+            i = stop
+        elif source.startswith("//", i):
+            end = source.find("\n", i + 2)
+            stop = n if end == -1 else end
+            for j in range(i, stop):
+                chars[j] = " "
+            i = stop
+        elif chars[i] in ('"', "'"):
+            quote = chars[i]
+            i += 1
+            while i < n and chars[i] != quote:
+                if chars[i] == "\\" and i + 1 < n:
+                    chars[i] = " "
+                    if chars[i + 1] != "\n":
+                        chars[i + 1] = " "
+                    i += 2
+                else:
+                    if chars[i] != "\n":
+                        chars[i] = " "
+                    i += 1
+            if i < n:
+                i += 1
+        else:
+            i += 1
+    return "".join(chars)
+
+
+def extract_c_function(source: str, fn_name: str) -> str:
+    """Extract the full C definition (signature + `{ ... }`) of `fn_name` from `source`."""
+    blanked = _blank_c_comments_and_literals_preserving_offsets(source)
+    sig_re = re.compile(
+        rf"(?:^|\n)([^\n;{{}}]*?\b{re.escape(fn_name)}\s*\([^;{{}}]*\)\s*\{{)",
+    )
+    match = sig_re.search(blanked)
+    if match is None:
+        raise ValueError(f"C function {fn_name!r} not found")
+    start = match.start(1)
+    pos = match.end(1)
+    depth = 1
+    while pos < len(blanked) and depth > 0:
+        if blanked[pos] == "{":
+            depth += 1
+        elif blanked[pos] == "}":
+            depth -= 1
+        pos += 1
+    return source[start:pos]

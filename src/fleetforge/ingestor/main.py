@@ -43,9 +43,8 @@ from fleetforge.config import get_settings
 from fleetforge.db.base import get_engine, get_sessionmaker
 from fleetforge.ingestor import otel
 from fleetforge.ingestor.handlers import handle_up_message
-from fleetforge.storage.blobs import blob_key
 from fleetforge.storage.factory import create_object_store, object_store_configured
-from fleetforge.storage.objectstore import ObjectStore, ObjectStoreError
+from fleetforge.storage.objectstore import ObjectStore
 
 logger = logging.getLogger("fleetforge.ingestor")
 
@@ -260,18 +259,12 @@ async def sweep_once(
             if store is None:
                 result = await retention.sweep(session, now=now_utc())
             else:
-                result = await retention.sweep(session, now=now_utc(), prune_orphans=True)
+                result = await retention.sweep(session, now=now_utc(), store=store)
             await session.commit()
     except (SQLAlchemyError, OSError) as exc:
         logger.error("retention sweep failed: %s", exc)
         return None
 
-    if store is not None and result.orphan_sha256s:
-        for sha256 in result.orphan_sha256s:
-            try:
-                await store.delete(blob_key(sha256))
-            except ObjectStoreError as exc:
-                logger.warning("retention blob delete failed for %s: %s", sha256, exc)
     if always_log or result.total:
         extra = ""
         if result.tokens or result.artifact_versions or result.artifacts:

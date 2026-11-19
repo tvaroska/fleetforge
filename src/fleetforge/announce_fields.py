@@ -181,6 +181,14 @@ def normalize_rollback_capable(value: object, *, device_id: str | None = None) -
     return None
 
 
+def normalize_safe_mode(value: object, *, device_id: str | None = None) -> bool | None:
+    """`True` / `False` as reported on `up/announce.safe_mode`, or `None` when absent/invalid."""
+    if value is None or isinstance(value, bool):
+        return value
+    _unusable("safe_mode", "not a boolean", device_id)
+    return None
+
+
 def normalize_reset_reason(value: object, *, device_id: str | None = None) -> str | None:
     """Why the chip last reset, as the board reported it, or `None` if it is unusable.
 

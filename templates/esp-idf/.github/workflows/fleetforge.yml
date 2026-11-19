@@ -63,7 +63,7 @@ jobs:
           BUILD_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
 
           curl --fail-with-body -X POST \
-            "${FLEETFORGE_URL%/}/v1/artifact?project={{PROJECT_SLUG}}&target={{TARGET}}&version=${VERSION}&partition_layout=ab-4m-v1&repo_url=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}&branch=${BRANCH}&commit_sha=${GITHUB_SHA}&tag=${TAG}&build_url=${BUILD_URL}&test_passed=true" \
+            "${FLEETFORGE_URL%/}/v1/artifact?project={{PROJECT_SLUG}}&target={{TARGET}}&version=${VERSION}&partition_layout=ab-4m-v1&repo_url=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}&branch=${BRANCH}&commit_sha=${GITHUB_SHA}&tag=${TAG}&build_url=${BUILD_URL}" \
             -H "Authorization: Bearer ${FLEETFORGE_TOKEN}" \
             -H "Content-Type: application/octet-stream" \
             --data-binary "@build/{{APP_NAME}}.bin"

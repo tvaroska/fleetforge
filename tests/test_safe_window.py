@@ -502,8 +502,17 @@ class TestTheCapability:
         )
         note = _function_body(identity, "ff_identity_note_safe_window")
         assert "s_safe_window_registered = registered;" in note
-        assert _mqtt().count("ff_identity_note_safe_window(") == 1
-        assert _mqtt().count("ff_safe_window_freeze(") == 1
+        from tests.agent_src import c_call_sites
+
+        raw_mqtt = FF_MQTT_C.read_text(encoding="utf-8")
+        assert c_call_sites(raw_mqtt, "ff_identity_note_safe_window") == [
+            "ff_mqtt_confirm_offline",
+            "ff_mqtt_run",
+        ]
+        assert c_call_sites(raw_mqtt, "ff_safe_window_freeze") == [
+            "ff_mqtt_confirm_offline",
+            "ff_mqtt_run",
+        ]
 
 
 class TestTheArduinoWrapper:

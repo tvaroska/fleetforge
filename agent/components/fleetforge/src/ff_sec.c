@@ -21,6 +21,7 @@
 #include "esp_crt_bundle.h"
 #include "esp_http_client.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "ff_identity_internal.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -36,6 +37,8 @@ static const char *TAG = "ff-sec";
 #define SECRETS_TASK_PRIO 4
 #define SECRETS_MAX_RETRIES 3
 #define SECRETS_RETRY_BASE_MS 1000
+#define SECRETS_MAX_RETRY_ROUNDS 5
+#define SECRETS_PERIODIC_RETRY_US (60LL * 1000000LL)
 #define SECRETS_MAX_STALE_KEYS 32
 
 static const ff_cfg_t *s_cfg;
@@ -46,26 +49,38 @@ static char s_topic_announce[96];
 static volatile uint32_t s_local_rev;
 static volatile uint32_t s_target_rev;
 static volatile uint32_t s_failed_rev;
+static volatile uint32_t s_retry_rounds;
 static volatile bool s_sync_in_flight;
+static esp_timer_handle_t s_retry_timer;
 
+static void start_sync_task(void);
+
+/* Shared key rule with server `SECRET_KEY_PATTERN = r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,14}$"` (D-7).
+ * Leading alphanumeric character prevents collision with reserved `_rev` (`FF_SEC_KEY_REV`). */
 static bool valid_secret_key(const char *key)
 {
     if (key == NULL || key[0] == '\0' || strcmp(key, FF_SEC_KEY_REV) == 0) {
         return false;
     }
-    size_t len = 0;
+    char c0 = key[0];
+    const bool ok0 =
+        (c0 >= 'a' && c0 <= 'z') || (c0 >= 'A' && c0 <= 'Z') || (c0 >= '0' && c0 <= '9');
+    if (!ok0) {
+        return false;
+    }
+    size_t len = 1;
     for (; key[len] != '\0'; len++) {
         if (len >= 15) {
             return false;
         }
         char c = key[len];
         const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                        (c >= '0' && c <= '9') || c == '_' || c == '-';
+                        (c >= '0' && c <= '9') || c == '_' || c == '.' || c == '-';
         if (!ok) {
             return false;
         }
     }
-    return len > 0;
+    return true;
 }
 
 esp_err_t ff_get_secret(const char *key, char *out, size_t cap)
@@ -93,11 +108,43 @@ esp_err_t ff_get_secret(const char *key, char *out, size_t cap)
     return err;
 }
 
+static void secrets_retry_timer_cb(void *arg)
+{
+    (void)arg;
+    if (s_sync_in_flight || s_local_rev >= s_target_rev) {
+        return;
+    }
+    if (s_retry_rounds >= SECRETS_MAX_RETRY_ROUNDS) {
+        return;
+    }
+    s_retry_rounds++;
+    start_sync_task();
+}
+
+static void schedule_periodic_retry(void)
+{
+    if (s_local_rev >= s_target_rev || s_retry_rounds >= SECRETS_MAX_RETRY_ROUNDS) {
+        return;
+    }
+    if (s_retry_timer == NULL) {
+        const esp_timer_create_args_t args = {
+            .callback = secrets_retry_timer_cb,
+            .name = "ff_sec_retry",
+        };
+        if (esp_timer_create(&args, &s_retry_timer) != ESP_OK) {
+            return;
+        }
+    }
+    (void)esp_timer_stop(s_retry_timer);
+    (void)esp_timer_start_once(s_retry_timer, SECRETS_PERIODIC_RETRY_US);
+}
+
 void ff_sec_init(const ff_cfg_t *cfg, const ff_cred_t *cred)
 {
     s_cfg = cfg;
     s_cred = cred;
     s_local_rev = 0;
+    s_retry_rounds = 0;
 
     nvs_handle_t handle;
     if (nvs_open(FF_SEC_NAMESPACE, NVS_READONLY, &handle) == ESP_OK) {
@@ -129,6 +176,16 @@ static esp_err_t store_secrets_json(const cJSON *secrets_obj, uint32_t rev)
         return ESP_ERR_INVALID_ARG;
     }
 
+    const cJSON *item = NULL;
+    cJSON_ArrayForEach(item, secrets_obj)
+    {
+        if (item->string == NULL || !valid_secret_key(item->string) || !cJSON_IsString(item) ||
+            item->valuestring == NULL) {
+            ESP_LOGE(TAG, "invalid secret entry in device-secrets payload; refusing sync");
+            return ESP_ERR_INVALID_ARG;
+        }
+    }
+
     nvs_handle_t handle;
     esp_err_t err = nvs_open(FF_SEC_NAMESPACE, NVS_READWRITE, &handle);
     if (err != ESP_OK) {
@@ -137,21 +194,16 @@ static esp_err_t store_secrets_json(const cJSON *secrets_obj, uint32_t rev)
         return err;
     }
 
-    /* Validate and write all incoming keys in-place BEFORE removing stale keys,
+    /* Write all validated incoming keys in-place BEFORE removing stale keys,
      * so a power loss or write error never wipes existing secrets. */
-    const cJSON *item = NULL;
     cJSON_ArrayForEach(item, secrets_obj)
     {
-        if (item->string != NULL && valid_secret_key(item->string) && cJSON_IsString(item) &&
-            item->valuestring != NULL) {
-            err = nvs_set_str(handle, item->string, item->valuestring);
-            if (err != ESP_OK) {
-                break;
-            }
+        err = nvs_set_str(handle, item->string, item->valuestring);
+        if (err != ESP_OK) {
+            break;
         }
     }
 
-    /* Prune only keys that were removed from `secrets_obj` in this revision. */
     if (err == ESP_OK) {
         char stale_keys[SECRETS_MAX_STALE_KEYS][16];
         size_t stale_count = 0;
@@ -186,9 +238,6 @@ static esp_err_t store_secrets_json(const cJSON *secrets_obj, uint32_t rev)
     return err;
 }
 
-/* The task's request buffers, on the heap: on the stack they put the frame past the
- * component's -Wframe-larger-than=1024. Wiped before free — raw_cred, b64 and auth_hdr
- * carry the broker credential. */
 typedef struct {
     char url[FF_CFG_MAX_URI + sizeof(SECRETS_PATH)];
     char raw_cred[FF_CRED_MAX_USER + 1 + FF_CRED_MAX_PASS];
@@ -218,6 +267,7 @@ static void secrets_sync_task(void *arg)
     if (scratch == NULL) {
         s_failed_rev = s_target_rev;
         s_sync_in_flight = false;
+        schedule_periodic_retry();
         vTaskDelete(NULL);
         return;
     }
@@ -261,6 +311,7 @@ static void secrets_sync_task(void *arg)
     if (client == NULL) {
         free_scratch(scratch);
         s_sync_in_flight = false;
+        schedule_periodic_retry();
         vTaskDelete(NULL);
         return;
     }
@@ -306,8 +357,6 @@ static void secrets_sync_task(void *arg)
     }
 
     if (!fetched) {
-        /* Release the sleep blocker for this wake cycle after bounded retries fail
-         * so a transient server outage does not drain a sleepy board's battery. */
         s_failed_rev = s_target_rev;
         goto done;
     }
@@ -316,11 +365,17 @@ static void secrets_sync_task(void *arg)
     if (root != NULL) {
         const cJSON *rev_item = cJSON_GetObjectItemCaseSensitive(root, "secrets_rev");
         const cJSON *secrets_obj = cJSON_GetObjectItemCaseSensitive(root, "secrets");
-        if (cJSON_IsNumber(rev_item) && rev_item->valuedouble >= 0) {
-            uint32_t rev = (uint32_t)rev_item->valuedouble;
+        if (cJSON_IsNumber(rev_item) && rev_item->valuedouble >= 0.0) {
+            uint32_t rev = rev_item->valuedouble >= (double)UINT32_MAX
+                               ? UINT32_MAX
+                               : (uint32_t)rev_item->valuedouble;
             if (store_secrets_json(secrets_obj, rev) == ESP_OK) {
                 s_local_rev = rev;
                 s_failed_rev = 0;
+                s_retry_rounds = 0;
+                if (s_retry_timer != NULL) {
+                    (void)esp_timer_stop(s_retry_timer);
+                }
                 if (s_target_rev < rev) {
                     s_target_rev = rev;
                 }
@@ -353,7 +408,24 @@ done:
     esp_http_client_cleanup(client);
     free_scratch(scratch);
     s_sync_in_flight = false;
+    if (s_local_rev < s_target_rev) {
+        schedule_periodic_retry();
+    }
     vTaskDelete(NULL);
+}
+
+static void start_sync_task(void)
+{
+    if (s_sync_in_flight) {
+        return;
+    }
+    s_sync_in_flight = true;
+    if (xTaskCreate(secrets_sync_task, "ff_sec", SECRETS_TASK_STACK, NULL, SECRETS_TASK_PRIO,
+                    NULL) != pdPASS) {
+        ESP_LOGE(TAG, "cannot start secrets sync task");
+        s_sync_in_flight = false;
+        schedule_periodic_retry();
+    }
 }
 
 void ff_sec_on_cfg(uint32_t target_rev, esp_mqtt_client_handle_t client,
@@ -366,14 +438,9 @@ void ff_sec_on_cfg(uint32_t target_rev, esp_mqtt_client_handle_t client,
     if (target_rev <= s_local_rev) {
         return;
     }
+    if (target_rev > s_target_rev) {
+        s_retry_rounds = 0;
+    }
     s_target_rev = target_rev;
-    if (s_sync_in_flight) {
-        return;
-    }
-    s_sync_in_flight = true;
-    if (xTaskCreate(secrets_sync_task, "ff_sec", SECRETS_TASK_STACK, NULL, SECRETS_TASK_PRIO,
-                    NULL) != pdPASS) {
-        ESP_LOGE(TAG, "cannot start secrets sync task");
-        s_sync_in_flight = false;
-    }
+    start_sync_task();
 }

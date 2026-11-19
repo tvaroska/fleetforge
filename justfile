@@ -305,15 +305,15 @@ sim-fleet count='3' *args='':
 # `scripts/` is also linted: capacity_snapshot.py is piped to prod over ssh and must
 # run with Python 3.11+ stdlib only, no project dependencies.
 lint:
-    uv run ruff check src/ tests/ alembic/ agent/tools/ scripts/
-    uv run ruff format --check src/ tests/ alembic/ agent/tools/ scripts/
+    uv run --no-sync ruff check --no-cache src/ tests/ alembic/ agent/tools/ scripts/
+    uv run --no-sync ruff format --check src/ tests/ alembic/ agent/tools/ scripts/
 
 typecheck:
-    uv run mypy src/ scripts/
+    uv run --no-sync mypy --config-file pyproject.toml src/ tests/ agent/tools/ scripts/
 
-# The T1 gate: lint + types + the full suite against a real Postgres (fails unless Postgres is up).
-test: lint typecheck
-    uv run pytest tests/ -x -v -rs
+# Unified local & CI gate (`scripts/ci_gate.sh`; fails unless PostgreSQL is reachable).
+test:
+    bash scripts/ci_gate.sh
 
 # The frontend's own type check + production build.
 frontend-build:

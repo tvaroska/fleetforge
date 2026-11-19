@@ -156,9 +156,16 @@ class TestTheListing:
     ) -> None:
         """The order the picker renders: one chip's versions together, newest at the top."""
         token = await login_admin(admin_app)
-        await upload(admin_app, token, IMAGE, target="esp32c6", version="1.5.0")
-        await upload(admin_app, token, OTHER_IMAGE, target="esp32c6", version="1.6.0")
-        await upload(admin_app, token, IMAGE, target="esp32", version="0.9.0")
+        esp32_image = IMAGE + b"esp32"
+        assert (
+            await upload(admin_app, token, IMAGE, target="esp32c6", version="1.5.0")
+        ).status_code == 201
+        assert (
+            await upload(admin_app, token, OTHER_IMAGE, target="esp32c6", version="1.6.0")
+        ).status_code == 201
+        assert (
+            await upload(admin_app, token, esp32_image, target="esp32", version="0.9.0")
+        ).status_code == 201
         # `created_at` defaults to `now()` and these three land inside one tick, so the
         # ordering claim is only tested if the timestamps really differ.
         async with engine.begin() as conn:

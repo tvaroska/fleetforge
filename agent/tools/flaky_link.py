@@ -177,10 +177,16 @@ class Link:
 
     async def start(self) -> None:
         for listen in self.listens:
+
+            def _on_connect(
+                r: asyncio.StreamReader,
+                w: asyncio.StreamWriter,
+                bound: Listen = listen,
+            ) -> None:
+                self._accept(bound, r, w)
+
             try:
-                server = await asyncio.start_server(
-                    lambda r, w, listen=listen: self._accept(listen, r, w), self.bind, listen.port
-                )
+                server = await asyncio.start_server(_on_connect, self.bind, listen.port)
             except OSError as exc:
                 await self.close()
                 raise FlakyLinkError(f"cannot listen on {self.bind}:{listen.port}: {exc}") from exc
@@ -274,7 +280,9 @@ class Link:
             await reading
         return None if pair.dead.is_set() else bytes(pending)
 
-    def _accept(self, listen: Listen, reader: asyncio.StreamReader, writer: asyncio.StreamWriter):
+    def _accept(
+        self, listen: Listen, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
         task = asyncio.ensure_future(self._serve(listen, reader, writer))
         self._tasks.add(task)
         task.add_done_callback(self._tasks.discard)
@@ -343,7 +351,7 @@ class Link:
             pair.abort()
 
 
-async def run_schedule(link: Link, entries: list[tuple[float, Mode]], repeat: float | None):
+async def run_schedule(link: Link, entries: list[tuple[float, Mode]], repeat: float | None) -> None:
     loop = asyncio.get_running_loop()
     start = loop.time()
     cycle = 0
@@ -359,7 +367,9 @@ async def run_schedule(link: Link, entries: list[tuple[float, Mode]], repeat: fl
         cycle += 1
 
 
-async def serve(listens: list[Listen], entries: list[tuple[float, Mode]], args) -> None:
+async def serve(
+    listens: list[Listen], entries: list[tuple[float, Mode]], args: argparse.Namespace
+) -> None:
     link = Link(listens, bind=args.bind, mode=entries[0][1])
     await link.start()
     stop = asyncio.Event()

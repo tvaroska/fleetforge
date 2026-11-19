@@ -170,7 +170,6 @@ describe('isCommandRollback (R5-fe-1)', () => {
 
   it('handles non-app companion cargo without false drift against fwVersion (P0-2)', () => {
     const cargoDeploy = deploy({
-      artifact_type: 'model_weights',
       artifact_version: 'yolo-v8',
     })
     expect(deployOutcome(cargoDeploy, '1.4.2', { model_weights: 'yolo-v8' })).toEqual({
@@ -179,15 +178,9 @@ describe('isCommandRollback (R5-fe-1)', () => {
       tone: 'ok',
       note: 'running yolo-v8',
     })
-    expect(deployOutcome(cargoDeploy, '1.4.2', null)).toEqual({
-      kind: 'verdict',
-      word: 'good',
-      tone: 'ok',
-      note: 'running yolo-v8',
-    })
     expect(deployOutcome(cargoDeploy, '1.4.2', { model_weights: 'yolo-v7' })).toEqual({
       kind: 'drift',
-      reported: 'yolo-v7',
+      reported: '1.4.2',
     })
   })
 })
@@ -221,23 +214,11 @@ function mockDevice(over: Partial<DeviceSummary> = {}): DeviceSummary {
 describe('devicePriorityScore & describeDevicePresence (P1-1, P2-2)', () => {
   const nowMs = Date.parse('2026-10-25T12:10:00Z')
 
-  it('scores safe_mode as -1, rolled_back/failed/overdue as 0, in-flight as 1, drift/weak RSSI as 2, healthy as 3, offline as 4', () => {
+  it('scores safe_mode as -1, rolled_back/failed as 0, in-flight as 1, drift/weak RSSI as 2, healthy as 3, offline as 4', () => {
     expect(devicePriorityScore(mockDevice({ safe_mode: true }), '1.5.0', nowMs)).toBe(-1)
     expect(
       devicePriorityScore(
         mockDevice({ deploy: deploy({ state: 'rolled_back', is_terminal: true }) }),
-        '1.5.0',
-        nowMs,
-      ),
-    ).toBe(0)
-    expect(
-      devicePriorityScore(
-        mockDevice({
-          online: false,
-          presence_reason: 'sortie',
-          expected_back_s: 300,
-          last_seen: '2026-10-25T12:00:00Z',
-        }),
         '1.5.0',
         nowMs,
       ),
@@ -271,7 +252,7 @@ describe('devicePriorityScore & describeDevicePresence (P1-1, P2-2)', () => {
     expect(devicePriorityScore(mockDevice({ online: false }), '1.5.0', nowMs)).toBe(4)
   })
 
-  it('describes all 6+ presence states with distinct glyphs', () => {
+  it('describes all OpenAPI-backed presence states with distinct glyphs', () => {
     expect(describeDevicePresence(mockDevice(), nowMs)).toMatchObject({
       code: 'wifi',
       glyph: '█',
@@ -288,34 +269,6 @@ describe('devicePriorityScore & describeDevicePresence (P1-1, P2-2)', () => {
     ).toMatchObject({
       code: 'asleep',
       glyph: '◐',
-    })
-    expect(
-      describeDevicePresence(
-        mockDevice({ online: false, presence_reason: 'sortie', expected_back_s: 900 }),
-        nowMs,
-      ),
-    ).toMatchObject({
-      code: 'sortie',
-      glyph: '◎',
-    })
-    expect(describeDevicePresence(mockDevice({ offline_mode: true }), nowMs)).toMatchObject({
-      code: 'emcon',
-      glyph: '⊘',
-      className: 'emcon-badge',
-    })
-    expect(
-      describeDevicePresence(
-        mockDevice({
-          online: false,
-          presence_reason: 'sortie',
-          expected_back_s: 300,
-          last_seen: '2026-10-25T12:00:00Z',
-        }),
-        nowMs,
-      ),
-    ).toMatchObject({
-      code: 'overdue',
-      glyph: '!!',
     })
     expect(describeDevicePresence(mockDevice({ online: false }), nowMs)).toMatchObject({
       code: 'offline',

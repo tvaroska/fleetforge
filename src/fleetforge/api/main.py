@@ -40,7 +40,7 @@ The login cookie is same-origin by construction, which is also why
 import asyncio
 import contextlib
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI
@@ -50,7 +50,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from fleetforge import __version__
+from fleetforge import __version__, rollout
 from fleetforge.api.deps import (
     SettingsDep,
     deploy_config_gaps,
@@ -64,6 +64,7 @@ from fleetforge.api.routers import (
     artifact_download,
     artifacts,
     auth,
+    auth_tokens,
     commands,
     deploys,
     device_secrets,
@@ -121,7 +122,11 @@ def _settings_or_none() -> Settings | None:
         return None
 
 
-def create_app() -> FastAPI:
+def create_app(
+    *,
+    settings_override: Settings | None = None,
+    listener_factory: Callable[..., Any] | None = None,
+) -> FastAPI:
     """Build the ASGI application.
 
     Everything is mounted under `/v1` — including the docs and the OpenAPI schema —
@@ -133,31 +138,29 @@ def create_app() -> FastAPI:
     # Per-app, never module-level: each test app gets a fresh cache and a fresh
     # limiter, so no auth state leaks between tests (and `dependency_overrides` on
     # `get_settings` cannot be undermined by a shared singleton).
-    settings = _settings_or_none()
+    settings = settings_override if settings_override is not None else _settings_or_none()
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        """Own the one `ff_events` LISTEN connection for this process.
-
-        `httpx`'s `ASGITransport` never runs a lifespan, which is deliberate here:
-        test apps get a hub and no listener, so nothing dials
-        `settings_for_tests()`'s intentionally unusable DSN. The listener has its own
-        integration test against the real test database.
-        """
+        """Own the `ff_events` LISTEN connection and periodic rollout reconcile for this process."""
         hub: EventHub = app.state.event_hub
         task: asyncio.Task[None] | None = None
+        reconcile_task: asyncio.Task[None] | None = None
         if settings is not None:
-            sessionmaker = get_sessionmaker()
+            sm_override = app.dependency_overrides.get(get_sessionmaker)
+            sessionmaker = sm_override() if sm_override is not None else get_sessionmaker()
+
+            def _resolve_publisher() -> Any:
+                pub_override = app.dependency_overrides.get(get_command_publisher)
+                if pub_override is not None:
+                    return pub_override()
+                return get_command_publisher(settings)
 
             async def _on_device_event(event: DeviceEvent) -> None:
-                # The API owns `MQTT_COMMAND_*`, `ARTIFACT_URL_SECRET`, and `PUBLIC_BASE_URL`
-                # (`design/production.md`: one privilege per service). Concurrent API workers
-                # receiving `ff_events` notifications are serialized by `SELECT ... FOR UPDATE`
-                # on `Project.id` inside `deploy_version_to_project_devices`.
                 if event.type == EventType.DEVICE_ANNOUNCE and event.online is not False:
-                    publisher = get_command_publisher(settings)
+                    publisher = _resolve_publisher()
                     async with sessionmaker() as session:
-                        await deploys.republish_open_requested_on_wake(
+                        await rollout.republish_open_requested_on_wake(
                             session,
                             device_id=event.device_id,
                             settings=settings,
@@ -168,9 +171,9 @@ def create_app() -> FastAPI:
                     and event.state == "confirmed"
                     and event.cmd_id is not None
                 ):
-                    publisher = get_command_publisher(settings)
+                    publisher = _resolve_publisher()
                     async with sessionmaker() as session:
-                        await deploys.advance_project_rollout_on_confirm(
+                        await rollout.advance_project_rollout_on_confirm(
                             session,
                             cmd_id=event.cmd_id,
                             settings=settings,
@@ -178,7 +181,25 @@ def create_app() -> FastAPI:
                             device_id=event.device_id,
                         )
 
-            listener = PostgresEventListener(
+            async def _rollout_reconcile_loop() -> None:
+                interval = max(0.05, float(settings.rollout_reconcile_interval_s))
+                while True:
+                    await asyncio.sleep(interval)
+                    try:
+                        publisher = _resolve_publisher()
+                        async with sessionmaker() as session:
+                            await rollout.reconcile_open_rollouts(
+                                session,
+                                settings=settings,
+                                publisher=publisher,
+                            )
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:  # noqa: BLE001
+                        logger.warning("rollout reconcile tick failed", exc_info=True)
+
+            factory = listener_factory or PostgresEventListener
+            listener = factory(
                 asyncpg_dsn(settings.database_url),
                 hub,
                 ping_s=settings.events_listener_ping_s,
@@ -186,6 +207,9 @@ def create_app() -> FastAPI:
             )
             app.state.event_listener = listener
             task = asyncio.create_task(listener.run(), name="ff-events-listener")
+            reconcile_task = asyncio.create_task(
+                _rollout_reconcile_loop(), name="ff-rollout-reconcile"
+            )
         else:
             logger.warning(
                 "no settings: the ff_events listener is not running, so /v1/events would "
@@ -194,10 +218,11 @@ def create_app() -> FastAPI:
         try:
             yield
         finally:
-            if task is not None:
-                task.cancel()
-                with contextlib.suppress(asyncio.CancelledError):
-                    await task
+            for bg_task in (reconcile_task, task):
+                if bg_task is not None:
+                    bg_task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError):
+                        await bg_task
             hub.close_all()
 
     app = FastAPI(
@@ -299,6 +324,7 @@ def create_app() -> FastAPI:
         )
 
     app.include_router(auth.router)
+    app.include_router(auth_tokens.router)
     app.include_router(projects.router)
     app.include_router(groups.router)
     app.include_router(users.router)

@@ -35,6 +35,7 @@ from fleetforge.announce_fields import (
     normalize_partition_table_sha256,
     normalize_reset_reason,
     normalize_rollback_capable,
+    normalize_safe_mode,
     normalize_ssid,
     normalize_sub_versions,
 )
@@ -156,6 +157,7 @@ class AnnouncePayload(_TolerantPayload):
     reset_reason: str | None = None
     secrets_rev: int | None = None
     sub_versions: dict[str, str] | None = None
+    safe_mode: bool | None = None
 
     @field_validator("ssid", mode="before")
     @classmethod
@@ -204,6 +206,12 @@ class AnnouncePayload(_TolerantPayload):
     def _usable_sub_versions(cls, value: object, info: ValidationInfo) -> dict[str, str] | None:
         """A 1-level `{component: version}` map, or `None` — never a `ValidationError`."""
         return normalize_sub_versions(value, device_id=_logged_device_id(info))
+
+    @field_validator("safe_mode", mode="before")
+    @classmethod
+    def _usable_safe_mode(cls, value: object, info: ValidationInfo) -> bool | None:
+        """A real JSON boolean, or `None` — never a `ValidationError` (`D-3`)."""
+        return normalize_safe_mode(value, device_id=_logged_device_id(info))
 
 
 class PresencePayload(_TolerantPayload):

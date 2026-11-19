@@ -1052,7 +1052,7 @@ class TestR6DeployKpis:
             "safety_target_met": True,
         }
 
-        # Now record a failed deploy (`publish_failed`) and verify safety drops below 100%.
+        # 1. Server-authored `publish_failed` never reached the board -> excluded from KPIs (`A-7`).
         await record_requested(
             db,
             device_id=DEVICE_ID,
@@ -1074,11 +1074,85 @@ class TestR6DeployKpis:
         )
         await db.commit()
 
-        after_fail = await deploy_kpis(db)
-        assert after_fail.total_completed == 11
-        assert after_fail.failed == 1
-        assert after_fail.delivery_target_met is False
-        assert after_fail.safety_target_met is False
+        after_pub_fail = await deploy_kpis(db)
+        assert after_pub_fail.total_completed == 10
+        assert after_pub_fail.failed == 0
+        assert after_pub_fail.delivery_target_met is True
+        assert after_pub_fail.safety_target_met is True
+
+        # 2. Pre-apply device refusal (`staging` -> `failed`, never entered `applying`/`rebooting`):
+        # counts as a delivery miss, while `fleet_safety_pct` stays 100.0% (`spec/prd.md` -> A-7).
+        await record_requested(
+            db,
+            device_id=DEVICE_ID,
+            cmd_id="cmd-preapply-fail",
+            artifact_version="1.7.1",
+            from_version="1.5.0",
+            sha256=IMAGE_SHA256,
+            size_bytes=len(IMAGE),
+            target="esp32c6",
+            apply="auto",
+            sent_by=sender,
+        )
+        await record_observed_status(
+            db,
+            device_id=DEVICE_ID,
+            cmd_id="cmd-preapply-fail",
+            state="staging",
+            at=now_utc(),
+        )
+        await record_observed_status(
+            db,
+            device_id=DEVICE_ID,
+            cmd_id="cmd-preapply-fail",
+            state="failed",
+            detail="sha256 mismatch",
+            at=now_utc(),
+        )
+        await db.commit()
+
+        after_preapply = await deploy_kpis(db)
+        assert after_preapply.total_completed == 11
+        assert after_preapply.failed == 1
+        assert after_preapply.delivery_target_met is False
+        assert after_preapply.fleet_safety_pct == 100.0
+        assert after_preapply.safety_target_met is True
+
+        # 3. Post-apply `failed` (crossed `applying` without confirming or rolling back) drops safety < 100%.
+        await record_requested(
+            db,
+            device_id=DEVICE_ID,
+            cmd_id="cmd-postapply-fail",
+            artifact_version="1.7.2",
+            from_version="1.5.0",
+            sha256=IMAGE_SHA256,
+            size_bytes=len(IMAGE),
+            target="esp32c6",
+            apply="auto",
+            sent_by=sender,
+        )
+        await record_observed_status(
+            db,
+            device_id=DEVICE_ID,
+            cmd_id="cmd-postapply-fail",
+            state="applying",
+            pct=100,
+            at=now_utc(),
+        )
+        await record_observed_status(
+            db,
+            device_id=DEVICE_ID,
+            cmd_id="cmd-postapply-fail",
+            state="failed",
+            detail="boot slot lost",
+            at=now_utc(),
+        )
+        await db.commit()
+
+        after_postapply = await deploy_kpis(db)
+        assert after_postapply.total_completed == 12
+        assert after_postapply.failed == 2
+        assert after_postapply.safety_target_met is False
 
 
 def test_production_ring_rejects_both_committed_dev_keys(tmp_path: Path) -> None:

@@ -541,10 +541,7 @@ describe('Fleet workbench controls, safe_mode & presence taxonomy (P0-3, P1-1, P
       device({
         device_id: 'a4cf12b3de01',
         safe_mode: true,
-        offline_mode: true,
         link_type: 'dock',
-        presence_reason: 'sortie',
-        expected_back_s: 600,
         health: {
           at: '2026-09-10T11:59:55Z',
           uptime_s: 45,
@@ -558,9 +555,7 @@ describe('Fleet workbench controls, safe_mode & presence taxonomy (P0-3, P1-1, P
 
     const row = screen.getAllByTestId('device-row')[0]!
     expect(within(row).getByLabelText('online')).toBeInTheDocument()
-    expect(within(row).getByTestId('presence-emcon')).toHaveTextContent('⊘ VENUE EMCON')
     expect(within(row).getByTestId('presence-dock')).toHaveTextContent('█ DOCK')
-    expect(within(row).getByTestId('presence-sortie')).toHaveTextContent('◎ SORTIE')
     expect(within(row).getByTestId('safe-mode-badge')).toHaveTextContent('!! SAFE MODE')
     expect(within(row).getByTestId('device-vitals')).toHaveTextContent('heap low 13.7 KiB')
     expect(within(row).getByTestId('device-vitals')).toHaveTextContent('free 62.5 KiB')

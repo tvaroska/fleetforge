@@ -62,8 +62,8 @@ TEST_PUBLIC_BASE_URL = "https://downloads.test"
 
 
 def database_url_for(db_name: str) -> str:
-    """Return the configured dev/test URL with its database name replaced."""
-    base = os.environ.get("TEST_DATABASE_URL") or os.environ.get("DATABASE_URL", DEFAULT_DEV_URL)
+    """Return the configured test URL (`TEST_DATABASE_URL` or local dev port 5433) with `db_name`."""
+    base = os.environ.get("TEST_DATABASE_URL") or DEFAULT_DEV_URL
     head, _, _ = base.rpartition("/")
     return f"{head}/{db_name}"
 
@@ -165,6 +165,33 @@ async def engine() -> AsyncIterator[AsyncEngine]:
     finally:
         await test_engine.dispose()
         await drop_database(TEST_DB_NAME)
+
+
+@pytest.fixture
+async def clean_tables(engine: AsyncEngine) -> AsyncIterator[None]:
+    """Clean up rows committed via the app's own sessionmaker before and after a test."""
+    from sqlalchemy import text
+
+    cleanup_sql = (
+        "DELETE FROM partition_profiles WHERE origin <> 'builtin'",
+        "DELETE FROM deploy_events",
+        "DELETE FROM enrollment_tokens",
+        "DELETE FROM devices",
+        "DELETE FROM device_groups",
+        "DELETE FROM artifact_versions",
+        "DELETE FROM artifacts",
+        "DELETE FROM project_members",
+        "DELETE FROM admin_tokens",
+        "DELETE FROM users",
+        "DELETE FROM projects WHERE slug <> 'default'",
+    )
+    async with engine.begin() as conn:
+        for stmt in cleanup_sql:
+            await conn.execute(text(stmt))
+    yield
+    async with engine.begin() as conn:
+        for stmt in cleanup_sql:
+            await conn.execute(text(stmt))
 
 
 @pytest.fixture

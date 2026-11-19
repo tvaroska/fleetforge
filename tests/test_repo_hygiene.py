@@ -11,6 +11,8 @@ Verifies that `fleetforge` remains 100% portable and free of:
 from __future__ import annotations
 
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -50,12 +52,19 @@ FORBIDDEN_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
 
 
 def _iter_tracked_text_files() -> list[Path]:
+    git_bin = shutil.which("git") or "/usr/bin/git"
+    listed = subprocess.run(  # noqa: S603
+        [git_bin, "-C", str(REPO_ROOT), "ls-files", "-z"],
+        check=True,
+        capture_output=True,
+    ).stdout.decode("utf-8", errors="replace")
     files: list[Path] = []
-    for path in sorted(REPO_ROOT.rglob("*")):
+    for rel in sorted(filter(None, listed.split("\0"))):
+        path = REPO_ROOT / rel
         if not path.is_file():
             continue
-        rel_parts = path.relative_to(REPO_ROOT).parts
-        if any(p.startswith(".") or p in EXCLUDED_DIRS for p in rel_parts):
+        rel_parts = Path(rel).parts
+        if any(p in EXCLUDED_DIRS for p in rel_parts):
             continue
         if rel_parts == ("tests", "test_repo_hygiene.py"):
             continue

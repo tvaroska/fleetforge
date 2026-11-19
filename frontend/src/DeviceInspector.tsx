@@ -163,14 +163,14 @@ export function DeviceInspector({
   // Exception / compare candidates for Mode C — never fall back to healthy boards
   const problemBoards = devices.filter(
     (d) =>
-      (d as DeviceSummary & { safe_mode?: boolean }).safe_mode === true ||
+      d.safe_mode === true ||
       d.deploy?.state === 'rolled_back' ||
       d.deploy?.state === 'failed' ||
       d.health?.boot_ok === false,
   )
   const compareBase = problemBoards
   const filteredCompareBoards = compareBase.filter((d) => {
-    const safeMode = Boolean((d as DeviceSummary & { safe_mode?: boolean }).safe_mode)
+    const safeMode = Boolean(d.safe_mode)
     const reasonText =
       `${d.deploy?.selftest?.reason ?? ''} ${d.deploy?.detail ?? ''} ${d.last_reset_reason ?? ''}`.toLowerCase()
     if (comparePattern === 'safe_mode') return safeMode
@@ -365,15 +365,10 @@ export function DeviceInspector({
     }
   }
 
-  const isSafeMode = Boolean(
-    effectiveDevice && (effectiveDevice as DeviceSummary & { safe_mode?: boolean }).safe_mode,
-  )
+  const isSafeMode = Boolean(effectiveDevice?.safe_mode)
   const resetInfo = effectiveDevice ? describeReset(effectiveDevice.last_reset_reason) : null
   const faultsText = effectiveDevice ? describeFaults(effectiveDevice.fault_resets) : null
-  const returnedToSlot =
-    effectiveDevice?.deploy?.selftest?.returned_to ??
-    (effectiveDevice?.deploy as { returned_to?: string | null } | null | undefined)?.returned_to ??
-    null
+  const returnedToSlot = effectiveDevice?.deploy?.selftest?.returned_to ?? null
 
   return (
     <aside
@@ -789,7 +784,7 @@ export function DeviceInspector({
                 </tr>
               ) : (
                 filteredCompareBoards.map((b) => {
-                  const bSafe = Boolean((b as DeviceSummary & { safe_mode?: boolean }).safe_mode)
+                  const bSafe = Boolean(b.safe_mode)
                   const slot = b.deploy?.selftest?.returned_to ?? null
                   const verdict = bSafe
                     ? slot

@@ -99,39 +99,20 @@ function NetworkNote({ device }: { device: DeviceSummary }) {
 }
 
 function PresenceBadges({ device }: { device: DeviceSummary }) {
-  const ext = device as DeviceSummary & {
-    offline_mode?: boolean
-    presence_reason?: string | null
-    expected_back_s?: number | null
-  }
-  const isEmcon = Boolean(ext.offline_mode)
   const isDock = device.link_type === 'dock'
-  const isSortie = ext.presence_reason === 'sortie'
-  if (!isEmcon && !isDock && !isSortie) return null
+  if (!isDock) return null
 
   return (
     <div className="presence-badges" data-testid="presence-badges">
-      {isEmcon && (
-        <span className="emcon-badge badge" data-testid="presence-emcon">
-          ⊘ VENUE EMCON
-        </span>
-      )}
-      {isDock && (
-        <span className="badge" data-testid="presence-dock">
-          █ DOCK{device.parent_device_id ? ` (@${device.parent_device_id})` : ''}
-        </span>
-      )}
-      {isSortie && (
-        <span className="warn badge" data-testid="presence-sortie">
-          ◎ SORTIE{ext.expected_back_s != null ? ` (${ext.expected_back_s}s)` : ''}
-        </span>
-      )}
+      <span className="badge" data-testid="presence-dock">
+        █ DOCK{device.parent_device_id ? ` (@${device.parent_device_id})` : ''}
+      </span>
     </div>
   )
 }
 
 function HealthCell({ device }: { device: DeviceSummary }) {
-  const safeMode = Boolean((device as DeviceSummary & { safe_mode?: boolean }).safe_mode)
+  const safeMode = Boolean(device.safe_mode)
   const reset = describeReset(device.last_reset_reason)
   const boot = describeBoot(device.health)
   const faults = describeFaults(device.fault_resets)
@@ -698,7 +679,7 @@ export function FleetTable({
       : 0
 
   function matchesQuickFilter(d: DeviceSummary, f: QuickFilter): boolean {
-    const safeMode = Boolean((d as DeviceSummary & { safe_mode?: boolean }).safe_mode)
+    const safeMode = Boolean(d.safe_mode)
     if (f === 'attention') {
       return (
         safeMode ||

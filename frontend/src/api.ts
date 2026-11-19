@@ -97,7 +97,6 @@ export type ProjectDeployAccepted = {
   project: string
   version: string
   target_filter: 'all' | 'dev'
-  group_id?: string | null
   deployed: DeployAccepted[]
   skipped: Record<string, string>
 }
@@ -170,7 +169,6 @@ export type AdminTokenIssued = {
   project_slug: string | null
   created_at: string
   expires_at: string | null
-  last_used_at?: string | null
 }
 
 export type ArtifactType =
@@ -284,9 +282,6 @@ export type DeviceSummary = {
   secrets_rev?: number | null
   sub_versions?: Record<string, string> | null
   safe_mode?: boolean
-  offline_mode?: boolean
-  expected_back_s?: number | null
-  presence_reason?: string | null
   deploy: DeploySummary | null
 }
 
@@ -361,8 +356,6 @@ export type DeploySummary = {
   is_terminal: boolean
   artifact_version: string | null
   from_version: string | null
-  artifact_type?: ArtifactType | string | null
-  returned_to?: string | null
   pct: number | null
   detail: string | null
   // R2b-fe-9, both OPTIONAL: a dashboard served against an older API, and every fixture
@@ -460,10 +453,6 @@ export type DockSyncResponse = {
   telemetry_batches_recorded: number
   log_batches_recorded: number
   device: DeviceSummary
-  ingested_statuses?: number
-  ingested_telemetry?: number
-  ingested_logs?: number
-  corrupted_lines?: number
 }
 
 // Mirrors `firmware/manifest.py::ConfigPartition`. Optional in the schema ON PURPOSE:

@@ -11,7 +11,7 @@
 # source is put on PYTHONPATH. That mirrors pytest's `pythonpath = ["src", "."]`.
 # =============================================================================
 
-FROM ghcr.io/astral-sh/uv:0.9.1-python3.12-bookworm-slim AS base
+FROM ghcr.io/astral-sh/uv:0.12.24-python3.12-bookworm-slim AS base
 
 WORKDIR /app
 

@@ -374,3 +374,56 @@ async def test_auth_routes_are_versioned(admin_app: FastAPI) -> None:
 
     paths = response.json()["paths"]
     assert {"/v1/auth/login", "/v1/auth/logout", "/v1/auth/me"} <= set(paths)
+
+
+async def test_firebase_upstream_error_still_counts_the_failed_local_password(
+    admin_app: FastAPI,
+    clean_tables: None,
+) -> None:
+    """A-6: a wrong local password that falls through to Firebase and receives a `503`
+    (`FirebaseAuthError`) still counts against the IP login limiter so brute-force bursts
+    cannot bypass local rate limiting when Firebase is degraded."""
+    from fleetforge.api.deps import get_firebase_auth
+    from fleetforge.auth.firebase import FirebaseAuthError
+    from tests.conftest import login_admin
+
+    class BrokenFirebase:
+        async def sign_in_with_password(self, *_args: object, **_kwargs: object) -> object:
+            raise FirebaseAuthError("upstream timeout")
+
+    super_token = await login_admin(admin_app)
+    async with _client(admin_app) as setup_client:
+        created = await setup_client.post(
+            "/v1/users",
+            headers={"Authorization": f"Bearer {super_token}"},
+            json={
+                "username": "alice",
+                "email": "alice@example.com",
+                "password": "correct-local-password-123",
+            },
+        )
+        assert created.status_code == 201, created.text
+
+    settings = settings_for_tests(
+        firebase_web_api_key="fake-firebase-web-api-key",
+        login_rate_limit_per_ip=3,
+        login_rate_limit_global=30,
+    )
+    admin_app.dependency_overrides[get_settings] = lambda: settings
+    admin_app.dependency_overrides[get_firebase_auth] = lambda: BrokenFirebase()
+    admin_app.state.login_limiter = FixedWindowLimiter(per_key=3, per_global=30, window_s=60)
+
+    async with _client(admin_app) as client:
+        for _ in range(3):
+            res = await client.post(
+                "/v1/auth/login",
+                json={"username": "alice@example.com", "password": "wrong-password-123"},
+            )
+            assert res.status_code == 503, res.text
+
+        # 4th attempt is rate-limited with 429 because the 3 failed local verifies stayed counted!
+        fourth = await client.post(
+            "/v1/auth/login",
+            json={"username": "alice@example.com", "password": "wrong-password-123"},
+        )
+        assert fourth.status_code == 429, fourth.text

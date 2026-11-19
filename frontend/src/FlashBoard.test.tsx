@@ -262,10 +262,9 @@ describe('PitDockCockpit — RULE E301 Venue Offline & USB-C Pit Cockpit (P2-1, 
     render(<PitDockCockpit devices={devices} onSynced={onSynced} />)
 
     const banner = screen.getByTestId('emcon-posture-banner')
-    expect(banner).toHaveTextContent('⊘ VENUE OFFLINE / EMCON MODE (RULE E301)')
-    expect(banner).toHaveTextContent('[⊘ 802.11 Wi-Fi: OFF]')
-    expect(banner).toHaveTextContent('[⊘ Improv BLE: OFF]')
-    expect(banner).toHaveTextContent('[✓ Shared NimBLE GATT: LIVE]')
+    expect(banner).toHaveTextContent('█ TETHERED USB-C DOCK ACTIVE')
+    expect(banner).toHaveTextContent('[Docked: 1/2]')
+    expect(banner).toHaveTextContent('[Safe mode: 0]')
 
     const strip = screen.getByTestId('pit-mini-fleet-strip')
     expect(within(strip).getByTestId('peer-mesh-skew')).toHaveTextContent('! SKEW')
@@ -283,7 +282,6 @@ describe('PitDockCockpit — RULE E301 Venue Offline & USB-C Pit Cockpit (P2-1, 
     expect(within(receipt).getByTestId('receipt-ingested-statuses')).toHaveTextContent('1')
     expect(within(receipt).getByTestId('receipt-ingested-telemetry')).toHaveTextContent('1')
     expect(within(receipt).getByTestId('receipt-ingested-logs')).toHaveTextContent('1')
-    expect(within(receipt).getByTestId('receipt-corrupted-lines')).toHaveTextContent('0')
     expect(onSynced).toHaveBeenCalledTimes(1)
     expect(fetchMock).toHaveBeenCalledWith(
       '/v1/devices/94a9900009a4/dock-sync',

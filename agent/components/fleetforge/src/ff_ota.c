@@ -446,8 +446,8 @@ static esp_err_t resume_range_perform(esp_https_ota_handle_t handle, const ff_ot
  * moved it (R5-fw-4; `why` is the second half of the log line). Since R2-fw-1 a sha256
  * mismatch never gets here — it is caught before finish() and nothing was moved (property
  * 3) — so for a failure this is the belt-and-braces branch for an image IDF itself
- * refused. It is also the only call to esp_ota_set_boot_partition() in this file. Logged at ERROR either way — an operator needs
- * to know a board is carrying a rejected image in its spare slot.
+ * refused. Together with `ff_ota_dock_stage`'s manual `esp_ota_end` switch, it is the only
+ * call to esp_ota_set_boot_partition() in this file. Logged at ERROR either way.
  *
  * It writes otadata ONLY if the pointer actually moved (R2-fw-2). finish() reaches
  * esp_ota_set_boot_partition() only after esp_ota_end() succeeded, and choose_target_slot()
@@ -1283,13 +1283,11 @@ static void ota_task(void *arg)
                   "PENDING_VERIFY; ff_mqtt confirms it only once the retained announce is "
                   "acknowledged, and rolls back otherwise.",
              cmd->cmd_id, target->label);
-    /* The transaction record was written at `staged` (ff_txn), so the image that comes
-     * up — or the one the bootloader falls back to — reports `confirming`/`confirmed` or
-     * `rolled_back` against this cmd_id. That is ff_mqtt.c's job, not this file's. */
+    /* Persist the stage id in FF_TXN_CMD_NAMESPACE so a persistent broker session that
+     * redelivers this stage right after reboot drops it as a duplicate (D-6). */
+    (void)ff_txn_note_reboot_cmd(cmd->cmd_id);
     vTaskDelay(pdMS_TO_TICKS(OTA_PUBLISH_DRAIN_MS));
-    /* R5-fw-5: the rule is asked once more immediately before the reboot. A window that closed
-     * during the drain is waited for again, silently: `applying` is already said, and the walk
-     * is committed (no cancel any more). */
+    /* R5-fw-5: ask the rule once more immediately before reboot; committed (no cancel). */
     while (!ff_safe_window_is_safe()) {
         vTaskDelay(pdMS_TO_TICKS(FF_SAFE_WINDOW_POLL_MS));
     }
@@ -1622,12 +1620,12 @@ esp_err_t ff_ota_dock_stage(const ff_ota_cmd_t *cmd, const uint8_t *data, size_t
         fail(cmd, sig_detail);
         return ESP_ERR_INVALID_STATE;
     }
-    if (esp_ota_end(ota_handle) != ESP_OK || (esp_ota_set_boot_partition)(target) != ESP_OK) {
+    if (esp_ota_end(ota_handle) != ESP_OK || esp_ota_set_boot_partition(target) != ESP_OK) {
         fail(cmd, "cannot finish the update");
-        (void)(restore_boot_partition)(WHY_REJECTED);
+        (void)restore_boot_partition(WHY_REJECTED);
         return ESP_FAIL;
     }
-    (void)(ff_txn_save)(cmd->cmd_id, target->address, cmd->confirm_timeout_s);
+    (void)ff_txn_save(cmd->cmd_id, target->address, cmd->confirm_timeout_s);
     ff_mqtt_publish_status(cmd->cmd_id, FF_STATUS_STAGED, 100, NULL);
     if (!cmd->apply_now) {
         return ESP_OK;

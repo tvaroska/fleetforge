@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from fleetforge.auth.enrollment import EnrollmentTokenStatus
 from fleetforge.db.models import ProjectRole
+from fleetforge.url_safety import validate_public_https_url
 
 USERNAME_PATTERN = r"^[a-z0-9][a-z0-9._-]{1,31}$"
 EMAIL_PATTERN = r"^[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}$"
@@ -156,7 +157,16 @@ class AdminTokenList(BaseModel):
 
 TrackMode = Literal["off", "branch", "tag", "commit"]
 AutoDeployTarget = Literal["off", "dev", "all"]
-SECRET_KEY_PATTERN = r"^[a-zA-Z0-9_.-]{1,15}$"  # noqa: S105 — regex pattern, not a secret
+SECRET_KEY_PATTERN = r"^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,14}$"  # noqa: S105 — regex pattern, not a secret
+
+
+def _normalize_outbound_url(v: str | None, field_name: str) -> str | None:
+    if v is None:
+        return None
+    stripped = v.strip()
+    if not stripped:
+        return None
+    return validate_public_https_url(stripped, field_name=field_name)
 
 
 class ProjectCreate(BaseModel):
@@ -176,6 +186,16 @@ class ProjectCreate(BaseModel):
     otel_endpoint: str | None = Field(default=None, max_length=512)
     otel_headers: str | None = Field(default=None, max_length=2048)
 
+    @field_validator("ci_webhook_url")
+    @classmethod
+    def _validate_webhook_url(cls, v: str | None) -> str | None:
+        return _normalize_outbound_url(v, "ci_webhook_url")
+
+    @field_validator("otel_endpoint")
+    @classmethod
+    def _validate_otel_endpoint(cls, v: str | None) -> str | None:
+        return _normalize_outbound_url(v, "otel_endpoint")
+
 
 class ProjectUpdate(BaseModel):
     """`PATCH /v1/projects/{slug}`: update display name, description, CD, or OTel settings."""
@@ -192,6 +212,16 @@ class ProjectUpdate(BaseModel):
     ci_webhook_header: str | None = Field(default=None, max_length=512)
     otel_endpoint: str | None = Field(default=None, max_length=512)
     otel_headers: str | None = Field(default=None, max_length=2048)
+
+    @field_validator("ci_webhook_url")
+    @classmethod
+    def _validate_webhook_url(cls, v: str | None) -> str | None:
+        return _normalize_outbound_url(v, "ci_webhook_url")
+
+    @field_validator("otel_endpoint")
+    @classmethod
+    def _validate_otel_endpoint(cls, v: str | None) -> str | None:
+        return _normalize_outbound_url(v, "otel_endpoint")
 
 
 class ProjectSummary(BaseModel):
@@ -307,7 +337,7 @@ class UserCreate(BaseModel):
     username: str = Field(pattern=USERNAME_PATTERN)
     email: str | None = Field(default=None, max_length=254)
     display_name: str | None = Field(default=None, max_length=64)
-    password: str | None = Field(default=None, min_length=1, max_length=1024)
+    password: str | None = Field(default=None, min_length=8, max_length=1024)
     is_superadmin: bool = False
     send_invite_email: bool = False
     project: str | None = Field(default=None, pattern=PROJECT_SLUG_PATTERN)
@@ -345,7 +375,7 @@ class UserUpdate(BaseModel):
 
     email: str | None = Field(default=None, max_length=254)
     display_name: str | None = Field(default=None, max_length=64)
-    password: str | None = Field(default=None, min_length=1, max_length=1024)
+    password: str | None = Field(default=None, min_length=8, max_length=1024)
     is_superadmin: bool | None = None
     disabled: bool | None = None
     send_password_reset: bool = False

@@ -290,7 +290,10 @@ class Settings(BaseSettings):
     # here for the reason `admin_password_hash` is (`create_app()` must stay
     # constructible with no environment); mandatory in docker-compose.yml (`${VAR:?}`).
     # Rotating it invalidates every URL in flight — at most `signed_url_ttl_s` of staged
-    # deploys, which simply re-deploy. Production value lives in services/prod/.env.
+    # deploys, which simply re-deploy. Set `SECRETS_ENCRYPTION_KEY` independently so
+    # rotating `ARTIFACT_URL_SECRET` does not re-key `project_secrets`, OTel, or webhook
+    # ciphertexts (`MultiFernet` tries `secrets_encryption_key` first, then
+    # `artifact_url_secret`). Production values live in services/prod/.env.
     artifact_url_secret: str | None = None
     # The origin a DEVICE reaches, e.g. https://bingo.tvaroska.sk — NOT the
     # container-internal one. It is what the `stage` command's URL is built on, so a
@@ -302,11 +305,14 @@ class Settings(BaseSettings):
     # board is never handed a credential that dies mid-download. 300 s against the 1800 s
     # `signed_url_ttl_s` — one TTL for both layers, one number, one place.
     artifact_url_refresh_margin_s: int = 300
+    # Periodic reconcile interval (seconds) for advancing staged cohort rollouts in case
+    # a confirm notification arrived during an API restart (`A-3`).
+    rollout_reconcile_interval_s: float = 30.0
 
     # --- Rotating device secrets (SEC-be-1) -----------------------------------
-    # Optional Fernet key (32 bytes urlsafe-base64) for encrypting `project_secrets.ciphertext`
-    # at rest. When unset, derived deterministically from `artifact_url_secret` (or a local
-    # fallback key in tests).
+    # Dedicated secret material for encrypting `project_secrets.ciphertext`, per-project
+    # `otel_headers`, and `ci_webhook_header` at rest. When unset, derived from
+    # `artifact_url_secret`; when both are unset, `secrets_crypto` fails closed.
     secrets_encryption_key: str | None = None
 
     # --- OpenTelemetry OTLP/HTTP export (OTEL-be-1) ---------------------------

@@ -182,3 +182,207 @@ async def test_openapi_is_versioned(app_no_db: FastAPI) -> None:
     paths = response.json()["paths"]
     assert paths
     assert all(path.startswith("/v1") for path in paths), sorted(paths)
+
+
+async def test_lifespan_with_settings_starts_and_dispatches_device_events(
+    engine: Any, clean_tables: None
+) -> None:
+    """T-2: entering `app.router.lifespan_context(app)` with real `Settings`, PostgreSQL, and
+    an injected listener starts cleanly and dispatches `DEVICE_ANNOUNCE` (wake republish) and
+    `DEVICE_DEPLOY` (`confirmed` wave advancement)."""
+    import asyncio
+    import datetime as dt
+    import hashlib
+
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from fleetforge.api.deps import get_command_publisher
+    from fleetforge.api.main import create_app
+    from fleetforge.clock import now_utc
+    from fleetforge.db.models import DEFAULT_PROJECT_ID, Artifact, ArtifactVersion, Device
+    from fleetforge.deploys import DeploySender, record_observed_status, record_requested
+    from fleetforge.events import DeviceEvent, EventType
+    from fleetforge.signing import generate_keypair, sign_digest
+
+    priv_pem, pub_pem = generate_keypair()
+    other_priv, other_pub = generate_keypair()
+    _ = other_priv
+    blob = b"\xe9\x00" + b"FFOTALIB:2.0.0" * 32
+    sha = hashlib.sha256(blob).hexdigest()
+    sig = sign_digest(sha, priv_pem)
+    now = now_utc()
+
+    sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
+    async with sessionmaker() as session:
+        session.add(
+            Artifact(
+                sha256=sha,
+                kind="user_firmware",
+                target="esp32c6",
+                size_bytes=len(blob),
+                partition_layout="ab-4m-v1",
+                has_lib_marker=True,
+                sig=sig,
+            )
+        )
+        session.add(
+            ArtifactVersion(
+                project_id=DEFAULT_PROJECT_ID,
+                target="esp32c6",
+                version="2.0.0",
+                sha256=sha,
+            )
+        )
+        # Sleepy board with open `requested` intent + canary & fleet board for rollout advance
+        session.add_all(
+            [
+                Device(
+                    device_id="a4cf12b3de11",
+                    project_id=DEFAULT_PROJECT_ID,
+                    platform_type="esp32c6",
+                    fw_version="1.0.0",
+                    partition_layout="ab-4m-v1",
+                    ota_slot_size=1966080,
+                    rollback_capable=True,
+                    capabilities=["ota", "sig"],
+                    link_type="wifi",
+                    power_class="sleepy",
+                    expected_wake_interval_s=3600,
+                    presence_reported=True,
+                    last_seen=now,
+                ),
+                Device(
+                    device_id="a4cf12b3de12",
+                    project_id=DEFAULT_PROJECT_ID,
+                    platform_type="esp32c6",
+                    fw_version="2.0.0",
+                    partition_layout="ab-4m-v1",
+                    ota_slot_size=1966080,
+                    rollback_capable=True,
+                    capabilities=["ota", "sig"],
+                    link_type="wifi",
+                    power_class="always_on",
+                    is_dev=True,
+                    presence_reported=True,
+                    last_seen=now,
+                ),
+                Device(
+                    device_id="a4cf12b3de13",
+                    project_id=DEFAULT_PROJECT_ID,
+                    platform_type="esp32c6",
+                    fw_version="1.0.0",
+                    partition_layout="ab-4m-v1",
+                    ota_slot_size=1966080,
+                    rollback_capable=True,
+                    capabilities=["ota", "sig"],
+                    link_type="wifi",
+                    power_class="always_on",
+                    is_dev=False,
+                    presence_reported=True,
+                    last_seen=now,
+                ),
+            ]
+        )
+        await session.flush()
+        sender = DeploySender(subject="admin", token_id="tok-1", credential="session")
+        await record_requested(
+            session,
+            device_id="a4cf12b3de11",
+            cmd_id="cmd-sleepy-wake",
+            artifact_version="2.0.0",
+            from_version="1.0.0",
+            sha256=sha,
+            size_bytes=len(blob),
+            target="esp32c6",
+            apply="auto",
+            sent_by=sender,
+        )
+        await record_requested(
+            session,
+            device_id="a4cf12b3de12",
+            cmd_id="cmd-canary-200",
+            artifact_version="2.0.0",
+            from_version="1.0.0",
+            sha256=sha,
+            size_bytes=len(blob),
+            target="esp32c6",
+            apply="auto",
+            sent_by=sender,
+            rollout={
+                "target_filter": "all",
+                "canary": True,
+                "max_parallel": 2,
+                "override": [],
+                "target_chip": "esp32c6",
+            },
+        )
+        await record_observed_status(
+            session,
+            device_id="a4cf12b3de12",
+            cmd_id="cmd-canary-200",
+            state="confirmed",
+            pct=100,
+            at=now + dt.timedelta(seconds=5),
+        )
+        await session.commit()
+
+    captured_on_event: list[Any] = []
+
+    class FakeListener:
+        def __init__(self, _dsn: str, _hub: Any, *, ping_s: float, on_event: Any = None) -> None:
+            self.ping_s = ping_s
+            captured_on_event.append(on_event)
+
+        async def run(self) -> None:
+            await asyncio.Event().wait()
+
+    published: list[tuple[str, dict[str, Any]]] = []
+
+    class RecordingPublisher:
+        async def publish(self, device_id: str, payload: dict[str, Any]) -> None:
+            published.append((device_id, payload))
+
+        async def publish_many(self, items: Any) -> None:
+            published.extend(items)
+
+    settings = deployable_settings(
+        artifact_signing_key=priv_pem,
+        artifact_signing_public_keys=f"{pub_pem};{other_pub}",
+        rollout_reconcile_interval_s=3600.0,
+    )
+    app = create_app(settings_override=settings, listener_factory=FakeListener)
+    app.dependency_overrides[get_sessionmaker] = lambda: sessionmaker
+    app.dependency_overrides[get_command_publisher] = lambda: RecordingPublisher()
+
+    async with app.router.lifespan_context(app):
+        assert len(captured_on_event) == 1
+        on_event = captured_on_event[0]
+        assert on_event is not None
+
+        # 1. Dispatch DEVICE_ANNOUNCE for sleepy board -> republishes `cmd-sleepy-wake`
+        await on_event(
+            DeviceEvent(
+                type=EventType.DEVICE_ANNOUNCE,
+                device_id="a4cf12b3de11",
+                at=now,
+                online=True,
+            )
+        )
+        assert [dev_id for dev_id, _ in published] == ["a4cf12b3de11"]
+        assert published[0][1]["id"] == "cmd-sleepy-wake"
+
+        # 2. Dispatch DEVICE_DEPLOY (`confirmed`) for canary -> advances Wave 2 to `a4cf12b3de13`
+        published.clear()
+        await on_event(
+            DeviceEvent(
+                type=EventType.DEVICE_DEPLOY,
+                device_id="a4cf12b3de12",
+                at=now,
+                online=True,
+                state="confirmed",
+                cmd_id="cmd-canary-200",
+                is_terminal=True,
+            )
+        )
+        assert [dev_id for dev_id, _ in published] == ["a4cf12b3de13"]
+        assert published[0][1]["artifact"]["version"] == "2.0.0"

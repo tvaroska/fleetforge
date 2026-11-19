@@ -960,11 +960,7 @@ export function Dashboard({
         <details
           className="console-card"
           data-testid="pit-dock-drawer"
-          open={(fleet.devices ?? []).some(
-            (d) =>
-              d.link_type === 'dock' ||
-              Boolean((d as { offline_mode?: boolean }).offline_mode),
-          )}
+          open={(fleet.devices ?? []).some((d) => d.link_type === 'dock')}
         >
           <summary>Offline Radio Lockout &amp; USB-C Dock Sync</summary>
           <PitDockCockpit

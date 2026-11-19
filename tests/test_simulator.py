@@ -1238,18 +1238,32 @@ async def test_stop_during_the_confirm_timer_cancels_it_cleanly(downloads: list[
 
 
 async def test_a_reconnect_resumes_the_confirm_timer_rather_than_restarting_it(
-    downloads: list[str],
+    downloads: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The firmware arms its timer once per boot; a broker blip does not buy more time."""
-    stage = await applied_stage(confirm=CONFIRM_NEVER, confirm_timeout_s=0.3)
-    await one_session(stage, FakeClient(), awake_s=0.2)  # a blip before the timer fires
-    assert stage.pending is not None
+    fake_now = [100.0]
+    recorded_delays: list[float] = []
+    real_confirm_timeout = StageRunner._confirm_timeout
 
+    async def spy_confirm_timeout(
+        self: StageRunner, client: Any, pending: Any, delay_s: float, step: Any
+    ) -> None:
+        recorded_delays.append(delay_s)
+        await real_confirm_timeout(self, client, pending, 0.01 if delay_s <= 0.15 else 0.5, step)
+
+    monkeypatch.setattr(StageRunner, "_confirm_timeout", spy_confirm_timeout)
+    stage = await applied_stage(
+        confirm=CONFIRM_NEVER, confirm_timeout_s=0.3, clock=lambda: fake_now[0]
+    )
+    await one_session(stage, FakeClient(), awake_s=0.05)  # a blip before the timer fires
+    assert stage.pending is not None
+    assert recorded_delays == [pytest.approx(0.3)]
+
+    fake_now[0] += 0.2  # 0.2s elapsed during the blip -> 0.1s remaining, NOT 0.3s
     second = FakeClient()
-    started = time.monotonic()
     await one_session(stage, second, awake_s=None)
 
-    assert time.monotonic() - started < 0.25, "the timer restarted from zero on reconnect"
+    assert recorded_delays[-1] == pytest.approx(0.1), "the timer restarted from zero on reconnect"
     assert [report["state"] for report in statuses(second)] == [
         STATE_CONFIRMING,
         STATE_ROLLING_BACK,

@@ -76,7 +76,7 @@ steps:
   #    (Note: release firmware bundles require FF_OTA_PRODUCTION_BUILD=1)     #
   # ------------------------------------------------------------------------- #
   - id: python-lint-typecheck-and-unit-tests
-    name: ghcr.io/astral-sh/uv:0.9.1-python3.12-bookworm
+    name: ghcr.io/astral-sh/uv:0.12.24-python3.12-bookworm
     waitFor:
       - start-test-services
     entrypoint: bash
@@ -86,6 +86,8 @@ steps:
       - UV_PROJECT_ENVIRONMENT=/workspace/.venv
       - PYTHONPATH=/workspace/src:/workspace
       - TEST_DATABASE_URL=postgresql+asyncpg://fleetforge:fleetforge@ci-postgres:5432/fleetforge_test
+      - FF_RUN_MINIO_TESTS=1
+      - MINIO_HOST=ci-minio
       - S3_ENDPOINT_URL=http://ci-minio:9000
       - S3_PUBLIC_ENDPOINT_URL=http://ci-minio:9000
       - S3_ACCESS_KEY=fleetforge
@@ -97,16 +99,7 @@ steps:
         set -euo pipefail
         uv sync --frozen --no-install-project
         /workspace/.venv/bin/python -c "import boto3; boto3.client('s3', endpoint_url='http://ci-minio:9000', aws_access_key_id='fleetforge', aws_secret_access_key='fleetforge-dev-only', region_name='us-east-1').create_bucket(Bucket='fleetforge')"
-        /workspace/.venv/bin/ruff check .
-        /workspace/.venv/bin/ruff format --check .
-        /workspace/.venv/bin/mypy src/
-        /workspace/.venv/bin/pytest -q -rs | tee /tmp/pytest-gate.out
-        SKIPPED="$$(grep -Eo '[0-9]+ skipped' /tmp/pytest-gate.out | tail -1 | awk '{print $$1}' || echo 0)"
-        SKIPPED="$${SKIPPED:-0}"
-        if [[ "$${SKIPPED}" -gt 12 ]]; then
-          echo "ERROR: pytest skipped $${SKIPPED} tests (database-backed tests must run in CI)" >&2
-          exit 1
-        fi
+        bash /workspace/scripts/ci_gate.sh
 
   # ------------------------------------------------------------------------- #
   # 3. Frontend TypeScript Check, Vitest Suite & Production Bundle Build (t=0)#
@@ -122,7 +115,7 @@ steps:
         set -euo pipefail
         npm ci
         npm run typecheck
-        npm test -- --exclude src/flash.test.tsx
+        npm test
         npm run build
 
   # ------------------------------------------------------------------------- #
@@ -184,13 +177,29 @@ steps:
         test "$${API_UID}" != "0"
         test "$${FE_UID}" != "0"
         echo "Starting fleetforge-api-smoke and fleetforge-frontend-smoke containers..."
-        docker run -d --name fleetforge-api-smoke fleetforge-api:ci
-        docker run -d --name fleetforge-frontend-smoke --add-host api:127.0.0.1 fleetforge-frontend:ci
+        docker run -d --network=cloudbuild --name fleetforge-api-smoke \
+          -e DATABASE_URL=postgresql+asyncpg://fleetforge:fleetforge@ci-postgres:5432/fleetforge \
+          -e RUN_MIGRATIONS=true \
+          -e S3_ENDPOINT_URL=http://ci-minio:9000 \
+          -e S3_PUBLIC_ENDPOINT_URL=http://ci-minio:9000 \
+          -e S3_ACCESS_KEY=fleetforge \
+          -e S3_SECRET_KEY=fleetforge-dev-only \
+          -e S3_BUCKET=fleetforge \
+          -e ARTIFACT_URL_SECRET=ci-smoke-artifact-url-secret-0123456789 \
+          -e SECRETS_ENCRYPTION_KEY=ci-smoke-secrets-encryption-key-012345 \
+          -e PUBLIC_BASE_URL=http://localhost:8080 \
+          -e MQTT_COMMAND_USERNAME=ff-commander \
+          -e MQTT_COMMAND_PASSWORD=ci-smoke-mqtt-pass \
+          fleetforge-api:ci
+        docker run -d --network=cloudbuild --name fleetforge-frontend-smoke \
+          --link fleetforge-api-smoke:api \
+          fleetforge-frontend:ci
         trap "docker rm -f fleetforge-api-smoke fleetforge-frontend-smoke >/dev/null 2>&1 || true" EXIT
-        for i in $$(seq 1 20); do
+        for i in $$(seq 1 30); do
           if docker exec fleetforge-api-smoke curl -fsS http://127.0.0.1:8000/v1/healthz >/dev/null \
+            && docker exec fleetforge-api-smoke curl -fsS http://127.0.0.1:8000/v1/readyz >/dev/null \
             && docker exec fleetforge-frontend-smoke wget -qO- http://127.0.0.1:8080/nginx-health >/dev/null; then
-            echo "Health probes (/v1/healthz and /nginx-health) passed on attempt $$i"
+            echo "Health & readiness probes (/v1/healthz, /v1/readyz, /nginx-health) passed on attempt $$i"
             exit 0
           fi
           sleep 1

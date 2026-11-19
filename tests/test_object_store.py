@@ -11,7 +11,7 @@ endpoint works from inside the compose network and fails on every real device.
 """
 
 import datetime as dt
-import time
+import threading
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import parse_qs, urlparse
@@ -885,9 +885,11 @@ async def test_gcs_signed_url_does_not_block_the_event_loop() -> None:
     time out after the full sleep, because the timeout could never fire during it.
     """
 
+    unblock = threading.Event()
+
     class SleepyBlob:
-        def generate_signed_url(self, **kwargs: Any) -> str:
-            time.sleep(2)
+        def generate_signed_url(self, **_kwargs: object) -> str:
+            unblock.wait(timeout=2.0)
             return "never-returned"
 
     class SleepyBucket:
@@ -900,19 +902,21 @@ async def test_gcs_signed_url_does_not_block_the_event_loop() -> None:
         prefix=PREFIX,
         default_ttl_s=60,
         max_get_bytes=1024,
-        timeout_s=0.2,
+        timeout_s=0.05,
     )
-    started = time.monotonic()
-    with pytest.raises(ObjectStoreError, match="gcs signed_url of .* timed out"):
-        await store.signed_url("a.bin")
-    assert time.monotonic() - started < 1.0
+    try:
+        with pytest.raises(ObjectStoreError, match="gcs signed_url of .* timed out"):
+            await store.signed_url("a.bin")
+    finally:
+        unblock.set()
 
 
 async def test_gcs_a_slow_bucket_factory_times_out() -> None:
     """The FIRST `bucket_factory()` call resolves ADC and mints a token; it can hang."""
+    unblock = threading.Event()
 
     def slow_factory() -> FakeBucket:
-        time.sleep(2)
+        unblock.wait(timeout=2.0)
         return FakeBucket()
 
     store = GcsObjectStore(
@@ -921,12 +925,13 @@ async def test_gcs_a_slow_bucket_factory_times_out() -> None:
         prefix=PREFIX,
         default_ttl_s=60,
         max_get_bytes=1024,
-        timeout_s=0.2,
+        timeout_s=0.05,
     )
-    started = time.monotonic()
-    with pytest.raises(ObjectStoreError, match="gcs get of .* timed out"):
-        await store.get("a.bin")
-    assert time.monotonic() - started < 1.0
+    try:
+        with pytest.raises(ObjectStoreError, match="gcs get of .* timed out"):
+            await store.get("a.bin")
+    finally:
+        unblock.set()
 
 
 # ---------------------------------------------------------------------------

@@ -173,13 +173,47 @@ _PRUNE_ARTIFACT_VERSIONS_SQL = text(
     """
 )
 
-# Garbage-collect user_firmware artifacts (and their backing object-store blobs)
-# once no surviving artifact_versions row or builds.outputs entry references them.
-# Never touches agent_* bundle rows.
-_PRUNE_ORPHAN_ARTIFACTS_SQL = text(
+# Identify user_firmware artifacts whose backing object-store blobs and DB rows are
+# eligible for garbage collection once no surviving artifact_versions row, builds.outputs
+# entry, or open deploy_events intent references them. Never touches agent_* bundle rows.
+_FIND_ORPHAN_ARTIFACTS_SQL = text(
+    """
+    SELECT a.sha256
+      FROM artifacts a
+     WHERE a.kind = 'user_firmware'
+       AND NOT EXISTS (
+           SELECT 1
+             FROM artifact_versions av
+            WHERE av.sha256 = a.sha256
+       )
+       AND NOT EXISTS (
+           SELECT 1
+             FROM builds b,
+                  jsonb_each(b.outputs) AS kv
+            WHERE kv.value ->> 'sha256' = a.sha256
+       )
+       AND NOT EXISTS (
+           SELECT 1
+             FROM deploy_events req
+            WHERE req.state = 'requested'
+              AND req.cmd_id IS NOT NULL
+              AND req.detail ->> 'sha256' = a.sha256
+              AND NOT EXISTS (
+                  SELECT 1
+                    FROM deploy_events term
+                   WHERE term.device_id = req.device_id
+                     AND term.cmd_id = req.cmd_id
+                     AND term.is_terminal
+              )
+       )
+    """
+)
+
+_DELETE_ORPHAN_ARTIFACT_SQL = text(
     """
     DELETE FROM artifacts a
-     WHERE a.kind = 'user_firmware'
+     WHERE a.sha256 = :sha256
+       AND a.kind = 'user_firmware'
        AND NOT EXISTS (
            SELECT 1
              FROM artifact_versions av
@@ -314,17 +348,20 @@ async def sweep(
     artifact_versions = _rowcount(
         await session.execute(_PRUNE_ARTIFACT_VERSIONS_SQL, {"version_cap": version_cap})
     )
-    orphan_sha256s: list[str] = []
-    if artifact_versions > 0 or store is not None or prune_orphans:
-        orphan_sha256s = [
-            str(sha) for sha in (await session.scalars(_PRUNE_ORPHAN_ARTIFACTS_SQL)).all()
+    deleted_orphans: list[str] = []
+    if store is not None:
+        candidate_orphans = [
+            str(sha) for sha in (await session.scalars(_FIND_ORPHAN_ARTIFACTS_SQL)).all()
         ]
-    if store is not None and orphan_sha256s:
-        for sha256 in orphan_sha256s:
+        for sha256 in candidate_orphans:
             try:
                 await store.delete(blob_key(sha256))
             except ObjectStoreError as exc:
                 logger.warning("retention blob delete failed for %s: %s", sha256, exc)
+                continue
+            removed = await session.scalar(_DELETE_ORPHAN_ARTIFACT_SQL, {"sha256": sha256})
+            if removed is not None:
+                deleted_orphans.append(str(removed))
     return SweepResult(
         logs=logs,
         telemetry_expired=telemetry_expired,
@@ -333,6 +370,6 @@ async def sweep(
         faults=faults,
         tokens=tokens,
         artifact_versions=artifact_versions,
-        artifacts=len(orphan_sha256s),
-        orphan_sha256s=tuple(orphan_sha256s),
+        artifacts=len(deleted_orphans),
+        orphan_sha256s=tuple(deleted_orphans),
     )

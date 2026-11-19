@@ -482,6 +482,18 @@ never the rest, and sends it as printable ASCII without `;`. An image without a 
 self-test confirms on the acknowledged announce, as before. A board that returns to an agent
 that predates R5 reports `rolled_back` in that agent's words, without the reason.
 
+**Venue Offline Mode confirmation (`ff_mqtt_confirm_offline`).** When firmware explicitly enables
+Venue Offline Mode (`ff_set_offline_mode(true)`) because RF/Wi-Fi radios are silenced at a
+contested venue and updates are staged over a wired USB-C dock (`ff_ota_dock_stage`), the
+broker is unreachable by design. In that mode, and ONLY when a custom `ff_selftest` is
+registered, `ff_mqtt_confirm_offline()` may run the self-test locally within the same
+`confirm_timeout_s` deadline and mark the pending image valid on `FF_SELFTEST_PASS` (recording
+`confirmed` with `detail` `selftest passed` into the offline ring for later `dock-sync`). An
+offline image with NO registered `ff_selftest` is refused (`ESP_ERR_INVALID_STATE`) and rolls
+back at the deadline; custom self-tests used with Venue Offline Mode must verify non-trivial
+runtime health (such as internal heap headroom and peripheral initialization) rather than
+returning `FF_SELFTEST_PASS` unconditionally.
+
 **The safe window gates the rollback too.** If the deadline passes, or the self-test fails,
 while the device judges the moment unsafe, the device decides to roll back and keeps that
 decision, and only the reboot waits. The transaction reports `awaiting_safe_window` with

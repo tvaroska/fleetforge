@@ -102,8 +102,8 @@ Every deployment passes gates; each catches what the previous can't (**defense i
 ### Success criteria
 Both metrics are recorded from R1 and surfaced in the dashboard at R6.
 
-- **Delivery success** = healthy AND running the intended new version (rollback counts as a *miss*; drives build quality + simulation). **Target ≥ 90%.**
-- **Fleet safety** = device ends healthy on *some* version (rollback counts as a *save*; drives robustness). **Target 100% — a bricked board is a product failure, not a missed percentage.**
+- **Delivery success** = healthy AND running the intended new version (rollback or device pre-apply refusal counts as a *miss*; drives build quality + simulation). **Target ≥ 90%.**
+- **Fleet safety** = device ends healthy on *some* version (rollback and pre-apply signature/digest/download refusals where the active boot slot was never touched count as *saves*; only a post-apply failure that neither confirms nor rolls back violates safety). Server-side `publish_failed` transactions (where the broker never accepted `stage` so the board never received the command) and operator `cancelled` transactions are excluded from completed device deploys. **Target 100% — a bricked board is a product failure, not a missed percentage.**
 
 Two numbers so neither is gamed at the other's expense; the gap between them tells you *which stage* to fix.
 

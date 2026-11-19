@@ -56,6 +56,7 @@ IDENTITY_FIELDS = (
     "rollback_capable",
     "capabilities",
     "sub_versions",
+    "safe_mode",
 )
 
 
@@ -106,6 +107,7 @@ async def enroll_device(
         values["capabilities"] = []
     if values.get("proto") is None:
         values["proto"] = 1
+    values["safe_mode"] = bool(values.get("safe_mode"))
 
     statement = insert(Device).values(**values)
     same_live_project = (

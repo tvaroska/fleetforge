@@ -25,7 +25,6 @@ import importlib.util
 import inspect
 import re
 import sys
-import time
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -678,16 +677,19 @@ class TestRollbackRun:
         summary = quickstart.check_rollback_row(row, CMD_R, VERSION_B, VERSION_R, DETAIL_R)
         assert "rolling_back seen: no" in summary
 
-    def test_wait_for_lines_fails_fast_on_a_forbidden_line(self, tmp_path: Path) -> None:
+    def test_wait_for_lines_fails_fast_on_a_forbidden_line(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        sleeps: list[float] = []
+        monkeypatch.setattr(quickstart.time, "sleep", lambda s: sleeps.append(s))
         run = quickstart.Run(
             tree=tmp_path, work=tmp_path, logs=tmp_path, base="", guest_base="", mqtt_uri=""
         )
         log = tmp_path / "qemu-R.log"
         log.write_text("boot\nW (1) ff-mqtt: now marked valid and CONFIRMED\n")
-        started = time.monotonic()
         with pytest.raises(quickstart.QuickstartError, match="CONFIRMED"):
             quickstart.wait_for_lines(run, log, ["never-there"], timeout=5, forbidden=["CONFIRMED"])
-        assert time.monotonic() - started < 2
+        assert sleeps == []
 
         clean = tmp_path / "clean.log"
         clean.write_text("one\ntwo\nthree\n")

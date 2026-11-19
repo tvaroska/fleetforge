@@ -453,10 +453,21 @@ class TestFfOta:
         assert leave < body.index("staged_phase(cmd_id, NULL, 0)") < body.index("cancel_staged(")
 
     def test_the_undo_still_has_one_boot_switch(self) -> None:
+        from tests.agent_src import c_call_sites
+
+        raw_ota = FF_OTA_C.read_text(encoding="utf-8")
         ota = _ota()
-        assert ota.count("esp_ota_set_boot_partition(") == 1
+        assert c_call_sites(raw_ota, "esp_ota_set_boot_partition") == [
+            "ff_ota_dock_stage",
+            "restore_boot_partition",
+        ]
         assert "static bool restore_boot_partition(const char *why)" in ota
-        assert ota.count("restore_boot_partition(WHY_REJECTED)") == 1
+        assert c_call_sites(raw_ota, "restore_boot_partition") == [
+            "cancel_staged",
+            "ff_ota_dock_stage",
+            "ota_task",
+            "ota_task",
+        ]
         assert '"boot partition put back to %s: %s"' in ota
 
     def test_a_fresh_transaction_resets_the_handshake(self) -> None:

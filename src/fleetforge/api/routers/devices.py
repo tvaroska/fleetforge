@@ -1,68 +1,9 @@
 """`GET /v1/devices` — the fleet read model — and `PATCH /v1/devices/{device_id}`.
 
-The other half of the SSE contract. `fleetforge.events` and `fleetforge.presence`
-both define the rule as *"the event is a hint; the consumer re-reads
-`GET /v1/devices`"*, because presence is derived and a sleepy device goes offline
-with no event at all — so a client that patched its state from event payloads would
-show a dead board as online forever. This endpoint is what that re-read hits, and
-R0-fe-2, the CLI and Home Assistant all use it.
-
-**Presence is computed here, on read**, by `fleetforge.presence.is_online` with
-`settings.presence_tolerance` — there is no `2.5` in this file and no `online`
-column in the database. One `now` serves the whole response: a list whose rows
-disagree about the current time is a confusing thing to debug.
-
-`PATCH /v1/devices/{device_id}` (R2b-be-1) sets the two operator-set facts, `name` and
-`group_id` (the *group/tag* of `spec/flows.md`), with merge-patch semantics. Device
-claims are not settable here: the board announces them. Names are unique among live
-boards, case-insensitively, checked in the app (no DB constraint, which would need a
-migration). The route emits `device.updated` so other open dashboards re-read.
-
-Deliberately absent, each with a reason:
-
-* `presence_reported` — `online` is the answer. Exposing the ingredient invites a
-  client to re-derive the rule, and `presence.py` exists so there is exactly one
-  implementation of it.
-* decommissioned rows — a soft-deleted device is gone from the fleet view, and the
-  ingestor drops its messages too. `?include_decommissioned=` arrives with the
-  decommission endpoint (`docs/features/enrollment.md` → *Post-v1*).
-* `GET /v1/devices/{device_id}` and pagination — `spec/prd.md` → *Capacity* is 25
-  devices; the list is the read model. Same reasoning as `LIST_LIMIT`.
-
-Two per-device **sub-resources** exist (R4-be-1), and they are not on the list because
-they are unbounded per device: `GET /v1/devices/{device_id}/logs` (up to 5 000 stored
-lines, `fleetforge.device_logs`) and `GET /v1/devices/{device_id}/telemetry?name=` (up
-to 500 000 samples, `fleetforge.telemetry_store`). The list carries only what is
-bounded: `last_reset_reason`, the fault counts over `settings.fault_window_s`
-(`fleetforge.faults`, derived on read), the latest heartbeat's `health`, and the latest
-value of at most 32 `metrics`, each read for exactly the ids the list already holds.
-
-`arrivals` (S0-fw-1) rides on this response rather than getting an endpoint of its
-own, for the same reason: the dashboard already re-reads this on every `ff_events`
-hint, so boards *arriving* need no second fetch and no poll. They are the boards that
-have reported a boot stage recently and are neither **currently online** nor **already
-arrived** — the first decided by the same `is_online` call that fills in the rows
-above, the second by `progress.has_already_arrived`.
-
-Two clauses and not one, because "not online" alone cannot tell a board that is on its
-way up from one that came up days ago and has since lost power: both are offline with
-a recent stage, and the second was reappearing as "stalled at `mqtt_connected`" for the
-rest of the progress window, duplicating a row this same response already showed as
-offline (S0-fe-3). The distinction lives in `progress.py`, not here.
-
-`deploy` (R1-fe-1) rides here for the third time on the same argument. The dashboard's
-one refresh engine is hint→re-read-this-endpoint, so a deploy state on its own endpoint
-would need its own poll to answer the case that matters: a board that reported
-`awaiting_safe_window` and then went quiet for an hour emits no further event, and its
-state is still the correct thing to show. The SQL is `deploys.latest_deploys` — that
-module owns `deploy_events` for reads as well as writes — and it is bounded by the same
-`LIST_LIMIT` as the list above, because it is handed exactly the ids already read.
-Since R2b-fe-9 it also carries the current transaction's steps and the confirm window,
-for the dashboard's update timeline.
-
-`last_command` (R5-be-2) rides here on the same argument: the newest verb the server sent
-the board and its first answer (`device_commands.latest_commands`, bounded by the same
-ids). The verbs themselves are `api/routers/commands.py`.
+Presence (`online`) is computed here on read via `fleetforge.presence.is_online` with
+`settings.presence_tolerance`, using a single `now` across the entire response.
+`arrivals`, `deploy`, and `last_command` ride on the same envelope so the dashboard's
+SSE hint -> re-read cycle refreshes fleet state in one request.
 """
 
 import datetime as dt
@@ -290,6 +231,7 @@ def _device_summary(
         stay_awake=row.stay_awake,
         secrets_rev=row.secrets_rev,
         sub_versions=row.sub_versions,
+        safe_mode=bool(row.safe_mode),
         deploy=deploy,
     )
 

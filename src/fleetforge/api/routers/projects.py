@@ -22,11 +22,7 @@ from fleetforge.api.deps import (
     now_utc,
     resolve_project_for_request,
 )
-from fleetforge.api.routers.deploys import (
-    _sender,
-    deploy_version_to_project_devices,
-    matches_project_tracking,
-)
+from fleetforge.api.routers.deploys import _sender
 from fleetforge.api.schemas import (
     PROJECT_SLUG_PATTERN,
     SECRET_KEY_PATTERN,
@@ -70,7 +66,12 @@ from fleetforge.deploys import latest_deploys
 from fleetforge.device_commands import mark_publish_failed, record_sent
 from fleetforge.ingestor.otel import invalidate_project_otel_cache
 from fleetforge.presence import is_online
+from fleetforge.rollout import (
+    deploy_version_to_project_devices,
+    matches_project_tracking,
+)
 from fleetforge.secrets_crypto import decrypt_secret, encrypt_secret
+from fleetforge.url_safety import validate_public_https_url
 
 logger = logging.getLogger(__name__)
 
@@ -209,12 +210,10 @@ async def _trigger_ci_webhook(proj: Project, settings: Settings | None = None) -
     """Best-effort webhook POST to trigger an external CI build when switching refs."""
     if not proj.ci_webhook_url:
         return False
+    webhook_url = validate_public_https_url(proj.ci_webhook_url, field_name="ci_webhook_url")
     headers: dict[str, str] = {"Content-Type": "application/json"}
     if proj.ci_webhook_header:
-        try:
-            headers["Authorization"] = decrypt_secret(proj.ci_webhook_header, settings)
-        except ValueError:
-            headers["Authorization"] = proj.ci_webhook_header
+        headers["Authorization"] = decrypt_secret(proj.ci_webhook_header, settings)
     payload = {
         "project": proj.slug,
         "repo_url": proj.repo_url,
@@ -224,7 +223,7 @@ async def _trigger_ci_webhook(proj: Project, settings: Settings | None = None) -
     }
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.post(proj.ci_webhook_url, json=payload, headers=headers)
+            resp = await client.post(webhook_url, json=payload, headers=headers)
             return 200 <= resp.status_code < 300
     except httpx.HTTPError:
         logger.warning("CI webhook dispatch failed for project %s", proj.slug, exc_info=True)

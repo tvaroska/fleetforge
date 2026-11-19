@@ -157,3 +157,42 @@ async def test_a_failed_write_does_not_stop_the_heartbeat(
     assert not task.done(), "one failed write must not end the session"
     client.drop()
     await task
+
+
+async def test_a_database_error_does_not_end_the_session(
+    heartbeat: Path, client: FakeClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T-7: `SQLAlchemyError` raised inside `handle_message` is caught and logged without ending `run_once`."""
+    from sqlalchemy.exc import SQLAlchemyError
+
+    seen_calls: list[int] = []
+
+    async def failing_db_session() -> None:
+        return None
+
+    class FailingDbSession:
+        async def __aenter__(self) -> object:
+            return object()
+
+        async def __aexit__(self, *_exc: object) -> bool:
+            return False
+
+    async def raise_sqlalchemy_error(*_args: object, **_kwargs: object) -> object:
+        seen_calls.append(1)
+        raise SQLAlchemyError("simulated deadlock / serialization failure")
+
+    monkeypatch.setattr(ingestor, "handle_up_message", raise_sqlalchemy_error)
+    task = asyncio.create_task(
+        ingestor.run_once("broker", 1883, FailingDbSession, 0.0)  # type: ignore[arg-type]
+    )
+    await asyncio.sleep(3 * TICK)
+    for _ in range(3):
+        client.inbox.put_nowait(FakeMessage())
+    await asyncio.sleep(3 * TICK)
+    assert len(seen_calls) == 3
+    backdate(heartbeat)
+    await asyncio.sleep(5 * TICK)
+    assert fresh(heartbeat)
+    assert not task.done(), "SQLAlchemyError inside handle_message must not end the session"
+    client.drop()
+    await task

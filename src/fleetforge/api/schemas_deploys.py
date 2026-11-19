@@ -10,6 +10,7 @@ from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    GetJsonSchemaHandler,
     SerializerFunctionWrapHandler,
     field_validator,
     model_serializer,
@@ -61,6 +62,14 @@ class ArtifactUploaded(BaseModel):
             and not (k == "artifact_type" and v in (None, "app"))
         }
 
+    @classmethod
+    def __get_pydantic_json_schema__(
+        cls, core_schema: Any, handler: GetJsonSchemaHandler
+    ) -> dict[str, Any]:
+        if handler.mode == "serialization":
+            return cls.model_json_schema(mode="validation")
+        return handler(core_schema)
+
 
 class ArtifactSummary(BaseModel):
     """One deployable label — a row of `GET /v1/artifact`. R1-fe-1."""
@@ -90,6 +99,14 @@ class ArtifactSummary(BaseModel):
             if (k not in _CI_OPTIONAL_FIELDS or v is not None)
             and not (k == "artifact_type" and v in (None, "app"))
         }
+
+    @classmethod
+    def __get_pydantic_json_schema__(
+        cls, core_schema: Any, handler: GetJsonSchemaHandler
+    ) -> dict[str, Any]:
+        if handler.mode == "serialization":
+            return cls.model_json_schema(mode="validation")
+        return handler(core_schema)
 
 
 class ArtifactList(BaseModel):

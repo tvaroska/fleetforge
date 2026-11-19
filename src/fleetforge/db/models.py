@@ -503,9 +503,8 @@ class Device(Base):
     is_dev: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     stay_awake: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     secrets_rev: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    # H5 / R7-cargo-1: component -> version mapping for attached co-processors / cargo
-    # (`spec/device-protocol.md` -> `up/announce.sub_versions`); NULL = none reported.
     sub_versions: Mapped[dict[str, str] | None] = mapped_column(JSONB, nullable=True)
+    safe_mode: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     # SEC-be-1: Argon2id hash of the device's `mqtt_password` issued at enrollment, used to
     # authenticate `GET /v1/device-secrets` over HTTPS (`Authorization: Basic <base64(device_id:mqtt_password)>`).
     mqtt_password_hash: Mapped[str | None] = mapped_column(Text, nullable=True)

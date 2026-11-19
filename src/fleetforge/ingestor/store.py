@@ -129,6 +129,7 @@ async def apply_announce(
     values.update(_network_values(payload))
     values.update(_measurement_values(payload))
     values.update(_reset_values(payload))
+    values.update(_safe_mode_values(payload))
     if advance_last_seen:
         values["last_seen"] = _last_seen_value(at)
     if not values:
@@ -183,19 +184,13 @@ def _measurement_values(payload: AnnouncePayload) -> dict[str, Any]:
 
 
 def _reset_values(payload: AnnouncePayload) -> dict[str, Any]:
-    """`last_reset_reason`: written on **every** announce, live or retained (R4-be-1).
-
-    The third exception to "absent means no change", for the `_measurement_values`
-    reasons: the announce is the full identity and the retained copy is always the
-    latest, so a board that OTAs back to an agent before 0.5.0 (which does not send the
-    key) must read "not reported", not repeat a reason it no longer vouches for. A
-    retained replay writes it too: it is the newest boot's reason, state rather than
-    liveness. Counting it as a fault is `fleetforge.faults`, on a live announce only.
-
-    Already normalised (`announce_fields.normalize_reset_reason`): 1-16 characters, no
-    control character or lone surrogate, unknown names kept, malformed `None`.
-    """
+    """`last_reset_reason`: written on **every** announce, live or retained (R4-be-1)."""
     return {"last_reset_reason": payload.reset_reason}
+
+
+def _safe_mode_values(payload: AnnouncePayload) -> dict[str, Any]:
+    """`safe_mode`: written on **every** announce (`D-3`), with absent/null meaning `False`."""
+    return {"safe_mode": bool(payload.safe_mode)}
 
 
 def _power_class_values(device_id: str, payload: AnnouncePayload) -> dict[str, Any]:

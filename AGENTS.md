@@ -28,9 +28,4 @@ FleetForge is built around **two thin waists** (MQTT control plane + HTTPS artif
 
 ## 4. Verification Gate
 
-```bash
-.venv/bin/ruff check .
-.venv/bin/ruff format --check .
-.venv/bin/mypy --config-file pyproject.toml src/
-.venv/bin/pytest -q -k "not (TestCiCdDatabaseAndApi or TestTrack1 and database)"
-```
+Run `bash scripts/ci_gate.sh` (requires PostgreSQL on `localhost:5433` or `TEST_DATABASE_URL`).

@@ -23,6 +23,7 @@ spellings these tests forbid.
 """
 
 import re
+from typing import Any
 
 from tests.test_agent_txn import FF_MQTT_C, FF_OTA_C, _function_body
 from tests.test_ff_cfg import _code
@@ -123,3 +124,94 @@ def test_ff_ota_start_still_refuses_while_running() -> None:
     start = _function_body(_code(FF_OTA_C), "ff_ota_start")
     guard = start.index("if (s_running)")
     assert "return ESP_ERR_INVALID_STATE;" in start[guard : start.index("}", guard)]
+
+
+async def test_stage_id_survives_its_own_reboot(
+    monkeypatch: Any,
+) -> None:
+    """D-6: `ota_task` persists `cmd->cmd_id` via `ff_txn_note_reboot_cmd` before `esp_restart()`,
+    `on_stage` drops any `stage` matching `held_txn_id()`, and the simulator deduplicates a
+    post-reboot `stage` redelivery after clearing RAM `seen`."""
+    import asyncio
+    import hashlib
+    import json
+
+    from fleetforge.simulator.device import (
+        CONFIRM_NEVER,
+        LINK_FAST,
+        DeviceIdentity,
+        LinkProfile,
+        run_always_on,
+    )
+    from tests.agent_src import c_call_sites
+    from tests.test_simulator import (
+        FIRMWARE,
+        FakeClient,
+        FakeHttpResponse,
+        FakeMessage,
+        credential_for,
+        drive_until,
+        stage_command,
+        statuses,
+    )
+
+    assert "ota_task" in c_call_sites(
+        FF_OTA_C.read_text(encoding="utf-8"), "ff_txn_note_reboot_cmd"
+    )
+    task_body = _function_body(_code(FF_OTA_C), "ota_task")
+    assert task_body.index("ff_txn_note_reboot_cmd(cmd->cmd_id)") < task_body.index("esp_restart()")
+
+    stage_body = _on_stage()
+    held_guard = stage_body.index("held_txn_id() != NULL && strcmp(held_txn_id(), cmd.cmd_id) == 0")
+    assert held_guard < stage_body.index("ff_mqtt_publish_status(")
+    assert held_guard < stage_body.index("ff_ota_start(")
+
+    fetched: list[str] = []
+
+    def fake_urlopen(url: str, timeout: float | None = None) -> FakeHttpResponse:
+        _ = timeout
+        fetched.append(url)
+        return FakeHttpResponse(FIRMWARE)
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    monkeypatch.setattr("fleetforge.simulator.device.REBOOT_DELAY_S", 0.0)
+
+    identity = DeviceIdentity(device_id="a4cf12b3de90", fw_version="1.4.2", capabilities=("ota",))
+    cmd_bytes = stage_command(cmd_id="cmd-stage-reboot-1", version="1.6.0")
+    other_cmd = json.dumps({"proto": 1, "id": "cmd-ping-2", "type": "identify"}).encode()
+    clients: list[FakeClient] = []
+
+    def factory() -> Any:
+        fake = FakeClient()
+        topic = f"ff/v1/d/{identity.device_id}/dn/cmd"
+        if not clients:
+            fake.inbox.put_nowait(FakeMessage(topic, cmd_bytes))
+        elif len(clients) == 1:
+            # Redeliver `cmd-stage-reboot-1` on the post-reboot session (RAM `seen` was cleared),
+            # and again after another command overwrites RAM's 1-slot `last_command_id` (`held_txn_id` catches it!).
+            fake.inbox.put_nowait(FakeMessage(topic, cmd_bytes))
+            fake.inbox.put_nowait(FakeMessage(topic, other_cmd))
+            fake.inbox.put_nowait(FakeMessage(topic, cmd_bytes))
+        clients.append(fake)
+        return fake
+
+    stop = asyncio.Event()
+    await drive_until(
+        run_always_on(
+            identity,
+            credential_for(identity.device_id),
+            client_factory=factory,
+            link=LinkProfile(LINK_FAST),
+            heartbeat_interval_s=0.01,
+            confirm=CONFIRM_NEVER,
+            confirm_timeout_s=30.0,
+            stop=stop,
+        ),
+        lambda: len(clients) >= 2 and len(statuses(clients[1])) >= 1,
+        stop,
+    )
+    await asyncio.sleep(0.05)
+    assert len(fetched) == 1, f"expected 1 download across reboot redelivery, got {len(fetched)}"
+    post_reboot_states = [s["state"] for s in statuses(clients[1])]
+    assert "failed" not in post_reboot_states, post_reboot_states
+    assert hashlib.sha256(FIRMWARE).hexdigest() is not None

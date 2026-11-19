@@ -795,8 +795,8 @@ class StageRunner:
     rollback_deferred: str | None = field(default=None, init=False)
     reboot_deferred: bool = field(default=False, init=False)
     returnable: tuple[DeviceIdentity, str] | None = field(default=None, init=False)
-    # When the confirm timer of the current boot fires (monotonic). Armed once per boot,
-    # like the firmware's esp_timer: a reconnect resumes it rather than restarting it.
+    last_reboot_cmd_id: str | None = field(default=None, init=False)
+    # Armed once per boot with `self.clock()`: a reconnect resumes rather than restarts it.
     _confirm_deadline: float | None = field(default=None, init=False, repr=False)
     _dock_statuses: list[dict[str, object]] = field(default_factory=list, init=False, repr=False)
     _offline_logs: list[tuple[float, str, str]] = field(
@@ -1168,19 +1168,17 @@ class StageRunner:
             return
 
         command_id = body.get("id")
-        if isinstance(command_id, str) and command_id in self.seen:
+        if isinstance(command_id, str) and (
+            command_id in self.seen or command_id == self.last_reboot_cmd_id
+        ):
             step(f"command  {message.topic.value} id={command_id} DUPLICATE — dropped")
             return
         if isinstance(command_id, str):
-            self.seen.add(command_id)
+            # Mirror firmware `ctx->last_command_id`: RAM remembers only the previous id.
+            self.seen = {command_id}
 
         kind = body.get("type")
         step(f"command  {message.topic.value} id={command_id} type={kind}")
-        # The whole payload, with the signed URL redacted: nothing else in the estate can
-        # observe a `dn/` message (no credential may subscribe there), so this transcript
-        # line is the only way a human checks the wire shape.
-        # `ensure_ascii=False` so the redaction's ellipsis prints as `…` and not as an
-        # escape — this line exists to be read by a human.
         step(f"payload  {json.dumps(redacted_command(body), sort_keys=True, ensure_ascii=False)}")
 
         if not isinstance(command_id, str) or not command_id:
@@ -1256,7 +1254,8 @@ class StageRunner:
             await self._ack(client, command_id, COMMAND_APPLY, ACK_ACCEPTED, cmd_id, None, step)
             version = self.staged_version
             self._clear_staged()
-            await self._release(client, cmd_id, version, step)
+            self.last_reboot_cmd_id = command_id
+            await self._release(client, cmd_id, version, step, note_stage_reboot=False)
             return
         if self.pending is not None and self.pending.cmd_id == cmd_id:
             # Already past `staged` (it rebooted into it): an accepted no-op (D3).
@@ -1315,6 +1314,7 @@ class StageRunner:
             await self._ack(
                 client, command_id, COMMAND_ROLLBACK, ACK_ACCEPTED, pending.cmd_id, None, step
             )
+            self.last_reboot_cmd_id = command_id
             await self._carry_out_rollback(client, pending.cmd_id, step)
             return
         if self.returnable is None:
@@ -1322,11 +1322,10 @@ class StageRunner:
                 client, command_id, COMMAND_ROLLBACK, ACK_REFUSED, None, ACK_NO_IMAGE, step
             )
             return
-        # A confirmed image: its own transaction, under the command's id (D5). No
-        # `requested` row exists for it on the server, so it stays out of the KPIs.
         if await self._deferred_rollback(client, command_id, command_id, step):
             return
         await self._ack(client, command_id, COMMAND_ROLLBACK, ACK_ACCEPTED, command_id, None, step)
+        self.last_reboot_cmd_id = command_id
         await self._carry_out_rollback(client, command_id, step)
 
     async def _carry_out_rollback(
@@ -1408,6 +1407,7 @@ class StageRunner:
             step(f"reboot   {self._waits('reboot')}")
             return
         await self._ack(client, command_id, COMMAND_REBOOT, ACK_ACCEPTED, None, None, step)
+        self.last_reboot_cmd_id = command_id
         self.identity = replace(self.identity, reset_reason=RESET_REASON_SW)
         step(f"reboot   restarting on {self.identity.fw_version} for command {command_id}")
         self.reboot.set()
@@ -1490,6 +1490,13 @@ class StageRunner:
         It ends at `rebooting`, as the firmware's does: the outcome belongs to the next
         session (`on_boot`), which is the one that can observe it.
         """
+        if self.staged == cmd_id or (
+            (self.pending is not None and self.pending.cmd_id == cmd_id)
+            or self.rolled_back == cmd_id
+        ):
+            step(f"stage    id={cmd_id} already handled by this transaction — ignored")
+            return
+
         artifact = body.get("artifact")
         if not isinstance(artifact, dict):
             await self._status(client, cmd_id, STATE_FAILED, step, detail="no artifact in command")
@@ -1714,36 +1721,28 @@ class StageRunner:
         await self._status(client, cmd_id, STATE_CONFIRMED, step, pct=100)
 
     async def _release(
-        self, client: aiomqtt.Client, cmd_id: str, version: str | None, step: Step
+        self,
+        client: aiomqtt.Client,
+        cmd_id: str,
+        version: str | None,
+        step: Step,
+        *,
+        note_stage_reboot: bool = True,
     ) -> None:
-        """`applying → rebooting`, then the reboot: one walk for `apply: auto` and for the
-        `apply` verb, so a commanded release is exactly an automatic one (D3)."""
+        """`applying → rebooting`, then the reboot (`apply: auto` and commanded `apply`)."""
         await self._status(client, cmd_id, STATE_APPLYING, step)
         await self._status(client, cmd_id, STATE_REBOOTING, step)
-        # The transaction crosses the reboot (the firmware writes it to NVS at `staged`;
-        # nothing here can reset between the two, so recording it at the reboot is the
-        # same). `previous_identity` is taken BEFORE the rebind below: it is what a
-        # rollback returns the board to.
+        if note_stage_reboot:
+            self.last_reboot_cmd_id = cmd_id
         self.pending = PendingConfirm(
             cmd_id=cmd_id, previous_identity=self.identity, previous_slot=self.slot
         )
         self.slot = SLOT_LABELS[1] if self.slot == SLOT_LABELS[0] else SLOT_LABELS[0]
         self._confirm_deadline = None
-        # The apply reboot is `esp_restart()`, so the next boot reads ESP_RST_SW (S0-fw-6).
         self.identity = replace(self.identity, reset_reason=RESET_REASON_SW)
         if version:
-            # The board comes back running the new image: later announces and heartbeats
-            # say so, which is what makes "delivery success" checkable end to end.
             self.identity = replace(self.identity, fw_version=version)
             step(f"apply    now running fw_version {version} (announced on the next connect)")
-        # **And the next connect has to actually happen.** Rebinding `identity` above
-        # changes nothing the server can see: `run_session` captured the old frozen
-        # identity and its heartbeat loop keeps publishing from it, so a board that never
-        # drops its session never reports the version it just applied (S0-test-4 — the
-        # defect that made CUJ-1 segment 5 unpassable). A real board reboots here, which
-        # is what ends the session; this is the simulator's reboot. Unconditional,
-        # because the reboot is the consequence of the apply and not of the payload
-        # carrying a version.
         self.reboot.set()
 
     async def on_boot(self, client: aiomqtt.Client, step: Step) -> "asyncio.Task[None] | None":
@@ -1809,8 +1808,8 @@ class StageRunner:
             return None
 
         if self._confirm_deadline is None:
-            self._confirm_deadline = time.monotonic() + self.confirm_timeout_s
-        remaining = max(0.0, self._confirm_deadline - time.monotonic())
+            self._confirm_deadline = self.clock() + self.confirm_timeout_s
+        remaining = max(0.0, self._confirm_deadline - self.clock())
         why = (
             f"{self.identity.fw_version} carries the broken marker {self.broken_marker!r}"
             if broken
@@ -2261,11 +2260,8 @@ async def _always_on(
             if stop.is_set():
                 return
             if stage.reboot.is_set():
-                # The session ended because the board applied an update. Come back as a
-                # freshly booted board: uptime restarts, and the next `run_session` is
-                # handed `stage.identity`, so the announce and every heartbeat after it
-                # carry the version that is now running.
                 stage.reboot.clear()
+                stage.seen.clear()
                 boot_monotonic = time.monotonic()
                 if telemetry is not None:
                     telemetry.clear()  # the ring is RAM
@@ -2383,10 +2379,8 @@ async def _sleepy(
         if stop.is_set():
             return
         if stage.reboot.is_set():
-            # An apply cut the wake short. A sleepy board boots into the new image and
-            # then goes back to its duty cycle, so it re-announces on its next wake
-            # rather than immediately — the same convergence, one wake interval later.
             stage.reboot.clear()
+            stage.seen.clear()
             boot_monotonic = time.monotonic()
             if telemetry is not None:
                 telemetry.clear()  # the ring is RAM

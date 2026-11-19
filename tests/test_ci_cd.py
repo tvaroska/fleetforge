@@ -775,9 +775,15 @@ class TestCli:
 
 class TestSecretsCryptoAndDeviceSecretsAuth:
     def test_encrypt_and_decrypt_secret_round_trip(self) -> None:
-        ciphertext = encrypt_secret("sk-live-rotated-key-42", None)
+        from fleetforge.config import Settings
+
+        settings = Settings(
+            database_url="postgresql+asyncpg://u:p@localhost/db",
+            secrets_encryption_key="dedicated-test-secrets-encryption-key-01",
+        )
+        ciphertext = encrypt_secret("sk-live-rotated-key-42", settings)
         assert "sk-live-rotated-key-42" not in ciphertext
-        assert decrypt_secret(ciphertext, None) == "sk-live-rotated-key-42"
+        assert decrypt_secret(ciphertext, settings) == "sk-live-rotated-key-42"
 
     def test_parse_basic_auth_validates_device_id_and_password(self) -> None:
         import base64
@@ -1162,18 +1168,18 @@ class TestOtelQueueAndRateLimiterAndStagedRollout:
 
         with (
             patch(
-                "fleetforge.api.routers.deploys.load_layout_catalog",
+                "fleetforge.rollout.load_layout_catalog",
                 return_value=catalog,
             ),
             patch(
-                "fleetforge.api.routers.deploys.latest_open_transaction",
+                "fleetforge.rollout.latest_open_transaction",
                 return_value=None,
             ),
-            patch("fleetforge.api.routers.deploys.record_requested", AsyncMock()),
+            patch("fleetforge.rollout.record_requested", AsyncMock()),
         ):
             # 1. Wave 1 (Canary Gate): No board has confirmed 1.2.0 yet -> only dev board stages
             with patch(
-                "fleetforge.api.routers.deploys.latest_deploys",
+                "fleetforge.rollout.latest_deploys",
                 return_value={},
             ):
                 deployed, skipped = await deploy_version_to_project_devices(
@@ -1196,7 +1202,7 @@ class TestOtelQueueAndRateLimiterAndStagedRollout:
             # 2. Wave 2 (Bounded Concurrency): Canary confirmed -> stages up to max_parallel=3
             devices[1].fw_version = "1.2.0"
             with patch(
-                "fleetforge.api.routers.deploys.latest_deploys",
+                "fleetforge.rollout.latest_deploys",
                 return_value={
                     "a4cf12b3de02": DeploySnapshot(
                         cmd_id="cmd-1",
@@ -1231,7 +1237,7 @@ class TestOtelQueueAndRateLimiterAndStagedRollout:
 
             # 3. Auto-Halt on Rollback: A board rolled back on 1.2.0 -> halts immediately
             with patch(
-                "fleetforge.api.routers.deploys.latest_deploys",
+                "fleetforge.rollout.latest_deploys",
                 return_value={
                     "a4cf12b3de02": DeploySnapshot(
                         cmd_id="cmd-1",
@@ -1335,22 +1341,22 @@ class TestOtelQueueAndRateLimiterAndStagedRollout:
 
         with (
             patch(
-                "fleetforge.api.routers.deploys.requested_rollout",
+                "fleetforge.rollout.requested_rollout",
                 return_value=rollout_req,
             ),
             patch(
-                "fleetforge.api.routers.deploys.load_layout_catalog",
+                "fleetforge.rollout.load_layout_catalog",
                 return_value=catalog,
             ),
             patch(
-                "fleetforge.api.routers.deploys.latest_open_transaction",
+                "fleetforge.rollout.latest_open_transaction",
                 return_value=None,
             ),
-            patch("fleetforge.api.routers.deploys.record_requested", AsyncMock()),
+            patch("fleetforge.rollout.record_requested", AsyncMock()),
         ):
             # Canary (device 1) confirmed, device 2 is already in-flight -> only 1 new board (device 3) stages
             with patch(
-                "fleetforge.api.routers.deploys.latest_deploys",
+                "fleetforge.rollout.latest_deploys",
                 return_value={
                     "a4cf12b3de01": DeploySnapshot(
                         cmd_id="cmd-1",
@@ -1583,6 +1589,7 @@ class TestOtelQueueAndRateLimiterAndStagedRollout:
 
         session = AsyncMock()
         session.get = AsyncMock(return_value=sleepy)
+        session.scalars = AsyncMock(return_value=SimpleNamespace(all=lambda: []))
         art_row = SimpleNamespace(
             sha256="d" * 64,
             size_bytes=4096,
@@ -1597,7 +1604,7 @@ class TestOtelQueueAndRateLimiterAndStagedRollout:
 
         with (
             patch(
-                "fleetforge.api.routers.deploys.latest_deploys",
+                "fleetforge.rollout.latest_deploys",
                 return_value={
                     sleepy.device_id: DeploySnapshot(
                         cmd_id="cmd-wake-1",
@@ -1614,8 +1621,9 @@ class TestOtelQueueAndRateLimiterAndStagedRollout:
                     )
                 },
             ),
+            patch("fleetforge.rollout.requested_rollout", return_value=None),
             patch(
-                "fleetforge.api.routers.deploys.deploy_transaction",
+                "fleetforge.rollout.deploy_transaction",
                 return_value=DeployTransaction(
                     cmd_id="cmd-wake-1",
                     apply="on_command",
@@ -1774,11 +1782,11 @@ class TestOtelQueueAndRateLimiterAndStagedRollout:
         }
 
         with (
-            patch("fleetforge.api.routers.deploys.requested_rollout", return_value=rollout_req),
-            patch("fleetforge.api.routers.deploys.load_layout_catalog", return_value=catalog),
-            patch("fleetforge.api.routers.deploys.latest_open_transaction", return_value=None),
-            patch("fleetforge.api.routers.deploys.record_requested", AsyncMock()),
-            patch("fleetforge.api.routers.deploys.latest_deploys", return_value=snapshots),
+            patch("fleetforge.rollout.requested_rollout", return_value=rollout_req),
+            patch("fleetforge.rollout.load_layout_catalog", return_value=catalog),
+            patch("fleetforge.rollout.latest_open_transaction", return_value=None),
+            patch("fleetforge.rollout.record_requested", AsyncMock()),
+            patch("fleetforge.rollout.latest_deploys", return_value=snapshots),
         ):
             # Even with max_parallel=1, stalled offline dev2 does NOT starve dev3_online!
             advanced = await advance_project_rollout_on_confirm(
@@ -2465,12 +2473,12 @@ class TestTrack1InfrastructureAndSecurityHardening:
             ),
         }
         with (
-            patch("fleetforge.api.routers.deploys.requested_rollout", return_value=rollout_req),
-            patch("fleetforge.api.routers.deploys.load_layout_catalog", return_value=catalog),
-            patch("fleetforge.api.routers.deploys.latest_open_transaction", return_value=None),
-            patch("fleetforge.api.routers.deploys.record_requested", AsyncMock()),
+            patch("fleetforge.rollout.requested_rollout", return_value=rollout_req),
+            patch("fleetforge.rollout.load_layout_catalog", return_value=catalog),
+            patch("fleetforge.rollout.latest_open_transaction", return_value=None),
+            patch("fleetforge.rollout.record_requested", AsyncMock()),
             patch(
-                "fleetforge.api.routers.deploys.latest_deploys",
+                "fleetforge.rollout.latest_deploys",
                 return_value=cancelled_snapshots,
             ),
         ):
@@ -2491,12 +2499,12 @@ class TestTrack1InfrastructureAndSecurityHardening:
             "a4cf12b3de01": cancelled_snapshots["a4cf12b3de01"],
         }
         with (
-            patch("fleetforge.api.routers.deploys.requested_rollout", return_value=rollout_req),
-            patch("fleetforge.api.routers.deploys.load_layout_catalog", return_value=catalog),
-            patch("fleetforge.api.routers.deploys.latest_open_transaction", return_value=None),
-            patch("fleetforge.api.routers.deploys.record_requested", AsyncMock()),
+            patch("fleetforge.rollout.requested_rollout", return_value=rollout_req),
+            patch("fleetforge.rollout.load_layout_catalog", return_value=catalog),
+            patch("fleetforge.rollout.latest_open_transaction", return_value=None),
+            patch("fleetforge.rollout.record_requested", AsyncMock()),
             patch(
-                "fleetforge.api.routers.deploys.latest_deploys",
+                "fleetforge.rollout.latest_deploys",
                 return_value=confirmed_only_snapshots,
             ),
         ):
@@ -2690,3 +2698,356 @@ class TestTrack2ShowcaseAndUxHygiene:
         assert "ble_gatts_chr_updated(s_improv_rpc_res_val_handle)" in wifi_c
         assert "BLE_GAP_EVENT_DISCONNECT" in wifi_c
         assert "improv_ble_gap_event" in wifi_c
+
+
+async def test_publish_failure_does_not_halt_a_retry_of_the_cohort() -> None:
+    """A-3: a server-authored `publish_failed` (`reason='publish_failed'`) never reached the
+    board, so retrying the cohort deploy for that version proceeds instead of halting."""
+    import datetime as dt
+    import uuid
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from fleetforge.api.deps import AuthContext
+    from fleetforge.config import Settings
+    from fleetforge.deploys import DeploySnapshot
+    from fleetforge.firmware.manifest import BUILTIN_LAYOUTS
+    from fleetforge.partition_profiles import LayoutCatalog
+    from fleetforge.rollout import deploy_version_to_project_devices
+
+    proj_id = uuid.uuid4()
+    now = dt.datetime.now(dt.UTC)
+    dev = Device(
+        device_id="a4cf12b3de01",
+        project_id=proj_id,
+        platform_type="esp32c6",
+        fw_version="1.0.0",
+        partition_layout="ab-4m-v1",
+        ota_slot_size=1966080,
+        rollback_capable=True,
+        capabilities=["ota", "sig"],
+        link_type="wifi",
+        power_class="always_on",
+        is_dev=True,
+        presence_reported=True,
+        last_seen=now,
+    )
+    session = AsyncMock()
+    session.scalars = AsyncMock(return_value=SimpleNamespace(all=lambda: [dev]))
+    session.get = AsyncMock(return_value=SimpleNamespace(name="ci-token"))
+    art_row = SimpleNamespace(
+        sha256="c" * 64,
+        size_bytes=2048,
+        partition_layout="ab-4m-v1",
+        has_lib_marker=True,
+        sig="ecdsa-p256-sha256:" + ("A" * 88),
+        artifact_type="app",
+    )
+    session.execute = AsyncMock(return_value=SimpleNamespace(first=lambda: art_row))
+    settings = Settings(
+        database_url="postgresql+asyncpg://u:p@localhost/db",
+        artifact_url_secret="s" * 32,
+        public_base_url="https://fleet.example.com",
+    )
+    admin = AuthContext(
+        token_id=uuid.uuid4(),
+        subject="ci",
+        expires_at=now + dt.timedelta(hours=1),
+        scopes=("deploy",),
+        is_superadmin=True,
+    )
+    publisher = AsyncMock()
+    catalog = LayoutCatalog(layouts=BUILTIN_LAYOUTS, by_fingerprint={}, pending=frozenset())
+
+    pub_failed_snap = {
+        dev.device_id: DeploySnapshot(
+            cmd_id="cmd-pub-fail",
+            state="failed",
+            at=now,
+            is_terminal=True,
+            artifact_version="1.2.0",
+            from_version="1.0.0",
+            pct=None,
+            detail="broker publish failed",
+            steps=(),
+            sent_by=None,
+            selftest=None,
+            reason="publish_failed",
+        )
+    }
+    with (
+        patch("fleetforge.rollout.load_layout_catalog", return_value=catalog),
+        patch("fleetforge.rollout.latest_open_transaction", return_value=None),
+        patch("fleetforge.rollout.record_requested", AsyncMock()),
+        patch("fleetforge.rollout.latest_deploys", return_value=pub_failed_snap),
+    ):
+        deployed, skipped = await deploy_version_to_project_devices(
+            session,
+            project_id=proj_id,
+            version="1.2.0",
+            target_filter="all",
+            apply="auto",
+            override=(),
+            admin=admin,
+            settings=settings,
+            publisher=publisher,
+            canary=True,
+        )
+        assert [d.device_id for d in deployed] == [dev.device_id]
+        assert skipped == {}
+
+
+async def test_mid_wave_publish_failure_closes_every_unpublished_intent() -> None:
+    """A-3: if broker publish fails mid-wave after `requested` rows were committed, EVERY
+    remaining unpublished wave member gets a `record_publish_failure` row before 503 is raised."""
+    import datetime as dt
+    import uuid
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from fastapi import HTTPException
+
+    from fleetforge.api.deps import AuthContext
+    from fleetforge.config import Settings
+    from fleetforge.firmware.manifest import BUILTIN_LAYOUTS
+    from fleetforge.partition_profiles import LayoutCatalog
+    from fleetforge.rollout import deploy_version_to_project_devices
+
+    proj_id = uuid.uuid4()
+    now = dt.datetime.now(dt.UTC)
+    devices = [
+        Device(
+            device_id=f"a4cf12b3de0{i}",
+            project_id=proj_id,
+            platform_type="esp32c6",
+            fw_version="1.0.0",
+            partition_layout="ab-4m-v1",
+            ota_slot_size=1966080,
+            rollback_capable=True,
+            capabilities=["ota", "sig"],
+            link_type="wifi",
+            power_class="always_on",
+            is_dev=True,
+            presence_reported=True,
+            last_seen=now,
+        )
+        for i in (1, 2, 3)
+    ]
+    session = AsyncMock()
+    session.scalars = AsyncMock(return_value=SimpleNamespace(all=lambda: devices))
+    session.get = AsyncMock(return_value=SimpleNamespace(name="ci-token"))
+    art_row = SimpleNamespace(
+        sha256="c" * 64,
+        size_bytes=2048,
+        partition_layout="ab-4m-v1",
+        has_lib_marker=True,
+        sig="ecdsa-p256-sha256:" + ("A" * 88),
+        artifact_type="app",
+    )
+    session.execute = AsyncMock(return_value=SimpleNamespace(first=lambda: art_row))
+    settings = Settings(
+        database_url="postgresql+asyncpg://u:p@localhost/db",
+        artifact_url_secret="s" * 32,
+        public_base_url="https://fleet.example.com",
+    )
+    admin = AuthContext(
+        token_id=uuid.uuid4(),
+        subject="ci",
+        expires_at=now + dt.timedelta(hours=1),
+        scopes=("deploy",),
+        is_superadmin=True,
+    )
+
+    class MidWaveFailingPublisher:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def publish_many(self, _items: Any) -> None:
+            raise CommandPublishError("batch failed")
+
+        async def publish(self, device_id: str, _payload: dict[str, Any]) -> None:
+            self.calls += 1
+            if self.calls >= 2:
+                raise CommandPublishError(f"broker dropped before {device_id}")
+
+    publisher = MidWaveFailingPublisher()
+    catalog = LayoutCatalog(layouts=BUILTIN_LAYOUTS, by_fingerprint={}, pending=frozenset())
+    recorded_failures: list[str] = []
+
+    async def capture_failure(_sess: Any, *, device_id: str, **_kw: Any) -> None:
+        recorded_failures.append(device_id)
+
+    with (
+        patch("fleetforge.rollout.load_layout_catalog", return_value=catalog),
+        patch("fleetforge.rollout.latest_open_transaction", return_value=None),
+        patch("fleetforge.rollout.record_requested", AsyncMock()),
+        patch("fleetforge.rollout.record_publish_failure", side_effect=capture_failure),
+        patch("fleetforge.rollout.latest_deploys", return_value={}),
+    ):
+        with pytest.raises(HTTPException) as exc_info:
+            await deploy_version_to_project_devices(
+                session,
+                project_id=proj_id,
+                version="1.2.0",
+                target_filter="all",
+                apply="auto",
+                override=(),
+                admin=admin,
+                settings=settings,
+                publisher=publisher,  # type: ignore[arg-type]
+                canary=False,
+                max_parallel=3,
+            )
+        assert exc_info.value.status_code == 503
+    # Board 1 published; boards 2 and 3 both received `record_publish_failure` rows!
+    assert recorded_failures == ["a4cf12b3de02", "a4cf12b3de03"]
+
+
+async def test_canary_on_one_target_does_not_unlock_another() -> None:
+    """A-3: confirming `version` on `esp32c6` unlocks Wave 2 for `esp32c6`, while `esp32s3`
+    still stages only its single canary first."""
+    import datetime as dt
+    import uuid
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from fleetforge.api.deps import AuthContext
+    from fleetforge.config import Settings
+    from fleetforge.firmware.manifest import BUILTIN_LAYOUTS
+    from fleetforge.partition_profiles import LayoutCatalog
+    from fleetforge.rollout import deploy_version_to_project_devices
+
+    proj_id = uuid.uuid4()
+    now = dt.datetime.now(dt.UTC)
+
+    def make_board(dev_id: str, plat: str, fw: str, *, is_dev: bool = False) -> Device:
+        return Device(
+            device_id=dev_id,
+            project_id=proj_id,
+            platform_type=plat,
+            fw_version=fw,
+            partition_layout="ab-4m-v1",
+            ota_slot_size=1966080,
+            rollback_capable=True,
+            capabilities=["ota", "sig"],
+            link_type="wifi",
+            power_class="always_on",
+            is_dev=is_dev,
+            presence_reported=True,
+            last_seen=now,
+        )
+
+    devices = [
+        make_board("a4cf12b3de01", "esp32c6", "1.2.0", is_dev=True),  # confirmed esp32c6 canary
+        make_board("a4cf12b3de02", "esp32c6", "1.0.0"),
+        make_board("a4cf12b3de03", "esp32c6", "1.0.0"),
+        make_board("a4cf12b3de04", "esp32s3", "1.0.0", is_dev=True),  # esp32s3 canary
+        make_board("a4cf12b3de05", "esp32s3", "1.0.0"),  # esp32s3 fleet board (must wait!)
+    ]
+    session = AsyncMock()
+    session.scalars = AsyncMock(return_value=SimpleNamespace(all=lambda: devices))
+    session.get = AsyncMock(return_value=SimpleNamespace(name="ci-token"))
+    art_row = SimpleNamespace(
+        sha256="c" * 64,
+        size_bytes=2048,
+        partition_layout="ab-4m-v1",
+        has_lib_marker=True,
+        sig="ecdsa-p256-sha256:" + ("A" * 88),
+        artifact_type="app",
+    )
+    session.execute = AsyncMock(return_value=SimpleNamespace(first=lambda: art_row))
+    settings = Settings(
+        database_url="postgresql+asyncpg://u:p@localhost/db",
+        artifact_url_secret="s" * 32,
+        public_base_url="https://fleet.example.com",
+    )
+    admin = AuthContext(
+        token_id=uuid.uuid4(),
+        subject="ci",
+        expires_at=now + dt.timedelta(hours=1),
+        scopes=("deploy",),
+        is_superadmin=True,
+    )
+    publisher = AsyncMock()
+    catalog = LayoutCatalog(layouts=BUILTIN_LAYOUTS, by_fingerprint={}, pending=frozenset())
+
+    with (
+        patch("fleetforge.rollout.load_layout_catalog", return_value=catalog),
+        patch("fleetforge.rollout.latest_open_transaction", return_value=None),
+        patch("fleetforge.rollout.record_requested", AsyncMock()),
+        patch("fleetforge.rollout.latest_deploys", return_value={}),
+    ):
+        deployed, skipped = await deploy_version_to_project_devices(
+            session,
+            project_id=proj_id,
+            version="1.2.0",
+            target_filter="all",
+            apply="auto",
+            override=(),
+            admin=admin,
+            settings=settings,
+            publisher=publisher,
+            canary=True,
+            max_parallel=5,
+        )
+        deployed_ids = {d.device_id for d in deployed}
+        assert deployed_ids == {"a4cf12b3de02", "a4cf12b3de03", "a4cf12b3de04"}
+        assert "a4cf12b3de05" in skipped
+        assert "waiting for canary a4cf12b3de04" in skipped["a4cf12b3de05"]
+
+
+def test_decrypt_with_missing_key_fails_closed() -> None:
+    """A-4: without `SECRETS_ENCRYPTION_KEY` or `ARTIFACT_URL_SECRET`, both `encrypt_secret`
+    and `decrypt_secret` raise `SecretKeyNotConfiguredError`, and OTel header resolution never
+    falls back to sending raw ciphertext."""
+    import asyncio
+    import contextlib
+    import uuid
+    from unittest.mock import AsyncMock, MagicMock
+
+    from fleetforge.config import Settings
+    from fleetforge.ingestor.otel import _resolve_project_otel, invalidate_project_otel_cache
+    from fleetforge.secrets_crypto import SecretKeyNotConfiguredError
+
+    unconfigured = Settings(
+        database_url="postgresql+asyncpg://u:p@localhost/db",
+        secrets_encryption_key=None,
+        artifact_url_secret=None,
+    )
+    with pytest.raises(SecretKeyNotConfiguredError):
+        encrypt_secret("secret-value", unconfigured)
+
+    keyed = Settings(
+        database_url="postgresql+asyncpg://u:p@localhost/db",
+        secrets_encryption_key="valid-encryption-key-0123456789",
+    )
+    token = encrypt_secret("Authorization: Bearer top-secret", keyed)
+    with pytest.raises(SecretKeyNotConfiguredError):
+        decrypt_secret(token, unconfigured)
+
+    invalidate_project_otel_cache()
+    proj = Project(
+        id=uuid.uuid4(),
+        slug="otel-test",
+        name="OTel Test",
+        otel_endpoint="https://otel.example.com",
+        otel_headers=token,
+    )
+    dev = Device(
+        device_id="a4cf12b3de01",
+        project_id=proj.id,
+        platform_type="esp32c6",
+        link_type="wifi",
+        power_class="always_on",
+    )
+    session = AsyncMock()
+    session.identity_map = None
+
+    @contextlib.asynccontextmanager
+    async def _nested() -> Any:
+        yield
+
+    session.begin_nested = MagicMock(side_effect=_nested)
+    session.get = AsyncMock(return_value=proj)
+    resolved = asyncio.run(_resolve_project_otel(session, dev, settings=unconfigured))
+    assert resolved is None

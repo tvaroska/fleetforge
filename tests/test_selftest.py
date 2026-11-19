@@ -231,19 +231,25 @@ class TestTheSessionWiring:
     def test_one_freeze_before_the_first_connect(self) -> None:
         """The gate flag and the capability are set from the freeze, before the first
         connect: never at the ack (DECISIONS R5-fw-2, the no-deadline window)."""
+        from tests.agent_src import c_call_sites
+
+        raw = FF_MQTT_C.read_text(encoding="utf-8")
         code = _code(FF_MQTT_C)
-        assert code.count("ff_selftest_freeze(") == 1
+        assert c_call_sites(raw, "ff_selftest_freeze") == [
+            "ff_mqtt_confirm_offline",
+            "ff_mqtt_run",
+        ]
         run = _function_body(code, "ff_mqtt_run")
         assert "s_selftest_registered = ff_selftest_freeze();" in run
         freeze = run.index("ff_selftest_freeze(")
         note = run.index("ff_identity_note_selftest(s_selftest_registered);")
         assert freeze < note
-        # R5-fw-5: the safe-window rule is frozen right after, on the same terms.
         safe = run.index("ff_identity_note_safe_window(ff_safe_window_freeze());")
         assert note < safe
         for later in ("ff_txn_init(", "classify_txn(", "esp_mqtt_client_start("):
             assert safe < run.index(later), later
-        assert code.count("s_selftest_registered =") == 1, "written once, in ff_mqtt_run"
+        assert code.count("s_selftest_registered =") == 2
+        assert "if (!s_boot_classified)" in _function_body(code, "ff_mqtt_confirm_offline")
 
     def test_never_from_timer_context(self) -> None:
         """Durable: fw-2 may call ff_selftest_run from mqtt_event_handler, never from
@@ -302,8 +308,12 @@ class TestTheHold:
     only its pass confirms (CRITICAL.md: the device-side confirm timer / rollback path)."""
 
     def test_one_run_from_the_ack_branch_between_the_guards(self) -> None:
-        code = _code(FF_MQTT_C)
-        assert code.count("ff_selftest_run(") == 1
+        from tests.agent_src import c_call_sites
+
+        assert c_call_sites(FF_MQTT_C.read_text(encoding="utf-8"), "ff_selftest_run") == [
+            "ff_mqtt_confirm_offline",
+            "mqtt_event_handler",
+        ]
         published = _published()
         run = published.index("ff_selftest_run(selftest_done)")
         assert published.index(PINNED_LATE_ACK) < run < published.index(PINNED_CONFIRM)
@@ -417,9 +427,14 @@ class TestTheHold:
         assert "FF_STATUS_ROLLING_BACK" in body and "s_ctx.connected" in body
 
     def test_only_the_session_stores_a_detail(self) -> None:
-        # 3 since R5-fw-4: the ack pre-store, the fail head, and store_rollback_head() (the
-        # `rolled back by command` head of the rollback verb).
-        assert _code(FF_MQTT_C).count("ff_txn_set_detail(") == 3
+        from tests.agent_src import c_call_sites
+
+        assert c_call_sites(FF_MQTT_C.read_text(encoding="utf-8"), "ff_txn_set_detail") == [
+            "ff_mqtt_confirm_offline",
+            "mqtt_event_handler",
+            "selftest_done",
+            "store_rollback_head",
+        ]
         for path in agent_sources():
             if path.name not in ("ff_mqtt.c", "ff_txn.c", "ff_txn.h"):
                 assert "ff_txn_set_detail" not in _code(path), path.name
@@ -473,7 +488,12 @@ class TestTheHold:
         note = _function_body(identity, "ff_identity_note_selftest")
         assert "s_selftest_registered = registered;" in note
         assert "void ff_identity_note_selftest(bool registered);" in _code(FF_IDENTITY_INTERNAL_H)
-        assert _code(FF_MQTT_C).count("ff_identity_note_selftest(") == 1
+        from tests.agent_src import c_call_sites
+
+        assert c_call_sites(FF_MQTT_C.read_text(encoding="utf-8"), "ff_identity_note_selftest") == [
+            "ff_mqtt_confirm_offline",
+            "ff_mqtt_run",
+        ]
 
 
 class TestTheArduinoWrapper:

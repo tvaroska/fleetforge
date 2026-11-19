@@ -1544,3 +1544,77 @@ async def test_pinned_admin_token_cannot_patch_its_own_user(
             assert after is not None
             assert after.password_hash == before_hash
             assert after.email == before_email
+
+
+async def test_webhook_url_must_be_public_https(admin_app: FastAPI, clean_tables: None) -> None:
+    """A-6: `ci_webhook_url` and `otel_endpoint` reject cleartext `http://`, loopback, RFC1918,
+    link-local metadata, CGNAT, and internal/dotless hosts (`422`), and `UserCreate`/`UserUpdate`
+    enforce a unified 8-character password minimum."""
+    admin_headers = _bearer(await login_admin(admin_app))
+
+    forbidden_urls = [
+        "http://hooks.example.com/ci",
+        "https://localhost/webhook",
+        "https://127.0.0.1:8443/hook",
+        "https://169.254.169.254/computeMetadata/v1/",
+        "https://10.0.0.12/internal",
+        "https://192.168.1.50/hook",
+        "https://100.64.0.5/cgnat",
+        "https://metadata.google.internal/v1",
+        "https://api.svc.cluster.local/v1",
+        "https://user:pw@hooks.example.com/ci",
+    ]
+
+    async with client_for(admin_app, base_url="https://testserver") as client:
+        for bad_url in forbidden_urls:
+            r_wh = await client.patch(
+                "/v1/projects/default",
+                headers=admin_headers,
+                json={"ci_webhook_url": bad_url},
+            )
+            assert r_wh.status_code == 422, (
+                f"expected 422 for ci_webhook_url={bad_url!r}: {r_wh.text}"
+            )
+
+            r_otel = await client.patch(
+                "/v1/projects/default",
+                headers=admin_headers,
+                json={"otel_endpoint": bad_url},
+            )
+            assert r_otel.status_code == 422, (
+                f"expected 422 for otel_endpoint={bad_url!r}: {r_otel.text}"
+            )
+
+        ok = await client.patch(
+            "/v1/projects/default",
+            headers=admin_headers,
+            json={
+                "ci_webhook_url": "https://ci.example.com/hooks/fleetforge",
+                "otel_endpoint": "https://otel.example.com:4318",
+            },
+        )
+        assert ok.status_code == 200, ok.text
+        assert ok.json()["ci_webhook_url"] == "https://ci.example.com/hooks/fleetforge"
+        assert ok.json()["otel_endpoint"] == "https://otel.example.com:4318"
+
+        # 1-character passwords rejected on both UserCreate and UserUpdate (`min_length=8`)
+        short_create = await client.post(
+            "/v1/users",
+            headers=admin_headers,
+            json={"username": "shortpw", "password": "x"},
+        )
+        assert short_create.status_code == 422, short_create.text
+
+        ok_create = await client.post(
+            "/v1/users",
+            headers=admin_headers,
+            json={"username": "validpw", "password": "eight-chars-pass"},
+        )
+        assert ok_create.status_code == 201, ok_create.text
+
+        short_patch = await client.patch(
+            "/v1/users/validpw",
+            headers=admin_headers,
+            json={"password": "short"},
+        )
+        assert short_patch.status_code == 422, short_patch.text

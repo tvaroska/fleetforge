@@ -17,6 +17,7 @@ Skips loudly (never silently) when MinIO is not up: `just minio-up`.
 """
 
 import contextlib
+import os
 import socket
 import urllib.error
 import urllib.request
@@ -39,8 +40,8 @@ from tests.conftest import (
     settings_for_tests,
 )
 
-MINIO_HOST = "localhost"
-MINIO_PORT = 9000
+MINIO_HOST = os.environ.get("MINIO_HOST", "localhost")
+MINIO_PORT = int(os.environ.get("MINIO_PORT", "9000"))
 ENDPOINT = f"http://{MINIO_HOST}:{MINIO_PORT}"
 BUCKET = "fleetforge"
 
@@ -50,7 +51,9 @@ SIZE = 204_800
 
 
 def _minio_reachable() -> bool:
-    """A TCP connect, not an HTTP request: this decides whether to skip, nothing more."""
+    """Opt-in (`FF_RUN_MINIO_TESTS=1`) so arbitrary listeners on port 9000 are never probed."""
+    if os.environ.get("FF_RUN_MINIO_TESTS") != "1":
+        return False
     try:
         with socket.create_connection((MINIO_HOST, MINIO_PORT), timeout=1):
             return True
@@ -60,7 +63,7 @@ def _minio_reachable() -> bool:
 
 pytestmark = pytest.mark.skipif(
     not _minio_reachable(),
-    reason=f"MinIO unreachable at {ENDPOINT}; start it with `just minio-up`",
+    reason=f"MinIO tests opt-in via FF_RUN_MINIO_TESTS=1 (target {ENDPOINT})",
 )
 
 

@@ -225,6 +225,7 @@ async def test_the_summary_carries_the_fleet_view_and_no_presence_ingredients(
         "stay_awake",
         "secrets_rev",
         "sub_versions",
+        "safe_mode",
         "deploy",
     }
     assert row["fw_version"] == "1.4.2"
@@ -1453,6 +1454,7 @@ async def test_the_health_fields_ride_on_the_list_before_deploy(
         "stay_awake",
         "secrets_rev",
         "sub_versions",
+        "safe_mode",
         "deploy",
     ], "frontend/src/api.ts mirrors this order; deploy stays last"
 

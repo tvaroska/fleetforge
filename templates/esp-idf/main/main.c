@@ -7,7 +7,9 @@
 
 #include <stdbool.h>
 #include <stdio.h>
+#include <string.h>
 
+#include "esp_heap_caps.h"
 #include "ff_identity.h"
 #include "ff_log.h"
 #include "ff_safe_window.h"
@@ -28,12 +30,22 @@ static bool is_safe_window(void *ctx)
     return !s_busy;
 }
 
-/* Defer OTA confirmation until the main loop verifies hardware health and calls ff_selftest_report(). */
+#define MIN_HEALTHY_INTERNAL_HEAP_BYTES 16384U
+
+/* Defer OTA confirmation until the main loop verifies heap headroom and identity, then calls ff_selftest_report(). */
 static ff_selftest_result_t on_selftest(void *ctx, char *reason, size_t len)
 {
     (void)ctx;
-    (void)reason;
-    (void)len;
+    size_t free_internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (free_internal < MIN_HEALTHY_INTERNAL_HEAP_BYTES) {
+        snprintf(reason, len, "internal heap low (%u B)", (unsigned)free_internal);
+        return FF_SELFTEST_FAIL;
+    }
+    const char *ver = ff_identity_fw_version();
+    if (ver == NULL || ver[0] == '\0') {
+        snprintf(reason, len, "empty firmware version");
+        return FF_SELFTEST_FAIL;
+    }
     return FF_SELFTEST_PENDING;
 }
 

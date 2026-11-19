@@ -5,14 +5,13 @@
 `mint_artifact_url` call site), record `requested`, commit, and publish `stage`.
 """
 
-import fnmatch
 import logging
 import uuid
 from collections.abc import Collection
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import select, text
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from fleetforge.api.deps import (
@@ -39,13 +38,12 @@ from fleetforge.artifact_urls import mint_artifact_url
 from fleetforge.broker import (
     CommandPublisher,
     CommandPublishError,
-    NullCommandPublisher,
     new_command_id,
     stage_payload,
 )
 from fleetforge.clock import now_utc
 from fleetforge.config import Settings
-from fleetforge.db.models import AdminToken, Device, Project, ProjectRole
+from fleetforge.db.models import AdminToken, Device, ProjectRole
 from fleetforge.deploy_precheck import (
     NO_ARTIFACT_FOR_TARGET,
     Finding,
@@ -57,17 +55,31 @@ from fleetforge.deploy_precheck import (
 )
 from fleetforge.deploys import (
     DeploySender,
-    DeploySnapshot,
     deploy_kpis,
-    deploy_transaction,
-    latest_deploys,
     latest_open_transaction,
     record_publish_failure,
     record_requested,
-    requested_rollout,
 )
 from fleetforge.partition_profiles import LayoutCatalog, load_layout_catalog
 from fleetforge.presence import is_online
+from fleetforge.rollout import (
+    DEFAULT_ROLLOUT_MAX_PARALLEL as DEFAULT_ROLLOUT_MAX_PARALLEL,
+)
+from fleetforge.rollout import (
+    advance_project_rollout_on_confirm as advance_project_rollout_on_confirm,
+)
+from fleetforge.rollout import (
+    deploy_version_to_project_devices as deploy_version_to_project_devices,
+)
+from fleetforge.rollout import (
+    effective_url_ttl_s as effective_url_ttl_s,
+)
+from fleetforge.rollout import (
+    matches_project_tracking as matches_project_tracking,
+)
+from fleetforge.rollout import (
+    republish_open_requested_on_wake as republish_open_requested_on_wake,
+)
 from fleetforge.signing import SigningKeyRing
 
 logger = logging.getLogger(__name__)
@@ -104,15 +116,6 @@ async def _sender(session: AsyncSession, admin: AuthContext) -> DeploySender:
         token_id=str(admin.token_id),
         credential=token.name if token is not None else None,
     )
-
-
-def effective_url_ttl_s(device: Device, settings: Settings) -> int:
-    """Signed URL TTL for `device`: extended by `2 * expected_wake_interval_s` for sleepy boards."""
-    base_ttl = int(settings.signed_url_ttl_s)
-    wake_s = int(device.expected_wake_interval_s or 0)
-    if str(device.power_class) == "sleepy" and wake_s > 0:
-        return max(base_ttl, 2 * wake_s + base_ttl)
-    return base_ttl
 
 
 LOW_HEAP_HTTP_FALLBACK_BYTES = 65536
@@ -587,508 +590,3 @@ async def _publish(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="the broker could not accept the deploy command; try again shortly",
         ) from None
-
-
-def _normalize_repo_url(url: str | None) -> str:
-    if not url:
-        return ""
-    stripped = url.strip().rstrip("/")
-    if stripped.endswith(".git"):
-        stripped = stripped[:-4]
-    return stripped.lower()
-
-
-def matches_project_tracking(
-    project: Project,
-    *,
-    repo_url: str | None,
-    branch: str | None,
-    commit_sha: str | None,
-    tag: str | None,
-    test_passed: bool | None,
-) -> bool:
-    """Return True if an artifact upload's Git provenance matches `project`'s active CD rule."""
-    if project.track_mode == "off" or project.auto_deploy_target not in ("dev", "all"):
-        return False
-    ref = (project.track_ref or "").strip()
-    if not ref:
-        return False
-    if test_passed is False:
-        return False
-    if (
-        project.repo_url
-        and repo_url
-        and _normalize_repo_url(project.repo_url) != _normalize_repo_url(repo_url)
-    ):
-        return False
-    if project.track_mode == "branch":
-        return branch is not None and branch == ref
-    if project.track_mode == "tag":
-        return tag is not None and fnmatch.fnmatchcase(tag, ref)
-    if project.track_mode == "commit":
-        return commit_sha is not None and (commit_sha == ref or commit_sha.startswith(ref))
-    return False
-
-
-DEFAULT_ROLLOUT_MAX_PARALLEL = 5
-
-
-async def deploy_version_to_project_devices(
-    session: AsyncSession,
-    *,
-    project_id: uuid.UUID,
-    version: str,
-    target_filter: str,
-    apply: str,
-    override: Collection[str],
-    admin: AuthContext | None = None,
-    settings: Settings,
-    publisher: CommandPublisher,
-    target_chip: str | None = None,
-    group_id: uuid.UUID | None = None,
-    best_effort_broker: bool = False,
-    canary: bool = True,
-    max_parallel: int = DEFAULT_ROLLOUT_MAX_PARALLEL,
-    sent_by_override: DeploySender | None = None,
-    republish_in_flight: bool = True,
-) -> tuple[list[DeployAccepted], dict[str, str]]:
-    """Stage `version` onto compatible live boards in `project_id` with staged rollout safety.
-
-    Enforces the three cohort rollout gates (`docs/features/groups-deploy.md`):
-    1. **Auto-Halt on Rollback / Failure:** If any board in the project cohort has already
-       entered `rolled_back` or `failed` on `version`, halt immediately and skip remaining boards.
-    2. **Wave 1 (Canary Gate):** When `canary=True` and multiple boards are eligible, if no
-       board in the project has confirmed `version` yet, stage onto 1 canary board (preferring
-       online `is_dev` / `always_on` boards) and hold the rest until confirmation.
-    3. **Wave 2 (Bounded Concurrency):** Cap concurrent in-flight downloads for `version` at
-       `max_parallel` (default 5) so a multi-board rollout does not saturate a 2.4 GHz AP.
-
-    Used by both `POST /v1/projects/{slug}/deploy` (`best_effort_broker=False`) and automatic
-    CD triggers on `POST /v1/artifact` / `PATCH /v1/projects/{slug}` (`best_effort_broker=True`).
-    """
-    _require_valid_version(version)
-    if best_effort_broker and (
-        isinstance(publisher, NullCommandPublisher)
-        or not settings.artifact_url_secret
-        or not settings.public_base_url
-    ):
-        return [], {}
-
-    # Serialize concurrent rollout evaluations for the same project across API workers
-    # so simultaneous 'confirmed' notifications cannot stage duplicate waves or exceed max_parallel.
-    await session.execute(select(Project.id).where(Project.id == project_id).with_for_update())
-
-    all_project_stmt = (
-        select(Device)
-        .where(Device.project_id == project_id, Device.decommissioned_at.is_(None))
-        .order_by(Device.device_id)
-    )
-    if target_chip is not None:
-        all_project_stmt = all_project_stmt.where(Device.platform_type == target_chip)
-    if group_id is not None:
-        all_project_stmt = all_project_stmt.where(Device.group_id == group_id)
-    all_project_devices = list((await session.scalars(all_project_stmt)).all())
-    if not all_project_devices:
-        return [], {}
-
-    devices = (
-        [d for d in all_project_devices if d.is_dev]
-        if target_filter == "dev"
-        else list(all_project_devices)
-    )
-    if not devices:
-        return [], {}
-
-    snapshots = await latest_deploys(session, device_ids=[d.device_id for d in all_project_devices])
-
-    # Rule 1: Auto-halt if any board in the project cohort rolled back or failed on `version`
-    # (or was cancelled during background rollout auto-advancement).
-    halt_states = (
-        ("rolled_back", "failed") if republish_in_flight else ("rolled_back", "failed", "cancelled")
-    )
-    for d in all_project_devices:
-        snap = snapshots.get(d.device_id)
-        if snap is not None and snap.artifact_version == version and snap.state in halt_states:
-            halt_reason = f"rollout halted: device {d.device_id} {snap.state} on version {version}"
-            return [], {cand.device_id: halt_reason for cand in devices}
-
-    has_confirmed_canary = any(
-        d.fw_version == version
-        or (
-            (snap := snapshots.get(d.device_id)) is not None
-            and snap.artifact_version == version
-            and snap.state == "confirmed"
-        )
-        for d in all_project_devices
-    )
-
-    catalog = await load_layout_catalog(session)
-    now = now_utc()
-    eligible: list[tuple[Device, ResolvedArtifact, bool]] = []
-    skipped: dict[str, str] = {}
-    artifacts_by_target: dict[str, ResolvedArtifact | None] = {}
-
-    for device in devices:
-        dev_snap = snapshots.get(device.device_id)
-        if device.fw_version == version or (
-            dev_snap is not None
-            and dev_snap.artifact_version == version
-            and dev_snap.state == "confirmed"
-        ):
-            skipped[device.device_id] = f"already running version {version}"
-            continue
-        if (
-            not republish_in_flight
-            and dev_snap is not None
-            and dev_snap.artifact_version == version
-            and not dev_snap.is_terminal
-        ):
-            skipped[device.device_id] = f"already in flight on version {version}"
-            continue
-        if device.platform_type not in artifacts_by_target:
-            artifacts_by_target[device.platform_type] = await _resolve_artifact_for_target(
-                session,
-                project_id=project_id,
-                target=device.platform_type,
-                version=version,
-                settings=settings,
-            )
-        found_artifact = artifacts_by_target[device.platform_type]
-        found_refusals: list[Finding] = [
-            *refusals(device, found_artifact, version=version, catalog=catalog),
-            *apply_refusals(device, apply),
-        ]
-        if found_refusals:
-            skipped[device.device_id] = found_refusals[0].message
-            continue
-        gated = unmet_gates(device, override, artifact=found_artifact)
-        if gated:
-            skipped[device.device_id] = gated[0].message
-            continue
-        if found_artifact is None:
-            skipped[device.device_id] = "no such artifact"
-            continue
-        online = is_online(device, now=now, tolerance=settings.presence_tolerance)
-        eligible.append((device, found_artifact, online))
-
-    if not eligible:
-        return [], skipped
-
-    def _is_stalled_in_flight(dev: Device, snap: DeploySnapshot | None) -> bool:
-        if snap is None or snap.artifact_version != version or snap.is_terminal:
-            return False
-        if is_online(dev, now=now, tolerance=settings.presence_tolerance):
-            return False
-        return (now - snap.at).total_seconds() >= settings.confirm_timeout_s
-
-    # Prioritise any non-stalled board already in-flight on `version`, then online dev boards,
-    # then online always_on boards, then online boards, then deterministic device_id order.
-    def _canary_priority(
-        item: tuple[Device, ResolvedArtifact, bool],
-    ) -> tuple[int, int, int, int, str]:
-        dev, _, online = item
-        snap = snapshots.get(dev.device_id)
-        in_flight_this_ver = (
-            snap is not None
-            and snap.artifact_version == version
-            and not snap.is_terminal
-            and not _is_stalled_in_flight(dev, snap)
-        )
-        return (
-            0 if in_flight_this_ver else 1,
-            0 if online else 1,
-            0 if dev.is_dev else 1,
-            0 if str(dev.power_class) == "always_on" else 1,
-            dev.device_id,
-        )
-
-    if canary and not has_confirmed_canary and len(eligible) > 1:
-        ordered = sorted(eligible, key=_canary_priority)
-        canary_item = ordered[0]
-        canary_id = canary_item[0].device_id
-        for dev, _, _ in ordered[1:]:
-            skipped[dev.device_id] = f"waiting for canary {canary_id} to confirm {version}"
-        wave_items = [canary_item]
-    else:
-        # Wave 2: Bounded concurrency (`max_parallel`). Count boards already in-flight on `version`
-        # outside the current eligible republish set whose state is actively transferring/applying
-        # or online (and not stalled offline past confirm_timeout_s), so offline/sleepy or stalled
-        # boards do not starve max_parallel.
-        eligible_ids = {dev.device_id for dev, _, _ in eligible}
-        active_in_flight = sum(
-            1
-            for d in all_project_devices
-            if d.device_id not in eligible_ids
-            and (snap := snapshots.get(d.device_id)) is not None
-            and snap.artifact_version == version
-            and not snap.is_terminal
-            and not _is_stalled_in_flight(d, snap)
-            and (
-                snap.state != "requested"
-                or is_online(d, now=now, tolerance=settings.presence_tolerance)
-            )
-        )
-        effective_cap = max(1, max_parallel)
-        available_slots = max(0, effective_cap - active_in_flight)
-        ordered = sorted(eligible, key=_canary_priority)
-        wave_items = ordered[:available_slots]
-        for dev, _, _ in ordered[available_slots:]:
-            skipped[dev.device_id] = f"queued for next wave (max_parallel={effective_cap})"
-
-    if not wave_items:
-        return [], skipped
-
-    if sent_by_override is not None:
-        sent_by = sent_by_override
-    elif admin is not None:
-        sent_by = await _sender(session, admin)
-    else:
-        sent_by = DeploySender("system", "rollout", None)
-    rollout_meta: dict[str, Any] = {
-        "target_filter": target_filter,
-        "canary": canary,
-        "max_parallel": max_parallel,
-        "override": list(override),
-        "target_chip": target_chip,
-        "group_id": str(group_id) if group_id is not None else None,
-    }
-    deployed: list[DeployAccepted] = []
-
-    # First pass: resolve artifacts and record all 'requested' transactions in DB while
-    # holding the Project.id FOR UPDATE lock.
-    stage_tasks: list[tuple[Device, ResolvedArtifact, str, bool, bool, dict[str, Any]]] = []
-    for device, found_artifact, online in wave_items:
-        ttl_s = effective_url_ttl_s(device, settings)
-        open_transaction = await latest_open_transaction(
-            session, device_id=device.device_id, window_s=ttl_s
-        )
-        reused = open_transaction is not None and open_transaction.sha256 == found_artifact.sha256
-        cmd_id = open_transaction.cmd_id if reused and open_transaction else new_command_id()
-        url = _artifact_url(found_artifact.sha256, settings, ttl_s=ttl_s, device=device)
-
-        if not reused:
-            await record_requested(
-                session,
-                device_id=device.device_id,
-                cmd_id=cmd_id,
-                artifact_version=version,
-                from_version=device.fw_version,
-                sha256=found_artifact.sha256,
-                size_bytes=found_artifact.size_bytes,
-                target=device.platform_type,
-                apply=apply,
-                sent_by=sent_by,
-                rollout=rollout_meta,
-            )
-
-        payload = stage_payload(
-            cmd_id=cmd_id,
-            url=url,
-            sha256=found_artifact.sha256,
-            size=found_artifact.size_bytes,
-            version=version,
-            apply=apply,
-            confirm_timeout_s=settings.confirm_timeout_s,
-            sig=found_artifact.sig,
-            artifact_type=found_artifact.artifact_type,
-        )
-        stage_tasks.append((device, found_artifact, cmd_id, reused, online, payload))
-
-    # Commit all recorded transactions atomically once before publishing over MQTT
-    await session.commit()
-
-    batch_published = False
-    if len(stage_tasks) > 1:
-        try:
-            await publisher.publish_many(
-                [(dev.device_id, payload) for dev, _, _, _, _, payload in stage_tasks]
-            )
-            batch_published = True
-        except CommandPublishError:
-            batch_published = False
-
-    if batch_published:
-        for device, found_artifact, cmd_id, reused, online, _ in stage_tasks:
-            deployed.append(
-                DeployAccepted(
-                    cmd_id=cmd_id,
-                    device_id=device.device_id,
-                    version=version,
-                    sha256=found_artifact.sha256,
-                    size_bytes=found_artifact.size_bytes,
-                    apply=apply,
-                    reused=reused,
-                    device_online=online,
-                )
-            )
-        return deployed, skipped
-
-    for device, found_artifact, cmd_id, reused, online, payload in stage_tasks:
-        if best_effort_broker:
-            try:
-                await publisher.publish(device.device_id, payload)
-            except CommandPublishError:
-                logger.exception(
-                    "auto-deploy %s for %s could not be published", cmd_id, device.device_id
-                )
-                await record_publish_failure(
-                    session,
-                    device_id=device.device_id,
-                    cmd_id=cmd_id,
-                    artifact_version=version,
-                    from_version=device.fw_version,
-                )
-                await session.commit()
-                skipped[device.device_id] = "broker publish failed"
-                continue
-        else:
-            await _publish(
-                publisher,
-                session,
-                payload,
-                device=device,
-                cmd_id=cmd_id,
-                version=version,
-            )
-
-        deployed.append(
-            DeployAccepted(
-                cmd_id=cmd_id,
-                device_id=device.device_id,
-                version=version,
-                sha256=found_artifact.sha256,
-                size_bytes=found_artifact.size_bytes,
-                apply=apply,
-                reused=reused,
-                device_online=online,
-            )
-        )
-
-    return deployed, skipped
-
-
-async def advance_project_rollout_on_confirm(
-    session: AsyncSession,
-    *,
-    cmd_id: str,
-    settings: Settings,
-    publisher: CommandPublisher,
-    device: Device | None = None,
-    device_id: str | None = None,
-) -> list[DeployAccepted]:
-    """Advance a staged project cohort rollout when a board confirms its wave transaction."""
-    if (
-        isinstance(publisher, NullCommandPublisher)
-        or not settings.artifact_url_secret
-        or not settings.public_base_url
-    ):
-        logger.warning(
-            "cannot advance staged rollout for cmd_id=%s: command publisher or artifact URL config missing",
-            cmd_id,
-        )
-        return []
-    resolved_device = device
-    if resolved_device is None and device_id is not None:
-        resolved_device = await session.get(Device, device_id)
-    if resolved_device is None:
-        return []
-
-    req = await requested_rollout(session, device_id=resolved_device.device_id, cmd_id=cmd_id)
-    if req is None:
-        return []
-
-    rollout_cfg = req.rollout
-    target_filter = str(rollout_cfg.get("target_filter") or "all")
-    canary = bool(rollout_cfg.get("canary", True))
-    raw_max_parallel = rollout_cfg.get("max_parallel", DEFAULT_ROLLOUT_MAX_PARALLEL)
-    max_parallel = (
-        int(raw_max_parallel) if isinstance(raw_max_parallel, int) else DEFAULT_ROLLOUT_MAX_PARALLEL
-    )
-    raw_override = rollout_cfg.get("override")
-    override = tuple(str(item) for item in raw_override) if isinstance(raw_override, list) else ()
-    raw_chip = rollout_cfg.get("target_chip")
-    target_chip = str(raw_chip) if isinstance(raw_chip, str) else None
-    raw_group = rollout_cfg.get("group_id")
-    group_id = uuid.UUID(raw_group) if isinstance(raw_group, str) and raw_group else None
-
-    deployed, _ = await deploy_version_to_project_devices(
-        session,
-        project_id=resolved_device.project_id,
-        version=req.artifact_version,
-        target_filter=target_filter,
-        apply=req.apply,
-        override=override,
-        admin=None,
-        settings=settings,
-        publisher=publisher,
-        target_chip=target_chip,
-        group_id=group_id,
-        best_effort_broker=True,
-        canary=canary,
-        max_parallel=max_parallel,
-        sent_by_override=req.sent_by,
-        republish_in_flight=False,
-    )
-    return deployed
-
-
-async def republish_open_requested_on_wake(
-    session: AsyncSession,
-    *,
-    device_id: str,
-    settings: Settings,
-    publisher: CommandPublisher,
-) -> bool:
-    """Re-mint a fresh signed URL and re-publish `stage` when a board wakes with an open `requested` deploy."""
-    if (
-        isinstance(publisher, NullCommandPublisher)
-        or not settings.artifact_url_secret
-        or not settings.public_base_url
-    ):
-        return False
-
-    device = await session.get(Device, device_id)
-    if device is None or device.decommissioned_at is not None:
-        return False
-
-    snapshots = await latest_deploys(session, device_ids=[device_id])
-    snap = snapshots.get(device_id)
-    if (
-        snap is None
-        or snap.state != "requested"
-        or snap.is_terminal
-        or not snap.artifact_version
-        or not snap.cmd_id
-    ):
-        return False
-
-    found_artifact = await _resolve_artifact_for_target(
-        session,
-        project_id=device.project_id,
-        target=device.platform_type,
-        version=snap.artifact_version,
-    )
-    if found_artifact is None:
-        return False
-
-    tx = await deploy_transaction(session, device_id=device_id, cmd_id=snap.cmd_id)
-    apply_mode = tx.apply if tx is not None and tx.apply else "auto"
-    url = _artifact_url(
-        found_artifact.sha256,
-        settings,
-        ttl_s=effective_url_ttl_s(device, settings),
-        device=device,
-    )
-    payload = stage_payload(
-        cmd_id=snap.cmd_id,
-        url=url,
-        sha256=found_artifact.sha256,
-        size=found_artifact.size_bytes,
-        version=snap.artifact_version,
-        apply=apply_mode,
-        confirm_timeout_s=settings.confirm_timeout_s,
-        sig=found_artifact.sig,
-        artifact_type=found_artifact.artifact_type,
-    )
-    await publisher.publish(device_id, payload)
-    return True
