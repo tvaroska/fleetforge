@@ -19,6 +19,11 @@ Source specs: [prd.md](../spec/prd.md) · [design/architecture.md](../design/arc
 - **Gateway-mediated non-IP radios:** Zigbee, BLE, and LoRa relay adapters behind the device-facing waist.
 - **Security & provisioning extensions:** Secure Boot v2 (new devices only), SoftAP provisioning, per-device mTLS, and self-host TLS onboarding without public DNS.
 - **Platform & observability extensions:** Raspberry Pi adapter and Grafana/Prometheus telemetry export.
+- **Agent memory optimization & fragmentation hardening (`agent/`):**
+  - Port `CONFIG_MBEDTLS_DYNAMIC_BUFFER=y`, `CONFIG_MBEDTLS_DYNAMIC_FREE_CONFIG_DATA=y`, and `CONFIG_MBEDTLS_DYNAMIC_FREE_CA_CERT=y` from `templates/esp-idf/sdkconfig.defaults` into `agent/sdkconfig.defaults`.
+  - Report `largest_free_block` (`heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)`) alongside `min_free_heap` in `ff_identity.c` (`up/hb`) to detect DRAM fragmentation.
+  - Reduce steady-state `cJSON`/heap churn (`40` `malloc`/`calloc`/`realloc` + `142` `cJSON_*` calls) and add explicit `heap_caps` placement + `xTaskCreateStatic` for long-lived agent tasks (`ff_mqtt`, `ff_log`, `ff_ota`, `ff_sec`).
+  - Enable `CONFIG_HEAP_POISONING_COMPREHENSIVE` and stack overflow canary checks in debug/QEMU CI builds.
 
 ## Review findings (2026-11-19, unscheduled)
 
