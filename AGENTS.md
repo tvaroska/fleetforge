@@ -28,4 +28,4 @@ FleetForge is built around **two thin waists** (MQTT control plane + HTTPS artif
 
 ## 4. Verification Gate
 
-Run `bash scripts/ci_gate.sh` (requires PostgreSQL on `localhost:5433` or `TEST_DATABASE_URL`).
+Run `bash scripts/ci_gate.sh` (requires PostgreSQL via `TEST_DATABASE_URL`, e.g., the shared k3s CNPG test environment; do not install local Postgres workarounds on hosts without Docker — `just db-up` on `localhost:5433` is only for Docker-equipped dev boxes).
