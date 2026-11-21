@@ -10,6 +10,7 @@ Source specs: [prd.md](../spec/prd.md) · [design/architecture.md](../design/arc
 
 | # | Milestone | Done when | Target |
 | :--- | :--- | :--- | :--- |
+| — | *No active milestone scheduled* | Promote an item from `Unscheduled backlog` or `Review findings` below when needed. | — |
 
 ## Unscheduled backlog
 
