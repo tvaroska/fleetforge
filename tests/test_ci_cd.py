@@ -433,7 +433,11 @@ class TestCli:
         assert out["app_name"] == "oled_status"
         assert out["project"] == "oled-status"
         assert out["target"] == "esp32c6"
+        assert (tpl_dir / "AGENTS.md.tmpl").is_file()
+        assert not (tpl_dir / "AGENTS.md").exists()
         assert (dest / "AGENTS.md").is_file()
+        assert not (dest / "AGENTS.md.tmpl").exists()
+        assert "{{" not in (dest / "AGENTS.md").read_text(encoding="utf-8")
         assert (dest / "CLAUDE.md").exists()
         assert not (dest / "cloudbuild.yaml").exists()
         gh_wf = dest / ".github" / "workflows" / "fleetforge.yml"

@@ -489,7 +489,8 @@ def render_template_project(
     written: list[Path] = []
     dest_dir.mkdir(parents=True, exist_ok=True)
     for rel_path, content in sorted(raw_files.items()):
-        out_path = dest_dir / rel_path
+        out_rel = rel_path.removesuffix(".tmpl")
+        out_path = dest_dir / out_rel
         out_path.parent.mkdir(parents=True, exist_ok=True)
         try:
             text = content.decode("utf-8")

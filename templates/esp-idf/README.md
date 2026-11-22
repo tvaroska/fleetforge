@@ -32,4 +32,4 @@ ESP-IDF 5.5 firmware for `{{TARGET}}` managed over the air by [Fleetforge](https
    just secrets set api_url https://example.com/api
    ```
 
-See [`AGENTS.md`](AGENTS.md) for the complete Fleetforge C API reference, rollback safety rules, and hardware DRAM budget.
+See `AGENTS.md` for the complete Fleetforge C API reference, rollback safety rules, and hardware DRAM budget.
