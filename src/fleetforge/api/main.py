@@ -211,9 +211,12 @@ def create_app(
             )
             app.state.event_listener = listener
             task = asyncio.create_task(listener.run(), name="ff-events-listener")
-            reconcile_task = asyncio.create_task(
-                _rollout_reconcile_loop(), name="ff-rollout-reconcile"
-            )
+            if float(settings.rollout_reconcile_interval_s) > 0:
+                reconcile_task = asyncio.create_task(
+                    _rollout_reconcile_loop(), name="ff-rollout-reconcile"
+                )
+            else:
+                logger.info("rollout reconcile loop disabled (rollout_reconcile_interval_s <= 0)")
         else:
             logger.warning(
                 "no settings: the ff_events listener is not running, so /v1/events would "

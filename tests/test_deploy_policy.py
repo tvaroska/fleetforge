@@ -33,7 +33,6 @@ from fleetforge.ingestor.handlers import handle_up_message
 from fleetforge.lib_marker import MAGIC
 from fleetforge.rollout import advance_project_rollout_on_confirm
 from fleetforge.signing import generate_keypair
-from fleetforge.simulation import HostPreflightSimRunner
 from tests.conftest import (
     FakeCommandPublisher,
     MemoryObjectStore,
@@ -41,6 +40,7 @@ from tests.conftest import (
     login_admin,
     settings_for_tests,
 )
+from tests.test_doubles import StubSimRunner
 
 _PRIV_A, _PUB_A = generate_keypair()
 _PRIV_B, _PUB_B = generate_keypair()
@@ -90,7 +90,7 @@ class TestStagedCohortDeployPolicyEngine:
         )
         store = MemoryObjectStore()
         publisher = FakeCommandPublisher()
-        sim_runner = HostPreflightSimRunner()
+        sim_runner = StubSimRunner()
         sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
 
         admin_app.dependency_overrides[get_settings] = lambda: settings
@@ -426,3 +426,542 @@ class TestStagedCohortDeployPolicyEngine:
             assert halt_ev["status"] == "halted"
             assert "free_heap 80000 < 120000 bytes" in (halt_ev["halt_reason"] or "")
             assert len(publisher.published) == 1
+
+    async def test_halted_ring_stages_no_further_board_in_that_ring(
+        self,
+        env: dict[str, Any],
+    ) -> None:
+        """A-22(1): when Ring 0's canary confirms in safe_mode / low heap, remaining boards
+        inside Ring 0 MUST NOT be staged before policy gates run."""
+        headers = {"Authorization": f"Bearer {env['token']}"}
+        publisher: FakeCommandPublisher = env["publisher"]
+        groups = env["groups"]
+
+        # Add 3 sibling boards to Ring 0 (`canary`) alongside `a4cf12b3c001`.
+        now = now_utc()
+        async with env["sessionmaker"]() as s:
+            s.add_all(
+                [
+                    _make_board("a4cf12b3c011", groups["canary"], now=now),
+                    _make_board("a4cf12b3c012", groups["canary"], now=now),
+                    _make_board("a4cf12b3c013", groups["canary"], now=now),
+                ]
+            )
+            await s.commit()
+
+        async with client_for(env["app"], base_url="https://testserver") as client:
+            pol = await client.post(
+                "/v1/projects/default/policies",
+                headers=headers,
+                json={
+                    "name": "ring0-inner-gate",
+                    "match_mode": "tag",
+                    "match_ref": "inner-*",
+                    "ring_group_ids": [str(groups["canary"]), str(groups["prod"])],
+                    "min_free_heap_bytes": 100_000,
+                },
+            )
+            assert pol.status_code == 201, pol.text
+            policy_id = pol.json()["id"]
+
+            img = _app_bin("v1.5.0-inner")
+            up = await client.post(
+                "/v1/artifact",
+                params={
+                    "target": "esp32s3",
+                    "version": "1.5.0",
+                    "partition_layout": "ab-4m-v1",
+                    "tag": "inner-1",
+                },
+                content=img,
+                headers={
+                    **headers,
+                    "Content-Type": "application/octet-stream",
+                    "Content-Length": str(len(img)),
+                },
+            )
+            assert up.status_code == 201, up.text
+            assert [did for did, _ in publisher.published] == ["a4cf12b3c001"]
+            canary_cmd_id = publisher.published[0][1]["id"]
+
+            # Canary confirms in safe_mode with 1 byte of free heap.
+            async with env["sessionmaker"]() as s:
+                dev = await s.get(Device, "a4cf12b3c001")
+                assert dev is not None
+                dev.safe_mode = True
+                dev.free_heap = 1
+                await handle_up_message(
+                    s,
+                    topic="ff/v1/d/a4cf12b3c001/up/status",
+                    payload=json.dumps({"cmd_id": canary_cmd_id, "state": "confirmed"}).encode(),
+                    retained=False,
+                    received_at=now_utc(),
+                    tolerance=2.5,
+                )
+                await s.commit()
+
+            publisher.published.clear()
+            async with env["sessionmaker"]() as s:
+                advanced = await advance_project_rollout_on_confirm(
+                    s,
+                    cmd_id=canary_cmd_id,
+                    device_id="a4cf12b3c001",
+                    settings=env["settings"],
+                    publisher=publisher,
+                )
+            assert advanced == []
+            assert publisher.published == []
+
+            ev = (
+                await client.post(
+                    f"/v1/projects/default/policies/{policy_id}/evaluate",
+                    headers=headers,
+                    json={"version": "1.5.0"},
+                )
+            ).json()
+            assert ev["status"] == "halted"
+            assert ev["deployed"] == []
+
+    async def test_unknown_free_heap_does_not_pass_the_heap_gate(
+        self,
+        env: dict[str, Any],
+    ) -> None:
+        """A-22(2): a board with `free_heap = NULL` must not pass `min_free_heap_bytes`."""
+        headers = {"Authorization": f"Bearer {env['token']}"}
+        publisher: FakeCommandPublisher = env["publisher"]
+        groups = env["groups"]
+
+        async with env["sessionmaker"]() as s:
+            dev = await s.get(Device, "a4cf12b3c001")
+            assert dev is not None
+            dev.free_heap = None
+            await s.commit()
+
+        async with client_for(env["app"], base_url="https://testserver") as client:
+            pol = await client.post(
+                "/v1/projects/default/policies",
+                headers=headers,
+                json={
+                    "name": "heap-required",
+                    "match_mode": "tag",
+                    "match_ref": "heap-*",
+                    "ring_group_ids": [str(groups["canary"]), str(groups["prod"])],
+                    "min_free_heap_bytes": 100_000,
+                    "min_soak_s": 0,
+                },
+            )
+            assert pol.status_code == 201
+            policy_id = pol.json()["id"]
+
+            img = _app_bin("v1.6.0-heap")
+            await client.post(
+                "/v1/artifact",
+                params={
+                    "target": "esp32s3",
+                    "version": "1.6.0",
+                    "partition_layout": "ab-4m-v1",
+                    "tag": "heap-1",
+                },
+                content=img,
+                headers={
+                    **headers,
+                    "Content-Type": "application/octet-stream",
+                    "Content-Length": str(len(img)),
+                },
+            )
+            canary_cmd_id = publisher.published[0][1]["id"]
+
+            async with env["sessionmaker"]() as s:
+                await handle_up_message(
+                    s,
+                    topic="ff/v1/d/a4cf12b3c001/up/status",
+                    payload=json.dumps({"cmd_id": canary_cmd_id, "state": "confirmed"}).encode(),
+                    retained=False,
+                    received_at=now_utc(),
+                    tolerance=2.5,
+                )
+                await s.commit()
+
+            publisher.published.clear()
+            ev = (
+                await client.post(
+                    f"/v1/projects/default/policies/{policy_id}/evaluate",
+                    headers=headers,
+                    json={"version": "1.6.0"},
+                )
+            ).json()
+            assert ev["status"] == "soaking"
+            assert ev["deployed"] == []
+            assert ev["rings"][0]["status"] != "promoted"
+            assert publisher.published == []
+
+            # Once healthy free_heap is reported, Ring 0 promotes and stages Ring 1.
+            async with env["sessionmaker"]() as s:
+                dev = await s.get(Device, "a4cf12b3c001")
+                assert dev is not None
+                dev.free_heap = 140_000
+                await s.commit()
+
+            ev_ok = (
+                await client.post(
+                    f"/v1/projects/default/policies/{policy_id}/evaluate",
+                    headers=headers,
+                    json={"version": "1.6.0"},
+                )
+            ).json()
+            assert ev_ok["status"] == "in_progress"
+            assert [d["device_id"] for d in ev_ok["deployed"]] == ["a4cf12b3c003"]
+
+    async def test_empty_or_deleted_ring_halts_instead_of_promoting(
+        self,
+        env: dict[str, Any],
+    ) -> None:
+        """A-22(4): a ring with no compatible board or a deleted group halts instead of skipping."""
+        headers = {"Authorization": f"Bearer {env['token']}"}
+        publisher: FakeCommandPublisher = env["publisher"]
+        groups = env["groups"]
+
+        async with env["sessionmaker"]() as s:
+            empty_grp = DeviceGroup(project_id=DEFAULT_PROJECT_ID, name="empty-canary")
+            doomed_grp = DeviceGroup(project_id=DEFAULT_PROJECT_ID, name="doomed-canary")
+            s.add_all([empty_grp, doomed_grp])
+            await s.commit()
+            empty_id, doomed_id = empty_grp.id, doomed_grp.id
+
+        async with client_for(env["app"], base_url="https://testserver") as client:
+            img = _app_bin("v1.7.0-empty-ring")
+            up = await client.post(
+                "/v1/artifact",
+                params={
+                    "target": "esp32s3",
+                    "version": "1.7.0",
+                    "partition_layout": "ab-4m-v1",
+                },
+                content=img,
+                headers={
+                    **headers,
+                    "Content-Type": "application/octet-stream",
+                    "Content-Length": str(len(img)),
+                },
+            )
+            assert up.status_code == 201
+
+            # Case 1: Empty Ring 0 must halt rather than promoting directly to prod.
+            pol_empty = (
+                await client.post(
+                    "/v1/projects/default/policies",
+                    headers=headers,
+                    json={
+                        "name": "empty-ring-guard",
+                        "match_mode": "tag",
+                        "match_ref": "never-*",
+                        "ring_group_ids": [str(empty_id), str(groups["prod"])],
+                    },
+                )
+            ).json()
+            ev_empty = (
+                await client.post(
+                    f"/v1/projects/default/policies/{pol_empty['id']}/evaluate",
+                    headers=headers,
+                    json={"version": "1.7.0"},
+                )
+            ).json()
+            assert ev_empty["status"] == "halted"
+            assert ev_empty["deployed"] == []
+            assert ev_empty["rings"][0]["status"] == "halted"
+            assert "no compatible devices" in (ev_empty["halt_reason"] or "")
+            assert publisher.published == []
+
+            # Case 2: Deleted Ring 0 group must also halt rather than promoting to prod.
+            pol_del = (
+                await client.post(
+                    "/v1/projects/default/policies",
+                    headers=headers,
+                    json={
+                        "name": "deleted-ring-guard",
+                        "match_mode": "tag",
+                        "match_ref": "never2-*",
+                        "ring_group_ids": [str(doomed_id), str(groups["prod"])],
+                    },
+                )
+            ).json()
+            del_resp = await client.delete(f"/v1/groups/{doomed_id}", headers=headers)
+            assert del_resp.status_code == 204
+            ev_del = (
+                await client.post(
+                    f"/v1/projects/default/policies/{pol_del['id']}/evaluate",
+                    headers=headers,
+                    json={"version": "1.7.0"},
+                )
+            ).json()
+            assert ev_del["status"] == "halted"
+            assert ev_del["deployed"] == []
+            assert "was deleted" in (ev_del["halt_reason"] or "")
+            assert publisher.published == []
+
+    async def test_halt_survives_a_newer_event_on_the_failed_board(
+        self,
+        env: dict[str, Any],
+    ) -> None:
+        """A-22(5): persisted halt survives newer deploy events on the failed board until explicit resume."""
+        headers = {"Authorization": f"Bearer {env['token']}"}
+        publisher: FakeCommandPublisher = env["publisher"]
+        groups = env["groups"]
+
+        async with client_for(env["app"], base_url="https://testserver") as client:
+            pol_id = (
+                await client.post(
+                    "/v1/projects/default/policies",
+                    headers=headers,
+                    json={
+                        "name": "halt-memory",
+                        "match_mode": "tag",
+                        "match_ref": "mem-*",
+                        "ring_group_ids": [str(groups["canary"]), str(groups["prod"])],
+                    },
+                )
+            ).json()["id"]
+
+            bad_img = _app_bin("v1.8.0-bad")
+            await client.post(
+                "/v1/artifact",
+                params={
+                    "target": "esp32s3",
+                    "version": "1.8.0",
+                    "partition_layout": "ab-4m-v1",
+                    "tag": "mem-1",
+                },
+                content=bad_img,
+                headers={
+                    **headers,
+                    "Content-Type": "application/octet-stream",
+                    "Content-Length": str(len(bad_img)),
+                },
+            )
+            bad_cmd = publisher.published[0][1]["id"]
+
+            # Canary rolls back on 1.8.0, then receives a newer deploy event on another command.
+            t1 = now_utc() + dt.timedelta(seconds=5)
+            t2 = t1 + dt.timedelta(seconds=5)
+            async with env["sessionmaker"]() as s:
+                await handle_up_message(
+                    s,
+                    topic="ff/v1/d/a4cf12b3c001/up/status",
+                    payload=json.dumps({"cmd_id": bad_cmd, "state": "rolled_back"}).encode(),
+                    retained=False,
+                    received_at=t1,
+                    tolerance=2.5,
+                )
+                await handle_up_message(
+                    s,
+                    topic="ff/v1/d/a4cf12b3c001/up/status",
+                    payload=json.dumps({"cmd_id": "cmd-other-ver", "state": "confirmed"}).encode(),
+                    retained=False,
+                    received_at=t2,
+                    tolerance=2.5,
+                )
+                await s.commit()
+
+            publisher.published.clear()
+            # Even though `latest_deploys` is now `cmd-other-ver`, the policy MUST halt on 1.8.0.
+            ev1 = (
+                await client.post(
+                    f"/v1/projects/default/policies/{pol_id}/evaluate",
+                    headers=headers,
+                    json={"version": "1.8.0"},
+                )
+            ).json()
+            assert ev1["status"] == "halted"
+            assert ev1["deployed"] == []
+            assert publisher.published == []
+
+            # A second evaluation without `resume=true` stays halted.
+            ev2 = (
+                await client.post(
+                    f"/v1/projects/default/policies/{pol_id}/evaluate",
+                    headers=headers,
+                    json={"version": "1.8.0"},
+                )
+            ).json()
+            assert ev2["status"] == "halted"
+            assert ev2["deployed"] == []
+
+            # Explicit `resume=true` clears the persisted halt and allows re-staging.
+            ev_resumed = (
+                await client.post(
+                    f"/v1/projects/default/policies/{pol_id}/evaluate",
+                    headers=headers,
+                    json={"version": "1.8.0", "resume": True},
+                )
+            ).json()
+            assert ev_resumed["status"] == "in_progress"
+            assert [d["device_id"] for d in ev_resumed["deployed"]] == ["a4cf12b3c001"]
+
+    async def test_soak_elapses_for_boards_confirmed_by_announce(
+        self,
+        env: dict[str, Any],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A-22(6): soak counts from first completeness even when confirmed by `up/announce` only."""
+        import fleetforge.deploy_policies as dp_mod
+
+        headers = {"Authorization": f"Bearer {env['token']}"}
+        groups = env["groups"]
+
+        # Canary announces `fw_version = 1.9.0` without any `confirmed` DeployEvent row.
+        async with env["sessionmaker"]() as s:
+            dev = await s.get(Device, "a4cf12b3c001")
+            assert dev is not None
+            dev.fw_version = "1.9.0"
+            await s.commit()
+
+        async with client_for(env["app"], base_url="https://testserver") as client:
+            img = _app_bin("v1.9.0-announce")
+            await client.post(
+                "/v1/artifact",
+                params={
+                    "target": "esp32s3",
+                    "version": "1.9.0",
+                    "partition_layout": "ab-4m-v1",
+                },
+                content=img,
+                headers={
+                    **headers,
+                    "Content-Type": "application/octet-stream",
+                    "Content-Length": str(len(img)),
+                },
+            )
+            pol_id = (
+                await client.post(
+                    "/v1/projects/default/policies",
+                    headers=headers,
+                    json={
+                        "name": "announce-soak",
+                        "match_mode": "tag",
+                        "match_ref": "soak-*",
+                        "ring_group_ids": [str(groups["canary"]), str(groups["prod"])],
+                        "min_soak_s": 30,
+                    },
+                )
+            ).json()["id"]
+
+            t0 = now_utc()
+            monkeypatch.setattr(dp_mod, "now_utc", lambda: t0)
+            ev1 = (
+                await client.post(
+                    f"/v1/projects/default/policies/{pol_id}/evaluate",
+                    headers=headers,
+                    json={"version": "1.9.0"},
+                )
+            ).json()
+            assert ev1["status"] == "soaking"
+            assert ev1["deployed"] == []
+
+            # 35 s later, soak elapses from the recorded first-completeness timestamp and stages prod.
+            monkeypatch.setattr(dp_mod, "now_utc", lambda: t0 + dt.timedelta(seconds=35))
+            ev2 = (
+                await client.post(
+                    f"/v1/projects/default/policies/{pol_id}/evaluate",
+                    headers=headers,
+                    json={"version": "1.9.0"},
+                )
+            ).json()
+            assert ev2["status"] == "in_progress"
+            assert ev2["rings"][0]["status"] == "promoted"
+            assert [d["device_id"] for d in ev2["deployed"]] == ["a4cf12b3c003"]
+
+    async def test_scoped_token_matrix_on_policy_routes(
+        self,
+        env: dict[str, Any],
+    ) -> None:
+        """A-26: `deploy`-scoped tokens manage/evaluate policies; `viewer`/`read`/`write:artifacts` cannot write."""
+        headers = {"Authorization": f"Bearer {env['token']}"}
+        groups = env["groups"]
+
+        async with client_for(env["app"], base_url="https://testserver") as client:
+            assert (
+                await client.post(
+                    "/v1/users",
+                    headers=headers,
+                    json={
+                        "username": "policyviewer",
+                        "password": "viewer-password-1234",
+                        "project": "default",
+                        "role": "viewer",
+                    },
+                )
+            ).status_code == 201
+            v_login = await client.post(
+                "/v1/auth/login",
+                json={"username": "policyviewer", "password": "viewer-password-1234"},
+            )
+            viewer_hdrs = {"Authorization": f"Bearer {v_login.cookies['ff_session']}"}
+
+            async def _mint(name: str, scopes: list[str]) -> dict[str, str]:
+                r = await client.post(
+                    "/v1/auth/tokens",
+                    headers=headers,
+                    json={"name": name, "project": "default", "scopes": scopes},
+                )
+                assert r.status_code == 201, r.text
+                return {"Authorization": f"Bearer {r.json()['token']}"}
+
+            read_hdrs = await _mint("pol-read", ["read"])
+            wa_hdrs = await _mint("pol-wa", ["write:artifacts"])
+            deploy_hdrs = await _mint("pol-deploy", ["deploy"])
+
+            pol_body = {
+                "name": "scoped-policy",
+                "match_mode": "tag",
+                "match_ref": "scoped-*",
+                "ring_group_ids": [str(groups["canary"]), str(groups["prod"])],
+            }
+            for forbidden in (viewer_hdrs, read_hdrs, wa_hdrs):
+                assert (
+                    await client.post(
+                        "/v1/projects/default/policies",
+                        headers=forbidden,
+                        json=pol_body,
+                    )
+                ).status_code == 403
+
+            created = await client.post(
+                "/v1/projects/default/policies",
+                headers=deploy_hdrs,
+                json=pol_body,
+            )
+            assert created.status_code == 201, created.text
+            pol_id = created.json()["id"]
+
+            assert (
+                await client.get("/v1/projects/default/policies", headers=viewer_hdrs)
+            ).status_code == 200
+            assert (
+                await client.get("/v1/projects/default/policies", headers=read_hdrs)
+            ).status_code == 200
+            assert (
+                await client.patch(
+                    f"/v1/projects/default/policies/{pol_id}",
+                    headers=deploy_hdrs,
+                    json={"min_soak_s": 10},
+                )
+            ).status_code == 200
+            assert (
+                await client.post(
+                    f"/v1/projects/default/policies/{pol_id}/evaluate",
+                    headers=read_hdrs,
+                    json={"version": "1.0.0"},
+                )
+            ).status_code == 403
+            assert (
+                await client.delete(
+                    f"/v1/projects/default/policies/{pol_id}",
+                    headers=viewer_hdrs,
+                )
+            ).status_code == 403
+            assert (
+                await client.delete(
+                    f"/v1/projects/default/policies/{pol_id}",
+                    headers=deploy_hdrs,
+                )
+            ).status_code == 204

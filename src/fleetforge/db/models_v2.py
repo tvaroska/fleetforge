@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
+from typing import Any
 
 from sqlalchemy import (
     BigInteger,
@@ -21,7 +22,7 @@ from sqlalchemy import (
     Uuid,
     text,
 )
-from sqlalchemy.dialects.postgresql import ARRAY, TIMESTAMP
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, TIMESTAMP
 from sqlalchemy.orm import Mapped, mapped_column
 
 from fleetforge.db.base import Base
@@ -155,5 +156,98 @@ class ArtifactDelta(Base):
     target_size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
     format: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'ffdelta-v1'"))
     created_at: Mapped[dt.datetime] = mapped_column(
+        TimestampTZ, nullable=False, server_default=text("now()")
+    )
+
+
+class ProjectRollout(Base):
+    """Persisted cohort rollout intent closed on completion, halt, supersession, or cancel (`A-21`).
+
+    `status` (`open | completed | halted | superseded | cancelled`) is plain `TEXT`
+    (convention 1 in `db/models.py`). Reconcile only inspects `open` rows within the
+    configured age window, so finished or superseded rollouts can never re-stage older
+    firmware over a newer fleet version.
+    """
+
+    __tablename__ = "project_rollouts"
+    __table_args__ = (
+        Index(
+            "ix_project_rollouts_project_status_updated",
+            "project_id",
+            "status",
+            text("updated_at DESC"),
+        ),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    version: Mapped[str] = mapped_column(Text, nullable=False)
+    target_filter: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'all'"))
+    target_chip: Mapped[str | None] = mapped_column(Text, nullable=True)
+    group_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("device_groups.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    policy_id: Mapped[uuid.UUID | None] = mapped_column(
+        Uuid,
+        ForeignKey("deploy_policies.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    apply: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'auto'"))
+    canary: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
+    max_parallel: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("5"))
+    override: Mapped[list[str]] = mapped_column(
+        ARRAY(Text), nullable=False, server_default=text("'{}'::text[]")
+    )
+    sent_by: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'open'"))
+    close_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        TimestampTZ, nullable=False, server_default=text("now()")
+    )
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        TimestampTZ, nullable=False, server_default=text("now()")
+    )
+    closed_at: Mapped[dt.datetime | None] = mapped_column(TimestampTZ, nullable=True)
+
+
+class DeployPolicyRun(Base):
+    """Persisted per-`(policy_id, version)` execution, halt memory, and soak anchors (`A-22`).
+
+    Halted runs stay halted across newer device events until an operator passes
+    `resume=True` explicitly. `ring_completed_at` records the ISO-8601 timestamp when
+    each ring index first reached full confirmation so soak elapses even when boards
+    confirmed via `up/announce` without a `confirmed` deploy event.
+    """
+
+    __tablename__ = "deploy_policy_runs"
+
+    policy_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("deploy_policies.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    version: Mapped[str] = mapped_column(Text, primary_key=True)
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'active'"))
+    halted_ring_index: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    halt_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    halted_at: Mapped[dt.datetime | None] = mapped_column(TimestampTZ, nullable=True)
+    ring_completed_at: Mapped[dict[str, str]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    resumed_at: Mapped[dt.datetime | None] = mapped_column(TimestampTZ, nullable=True)
+    resumed_by: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        TimestampTZ, nullable=False, server_default=text("now()")
+    )
+    updated_at: Mapped[dt.datetime] = mapped_column(
         TimestampTZ, nullable=False, server_default=text("now()")
     )

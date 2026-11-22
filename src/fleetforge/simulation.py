@@ -1,9 +1,10 @@
-"""Pluggable pre-flight firmware simulation Port and QEMU / host adapters (`R9-1`).
+"""Pluggable pre-flight firmware simulation Port and Espressif QEMU adapter (`R9-1`, `A-24`).
 
 Implements the `SimRunner` Protocol (`design/architecture.md` -> *Simulation backend*,
-`docs/features/simulation.md`): boot an uploaded artifact, execute its `R5` self-test,
-and produce an advisory `SimResult` (`passed`, `failed`, or `skipped`) before any
-physical board receives the image.
+`docs/features/simulation.md`): boot an uploaded artifact in Espressif QEMU, execute its
+`R5` self-test, and produce an advisory `SimResult` (`passed`, `failed`, or `skipped`)
+before any physical board receives the image. When QEMU is unavailable, `auto` reports
+`skipped` with the reason rather than substituting a fake runner.
 """
 
 from __future__ import annotations
@@ -21,11 +22,7 @@ from typing import Protocol
 
 from fleetforge.clock import now_utc
 from fleetforge.deploys import sanitise_device_text
-from fleetforge.lib_marker import find_marker
-from fleetforge.merged_image import detect_merged
 
-ESP_IMAGE_MAGIC = 0xE9
-MIN_ESP_APP_BYTES = 32
 DEFAULT_QEMU_FLASH_BYTES = 4 * 1024 * 1024
 APP_SLOT_OFFSET = 0x10000
 
@@ -54,13 +51,6 @@ _SERIAL_FAIL_MARKERS: tuple[str, ...] = (
     "selftest timed out",
     "rolled_back",
     "invalid header",
-)
-
-_BINARY_FAULT_VECTORS: tuple[tuple[bytes, str], ...] = (
-    (b"FF_SIM_BOOT_CRASH", "boot panic simulated before R5 self-test confirmation"),
-    (b"FF_SIM_PANIC", "Guru Meditation panic simulated during boot"),
-    (b"Guru Meditation Error", "Guru Meditation panic vector detected in image"),
-    (b"FF_SIM_SELFTEST_FAIL", "R5 self-test reported failure in simulation"),
 )
 
 
@@ -114,88 +104,6 @@ def parse_qemu_serial_verdict(serial_log: str) -> tuple[SimStatus, str] | None:
             return SimStatus.PASSED, f"QEMU booted cleanly and confirmed R5 self-test ({marker})"
 
     return None
-
-
-class HostPreflightSimRunner:
-    """Deterministic host-side ESP-IDF boot + `R5` self-test pre-flight simulator.
-
-    Used when QEMU binaries are not installed in unit/CI containers or when `FF_SIM_BACKEND=host`.
-    Validates ESP-IDF app header framing, rejects merged images and unmarked binaries whose `R5`
-    self-test would never execute, and honours embedded fault/self-test simulation markers.
-    """
-
-    runner_name = "host-preflight"
-
-    async def simulate(
-        self,
-        *,
-        sha256: str,
-        target: str,
-        image: bytes,
-        partition_layout: str | None = None,
-        artifact_type: str = "app",
-    ) -> SimResult:
-        _ = (sha256, partition_layout)
-        started = time.monotonic()
-        ran_at = now_utc()
-
-        if artifact_type != "app":
-            return SimResult(
-                status=SimStatus.SKIPPED,
-                detail=f"non-app cargo ({artifact_type}) does not boot directly",
-                ran_at=ran_at,
-                runner=self.runner_name,
-                duration_ms=int((time.monotonic() - started) * 1000),
-            )
-
-        if len(image) < MIN_ESP_APP_BYTES or image[0] != ESP_IMAGE_MAGIC:
-            return SimResult(
-                status=SimStatus.FAILED,
-                detail=(
-                    f"invalid {target} app boot header: expected 0xE9 magic and >= {MIN_ESP_APP_BYTES} bytes"
-                ),
-                ran_at=ran_at,
-                runner=self.runner_name,
-                duration_ms=int((time.monotonic() - started) * 1000),
-            )
-
-        merged = detect_merged(image)
-        if merged is not None:
-            return SimResult(
-                status=SimStatus.FAILED,
-                detail="merged full-flash image cannot boot from an OTA app slot",
-                ran_at=ran_at,
-                runner=self.runner_name,
-                duration_ms=int((time.monotonic() - started) * 1000),
-            )
-
-        for pattern, reason in _BINARY_FAULT_VECTORS:
-            if pattern in image:
-                return SimResult(
-                    status=SimStatus.FAILED,
-                    detail=reason,
-                    ran_at=ran_at,
-                    runner=self.runner_name,
-                    duration_ms=int((time.monotonic() - started) * 1000),
-                )
-
-        marker = find_marker(image)
-        if marker is None:
-            return SimResult(
-                status=SimStatus.FAILED,
-                detail="missing FleetForge OTA library marker; R5 self-test never confirmed",
-                ran_at=ran_at,
-                runner=self.runner_name,
-                duration_ms=int((time.monotonic() - started) * 1000),
-            )
-
-        return SimResult(
-            status=SimStatus.PASSED,
-            detail=f"booted {target} image (libfleetforge {marker.lib_version}) and passed R5 self-test",
-            ran_at=ran_at,
-            runner=self.runner_name,
-            duration_ms=int((time.monotonic() - started) * 1000),
-        )
 
 
 class EspressifQemuSimRunner:
@@ -371,12 +279,8 @@ class EspressifQemuSimRunner:
 
 
 def create_sim_runner(backend: str | None = None) -> SimRunner:
-    """Instantiate the configured `SimRunner` (`qemu`, `host`, or `auto`)."""
+    """Instantiate the configured `SimRunner` (`qemu` or `auto`, never a test stand-in)."""
     mode = (backend or os.environ.get("FF_SIM_BACKEND") or "auto").strip().lower()
-    if mode == "qemu":
+    if mode in ("auto", "qemu"):
         return EspressifQemuSimRunner()
-    if mode == "host":
-        return HostPreflightSimRunner()
-    if shutil.which("qemu-system-xtensa") or shutil.which("qemu-system-riscv32"):
-        return EspressifQemuSimRunner()
-    return HostPreflightSimRunner()
+    raise ValueError(f"unsupported simulation backend {mode!r}; expected 'auto' or 'qemu'")

@@ -98,7 +98,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--interval", type=float, default=5.0, help="Poll interval in seconds")
     parser.add_argument(
         "--backend",
-        choices=("auto", "docker", "local"),
+        choices=("auto", "docker"),
         default="auto",
         help="Build runner backend",
     )

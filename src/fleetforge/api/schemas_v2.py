@@ -129,11 +129,12 @@ class DeployPolicyList(BaseModel):
 
 
 class DeployPolicyEvaluateRequest(BaseModel):
-    """`POST /v1/projects/{slug}/policies/{policy_id}/evaluate` request body (`R11-1`)."""
+    """`POST /v1/projects/{slug}/policies/{policy_id}/evaluate` request body (`R11-1`, `A-22`)."""
 
     model_config = ConfigDict(extra="forbid")
 
     version: str = Field(min_length=1, max_length=64)
+    resume: bool = False
 
 
 class PolicyRingStatus(BaseModel):

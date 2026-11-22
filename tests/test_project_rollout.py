@@ -18,7 +18,7 @@ from fleetforge.api.deps import get_command_publisher, get_object_store, get_set
 from fleetforge.clock import now_utc
 from fleetforge.db.models import Device
 from fleetforge.ingestor.handlers import handle_up_message
-from fleetforge.rollout import advance_project_rollout_on_confirm
+from fleetforge.rollout import advance_project_rollout_on_confirm, reconcile_open_rollouts
 from fleetforge.signing import generate_keypair, sign_digest
 from tests.conftest import MemoryObjectStore, client_for, login_admin, settings_for_tests
 
@@ -301,3 +301,181 @@ async def test_project_cohort_rollout_canary_waves_halt_and_rbac_over_postgres(
         halted_body = r_halted.json()
         assert halted_body["deployed"] == []
         assert "rollout halted" in halted_body["skipped"]["a4cf12b3de24"]
+
+
+async def test_reconcile_does_not_restage_a_superseded_version(
+    admin_app: FastAPI, engine: AsyncEngine, clean_tables: None
+) -> None:
+    """A-21: after rolling out 1.0.0 and then 2.0.0 across four boards, repeated reconcile
+    ticks and replayed confirm events for 1.0.0 must never downgrade or flip any board."""
+    _ = clean_tables
+    store = MemoryObjectStore()
+    publisher = RecordingCommandPublisher()
+    settings = settings_for_tests(
+        s3_endpoint_url="http://minio:9000",
+        s3_bucket="fleetforge",
+        artifact_url_secret="s" * 32,
+        public_base_url="https://fleet.example.com",
+        mqtt_command_username="ff-commander",
+        mqtt_command_password="pw",
+        artifact_signing_key=_PRIV_A,
+        artifact_signing_public_keys=f"{_PUB_A};{_PUB_B}",
+    )
+    admin_app.dependency_overrides[get_settings] = lambda: settings
+    admin_app.dependency_overrides[get_object_store] = lambda: store
+    admin_app.dependency_overrides[get_command_publisher] = lambda: publisher
+
+    token = await login_admin(admin_app)
+    headers = {"Authorization": f"Bearer {token}"}
+    sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
+
+    from fleetforge.lib_marker import MAGIC
+
+    marker = MAGIC + b"\x01\x00\x00\x00" + b"0.6.0\x00".ljust(32, b"\x00") + b"\x00" * 12
+
+    async with client_for(admin_app, base_url="https://testserver") as client:
+        proj_resp = await client.post(
+            "/v1/projects",
+            headers=headers,
+            json={"slug": "reconcile-fleet", "name": "Reconcile Fleet"},
+        )
+        assert proj_resp.status_code == 201, proj_resp.text
+        proj_id = proj_resp.json()["id"]
+
+        for ver in ("1.0.0", "2.0.0"):
+            fw = b"\xe9\x00\x00\x00" + marker + f"fw-{ver}".encode() * 32
+            sha = hashlib.sha256(fw).hexdigest()
+            up = await client.post(
+                "/v1/artifact",
+                params={
+                    "project": "reconcile-fleet",
+                    "target": "esp32c6",
+                    "version": ver,
+                    "partition_layout": "ab-4m-v1",
+                    "sig": sign_digest(sha, _PRIV_A),
+                },
+                headers=headers,
+                content=fw,
+            )
+            assert up.status_code == 201, up.text
+
+        now = now_utc()
+        board_ids = [f"a4cf12b3de3{i}" for i in (1, 2, 3, 4)]
+        async with sessionmaker() as s:
+            for idx, did in enumerate(board_ids):
+                s.add(
+                    Device(
+                        device_id=did,
+                        project_id=proj_id,
+                        platform_type="esp32c6",
+                        fw_version="0.9.0",
+                        partition_layout="ab-4m-v1",
+                        ota_slot_size=1966080,
+                        rollback_capable=True,
+                        capabilities=["ota", "sig", "cancel"],
+                        link_type="wifi",
+                        power_class="always_on",
+                        is_dev=(idx == 0),
+                        presence_reported=True,
+                        last_seen=now,
+                    )
+                )
+            await s.commit()
+
+        async def _confirm(did: str, cmd_id: str, ver: str) -> None:
+            async with sessionmaker() as s:
+                await handle_up_message(
+                    s,
+                    topic=f"ff/v1/d/{did}/up/announce",
+                    payload=json.dumps(
+                        {
+                            "device_id": did,
+                            "platform_type": "esp32c6",
+                            "fw_version": ver,
+                            "partition_layout": "ab-4m-v1",
+                            "ota_slot_size": 1966080,
+                            "rollback_capable": True,
+                            "capabilities": ["ota", "sig", "cancel"],
+                        }
+                    ).encode(),
+                    retained=True,
+                    received_at=now_utc(),
+                    tolerance=settings.presence_tolerance,
+                )
+                await handle_up_message(
+                    s,
+                    topic=f"ff/v1/d/{did}/up/status",
+                    payload=json.dumps(
+                        {"cmd_id": cmd_id, "state": "confirmed", "pct": 100}
+                    ).encode(),
+                    retained=True,
+                    received_at=now_utc(),
+                    tolerance=settings.presence_tolerance,
+                )
+                await s.commit()
+
+        # Roll out 1.0.0: canary -> missed confirm recovered by reconcile -> rest confirm 1.0.0.
+        r1 = await client.post(
+            "/v1/projects/reconcile-fleet/deploy",
+            headers=headers,
+            json={"version": "1.0.0", "target_filter": "all", "canary": True, "max_parallel": 5},
+        )
+        assert r1.status_code == 202, r1.text
+        v1_canary_cmd = r1.json()["deployed"][0]["cmd_id"]
+        await _confirm(board_ids[0], v1_canary_cmd, "1.0.0")
+
+        publisher.published.clear()
+        async with sessionmaker() as s:
+            recovered_v1 = await reconcile_open_rollouts(s, settings=settings, publisher=publisher)
+        assert [d.device_id for d in recovered_v1] == board_ids[1:]
+        for item in recovered_v1:
+            await _confirm(item.device_id, item.cmd_id, "1.0.0")
+
+        # Next reconcile tick closes 1.0.0 as completed with zero new commands.
+        publisher.published.clear()
+        async with sessionmaker() as s:
+            done_v1 = await reconcile_open_rollouts(s, settings=settings, publisher=publisher)
+        assert done_v1 == []
+        assert publisher.published == []
+
+        # Roll out 2.0.0 across all four boards.
+        r2 = await client.post(
+            "/v1/projects/reconcile-fleet/deploy",
+            headers=headers,
+            json={"version": "2.0.0", "target_filter": "all", "canary": True, "max_parallel": 5},
+        )
+        assert r2.status_code == 202, r2.text
+        v2_canary_cmd = r2.json()["deployed"][0]["cmd_id"]
+        await _confirm(board_ids[0], v2_canary_cmd, "2.0.0")
+
+        publisher.published.clear()
+        async with sessionmaker() as s:
+            wave2_v2 = await advance_project_rollout_on_confirm(
+                s,
+                device_id=board_ids[0],
+                cmd_id=v2_canary_cmd,
+                settings=settings,
+                publisher=publisher,
+            )
+        assert [d.device_id for d in wave2_v2] == board_ids[1:]
+        for item in wave2_v2:
+            await _confirm(item.device_id, item.cmd_id, "2.0.0")
+
+        # Six reconcile ticks + a replayed 1.0.0 confirm must produce ZERO downgrades or flips.
+        publisher.published.clear()
+        for _ in range(6):
+            async with sessionmaker() as s:
+                reconciled = await reconcile_open_rollouts(
+                    s, settings=settings, publisher=publisher
+                )
+            assert reconciled == []
+        async with sessionmaker() as s:
+            replayed = await advance_project_rollout_on_confirm(
+                s,
+                device_id=board_ids[0],
+                cmd_id=v1_canary_cmd,
+                settings=settings,
+                publisher=publisher,
+            )
+        assert replayed == []
+        assert publisher.published == []

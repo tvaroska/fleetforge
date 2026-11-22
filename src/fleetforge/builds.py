@@ -33,7 +33,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from fleetforge.clock import now_utc
 from fleetforge.config import Settings
 from fleetforge.db.models import ArtifactKind, Build, BuildJob
-from fleetforge.lib_marker import MAGIC, find_marker
+from fleetforge.lib_marker import find_marker
 from fleetforge.signing import SigningKeyRing
 from fleetforge.storage.blobs import blob_key, digest_bytes, put_blob
 from fleetforge.storage.objectstore import ObjectNotFound, ObjectStore
@@ -368,53 +368,12 @@ class SandboxedIdfContainerRunner:
         return bins[0].read_bytes()
 
 
-class DeterministicLocalBuildRunner:
-    """Deterministic host-side build adapter for CI and integration tests without Docker."""
-
-    async def compile_source(
-        self,
-        *,
-        work_dir: Path,
-        target: str,
-        partition_layout: str,
-        idf_image: str,
-        on_log: LogSink | None = None,
-    ) -> bytes:
-        if on_log is not None:
-            await on_log(f"[1/3] Configuring target {target} ({partition_layout}) on {idf_image}\n")
-
-        sources = sorted(p for p in work_dir.rglob("*") if p.is_file())
-        if not sources:
-            raise BuildError("repository checkout contains no source files")
-
-        combined = hashlib.sha256()
-        for src in sources:
-            content = src.read_bytes()
-            if b"FF_BUILD_FAIL" in content:
-                if on_log is not None:
-                    await on_log(f"error: compilation failed in {src.relative_to(work_dir)}\n")
-                raise BuildError(f"compile error in {src.relative_to(work_dir)}")
-            combined.update(content)
-
-        if on_log is not None:
-            await on_log(f"[2/3] Compiling {len(sources)} source file(s) for {target}\n")
-            await on_log("[3/3] Linking ESP-IDF app image with libfleetforge marker\n")
-
-        marker = MAGIC + b"\x01\x00\x00\x00" + b"0.6.0\x00".ljust(32, b"\x00") + b"\x00" * 12
-        meta = f"{target}:{partition_layout}:{idf_image}:{combined.hexdigest()}".encode("ascii")
-        return b"\xe9\x00\x02\x20" + marker + meta + (b"\x00" * 64)
-
-
 def create_build_runner(backend: str | None = None) -> BuildRunner:
-    """Instantiate the configured `BuildRunner` (`docker`, `local`, or `auto`)."""
+    """Instantiate the configured `BuildRunner` (`docker` or `auto`, never a test stand-in)."""
     mode = (backend or os.environ.get("FF_BUILD_BACKEND") or "auto").strip().lower()
-    if mode == "docker":
+    if mode in ("auto", "docker"):
         return SandboxedIdfContainerRunner()
-    if mode == "local":
-        return DeterministicLocalBuildRunner()
-    if shutil.which("docker"):
-        return SandboxedIdfContainerRunner()
-    return DeterministicLocalBuildRunner()
+    raise ValueError(f"unsupported build backend {mode!r}; expected 'auto' or 'docker'")
 
 
 _APPEND_LOG_SQL = text(

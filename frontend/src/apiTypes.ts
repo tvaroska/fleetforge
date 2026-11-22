@@ -375,6 +375,7 @@ export type ArtifactSimulateResponse = {
   target: string | null
   sim_status: SimStatus
   sim_detail: string | null
+  sim_runner?: string | null
   sim_ran_at: string
 }
 
@@ -396,6 +397,7 @@ export type ArtifactSummary = {
   test_passed?: boolean | null
   sim_status?: SimStatus | null
   sim_detail?: string | null
+  sim_runner?: string | null
   sim_ran_at?: string | null
 }
 
@@ -420,6 +422,7 @@ export type ArtifactUploaded = {
   auto_deployed_devices?: string[] | null
   sim_status?: SimStatus | null
   sim_detail?: string | null
+  sim_runner?: string | null
   sim_ran_at?: string | null
 }
 
@@ -606,6 +609,7 @@ export type DeployPolicyList = {
 
 export type DeployPolicyEvaluateRequest = {
   version: string
+  resume?: boolean
 }
 
 export type PolicyRingStatus = {

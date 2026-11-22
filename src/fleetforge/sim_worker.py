@@ -46,6 +46,7 @@ _RECORD_SIM_RESULT_SQL = text(
     UPDATE artifacts
        SET sim_status = :sim_status,
            sim_detail = :sim_detail,
+           sim_runner = :sim_runner,
            sim_ran_at = :sim_ran_at
      WHERE sha256 = :sha256
     """
@@ -98,6 +99,7 @@ async def run_once(
                     "sha256": sha256,
                     "sim_status": result.status.value,
                     "sim_detail": result.detail,
+                    "sim_runner": result.runner,
                     "sim_ran_at": result.ran_at,
                 },
             )
@@ -124,7 +126,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--interval", type=float, default=5.0, help="Poll interval in seconds")
     parser.add_argument(
         "--backend",
-        choices=("auto", "qemu", "host"),
+        choices=("auto", "qemu"),
         default="auto",
         help="Simulation runner backend",
     )

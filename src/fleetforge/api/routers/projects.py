@@ -10,6 +10,7 @@ import httpx
 from fastapi import APIRouter, Depends, HTTPException, Path, status
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from fleetforge.api.deps import (
     FORBIDDEN,
@@ -67,6 +68,7 @@ from fleetforge.device_commands import mark_publish_failed, record_sent
 from fleetforge.ingestor.otel import invalidate_project_otel_cache
 from fleetforge.presence import is_online
 from fleetforge.rollout import (
+    close_matching_rollouts,
     deploy_version_to_project_devices,
     matches_project_tracking,
 )
@@ -484,7 +486,19 @@ async def cancel_project_deploy(
             online = is_online(device, now=now, tolerance=settings.presence_tolerance)
             pending_publishes.append((device, command_id, snap.cmd_id, online))
 
+        closed = await close_matching_rollouts(
+            session,
+            project_id=proj.id,
+            version=body.version,
+            target_filter=body.target_filter,
+            target_chip=None,
+            group_id=body.group_id,
+            status_value="cancelled",
+            reason=f"cancelled by {admin.subject}",
+        )
         if not pending_publishes:
+            if closed:
+                await session.commit()
             return ProjectDeployCancelAccepted(project=slug, cancelled=[], skipped=skipped)
 
         await session.commit()
@@ -716,6 +730,20 @@ async def _publish_project_cfg(
                 )
 
 
+async def _project_secret_list(session: AsyncSession, proj: Project) -> ProjectSecretList:
+    rows = (
+        await session.scalars(
+            select(ProjectSecret)
+            .where(ProjectSecret.project_id == proj.id)
+            .order_by(ProjectSecret.key)
+        )
+    ).all()
+    return ProjectSecretList(
+        secrets_rev=proj.secrets_rev,
+        secrets=[ProjectSecretSummary(key=r.key, updated_at=r.updated_at) for r in rows],
+    )
+
+
 @router.get(
     "/{slug}/secrets",
     response_model=ProjectSecretList,
@@ -732,17 +760,7 @@ async def list_project_secrets(
         proj = await resolve_project_for_request(
             session, admin, slug, min_role=ProjectRole.VIEWER, required_scope="read"
         )
-        rows = (
-            await session.scalars(
-                select(ProjectSecret)
-                .where(ProjectSecret.project_id == proj.id)
-                .order_by(ProjectSecret.key)
-            )
-        ).all()
-        return ProjectSecretList(
-            secrets_rev=proj.secrets_rev,
-            secrets=[ProjectSecretSummary(key=r.key, updated_at=r.updated_at) for r in rows],
-        )
+        return await _project_secret_list(session, proj)
 
 
 @router.put(
@@ -787,20 +805,8 @@ async def upsert_project_secret(
         proj.secrets_rev = (proj.secrets_rev or 0) + 1
         proj.updated_at = now
         await session.commit()
-
-        rows = (
-            await session.scalars(
-                select(ProjectSecret)
-                .where(ProjectSecret.project_id == proj.id)
-                .order_by(ProjectSecret.key)
-            )
-        ).all()
-        rev = proj.secrets_rev
-        pid = proj.id
-        summary = ProjectSecretList(
-            secrets_rev=rev,
-            secrets=[ProjectSecretSummary(key=r.key, updated_at=r.updated_at) for r in rows],
-        )
+        rev, pid = proj.secrets_rev, proj.id
+        summary = await _project_secret_list(session, proj)
 
     await _publish_project_cfg(sessionmaker, publisher, pid, rev)
     return summary
@@ -839,20 +845,8 @@ async def delete_project_secret(
         proj.secrets_rev = (proj.secrets_rev or 0) + 1
         proj.updated_at = now
         await session.commit()
-
-        rows = (
-            await session.scalars(
-                select(ProjectSecret)
-                .where(ProjectSecret.project_id == proj.id)
-                .order_by(ProjectSecret.key)
-            )
-        ).all()
-        rev = proj.secrets_rev
-        pid = proj.id
-        summary = ProjectSecretList(
-            secrets_rev=rev,
-            secrets=[ProjectSecretSummary(key=r.key, updated_at=r.updated_at) for r in rows],
-        )
+        rev, pid = proj.secrets_rev, proj.id
+        summary = await _project_secret_list(session, proj)
 
     await _publish_project_cfg(sessionmaker, publisher, pid, rev)
     return summary

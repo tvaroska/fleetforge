@@ -18,10 +18,9 @@ from fleetforge.api.deps import (
     ObjectStoreDep,
     SessionMakerDep,
     SimRunnerDep,
+    authorize_artifact_digests,
     bearer_scheme,
     cookie_scheme,
-    resolve_project_for_request,
-    visible_project_ids,
 )
 from fleetforge.api.schemas import PROJECT_SLUG_PATTERN, ArtifactSimulateResponse
 from fleetforge.db.models import ProjectRole
@@ -41,6 +40,7 @@ _ARTIFACT_SIM_UPDATE_SQL = text(
     UPDATE artifacts
        SET sim_status = :sim_status,
            sim_detail = :sim_detail,
+           sim_runner = :sim_runner,
            sim_ran_at = :sim_ran_at
      WHERE sha256 = :sha256
     """
@@ -75,53 +75,16 @@ async def simulate_artifact(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="sha256 must be 64 lowercase hex characters",
         )
-    if not ({"admin", "write:artifacts", "deploy"} & set(admin.scopes)):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="insufficient permissions",
-        )
 
     async with sessionmaker() as session:
-        if project is not None or admin.project_id is not None:
-            target_project = await resolve_project_for_request(
-                session,
-                admin,
-                project_slug=project,
-                min_role=ProjectRole.OPERATOR,
-            )
-            visible_link = await session.scalar(
-                text(
-                    "SELECT 1 FROM artifact_versions "
-                    "WHERE project_id = :pid AND sha256 = :sha256 LIMIT 1"
-                ),
-                {"pid": target_project.id, "sha256": sha256},
-            )
-            if visible_link is None:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail=f"no such artifact: {sha256}",
-                )
-        else:
-            allowed_pids = await visible_project_ids(session, admin)
-            if allowed_pids is not None:
-                if not allowed_pids:
-                    raise HTTPException(
-                        status_code=status.HTTP_404_NOT_FOUND,
-                        detail=f"no such artifact: {sha256}",
-                    )
-                visible_link = await session.scalar(
-                    text(
-                        "SELECT 1 FROM artifact_versions "
-                        "WHERE project_id = ANY(:pids) AND sha256 = :sha256 LIMIT 1"
-                    ),
-                    {"pids": list(allowed_pids), "sha256": sha256},
-                )
-                if visible_link is None:
-                    raise HTTPException(
-                        status_code=status.HTTP_404_NOT_FOUND,
-                        detail=f"no such artifact: {sha256}",
-                    )
-
+        await authorize_artifact_digests(
+            session,
+            admin,
+            (sha256,),
+            project_slug=project,
+            min_role=ProjectRole.OPERATOR,
+            required_scope=("write:artifacts", "deploy"),
+        )
         row = (await session.execute(_ARTIFACT_SIM_SELECT_SQL, {"sha256": sha256})).first()
         if row is None:
             raise HTTPException(
@@ -158,6 +121,7 @@ async def simulate_artifact(
                 "sha256": sha256,
                 "sim_status": sim_res.status.value,
                 "sim_detail": sim_res.detail,
+                "sim_runner": sim_res.runner,
                 "sim_ran_at": sim_res.ran_at,
             },
         )
@@ -168,5 +132,6 @@ async def simulate_artifact(
         target=row.target,
         sim_status=sim_res.status.value,
         sim_detail=sim_res.detail,
+        sim_runner=sim_res.runner,
         sim_ran_at=sim_res.ran_at,
     )

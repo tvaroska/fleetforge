@@ -803,5 +803,11 @@ from fleetforge.db.models_v2 import (  # noqa: E402
     DeployPolicy as DeployPolicy,
 )
 from fleetforge.db.models_v2 import (  # noqa: E402
+    DeployPolicyRun as DeployPolicyRun,
+)
+from fleetforge.db.models_v2 import (  # noqa: E402
     GatewayRelayState as GatewayRelayState,
+)
+from fleetforge.db.models_v2 import (  # noqa: E402
+    ProjectRollout as ProjectRollout,
 )

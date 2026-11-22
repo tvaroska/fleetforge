@@ -305,11 +305,12 @@ class RequestedRollout:
     apply: str
     sent_by: DeploySender
     rollout: dict[str, Any]
+    at: dt.datetime | None = None
 
 
 _REQUESTED_ROLLOUT_SQL = text(
     """
-    SELECT artifact_version, detail
+    SELECT at, artifact_version, detail
       FROM deploy_events
      WHERE device_id = :device_id
        AND cmd_id = :cmd_id
@@ -360,6 +361,7 @@ async def requested_rollout(
         apply=apply_str,
         sent_by=sent_by,
         rollout=rollout,
+        at=getattr(row, "at", None),
     )
 
 

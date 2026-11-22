@@ -136,11 +136,6 @@ async def create_policy(
     admin: AdminDep,
     sessionmaker: SessionMakerDep,
 ) -> DeployPolicySummary:
-    if not ({"admin", "deploy"} & set(admin.scopes)):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="insufficient permissions",
-        )
     name = body.name.strip()
     match_ref = body.match_ref.strip()
     if not name or not match_ref:
@@ -155,6 +150,7 @@ async def create_policy(
             admin,
             project_slug=slug,
             min_role=ProjectRole.OPERATOR,
+            required_scope="deploy",
         )
         rings = await _validate_ring_groups(
             session,
@@ -198,17 +194,13 @@ async def update_policy(
     admin: AdminDep,
     sessionmaker: SessionMakerDep,
 ) -> DeployPolicySummary:
-    if not ({"admin", "deploy"} & set(admin.scopes)):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="insufficient permissions",
-        )
     async with sessionmaker() as session:
         project = await resolve_project_for_request(
             session,
             admin,
             project_slug=slug,
             min_role=ProjectRole.OPERATOR,
+            required_scope="deploy",
         )
         row = await session.get(DeployPolicy, policy_id)
         if row is None or row.project_id != project.id:
@@ -274,17 +266,13 @@ async def delete_policy(
     admin: AdminDep,
     sessionmaker: SessionMakerDep,
 ) -> Response:
-    if not ({"admin", "deploy"} & set(admin.scopes)):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="insufficient permissions",
-        )
     async with sessionmaker() as session:
         project = await resolve_project_for_request(
             session,
             admin,
             project_slug=slug,
             min_role=ProjectRole.OPERATOR,
+            required_scope="deploy",
         )
         row = await session.get(DeployPolicy, policy_id)
         if row is None or row.project_id != project.id:
@@ -318,17 +306,13 @@ async def evaluate_policy(
                 "'-', starting with a letter or digit"
             ),
         )
-    if not ({"admin", "deploy"} & set(admin.scopes)):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="insufficient permissions",
-        )
     async with sessionmaker() as session:
         project = await resolve_project_for_request(
             session,
             admin,
             project_slug=slug,
             min_role=ProjectRole.OPERATOR,
+            required_scope="deploy",
         )
         row = await session.get(DeployPolicy, policy_id)
         if row is None or row.project_id != project.id:
@@ -343,4 +327,5 @@ async def evaluate_policy(
             publisher=publisher,
             admin=admin,
             republish_in_flight=True,
+            resume=body.resume,
         )

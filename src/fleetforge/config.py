@@ -306,8 +306,10 @@ class Settings(BaseSettings):
     # `signed_url_ttl_s` — one TTL for both layers, one number, one place.
     artifact_url_refresh_margin_s: int = 300
     # Periodic reconcile interval (seconds) for advancing staged cohort rollouts in case
-    # a confirm notification arrived during an API restart (`A-3`).
+    # a confirm notification arrived during an API restart (`A-3`). Set <= 0 to disable (`A-21`).
     rollout_reconcile_interval_s: float = 30.0
+    # Maximum age (seconds) for an open rollout to remain eligible for background reconciliation.
+    rollout_reconcile_max_age_s: int = 86_400
 
     # --- Rotating device secrets (SEC-be-1) -----------------------------------
     # Dedicated secret material for encrypting `project_secrets.ciphertext`, per-project

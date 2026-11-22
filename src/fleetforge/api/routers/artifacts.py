@@ -127,7 +127,7 @@ _LIST_SQL = text(
     SELECT v.target, v.version, v.sha256, v.created_at,
            v.repo_url, v.branch, v.commit_sha, v.tag, v.build_url, v.test_passed,
            a.size_bytes, a.partition_layout, a.kind, a.artifact_type, a.sig,
-           a.sim_status, a.sim_detail, a.sim_ran_at
+           a.sim_status, a.sim_detail, a.sim_runner, a.sim_ran_at
       FROM artifact_versions AS v
       JOIN artifacts AS a ON a.sha256 = v.sha256
      WHERE v.project_id = :project_id
@@ -197,7 +197,7 @@ _LABEL_SELECT_SQL = text(
 
 _ARTIFACT_SELECT_SQL = text(
     "SELECT sha256, size_bytes, target, partition_layout, artifact_type, has_lib_marker, sig, "
-    "sim_status, sim_detail, sim_ran_at "
+    "sim_status, sim_detail, sim_runner, sim_ran_at "
     "FROM artifacts WHERE sha256 = :sha256"
 )
 
@@ -206,6 +206,7 @@ _ARTIFACT_SIM_UPDATE_SQL = text(
     UPDATE artifacts
        SET sim_status = :sim_status,
            sim_detail = :sim_detail,
+           sim_runner = :sim_runner,
            sim_ran_at = :sim_ran_at
      WHERE sha256 = :sha256
     """
@@ -596,6 +597,7 @@ async def upload_artifact(
                     "sha256": digest,
                     "sim_status": sim_res.status.value,
                     "sim_detail": sim_res.detail,
+                    "sim_runner": sim_res.runner,
                     "sim_ran_at": sim_res.ran_at,
                 },
             )
@@ -700,6 +702,7 @@ async def upload_artifact(
         auto_deployed_devices=auto_deployed,
         sim_status=getattr(stored_blob, "sim_status", None),
         sim_detail=getattr(stored_blob, "sim_detail", None),
+        sim_runner=getattr(stored_blob, "sim_runner", None),
         sim_ran_at=getattr(stored_blob, "sim_ran_at", None),
     )
 
@@ -756,6 +759,7 @@ async def list_artifacts(
                 test_passed=row.test_passed,
                 sim_status=getattr(row, "sim_status", None),
                 sim_detail=getattr(row, "sim_detail", None),
+                sim_runner=getattr(row, "sim_runner", None),
                 sim_ran_at=getattr(row, "sim_ran_at", None),
             )
             for row in rows

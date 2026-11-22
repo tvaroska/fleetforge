@@ -39,12 +39,12 @@ from fleetforge.api.deps import (
 from fleetforge.builds import (
     PINNED_IDF_IMAGES,
     BuildError,
-    DeterministicLocalBuildRunner,
     GitShallowSourceFetcher,
     SandboxedIdfContainerRunner,
     build_sandboxed_docker_cmd,
     compute_build_cache_key,
     compute_tree_and_config_digests,
+    create_build_runner,
     resolve_pinned_idf_image,
 )
 from fleetforge.db.models import Artifact, Build, BuildJob
@@ -56,6 +56,7 @@ from tests.conftest import (
     login_admin,
     settings_for_tests,
 )
+from tests.test_doubles import StubBuildRunner
 
 _PRIV_A, _PUB_A = generate_keypair()
 _PRIV_B, _PUB_B = generate_keypair()
@@ -216,7 +217,7 @@ class TestBuildSecurityAndCacheKey:
 class _CountingBuildRunner:
     def __init__(self) -> None:
         self.calls = 0
-        self._inner = DeterministicLocalBuildRunner()
+        self._inner = StubBuildRunner()
 
     async def compile_source(self, **kwargs: Any) -> bytes:
         self.calls += 1
@@ -418,3 +419,158 @@ class TestBuildPipelineApiAndWorker:
                 assert row is not None
                 assert row.status == "cancelled"
                 assert BuildError is not None
+
+    async def test_auto_backend_without_docker_fails_the_job(
+        self,
+        env: dict[str, Any],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A-24: `create_build_runner('auto')` without Docker must fail the job, never fabricate a binary."""
+        monkeypatch.delenv("FF_BUILD_BACKEND", raising=False)
+        real_which = shutil.which
+        monkeypatch.setattr(
+            shutil,
+            "which",
+            lambda name: None if name == "docker" else real_which(name),
+        )
+
+        with pytest.raises(ValueError, match="unsupported build backend"):
+            create_build_runner("local")
+
+        auto_runner = create_build_runner("auto")
+        assert isinstance(auto_runner, SandboxedIdfContainerRunner)
+
+        headers = {"Authorization": f"Bearer {env['token']}"}
+        async with client_for(env["app"], base_url="https://testserver") as client:
+            queued = await client.post(
+                "/v1/projects/default/builds",
+                headers=headers,
+                json={
+                    "repo_url": str(env["repo_dir"]),
+                    "git_ref": "v2.1.0",
+                    "target": "esp32s3",
+                    "version": "2.2.0-nodocker",
+                    "partition_layout": "ab-4m-v1",
+                },
+            )
+            assert queued.status_code == 201, queued.text
+
+            completed = await builder.run_once(
+                env["sessionmaker"],
+                env["store"],
+                env["settings"],
+                source_fetcher=env["fetcher"],
+                build_runner=auto_runner,
+            )
+            assert len(completed) == 1
+            assert completed[0].status == "failed"
+            assert "docker" in (completed[0].error_detail or "").lower()
+            assert completed[0].artifact_sha256 is None
+
+    async def test_scoped_token_matrix_on_build_routes(
+        self,
+        env: dict[str, Any],
+    ) -> None:
+        """A-26: CI tokens (`write:artifacts`, `deploy`) can queue/cancel/retry builds while
+        `read`, `enroll`, `viewer`, and cross-project tokens receive 403."""
+        super_headers = {"Authorization": f"Bearer {env['token']}"}
+        async with client_for(env["app"], base_url="https://testserver") as client:
+            r_other = await client.post(
+                "/v1/projects",
+                headers=super_headers,
+                json={"slug": "other-builds", "name": "Other Builds"},
+            )
+            assert r_other.status_code == 201
+
+            r_viewer = await client.post(
+                "/v1/users",
+                headers=super_headers,
+                json={
+                    "username": "buildviewer",
+                    "password": "viewer-password-1234",
+                    "project": "default",
+                    "role": "viewer",
+                },
+            )
+            assert r_viewer.status_code == 201
+            viewer_login = await client.post(
+                "/v1/auth/login",
+                json={"username": "buildviewer", "password": "viewer-password-1234"},
+            )
+            viewer_headers = {"Authorization": f"Bearer {viewer_login.cookies['ff_session']}"}
+
+            async def _mint(
+                name: str, scopes: list[str], project: str = "default"
+            ) -> dict[str, str]:
+                resp = await client.post(
+                    "/v1/auth/tokens",
+                    headers=super_headers,
+                    json={"name": name, "project": project, "scopes": scopes},
+                )
+                assert resp.status_code == 201, resp.text
+                return {"Authorization": f"Bearer {resp.json()['token']}"}
+
+            read_hdrs = await _mint("b-read", ["read"])
+            enroll_hdrs = await _mint("b-enroll", ["enroll"])
+            wa_hdrs = await _mint("b-write-art", ["write:artifacts"])
+            deploy_hdrs = await _mint("b-deploy", ["deploy"])
+            wrong_proj_hdrs = await _mint(
+                "b-wrong-proj", ["write:artifacts", "deploy"], "other-builds"
+            )
+
+            payload = {
+                "repo_url": str(env["repo_dir"]),
+                "git_ref": "v2.1.0",
+                "target": "esp32s3",
+                "version": "3.0.0",
+            }
+
+            # Forbidden on POST /builds: viewer, read, enroll, wrong project.
+            for forbidden in (viewer_headers, read_hdrs, enroll_hdrs, wrong_proj_hdrs):
+                r = await client.post(
+                    "/v1/projects/default/builds", headers=forbidden, json=payload
+                )
+                assert r.status_code == 403, f"expected 403, got {r.status_code}: {r.text}"
+
+            # Allowed on POST /builds, cancel, and retry: `write:artifacts` and `deploy` tokens!
+            for idx, (allowed_hdrs, ver) in enumerate(((wa_hdrs, "3.0.1"), (deploy_hdrs, "3.0.2"))):
+                r_create = await client.post(
+                    "/v1/projects/default/builds",
+                    headers=allowed_hdrs,
+                    json={**payload, "version": ver},
+                )
+                assert r_create.status_code == 201, r_create.text
+                bid = r_create.json()["id"]
+
+                # Viewer and read-only tokens can read list/detail, but cannot cancel.
+                assert (
+                    await client.get(f"/v1/projects/default/builds/{bid}", headers=viewer_headers)
+                ).status_code == 200
+                assert (
+                    await client.get(f"/v1/projects/default/builds/{bid}", headers=read_hdrs)
+                ).status_code == 200
+                assert (
+                    await client.post(
+                        f"/v1/projects/default/builds/{bid}/cancel", headers=viewer_headers
+                    )
+                ).status_code == 403
+                assert (
+                    await client.post(
+                        f"/v1/projects/default/builds/{bid}/cancel", headers=read_hdrs
+                    )
+                ).status_code == 403
+
+                r_cancel = await client.post(
+                    f"/v1/projects/default/builds/{bid}/cancel", headers=allowed_hdrs
+                )
+                assert r_cancel.status_code == 200, r_cancel.text
+
+                assert (
+                    await client.post(
+                        f"/v1/projects/default/builds/{bid}/retry", headers=viewer_headers
+                    )
+                ).status_code == 403
+                r_retry = await client.post(
+                    f"/v1/projects/default/builds/{bid}/retry", headers=allowed_hdrs
+                )
+                assert r_retry.status_code == 201, (idx, r_retry.text)

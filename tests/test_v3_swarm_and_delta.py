@@ -512,3 +512,100 @@ class TestSwarmHierarchyEdgeRelayAndAirtimeRollout:
             assert len(body["skipped"]) == 2
             for reason in body["skipped"].values():
                 assert "airtime cap=1 on lora link" in reason
+
+    async def test_viewer_cannot_create_a_delta(
+        self,
+        env: dict[str, Any],
+    ) -> None:
+        """A-26: omitting `?project=` on delta creation must still enforce operator role and scope."""
+        from sqlalchemy import text
+
+        super_headers = {"Authorization": f"Bearer {env['token']}"}
+        v1_bytes = _realistic_firmware("1.0.0")
+        v2_bytes = _realistic_firmware("1.1.0")
+
+        async with client_for(env["app"], base_url="https://testserver") as client:
+            up1 = await client.post(
+                "/v1/artifact",
+                params={"target": "esp32c6", "version": "1.0.0", "partition_layout": "ab-4m-v1"},
+                content=v1_bytes,
+                headers={
+                    **super_headers,
+                    "Content-Type": "application/octet-stream",
+                    "Content-Length": str(len(v1_bytes)),
+                },
+            )
+            sha1 = up1.json()["sha256"]
+            up2 = await client.post(
+                "/v1/artifact",
+                params={"target": "esp32c6", "version": "1.1.0", "partition_layout": "ab-4m-v1"},
+                content=v2_bytes,
+                headers={
+                    **super_headers,
+                    "Content-Type": "application/octet-stream",
+                    "Content-Length": str(len(v2_bytes)),
+                },
+            )
+            sha2 = up2.json()["sha256"]
+
+            # Create a viewer on `default`.
+            r_v = await client.post(
+                "/v1/users",
+                headers=super_headers,
+                json={
+                    "username": "deltaviewer",
+                    "password": "viewer-password-1234",
+                    "project": "default",
+                    "role": "viewer",
+                },
+            )
+            assert r_v.status_code == 201
+            v_login = await client.post(
+                "/v1/auth/login",
+                json={"username": "deltaviewer", "password": "viewer-password-1234"},
+            )
+            viewer_headers = {"Authorization": f"Bearer {v_login.cookies['ff_session']}"}
+
+            # Viewer gets 403 both without and with `?project=default`, leaving 0 delta rows.
+            r_no_proj = await client.post(
+                f"/v1/artifact/{sha2}/deltas",
+                headers=viewer_headers,
+                json={"from_sha256": sha1},
+            )
+            assert r_no_proj.status_code == 403, r_no_proj.text
+            r_with_proj = await client.post(
+                f"/v1/artifact/{sha2}/deltas?project=default",
+                headers=viewer_headers,
+                json={"from_sha256": sha1},
+            )
+            assert r_with_proj.status_code == 403, r_with_proj.text
+
+            async with env["sessionmaker"]() as s:
+                delta_count = await s.scalar(text("SELECT count(*) FROM artifact_deltas"))
+            assert delta_count == 0
+
+            # Scoped `read` token -> 403; scoped `write:artifacts` token -> 201!
+            r_read = await client.post(
+                "/v1/auth/tokens",
+                headers=super_headers,
+                json={"name": "delta-read", "project": "default", "scopes": ["read"]},
+            )
+            assert (
+                await client.post(
+                    f"/v1/artifact/{sha2}/deltas",
+                    headers={"Authorization": f"Bearer {r_read.json()['token']}"},
+                    json={"from_sha256": sha1},
+                )
+            ).status_code == 403
+
+            r_wa = await client.post(
+                "/v1/auth/tokens",
+                headers=super_headers,
+                json={"name": "delta-write", "project": "default", "scopes": ["write:artifacts"]},
+            )
+            r_ok = await client.post(
+                f"/v1/artifact/{sha2}/deltas",
+                headers={"Authorization": f"Bearer {r_wa.json()['token']}"},
+                json={"from_sha256": sha1},
+            )
+            assert r_ok.status_code == 201, r_ok.text

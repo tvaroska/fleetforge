@@ -30,6 +30,7 @@ _CI_OPTIONAL_FIELDS = frozenset(
         "auto_deployed_devices",
         "sim_status",
         "sim_detail",
+        "sim_runner",
         "sim_ran_at",
     }
 )
@@ -42,6 +43,7 @@ class ArtifactSimulateResponse(BaseModel):
     target: str | None
     sim_status: Literal["pending", "running", "passed", "failed", "skipped"]
     sim_detail: str | None
+    sim_runner: str | None = None
     sim_ran_at: dt.datetime
 
 
@@ -66,6 +68,7 @@ class ArtifactUploaded(BaseModel):
     auto_deployed_devices: list[str] | None = None
     sim_status: str | None = None
     sim_detail: str | None = None
+    sim_runner: str | None = None
     sim_ran_at: dt.datetime | None = None
 
     @model_serializer(mode="wrap")
@@ -107,6 +110,7 @@ class ArtifactSummary(BaseModel):
     test_passed: bool | None = None
     sim_status: str | None = None
     sim_detail: str | None = None
+    sim_runner: str | None = None
     sim_ran_at: dt.datetime | None = None
 
     @model_serializer(mode="wrap")

@@ -26,11 +26,11 @@ from fleetforge.api.deps import (
     ObjectStoreDep,
     SessionMakerDep,
     SettingsDep,
+    authorize_artifact_digests,
     bearer_scheme,
     check_project_access,
     cookie_scheme,
     resolve_project_for_request,
-    visible_project_ids,
 )
 from fleetforge.api.routers.deploys import _artifact_url
 from fleetforge.api.schemas import PROJECT_SLUG_PATTERN
@@ -488,39 +488,16 @@ async def create_artifact_delta(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="from_sha256 and to_sha256 must be distinct firmware digests",
         )
-    if not ({"admin", "write:artifacts", "deploy"} & set(admin.scopes)):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="insufficient permissions",
-        )
 
     async with sessionmaker() as session:
-        if project is not None or admin.project_id is not None:
-            target_proj = await resolve_project_for_request(
-                session,
-                admin,
-                project_slug=project,
-                min_role=ProjectRole.OPERATOR,
-            )
-            allowed_pids: set[object] | None = {target_proj.id}
-        else:
-            vis = await visible_project_ids(session, admin)
-            allowed_pids = set(vis) if vis is not None else None
-
-        if allowed_pids is not None:
-            for sha in (body.from_sha256, to_sha256):
-                found_link = await session.scalar(
-                    text(
-                        "SELECT 1 FROM artifact_versions "
-                        "WHERE project_id = ANY(:pids) AND sha256 = :sha LIMIT 1"
-                    ),
-                    {"pids": list(allowed_pids), "sha": sha},
-                )
-                if found_link is None:
-                    raise HTTPException(
-                        status_code=status.HTTP_404_NOT_FOUND,
-                        detail=f"no such artifact: {sha}",
-                    )
+        await authorize_artifact_digests(
+            session,
+            admin,
+            (body.from_sha256, to_sha256),
+            project_slug=project,
+            min_role=ProjectRole.OPERATOR,
+            required_scope=("write:artifacts", "deploy"),
+        )
 
         existing = await session.scalar(
             select(ArtifactDelta).where(

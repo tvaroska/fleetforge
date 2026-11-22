@@ -51,6 +51,7 @@ class Artifact(Base):
     provenance: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     sim_status: Mapped[str | None] = mapped_column(Text, nullable=True)
     sim_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sim_runner: Mapped[str | None] = mapped_column(Text, nullable=True)
     sim_ran_at: Mapped[dt.datetime | None] = mapped_column(TimestampTZ, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(
         TimestampTZ, nullable=False, server_default=text("now()")

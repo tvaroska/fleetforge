@@ -14,6 +14,7 @@ import ipaddress
 import logging
 import threading
 import uuid
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from typing import Annotated
 
@@ -459,13 +460,34 @@ def require_unpinned_admin(admin: AdminDep) -> AuthContext:
 UnpinnedAdminDep = Annotated[AuthContext, Depends(require_unpinned_admin)]
 
 
+def _enforce_scope(
+    admin: AuthContext,
+    *,
+    min_role: ProjectRole,
+    required_scope: str | Collection[str] | None,
+) -> None:
+    if "admin" in admin.scopes:
+        return
+    if required_scope is not None:
+        if isinstance(required_scope, str):
+            allowed = READ_SCOPES if required_scope == "read" else {required_scope}
+        else:
+            allowed = set(required_scope)
+        if not (allowed & set(admin.scopes)):
+            raise FORBIDDEN
+    elif min_role != ProjectRole.VIEWER:
+        raise FORBIDDEN
+    elif not (READ_SCOPES & set(admin.scopes)):
+        raise FORBIDDEN
+
+
 async def check_project_access(
     session: AsyncSession,
     admin: AuthContext,
     target_project_id: uuid.UUID,
     *,
     min_role: ProjectRole = ProjectRole.VIEWER,
-    required_scope: str | None = None,
+    required_scope: str | Collection[str] | None = None,
     not_found: HTTPException | None = None,
 ) -> None:
     """Verify `admin` may perform an action on `target_project_id`.
@@ -497,17 +519,7 @@ async def check_project_access(
                 raise hidden
 
     # 2. Scope.
-    if "admin" not in admin.scopes:
-        if required_scope is not None:
-            if required_scope == "read":
-                if not (READ_SCOPES & set(admin.scopes)):
-                    raise FORBIDDEN
-            elif required_scope not in admin.scopes:
-                raise FORBIDDEN
-        elif min_role != ProjectRole.VIEWER:
-            raise FORBIDDEN
-        elif not (READ_SCOPES & set(admin.scopes)):
-            raise FORBIDDEN
+    _enforce_scope(admin, min_role=min_role, required_scope=required_scope)
 
     # 3. Role.
     if member is not None and ROLE_RANK.get(member.role, 0) < ROLE_RANK[min_role.value]:
@@ -548,7 +560,7 @@ async def resolve_project_for_request(
     project_slug: str | None = None,
     *,
     min_role: ProjectRole = ProjectRole.VIEWER,
-    required_scope: str | None = None,
+    required_scope: str | Collection[str] | None = None,
 ) -> Project:
     """Resolve `project_slug` (or token's pinned project / `'default'`) and enforce RBAC."""
     if project_slug is not None:
@@ -581,6 +593,105 @@ async def resolve_project_for_request(
         required_scope=required_scope,
     )
     return project
+
+
+async def authorize_artifact_digests(
+    session: AsyncSession,
+    admin: AuthContext,
+    digests: Sequence[str],
+    *,
+    project_slug: str | None = None,
+    min_role: ProjectRole = ProjectRole.OPERATOR,
+    required_scope: str | Collection[str] | None = None,
+) -> None:
+    """Enforce project role + scope over digest-addressed artifact mutation routes (`A-26`).
+
+    When `project_slug` or `admin.project_id` is present, resolves that project via
+    `resolve_project_for_request` and verifies every digest is linked to it. When neither is
+    present, still enforces `required_scope` and requires `min_role` in a project that links
+    every requested digest (returning 403 when visible only at a lower role, 404 when hidden).
+    """
+    unique_digests = list(dict.fromkeys(digests))
+    if project_slug is not None or admin.project_id is not None:
+        target_project = await resolve_project_for_request(
+            session,
+            admin,
+            project_slug=project_slug,
+            min_role=min_role,
+            required_scope=required_scope,
+        )
+        for sha in unique_digests:
+            linked = await session.scalar(
+                text(
+                    "SELECT 1 FROM artifact_versions "
+                    "WHERE project_id = :pid AND sha256 = :sha LIMIT 1"
+                ),
+                {"pid": target_project.id, "sha": sha},
+            )
+            if linked is None:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"no such artifact: {sha}",
+                )
+        return
+
+    _enforce_scope(admin, min_role=min_role, required_scope=required_scope)
+
+    if admin.is_superadmin or admin.user_id is None:
+        return
+
+    user = await session.get(User, admin.user_id)
+    if user is not None and user.is_superadmin:
+        return
+
+    memberships = list(
+        (
+            await session.scalars(
+                select(ProjectMember).where(ProjectMember.user_id == admin.user_id)
+            )
+        ).all()
+    )
+    visible_pids = [m.project_id for m in memberships]
+    if not visible_pids:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"no such artifact: {unique_digests[0]}",
+        )
+
+    min_rank = ROLE_RANK[min_role.value]
+    authorized_pids = [m.project_id for m in memberships if ROLE_RANK.get(m.role, 0) >= min_rank]
+    if authorized_pids:
+        matched_project = await session.scalar(
+            text(
+                "SELECT project_id FROM artifact_versions "
+                "WHERE project_id = ANY(:pids) AND sha256 = ANY(:shas) "
+                "GROUP BY project_id "
+                "HAVING count(DISTINCT sha256) = :expected_n "
+                "LIMIT 1"
+            ),
+            {
+                "pids": authorized_pids,
+                "shas": unique_digests,
+                "expected_n": len(unique_digests),
+            },
+        )
+        if matched_project is not None:
+            return
+
+    for sha in unique_digests:
+        visible_link = await session.scalar(
+            text(
+                "SELECT 1 FROM artifact_versions "
+                "WHERE project_id = ANY(:pids) AND sha256 = :sha LIMIT 1"
+            ),
+            {"pids": visible_pids, "sha": sha},
+        )
+        if visible_link is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"no such artifact: {sha}",
+            )
+    raise FORBIDDEN
 
 
 _firebase_client: FirebaseAuthClient = LiveFirebaseAuthClient()

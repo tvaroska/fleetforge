@@ -7,7 +7,7 @@ focused on HTTP request/response translation.
 
 from __future__ import annotations
 
-import fnmatch
+import datetime as dt
 import logging
 import re
 import uuid
@@ -39,7 +39,6 @@ from fleetforge.deploy_precheck import (
 )
 from fleetforge.deploys import (
     DeploySender,
-    DeploySnapshot,
     deploy_transaction,
     latest_deploys,
     latest_open_transaction,
@@ -49,20 +48,40 @@ from fleetforge.deploys import (
 )
 from fleetforge.partition_profiles import load_layout_catalog
 from fleetforge.presence import is_online
+from fleetforge.rollout_state import (
+    DEFAULT_ROLLOUT_MAX_PARALLEL as DEFAULT_ROLLOUT_MAX_PARALLEL,
+)
+from fleetforge.rollout_state import (
+    LINK_AIRTIME_MAX_PARALLEL as LINK_AIRTIME_MAX_PARALLEL,
+)
+from fleetforge.rollout_state import (
+    PARENT_GATEWAY_MAX_PARALLEL as PARENT_GATEWAY_MAX_PARALLEL,
+)
+from fleetforge.rollout_state import (
+    close_matching_rollouts,
+    find_open_rollout,
+    has_newer_confirmed_or_in_flight,
+    open_or_supersede_rollout,
+    resolve_rollout_for_confirm,
+    select_rollout_wave,
+)
+from fleetforge.rollout_state import (
+    effective_url_ttl_s as effective_url_ttl_s,
+)
+from fleetforge.rollout_state import (
+    is_cohort_halt_snapshot as _is_cohort_halt_snapshot,
+)
+from fleetforge.rollout_state import (
+    matches_project_tracking as matches_project_tracking,
+)
+from fleetforge.rollout_state import (
+    reconcile_open_rollouts as reconcile_open_rollouts,
+)
 from fleetforge.signing import SigningKeyRing
 from fleetforge.swarm_gateway import build_stage_urls_and_delta
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_ROLLOUT_MAX_PARALLEL = 5
-LINK_AIRTIME_MAX_PARALLEL: dict[str, int] = {
-    "lora": 1,
-    "ble": 1,
-    "zigbee": 1,
-    "thread": 2,
-    "cellular": 2,
-}
-PARENT_GATEWAY_MAX_PARALLEL = 3
 _ROLLOUT_VERSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}\Z")
 
 _ARTIFACT_FOR_TARGET_SQL = text(
@@ -74,80 +93,6 @@ _ARTIFACT_FOR_TARGET_SQL = text(
      WHERE v.project_id = :project_id AND v.target = :target AND v.version = :version
     """
 )
-
-_RECONCILE_CANDIDATES_SQL = text(
-    """
-    SELECT DISTINCT ON (d.project_id, req.artifact_version)
-           req.device_id,
-           req.cmd_id
-      FROM deploy_events AS req
-      JOIN devices AS d ON d.device_id = req.device_id
-     WHERE req.state = 'requested'
-       AND req.cmd_id IS NOT NULL
-       AND req.artifact_version IS NOT NULL
-       AND req.detail ? 'rollout'
-       AND d.decommissioned_at IS NULL
-       AND EXISTS (
-           SELECT 1
-             FROM deploy_events AS conf
-            WHERE conf.device_id = req.device_id
-              AND conf.cmd_id = req.cmd_id
-              AND conf.state = 'confirmed'
-       )
-     ORDER BY d.project_id, req.artifact_version, req.at DESC, req.id DESC
-     LIMIT 64
-    """
-)
-
-
-def effective_url_ttl_s(device: Device, settings: Settings) -> int:
-    """Signed URL TTL for `device`: extended by `2 * expected_wake_interval_s` for sleepy boards."""
-    base_ttl = int(settings.signed_url_ttl_s)
-    wake_s = int(device.expected_wake_interval_s or 0)
-    if str(device.power_class) == "sleepy" and wake_s > 0:
-        return max(base_ttl, 2 * wake_s + base_ttl)
-    return base_ttl
-
-
-def _normalize_repo_url(url: str | None) -> str:
-    if not url:
-        return ""
-    stripped = url.strip().rstrip("/")
-    if stripped.endswith(".git"):
-        stripped = stripped[:-4]
-    return stripped.lower()
-
-
-def matches_project_tracking(
-    project: Project,
-    *,
-    repo_url: str | None,
-    branch: str | None,
-    commit_sha: str | None,
-    tag: str | None,
-    test_passed: bool | None,
-) -> bool:
-    """Return True if an artifact upload's Git provenance matches `project`'s active CD rule."""
-    if project.track_mode == "off" or project.auto_deploy_target not in ("dev", "all"):
-        return False
-    ref = (project.track_ref or "").strip()
-    if not ref:
-        return False
-    if test_passed is False:
-        return False
-    if (
-        project.repo_url
-        and repo_url
-        and _normalize_repo_url(project.repo_url) != _normalize_repo_url(repo_url)
-    ):
-        return False
-    if project.track_mode == "branch":
-        return branch is not None and branch == ref
-    if project.track_mode == "tag":
-        return tag is not None and fnmatch.fnmatchcase(tag, ref)
-    if project.track_mode == "commit":
-        return commit_sha is not None and (commit_sha == ref or commit_sha.startswith(ref))
-    return False
 
 
 async def resolve_artifact_for_target(
@@ -193,28 +138,6 @@ async def resolve_artifact_for_target(
         sim_status=getattr(row, "sim_status", None),
         sim_detail=getattr(row, "sim_detail", None),
     )
-
-
-def _is_cohort_halt_snapshot(
-    snap: DeploySnapshot | None,
-    version: str,
-    *,
-    include_cancelled: bool,
-) -> bool:
-    """Return True if `snap` halts cohort progression on `version` (`A-3`).
-
-    Excludes server-authored `publish_failed` (`snap.reason == "publish_failed"`): the board
-    never received the command, so a transient broker blip must not wedge retries of `version`.
-    """
-    if snap is None or snap.artifact_version != version:
-        return False
-    if snap.state == "rolled_back":
-        return True
-    if include_cancelled and snap.state == "cancelled":
-        return True
-    if snap.state == "failed" and snap.reason != "publish_failed":
-        return True
-    return False
 
 
 async def _sender_for(session: AsyncSession, admin: AuthContext) -> DeploySender:
@@ -264,6 +187,9 @@ async def deploy_version_to_project_devices(
     sent_by_override: DeploySender | None = None,
     republish_in_flight: bool = True,
     mint_url: Callable[..., str] | None = None,
+    policy_id: uuid.UUID | None = None,
+    rollout_started_at: dt.datetime | None = None,
+    ignore_halts_before: dt.datetime | None = None,
 ) -> tuple[list[DeployAccepted], dict[str, str]]:
     """Stage `version` onto compatible live boards in `project_id` with staged rollout safety."""
     if not _ROLLOUT_VERSION_RE.match(version):
@@ -304,15 +230,65 @@ async def deploy_version_to_project_devices(
     if not devices:
         return [], {}
 
+    if sent_by_override is not None:
+        sent_by = sent_by_override
+    elif admin is not None:
+        sent_by = await _sender_for(session, admin)
+    else:
+        sent_by = DeploySender("system", "rollout", None)
+
+    if republish_in_flight:
+        rollout_row = await open_or_supersede_rollout(
+            session,
+            project_id=project_id,
+            version=version,
+            target_filter=target_filter,
+            target_chip=target_chip,
+            group_id=group_id,
+            policy_id=policy_id,
+            apply=apply,
+            canary=canary,
+            max_parallel=max_parallel,
+            override=override,
+            sent_by=sent_by,
+        )
+    else:
+        rollout_row = await find_open_rollout(
+            session,
+            project_id=project_id,
+            version=version,
+            target_filter=target_filter,
+            target_chip=target_chip,
+            group_id=group_id,
+            policy_id=policy_id,
+        )
+        if rollout_started_at is None and rollout_row is not None:
+            rollout_started_at = rollout_row.created_at
+
     snapshots = await latest_deploys(session, device_ids=[d.device_id for d in all_project_devices])
 
     include_cancelled = not republish_in_flight
     for d in all_project_devices:
         snap = snapshots.get(d.device_id)
-        if snap is not None and _is_cohort_halt_snapshot(
-            snap, version, include_cancelled=include_cancelled
+        if (
+            snap is not None
+            and (ignore_halts_before is None or snap.at > ignore_halts_before)
+            and _is_cohort_halt_snapshot(snap, version, include_cancelled=include_cancelled)
         ):
             halt_reason = f"rollout halted: device {d.device_id} {snap.state} on version {version}"
+            await close_matching_rollouts(
+                session,
+                project_id=project_id,
+                version=version,
+                target_filter=target_filter,
+                target_chip=target_chip,
+                group_id=group_id,
+                policy_id=policy_id,
+                status_value="halted",
+                reason=halt_reason,
+            )
+            if isinstance(session, AsyncSession):
+                await session.commit()
             return [], {cand.device_id: halt_reason for cand in devices}
 
     # Per-target canary (`A-3`): confirming `version` on `esp32` unlocks Wave 2 for `esp32`,
@@ -351,6 +327,15 @@ async def deploy_version_to_project_devices(
         ):
             skipped[device.device_id] = f"already in flight on version {version}"
             continue
+        if not republish_in_flight and has_newer_confirmed_or_in_flight(
+            dev_snap, version=version, rollout_started_at=rollout_started_at
+        ):
+            skipped[device.device_id] = (
+                f"already running newer rollout version {dev_snap.artifact_version}"
+                if dev_snap is not None
+                else "already running newer rollout version"
+            )
+            continue
         if device.platform_type not in artifacts_by_target:
             artifacts_by_target[device.platform_type] = await resolve_artifact_for_target(
                 session,
@@ -378,141 +363,44 @@ async def deploy_version_to_project_devices(
         eligible.append((device, found_artifact, online))
 
     if not eligible:
-        return [], skipped
-
-    def _is_stalled_in_flight(dev: Device, snap: DeploySnapshot | None) -> bool:
-        if snap is None or snap.artifact_version != version or snap.is_terminal:
-            return False
-        if is_online(dev, now=now, tolerance=settings.presence_tolerance):
-            return False
-        return (now - snap.at).total_seconds() >= settings.confirm_timeout_s
-
-    def _canary_priority(
-        item: tuple[Device, ResolvedArtifact, bool],
-    ) -> tuple[int, int, int, int, str]:
-        dev, _, online = item
-        snap = snapshots.get(dev.device_id)
-        in_flight_this_ver = (
-            snap is not None
+        any_in_flight = any(
+            (snap := snapshots.get(d.device_id)) is not None
             and snap.artifact_version == version
             and not snap.is_terminal
-            and not _is_stalled_in_flight(dev, snap)
+            for d in devices
         )
-        return (
-            0 if in_flight_this_ver else 1,
-            0 if online else 1,
-            0 if dev.is_dev else 1,
-            0 if str(dev.power_class) == "always_on" else 1,
-            dev.device_id,
-        )
-
-    by_target: dict[str, list[tuple[Device, ResolvedArtifact, bool]]] = {}
-    for item in eligible:
-        by_target.setdefault(item[0].platform_type, []).append(item)
-
-    post_canary: list[tuple[Device, ResolvedArtifact, bool]] = []
-    for plat in sorted(by_target):
-        plat_ordered = sorted(by_target[plat], key=_canary_priority)
-        # Also check whether another board of `plat` in the cohort is ALREADY in-flight as canary!
-        plat_eligible_ids = {d.device_id for d, _, _ in plat_ordered}
-        existing_plat_canary = next(
-            (
-                d.device_id
-                for d in all_project_devices
-                if d.platform_type == plat
-                and d.device_id not in plat_eligible_ids
-                and (snap := snapshots.get(d.device_id)) is not None
-                and snap.artifact_version == version
-                and not snap.is_terminal
-                and not _is_stalled_in_flight(d, snap)
-            ),
-            None,
-        )
-        if canary and plat not in confirmed_targets:
-            if existing_plat_canary is not None:
-                for dev, _, _ in plat_ordered:
-                    skipped[dev.device_id] = (
-                        f"waiting for canary {existing_plat_canary} to confirm {version}"
-                    )
-            elif len(plat_ordered) > 1:
-                canary_item = plat_ordered[0]
-                canary_id = canary_item[0].device_id
-                for dev, _, _ in plat_ordered[1:]:
-                    skipped[dev.device_id] = f"waiting for canary {canary_id} to confirm {version}"
-                post_canary.append(canary_item)
-            else:
-                post_canary.extend(plat_ordered)
-        else:
-            post_canary.extend(plat_ordered)
-
-    if not post_canary:
+        if not any_in_flight:
+            await close_matching_rollouts(
+                session,
+                project_id=project_id,
+                version=version,
+                target_filter=target_filter,
+                target_chip=target_chip,
+                group_id=group_id,
+                policy_id=policy_id,
+                status_value="completed",
+                reason=None,
+            )
+        if isinstance(session, AsyncSession):
+            await session.commit()
         return [], skipped
 
-    eligible_ids = {dev.device_id for dev, _, _ in post_canary}
-    active_in_flight = 0
-    in_flight_by_link: dict[str, int] = {}
-    in_flight_by_parent: dict[str, int] = {}
-    for d in all_project_devices:
-        if d.device_id in eligible_ids:
-            continue
-        snap = snapshots.get(d.device_id)
-        if (
-            snap is not None
-            and snap.artifact_version == version
-            and not snap.is_terminal
-            and not _is_stalled_in_flight(d, snap)
-            and (
-                snap.state != "requested"
-                or is_online(d, now=now, tolerance=settings.presence_tolerance)
-            )
-        ):
-            active_in_flight += 1
-            in_flight_by_link[d.link_type] = in_flight_by_link.get(d.link_type, 0) + 1
-            if d.parent_device_id:
-                in_flight_by_parent[d.parent_device_id] = (
-                    in_flight_by_parent.get(d.parent_device_id, 0) + 1
-                )
-
-    effective_cap = max(1, max_parallel)
-    ordered = sorted(post_canary, key=_canary_priority)
-    wave_items: list[tuple[Device, ResolvedArtifact, bool]] = []
-    for dev, found_art, online in ordered:
-        if active_in_flight >= effective_cap:
-            skipped[dev.device_id] = f"queued for next wave (max_parallel={effective_cap})"
-            continue
-        link_cap = min(
-            effective_cap,
-            LINK_AIRTIME_MAX_PARALLEL.get(dev.link_type, effective_cap),
-        )
-        if in_flight_by_link.get(dev.link_type, 0) >= link_cap:
-            skipped[dev.device_id] = (
-                f"queued for next wave (airtime cap={link_cap} on {dev.link_type} link)"
-            )
-            continue
-        if dev.parent_device_id:
-            gw_cap = min(effective_cap, PARENT_GATEWAY_MAX_PARALLEL)
-            if in_flight_by_parent.get(dev.parent_device_id, 0) >= gw_cap:
-                skipped[dev.device_id] = (
-                    f"queued for next wave (gateway {dev.parent_device_id} airtime cap={gw_cap})"
-                )
-                continue
-        wave_items.append((dev, found_art, online))
-        active_in_flight += 1
-        in_flight_by_link[dev.link_type] = in_flight_by_link.get(dev.link_type, 0) + 1
-        if dev.parent_device_id:
-            in_flight_by_parent[dev.parent_device_id] = (
-                in_flight_by_parent.get(dev.parent_device_id, 0) + 1
-            )
-
+    wave_items = select_rollout_wave(
+        eligible=eligible,
+        all_project_devices=all_project_devices,
+        snapshots=snapshots,
+        confirmed_targets=confirmed_targets,
+        version=version,
+        canary=canary,
+        max_parallel=max_parallel,
+        now=now,
+        settings=settings,
+        skipped=skipped,
+    )
     if not wave_items:
+        if isinstance(session, AsyncSession):
+            await session.commit()
         return [], skipped
-
-    if sent_by_override is not None:
-        sent_by = sent_by_override
-    elif admin is not None:
-        sent_by = await _sender_for(session, admin)
-    else:
-        sent_by = DeploySender("system", "rollout", None)
 
     rollout_meta: dict[str, Any] = {
         "target_filter": target_filter,
@@ -522,6 +410,8 @@ async def deploy_version_to_project_devices(
         "target_chip": target_chip,
         "group_id": str(group_id) if group_id is not None else None,
     }
+    if policy_id is not None:
+        rollout_meta["policy_id"] = str(policy_id)
     url_builder = mint_url or _default_mint_url
     deployed: list[DeployAccepted] = []
 
@@ -703,6 +593,41 @@ async def advance_project_rollout_on_confirm(
     target_chip = str(raw_chip) if isinstance(raw_chip, str) else None
     raw_group = rollout_cfg.get("group_id")
     group_id = uuid.UUID(raw_group) if isinstance(raw_group, str) and raw_group else None
+    raw_policy = rollout_cfg.get("policy_id")
+    policy_id = uuid.UUID(raw_policy) if isinstance(raw_policy, str) and raw_policy else None
+
+    _, is_closed, started_at = await resolve_rollout_for_confirm(
+        session,
+        project_id=resolved_device.project_id,
+        version=req.artifact_version,
+        target_filter=target_filter,
+        target_chip=target_chip,
+        group_id=group_id,
+        policy_id=policy_id,
+        fallback_started_at=req.at,
+    )
+    if is_closed:
+        return []
+
+    from fleetforge.deploy_policies import (
+        advance_project_policies_for_version,
+        group_is_policy_governed,
+    )
+
+    if policy_id is not None or await group_is_policy_governed(
+        session,
+        project_id=resolved_device.project_id,
+        version=req.artifact_version,
+        group_id=group_id,
+    ):
+        return await advance_project_policies_for_version(
+            session,
+            project_id=resolved_device.project_id,
+            version=req.artifact_version,
+            settings=settings,
+            publisher=publisher,
+            target_policy_id=policy_id,
+        )
 
     deployed, _ = await deploy_version_to_project_devices(
         session,
@@ -721,9 +646,8 @@ async def advance_project_rollout_on_confirm(
         max_parallel=max_parallel,
         sent_by_override=req.sent_by,
         republish_in_flight=False,
+        rollout_started_at=started_at,
     )
-    from fleetforge.deploy_policies import advance_project_policies_for_version
-
     policy_promoted = await advance_project_policies_for_version(
         session,
         project_id=resolved_device.project_id,
@@ -836,31 +760,3 @@ async def republish_open_requested_on_wake(
     )
     await publisher.publish(device_id, payload)
     return True
-
-
-async def reconcile_open_rollouts(
-    session: AsyncSession,
-    *,
-    settings: Settings,
-    publisher: CommandPublisher,
-) -> list[DeployAccepted]:
-    """Advance any confirmed cohort rollout whose confirm event was missed across a restart (`A-3`)."""
-    if (
-        isinstance(publisher, NullCommandPublisher)
-        or not settings.artifact_url_secret
-        or not settings.public_base_url
-    ):
-        return []
-
-    rows = (await session.execute(_RECONCILE_CANDIDATES_SQL)).all()
-    advanced_total: list[DeployAccepted] = []
-    for row in rows:
-        advanced = await advance_project_rollout_on_confirm(
-            session,
-            device_id=str(row.device_id),
-            cmd_id=str(row.cmd_id),
-            settings=settings,
-            publisher=publisher,
-        )
-        advanced_total.extend(advanced)
-    return advanced_total

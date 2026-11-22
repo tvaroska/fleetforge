@@ -143,12 +143,6 @@ async def create_build(
                 "'-', starting with a letter or digit"
             ),
         )
-    if not ({"admin", "write:artifacts", "deploy"} & set(admin.scopes)):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="insufficient permissions",
-        )
-
     try:
         idf_image = resolve_pinned_idf_image(body.target)
     except ValueError as exc:
@@ -160,6 +154,7 @@ async def create_build(
             admin,
             project_slug=slug,
             min_role=ProjectRole.OPERATOR,
+            required_scope=("write:artifacts", "deploy"),
         )
         catalog = await load_layout_catalog(session)
         if body.partition_layout not in catalog.layouts:
@@ -238,17 +233,13 @@ async def cancel_build(
     admin: AdminDep,
     sessionmaker: SessionMakerDep,
 ) -> BuildJobSummary:
-    if not ({"admin", "write:artifacts", "deploy"} & set(admin.scopes)):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="insufficient permissions",
-        )
     async with sessionmaker() as session:
         project = await resolve_project_for_request(
             session,
             admin,
             project_slug=slug,
             min_role=ProjectRole.OPERATOR,
+            required_scope=("write:artifacts", "deploy"),
         )
         job = await session.get(BuildJob, build_id)
         if job is None or job.project_id != project.id:
@@ -285,17 +276,13 @@ async def retry_build(
         Query(description="Execute the retried build job immediately"),
     ] = False,
 ) -> BuildJobSummary:
-    if not ({"admin", "write:artifacts", "deploy"} & set(admin.scopes)):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="insufficient permissions",
-        )
     async with sessionmaker() as session:
         project = await resolve_project_for_request(
             session,
             admin,
             project_slug=slug,
             min_role=ProjectRole.OPERATOR,
+            required_scope=("write:artifacts", "deploy"),
         )
         prev = await session.get(BuildJob, build_id)
         if prev is None or prev.project_id != project.id:
