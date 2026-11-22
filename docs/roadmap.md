@@ -11,6 +11,7 @@ Source specs: [prd.md](../spec/prd.md) · [design/architecture.md](../design/arc
 | # | Milestone | Done when | Target |
 | :--- | :--- | :--- | :--- |
 | 1 | **v0.9.3** review findings of 2026-11-21 | Every item in its section is fixed and its named test passes; the gate passes with PostgreSQL up and 0 skipped; the four "verify first" checks (`A-25` item 2, `A-27`, `D-22`, `D-23`) are run and recorded; released as `v0.9.3`. | 31 items (34 findings); needs k3s CNPG PostgreSQL (`TEST_DATABASE_URL`), Docker, QEMU and an ESP-IDF toolchain |
+| 2 | **v0.9.4** full-stack CI, browser E2E & migration safety | Concurrent Alembic rollouts are advisory-locked, `cloudbuild.yaml` runs full `api` + `ingestor` + `mosquitto` + `frontend` E2E and Playwright browser suites automatically, fakes pass parameterized Port-conformance tests, and `AGENTS.md` enforces E2E/prod → unit escape analysis. | `v0.9.4` (4 items, ~2.25d) |
 
 ## v0.9.3: review findings of 2026-11-21
 
@@ -72,6 +73,23 @@ Not reachable on the live topology: without `git` the fetch fails first (ran). R
 ### P4
 
 - [ ] **A-34, D-29, T-25 · Ideas.** Name the selected build and simulation backend in `/v1/readyz`; a compose profile for the workers; nightly sanitizer and differential runs of the three delta decoders; a capability table read by a test; a nightly mutation run with PostgreSQL up; `--durations=15` in the gate output.
+
+## Milestone 2 — v0.9.4: Full-Stack CI, Browser E2E & Migration Safety
+
+Close the remaining end-to-end, browser, and concurrent-migration gaps identified in the 2026-11-22 GKE testing audit (building on `T-17` gate unification and `T-26` k3s CNPG test DB in `v0.9.3` above).
+
+- [ ] **T-27 (P0, 0.25d) · Advisory-lock `alembic upgrade head` across multi-replica rollouts**
+  Files: [`docker/entrypoint.sh`](../docker/entrypoint.sh), [`alembic/env.py`](../alembic/env.py), [`tests/test_schema.py`](../tests/test_schema.py)
+  Guard `RUN_MIGRATIONS=true` startup migrations with a PostgreSQL session advisory lock (`pg_advisory_lock`) so `replicas: 2` (`maxSurge: 1`) rollouts of `fleetforge-api` cannot race `alembic_version`. Verify: add a concurrent two-process migration test in `tests/test_schema.py` against PostgreSQL 17 with 0 skipped.
+- [ ] **T-28 (P1, 0.75d) · Full-stack `api` + `ingestor` + `mosquitto` + `frontend` E2E step in `cloudbuild.yaml`**
+  Files: [`cloudbuild.yaml`](../cloudbuild.yaml), [`scripts/selftest_window_e2e.py`](../scripts/selftest_window_e2e.py)
+  Expand `cloudbuild.yaml` beyond the current `fleetforge-api` + `fleetforge-frontend` `/v1/healthz` smoke to boot `mosquitto` and `fleetforge-ingestor` alongside `ci-postgres` + `ci-minio` and execute `scripts/selftest_window_e2e.py` (with simulated boards) on release builds. Verify: Cloud Build passes full simulated OTA upload → MQTT stage → ingestor → rollback/confirm flow end-to-end.
+- [ ] **T-29 (P1, 0.75d) · Wire real-Chromium Playwright E2E scripts into CI / k3s staging**
+  Files: [`cloudbuild.yaml`](../cloudbuild.yaml), [`frontend/package.json`](../frontend/package.json), [`frontend/scripts/update-flow-e2e.mjs`](../frontend/scripts/update-flow-e2e.mjs), [`frontend/scripts/commands-e2e.mjs`](../frontend/scripts/commands-e2e.mjs), [`frontend/scripts/device-log-e2e.mjs`](../frontend/scripts/device-log-e2e.mjs), [`frontend/scripts/fleet-health-e2e.mjs`](../frontend/scripts/fleet-health-e2e.mjs)
+  Remove the manual global `PLAYWRIGHT_MODULE` + local `just up` prerequisite by pinning Playwright in a CI/staging runner image and executing the 4 real-Chromium dashboard E2E scripts automatically against the live stack (in Cloud Build and/or k3s staging once `services` `S4-infra-39` lands). Verify: all 4 `*-e2e.mjs` suites exit `0` automatically without manual host setup.
+- [ ] **T-30 (P1, 0.5d) · Populated-data migration test, Port-conformance fakes (`T-8`), and E2E → unit escape-analysis rule**
+  Files: [`tests/conftest.py`](../tests/conftest.py), `tests/contracts/test_object_store_contract.py` (new), [`tests/test_schema.py`](../tests/test_schema.py), [`AGENTS.md`](../AGENTS.md)
+  Promote `T-8` (parameterized `ObjectStore` and `CommandPublisher` Port-conformance suites over both fakes and MinIO/real adapters), add a populated-rows Alembic upgrade/downgrade test (complementing k3s `--from-prod-backup` in `S4-infra-39`), and add the E2E/staging/prod → unit escape-analysis checklist to `AGENTS.md`. Verify: contract suites pass across fakes + MinIO and `bash scripts/ci_gate.sh` passes with 0 skipped.
 
 ## Unscheduled backlog
 
