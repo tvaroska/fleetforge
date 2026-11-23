@@ -20,7 +20,6 @@
     "frontend/src/boardConsole.ts": 1177,
     "scripts/lib_quickstart.py": 1949,
     "scripts/selftest_window_e2e.py": 858,
-    "src/fleetforge/cli.py": 1277,
     "src/fleetforge/simulator/device.py": 2202
   },
   "narration_comments": 71

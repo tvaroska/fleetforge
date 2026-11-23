@@ -36,6 +36,7 @@ from fleetforge.ingestor.otel import (
 )
 from fleetforge.ingestor.protocol import AnnouncePayload, LogLine, TelemetrySample
 from fleetforge.secrets_crypto import decrypt_secret, encrypt_secret
+from tests.conftest import settings_for_tests
 from tests.test_broker_commands import DEVICE_ID, FakeMqttClient
 
 
@@ -779,10 +780,7 @@ class TestCli:
 
 class TestSecretsCryptoAndDeviceSecretsAuth:
     def test_encrypt_and_decrypt_secret_round_trip(self) -> None:
-        from fleetforge.config import Settings
-
-        settings = Settings(
-            database_url="postgresql+asyncpg://u:p@localhost/db",
+        settings = settings_for_tests(
             secrets_encryption_key="dedicated-test-secrets-encryption-key-01",
         )
         ciphertext = encrypt_secret("sk-live-rotated-key-42", settings)
@@ -1106,7 +1104,6 @@ class TestOtelQueueAndRateLimiterAndStagedRollout:
 
         from fleetforge.api.deps import AuthContext
         from fleetforge.api.routers.deploys import deploy_version_to_project_devices
-        from fleetforge.config import Settings
         from fleetforge.deploys import DeploySnapshot
         from fleetforge.firmware.manifest import BUILTIN_LAYOUTS
         from fleetforge.partition_profiles import LayoutCatalog
@@ -1158,8 +1155,7 @@ class TestOtelQueueAndRateLimiterAndStagedRollout:
             scopes=("deploy",),
             is_superadmin=True,
         )
-        settings = Settings(
-            database_url="postgresql+asyncpg://u:p@localhost/db",
+        settings = settings_for_tests(
             artifact_url_secret="s" * 32,
             public_base_url="https://fleet.example.com",
         )
@@ -1283,7 +1279,6 @@ class TestOtelQueueAndRateLimiterAndStagedRollout:
         from unittest.mock import AsyncMock
 
         from fleetforge.api.routers.deploys import advance_project_rollout_on_confirm
-        from fleetforge.config import Settings
         from fleetforge.deploys import DeploySender, DeploySnapshot, RequestedRollout
         from fleetforge.firmware.manifest import BUILTIN_LAYOUTS
         from fleetforge.partition_profiles import LayoutCatalog
@@ -1323,8 +1318,7 @@ class TestOtelQueueAndRateLimiterAndStagedRollout:
         )
         session.execute = AsyncMock(return_value=SimpleNamespace(first=lambda: art_row))
 
-        settings = Settings(
-            database_url="postgresql+asyncpg://u:p@localhost/db",
+        settings = settings_for_tests(
             artifact_url_secret="s" * 32,
             public_base_url="https://fleet.example.com",
         )
@@ -1403,11 +1397,9 @@ class TestOtelQueueAndRateLimiterAndStagedRollout:
         from unittest.mock import AsyncMock
 
         from fleetforge.api.routers.projects import _trigger_ci_webhook
-        from fleetforge.config import Settings
         from fleetforge.secrets_crypto import decrypt_secret, encrypt_secret
 
-        settings = Settings(
-            database_url="postgresql+asyncpg://u:p@localhost/db",
+        settings = settings_for_tests(
             artifact_url_secret="k" * 32,
         )
         raw_header = "Bearer ghp_super_secret_token"
@@ -1446,7 +1438,6 @@ class TestOtelQueueAndRateLimiterAndStagedRollout:
         import uuid
         from unittest.mock import AsyncMock
 
-        from fleetforge.config import Settings
         from fleetforge.ingestor.otel import (
             _project_otel_cache,
             _resolve_project_otel,
@@ -1456,8 +1447,7 @@ class TestOtelQueueAndRateLimiterAndStagedRollout:
 
         proj_id = uuid.uuid4()
         invalidate_project_otel_cache()
-        settings = Settings(
-            database_url="postgresql+asyncpg://u:p@localhost/db",
+        settings = settings_for_tests(
             artifact_url_secret="k" * 32,
         )
         enc_headers = encrypt_secret('{"Authorization": "Bearer secret-tok"}', settings)
@@ -1565,11 +1555,9 @@ class TestOtelQueueAndRateLimiterAndStagedRollout:
             effective_url_ttl_s,
             republish_open_requested_on_wake,
         )
-        from fleetforge.config import Settings
         from fleetforge.deploys import DeploySnapshot, DeployTransaction
 
-        settings = Settings(
-            database_url="postgresql+asyncpg://u:p@localhost/db",
+        settings = settings_for_tests(
             artifact_url_secret="s" * 32,
             public_base_url="https://fleet.example.com",
             signed_url_ttl_s=1800,
@@ -1660,7 +1648,6 @@ class TestOtelQueueAndRateLimiterAndStagedRollout:
         from fleetforge.api.routers.deploys import advance_project_rollout_on_confirm
         from fleetforge.api.routers.projects import cancel_project_deploy
         from fleetforge.api.schemas import ProjectDeployCancelRequest
-        from fleetforge.config import Settings
         from fleetforge.deploys import DeploySender, DeploySnapshot, RequestedRollout
         from fleetforge.firmware.manifest import BUILTIN_LAYOUTS
         from fleetforge.partition_profiles import LayoutCatalog
@@ -1736,8 +1723,7 @@ class TestOtelQueueAndRateLimiterAndStagedRollout:
         )
         session.execute = AsyncMock(return_value=SimpleNamespace(first=lambda: art_row))
 
-        settings = Settings(
-            database_url="postgresql+asyncpg://u:p@localhost/db",
+        settings = settings_for_tests(
             artifact_url_secret="s" * 32,
             public_base_url="https://fleet.example.com",
             confirm_timeout_s=120,
@@ -1980,7 +1966,6 @@ class TestCuj3PitTetheredDockAndVenueOffline:
         from fleetforge.api.deps import AuthContext
         from fleetforge.api.routers.devices import dock_sync_device
         from fleetforge.api.schemas import DockSyncRequest
-        from fleetforge.config import Settings
         from fleetforge.deploys import DeploySnapshot
         from fleetforge.signing import sign_digest
         from fleetforge.simulator.device import (
@@ -2170,8 +2155,7 @@ class TestCuj3PitTetheredDockAndVenueOffline:
             scopes=("deploy",),
             is_superadmin=True,
         )
-        settings = Settings(
-            database_url="postgresql+asyncpg://u:p@localhost/db",
+        settings = settings_for_tests(
             artifact_url_secret="s" * 32,
         )
 
@@ -2261,21 +2245,18 @@ class TestCuj3PitTetheredDockAndVenueOffline:
 
 class TestTrack1InfrastructureAndSecurityHardening:
     def test_multifernet_secret_rotation_fallback_and_signing_default_ring_flag(self) -> None:
-        from fleetforge.config import Settings
         from fleetforge.secrets_crypto import decrypt_secret, encrypt_secret
         from fleetforge.signing import DEFAULT_PRIMARY_PUBLIC_KEY_PEM, SigningKeyRing
 
         # 1. Encrypt under legacy ARTIFACT_URL_SECRET only
-        legacy_settings = Settings(
-            database_url="postgresql+asyncpg://u:p@localhost/db",
+        legacy_settings = settings_for_tests(
             artifact_url_secret="legacy-artifact-url-secret-0001",
             secrets_encryption_key=None,
         )
         token = encrypt_secret("wifi-psk-top-secret", legacy_settings)
 
         # 2. Introduce SECRETS_ENCRYPTION_KEY while keeping ARTIFACT_URL_SECRET in MultiFernet ring
-        dual_settings = Settings(
-            database_url="postgresql+asyncpg://u:p@localhost/db",
+        dual_settings = settings_for_tests(
             artifact_url_secret="legacy-artifact-url-secret-0001",
             secrets_encryption_key="dedicated-secrets-key-0002",
         )
@@ -2283,8 +2264,7 @@ class TestTrack1InfrastructureAndSecurityHardening:
 
         # 3. Re-encrypting under dual_settings uses primary SECRETS_ENCRYPTION_KEY, surviving ARTIFACT_URL_SECRET rotation
         rotated_token = encrypt_secret("wifi-psk-top-secret", dual_settings)
-        post_rotate_settings = Settings(
-            database_url="postgresql+asyncpg://u:p@localhost/db",
+        post_rotate_settings = settings_for_tests(
             artifact_url_secret="brand-new-artifact-url-secret-0003",
             secrets_encryption_key="dedicated-secrets-key-0002",
         )
@@ -2327,7 +2307,6 @@ class TestTrack1InfrastructureAndSecurityHardening:
         from fastapi import HTTPException
 
         from fleetforge.api.routers.device_secrets import get_device_secrets
-        from fleetforge.config import Settings
         from fleetforge.db.models import Device, Project, ProjectSecret
 
         pw = "device-mqtt-pass-123"
@@ -2368,8 +2347,7 @@ class TestTrack1InfrastructureAndSecurityHardening:
 
         auth_b64 = base64.b64encode(f"{DEVICE_ID}:{pw}".encode()).decode("ascii")
         req = SimpleNamespace(headers={"Authorization": f"Basic {auth_b64}"})
-        settings = Settings(
-            database_url="postgresql+asyncpg://u:p@localhost/db",
+        settings = settings_for_tests(
             artifact_url_secret="k" * 32,
         )
 
@@ -2390,7 +2368,6 @@ class TestTrack1InfrastructureAndSecurityHardening:
         from unittest.mock import AsyncMock
 
         from fleetforge.api.routers.deploys import advance_project_rollout_on_confirm
-        from fleetforge.config import Settings
         from fleetforge.deploys import DeploySender, DeploySnapshot, RequestedRollout
         from fleetforge.firmware.manifest import BUILTIN_LAYOUTS
         from fleetforge.partition_profiles import LayoutCatalog
@@ -2427,8 +2404,7 @@ class TestTrack1InfrastructureAndSecurityHardening:
             artifact_type="app",
         )
         session.execute = AsyncMock(return_value=SimpleNamespace(first=lambda: art_row))
-        settings = Settings(
-            database_url="postgresql+asyncpg://u:p@localhost/db",
+        settings = settings_for_tests(
             artifact_url_secret="s" * 32,
             public_base_url="https://fleet.example.com",
         )
@@ -2713,7 +2689,6 @@ async def test_publish_failure_does_not_halt_a_retry_of_the_cohort() -> None:
     from unittest.mock import AsyncMock
 
     from fleetforge.api.deps import AuthContext
-    from fleetforge.config import Settings
     from fleetforge.deploys import DeploySnapshot
     from fleetforge.firmware.manifest import BUILTIN_LAYOUTS
     from fleetforge.partition_profiles import LayoutCatalog
@@ -2748,8 +2723,7 @@ async def test_publish_failure_does_not_halt_a_retry_of_the_cohort() -> None:
         artifact_type="app",
     )
     session.execute = AsyncMock(return_value=SimpleNamespace(first=lambda: art_row))
-    settings = Settings(
-        database_url="postgresql+asyncpg://u:p@localhost/db",
+    settings = settings_for_tests(
         artifact_url_secret="s" * 32,
         public_base_url="https://fleet.example.com",
     )
@@ -2812,7 +2786,6 @@ async def test_mid_wave_publish_failure_closes_every_unpublished_intent() -> Non
     from fastapi import HTTPException
 
     from fleetforge.api.deps import AuthContext
-    from fleetforge.config import Settings
     from fleetforge.firmware.manifest import BUILTIN_LAYOUTS
     from fleetforge.partition_profiles import LayoutCatalog
     from fleetforge.rollout import deploy_version_to_project_devices
@@ -2849,8 +2822,7 @@ async def test_mid_wave_publish_failure_closes_every_unpublished_intent() -> Non
         artifact_type="app",
     )
     session.execute = AsyncMock(return_value=SimpleNamespace(first=lambda: art_row))
-    settings = Settings(
-        database_url="postgresql+asyncpg://u:p@localhost/db",
+    settings = settings_for_tests(
         artifact_url_secret="s" * 32,
         public_base_url="https://fleet.example.com",
     )
@@ -2916,7 +2888,6 @@ async def test_canary_on_one_target_does_not_unlock_another() -> None:
     from unittest.mock import AsyncMock
 
     from fleetforge.api.deps import AuthContext
-    from fleetforge.config import Settings
     from fleetforge.firmware.manifest import BUILTIN_LAYOUTS
     from fleetforge.partition_profiles import LayoutCatalog
     from fleetforge.rollout import deploy_version_to_project_devices
@@ -2960,8 +2931,7 @@ async def test_canary_on_one_target_does_not_unlock_another() -> None:
         artifact_type="app",
     )
     session.execute = AsyncMock(return_value=SimpleNamespace(first=lambda: art_row))
-    settings = Settings(
-        database_url="postgresql+asyncpg://u:p@localhost/db",
+    settings = settings_for_tests(
         artifact_url_secret="s" * 32,
         public_base_url="https://fleet.example.com",
     )
@@ -3009,20 +2979,17 @@ def test_decrypt_with_missing_key_fails_closed() -> None:
     import uuid
     from unittest.mock import AsyncMock, MagicMock
 
-    from fleetforge.config import Settings
     from fleetforge.ingestor.otel import _resolve_project_otel, invalidate_project_otel_cache
     from fleetforge.secrets_crypto import SecretKeyNotConfiguredError
 
-    unconfigured = Settings(
-        database_url="postgresql+asyncpg://u:p@localhost/db",
+    unconfigured = settings_for_tests(
         secrets_encryption_key=None,
         artifact_url_secret=None,
     )
     with pytest.raises(SecretKeyNotConfiguredError):
         encrypt_secret("secret-value", unconfigured)
 
-    keyed = Settings(
-        database_url="postgresql+asyncpg://u:p@localhost/db",
+    keyed = settings_for_tests(
         secrets_encryption_key="valid-encryption-key-0123456789",
     )
     token = encrypt_secret("Authorization: Bearer top-secret", keyed)
@@ -3055,3 +3022,87 @@ def test_decrypt_with_missing_key_fails_closed() -> None:
     session.get = AsyncMock(return_value=proj)
     resolved = asyncio.run(_resolve_project_otel(session, dev, settings=unconfigured))
     assert resolved is None
+
+
+def test_gate_fails_when_database_tests_cannot_run() -> None:
+    """T-17 / T-20 / T-26: unreachable Postgres fails fast once, CI refuses FF_ALLOW_DB_SKIP=1,
+    and the skip-allowlist guard catches any DB skip or unallowlisted skip."""
+    import os
+    import subprocess
+    import sys
+
+    from scripts.check_pytest_skips import validate_pytest_output
+
+    repo_root = Path(__file__).resolve().parents[1]
+    gate_script = repo_root / "scripts" / "gate.sh"
+    ci_gate_script = repo_root / "scripts" / "ci_gate.sh"
+
+    assert "TestCiCdDatabaseAndApi" not in gate_script.read_text(encoding="utf-8")
+    assert "TestCiCdDatabaseAndApi" not in ci_gate_script.read_text(encoding="utf-8")
+    assert "gate.sh" in ci_gate_script.read_text(encoding="utf-8")
+
+    base_env = dict(os.environ)
+    base_env.pop("FF_ALLOW_DB_SKIP", None)
+    base_env.pop("CI", None)
+    base_env["TEST_DATABASE_URL"] = "postgresql+asyncpg://unused:unused@127.0.0.1:1/fleetforge_test"
+
+    # Unreachable PostgreSQL exits immediately via pytest.exit (single exit, not per-test failures).
+    proc_no_db = subprocess.run(  # noqa: S603
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            "-rs",
+            "-p",
+            "no:cacheprovider",
+            "tests/test_schema.py",
+        ],
+        cwd=repo_root,
+        env=base_env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    combined_no_db = proc_no_db.stdout + proc_no_db.stderr
+    assert proc_no_db.returncode == 1, combined_no_db
+    assert "Cannot reach PostgreSQL" in combined_no_db
+    assert "TEST_DATABASE_URL" in combined_no_db
+    assert "btvaroska" in combined_no_db
+
+    # CI must refuse FF_ALLOW_DB_SKIP=1 at the gate boundary before running tests.
+    ci_env = {**base_env, "CI": "1", "FF_ALLOW_DB_SKIP": "1"}
+    proc_ci_skip = subprocess.run(  # noqa: S603
+        ["bash", str(gate_script)],  # noqa: S607
+        cwd=repo_root,
+        env=ci_env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+    assert proc_ci_skip.returncode == 1
+    assert "FF_ALLOW_DB_SKIP=1 is forbidden when CI is set" in (
+        proc_ci_skip.stdout + proc_ci_skip.stderr
+    )
+
+    # Even if a fixture mutant converts pytest.exit into pytest.skip, the skip allowlist rejects it.
+    mutated_skip_out = (
+        "SKIPPED [1] tests/conftest.py:165: Cannot reach PostgreSQL at localhost:5433\n"
+        "1855 passed, 1 skipped in 4.20s\n"
+    )
+    violations = validate_pytest_output(mutated_skip_out, {})
+    assert violations, "expected skip allowlist to reject a PostgreSQL skip"
+    assert any("Cannot reach PostgreSQL" in v for v in violations)
+
+    # Allowlisted non-DB skips (2 absent bundles + 10 opt-in MinIO) pass when FF_RUN_MINIO_TESTS!=1.
+    clean_out = (
+        "SKIPPED [2] tests/test_agent_power_and_size.py:403: no bundle in agent/dist — run `just agent-build-all`\n"
+        "SKIPPED [4] tests/test_artifact_download_minio.py: MinIO tests opt-in via FF_RUN_MINIO_TESTS=1 (target http://localhost:9000)\n"
+        "SKIPPED [6] tests/test_object_store_minio.py: MinIO tests opt-in via FF_RUN_MINIO_TESTS=1 (target http://localhost:9000)\n"
+        "2625 passed, 12 skipped in 12.34s\n"
+    )
+    assert validate_pytest_output(clean_out, {}) == []
+    # When FF_RUN_MINIO_TESTS=1, MinIO skips are no longer allowlisted.
+    assert validate_pytest_output(clean_out, {"FF_RUN_MINIO_TESTS": "1"}) != []

@@ -28,7 +28,7 @@ the `upsert` rule are testable on their own.
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from typing import Final, Literal
 
@@ -107,7 +107,12 @@ class AgentIndex(BaseModel):
                 return entry
         return None
 
-    def upsert(self, entry: AgentIndexEntry) -> AgentIndex:
+    def upsert(
+        self,
+        entry: AgentIndexEntry,
+        *,
+        now: Callable[[], str] = utc_now,
+    ) -> AgentIndex:
         """A new index with `entry` current for its key. Pure — nothing is mutated.
 
         The displaced entry is pushed onto the new one's `superseded`, newest first, and
@@ -142,7 +147,7 @@ class AgentIndex(BaseModel):
         others = [e for e in self.bundles if e.key != entry.key]
         return AgentIndex(
             schema=INDEX_SCHEMA,
-            updated_at=utc_now(),
+            updated_at=now(),
             bundles=sorted([*others, replacement], key=lambda e: e.key),
         )
 

@@ -1147,7 +1147,7 @@ class TestPrecheck:
             ({"presence_reported": False}, ["offline"]),
             ({"presence_reported": None, "last_seen": None}, ["never_connected"]),
             (
-                {"power_class": "sleepy", "expected_wake_interval_s": 60, "last_seen": now_utc()},
+                {"power_class": "sleepy", "expected_wake_interval_s": 60, "last_seen": "now"},
                 ["sleepy"],
             ),
         ],
@@ -1161,7 +1161,10 @@ class TestPrecheck:
         overrides: dict[str, Any],
         codes: list[str],
     ) -> None:
-        await add_device(db, **overrides)
+        resolved: dict[str, Any] = {
+            k: (now_utc() if k == "last_seen" and v == "now" else v) for k, v in overrides.items()
+        }
+        await add_device(db, **resolved)
         await add_artifact(db)
         token = await login_admin(admin_app)
 

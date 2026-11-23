@@ -97,6 +97,7 @@ steps:
       - S3_ACCESS_KEY=fleetforge
       - S3_SECRET_KEY=fleetforge-dev-only
       - S3_BUCKET=fleetforge
+      - CI=1
       - FF_SKIP_FRONTEND_GATE=1
     args:
       - -c
@@ -104,7 +105,7 @@ steps:
         set -euo pipefail
         uv sync --frozen --no-install-project
         /workspace/.venv/bin/python -c "import boto3; boto3.client('s3', endpoint_url='http://ci-minio:9000', aws_access_key_id='fleetforge', aws_secret_access_key='fleetforge-dev-only', region_name='us-east-1').create_bucket(Bucket='fleetforge')"
-        bash /workspace/scripts/ci_gate.sh
+        bash /workspace/scripts/gate.sh
 
   # ------------------------------------------------------------------------- #
   # 3. Frontend TypeScript Check, Vitest Suite & Production Bundle Build (t=0)#

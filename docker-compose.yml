@@ -83,7 +83,7 @@ services:
   # Database. Seeded by R0-db-1; unchanged except for joining `backend`.
   # ---------------------------------------------------------------------------
   postgres:
-    image: postgres:16
+    image: postgres:17
     container_name: fleetforge-postgres
     restart: unless-stopped
     environment:

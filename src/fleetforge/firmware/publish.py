@@ -24,6 +24,7 @@ that separation is the whole point of the feature.
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from pydantic import ValidationError
@@ -103,6 +104,7 @@ async def publish_bundle(
     bundle: LocalBundle,
     *,
     index_key: str = DEFAULT_INDEX_KEY,
+    now: Callable[[], str] = utc_now,
 ) -> PublishResult:
     """Upload every part and the manifest, then point the index at it.
 
@@ -142,9 +144,9 @@ async def publish_bundle(
         partition_layout=bundle.partition_layout,
         agent_version=bundle.agent_version,
         manifest_sha256=manifest_sha256,
-        published_at=utc_now(),
+        published_at=now(),
     )
-    updated = index.upsert(entry)
+    updated = index.upsert(entry, now=now)
     await write_index(store, updated, index_key)
 
     logger.info(
@@ -172,6 +174,7 @@ async def rollback(
     *,
     layout: str | None = None,
     index_key: str = DEFAULT_INDEX_KEY,
+    now: Callable[[], str] = utc_now,
 ) -> AgentIndex:
     """Make a previously published bundle current again. One object write, no rebuild.
 
@@ -223,12 +226,12 @@ async def rollback(
         partition_layout=entry.partition_layout,
         agent_version=manifest.agent_version,
         manifest_sha256=manifest_sha256,
-        published_at=utc_now(),
+        published_at=now(),
         # Empty on purpose: `upsert` pushes the displaced (current) entry onto the history
         # and carries the rest of it over, dropping the digest being restored.
         superseded=[],
     )
-    updated = index.upsert(replacement)
+    updated = index.upsert(replacement, now=now)
     await write_index(store, updated, index_key)
     logger.info(
         "rolled %s/%s back to %s (%s)",

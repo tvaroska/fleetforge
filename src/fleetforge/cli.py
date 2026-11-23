@@ -32,105 +32,72 @@ Git-driven fast iteration loop (`CI-CD-cli-1` / CUJ-2):
 from __future__ import annotations
 
 import argparse
-import datetime as dt
-import getpass
-import http.cookies
-import io
-import json
 import os
-import re
-import socket
-import subprocess
 import sys
-import tarfile
-import urllib.error
-import urllib.parse
-import urllib.request
 from pathlib import Path
 from typing import Any
 
 from fleetforge import __version__
+from fleetforge.cli_client import (
+    DEFAULT_FLEETFORGE_URL,
+    DEFAULT_PUBLIC_REPO_URL,
+    SUPPORTED_IDF_TARGETS,
+    _extract_session_cookie,
+    _git_output,
+    _login_with_password,
+    _request_json,
+    _update_dotenv,
+    build_artifact_upload_url,
+    default_credentials_path,
+    detect_git_metadata,
+    load_credentials,
+    resolve_url_and_token,
+    save_credentials,
+)
+from fleetforge.cli_client import (
+    resolve_project as _resolve_project_impl,
+)
+from fleetforge.cli_commands import (
+    COMMAND_HANDLERS,
+    UNAUTHENTICATED_COMMANDS,
+    CliContext,
+    _format_device_table,
+)
+from fleetforge.cli_templates import (
+    _fetch_remote_template_files,
+    _github_tarball_url,
+    _sanitize_app_name,
+    _sanitize_project_slug,
+    load_template_files,
+    render_template_project,
+)
 
-DEFAULT_PUBLIC_REPO_URL = "https://github.com/tvaroska/fleetforge"
-DEFAULT_FLEETFORGE_URL = "https://bingo.tvaroska.sk"
-SUPPORTED_IDF_TARGETS = ("esp32s3", "esp32c6", "esp32", "esp32c3")
-
-
-def default_credentials_path() -> Path:
-    """Return the path to the local CLI credentials file (`0600`)."""
-    override = os.environ.get("FLEETFORGE_CREDENTIALS_FILE")
-    if override:
-        return Path(override).expanduser()
-    xdg = os.environ.get("XDG_CONFIG_HOME")
-    base = Path(xdg).expanduser() if xdg else (Path.home() / ".config")
-    return base / "fleetforge" / "credentials.json"
-
-
-def load_credentials(path: Path | None = None) -> dict[str, Any]:
-    """Load saved CLI credentials from disk, or return an empty dict."""
-    target = path or default_credentials_path()
-    if not target.is_file():
-        return {}
-    try:
-        data = json.loads(target.read_text(encoding="utf-8"))
-        return data if isinstance(data, dict) else {}
-    except (OSError, ValueError):
-        return {}
-
-
-def save_credentials(data: dict[str, Any], path: Path | None = None) -> Path:
-    """Write CLI credentials to disk with `0700` directory and `0600` file permissions."""
-    target = path or default_credentials_path()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        os.chmod(target.parent, 0o700)
-    except OSError:
-        pass
-    payload = json.dumps(data, indent=2) + "\n"
-    fd = os.open(str(target), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        fh.write(payload)
-    try:
-        os.chmod(target, 0o600)
-    except OSError:
-        pass
-    return target
-
-
-def resolve_url_and_token(
-    cli_url: str | None,
-    cli_token: str | None,
-    *,
-    default_url_fallback: str = "http://localhost:8000",
-    creds_path: Path | None = None,
-) -> tuple[str, str]:
-    """Resolve `(base_url, token)` from CLI flags -> environment -> `credentials.json`."""
-    creds = load_credentials(creds_path)
-    raw_profiles = creds.get("profiles")
-    profiles: dict[str, Any] = dict(raw_profiles) if isinstance(raw_profiles, dict) else {}
-
-    raw_url = cli_url or os.environ.get("FLEETFORGE_URL") or creds.get("default_url")
-    base_url = str(raw_url or default_url_fallback).rstrip("/")
-
-    raw_token = cli_token or os.environ.get("FLEETFORGE_TOKEN") or ""
-    if raw_token:
-        return base_url, raw_token
-
-    prof = profiles.get(base_url)
-    if isinstance(prof, dict) and isinstance(prof.get("token"), str) and prof["token"]:
-        return base_url, prof["token"]
-
-    default_prof_url = creds.get("default_url")
-    if isinstance(default_prof_url, str):
-        default_prof = profiles.get(default_prof_url.rstrip("/"))
-        if (
-            isinstance(default_prof, dict)
-            and isinstance(default_prof.get("token"), str)
-            and default_prof["token"]
-        ):
-            return base_url, default_prof["token"]
-
-    return base_url, ""
+__all__ = [
+    "DEFAULT_FLEETFORGE_URL",
+    "DEFAULT_PUBLIC_REPO_URL",
+    "SUPPORTED_IDF_TARGETS",
+    "_build_parser",
+    "_extract_session_cookie",
+    "_fetch_remote_template_files",
+    "_format_device_table",
+    "_git_output",
+    "_github_tarball_url",
+    "_login_with_password",
+    "_request_json",
+    "_sanitize_app_name",
+    "_sanitize_project_slug",
+    "_update_dotenv",
+    "build_artifact_upload_url",
+    "default_credentials_path",
+    "detect_git_metadata",
+    "load_credentials",
+    "load_template_files",
+    "main",
+    "render_template_project",
+    "resolve_project",
+    "resolve_url_and_token",
+    "save_credentials",
+]
 
 
 def resolve_project(
@@ -142,457 +109,19 @@ def resolve_project(
     query_server: bool = False,
 ) -> str | None:
     """Resolve project slug from flag/env -> saved CLI profile -> `/v1/auth/me`."""
-    if explicit_project:
-        return explicit_project
-    env_proj = os.environ.get("FLEETFORGE_PROJECT")
-    if env_proj:
-        return env_proj
-
-    creds = load_credentials(creds_path)
-    raw_profiles = creds.get("profiles")
-    profiles: dict[str, Any] = dict(raw_profiles) if isinstance(raw_profiles, dict) else {}
-    norm_url = base_url.rstrip("/")
-
-    prof = profiles.get(norm_url)
-    if isinstance(prof, dict):
-        proj_val = prof.get("project")
-        if isinstance(proj_val, str) and proj_val:
-            return proj_val
-
-    default_prof_url = creds.get("default_url")
-    if isinstance(default_prof_url, str):
-        default_prof = profiles.get(default_prof_url.rstrip("/"))
-        if isinstance(default_prof, dict):
-            def_proj_val = default_prof.get("project")
-            if isinstance(def_proj_val, str) and def_proj_val:
-                return def_proj_val
-
-    if query_server and token:
-        me_status, me_resp = _request_json("GET", f"{norm_url}/v1/auth/me", token=token)
-        if me_status == 200:
-            projs = me_resp.get("projects")
-            if isinstance(projs, list) and len(projs) == 1 and isinstance(projs[0], dict):
-                slug = projs[0].get("slug")
-                if isinstance(slug, str) and slug:
-                    return slug
-
-    return None
-
-
-def _extract_session_cookie(set_cookie_headers: list[str]) -> str | None:
-    """Extract the `ff_session` `ffa_...` token from `Set-Cookie` response headers."""
-    for header in set_cookie_headers:
-        cookie: http.cookies.SimpleCookie = http.cookies.SimpleCookie()
-        try:
-            cookie.load(header)
-            if "ff_session" in cookie and cookie["ff_session"].value:
-                return cookie["ff_session"].value
-        except http.cookies.CookieError:
-            pass
-        match = re.search(r"(?:^|;\s*|,\s*)ff_session=([^;\s,]+)", header)
-        if match:
-            return match.group(1)
-    return None
-
-
-def _login_with_password(
-    base_url: str,
-    username: str,
-    password: str,
-) -> tuple[int, dict[str, Any], str | None]:
-    """Authenticate against `POST /v1/auth/login` and return `(status, body, ff_session_token)`."""
-    url = f"{base_url.rstrip('/')}/v1/auth/login"
-    body = json.dumps({"username": username, "password": password}).encode("utf-8")
-    req = urllib.request.Request(
-        url,
-        data=body,
-        headers={
-            "Content-Type": "application/json",
-            "Content-Length": str(len(body)),
-        },
-        method="POST",
+    return _resolve_project_impl(
+        explicit_project,
+        base_url=base_url,
+        token=token,
+        creds_path=creds_path,
+        query_server=query_server,
+        request_json=_request_json,
     )
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            raw = resp.read().decode("utf-8")
-            parsed = json.loads(raw) if raw else {}
-            set_cookies = resp.headers.get_all("Set-Cookie") or []
-            token = _extract_session_cookie(set_cookies) or parsed.get("token")
-            return resp.status, parsed, token
-    except urllib.error.HTTPError as exc:
-        err_body = exc.read().decode("utf-8", errors="replace")
-        try:
-            parsed = json.loads(err_body)
-        except ValueError:
-            parsed = {"detail": err_body}
-        return exc.code, parsed, None
 
 
-def _update_dotenv(
-    env_path: Path,
-    updates: dict[str, str],
+def _add_auth_subparsers(
+    sub: argparse._SubParsersAction[Any], common: argparse.ArgumentParser
 ) -> None:
-    """Update or append `KEY=VALUE` lines in `env_path` (`0600`)."""
-    existing_lines: list[str] = []
-    if env_path.is_file():
-        existing_lines = env_path.read_text(encoding="utf-8").splitlines()
-
-    remaining = dict(updates)
-    out_lines: list[str] = []
-    for line in existing_lines:
-        stripped = line.strip()
-        if not stripped or stripped.startswith("#") or "=" not in line:
-            out_lines.append(line)
-            continue
-        key = line.split("=", 1)[0].strip()
-        if key in remaining:
-            out_lines.append(f"{key}={remaining.pop(key)}")
-        else:
-            out_lines.append(line)
-
-    for key, val in remaining.items():
-        out_lines.append(f"{key}={val}")
-
-    payload = "\n".join(out_lines) + "\n"
-    fd = os.open(str(env_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
-        fh.write(payload)
-    try:
-        os.chmod(env_path, 0o600)
-    except OSError:
-        pass
-
-
-def _git_output(args: list[str], cwd: Path | None = None) -> str | None:
-    """Run `git <args>` and return stripped stdout, or `None` if unavailable."""
-    try:
-        proc = subprocess.run(
-            ["git", *args],
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=5,
-        )
-    except OSError:
-        return None
-    if proc.returncode != 0:
-        return None
-    out = proc.stdout.strip()
-    return out if out else None
-
-
-def detect_git_metadata(cwd: Path | None = None) -> dict[str, str | None]:
-    """Detect `repo_url`, `branch`, `commit_sha`, and exact `tag` from a local git checkout."""
-    repo_url = _git_output(["config", "--get", "remote.origin.url"], cwd=cwd)
-    commit_sha = _git_output(["rev-parse", "HEAD"], cwd=cwd)
-    branch = _git_output(["rev-parse", "--abbrev-ref", "HEAD"], cwd=cwd)
-    if branch == "HEAD":
-        branch = os.environ.get("GITHUB_REF_NAME") or None
-    tag = _git_output(["describe", "--tags", "--exact-match"], cwd=cwd)
-    return {
-        "repo_url": repo_url,
-        "branch": branch,
-        "commit_sha": commit_sha,
-        "tag": tag,
-    }
-
-
-def build_artifact_upload_url(
-    base_url: str,
-    *,
-    target: str,
-    version: str,
-    partition_layout: str = "ab-4m-v1",
-    project: str | None = None,
-    repo_url: str | None = None,
-    branch: str | None = None,
-    commit_sha: str | None = None,
-    tag: str | None = None,
-    build_url: str | None = None,
-    test_passed: bool | None = None,
-) -> str:
-    """Construct the `POST /v1/artifact` URL with query parameters."""
-    params: dict[str, str] = {
-        "target": target,
-        "version": version,
-        "partition_layout": partition_layout,
-    }
-    if project:
-        params["project"] = project
-    if repo_url:
-        params["repo_url"] = repo_url
-    if branch:
-        params["branch"] = branch
-    if commit_sha:
-        params["commit_sha"] = commit_sha
-    if tag:
-        params["tag"] = tag
-    if build_url:
-        params["build_url"] = build_url
-    if test_passed is not None:
-        params["test_passed"] = "true" if test_passed else "false"
-    query = urllib.parse.urlencode(params)
-    return f"{base_url.rstrip('/')}/v1/artifact?{query}"
-
-
-def _request_json(
-    method: str,
-    url: str,
-    *,
-    token: str,
-    body: bytes | None = None,
-    content_type: str = "application/octet-stream",
-) -> tuple[int, dict[str, Any]]:
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": content_type,
-    }
-    if body is not None:
-        headers["Content-Length"] = str(len(body))
-    req = urllib.request.Request(url, data=body, headers=headers, method=method)
-    try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
-            raw = resp.read().decode("utf-8")
-            return resp.status, json.loads(raw) if raw else {}
-    except urllib.error.HTTPError as exc:
-        err_body = exc.read().decode("utf-8", errors="replace")
-        try:
-            parsed = json.loads(err_body)
-        except ValueError:
-            parsed = {"detail": err_body}
-        return exc.code, parsed
-
-
-def _sanitize_app_name(raw: str) -> str:
-    cleaned = re.sub(r"[^a-z0-9_]+", "_", raw.strip().lower()).strip("_")
-    if not cleaned or not cleaned[0].isalpha():
-        cleaned = f"app_{cleaned}" if cleaned else "board_app"
-    return cleaned[:32]
-
-
-def _sanitize_project_slug(raw: str) -> str:
-    cleaned = re.sub(r"[^a-z0-9-]+", "-", raw.strip().lower()).strip("-")
-    if not cleaned or not cleaned[0].isalnum():
-        cleaned = f"proj-{cleaned}" if cleaned else "default"
-    return cleaned[:64]
-
-
-def _github_tarball_url(repo_url: str, ref: str) -> str:
-    """Convert a GitHub repo URL (`https://github.com/owner/repo[.git]`) into a codeload tarball URL."""
-    stripped = repo_url.rstrip("/")
-    if stripped.endswith(".git"):
-        stripped = stripped[:-4]
-    parsed = urllib.parse.urlparse(stripped)
-    path_parts = [p for p in parsed.path.strip("/").split("/") if p]
-    if parsed.netloc in ("github.com", "www.github.com") and len(path_parts) >= 2:
-        owner, repo = path_parts[0], path_parts[1]
-        return f"https://codeload.github.com/{owner}/{repo}/tar.gz/{ref}"
-    return f"{stripped}/archive/{ref}.tar.gz"
-
-
-def _fetch_remote_template_files(
-    repo_url: str, ref: str, template_subdir: str = "templates/esp-idf"
-) -> dict[str, bytes]:
-    """Download `templates/esp-idf/` from the public GitHub repository tarball."""
-    candidates = [ref]
-    if ref != "main":
-        candidates.append("main")
-
-    last_err: Exception | None = None
-    raw_tar: bytes | None = None
-    for candidate_ref in candidates:
-        url = _github_tarball_url(repo_url, candidate_ref)
-        req = urllib.request.Request(url, headers={"User-Agent": f"fleetforge-cli/{__version__}"})
-        try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                raw_tar = resp.read()
-                break
-        except (urllib.error.URLError, OSError) as exc:
-            last_err = exc
-
-    if raw_tar is None:
-        raise RuntimeError(f"failed to fetch template from {repo_url} ({ref}): {last_err}")
-
-    files: dict[str, bytes] = {}
-    prefix_needle = f"/{template_subdir.strip('/')}/"
-    with tarfile.open(fileobj=io.BytesIO(raw_tar), mode="r:gz") as tf:
-        for member in tf.getmembers():
-            if not member.isfile():
-                continue
-            norm_name = "/" + member.name.lstrip("/")
-            idx = norm_name.find(prefix_needle)
-            if idx == -1:
-                continue
-            rel_path = norm_name[idx + len(prefix_needle) :]
-            if not rel_path or ".." in Path(rel_path).parts:
-                continue
-            extracted = tf.extractfile(member)
-            if extracted is not None:
-                files[rel_path] = extracted.read()
-
-    if not files:
-        raise RuntimeError(f"template '{template_subdir}' not found in archive from {repo_url}")
-    return files
-
-
-def load_template_files(
-    *,
-    repo_url: str = DEFAULT_PUBLIC_REPO_URL,
-    ref: str = f"v{__version__}",
-    prefer_remote: bool = False,
-) -> dict[str, bytes]:
-    """Load `templates/esp-idf/` from the local checkout or public GitHub repository."""
-    local_dir = Path(__file__).resolve().parents[2] / "templates" / "esp-idf"
-    if not prefer_remote and local_dir.is_dir():
-        files: dict[str, bytes] = {}
-        for path in sorted(local_dir.rglob("*")):
-            if path.is_file():
-                rel = path.relative_to(local_dir).as_posix()
-                files[rel] = path.read_bytes()
-        if files:
-            return files
-    return _fetch_remote_template_files(repo_url, ref)
-
-
-def render_template_project(
-    dest_dir: Path,
-    *,
-    app_name: str,
-    project_slug: str,
-    target: str,
-    fleetforge_url: str,
-    fleetforge_ref: str,
-    repo_url: str = DEFAULT_PUBLIC_REPO_URL,
-    prefer_remote: bool = False,
-    force: bool = False,
-) -> list[Path]:
-    """Scaffold an ESP-IDF board repository into `dest_dir` and return written file paths."""
-    if dest_dir.exists() and any(dest_dir.iterdir()) and not force:
-        raise FileExistsError(
-            f"destination directory '{dest_dir}' is not empty (pass --force to overwrite)"
-        )
-
-    raw_files = load_template_files(
-        repo_url=repo_url,
-        ref=fleetforge_ref,
-        prefer_remote=prefer_remote,
-    )
-    replacements = {
-        "{{APP_NAME}}": app_name,
-        "{{PROJECT_SLUG}}": project_slug,
-        "{{TARGET}}": target,
-        "{{FLEETFORGE_URL}}": fleetforge_url.rstrip("/"),
-        "{{FLEETFORGE_REF}}": fleetforge_ref,
-    }
-
-    written: list[Path] = []
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    for rel_path, content in sorted(raw_files.items()):
-        out_rel = rel_path.removesuffix(".tmpl")
-        out_path = dest_dir / out_rel
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            text = content.decode("utf-8")
-            for needle, value in replacements.items():
-                text = text.replace(needle, value)
-            out_path.write_text(text, encoding="utf-8")
-        except UnicodeDecodeError:
-            out_path.write_bytes(content)
-        written.append(out_path)
-
-    claude_link = dest_dir / "CLAUDE.md"
-    if not claude_link.exists() and not claude_link.is_symlink():
-        try:
-            claude_link.symlink_to("AGENTS.md")
-            written.append(claude_link)
-        except OSError:
-            agents_md = dest_dir / "AGENTS.md"
-            if agents_md.is_file():
-                claude_link.write_text(agents_md.read_text(encoding="utf-8"), encoding="utf-8")
-                written.append(claude_link)
-
-    return written
-
-
-def _format_device_table(devices: list[dict[str, Any]]) -> str:
-    if not devices:
-        return "No enrolled devices found."
-    header = (
-        f"{'DEVICE_ID':<14} {'NAME':<18} {'TARGET':<8} {'FW':<12} "
-        f"{'PRESENCE':<12} {'HEAP':<9} {'RSSI':<6} {'SEC':<4} {'DEPLOY'}"
-    )
-    lines = [header, "-" * len(header)]
-    for d in devices:
-        dev_id = str(d.get("device_id") or "")
-        name = str(d.get("name") or "-")[:18]
-        target = str(d.get("platform_type") or "-")[:8]
-        fw = str(d.get("fw_version") or "-")[:12]
-        online = bool(d.get("online"))
-        power = str(d.get("power_class") or "always_on")
-        presence = "online" if online else ("sleepy" if power == "sleepy" else "offline")
-        health = d.get("health") or {}
-        heap_val = health.get("free_heap")
-        heap_str = f"{heap_val // 1024} KB" if isinstance(heap_val, int) else "-"
-        rssi_val = health.get("rssi")
-        rssi_str = str(rssi_val) if rssi_val is not None else "-"
-        sec_rev = str(d.get("secrets_rev") if d.get("secrets_rev") is not None else "-")
-        deploy = d.get("deploy")
-        if isinstance(deploy, dict) and deploy.get("state"):
-            dep_str = f"{deploy.get('state')} ({deploy.get('artifact_version') or '?'})"
-            if deploy.get("detail"):
-                dep_str += f": {deploy['detail']}"
-        else:
-            dep_str = "-"
-        lines.append(
-            f"{dev_id:<14} {name:<18} {target:<8} {fw:<12} "
-            f"{presence:<12} {heap_str:<9} {rssi_str:<6} {sec_rev:<4} {dep_str}"
-        )
-    return "\n".join(lines)
-
-
-def _build_parser() -> argparse.ArgumentParser:
-    common = argparse.ArgumentParser(add_help=False)
-    common.add_argument(
-        "--url",
-        default=argparse.SUPPRESS,
-        help="Fleetforge base URL (default: $FLEETFORGE_URL, saved login URL, or http://localhost:8000)",
-    )
-    common.add_argument(
-        "--token",
-        default=argparse.SUPPRESS,
-        help="Project/admin bearer token ffa_... (default: $FLEETFORGE_TOKEN or saved login)",
-    )
-    common.add_argument(
-        "--credentials-file",
-        type=Path,
-        default=argparse.SUPPRESS,
-        help="Override path to credentials.json (default: ~/.config/fleetforge/credentials.json)",
-    )
-
-    parser = argparse.ArgumentParser(
-        prog="fleetforge",
-        description="Fleetforge CLI for login, board project scaffolding, OTA deploys, logs, and secrets.",
-    )
-    parser.add_argument(
-        "--url",
-        default=None,
-        help="Fleetforge base URL (default: $FLEETFORGE_URL, saved login URL, or http://localhost:8000)",
-    )
-    parser.add_argument(
-        "--token",
-        default=None,
-        help="Project/admin bearer token ffa_... (default: $FLEETFORGE_TOKEN or saved login)",
-    )
-    parser.add_argument(
-        "--credentials-file",
-        type=Path,
-        default=None,
-        help="Override path to credentials.json (default: ~/.config/fleetforge/credentials.json)",
-    )
-
-    sub = parser.add_subparsers(dest="command", required=True)
-
     login_p = sub.add_parser(
         "login",
         parents=[common],
@@ -658,6 +187,10 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Revoke the active CLI token on the server and remove it from local credentials",
     )
 
+
+def _add_project_subparsers(
+    sub: argparse._SubParsersAction[Any], common: argparse.ArgumentParser
+) -> None:
     new_p = sub.add_parser(
         "new",
         parents=[common],
@@ -782,6 +315,10 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     track_p.add_argument("--repo", default=None, help="Git repository URL")
 
+
+def _add_device_subparsers(
+    sub: argparse._SubParsersAction[Any], common: argparse.ArgumentParser
+) -> None:
     status_p = sub.add_parser(
         "status",
         aliases=["devices"],
@@ -851,6 +388,51 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Path to the JSON bundle drained from the USB-C pit dock",
     )
 
+
+def _build_parser() -> argparse.ArgumentParser:
+    common = argparse.ArgumentParser(add_help=False)
+    common.add_argument(
+        "--url",
+        default=argparse.SUPPRESS,
+        help="Fleetforge base URL (default: $FLEETFORGE_URL, saved login URL, or http://localhost:8000)",
+    )
+    common.add_argument(
+        "--token",
+        default=argparse.SUPPRESS,
+        help="Project/admin bearer token ffa_... (default: $FLEETFORGE_TOKEN or saved login)",
+    )
+    common.add_argument(
+        "--credentials-file",
+        type=Path,
+        default=argparse.SUPPRESS,
+        help="Override path to credentials.json (default: ~/.config/fleetforge/credentials.json)",
+    )
+
+    parser = argparse.ArgumentParser(
+        prog="fleetforge",
+        description="Fleetforge CLI for login, board project scaffolding, OTA deploys, logs, and secrets.",
+    )
+    parser.add_argument(
+        "--url",
+        default=None,
+        help="Fleetforge base URL (default: $FLEETFORGE_URL, saved login URL, or http://localhost:8000)",
+    )
+    parser.add_argument(
+        "--token",
+        default=None,
+        help="Project/admin bearer token ffa_... (default: $FLEETFORGE_TOKEN or saved login)",
+    )
+    parser.add_argument(
+        "--credentials-file",
+        type=Path,
+        default=None,
+        help="Override path to credentials.json (default: ~/.config/fleetforge/credentials.json)",
+    )
+
+    sub = parser.add_subparsers(dest="command", required=True)
+    _add_auth_subparsers(sub, common)
+    _add_project_subparsers(sub, common)
+    _add_device_subparsers(sub, common)
     return parser
 
 
@@ -861,7 +443,7 @@ def main(argv: list[str] | None = None) -> int:
 
     default_url_for_cmd = (
         DEFAULT_FLEETFORGE_URL
-        if args.command in ("new", "login", "whoami", "logout")
+        if args.command in UNAUTHENTICATED_COMMANDS
         else "http://localhost:8000"
     )
     resolved_url, resolved_token = resolve_url_and_token(
@@ -873,514 +455,26 @@ def main(argv: list[str] | None = None) -> int:
     args.url = resolved_url
     args.token = resolved_token
 
-    if args.command == "login":
-        base_url = args.url.rstrip("/")
-        explicit_token = args.token if (argv and "--token" in argv) else None
-        active_token: str | None = explicit_token
-
-        if not active_token:
-            username: str | None = args.username
-            if not username:
-                if sys.stdin.isatty():
-                    username = input("Username or email: ").strip()
-                if not username:
-                    print(
-                        "error: --username / $FLEETFORGE_USER (or --token) is required",
-                        file=sys.stderr,
-                    )
-                    return 2
-
-            password: str | None = None
-            if args.password_stdin:
-                password = sys.stdin.readline().rstrip("\r\n")
-            elif args.password:
-                password = args.password
-            elif sys.stdin.isatty():
-                password = getpass.getpass(f"Password for {username}: ")
-            if not password:
-                print(
-                    "error: password is required (--password, --password-stdin, or $FLEETFORGE_PASSWORD)",
-                    file=sys.stderr,
-                )
-                return 2
-
-            l_status, l_resp, session_token = _login_with_password(base_url, username, password)
-            if l_status != 200 or not session_token:
-                detail = l_resp.get("detail", l_resp) if isinstance(l_resp, dict) else l_resp
-                print(f"login error ({l_status}): {detail}", file=sys.stderr)
-                return 1
-            active_token = session_token
-
-            # Optionally mint a dedicated or project-pinned token and revoke the temporary session
-            wants_mint = any(
-                x is not None
-                for x in (args.project, args.scopes, args.expires_in_days, args.token_name)
-            )
-            if wants_mint:
-                host = socket.gethostname().split(".")[0] or "local"
-                tok_name = args.token_name or (
-                    f"cli ({host}:{args.project})" if args.project else f"cli ({host})"
-                )
-                scopes_list = (
-                    [s.strip() for s in args.scopes.split(",") if s.strip()]
-                    if args.scopes
-                    else (["read", "write:artifacts", "deploy"] if args.project else ["admin"])
-                )
-                mint_payload: dict[str, Any] = {
-                    "name": tok_name[:64],
-                    "scopes": scopes_list,
-                }
-                if args.project:
-                    mint_payload["project"] = args.project
-                if args.expires_in_days is not None:
-                    mint_payload["expires_in_days"] = args.expires_in_days
-                m_status, m_resp = _request_json(
-                    "POST",
-                    f"{base_url}/v1/auth/tokens",
-                    token=session_token,
-                    body=json.dumps(mint_payload).encode("utf-8"),
-                    content_type="application/json",
-                )
-                if m_status != 201 or not isinstance(m_resp.get("token"), str):
-                    print(
-                        f"token mint error ({m_status}): {m_resp.get('detail', m_resp)}",
-                        file=sys.stderr,
-                    )
-                    return 1
-                active_token = m_resp["token"]
-                _request_json("POST", f"{base_url}/v1/auth/logout", token=session_token)
-
-        me_status, me_resp = _request_json("GET", f"{base_url}/v1/auth/me", token=active_token)
-        if me_status != 200:
-            print(
-                f"auth verification failed ({me_status}): {me_resp.get('detail', me_resp)}",
-                file=sys.stderr,
-            )
-            return 1
-
-        creds = load_credentials(creds_path)
-        raw_profiles = creds.get("profiles")
-        profiles: dict[str, Any] = dict(raw_profiles) if isinstance(raw_profiles, dict) else {}
-        now_iso = dt.datetime.now(dt.UTC).isoformat()
-        profiles[base_url] = {
-            "token": active_token,
-            "token_id": me_resp.get("token_id"),
-            "subject": me_resp.get("subject"),
-            "email": me_resp.get("email"),
-            "display_name": me_resp.get("display_name"),
-            "is_superadmin": bool(me_resp.get("is_superadmin")),
-            "scopes": me_resp.get("scopes", []),
-            "project": args.project,
-            "expires_at": me_resp.get("expires_at"),
-            "saved_at": now_iso,
-        }
-        creds["default_url"] = base_url
-        creds["profiles"] = profiles
-        saved_file = save_credentials(creds, creds_path)
-
-        if args.write_env:
-            env_updates = {
-                "FLEETFORGE_URL": base_url,
-                "FLEETFORGE_TOKEN": active_token,
-            }
-            if args.project:
-                env_updates["FLEETFORGE_PROJECT"] = args.project
-            _update_dotenv(Path(args.write_env), env_updates)
-
-        print(
-            json.dumps(
-                {
-                    "status": "authenticated",
-                    "url": base_url,
-                    "subject": me_resp.get("subject"),
-                    "email": me_resp.get("email"),
-                    "display_name": me_resp.get("display_name"),
-                    "is_superadmin": bool(me_resp.get("is_superadmin")),
-                    "scopes": me_resp.get("scopes", []),
-                    "expires_at": me_resp.get("expires_at"),
-                    "projects": [
-                        {"slug": p.get("slug"), "role": p.get("role")}
-                        for p in (me_resp.get("projects") or [])
-                        if isinstance(p, dict)
-                    ],
-                    "credentials_file": str(saved_file),
-                    "env_file": str(args.write_env) if args.write_env else None,
-                },
-                indent=2,
-            )
-        )
-        return 0
-
-    if args.command == "whoami":
-        if not args.token:
-            print(
-                "error: not authenticated — run 'fleetforge login' or pass --token / $FLEETFORGE_TOKEN",
-                file=sys.stderr,
-            )
-            return 2
-        status_code, me_resp = _request_json(
-            "GET", f"{args.url.rstrip('/')}/v1/auth/me", token=args.token
-        )
-        if status_code != 200:
-            print(f"error ({status_code}): {me_resp.get('detail', me_resp)}", file=sys.stderr)
-            return 1
-        if args.json:
-            print(json.dumps(me_resp, indent=2))
-            return 0
-        projs = ", ".join(
-            f"{p.get('slug')} ({p.get('role')})"
-            for p in (me_resp.get("projects") or [])
-            if isinstance(p, dict)
-        )
-        print(f"URL:        {args.url}")
-        print(f"User:       {me_resp.get('subject')} ({me_resp.get('email') or 'no email'})")
-        if me_resp.get("display_name"):
-            print(f"Name:       {me_resp.get('display_name')}")
-        print(f"Superadmin: {'yes' if me_resp.get('is_superadmin') else 'no'}")
-        print(f"Scopes:     {', '.join(me_resp.get('scopes') or [])}")
-        print(f"Expires:    {me_resp.get('expires_at') or 'never'}")
-        print(f"Projects:   {projs or '-'}")
-        return 0
-
-    if args.command == "logout":
-        base_url = args.url.rstrip("/")
-        if args.token:
-            _request_json("POST", f"{base_url}/v1/auth/logout", token=args.token)
-        creds = load_credentials(creds_path)
-        raw_saved = creds.get("profiles")
-        saved_profiles: dict[str, Any] = dict(raw_saved) if isinstance(raw_saved, dict) else {}
-        removed = saved_profiles.pop(base_url, None) is not None
-        if creds.get("default_url") == base_url:
-            creds["default_url"] = next(iter(saved_profiles.keys()), None)
-        creds["profiles"] = saved_profiles
-        if creds_path or default_credentials_path().is_file():
-            save_credentials(creds, creds_path)
-        print(
-            json.dumps(
-                {"status": "logged_out", "url": base_url, "removed_saved_profile": removed},
-                indent=2,
-            )
-        )
-        return 0
-
-    if args.command == "new":
-        dest_dir: Path = args.directory
-        raw_base = dest_dir.resolve().name if dest_dir.name in (".", "") else dest_dir.name
-        app_name = _sanitize_app_name(args.name or raw_base)
-        project_slug = _sanitize_project_slug(
-            args.project or os.environ.get("FLEETFORGE_PROJECT") or raw_base
-        )
-        effective_url = args.url or DEFAULT_FLEETFORGE_URL
-        try:
-            written = render_template_project(
-                dest_dir,
-                app_name=app_name,
-                project_slug=project_slug,
-                target=args.target,
-                fleetforge_url=effective_url,
-                fleetforge_ref=args.ref,
-                repo_url=args.repo_url,
-                prefer_remote=args.remote,
-                force=args.force,
-            )
-        except (FileExistsError, RuntimeError, OSError) as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 1
-
-        if args.create_project:
-            if not args.token:
-                print(
-                    "error: --create-project requires 'fleetforge login' or --token / $FLEETFORGE_TOKEN",
-                    file=sys.stderr,
-                )
-                return 2
-            create_url = f"{effective_url.rstrip('/')}/v1/projects"
-            body = json.dumps({"slug": project_slug, "name": project_slug}).encode("utf-8")
-            p_status, p_resp = _request_json(
-                "POST",
-                create_url,
-                token=args.token,
-                body=body,
-                content_type="application/json",
-            )
-            if p_status not in (200, 201, 409):
-                print(
-                    f"project create error ({p_status}): {p_resp.get('detail', p_resp)}",
-                    file=sys.stderr,
-                )
-                return 1
-
-        print(
-            json.dumps(
-                {
-                    "directory": str(dest_dir),
-                    "app_name": app_name,
-                    "project": project_slug,
-                    "target": args.target,
-                    "fleetforge_ref": args.ref,
-                    "fleetforge_url": effective_url,
-                    "files": [p.relative_to(dest_dir).as_posix() for p in written],
-                },
-                indent=2,
-            )
-        )
-        return 0
-
-    if not args.token:
+    if args.command not in UNAUTHENTICATED_COMMANDS and not args.token:
         print(
             "error: not authenticated — run 'fleetforge login' or pass --token / $FLEETFORGE_TOKEN",
             file=sys.stderr,
         )
         return 2
 
-    if args.command == "push":
-        bin_path: Path = args.binary
-        if not bin_path.is_file():
-            print(f"error: binary not found: {bin_path}", file=sys.stderr)
-            return 2
-        data = bin_path.read_bytes()
-        git_meta = (
-            {"repo_url": None, "branch": None, "commit_sha": None, "tag": None}
-            if args.no_git
-            else detect_git_metadata(bin_path.parent)
-        )
-        resolved_proj = resolve_project(
-            args.project,
-            base_url=args.url,
-            creds_path=creds_path,
-        )
-        url = build_artifact_upload_url(
-            args.url,
-            target=args.target,
-            version=args.version,
-            partition_layout=args.layout,
-            project=resolved_proj,
-            repo_url=args.repo if args.repo is not None else git_meta["repo_url"],
-            branch=args.branch if args.branch is not None else git_meta["branch"],
-            commit_sha=args.commit if args.commit is not None else git_meta["commit_sha"],
-            tag=args.tag if args.tag is not None else git_meta["tag"],
-            build_url=args.build_url,
-            test_passed=args.test_passed,
-        )
-        status_code, resp = _request_json("POST", url, token=args.token, body=data)
-        if status_code not in (200, 201):
-            print(
-                f"error ({status_code}): {resp.get('detail', resp)}",
-                file=sys.stderr,
-            )
-            return 1
-        print(json.dumps(resp, indent=2))
+    handler = COMMAND_HANDLERS.get(args.command)
+    if handler is None:
+        return 2
 
-        if args.deploy:
-            proj_slug = (
-                resolve_project(
-                    args.project,
-                    base_url=args.url,
-                    token=args.token,
-                    creds_path=creds_path,
-                    query_server=True,
-                )
-                or "default"
-            )
-            deploy_url = f"{args.url.rstrip('/')}/v1/projects/{proj_slug}/deploy"
-            deploy_body = json.dumps(
-                {
-                    "version": args.version,
-                    "target_filter": args.deploy,
-                    "apply": "auto",
-                }
-            ).encode("utf-8")
-            d_status, d_resp = _request_json(
-                "POST",
-                deploy_url,
-                token=args.token,
-                body=deploy_body,
-                content_type="application/json",
-            )
-            if d_status != 202:
-                print(
-                    f"deploy error ({d_status}): {d_resp.get('detail', d_resp)}",
-                    file=sys.stderr,
-                )
-                return 1
-            print(json.dumps(d_resp, indent=2))
-        return 0
-
-    if args.command == "track":
-        proj_slug = (
-            resolve_project(
-                args.project,
-                base_url=args.url,
-                token=args.token,
-                creds_path=creds_path,
-                query_server=True,
-            )
-            or "default"
-        )
-        patch_url = f"{args.url.rstrip('/')}/v1/projects/{proj_slug}"
-        payload: dict[str, Any] = {"track_mode": args.mode}
-        if args.ref is not None:
-            payload["track_ref"] = args.ref
-        if args.auto_deploy is not None:
-            payload["auto_deploy_target"] = args.auto_deploy
-        if args.repo is not None:
-            payload["repo_url"] = args.repo
-        status_code, resp = _request_json(
-            "PATCH",
-            patch_url,
-            token=args.token,
-            body=json.dumps(payload).encode("utf-8"),
-            content_type="application/json",
-        )
-        if status_code != 200:
-            print(f"error ({status_code}): {resp.get('detail', resp)}", file=sys.stderr)
-            return 1
-        print(json.dumps(resp, indent=2))
-        return 0
-
-    if args.command in ("status", "devices"):
-        opt_proj = resolve_project(
-            args.project,
-            base_url=args.url,
-            creds_path=creds_path,
-        )
-        url = f"{args.url.rstrip('/')}/v1/devices"
-        if opt_proj:
-            url = f"{url}?{urllib.parse.urlencode({'project': opt_proj})}"
-        status_code, resp = _request_json("GET", url, token=args.token)
-        if status_code != 200:
-            print(f"error ({status_code}): {resp.get('detail', resp)}", file=sys.stderr)
-            return 1
-        devices: list[dict[str, Any]] = list(resp.get("devices") or [])
-        if args.device:
-            devices = [d for d in devices if d.get("device_id") == args.device]
-        if args.json:
-            print(json.dumps({"devices": devices}, indent=2))
-        else:
-            print(_format_device_table(devices))
-        return 0
-
-    if args.command == "logs":
-        device_id: str | None = args.device_id
-        if not device_id:
-            opt_proj = resolve_project(
-                args.project,
-                base_url=args.url,
-                creds_path=creds_path,
-            )
-            dev_url = f"{args.url.rstrip('/')}/v1/devices"
-            if opt_proj:
-                dev_url = f"{dev_url}?{urllib.parse.urlencode({'project': opt_proj})}"
-            d_status, d_resp = _request_json("GET", dev_url, token=args.token)
-            if d_status != 200:
-                print(
-                    f"error ({d_status}): {d_resp.get('detail', d_resp)}",
-                    file=sys.stderr,
-                )
-                return 1
-            devs = list(d_resp.get("devices") or [])
-            if not devs:
-                print(
-                    f"error: no devices enrolled in project '{opt_proj or 'default'}'",
-                    file=sys.stderr,
-                )
-                return 1
-            device_id = str(devs[0]["device_id"])
-
-        l_query = urllib.parse.urlencode({"limit": str(args.limit)})
-        logs_url = f"{args.url.rstrip('/')}/v1/devices/{device_id}/logs?{l_query}"
-        status_code, resp = _request_json("GET", logs_url, token=args.token)
-        if status_code != 200:
-            print(f"error ({status_code}): {resp.get('detail', resp)}", file=sys.stderr)
-            return 1
-        lines: list[dict[str, Any]] = list(resp.get("lines") or [])
-        if args.level:
-            lines = [ln for ln in lines if ln.get("level") == args.level]
-        if args.json:
-            print(json.dumps({"device_id": device_id, "lines": lines}, indent=2))
-            return 0
-        for ln in reversed(lines):
-            ts = str(ln.get("logged_at") or ln.get("received_at") or "")
-            lvl = str(ln.get("level") or "I")
-            txt = str(ln.get("text") or "")
-            ctx = ln.get("context") or {}
-            ctx_parts: list[str] = []
-            if isinstance(ctx, dict):
-                if "firmware.version" in ctx:
-                    ctx_parts.append(f"fw={ctx['firmware.version']}")
-                if "device.free_heap_bytes" in ctx:
-                    ctx_parts.append(f"heap={ctx['device.free_heap_bytes']}")
-                if "device.rssi_dbm" in ctx:
-                    ctx_parts.append(f"rssi={ctx['device.rssi_dbm']}")
-            suffix = f" ({' '.join(ctx_parts)})" if ctx_parts else ""
-            print(f"{ts} [{lvl}] {txt}{suffix}")
-        return 0
-
-    if args.command == "secrets":
-        proj_slug = (
-            resolve_project(
-                args.project,
-                base_url=args.url,
-                token=args.token,
-                creds_path=creds_path,
-                query_server=True,
-            )
-            or "default"
-        )
-        base_sec_url = f"{args.url.rstrip('/')}/v1/projects/{proj_slug}/secrets"
-        if args.action == "list":
-            status_code, resp = _request_json("GET", base_sec_url, token=args.token)
-        elif args.action == "set":
-            if not args.key or args.value is None:
-                print("error: 'secrets set' requires <key> and <value>", file=sys.stderr)
-                return 2
-            status_code, resp = _request_json(
-                "PUT",
-                f"{base_sec_url}/{urllib.parse.quote(args.key)}",
-                token=args.token,
-                body=json.dumps({"value": args.value}).encode("utf-8"),
-                content_type="application/json",
-            )
-        else:
-            if not args.key:
-                print("error: 'secrets delete' requires <key>", file=sys.stderr)
-                return 2
-            status_code, resp = _request_json(
-                "DELETE",
-                f"{base_sec_url}/{urllib.parse.quote(args.key)}",
-                token=args.token,
-            )
-        if status_code != 200:
-            print(f"error ({status_code}): {resp.get('detail', resp)}", file=sys.stderr)
-            return 1
-        print(json.dumps(resp, indent=2))
-        return 0
-
-    if args.command == "dock-sync":
-        bundle_path: Path = args.bundle
-        if not bundle_path.is_file():
-            print(f"error: bundle not found: {bundle_path}", file=sys.stderr)
-            return 2
-        try:
-            raw_bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError) as exc:
-            print(f"error: invalid JSON bundle {bundle_path}: {exc}", file=sys.stderr)
-            return 2
-        sync_url = f"{args.url.rstrip('/')}/v1/devices/{args.device_id}/dock-sync"
-        status_code, resp = _request_json(
-            "POST",
-            sync_url,
-            token=args.token,
-            body=json.dumps(raw_bundle).encode("utf-8"),
-            content_type="application/json",
-        )
-        if status_code != 200:
-            print(f"error ({status_code}): {resp.get('detail', resp)}", file=sys.stderr)
-            return 1
-        print(json.dumps(resp, indent=2))
-        return 0
-
-    return 2
+    # Look up transport helpers from this module's globals so tests patching
+    # `fleetforge.cli._request_json` or `fleetforge.cli._login_with_password` work seamlessly.
+    ctx = CliContext(
+        creds_path=creds_path,
+        argv=argv,
+        request_json=_request_json,
+        login_with_password=_login_with_password,
+    )
+    return handler(args, ctx)
 
 
 if __name__ == "__main__":

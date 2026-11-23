@@ -107,9 +107,10 @@ class TestPublish:
     async def test_republishing_the_same_bundle_is_idempotent(self, tmp_path: Path) -> None:
         store = MemoryObjectStore()
         bundle = load_bundle_dir(write_bundle(tmp_path, "esp32"))
-        await publish_bundle(store, bundle)
+        fixed_clock = lambda: "2026-11-23T12:00:00Z"  # noqa: E731
+        await publish_bundle(store, bundle, now=fixed_clock)
         before = dict(store.objects)
-        await publish_bundle(store, bundle)
+        await publish_bundle(store, bundle, now=fixed_clock)
 
         assert store.objects == before, "content addressing makes a re-publish a no-op"
         index = await read_index(store)

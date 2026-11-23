@@ -28,7 +28,9 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from fastapi import FastAPI
+from pydantic_settings import BaseSettings, PydanticBaseSettingsSource
 from sqlalchemy import text
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -62,10 +64,14 @@ TEST_PUBLIC_BASE_URL = "https://downloads.test"
 
 
 def database_url_for(db_name: str) -> str:
-    """Return the configured test URL (`TEST_DATABASE_URL` or local dev port 5433) with `db_name`."""
+    """Return `TEST_DATABASE_URL` (e.g. shared btvaroska k3s CNPG) or optional Docker dev fallback with `db_name`."""
     base = os.environ.get("TEST_DATABASE_URL") or DEFAULT_DEV_URL
     head, _, _ = base.rpartition("/")
     return f"{head}/{db_name}"
+
+
+def _is_ci_env() -> bool:
+    return os.environ.get("CI", "").strip().lower() not in ("", "0", "false")
 
 
 TERMINATE_SQL = text(
@@ -148,14 +154,21 @@ async def engine() -> AsyncIterator[AsyncEngine]:
         SQLAlchemyError,
         OSError,
     ) as exc:  # pragma: no cover - environment problem, not a test failure
+        redacted_url = make_url(database_url_for("postgres")).render_as_string(hide_password=True)
         msg = (
-            "Cannot reach PostgreSQL at "
-            f"{database_url_for('postgres')}: {exc} "
-            "(start dev database with `just db-up`, or set FF_ALLOW_DB_SKIP=1 to skip)"
+            f"Cannot reach PostgreSQL at {redacted_url}: {exc} "
+            "(set TEST_DATABASE_URL to the shared btvaroska k3s CloudNativePG test environment; "
+            "on a Docker-equipped dev box you may alternatively run `just db-up`, "
+            "or pass FF_ALLOW_DB_SKIP=1 locally to skip DB tests)"
         )
         if os.environ.get("FF_ALLOW_DB_SKIP") == "1":
+            if _is_ci_env():
+                pytest.exit(
+                    f"FF_ALLOW_DB_SKIP=1 is forbidden when CI is set; {msg}",
+                    returncode=1,
+                )
             pytest.skip(msg)
-        pytest.fail(msg)
+        pytest.exit(msg, returncode=1)
 
     await run_alembic(test_url)
 
@@ -167,38 +180,39 @@ async def engine() -> AsyncIterator[AsyncEngine]:
         await drop_database(TEST_DB_NAME)
 
 
+_CLEANUP_BLOCK_SQL = """
+DO $$
+BEGIN
+    DELETE FROM partition_profiles WHERE origin <> 'builtin';
+    DELETE FROM project_rollouts;
+    DELETE FROM deploy_policy_runs;
+    DELETE FROM deploy_policies;
+    DELETE FROM deploy_events;
+    DELETE FROM enrollment_tokens;
+    DELETE FROM gateway_relays;
+    DELETE FROM devices;
+    DELETE FROM device_groups;
+    DELETE FROM build_jobs;
+    DELETE FROM builds;
+    DELETE FROM artifact_deltas;
+    DELETE FROM artifact_versions;
+    DELETE FROM artifacts;
+    DELETE FROM project_members;
+    DELETE FROM admin_tokens;
+    DELETE FROM users;
+    DELETE FROM projects WHERE slug <> 'default';
+END $$;
+"""
+
+
 @pytest.fixture
 async def clean_tables(engine: AsyncEngine) -> AsyncIterator[None]:
     """Clean up rows committed via the app's own sessionmaker before and after a test."""
-    from sqlalchemy import text
-
-    cleanup_sql = (
-        "DELETE FROM partition_profiles WHERE origin <> 'builtin'",
-        "DELETE FROM project_rollouts",
-        "DELETE FROM deploy_policy_runs",
-        "DELETE FROM deploy_policies",
-        "DELETE FROM deploy_events",
-        "DELETE FROM enrollment_tokens",
-        "DELETE FROM gateway_relays",
-        "DELETE FROM devices",
-        "DELETE FROM device_groups",
-        "DELETE FROM build_jobs",
-        "DELETE FROM builds",
-        "DELETE FROM artifact_deltas",
-        "DELETE FROM artifact_versions",
-        "DELETE FROM artifacts",
-        "DELETE FROM project_members",
-        "DELETE FROM admin_tokens",
-        "DELETE FROM users",
-        "DELETE FROM projects WHERE slug <> 'default'",
-    )
     async with engine.begin() as conn:
-        for stmt in cleanup_sql:
-            await conn.execute(text(stmt))
+        await conn.exec_driver_sql(_CLEANUP_BLOCK_SQL)
     yield
     async with engine.begin() as conn:
-        for stmt in cleanup_sql:
-            await conn.execute(text(stmt))
+        await conn.exec_driver_sql(_CLEANUP_BLOCK_SQL)
 
 
 @pytest.fixture
@@ -292,18 +306,27 @@ def client_for(app: FastAPI, base_url: str = "http://testserver") -> httpx.Async
     return httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=base_url)
 
 
+class _IsolatedTestSettings(Settings):
+    """`Settings` that reads only explicit kwargs — never `os.environ` or `.env`."""
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        return (init_settings,)
+
+
 def settings_for_tests(**overrides: object) -> Settings:
-    """A `Settings` built explicitly, not from the environment.
+    """A `Settings` built explicitly, never reading `os.environ` or `.env`.
 
     The database URL is deliberately unusable: every app fixture overrides
     `get_sessionmaker`, so anything that reaches for this URL is a bug worth a loud
     connection error rather than a silent write to the developer's dev database.
-
-    **Every object-store field is nulled**, because `Settings` still reads `.env` for
-    anything not passed here and `.env.example` ships `S3_ENDPOINT_URL=…`. Without
-    these, "no backend configured → 503" passes on a machine with no `.env` and fails
-    on a developer's box — or, worse, the reverse. Same family of trap as `capture_logs`
-    above.
     """
     values: dict[str, object] = {
         "database_url": "postgresql+asyncpg://unused:unused@127.0.0.1:1/unused",
@@ -317,16 +340,11 @@ def settings_for_tests(**overrides: object) -> Settings:
         "gcs_bucket": None,
         "gcs_credentials_file": None,
         "gcs_impersonate_service_account": None,
-        # R1-be-3: the download endpoint's HMAC key and the host it mints links for.
-        # Fixed here for the same reason as the store fields — `.env.example` ships an
-        # `ARTIFACT_URL_SECRET`, and a suite whose signatures depend on the developer's
-        # `.env` is a suite that passes on one box and fails on the next. Tests that
-        # exercise "no secret configured → 503" pass `artifact_url_secret=None`.
         "artifact_url_secret": TEST_ARTIFACT_URL_SECRET,
         "public_base_url": TEST_PUBLIC_BASE_URL,
     }
     values.update(overrides)
-    return Settings(**values)  # type: ignore[arg-type]
+    return _IsolatedTestSettings(**values)  # type: ignore[arg-type]
 
 
 @pytest.fixture
