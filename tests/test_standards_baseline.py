@@ -194,13 +194,24 @@ class StandardsBaselineTest(unittest.TestCase):
 
     def test_oversized_debt_is_current(self) -> None:
         still_oversized = self.state["oversized_files"]
-        fixed = sorted(
-            path
-            for path in self.debt["oversized_files"]
-            if path not in still_oversized and (REPO_ROOT / path).is_file()
+        caps: dict[str, int] = self.debt["oversized_files"]
+        missing = sorted(path for path in caps if not (REPO_ROOT / path).is_file())
+        self.assertFalse(
+            missing, f"Deleted; drop these 'oversized_files' entries in {DEBT_PATH.name}: {missing}"
         )
+        fixed = sorted(path for path in caps if path not in still_oversized)
         self.assertFalse(
             fixed, f"Fixed; drop these 'oversized_files' entries in {DEBT_PATH.name}: {fixed}"
+        )
+        # T-12 downward ratchet: lower recorded caps whenever a listed file shrinks by >=50 lines.
+        over_capped = {
+            path: {"actual": still_oversized[path], "cap": cap}
+            for path, cap in caps.items()
+            if path in still_oversized and (cap - still_oversized[path]) >= 50
+        }
+        self.assertFalse(
+            over_capped,
+            f"Shrank >=50 lines below cap; tighten 'oversized_files' in {DEBT_PATH.name}: {over_capped}",
         )
 
     def test_narration_comments_do_not_grow(self) -> None:

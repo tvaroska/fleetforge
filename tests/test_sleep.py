@@ -293,9 +293,7 @@ class TestTheConnectedFlags:
     def test_the_confirm_block_follows_unchanged(self) -> None:
         published = _published()
         flags = published.index("s_checked_in = true;")
-        confirm = published.index(
-            "if (event->msg_id == ctx->announce_msg_id && !ctx->session_confirmed) {"
-        )
+        confirm = published.index("if (!ctx->session_confirmed) {")
         assert flags < confirm
         assert (
             published.index("else if (confirm_this_image() && s_txn.kind == TXN_CONFIRMING)")

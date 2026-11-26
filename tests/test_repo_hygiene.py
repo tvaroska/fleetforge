@@ -150,24 +150,103 @@ def test_zero_internal_customer_or_machine_path_leaks() -> None:
     assert not violations, "Repository hygiene violations found:\n" + "\n".join(violations)
 
 
-def test_all_relative_markdown_links_resolve_within_repo() -> None:
+def _github_heading_slugs(markdown_text: str) -> set[str]:
+    """Extract GitHub-style `#anchor` slugs from ATX headings (skipping fenced code blocks)."""
+    slugs: set[str] = set()
+    counts: dict[str, int] = {}
+    in_fence = False
+    for line in markdown_text.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith(("```", "~~~")):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        m = re.match(r"^#{1,6}\s+(.+?)\s*#*\s*$", stripped)
+        if not m:
+            continue
+        heading = m.group(1)
+        # Strip inline markdown links `[label](url)` -> `label`, inline code/emphasis markers.
+        # Keep literal `_` (GFM retains `_` in snake_case headings via `\w`).
+        heading = re.sub(r"\[([^\]]+)\]\([^)]+\)", r"\1", heading)
+        heading = heading.replace("`", "").replace("*", "")
+        slug = re.sub(r"[^\w\s-]", "", heading.lower(), flags=re.UNICODE)
+        slug = re.sub(r"\s+", "-", slug.strip())
+        if not slug:
+            continue
+        idx = counts.get(slug, 0)
+        counts[slug] = idx + 1
+        slugs.add(slug if idx == 0 else f"{slug}-{idx}")
+    return slugs
+
+
+def _iter_markdown_links(markdown_text: str) -> list[str]:
+    """Return link targets outside fenced code blocks."""
     md_link_re = re.compile(r"\[[^\]\n]+\]\(([^)\s]+)\)")
+    links: list[str] = []
+    in_fence = False
+    for line in markdown_text.splitlines():
+        if line.lstrip().startswith(("```", "~~~")):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
+        for match in md_link_re.finditer(line):
+            links.append(match.group(1))
+    return links
+
+
+def test_github_heading_slugs_and_anchor_detection() -> None:
+    """T-12 positive control: snake_case headings keep `_`, duplicates suffix, code blocks skipped."""
+    doc = (
+        "# `foo_bar` Setup\n"
+        "## Overview\n"
+        "## Overview\n"
+        "```md\n"
+        "# Ignored Heading\n"
+        "[ignored](missing.md#nope)\n"
+        "```\n"
+        "[ok](#foo_bar-setup)\n"
+    )
+    slugs = _github_heading_slugs(doc)
+    assert "foo_bar-setup" in slugs
+    assert "overview" in slugs
+    assert "overview-1" in slugs
+    assert "ignored-heading" not in slugs
+    assert _iter_markdown_links(doc) == ["#foo_bar-setup"]
+
+
+def test_all_relative_markdown_links_resolve_within_repo() -> None:
     broken: list[str] = []
     repo_resolved = REPO_ROOT.resolve()
+    slug_cache: dict[Path, set[str]] = {}
     for md_file in sorted(REPO_ROOT.rglob("*.md")):
         rel_parts = md_file.relative_to(REPO_ROOT).parts
         if any(p.startswith(".") or p in EXCLUDED_DIRS for p in rel_parts):
             continue
         text = md_file.read_text(encoding="utf-8")
-        for match in md_link_re.finditer(text):
-            raw_target = match.group(1).split("#", 1)[0]
-            if not raw_target or raw_target.startswith(("http://", "https://", "mailto:")):
+        for raw_link in _iter_markdown_links(text):
+            if raw_link.startswith(("http://", "https://", "mailto:")):
                 continue
-            target = (md_file.parent / raw_target.replace("%20", " ")).resolve()
+            raw_target, _, raw_anchor = raw_link.partition("#")
+            if not raw_target:
+                target = md_file.resolve()
+            else:
+                target = (md_file.parent / raw_target.replace("%20", " ")).resolve()
             if not target.is_relative_to(repo_resolved):
-                broken.append(
-                    f"{md_file.relative_to(REPO_ROOT)}: sibling escape link ({raw_target})"
-                )
-            elif not target.exists():
-                broken.append(f"{md_file.relative_to(REPO_ROOT)}: {raw_target}")
+                broken.append(f"{md_file.relative_to(REPO_ROOT)}: sibling escape link ({raw_link})")
+                continue
+            if not target.exists():
+                broken.append(f"{md_file.relative_to(REPO_ROOT)}: {raw_link}")
+                continue
+            if raw_anchor and target.is_file() and target.suffix.lower() == ".md":
+                if target not in slug_cache:
+                    slug_cache[target] = _github_heading_slugs(
+                        target.read_text(encoding="utf-8", errors="ignore")
+                    )
+                if raw_anchor.lower() not in slug_cache[target]:
+                    broken.append(
+                        f"{md_file.relative_to(REPO_ROOT)}: missing anchor #{raw_anchor} in "
+                        f"{target.relative_to(REPO_ROOT)}"
+                    )
     assert not broken, "Broken or escaping markdown links found:\n" + "\n".join(broken)

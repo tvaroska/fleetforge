@@ -11,25 +11,18 @@ import base64
 import hashlib
 
 from cryptography.fernet import Fernet, InvalidToken, MultiFernet
-from pydantic import ValidationError
 
-from fleetforge.config import Settings, get_settings
+from fleetforge.config import Settings
 
 
 class SecretKeyNotConfiguredError(ValueError):
     """Raised when attempting to encrypt or decrypt secrets with no key configured."""
 
 
-def _fernet_for(settings: Settings | None = None) -> MultiFernet:
-    cfg = settings
-    if cfg is None:
-        try:
-            cfg = get_settings()
-        except ValidationError:
-            cfg = None
+def _fernet_for(settings: Settings | None) -> MultiFernet:
     candidates: list[str] = []
-    if cfg is not None:
-        for raw in (cfg.secrets_encryption_key, cfg.artifact_url_secret):
+    if settings is not None:
+        for raw in (settings.secrets_encryption_key, settings.artifact_url_secret):
             if raw and raw not in candidates:
                 candidates.append(raw)
     if not candidates:
@@ -41,12 +34,12 @@ def _fernet_for(settings: Settings | None = None) -> MultiFernet:
     )
 
 
-def encrypt_secret(plaintext: str, settings: Settings | None = None) -> str:
+def encrypt_secret(plaintext: str, settings: Settings | None) -> str:
     """Encrypt a plaintext string and return the ASCII Fernet token."""
     return _fernet_for(settings).encrypt(plaintext.encode("utf-8")).decode("ascii")
 
 
-def decrypt_secret(ciphertext: str, settings: Settings | None = None) -> str:
+def decrypt_secret(ciphertext: str, settings: Settings | None) -> str:
     """Decrypt a Fernet token back to its UTF-8 plaintext string."""
     try:
         return _fernet_for(settings).decrypt(ciphertext.encode("ascii")).decode("utf-8")

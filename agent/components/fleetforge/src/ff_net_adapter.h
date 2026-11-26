@@ -1,9 +1,9 @@
 /*
- * ff_net_adapter — the private side of the ff_net seam: what an adapter must provide, and
+ * ff_net_adapter — the private side of the ff_net Port: what an adapter must provide, and
  * the one callback it uses to say "there is an IP".
  *
  * Not included by anything above ff_net.c. Keeping it out of ff_net.h is the point of the
- * seam: the enroll and MQTT layers must not be able to reach a link-specific symbol even
+ * Port boundary: the enroll and MQTT layers must not be able to reach a link-specific symbol even
  * by accident, or the abstraction stops being one.
  */
 
@@ -33,14 +33,15 @@ const char *ff_net_wifi_ssid(void);
 int ff_net_wifi_known_count(void);
 
 /* Persist a newly provisioned Wi-Fi network to the NVS `ff_net` overlay (`ssid_0`/`psk_0`)
- * and prepend it to the active scan list without reflashing `ff_cfg` (WIFI-BLE-fw-1). */
+ * and append it after flashed `ff_cfg` networks in the active scan list without reflashing `ff_cfg`. */
 esp_err_t ff_net_wifi_save_nvs(const char *ssid, const char *passphrase);
 
-/* CUJ-3: Venue Offline Mode radio silence (`esp_wifi_stop()`) and Improv BLE suppression
- * for shared NimBLE coexistence. */
+/* CUJ-3: Venue Offline Mode radio silence (`esp_wifi_stop()`), Improv BLE suppression,
+ * and physical/serial authorization release (D-8). */
 esp_err_t ff_net_wifi_set_offline_mode(bool offline);
 bool ff_net_wifi_is_offline_mode(void);
 void ff_net_wifi_set_improv_ble_enabled(bool enabled);
+void ff_net_wifi_improv_authorize(void);
 
 /* Called by an adapter's IP_EVENT handler. Unblocks ff_net_bring_up(). */
 void ff_net_report_got_ip(esp_netif_t *netif);

@@ -225,3 +225,23 @@ def extract_c_function(source: str, fn_name: str) -> str:
             depth -= 1
         pos += 1
     return source[start:pos]
+
+
+def find_c_function(fn_name: str) -> tuple[Path, str]:
+    """T-9: Locate `fn_name` across all agent C sources without hardcoding one `.c` filename."""
+    matches: list[tuple[Path, str]] = []
+    for path in agent_sources():
+        if path.suffix != ".c":
+            continue
+        source = path.read_text(encoding="utf-8")
+        try:
+            body = extract_c_function(source, fn_name)
+        except ValueError:
+            continue
+        matches.append((path, body))
+    if not matches:
+        raise ValueError(f"C function {fn_name!r} not found in agent_sources()")
+    if len(matches) > 1:
+        names = ", ".join(p.name for p, _ in matches)
+        raise ValueError(f"C function {fn_name!r} defined in multiple files: {names}")
+    return matches[0]

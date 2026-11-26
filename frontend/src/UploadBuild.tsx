@@ -88,7 +88,14 @@ export function uploadErrorMessage(err: unknown, fileSize: number): string {
   const message = err instanceof Error ? err.message : ''
   const status = err instanceof ApiError ? err.status : null
   if (status === 0) return message
-  if (message !== '' && !message.startsWith('<') && message !== `HTTP ${status}`) return message
+  if (
+    message !== '' &&
+    !message.startsWith('<') &&
+    message !== `HTTP ${status}` &&
+    message !== 'request payload too large'
+  ) {
+    return message
+  }
   if (status === 413) {
     return (
       `This file (${count(fileSize)} bytes) is larger than the server accepts. An OTA slot is ` +

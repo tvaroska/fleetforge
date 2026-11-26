@@ -66,7 +66,7 @@ void app_main(void)
                cycle,
                ff_identity_fw_version(),
                ff_is_connected(),
-               has_url ? api_url : "(unset)");
+               has_url ? "configured" : "unset");
 
         ff_logf('I', "{{APP_NAME}} cycle=%u fw=%s api_url=%s",
                 cycle,

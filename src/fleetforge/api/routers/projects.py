@@ -23,6 +23,7 @@ from fleetforge.api.deps import (
     cookie_scheme,
     now_utc,
     resolve_project_for_request,
+    visible_projects_with_roles,
 )
 from fleetforge.api.router_helpers import resolve_deploy_sender as _sender
 from fleetforge.api.schemas import (
@@ -120,32 +121,8 @@ def _project_summary(
 async def list_projects(admin: AdminDep, sessionmaker: SessionMakerDep) -> ProjectList:
     """List projects visible to `admin`, ordered by `slug`."""
     async with sessionmaker() as session:
-        if admin.project_id is not None:
-            proj = await session.get(Project, admin.project_id)
-            return ProjectList(
-                projects=[_project_summary(proj, role="token")] if proj is not None else []
-            )
-
-        if admin.is_superadmin:
-            rows = (await session.scalars(select(Project).order_by(Project.slug))).all()
-            return ProjectList(
-                projects=[_project_summary(p, role=ProjectRole.OWNER.value) for p in rows]
-            )
-
-        if admin.user_id is not None:
-            stmt = (
-                select(Project, ProjectMember.role)
-                .join(ProjectMember, ProjectMember.project_id == Project.id)
-                .where(ProjectMember.user_id == admin.user_id)
-                .order_by(Project.slug)
-            )
-            member_rows = (await session.execute(stmt)).all()
-            return ProjectList(
-                projects=[_project_summary(proj, role=role) for proj, role in member_rows]
-            )
-
-        rows = (await session.scalars(select(Project).order_by(Project.slug))).all()
-        return ProjectList(projects=[_project_summary(p, role="token") for p in rows])
+        rows = await visible_projects_with_roles(session, admin)
+        return ProjectList(projects=[_project_summary(proj, role=role) for proj, role in rows])
 
 
 @router.post(
@@ -476,31 +453,34 @@ async def _publish_cohort_cancels(
     pending_publishes: list[tuple[Device, str, str, bool]],
     skipped: dict[str, str],
 ) -> list[CommandAccepted]:
-    cancelled: list[CommandAccepted] = []
-    for device, command_id, cmd_id, online in pending_publishes:
-        payload = verb_payload(command_id=command_id, type=CommandType.CANCEL, cmd_id=cmd_id)
-        try:
-            await publisher.publish(device.device_id, payload)
-        except CommandPublishError:
-            logger.exception(
-                "cohort cancel %s for %s could not be published",
-                command_id,
-                device.device_id,
-            )
-            await mark_publish_failed(session, command_id=command_id)
-            await session.commit()
-            skipped[device.device_id] = "broker publish failed"
-            continue
-        cancelled.append(
-            CommandAccepted(
-                command_id=command_id,
-                device_id=device.device_id,
-                type=CommandType.CANCEL.value,
-                cmd_id=cmd_id,
-                device_online=online,
-            )
+    if not pending_publishes:
+        return []
+    messages = [
+        (
+            device.device_id,
+            verb_payload(command_id=command_id, type=CommandType.CANCEL, cmd_id=cmd_id),
         )
-    return cancelled
+        for device, command_id, cmd_id, _ in pending_publishes
+    ]
+    try:
+        await publisher.publish_many(messages)
+    except CommandPublishError:
+        logger.exception("cohort cancel batch (%d devices) could not be published", len(messages))
+        for device, command_id, _, _ in pending_publishes:
+            await mark_publish_failed(session, command_id=command_id)
+            skipped[device.device_id] = "broker publish failed"
+        await session.commit()
+        return []
+    return [
+        CommandAccepted(
+            command_id=command_id,
+            device_id=device.device_id,
+            type=CommandType.CANCEL.value,
+            cmd_id=cmd_id,
+            device_online=online,
+        )
+        for device, command_id, cmd_id, online in pending_publishes
+    ]
 
 
 @router.post(

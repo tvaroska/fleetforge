@@ -7,8 +7,8 @@ never attached to a cross-site request and there is nothing for a CSRF token to 
 The corollary is that CORS middleware must never appear — see `api/main.py`.
 
 **Every login mints a row** in `admin_tokens`. That is intended: revocation is
-per-session, so each session needs its own revocable row. Purging revoked/expired
-rows after 90 days (`spec/prd.md` → *Retention*) is R1 work and does not exist yet.
+per-session, so each session needs its own revocable row. Expired/revoked rows are
+pruned on the ingestor's hourly retention sweep (`fleetforge.retention`).
 """
 
 import datetime as dt
@@ -17,7 +17,6 @@ import re
 import uuid
 from typing import Annotated, Any
 
-import anyio.to_thread
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from sqlalchemy import or_, select, text
 from sqlalchemy.exc import IntegrityError
@@ -38,6 +37,7 @@ from fleetforge.api.deps import (
     login_limiter,
     now_utc,
     token_cache,
+    visible_projects_with_roles,
 )
 from fleetforge.api.schemas import (
     PROJECT_SLUG_PATTERN,
@@ -55,14 +55,11 @@ from fleetforge.auth.firebase import (
     FirebaseIdentity,
     FirebaseInvalidCredentials,
 )
-from fleetforge.auth.hashing import ARGON2_LIMITER, averify_secret, dummy_verify, hash_secret
+from fleetforge.auth.hashing import ahash_secret, averify_secret, dummy_verify
 from fleetforge.auth.ratelimit import FixedWindowLimiter
 from fleetforge.auth.tokens import ADMIN_TOKEN_PREFIX, aissue_token
 from fleetforge.db.models import (
     AdminToken,
-    Project,
-    ProjectMember,
-    ProjectRole,
     User,
 )
 
@@ -113,62 +110,16 @@ async def visible_projects_for(
     session: AsyncSession, admin: AuthContext
 ) -> list[UserProjectSummary]:
     """Return all projects visible to `admin`, ordered by `slug`."""
-    if admin.project_id is not None:
-        proj = await session.get(Project, admin.project_id)
-        if proj is None:
-            return []
-        return [
-            UserProjectSummary(
-                id=proj.id,
-                slug=proj.slug,
-                name=proj.name,
-                description=proj.description,
-                role="token",
-            )
-        ]
-
-    if admin.is_superadmin:
-        rows = (await session.scalars(select(Project).order_by(Project.slug))).all()
-        return [
-            UserProjectSummary(
-                id=p.id,
-                slug=p.slug,
-                name=p.name,
-                description=p.description,
-                role=ProjectRole.OWNER.value,
-            )
-            for p in rows
-        ]
-
-    if admin.user_id is not None:
-        stmt = (
-            select(Project, ProjectMember.role)
-            .join(ProjectMember, ProjectMember.project_id == Project.id)
-            .where(ProjectMember.user_id == admin.user_id)
-            .order_by(Project.slug)
-        )
-        member_rows = (await session.execute(stmt)).all()
-        return [
-            UserProjectSummary(
-                id=proj.id,
-                slug=proj.slug,
-                name=proj.name,
-                description=proj.description,
-                role=role,
-            )
-            for proj, role in member_rows
-        ]
-
-    rows = (await session.scalars(select(Project).order_by(Project.slug))).all()
+    rows = await visible_projects_with_roles(session, admin)
     return [
         UserProjectSummary(
-            id=p.id,
-            slug=p.slug,
-            name=p.name,
-            description=p.description,
-            role="token",
+            id=proj.id,
+            slug=proj.slug,
+            name=proj.name,
+            description=proj.description,
+            role=role,
         )
-        for p in rows
+        for proj, role in rows
     ]
 
 
@@ -573,7 +524,7 @@ async def reset_password(
             detail="Firebase authentication service is unavailable",
         ) from None
 
-    pw_hash = await anyio.to_thread.run_sync(hash_secret, body.new_password, limiter=ARGON2_LIMITER)
+    pw_hash = await ahash_secret(body.new_password)
 
     revoked_ids: list[object] = []
     async with sessionmaker() as session:
@@ -740,11 +691,7 @@ async def update_me(
                     headers={"WWW-Authenticate": "Bearer"},
                 )
 
-        pw_hash = (
-            await anyio.to_thread.run_sync(hash_secret, body.password, limiter=ARGON2_LIMITER)
-            if body.password is not None
-            else None
-        )
+        pw_hash = await ahash_secret(body.password) if body.password is not None else None
 
         if user is None:
             now = now_utc()

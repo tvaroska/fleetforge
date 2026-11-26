@@ -644,6 +644,7 @@ typedef struct {{ size_t pos; }} mock_http_t;
 typedef mock_http_t *esp_http_client_handle_t;
 
 static void *esp_crt_bundle_attach = NULL;
+static portMUX_TYPE s_cancel_lock = 0;
 static volatile bool s_running = false;
 static char g_last_fail[64];
 static int g_finish_calls = 0;
@@ -724,6 +725,7 @@ static esp_err_t esp_ota_end(esp_ota_handle_t h) {{ (void)h; return ESP_OK; }}
 static esp_err_t esp_ota_set_boot_partition(const esp_partition_t *p) {{ (void)p; g_set_boot_calls++; return ESP_OK; }}
 static bool restore_boot_partition(const char *w) {{ (void)w; return true; }}
 static esp_err_t ff_txn_save(const char *id, uint32_t a, uint32_t t) {{ (void)id; (void)a; (void)t; return ESP_OK; }}
+static esp_err_t ff_txn_clear_if(const char *id) {{ (void)id; return ESP_OK; }}
 static bool ff_safe_window_is_safe(void) {{ return true; }}
 static esp_err_t partition_digest(const esp_partition_t *p, size_t l, char out[65], uint8_t raw[32]) {{
     (void)p; (void)l;
@@ -904,3 +906,174 @@ int test_sec_retry_cap(uint32_t initial_rounds) {{
     # `secrets_retry_timer_cb` stops at `SECRETS_MAX_RETRY_ROUNDS` (`ff_sec.c:117`).
     assert lib.test_sec_retry_cap(4) == 1
     assert lib.test_sec_retry_cap(5) == 0
+
+
+def test_improv_ble_and_mqtt_parse_hardening(tmp_path: Path) -> None:
+    """D-8 & D-15: Host-compiled Improv BLE auth gate + firmware MQTT/cfg parse bounds."""
+    gcc = shutil.which("gcc")
+    assert gcc is not None, "gcc must be available to compile host C verification tests"
+
+    wifi_raw = (COMPONENT_SRC / "ff_net_wifi.c").read_text(encoding="utf-8")
+    mqtt_raw = FF_MQTT_C.read_text(encoding="utf-8")
+    cfg_raw = (COMPONENT_SRC / "ff_cfg.c").read_text(encoding="utf-8")
+
+    # D-8 static invariants: encrypted write flag + link check + window rate cap + flashed-first priority.
+    assert "BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_ENC" in wifi_raw
+    assert "desc.sec_state.encrypted" in wifi_raw
+    assert "IMPROV_BLE_MAX_OPENS_PER_BOOT" in wifi_raw
+    assert "IMPROV_BLE_COOLDOWN_US" in wifi_raw
+    assert "static uint8_t s_improv_state = IMPROV_STATE_AUTH_REQUIRED;" in wifi_raw
+    overlay_body = extract_c_function(wifi_raw, "load_nvs_net_overlay")
+    assert overlay_body.index("cfg->nets[i]") < overlay_body.index("nvs_open(")
+
+    # D-15 static invariants: total_data_len guard, bounded size cast, hb_s cap, shared s_decide_lock.
+    assert "event->total_data_len != event->data_len" in mqtt_raw
+    assert "artifact size invalid" in mqtt_raw
+    assert "out->hb_s > 86400" in cfg_raw
+    assert "ctx->cfg->hb_s <= 86400" in mqtt_raw
+    confirm_cb = extract_c_function(mqtt_raw, "confirm_timeout_cb")
+    assert "session_confirmed = s_ctx.session_confirmed;" in confirm_cb
+    assert confirm_cb.index("portENTER_CRITICAL(&s_decide_lock)") < confirm_cb.index(
+        "s_ctx.session_confirmed"
+    )
+    assert "s_venue_offline" not in mqtt_raw
+
+    # Compile real `improv_rpc_fail`, `improv_handle_rpc_command`, and `ff_net_wifi_improv_authorize` under host gcc.
+    fn_rpc_fail = extract_c_function(wifi_raw, "improv_rpc_fail")
+    fn_rpc = extract_c_function(wifi_raw, "improv_handle_rpc_command")
+    fn_auth = extract_c_function(wifi_raw, "ff_net_wifi_improv_authorize")
+    harness_c = f"""
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <string.h>
+
+typedef int esp_err_t;
+typedef int portMUX_TYPE;
+#define portMUX_INITIALIZER_UNLOCKED 0
+#define portENTER_CRITICAL(m) ((void)(m))
+#define portEXIT_CRITICAL(m) ((void)(m))
+#define ESP_OK 0
+#define ESP_ERR_INVALID_ARG 0x102
+#define ESP_ERR_INVALID_STATE 0x103
+#define ESP_ERR_INVALID_CRC 0x109
+#define ESP_ERR_NOT_SUPPORTED 0x106
+#define IMPROV_STATE_AUTH_REQUIRED 0x01
+#define IMPROV_STATE_AUTHORIZED 0x02
+#define IMPROV_STATE_PROVISIONING 0x03
+#define IMPROV_ERR_NONE 0x00
+#define IMPROV_ERR_INVALID_RPC 0x01
+#define IMPROV_ERR_UNKNOWN_RPC 0x02
+#define IMPROV_ERR_NOT_AUTHORIZED 0x04
+#define IMPROV_CMD_WIFI_SETTINGS 0x01
+#define IMPROV_CMD_IDENTIFY 0x02
+#define WIFI_EVENT 0
+#define FF_WIFI_EVENT_IMPROV_CRED 1
+#define ESP_LOGI(tag, ...) ((void)(tag))
+
+static const char *TAG = "test";
+static volatile bool s_improv_active = true;
+static volatile bool s_venue_offline = false;
+static volatile bool s_improv_ble_enabled = true;
+static portMUX_TYPE s_improv_lock = portMUX_INITIALIZER_UNLOCKED;
+static uint8_t s_improv_state = IMPROV_STATE_AUTH_REQUIRED;
+static uint8_t s_improv_error = IMPROV_ERR_NONE;
+static char s_improv_ssid[33];
+static char s_improv_sec[65];
+static int g_saved_calls = 0;
+
+static void improv_ble_notify_status(void) {{}}
+static esp_err_t ff_net_wifi_save_nvs(const char *s, const char *p) {{
+    (void)s; (void)p; g_saved_calls++; return ESP_OK;
+}}
+static esp_err_t esp_event_post(int base, int id, const void *d, size_t l, int t) {{
+    (void)base; (void)id; (void)d; (void)l; (void)t; return ESP_OK;
+}}
+
+{fn_rpc_fail}
+{fn_rpc}
+{fn_auth}
+
+int run_rpc_test(bool active, bool offline, bool authorize_first, uint8_t cmd, int *out_saved, uint8_t *out_err) {{
+    s_improv_active = active;
+    s_venue_offline = offline;
+    s_improv_ble_enabled = true;
+    s_improv_state = IMPROV_STATE_AUTH_REQUIRED;
+    s_improv_error = IMPROV_ERR_NONE;
+    g_saved_calls = 0;
+    if (authorize_first) {{
+        ff_net_wifi_improv_authorize();
+    }}
+    uint8_t pkt[16];
+    size_t len = 0;
+    if (cmd == IMPROV_CMD_IDENTIFY) {{
+        pkt[0] = IMPROV_CMD_IDENTIFY; pkt[1] = 0; pkt[2] = IMPROV_CMD_IDENTIFY; len = 3;
+    }} else {{
+        pkt[0] = IMPROV_CMD_WIFI_SETTINGS; pkt[1] = 6;
+        pkt[2] = 2; pkt[3] = 'O'; pkt[4] = 'K';
+        pkt[5] = 2; pkt[6] = 'p'; pkt[7] = 'w';
+        uint8_t sum = 0;
+        for (size_t i = 0; i < 8; i++) sum = (uint8_t)(sum + pkt[i]);
+        pkt[8] = sum;
+        len = 9;
+    }}
+    int rc = improv_handle_rpc_command(pkt, len);
+    *out_saved = g_saved_calls;
+    *out_err = s_improv_error;
+    return rc;
+}}
+"""
+    so_path = tmp_path / "libff_improv.so"
+    proc = subprocess.run(  # noqa: S603
+        [
+            gcc,
+            "-O2",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-Wno-unused-function",
+            "-shared",
+            "-fPIC",
+            "-x",
+            "c",
+            "-",
+            "-o",
+            str(so_path),
+        ],
+        input=harness_c.encode("utf-8"),
+        capture_output=True,
+    )
+    assert proc.returncode == 0, proc.stderr.decode("utf-8", errors="replace")
+    lib = ctypes.CDLL(str(so_path))
+    lib.run_rpc_test.argtypes = [
+        ctypes.c_bool,
+        ctypes.c_bool,
+        ctypes.c_bool,
+        ctypes.c_uint8,
+        ctypes.POINTER(ctypes.c_int),
+        ctypes.POINTER(ctypes.c_uint8),
+    ]
+    lib.run_rpc_test.restype = ctypes.c_int
+
+    saved = ctypes.c_int(0)
+    err = ctypes.c_uint8(0)
+    # Without physical/serial authorization, WIFI_SETTINGS is refused with IMPROV_ERR_NOT_AUTHORIZED.
+    assert (
+        lib.run_rpc_test(True, False, False, 0x01, ctypes.byref(saved), ctypes.byref(err)) == 0x103
+    )
+    assert saved.value == 0
+    assert err.value == 0x04
+    # Identify remains allowed while awaiting authorization.
+    assert lib.run_rpc_test(True, False, False, 0x02, ctypes.byref(saved), ctypes.byref(err)) == 0
+    assert saved.value == 0
+    # After explicit authorization, WIFI_SETTINGS succeeds and saves once.
+    assert lib.run_rpc_test(True, False, True, 0x01, ctypes.byref(saved), ctypes.byref(err)) == 0
+    assert saved.value == 1
+    assert err.value == 0x00
+    # Inactive (post-timeout) or venue-offline window refuses WIFI_SETTINGS even after authorize().
+    assert (
+        lib.run_rpc_test(False, False, True, 0x01, ctypes.byref(saved), ctypes.byref(err)) == 0x103
+    )
+    assert saved.value == 0
+    assert lib.run_rpc_test(True, True, True, 0x01, ctypes.byref(saved), ctypes.byref(err)) == 0x103
+    assert saved.value == 0

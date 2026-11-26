@@ -269,7 +269,7 @@ FF_IDENTITY_INTERNAL_H = COMPONENT_SRC / "ff_identity_internal.h"
 # their FIRST occurrence: the done callback must not repeat them.
 PINNED_CONFIRM = "else if (confirm_this_image() && s_txn.kind == TXN_CONFIRMING)"
 PINNED_BOOTED_NEW = "s_txn.kind == TXN_BOOTED_NEW && accept_unverified_image()"
-PINNED_LATE_ACK = "if (s_rollback_decided)"
+PINNED_LATE_ACK = "if (rollback_decided)"
 # The esp_timer side of the confirm/rollback pair never writes flash, never takes the
 # client lock and never touches the self-test API (the pre-store makes `timed out` free).
 # R5-fw-5: nor the maker's safe-window rule (ff_safe_window_registered() is allowed: it only
@@ -316,7 +316,12 @@ class TestTheHold:
         ]
         published = _published()
         run = published.index("ff_selftest_run(selftest_done)")
-        assert published.index(PINNED_LATE_ACK) < run < published.index(PINNED_CONFIRM)
+        assert (
+            published.index("rollback_decided = s_rollback_decided;")
+            < published.index(PINNED_LATE_ACK)
+            < run
+            < published.index(PINNED_CONFIRM)
+        )
         hold = published[published.index(PINNED_LATE_ACK) : run]
         assert (
             "else if (s_selftest_registered && (pending_verify() || s_txn.kind == TXN_BOOTED_NEW))"
@@ -343,7 +348,8 @@ class TestTheHold:
     def test_the_deadline_still_applies_to_a_held_image(self) -> None:
         body = _function_body(_code(FF_MQTT_C), "confirm_timeout_cb")
         assert "if (!pending_verify())" in body
-        assert "if (s_ctx.session_confirmed && !s_selftest_registered)" in body
+        assert "session_confirmed = s_ctx.session_confirmed;" in body
+        assert "if (session_confirmed && !s_selftest_registered)" in body
         assert "s_ctx.session_confirmed || !pending_verify()" not in body
         # Today's line, byte for byte (the quickstart's R phase greps it), and the new one.
         source = FF_MQTT_C.read_text()

@@ -78,6 +78,30 @@ describe('api.updateDevice', () => {
     expect(err.status).toBe(0)
     expect(err.message).toBe('the API is unreachable')
   })
+
+  it('maps an nginx HTML 413 page to a clean payload-too-large message (D-11)', async () => {
+    respond(
+      413,
+      '<html><head><title>413 Request Entity Too Large</title></head><body><h1>413</h1></body></html>',
+    )
+    const err = await rejection(api.updateDevice('0000000fe601', { name: 'x' }))
+    expect(err.status).toBe(413)
+    expect(err.message).toBe('request payload too large')
+  })
+
+  it('falls back to HTTP status on non-413 HTML error pages (D-11)', async () => {
+    respond(502, '<html><body>502 Bad Gateway</body></html>')
+    const err = await rejection(api.updateDevice('0000000fe601', { name: 'x' }))
+    expect(err.status).toBe(502)
+    expect(err.message).toBe('HTTP 502')
+  })
+
+  it('throws ApiError rather than SyntaxError on a non-JSON 200 body (D-16)', async () => {
+    respond(200, '<html><body>SSO login</body></html>')
+    const err = await rejection(api.updateDevice('0000000fe601', { name: 'x' }))
+    expect(err.status).toBe(200)
+    expect(err.message).toBe('unexpected non-JSON response from API')
+  })
 })
 
 describe('api.listPartitionProfiles and api.adoptPartitionProfile (R3-fe-1)', () => {

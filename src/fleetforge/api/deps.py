@@ -526,6 +526,32 @@ async def check_project_access(
         raise FORBIDDEN
 
 
+async def visible_projects_with_roles(
+    session: AsyncSession, admin: AuthContext
+) -> list[tuple[Project, str]]:
+    """Single source of truth for projects visible to `admin` and their effective role (A-12)."""
+    if admin.project_id is not None:
+        proj = await session.get(Project, admin.project_id)
+        return [(proj, "token")] if proj is not None else []
+
+    if admin.is_superadmin:
+        rows = (await session.scalars(select(Project).order_by(Project.slug))).all()
+        return [(p, ProjectRole.OWNER.value) for p in rows]
+
+    if admin.user_id is not None:
+        stmt = (
+            select(Project, ProjectMember.role)
+            .join(ProjectMember, ProjectMember.project_id == Project.id)
+            .where(ProjectMember.user_id == admin.user_id)
+            .order_by(Project.slug)
+        )
+        member_rows = (await session.execute(stmt)).all()
+        return [(proj, role) for proj, role in member_rows]
+
+    rows = (await session.scalars(select(Project).order_by(Project.slug))).all()
+    return [(p, "token") for p in rows]
+
+
 async def visible_project_ids(
     session: AsyncSession, admin: AuthContext
 ) -> frozenset[uuid.UUID] | None:

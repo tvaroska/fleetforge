@@ -219,8 +219,8 @@ static esp_err_t parse_payload(const char *payload, size_t length, ff_cfg_t *out
         goto done;
     if ((err = copy_int(root, "wake_s", &out->wake_s, 0)) != ESP_OK)
         goto done;
-    if (out->hb_s <= 0) {
-        ESP_LOGE(TAG, "config hb_s must be positive, not %d", out->hb_s);
+    if (out->hb_s <= 0 || out->hb_s > 86400) {
+        ESP_LOGE(TAG, "config hb_s must be in 1..86400, not %d", out->hb_s);
         err = ESP_ERR_INVALID_ARG;
         goto done;
     }

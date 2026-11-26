@@ -1629,7 +1629,15 @@ def imported_modules(path: Path) -> set[str]:
     return modules
 
 
-@pytest.mark.parametrize("path", sorted(SIMULATOR_DIR.glob("*.py")), ids=lambda p: p.name)
+def _simulator_py_files(root: Path = SIMULATOR_DIR) -> list[Path]:
+    return sorted(root.rglob("*.py"))
+
+
+@pytest.mark.parametrize(
+    "path",
+    _simulator_py_files(),
+    ids=lambda p: p.relative_to(SIMULATOR_DIR).as_posix(),
+)
 def test_the_simulator_imports_nothing_from_the_server(path: Path) -> None:
     """A simulator sharing the server's parsing agrees with it by construction.
 
@@ -1652,6 +1660,16 @@ def test_the_purity_tripwire_can_actually_fail(tmp_path: Path) -> None:
     sample = tmp_path / "bad.py"
     sample.write_text("import sqlalchemy\nfrom fleetforge.config import get_settings\n")
     assert imported_modules(sample) == {"sqlalchemy", "fleetforge.config"}
+
+
+def test_the_purity_guard_sees_subpackages(tmp_path: Path) -> None:
+    """T-9: `rglob` discovers nested simulator subpackages rather than stopping at flat `*.py`."""
+    nested = tmp_path / "subpkg" / "leak.py"
+    nested.parent.mkdir(parents=True)
+    nested.write_text("import fastapi\n", encoding="utf-8")
+    discovered = _simulator_py_files(tmp_path)
+    assert discovered == [nested]
+    assert "fastapi" in imported_modules(discovered[0])
 
 
 # ---------------------------------------------------------------------------

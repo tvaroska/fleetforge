@@ -17,13 +17,12 @@ authenticate an admin request, even though both are rows with the same shape. Th
 module is prefix-generic so R0-be-2 can reuse it for `ffe_` unchanged.
 """
 
+import asyncio
 import secrets
 import uuid
 from dataclasses import dataclass
 
-import anyio.to_thread
-
-from fleetforge.auth.hashing import ARGON2_LIMITER, hash_secret
+from fleetforge.auth.hashing import _ARGON2_EXECUTOR, ARGON2_LIMITER, hash_secret
 
 ADMIN_TOKEN_PREFIX = "ffa"  # noqa: S105 - a namespace tag in the wire format, not a secret
 ENROLLMENT_TOKEN_PREFIX = "ffe"  # noqa: S105 - same; reserved for R0-be-2
@@ -75,8 +74,10 @@ def issue_token(prefix: str) -> IssuedToken:
 
 
 async def aissue_token(prefix: str) -> IssuedToken:
-    """`issue_token` off the event loop. One code path: this calls `issue_token`."""
-    return await anyio.to_thread.run_sync(issue_token, prefix, limiter=ARGON2_LIMITER)
+    """`issue_token` off the event loop on `_ARGON2_EXECUTOR` (A-12)."""
+    async with ARGON2_LIMITER:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(_ARGON2_EXECUTOR, issue_token, prefix)
 
 
 def parse_token(raw: str | None, expected_prefix: str) -> TokenParts | None:

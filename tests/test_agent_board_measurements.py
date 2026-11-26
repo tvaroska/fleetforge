@@ -242,7 +242,11 @@ def test_new_at_target_confirms_only_after_a_mark_valid_from_new() -> None:
     new = "s_txn.kind == TXN_BOOTED_NEW && accept_unverified_image()"
     assert existing in mqtt, "the R2-be-1 confirm line must stay byte-identical"
     assert new in mqtt
-    assert mqtt.index("if (s_rollback_decided)") < mqtt.index(existing) < mqtt.index(new)
+    assert (
+        mqtt.index("rollback_decided = s_rollback_decided;")
+        < mqtt.index(existing)
+        < mqtt.index(new)
+    )
     accept = _function_body(mqtt, "accept_unverified_image")
     assert "ESP_OTA_IMG_NEW" in accept
     assert accept.index("ESP_OTA_IMG_NEW") < accept.index(

@@ -1541,27 +1541,28 @@ esp_err_t ff_ota_dock_stage(const ff_ota_cmd_t *cmd, const uint8_t *data, size_t
     if (cmd == NULL || data == NULL || len == 0) {
         return ESP_ERR_INVALID_ARG;
     }
-    if (s_running) {
+    bool busy;
+    portENTER_CRITICAL(&s_cancel_lock);
+    busy = s_running;
+    if (!busy) {
+        s_running = true;
+    }
+    portEXIT_CRITICAL(&s_cancel_lock);
+    if (busy) {
         return ESP_ERR_INVALID_STATE;
     }
 
+    esp_err_t rc = ESP_OK;
     ff_mqtt_publish_status(cmd->cmd_id, FF_STATUS_STAGING, 0, NULL);
     if (cmd->size != 0 && len != cmd->size) {
-        fail(cmd, "size mismatch");
-        return ESP_ERR_INVALID_SIZE;
+        fail(cmd, "size mismatch"); rc = ESP_ERR_INVALID_SIZE; goto done;
     }
-
     if (cmd->type[0] != '\0' && strcmp(cmd->type, "app") != 0) {
         const ff_cargo_handler_t *handler = find_cargo_handler(cmd->type);
         if (handler == NULL) {
-            fail(cmd, "unsupported artifact type");
-            return ESP_ERR_NOT_SUPPORTED;
+            fail(cmd, "unsupported artifact type"); rc = ESP_ERR_NOT_SUPPORTED; goto done;
         }
         ff_mqtt_publish_status(cmd->cmd_id, FF_STATUS_DOWNLOADING, 0, NULL);
-        if (handler->write_cb(0, data, len, handler->ctx) != ESP_OK) {
-            fail(cmd, "download failed");
-            return ESP_FAIL;
-        }
         uint8_t digest_raw[32];
         mbedtls_sha256_context sha;
         mbedtls_sha256_init(&sha);
@@ -1569,85 +1570,76 @@ esp_err_t ff_ota_dock_stage(const ff_ota_cmd_t *cmd, const uint8_t *data, size_t
         (void)mbedtls_sha256_update(&sha, data, len);
         (void)mbedtls_sha256_finish(&sha, digest_raw);
         mbedtls_sha256_free(&sha);
-
         ff_mqtt_publish_status(cmd->cmd_id, FF_STATUS_VERIFYING, FF_STATUS_PCT_NONE, NULL);
         char digest_hex[65];
         hex_encode(digest_raw, sizeof(digest_raw), digest_hex);
         if (strcmp(digest_hex, cmd->sha256) != 0) {
-            fail(cmd, "sha256 mismatch");
-            return ESP_ERR_INVALID_CRC;
+            fail(cmd, "sha256 mismatch"); rc = ESP_ERR_INVALID_CRC; goto done;
         }
         const char *sig_detail = "signature invalid";
         if (!verify_artifact_signature(digest_raw, cmd->sig, &sig_detail)) {
-            fail(cmd, sig_detail);
-            return ESP_ERR_INVALID_STATE;
+            fail(cmd, sig_detail); rc = ESP_ERR_INVALID_STATE; goto done;
+        }
+        if (handler->write_cb(0, data, len, handler->ctx) != ESP_OK) {
+            fail(cmd, "download failed"); rc = ESP_FAIL; goto done;
         }
         ff_mqtt_publish_status(cmd->cmd_id, FF_STATUS_STAGED, 100, NULL);
         ff_mqtt_publish_status(cmd->cmd_id, FF_STATUS_APPLYING, 100, NULL);
         if (handler->finish_cb(len, digest_hex, cmd->version, handler->ctx) != ESP_OK) {
-            fail(cmd, "cargo apply failed");
-            return ESP_FAIL;
+            fail(cmd, "cargo apply failed"); rc = ESP_FAIL; goto done;
         }
         ff_mqtt_complete_cargo(cmd->cmd_id, cmd->type, cmd->version);
-        return ESP_OK;
+        goto done;
     }
 
     const esp_partition_t *target = choose_target_slot(cmd);
     if (target == NULL) {
-        return ESP_ERR_INVALID_STATE;
+        rc = ESP_ERR_INVALID_STATE; goto done;
     }
     if (len > target->size) {
-        fail(cmd, "artifact larger than the ota slot");
-        return ESP_ERR_INVALID_SIZE;
+        fail(cmd, "artifact larger than the ota slot"); rc = ESP_ERR_INVALID_SIZE; goto done;
     }
-
     esp_ota_handle_t ota_handle = 0;
     if (esp_ota_begin(target, len, &ota_handle) != ESP_OK) {
-        fail(cmd, "cannot open the artifact");
-        return ESP_FAIL;
+        fail(cmd, "cannot open the artifact"); rc = ESP_FAIL; goto done;
     }
     ff_mqtt_publish_status(cmd->cmd_id, FF_STATUS_DOWNLOADING, 0, NULL);
     if (esp_ota_write(ota_handle, data, len) != ESP_OK) {
         (void)esp_ota_abort(ota_handle);
-        fail(cmd, "download failed");
-        return ESP_FAIL;
+        fail(cmd, "download failed"); rc = ESP_FAIL; goto done;
     }
-
     ff_mqtt_publish_status(cmd->cmd_id, FF_STATUS_VERIFYING, FF_STATUS_PCT_NONE, NULL);
     char digest[65];
     uint8_t digest_raw[32];
     if (partition_digest(target, len, digest, digest_raw) != ESP_OK) {
         (void)esp_ota_abort(ota_handle);
-        fail(cmd, "cannot verify the staged image");
-        return ESP_FAIL;
+        fail(cmd, "cannot verify the staged image"); rc = ESP_FAIL; goto done;
     }
     if (strcmp(digest, cmd->sha256) != 0) {
         (void)esp_ota_abort(ota_handle);
-        fail(cmd, "sha256 mismatch");
-        return ESP_ERR_INVALID_CRC;
+        fail(cmd, "sha256 mismatch"); rc = ESP_ERR_INVALID_CRC; goto done;
     }
     const char *sig_detail = "signature invalid";
     if (!verify_artifact_signature(digest_raw, cmd->sig, &sig_detail)) {
         (void)esp_ota_abort(ota_handle);
-        fail(cmd, sig_detail);
-        return ESP_ERR_INVALID_STATE;
+        fail(cmd, sig_detail); rc = ESP_ERR_INVALID_STATE; goto done;
     }
-    if (esp_ota_end(ota_handle) != ESP_OK || esp_ota_set_boot_partition(target) != ESP_OK) {
+    if (esp_ota_end(ota_handle) != ESP_OK ||
+        ff_txn_save(cmd->cmd_id, target->address, cmd->confirm_timeout_s) != ESP_OK) {
+        fail(cmd, "cannot finish the update");
+        rc = ESP_FAIL; goto done;
+    }
+    if (esp_ota_set_boot_partition(target) != ESP_OK) {
+        (void)ff_txn_clear_if(cmd->cmd_id);
         fail(cmd, "cannot finish the update");
         (void)restore_boot_partition(WHY_REJECTED);
-        return ESP_FAIL;
+        rc = ESP_FAIL; goto done;
     }
-    (void)ff_txn_save(cmd->cmd_id, target->address, cmd->confirm_timeout_s);
+    /* Caller owns reboot timing after dock staging; stop honestly at `staged`. */
     ff_mqtt_publish_status(cmd->cmd_id, FF_STATUS_STAGED, 100, NULL);
-    if (!cmd->apply_now) {
-        return ESP_OK;
-    }
-    if (!ff_safe_window_is_safe()) {
-        ff_mqtt_publish_status(cmd->cmd_id, FF_STATUS_AWAITING_SAFE_WINDOW, 100,
-                               FF_DETAIL_APPLY_WAITS);
-        return ESP_OK;
-    }
-    ff_mqtt_publish_status(cmd->cmd_id, FF_STATUS_APPLYING, 100, NULL);
-    ff_mqtt_publish_status(cmd->cmd_id, FF_STATUS_REBOOTING, 100, NULL);
-    return ESP_OK;
+done:
+    portENTER_CRITICAL(&s_cancel_lock);
+    s_running = false;
+    portEXIT_CRITICAL(&s_cancel_lock);
+    return rc;
 }

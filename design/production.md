@@ -121,6 +121,10 @@ authorization, and the API answers **307** to a cached store URL rather than pro
 bytes. Thus, the backend stays invisible to the fleet while "served without touching the API
 process" remains true, and range/resume stays the store's own RFC-correct implementation.
 It needs `ARTIFACT_URL_SECRET` and `PUBLIC_BASE_URL` in the production environment.
+For low-heap boards (`0 < free_heap < 65536` bytes), `deploy_urls.mint_deploy_artifact_url`
+appends `&proto=http` and downgrades the link scheme so `artifact_download.py` redirects
+GCS URLs over plain HTTP (relying on SHA-256 + ECDSA P-256 artifact signatures for integrity
+rather than a second concurrent TLS handshake that would exhaust internal DRAM).
 
 ## Retire bingo
 

@@ -506,10 +506,6 @@ def sanitise_device_text(value: str) -> str:
     return stripped[:MAX_OBSERVED_DETAIL]
 
 
-# The name this module's own writer has always used.
-_sanitise_detail = sanitise_device_text
-
-
 def _observed_detail(pct: int | None, detail: str | None) -> dict[str, Any] | None:
     """The JSONB blob for an observed state: what the device sent, and nothing else.
 
@@ -520,7 +516,7 @@ def _observed_detail(pct: int | None, detail: str | None) -> dict[str, Any] | No
     if pct is not None:
         blob["pct"] = pct
     if detail is not None:
-        text_detail = _sanitise_detail(detail)
+        text_detail = sanitise_device_text(detail)
         if text_detail:
             blob["detail"] = text_detail
     return blob or None
@@ -698,7 +694,7 @@ class DeployStepSnapshot:
 
     `state` is device-controlled text, like `DeploySnapshot.state`. There is no detail
     on purpose: a `requested` row's blob carries `sha256`/`size_bytes`, which is not
-    what a timeline is about (the `_snapshot_detail` reasoning).
+    what a timeline is about (the `snapshot_detail` reasoning).
     """
 
     state: str
@@ -773,16 +769,13 @@ def snapshot_detail(detail: Any) -> str | None:
 
     A `requested` row's blob carries `sha256`/`size_bytes`/`target`/`apply`, which is
     not a lie but is not what `detail` means in the API, so nothing else is surfaced.
-    The stored string was already sanitised at write time (`_sanitise_detail`): do not
+    The stored string was already sanitised at write time (`sanitise_device_text`): do not
     re-sanitise it here, and above all do not un-redact it.
     """
     if not isinstance(detail, dict):
         return None
     value = detail.get("detail")
     return value if isinstance(value, str) else None
-
-
-_snapshot_detail = snapshot_detail
 
 
 def _snapshot_sender(value: Any) -> SenderSnapshot | None:
@@ -831,7 +824,7 @@ async def latest_deploys(
         steps.setdefault(step.device_id, []).append(DeployStepSnapshot(step.state, step.at))
     snapshots: dict[str, DeploySnapshot] = {}
     for row in rows:
-        detail = _snapshot_detail(row.detail)
+        detail = snapshot_detail(row.detail)
         snapshots[row.device_id] = DeploySnapshot(
             cmd_id=row.cmd_id,
             state=row.state,

@@ -405,8 +405,6 @@ static volatile bool s_checked_in;
 /* CUJ-2: retained dn/cfg stay_awake flag. Holds ff_ready_for_sleep() false during active
  * development iteration without reflashing. */
 static volatile bool s_stay_awake;
-/* CUJ-3: Venue Offline Mode flag. */
-static volatile bool s_venue_offline;
 
 /* R5-fw-2. `selftest failed: <reason>`, with the reason (already printable ASCII without `;`,
  * ff_selftest.c) shortened so that the returned-to image's `<head>; returned to <slot>` fits
@@ -554,26 +552,23 @@ static void confirm_timeout_cb(void *arg)
     if (!pending_verify()) {
         return;
     }
-    /* R5-fw-2: a working session confirms on its own only when no self-test is registered.
-     * With one, the ack started the self-test and the image is still unconfirmed: the
-     * deadline still applies to it. */
-    if (s_ctx.session_confirmed && !s_selftest_registered) {
-        return;
-    }
-
-    /* R5-fw-2: claim the rollback (see s_decide_lock). Without a self-test nothing else ever
-     * claims, and this is the plain `s_rollback_decided = true` it always was. */
+    /* Claim rollback under s_decide_lock (shared with announce-ack confirm in MQTT_EVENT_PUBLISHED). */
     bool confirm_claimed;
     bool already_decided;
     bool commanded;
+    bool session_confirmed;
     portENTER_CRITICAL(&s_decide_lock);
+    session_confirmed = s_ctx.session_confirmed;
     confirm_claimed = s_confirm_claimed;
     already_decided = s_rollback_decided;
     commanded = s_rollback_commanded;
-    if (!confirm_claimed && !already_decided) {
+    if (!(session_confirmed && !s_selftest_registered) && !confirm_claimed && !already_decided) {
         s_rollback_decided = true;
     }
     portEXIT_CRITICAL(&s_decide_lock);
+    if (session_confirmed && !s_selftest_registered) {
+        return;
+    }
     if (confirm_claimed) {
         /* The self-test passed first; its confirm is being written right now. */
         ESP_LOGW(TAG, "the confirm deadline passed as a passing self-test confirms this image "
@@ -1023,8 +1018,10 @@ static void heartbeat_task(void *arg)
 {
     ff_mqtt_ctx_t *ctx = (ff_mqtt_ctx_t *)arg;
     const int64_t boot_us = esp_timer_get_time();
+    const uint32_t hb_s =
+        (ctx->cfg->hb_s > 0 && ctx->cfg->hb_s <= 86400) ? (uint32_t)ctx->cfg->hb_s : 60U;
     while (true) {
-        vTaskDelay(pdMS_TO_TICKS((uint32_t)ctx->cfg->hb_s * 1000));
+        vTaskDelay(pdMS_TO_TICKS(hb_s * 1000U));
         uint32_t uptime_s = (uint32_t)((esp_timer_get_time() - boot_us) / 1000000);
         char *payload = ff_identity_heartbeat_json(uptime_s);
         if (payload == NULL) {
@@ -1043,11 +1040,7 @@ static void on_connected(ff_mqtt_ctx_t *ctx)
 {
     ESP_LOGI(TAG, "mqtt connected as %s (%s)", ff_device_id(), ctx->cfg->mqtt_uri);
 
-    /* The last stage of an arrival, and the one that ends it: the retained announce
-     * published a few lines below is what puts this board in the fleet proper, after
-     * which the dashboard stops listing it as arriving at all. Reported anyway, because
-     * the gap between this and the announce landing is where a broker ACL problem
-     * lives. A no-op on a board that had a stored credential and never enrolled. */
+    /* Arrival completes once retained announce lands; report connect so ACL gaps surface. */
     ff_progress_report(FF_PROGRESS_MQTT_CONNECTED, NULL);
 
     /* R5-fw-7: not "connected" for the firmware until THIS connection's announce is
@@ -1066,13 +1059,7 @@ static void on_connected(ff_mqtt_ctx_t *ctx)
         ESP_LOGI(TAG, "publish %s (qos 1, retain, msg_id %d)", ctx->topic_announce,
                  ctx->announce_msg_id);
 #if FF_ROLLBACK_TEST
-        /* The single injected fault. The announce IS published and IS retained, so the
-         * board really does appear in the fleet on this version — that is what makes the
-         * rollback observable from the dashboard rather than only from a serial console.
-         * What we throw away is the msg_id, so the PUBACK can never match and
-         * `session_confirmed` stays false forever. That is precisely the state
-         * `confirm_timeout_cb()` exists to rescue a board from, and the only branch of
-         * the confirm/rollback pair that has never run on hardware. */
+        /* Drop announce_msg_id so PUBACK never confirms and confirm_timeout_cb must roll back. */
         ctx->announce_msg_id = -1;
         ESP_LOGE(TAG, "FF_ROLLBACK_TEST: ignoring the announce ack on purpose — this "
                       "image must roll back in %d s",
@@ -1358,11 +1345,18 @@ static void on_stage(const cJSON *root, const char *id)
     }
 
     const cJSON *size = cJSON_GetObjectItemCaseSensitive(artifact, "size");
-    if (cJSON_IsNumber(size) && size->valuedouble > 0) {
-        cmd.size = (size_t)size->valuedouble;
+    if (size != NULL && !cJSON_IsNull(size)) {
+        const double raw_size = cJSON_IsNumber(size) ? size->valuedouble : -1.0;
+        if (!(raw_size > 0.0 && raw_size <= (double)(16U * 1024U * 1024U)) ||
+            (double)(size_t)raw_size != raw_size) {
+            ff_mqtt_publish_status(cmd.cmd_id, FF_STATUS_FAILED, FF_STATUS_PCT_NONE,
+                                   "artifact size invalid");
+            return;
+        }
+        cmd.size = (size_t)raw_size;
     }
 
-    /* R6-SEC-1: `artifact.sig` (`ecdsa-p256-sha256:<base64_der>`). Optional at the seam unless
+    /* R6-SEC-1: `artifact.sig` (`ecdsa-p256-sha256:<base64_der>`). Optional at the boundary unless
      * `FF_OTA_REQUIRE_SIGNATURE` is compiled in (checked by ff_ota.c), but any present
      * signature must match the wire format before a slot is erased or downloaded. */
     switch (take_string(artifact, "sig", cmd.sig, sizeof(cmd.sig))) {
@@ -2111,52 +2105,45 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base, int32_t event_i
             s_acked_this_connection = true; /* R5-fw-7: isConnected() */
             s_checked_in = true;            /* R5-fw-7: this wake reached the fleet */
         }
-        if (event->msg_id == ctx->announce_msg_id && !ctx->session_confirmed) {
-            ctx->session_confirmed = true;
-            ESP_LOGI(TAG, "announce acknowledged by the broker");
-            if (s_rollback_decided) {
-                ESP_LOGW(TAG, "the announce ack arrived after the confirm timeout — the "
-                              "rollback already decided stands; NOT confirming");
-            } else if (s_selftest_registered &&
-                       (pending_verify() || s_txn.kind == TXN_BOOTED_NEW)) {
-                /* R5-fw-2: the hold. This image registered a custom self-test, so reaching
-                 * the fleet is no longer enough: the ack starts the self-test in its own task
-                 * and only its pass confirms (selftest_done), inside the same deadline. The
-                 * outcome head is pre-stored STRICTLY BEFORE the run — selftest_done may run at
-                 * once on the other core, and its `failed` head must not be overwritten — so a
-                 * deadline (or a reset) with the self-test still pending reports `selftest
-                 * timed out` and the esp_timer path never writes NVS. TXN_BOOTED_NEW has no
-                 * deadline and no pre-store. */
-                if (s_txn.kind == TXN_CONFIRMING) {
-                    (void)ff_txn_set_detail(s_txn.cmd_id, DETAIL_SELFTEST_TIMED_OUT);
+        if (event->msg_id == ctx->announce_msg_id) {
+            bool first_confirm = false;
+            bool rollback_decided = false;
+            portENTER_CRITICAL(&s_decide_lock);
+            if (!ctx->session_confirmed) {
+                ctx->session_confirmed = true;
+                first_confirm = true;
+                rollback_decided = s_rollback_decided;
+                if (!rollback_decided && !s_selftest_registered) {
+                    s_confirm_claimed = true;
                 }
-                esp_err_t err = ff_selftest_run(selftest_done);
-                if (err != ESP_OK) {
-                    /* Fail-safe: no confirm without a pass. In pending_verify the deadline
-                     * rolls this image back with the pre-stored `selftest timed out`. */
-                    ESP_LOGE(TAG, "cannot start the custom self-test (%s) — NOT confirming",
-                             esp_err_to_name(err));
+            }
+            portEXIT_CRITICAL(&s_decide_lock);
+            if (first_confirm) {
+                ESP_LOGI(TAG, "announce acknowledged by the broker");
+                if (rollback_decided) {
+                    ESP_LOGW(TAG, "announce ack arrived after confirm timeout — NOT confirming");
+                } else if (s_selftest_registered &&
+                           (pending_verify() || s_txn.kind == TXN_BOOTED_NEW)) {
+                    if (s_txn.kind == TXN_CONFIRMING) {
+                        (void)ff_txn_set_detail(s_txn.cmd_id, DETAIL_SELFTEST_TIMED_OUT);
+                    }
+                    esp_err_t err = ff_selftest_run(selftest_done);
+                    if (err != ESP_OK) {
+                        ESP_LOGE(TAG, "cannot start the custom self-test (%s) — NOT confirming",
+                                 esp_err_to_name(err));
+                    }
+                } else if (confirm_this_image() && s_txn.kind == TXN_CONFIRMING) {
+                    s_txn.kind = TXN_ALREADY_CONFIRMED;
+                    s_txn.terminal_msg_id =
+                        enqueue_status(s_txn.cmd_id, FF_STATUS_CONFIRMED, 100, NULL);
+                } else if (s_txn.kind == TXN_BOOTED_NEW && accept_unverified_image()) {
+                    s_txn.kind = TXN_ALREADY_CONFIRMED;
+                    s_txn.terminal_msg_id =
+                        enqueue_status(s_txn.cmd_id, FF_STATUS_CONFIRMED, 100, s_txn.detail);
                 }
-            } else if (confirm_this_image() && s_txn.kind == TXN_CONFIRMING) {
-                /* Reported only on a successful mark-valid. If marking failed nothing is
-                 * said: the bootloader rolls back at the next reset and the image we
-                 * return to reports `rolled_back`. From here this boot owes `confirmed`,
-                 * and a reconnect before it is queued retries it. */
-                s_txn.kind = TXN_ALREADY_CONFIRMED;
-                s_txn.terminal_msg_id =
-                    enqueue_status(s_txn.cmd_id, FF_STATUS_CONFIRMED, 100, NULL);
-            } else if (s_txn.kind == TXN_BOOTED_NEW && accept_unverified_image()) {
-                /* R2b-fw-2. The same gate, for an image the bootloader never armed: the
-                 * deploy ends `confirmed`, with the detail naming what was missing. */
-                s_txn.kind = TXN_ALREADY_CONFIRMED;
-                s_txn.terminal_msg_id =
-                    enqueue_status(s_txn.cmd_id, FF_STATUS_CONFIRMED, 100, s_txn.detail);
             }
         }
-        /* The terminal state is delivered: the transaction is closed, and only now is the
-         * record cleared. A reset before this re-derives the same outcome from otadata at
-         * the next boot and says it again, which the server deduplicates. Clearing at
-         * enqueue time would trade that harmless repeat for a lost outcome. */
+        /* Clear the NVS transaction only once the terminal status PUBACK lands. */
         if (s_txn.kind != TXN_NONE && s_txn.terminal_msg_id > 0 &&
             event->msg_id == s_txn.terminal_msg_id) {
             (void)ff_txn_clear_if(s_txn.cmd_id);
@@ -2166,6 +2153,12 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base, int32_t event_i
         break;
 
     case MQTT_EVENT_DATA:
+        if (event->data_len < 0 || event->topic_len < 0 || event->current_data_offset != 0 ||
+            event->total_data_len != event->data_len) {
+            ESP_LOGE(TAG, "refusing truncated/fragmented MQTT message (len=%d total=%d offset=%d)",
+                     event->data_len, event->total_data_len, event->current_data_offset);
+            break;
+        }
         if (event->topic != NULL && (size_t)event->topic_len == strlen(ctx->topic_cfg) &&
             strncmp(event->topic, ctx->topic_cfg, (size_t)event->topic_len) == 0) {
             on_cfg(ctx, event->data, event->data_len);
@@ -2347,7 +2340,6 @@ void ff_mqtt_complete_cargo(const char *cmd_id, const char *type, const char *ve
 
 void ff_mqtt_set_offline_mode(bool offline)
 {
-    s_venue_offline = offline;
     if (offline && (pending_verify() || s_txn.kind == TXN_BOOTED_NEW)) {
         (void)ff_mqtt_confirm_offline();
     }

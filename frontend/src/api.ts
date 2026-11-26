@@ -92,10 +92,14 @@ async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const body = await response.text()
 
   if (!response.ok) {
-    throw new ApiError(response.status, detailOf(body) ?? `HTTP ${response.status}`)
+    throw new ApiError(response.status, detailOf(body, response.status) ?? `HTTP ${response.status}`)
   }
 
-  return JSON.parse(body) as T
+  try {
+    return JSON.parse(body) as T
+  } catch {
+    throw new ApiError(response.status, 'unexpected non-JSON response from API')
+  }
 }
 
 /**
@@ -109,7 +113,10 @@ async function requestBytes(path: string): Promise<Uint8Array> {
     throw new ApiError(0, 'the API is unreachable')
   }
   if (!response.ok) {
-    throw new ApiError(response.status, detailOf(await response.text()) ?? `HTTP ${response.status}`)
+    throw new ApiError(
+      response.status,
+      detailOf(await response.text(), response.status) ?? `HTTP ${response.status}`,
+    )
   }
   return new Uint8Array(await response.arrayBuffer())
 }
@@ -118,7 +125,7 @@ async function requestBytes(path: string): Promise<Uint8Array> {
  * FastAPI puts the human-readable reason in `detail`: a string from an `HTTPException`, or
  * (422, request validation) an array of `{msg, ...}` items.
  */
-function detailOf(body: string): string | null {
+function detailOf(body: string, status?: number): string | null {
   try {
     const parsed: unknown = JSON.parse(body)
     if (parsed && typeof parsed === 'object' && 'detail' in parsed) {
@@ -138,7 +145,13 @@ function detailOf(body: string): string | null {
   } catch {
     /* not JSON — fall through */
   }
-  return body.trim() === '' ? null : body.trim()
+  const trimmed = body.trim()
+  if (trimmed === '') return null
+  // D-11: nginx HTML error pages (e.g. 413 Request Entity Too Large) should never render raw markup.
+  if (trimmed.startsWith('<')) {
+    return status === 413 ? 'request payload too large' : null
+  }
+  return trimmed
 }
 
 export const api = {
@@ -233,29 +246,6 @@ export const api = {
         body: JSON.stringify({ group_id: groupId }),
       },
     ),
-
-  createEnrollmentToken: (
-    groupIdOrBody: string | null | { group_id?: string | null; project?: string } = null,
-    project?: string,
-  ) => {
-    const groupId =
-      groupIdOrBody !== null && typeof groupIdOrBody === 'object'
-        ? (groupIdOrBody.group_id ?? null)
-        : groupIdOrBody
-    const proj =
-      groupIdOrBody !== null && typeof groupIdOrBody === 'object'
-        ? (groupIdOrBody.project ?? project)
-        : project
-    return request<EnrollmentTokenIssued>(
-      proj && proj !== 'default'
-        ? `/v1/enrollment-tokens?project=${encodeURIComponent(proj)}`
-        : '/v1/enrollment-tokens',
-      {
-        method: 'POST',
-        body: JSON.stringify({ group_id: groupId }),
-      },
-    )
-  },
 
   revokeEnrollmentToken: (id: string) =>
     request<void>(`/v1/enrollment-tokens/${encodeURIComponent(id)}/revoke`, { method: 'POST' }),
@@ -584,25 +574,8 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
-  createAdminToken: (body: {
-    name: string
-    project?: string | null
-    scopes?: string[]
-    expires_in_days?: number | null
-  }) =>
-    request<AdminTokenIssued>('/v1/auth/tokens', {
-      method: 'POST',
-      body: JSON.stringify(body),
-    }),
-
   revokeAdminToken: (id: string) =>
     request<void>(`/v1/auth/tokens/${encodeURIComponent(id)}/revoke`, { method: 'POST' }),
-
-  loginFirebase: (idToken: string) =>
-    request<LoginResult>('/v1/auth/firebase', {
-      method: 'POST',
-      body: JSON.stringify({ id_token: idToken }),
-    }),
 
   listUsers: () => request<{ users: UserSummary[] }>('/v1/users'),
 

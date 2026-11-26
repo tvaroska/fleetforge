@@ -945,5 +945,17 @@ describe('Dashboard', () => {
         expect(href.toLowerCase()).not.toMatch(/^\s*(javascript|data|vbscript):/)
       }
     })
+
+    it('auto-opens the Pit Dock drawer once when a dock board exists and allows closing it (D-16)', async () => {
+      mockApi([device({ link_type: 'dock' })])
+      renderDashboard()
+      await userEvent.click(screen.getByTestId('tab-onboard'))
+
+      const drawer = screen.getByTestId('pit-dock-drawer') as HTMLDetailsElement
+      await waitFor(() => expect(drawer.open).toBe(true))
+
+      await userEvent.click(within(drawer).getByText(/Offline Radio Lockout/i))
+      await waitFor(() => expect(drawer.open).toBe(false))
+    })
   })
 })

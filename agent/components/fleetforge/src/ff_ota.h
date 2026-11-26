@@ -166,10 +166,11 @@ typedef esp_err_t (*ff_cargo_finish_fn_t)(size_t total_bytes, const char *sha256
 esp_err_t ff_ota_register_cargo_handler(const char *type, ff_cargo_write_fn_t write_cb,
                                         ff_cargo_finish_fn_t finish_cb, void *ctx);
 
-/* CUJ-3: Stage a signed `app` image or non-`app` `data_partition` cargo delivered over
- * tethered USB-C dock (`link_type: "dock"`), enforcing `choose_target_slot`, `ota_slot_size`,
- * SHA-256 read-back verification, `verify_artifact_signature` against the 2-key ECDSA P-256
- * rotation ring, and `ff_safe_window_is_safe()`. */
+/* CUJ-3 (component-internal in src/ff_ota.h, not include/): Stage a complete in-memory
+ * `app` image or non-`app` `data_partition` cargo buffer, enforcing `choose_target_slot`,
+ * `ota_slot_size`, SHA-256 read-back verification, and `verify_artifact_signature`.
+ * For `app` images, writes `otadata` + `ff_txn` and stops at `staged`; the caller owns
+ * safe-window checks and triggers `esp_restart()` when ready. */
 esp_err_t ff_ota_dock_stage(const ff_ota_cmd_t *cmd, const uint8_t *data, size_t len);
 
 #ifdef __cplusplus

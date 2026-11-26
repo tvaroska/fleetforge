@@ -14,10 +14,8 @@ carries artifact bytes:
 * `design/production.md` → *Artifact storage* is explicit that signed URLs are
   "range-capable, and served without touching the API process", so "device downloads do
   not consume the VM's bandwidth";
-* a proxy would need an HTTP client in the production image (`httpx` is a **dev**
-  dependency — `simulator/device.py::_fetch` uses `urllib.request` for that reason), and
-  a `urllib` proxy would hold one of uvicorn's threadpool slots per board for the
-  duration of a 1.9 MB transfer on a 256 M container;
+* a proxy would buffer or hold a worker slot per board for the duration of a 1.9 MB
+  transfer on a 256 M container instead of offloading bytes to object storage;
 * `Range`, `If-Range`, `Content-Range`, suffix ranges and 416 are then the **store's**
   RFC-correct implementation, not a hand-rolled parser on the OTA critical path.
 

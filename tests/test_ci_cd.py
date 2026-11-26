@@ -446,6 +446,11 @@ class TestCli:
         gh_text = gh_wf.read_text(encoding="utf-8")
         assert "idf.py set-target esp32c6" in gh_text
         assert "build/oled_status.bin" in gh_text
+        assert "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683" in gh_text
+        assert "actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02" in gh_text
+        assert "urllib.parse.urlencode" in gh_text
+        main_c_text = (dest / "main" / "main.c").read_text(encoding="utf-8")
+        assert "has_url ? api_url" not in main_c_text
         just_text = (dest / "justfile").read_text(encoding="utf-8")
         assert "build-idf:" in just_text
         assert "build-docker:" in just_text
@@ -1485,33 +1490,32 @@ class TestOtelQueueAndRateLimiterAndStagedRollout:
             power_class="always_on",
         )
 
-        with patch("fleetforge.ingest.otel._safe_settings", return_value=settings):
-            res1 = await _resolve_project_otel(session, dev)
-            res2 = await _resolve_project_otel(session, dev)
-            assert res1 == (
-                "eink",
-                "https://otel.example.com",
-                {"Authorization": "Bearer secret-tok"},
-            )
-            assert res2 == res1
-            assert session.get.call_count == 1
-            assert any(k[0] == proj_id for k in _project_otel_cache)
+        res1 = await _resolve_project_otel(session, dev, settings=settings)
+        res2 = await _resolve_project_otel(session, dev, settings=settings)
+        assert res1 == (
+            "eink",
+            "https://otel.example.com",
+            {"Authorization": "Bearer secret-tok"},
+        )
+        assert res2 == res1
+        assert session.get.call_count == 1
+        assert any(k[0] == proj_id for k in _project_otel_cache)
 
-            # A-29 cross-pod invalidation: when another pod advances `projects.updated_at`,
-            # the ingestor cache misses immediately without in-process invalidation.
-            proj.otel_endpoint = "https://otel-v2.example.com"
-            proj.updated_at = t1
-            session.scalar = AsyncMock(return_value=t1)
-            res3 = await _resolve_project_otel(session, dev)
-            assert res3 == (
-                "eink",
-                "https://otel-v2.example.com",
-                {"Authorization": "Bearer secret-tok"},
-            )
-            assert session.get.call_count == 2
+        # A-29 cross-pod invalidation: when another pod advances `projects.updated_at`,
+        # the ingestor cache misses immediately without in-process invalidation.
+        proj.otel_endpoint = "https://otel-v2.example.com"
+        proj.updated_at = t1
+        session.scalar = AsyncMock(return_value=t1)
+        res3 = await _resolve_project_otel(session, dev, settings=settings)
+        assert res3 == (
+            "eink",
+            "https://otel-v2.example.com",
+            {"Authorization": "Bearer secret-tok"},
+        )
+        assert session.get.call_count == 2
 
-            invalidate_project_otel_cache(proj_id)
-            assert not any(k[0] == proj_id for k in _project_otel_cache)
+        invalidate_project_otel_cache(proj_id)
+        assert not any(k[0] == proj_id for k in _project_otel_cache)
 
     def test_non_app_artifact_schema_serialization_omits_app_and_includes_cargo(self) -> None:
         import datetime as dt
@@ -1763,13 +1767,14 @@ class TestCuj3PitTetheredDockAndVenueOffline:
         # Track 1 (CUJ-3 Step 4): Venue Offline Mode, NimBLE coexistence, offline PENDING_VERIFY
         assert "esp_err_t ff_set_offline_mode(bool offline);" in ff_sec_h
         assert "ff_set_offline_mode(" in ff_net_c
-        assert "ff_net_set_dock_active(" in ff_net_c
-        assert 'return "dock";' in ff_net_c
+        assert "ff_net_set_dock_active" not in ff_net_c
         assert "s_venue_offline" in ff_wifi_c
+        assert "s_venue_offline" not in ff_mqtt_c
         assert "s_improv_ble_enabled" in ff_wifi_c
         assert "ble_hs_synced()" in ff_wifi_c
         assert "ff_net_wifi_set_offline_mode(" in ff_wifi_c
         assert "ff_net_wifi_set_improv_ble_enabled(" in ff_wifi_c
+        assert "ff_net_wifi_improv_authorize(" in ff_wifi_c
         assert "ff_mqtt_confirm_offline(" in ff_mqtt_c
         assert "if (!s_selftest_registered)" in ff_mqtt_c
         assert "setOfflineMode(bool offline)" in arduino_h
@@ -1804,7 +1809,6 @@ class TestCuj3PitTetheredDockAndVenueOffline:
         from fleetforge.signing import sign_digest
         from fleetforge.simulator.device import (
             CAPABILITY_SELFTEST,
-            SAFE_WINDOW_AUTO,
             SAFE_WINDOW_HOLD,
             DeviceIdentity,
             LinkProfile,
@@ -1882,25 +1886,7 @@ class TestCuj3PitTetheredDockAndVenueOffline:
         assert unsigned_steps[-1]["detail"] == "signature missing"
         assert runner.identity.fw_version == "2026.2.1-qual11"
 
-        # While safe_window="hold", a valid signed app stage parks in awaiting_safe_window
-        held_steps = runner.dock_stage(
-            "cmd-dock-app-hold",
-            good_bin,
-            sha256=good_sha,
-            version="2026.2.2-qual12",
-            sig=good_sig,
-        )
-        assert [s["state"] for s in held_steps] == [
-            "staging",
-            "downloading",
-            "verifying",
-            "staged",
-            "awaiting_safe_window",
-        ]
-        runner._clear_staged()
-
-        # 4. Safe window opens in the pit -> signed app stages, reboots, and confirms via local ff_selftest
-        runner.safe_window = SAFE_WINDOW_AUTO
+        # D-5 parity: dock_stage writes buffer, verifies digest/sig, and stops honestly at `staged`.
         app_steps = runner.dock_stage(
             "cmd-dock-app-1",
             good_bin,
@@ -1913,9 +1899,9 @@ class TestCuj3PitTetheredDockAndVenueOffline:
             "downloading",
             "verifying",
             "staged",
-            "applying",
-            "rebooting",
         ]
+        # Caller triggers reboot into the dock-staged slot, then confirms via local ff_selftest.
+        runner.dock_reboot_staged()
         boot_steps = runner.dock_confirm_boot()
         assert [s["state"] for s in boot_steps] == ["confirming", "confirmed"]
         assert boot_steps[-1]["detail"] == "selftest passed"
@@ -1932,6 +1918,7 @@ class TestCuj3PitTetheredDockAndVenueOffline:
             version="2026.2.3-badcan",
             sig=bad_sig,
         )
+        runner.dock_reboot_staged()
         rb_steps = runner.dock_confirm_boot()
         assert [s["state"] for s in rb_steps] == ["confirming", "rolling_back", "rolled_back"]
         assert (

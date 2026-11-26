@@ -113,7 +113,7 @@ async def test_a_wedged_consumer_stops_the_heartbeat(
 ) -> None:
     release = asyncio.Event()
 
-    async def hung_write(*_args: object) -> None:
+    async def hung_write(*_args: object, **_kwargs: object) -> None:
         await release.wait()
 
     monkeypatch.setattr(ingestor, "handle_message", hung_write)

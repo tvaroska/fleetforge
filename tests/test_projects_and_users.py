@@ -258,7 +258,8 @@ async def test_project_isolation_for_artifacts_enrollment_devices_and_deploys(
             },
         )
         assert cross.status_code == 409, cross.text
-        assert "another project" in cross.json()["detail"]
+        assert cross.json()["detail"] == "enrollment token is not usable"
+        assert "another project" not in cross.json()["detail"]
 
         # Deploying version 1.5.0 to a4cf12b3de90 resolves robotics' SHA_B, not default's SHA_A
         dep = await client.post(

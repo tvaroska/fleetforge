@@ -15,7 +15,7 @@
 // The device log (R4-fe-2) follows the strip's board and is re-read when THAT board's
 // `last_seen` changes (an `up/log` batch moves it): no new stream, no frame body read.
 
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api, type DeviceGroupSummary, type Me } from './api'
 import { buildInfo, type BuildInfo } from './buildInfo'
 import { BuildPipelineCard } from './BuildPipelineCard'
@@ -67,6 +67,8 @@ export function Dashboard({
   const [activeTab, setActiveTab] = useState<DashboardTab>('fleet')
   const [compactDensity, setCompactDensity] = useState(false)
   const [pitContrast, setPitContrast] = useState(false)
+  const [dockDrawerOpen, setDockDrawerOpen] = useState(false)
+  const sawDockBoard = useRef(false)
 
   useEffect(() => {
     if (typeof document === 'undefined') return
@@ -120,6 +122,16 @@ export function Dashboard({
     effective === null ? null : (fleet.devices?.find((d) => d.device_id === effective) ?? null)
   // One read for the flasher's result card and the table's update result cards (R2b-fe-10).
   const versions = describeVersions(ui, health)
+
+  const hasDockBoard = (fleet.devices ?? []).some((d) => d.link_type === 'dock')
+  useEffect(() => {
+    if (hasDockBoard && !sawDockBoard.current) {
+      sawDockBoard.current = true
+      setDockDrawerOpen(true)
+    } else if (!hasDockBoard) {
+      sawDockBoard.current = false
+    }
+  }, [hasDockBoard])
 
   const deviceCount = fleet.devices?.length ?? 0
   let artifactCount = 0
@@ -355,7 +367,8 @@ export function Dashboard({
         <details
           className="console-card"
           data-testid="pit-dock-drawer"
-          open={(fleet.devices ?? []).some((d) => d.link_type === 'dock')}
+          open={dockDrawerOpen}
+          onToggle={(event) => setDockDrawerOpen(event.currentTarget.open)}
         >
           <summary>Offline Radio Lockout &amp; USB-C Dock Sync</summary>
           <PitDockCockpit

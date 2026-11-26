@@ -115,7 +115,7 @@ def test_a_late_ack_cannot_confirm_an_image_already_rolling_back() -> None:
     mqtt = _code(FF_MQTT_C)
     timeout = _function_body(mqtt, "confirm_timeout_cb")
     assert timeout.index("s_rollback_decided = true;") < timeout.index("esp_timer_start_once(")
-    assert mqtt.index("if (s_rollback_decided)") < mqtt.index(
+    assert mqtt.index("rollback_decided = s_rollback_decided;") < mqtt.index(
         "else if (confirm_this_image() && s_txn.kind == TXN_CONFIRMING)"
     )
 

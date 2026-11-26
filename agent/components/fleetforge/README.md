@@ -189,7 +189,7 @@ same `cmd_id`.
 Update a co-processor, quantized ML model weights, an FPGA bitstream, or a data partition attached
 to your board without overwriting the ESP32 application slot or rebooting:
 
-- Register a cargo handler before starting the MQTT session (`ff_ota_register_cargo_handler(type, write_cb, finish_cb, ctx)` in `src/ff_ota.h`).
+- Register a cargo handler before starting the MQTT session (`ff_ota_register_cargo_handler(type, write_cb, finish_cb, ctx)` in component-internal `src/ff_ota.h`, not `include/`).
 - Registering a handler automatically adds `type` (for example `"model_weights"`, `"mcu_fw"`,
   `"fpga_bitstream"`, or `"data_partition"`) to the board's announced `capabilities`, which unlocks
   `POST /v1/artifact?artifact_type=<type>` deploys to that board.
@@ -210,10 +210,11 @@ to your board without overwriting the ESP32 application slot or rebooting:
   `ff_mqtt_confirm_offline()` confirms `ESP_OTA_IMG_PENDING_VERIFY` images locally via your
   registered `ff_selftest` without waiting for an MQTT `PUBACK`.
 - **Tethered USB-C dock stage & ring drains (`ff_ota_dock_stage`, `ff_log_drain_json`, `ff_telemetry_drain_json`)**:
-  When Wi-Fi is disabled, a tethered host (`fleetforge` CLI) streams a signed `app`
-  image or non-`app` `data_partition` cargo into `ff_ota_dock_stage(&cmd, data, len)` (`src/ff_ota.h`),
-  preserving SHA-256 + ECDSA P-256 verification, `ota_slot_size` checks, and `ff_safe_window`
-  deferral (`link_type: "dock"`). `ff_log_drain_json(buf, cap)` and `ff_telemetry_drain_json(buf, cap)`
+  When Wi-Fi is disabled, a tethered host stages a complete in-memory signed `app`
+  image or non-`app` `data_partition` cargo buffer via `ff_ota_dock_stage(&cmd, data, len)`
+  (component-internal `src/ff_ota.h`, not `include/`), preserving SHA-256 + ECDSA P-256
+  verification and `ota_slot_size` checks. For `app` images it writes `otadata` + `ff_txn` and
+  stops at `staged`; the caller checks `ff_safe_window` and triggers reboot. `ff_log_drain_json(buf, cap)` and `ff_telemetry_drain_json(buf, cap)`
   drain buffered RAM + `[prev-boot]` `RTC_NOINIT_ATTR` logs and `age_ms` telemetry into JSON so the
   laptop can replay the bundle later via `POST /v1/devices/{device_id}/dock-sync` or
   `fleetforge dock-sync <device_id> <bundle.json>`.

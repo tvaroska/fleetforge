@@ -874,7 +874,6 @@ class StageRunner:
         version: str | None = None,
         sig: str | None = None,
         artifact_type: str = "app",
-        apply: str = APPLY_AUTO,
         size: int | None = None,
     ) -> list[dict[str, object]]:
         """`ff_ota_dock_stage`: stage a signed `.bin` or `data_partition` cargo over USB-C dock."""
@@ -896,6 +895,9 @@ class StageRunner:
             return emitted
 
         emit(STATE_STAGING)
+        if size is not None and size != 0 and len(data) != size:
+            emit(STATE_FAILED, detail="size mismatch")
+            return emitted
 
         if artifact_type != "app":
             handler = self.cargo_handlers.get(artifact_type)
@@ -960,20 +962,19 @@ class StageRunner:
             return emitted
 
         emit(STATE_STAGED, pct=100)
-        staged_version = version if isinstance(version, str) and version else None
-        if apply == APPLY_ON_COMMAND:
-            self.staged = cmd_id
-            self.staged_version = staged_version
-            return emitted
-        if self._unsafe_now():
-            emit(STATE_AWAITING_SAFE_WINDOW, pct=100)
-            self.staged = cmd_id
-            self.staged_version = staged_version
-            self.apply_deferred = cmd_id
-            return emitted
+        # D-5 parity: real `ff_ota_dock_stage` stages an in-memory buffer and stops at `staged`;
+        # the caller triggers reboot (`dock_reboot_staged`) after checking safe windows.
+        self.staged = cmd_id
+        self.staged_version = version if isinstance(version, str) and version else None
+        return emitted
 
-        emit(STATE_APPLYING)
-        emit(STATE_REBOOTING)
+    def dock_reboot_staged(self) -> None:
+        """Caller-triggered reboot into a dock-staged image (paired with `ff_ota_dock_stage`)."""
+        if self.staged is None:
+            return
+        cmd_id = self.staged
+        staged_version = self.staged_version
+        self._clear_staged()
         self.pending = PendingConfirm(
             cmd_id=cmd_id, previous_identity=self.identity, previous_slot=self.slot
         )
@@ -983,7 +984,6 @@ class StageRunner:
         if staged_version:
             self.identity = replace(self.identity, fw_version=staged_version)
         self.reboot.set()
-        return emitted
 
     def dock_confirm_boot(self) -> list[dict[str, object]]:
         """`ff_mqtt_confirm_offline`: evaluate `PENDING_VERIFY` locally in Venue Offline Mode."""

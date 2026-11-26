@@ -23,7 +23,7 @@ jobs:
       image: espressif/idf:v5.5.5@sha256:a9231d0697ab8f7517cc072e93b7c83e04907bfbfba80b6440d7dbbf90665cf2
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           ref: ${{ github.event.inputs.ref || github.event.client_payload.track_ref || github.ref }}
 
@@ -37,7 +37,7 @@ jobs:
           ls -lh build/{{APP_NAME}}.bin
 
       - name: Upload build/{{APP_NAME}}.bin artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: {{APP_NAME}}-{{TARGET}}-bin
           path: build/{{APP_NAME}}.bin
@@ -48,6 +48,7 @@ jobs:
         env:
           FLEETFORGE_URL: ${{ vars.FLEETFORGE_URL || '{{FLEETFORGE_URL}}' }}
           FLEETFORGE_TOKEN: ${{ secrets.FLEETFORGE_TOKEN }}
+          DEPLOY_TARGET: ${{ github.event.inputs.deploy || 'off' }}
         run: |
           set -euo pipefail
           BASE_VER="$(sed -n 's/^set(PROJECT_VER "\(.*\)")/\1/p' CMakeLists.txt)"
@@ -61,18 +62,20 @@ jobs:
             VERSION="${BASE_VER}-${SHORT_SHA}"
           fi
           BUILD_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+          export VERSION BRANCH TAG BUILD_URL
+          QUERY="$(python3 -c 'import os, urllib.parse; print(urllib.parse.urlencode([("project", "{{PROJECT_SLUG}}"), ("target", "{{TARGET}}"), ("version", os.environ["VERSION"]), ("partition_layout", "ab-4m-v1"), ("repo_url", os.environ["GITHUB_SERVER_URL"] + "/" + os.environ["GITHUB_REPOSITORY"]), ("branch", os.environ["BRANCH"]), ("commit_sha", os.environ["GITHUB_SHA"]), ("tag", os.environ["TAG"]), ("build_url", os.environ["BUILD_URL"])]))')"
 
           curl --fail-with-body -X POST \
-            "${FLEETFORGE_URL%/}/v1/artifact?project={{PROJECT_SLUG}}&target={{TARGET}}&version=${VERSION}&partition_layout=ab-4m-v1&repo_url=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}&branch=${BRANCH}&commit_sha=${GITHUB_SHA}&tag=${TAG}&build_url=${BUILD_URL}" \
+            "${FLEETFORGE_URL%/}/v1/artifact?${QUERY}" \
             -H "Authorization: Bearer ${FLEETFORGE_TOKEN}" \
             -H "Content-Type: application/octet-stream" \
             --data-binary "@build/{{APP_NAME}}.bin"
 
-          DEPLOY_TARGET="${{ github.event.inputs.deploy || 'off' }}"
           if [[ "${DEPLOY_TARGET}" == "dev" || "${DEPLOY_TARGET}" == "all" ]]; then
+            DEPLOY_BODY="$(python3 -c 'import json, os; print(json.dumps({"version": os.environ["VERSION"], "target_filter": os.environ["DEPLOY_TARGET"], "apply": "auto"}))')"
             curl --fail-with-body -X POST \
               "${FLEETFORGE_URL%/}/v1/projects/{{PROJECT_SLUG}}/deploy" \
               -H "Authorization: Bearer ${FLEETFORGE_TOKEN}" \
               -H "Content-Type: application/json" \
-              -d "{\"version\":\"${VERSION}\",\"target_filter\":\"${DEPLOY_TARGET}\",\"apply\":\"auto\"}"
+              -d "${DEPLOY_BODY}"
           fi

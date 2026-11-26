@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from fleetforge import device_commands, device_logs, faults, partition_profiles, telemetry_store
 from fleetforge.clock import device_time
+from fleetforge.config import Settings
 from fleetforge.db.models import DeployEvent, Device
 from fleetforge.deploys import record_observed_status, snapshot_detail
 from fleetforge.events import DeviceEvent, EventType, emit
@@ -182,11 +183,16 @@ async def _apply_secondary_payloads(
     row: Device,
     status: StatusPayload | None,
     event_type: EventType,
+    settings: Settings | None = None,
 ) -> tuple[EventType, str | None, DeployEvent | None]:
     if channel == UpChannel.TELEMETRY:
-        await _store_telemetry(session, device_id, topic, payload, received_at, device=row)
+        await _store_telemetry(
+            session, device_id, topic, payload, received_at, device=row, settings=settings
+        )
     elif channel == UpChannel.LOG:
-        await _store_log(session, device_id, topic, payload, received_at, device=row)
+        await _store_log(
+            session, device_id, topic, payload, received_at, device=row, settings=settings
+        )
 
     answered: str | None = None
     if channel == UpChannel.ACK:
@@ -218,6 +224,7 @@ async def handle_up_message(
     retained: bool,
     received_at: dt.datetime,
     tolerance: float,
+    settings: Settings | None = None,
 ) -> DeviceEvent | None:
     """Ingest one `up/` message; return the event emitted, or `None` if it was dropped."""
     parsed = parse_up_topic(topic)
@@ -253,6 +260,7 @@ async def handle_up_message(
         row=row,
         status=status,
         event_type=event_type,
+        settings=settings,
     )
 
     terminal_detail = (
@@ -306,6 +314,7 @@ async def _store_telemetry(
     received_at: dt.datetime,
     *,
     device: Device | None = None,
+    settings: Settings | None = None,
 ) -> None:
     """Decode an `up/telemetry` batch, store it, and log a summary; never raises."""
     if len(payload) > TELEMETRY_MAX_BYTES:
@@ -346,6 +355,7 @@ async def _store_telemetry(
                 device=device,
                 samples=telemetry.samples,
                 received_at=received_at,
+                settings=settings,
             )
 
 
@@ -357,6 +367,7 @@ async def _store_log(
     received_at: dt.datetime,
     *,
     device: Device | None = None,
+    settings: Settings | None = None,
 ) -> None:
     """Decode an `up/log` batch and store it, bounded; never raises, never logs `text`."""
     if len(payload) > LOG_MAX_BYTES:
@@ -392,6 +403,7 @@ async def _store_log(
             lines=batch.lines,
             dropped=batch.dropped or 0,
             received_at=received_at,
+            settings=settings,
         )
 
 

@@ -351,20 +351,25 @@ async def update_device(
         if "project" in fields:
             if body.project is None:
                 raise HTTPException(status.HTTP_400_BAD_REQUEST, "project cannot be null")
-            dest_project = await session.scalar(select(Project).where(Project.slug == body.project))
-            if dest_project is None:
-                raise HTTPException(status.HTTP_404_NOT_FOUND, f"no such project: {body.project}")
+            # Check source-project OWNER before looking up destination slug so an operator
+            # cannot distinguish existing vs nonexistent destination slugs via 403 vs 404.
             await check_project_access(
                 session,
                 admin,
                 device.project_id,
                 min_role=ProjectRole.OWNER,
             )
+            dest_project = await session.scalar(select(Project).where(Project.slug == body.project))
+            if dest_project is None:
+                raise HTTPException(status.HTTP_404_NOT_FOUND, f"no such project: {body.project}")
             await check_project_access(
                 session,
                 admin,
                 dest_project.id,
                 min_role=ProjectRole.OWNER,
+                not_found=HTTPException(
+                    status.HTTP_404_NOT_FOUND, f"no such project: {body.project}"
+                ),
             )
             target_project_id = dest_project.id
 
@@ -435,13 +440,17 @@ async def update_device(
             )
             try:
                 await session.commit()
-            except IntegrityError:
-                # The only FK being written is `group_id`: the group vanished between
-                # the check above and the commit (same reasoning as enrollment.py).
+            except IntegrityError as exc:
                 await session.rollback()
-                raise HTTPException(
-                    status.HTTP_404_NOT_FOUND, f"no such group: {body.group_id}"
-                ) from None
+                orig_text = str(getattr(exc, "orig", exc)).lower()
+                constraint = str(
+                    getattr(getattr(exc, "orig", None), "constraint_name", "") or ""
+                ).lower()
+                if "group_id" in constraint or "group_id" in orig_text:
+                    raise HTTPException(
+                        status.HTTP_404_NOT_FOUND, f"no such group: {body.group_id}"
+                    ) from None
+                raise HTTPException(status.HTTP_409_CONFLICT, "device update conflict") from None
 
             if "stay_awake" in changed or "project" in changed:
                 proj = await session.get(Project, device.project_id)
@@ -735,6 +744,7 @@ async def dock_sync_device(
             retained=False,
             received_at=now,
             tolerance=settings.presence_tolerance,
+            settings=settings,
         )
 
         statuses_recorded = 0
@@ -746,6 +756,7 @@ async def dock_sync_device(
                 retained=False,
                 received_at=now,
                 tolerance=settings.presence_tolerance,
+                settings=settings,
             )
             if ev is not None:
                 statuses_recorded += 1
@@ -759,6 +770,7 @@ async def dock_sync_device(
                 retained=False,
                 received_at=now,
                 tolerance=settings.presence_tolerance,
+                settings=settings,
             )
             if ev is not None:
                 telemetry_batches_recorded += 1
@@ -772,6 +784,7 @@ async def dock_sync_device(
                 retained=False,
                 received_at=now,
                 tolerance=settings.presence_tolerance,
+                settings=settings,
             )
             if ev is not None:
                 log_batches_recorded += 1

@@ -16,6 +16,3 @@ from fleetforge.ingest.otel import (
 from fleetforge.ingest.otel import (
     _resource_attributes as _resource_attributes,
 )
-from fleetforge.ingest.otel import (
-    _safe_settings as _safe_settings,
-)

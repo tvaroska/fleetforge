@@ -5,7 +5,8 @@ The **device-facing** half of the enrollment credential. Its admin-facing siblin
 endpoint burns. `spec/device-protocol.md` → *Enrolment happens over HTTPS, not MQTT*
 is the exchange, verbatim; this is steps 2 → 4 of it.
 
-It is the **first and only unauthenticated write endpoint** in the API — the token in
+It is one of the narrow public write endpoints in the API (alongside `/v1/auth/login`,
+`/v1/auth/firebase`, `/v1/auth/reset-password`, and `/v1/progress`) — the token in
 the body *is* the credential — and it is the codebase's only path into `devices`
 (`fleetforge.registry`).
 
@@ -85,10 +86,8 @@ UNKNOWN_PARENT = HTTPException(
     status_code=status.HTTP_400_BAD_REQUEST, detail="unknown parent device"
 )
 
-CROSS_PROJECT_ENROLL = HTTPException(
-    status_code=status.HTTP_409_CONFLICT,
-    detail="device is enrolled in another project; decommission or transfer it first",
-)
+# Uniform 409 body — never confirms whether `device_id` exists in another project (A-13).
+CROSS_PROJECT_ENROLL = TOKEN_UNUSABLE
 
 # Stamped only once the broker really holds the credential (`ensure_client` → True).
 # A separate, tiny transaction: the enrollment is already committed by then.
@@ -194,17 +193,28 @@ async def enroll(
                 project_id=row.project_id,
                 mqtt_password_hash=password_hash,
             )
-        except IntegrityError:
-            # The only FK the body can violate is `parent_device_id`. Check-then-insert
-            # would still be a race, so the insert itself is the check — the same shape
-            # `routers/enrollment.py` uses for `group_id`.
+        except IntegrityError as exc:
             await session.rollback()
-            logger.info(
-                "enrollment refused for %s: unknown parent device %s",
+            orig_text = str(getattr(exc, "orig", exc)).lower()
+            constraint = str(
+                getattr(getattr(exc, "orig", None), "constraint_name", "") or ""
+            ).lower()
+            if "parent_device_id" in constraint or "parent_device_id" in orig_text:
+                logger.info(
+                    "enrollment refused for %s: unknown parent device %s",
+                    device_id,
+                    body.parent_device_id,
+                )
+                raise UNKNOWN_PARENT from None
+            logger.warning(
+                "enrollment integrity conflict for %s (%s)",
                 device_id,
-                body.parent_device_id,
+                constraint or type(exc).__name__,
             )
-            raise UNKNOWN_PARENT from None
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="device enrollment conflict",
+            ) from None
 
         burned = (
             await session.execute(BURN_SQL, {"token_id": parts.token_id, "device_id": device_id})

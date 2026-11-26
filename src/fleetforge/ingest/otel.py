@@ -10,6 +10,7 @@ cross-process dictionary mutation.
 import asyncio
 import dataclasses
 import datetime as dt
+import hashlib
 import json
 import logging
 import os
@@ -18,14 +19,13 @@ import uuid
 from typing import Any
 
 import httpx
-from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from fleetforge import __version__
 from fleetforge.clock import device_time
-from fleetforge.config import Settings, get_settings
+from fleetforge.config import Settings
 from fleetforge.db.models import Device, Project
 from fleetforge.deploys import sanitise_device_text
 from fleetforge.ingest.protocol import LogLine, TelemetrySample
@@ -44,10 +44,9 @@ OTEL_PROJECT_CACHE_TTL_S = 30.0
 
 _ProjectOtelResolved = tuple[str, str, dict[str, str], bool]
 _project_otel_cache: dict[
-    tuple[uuid.UUID, str | None, str | None, str | None],
+    tuple[uuid.UUID, str | None, str | None, str | None, str],
     tuple[float, _ProjectOtelResolved | None],
 ] = {}
-_cached_safe_settings: tuple[bool, Settings | None] = (False, None)
 
 
 def invalidate_project_otel_cache(project_id: uuid.UUID | None = None) -> None:
@@ -414,19 +413,11 @@ def build_otlp_metrics_payload(
     }
 
 
-def _safe_settings() -> Settings | None:
-    global _cached_safe_settings
-    if get_settings.cache_info().currsize > 0:
-        return get_settings()
-    initialized, cached = _cached_safe_settings
-    if initialized:
-        return cached
-    try:
-        resolved = get_settings()
-    except ValidationError:
-        resolved = None
-    _cached_safe_settings = (True, resolved)
-    return resolved
+def _settings_key_fingerprint(cfg: Settings | None) -> str:
+    if cfg is None:
+        return ""
+    raw = f"{cfg.secrets_encryption_key or ''}\x00{cfg.artifact_url_secret or ''}"
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
 
 
 async def _resolve_project_otel_with_source(
@@ -436,7 +427,7 @@ async def _resolve_project_otel_with_source(
     settings: Settings | None = None,
 ) -> _ProjectOtelResolved | None:
     """Return `(project_slug, base_endpoint, headers, is_project_configured)` if enabled."""
-    cfg = settings if settings is not None else _safe_settings()
+    cfg = settings
     env_endpoint = (
         cfg.otel_exporter_otlp_endpoint
         if cfg and cfg.otel_exporter_otlp_endpoint
@@ -447,6 +438,7 @@ async def _resolve_project_otel_with_source(
         if cfg and cfg.otel_exporter_otlp_headers
         else os.environ.get("OTEL_EXPORTER_OTLP_HEADERS")
     )
+    key_fp = _settings_key_fingerprint(cfg)
 
     project_id = device.project_id
     now_mono = time.monotonic()
@@ -473,8 +465,8 @@ async def _resolve_project_otel_with_source(
         if isinstance(raw_updated, dt.datetime):
             updated_key = raw_updated.isoformat()
 
-    cache_key = (project_id, updated_key, env_endpoint, env_headers)
-    if settings is None and cache_key in _project_otel_cache:
+    cache_key = (project_id, updated_key, env_endpoint, env_headers, key_fp)
+    if cache_key in _project_otel_cache:
         expires_at, cached_result = _project_otel_cache[cache_key]
         if now_mono < expires_at:
             return cached_result
@@ -494,7 +486,7 @@ async def _resolve_project_otel_with_source(
         proj_updated = getattr(project, "updated_at", None)
         if isinstance(proj_updated, dt.datetime):
             updated_key = proj_updated.isoformat()
-            cache_key = (project_id, updated_key, env_endpoint, env_headers)
+            cache_key = (project_id, updated_key, env_endpoint, env_headers, key_fp)
 
     project_slug = project.slug if project is not None else "default"
     endpoint: str | None = None
@@ -523,9 +515,8 @@ async def _resolve_project_otel_with_source(
         if endpoint
         else None
     )
-    if settings is None:
-        invalidate_project_otel_cache(project_id)
-        _project_otel_cache[cache_key] = (now_mono + OTEL_PROJECT_CACHE_TTL_S, result)
+    invalidate_project_otel_cache(project_id)
+    _project_otel_cache[cache_key] = (now_mono + OTEL_PROJECT_CACHE_TTL_S, result)
     return result
 
 
@@ -550,10 +541,11 @@ async def _build_logs_batch(
     lines: list[LogLine],
     dropped: int,
     received_at: dt.datetime,
+    settings: Settings | None = None,
 ) -> OtelExportBatch | None:
     if not lines:
         return None
-    resolved = await _resolve_project_otel_with_source(session, device)
+    resolved = await _resolve_project_otel_with_source(session, device, settings=settings)
     if resolved is None:
         return None
     project_slug, base_endpoint, headers, is_project_configured = resolved
@@ -581,10 +573,11 @@ async def _build_metrics_batch(
     device: Device,
     samples: list[TelemetrySample],
     received_at: dt.datetime,
+    settings: Settings | None = None,
 ) -> OtelExportBatch | None:
     if not samples:
         return None
-    resolved = await _resolve_project_otel_with_source(session, device)
+    resolved = await _resolve_project_otel_with_source(session, device, settings=settings)
     if resolved is None:
         return None
     project_slug, base_endpoint, headers, is_project_configured = resolved
@@ -612,6 +605,7 @@ async def enqueue_logs_to_otel(
     lines: list[LogLine],
     dropped: int,
     received_at: dt.datetime,
+    settings: Settings | None = None,
 ) -> bool:
     """Resolve OTel config in `session` and enqueue the `/v1/logs` batch without blocking."""
     batch = await _build_logs_batch(
@@ -620,6 +614,7 @@ async def enqueue_logs_to_otel(
         lines=lines,
         dropped=dropped,
         received_at=received_at,
+        settings=settings,
     )
     if batch is None:
         return False
@@ -632,6 +627,7 @@ async def enqueue_metrics_to_otel(
     device: Device,
     samples: list[TelemetrySample],
     received_at: dt.datetime,
+    settings: Settings | None = None,
 ) -> bool:
     """Resolve OTel config in `session` and enqueue the `/v1/metrics` batch without blocking."""
     batch = await _build_metrics_batch(
@@ -639,6 +635,7 @@ async def enqueue_metrics_to_otel(
         device=device,
         samples=samples,
         received_at=received_at,
+        settings=settings,
     )
     if batch is None:
         return False

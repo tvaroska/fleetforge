@@ -11,7 +11,6 @@ import uuid
 from collections import defaultdict
 from typing import Annotated
 
-import anyio.to_thread
 from fastapi import APIRouter, Depends, HTTPException, Path, status
 from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
@@ -39,7 +38,7 @@ from fleetforge.api.schemas import (
 )
 from fleetforge.auth.cache import VerifiedSecretCache
 from fleetforge.auth.firebase import FirebaseAuthClient, FirebaseAuthError
-from fleetforge.auth.hashing import ARGON2_LIMITER, hash_secret
+from fleetforge.auth.hashing import ahash_secret
 from fleetforge.config import Settings
 from fleetforge.db.models import AdminToken, Project, ProjectMember, ProjectRole, User
 
@@ -119,7 +118,7 @@ async def _send_setup_email(
 
 
 async def _ahash_password(password: str) -> str:
-    return await anyio.to_thread.run_sync(hash_secret, password, limiter=ARGON2_LIMITER)
+    return await ahash_secret(password)
 
 
 @router.get(

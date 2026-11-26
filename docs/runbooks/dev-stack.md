@@ -77,7 +77,9 @@ It is deliberately not part of `just test` (that must not need a broker).
 The api container's healthcheck is `/v1/readyz`, not `/v1/healthz`. It is `unhealthy`,
 and the body names the gap. Meanwhile, the database is unreachable **or** any
 deploy-mandatory setting is missing: the object store, `ARTIFACT_URL_SECRET`,
-`PUBLIC_BASE_URL`, `MQTT_COMMAND_*`.. This is because `frontend` waits for a healthy api, a gap
+`PUBLIC_BASE_URL`, `MQTT_COMMAND_*`. Set `SECRETS_ENCRYPTION_KEY` separately from
+`ARTIFACT_URL_SECRET` (see `.env.example`) so rotating artifact-download HMAC keys never
+invalidates encrypted `project_secrets`, OTel headers, or CI webhook headers. This is because `frontend` waits for a healthy api, a gap
 also means the dashboard never starts on a fresh `up`. Ask the API directly:
 
 ```bash

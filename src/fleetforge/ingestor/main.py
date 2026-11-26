@@ -39,7 +39,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from fleetforge import retention
 from fleetforge.clock import now_utc
-from fleetforge.config import get_settings
+from fleetforge.config import Settings, get_settings
 from fleetforge.db.base import get_engine, get_sessionmaker
 from fleetforge.ingest import otel
 from fleetforge.ingest.handlers import handle_up_message
@@ -114,6 +114,8 @@ async def handle_message(
     message: aiomqtt.Message,
     sessionmaker: async_sessionmaker[AsyncSession],
     tolerance: float,
+    *,
+    settings: Settings | None = None,
 ) -> None:
     """Handle one inbound device message; never raise.
 
@@ -152,6 +154,7 @@ async def handle_message(
                 retained=message.retain,
                 received_at=received_at,
                 tolerance=tolerance,
+                settings=settings,
             )
             await session.commit()
         if event is not None:
@@ -173,6 +176,8 @@ async def run_once(
     tolerance: float,
     username: str | None = None,
     password: str | None = None,
+    *,
+    settings: Settings | None = None,
 ) -> None:
     """Connect, subscribe and consume until the connection drops.
 
@@ -205,7 +210,7 @@ async def run_once(
             async for message in client.messages:
                 consumer.busy_since = time.monotonic()
                 try:
-                    await handle_message(message, sessionmaker, tolerance)
+                    await handle_message(message, sessionmaker, tolerance, settings=settings)
                 finally:
                     consumer.busy_since = None
         finally:
@@ -221,6 +226,8 @@ async def run(
     tolerance: float,
     username: str | None = None,
     password: str | None = None,
+    *,
+    settings: Settings | None = None,
 ) -> None:
     """Consume forever, reconnecting with capped exponential backoff.
 
@@ -231,7 +238,9 @@ async def run(
     delay = RECONNECT_INITIAL_DELAY
     while True:
         try:
-            await run_once(hostname, port, sessionmaker, tolerance, username, password)
+            await run_once(
+                hostname, port, sessionmaker, tolerance, username, password, settings=settings
+            )
             logger.warning("broker connection closed; reconnecting")
         except aiomqtt.MqttError as exc:
             logger.warning("broker error (%s); reconnecting in %.0fs", exc, delay)
@@ -323,6 +332,7 @@ async def main() -> None:
             settings.presence_tolerance,
             settings.mqtt_username,
             settings.mqtt_password,
+            settings=settings,
         )
     )
 

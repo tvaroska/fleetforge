@@ -63,6 +63,13 @@ def verify_secret(secret: str, phc: str) -> bool:
         return False
 
 
+async def ahash_secret(secret: str) -> str:
+    """`hash_secret` off the event loop on `_ARGON2_EXECUTOR`, under `ARGON2_LIMITER`."""
+    async with ARGON2_LIMITER:
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(_ARGON2_EXECUTOR, hash_secret, secret)
+
+
 async def averify_secret(secret: str, phc: str) -> bool:
     """`verify_secret` off the event loop, under `ARGON2_LIMITER`."""
     async with ARGON2_LIMITER:

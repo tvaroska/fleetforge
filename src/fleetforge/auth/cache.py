@@ -23,8 +23,7 @@ import uuid
 
 DEFAULT_TTL_S = 60.0
 
-# One admin means one live entry in practice, but the key is attacker-influenced
-# (any unknown-but-well-formed token id would allocate) — so it is bounded.
+# Bounded to protect memory against attacker-influenced unknown token IDs across all users/tokens.
 DEFAULT_MAX_ENTRIES = 256
 
 

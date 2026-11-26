@@ -8,6 +8,7 @@ evidence with it.
 
 import asyncio
 import datetime as dt
+import re
 from pathlib import Path
 
 import pytest
@@ -300,6 +301,50 @@ SRC_DIR = Path(__file__).resolve().parent.parent / "src" / "fleetforge"
 DEPLOY_EVENT_WRITERS = {"deploys.py", "db/models.py"}
 
 
+_CORE_DML_NAMES = frozenset({"insert", "update", "delete"})
+
+
+def _writes_table(source: str, *, model_name: str, table_name: str) -> bool:
+    """T-9: AST + SQL check catching ORM constructors, Core insert/update/delete, and raw SQL."""
+    import ast
+
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call):
+            fn = node.func
+            # Direct ORM constructor: `DeployEvent(...)`
+            if (isinstance(fn, ast.Name) and fn.id == model_name) or (
+                isinstance(fn, ast.Attribute) and fn.attr == model_name
+            ):
+                return True
+            # Core DML call: `insert(DeployEvent)` / `sa.update(DeployEvent)` / `delete(DeployEvent)`
+            fn_name = (
+                fn.id
+                if isinstance(fn, ast.Name)
+                else fn.attr
+                if isinstance(fn, ast.Attribute)
+                else ""
+            )
+            if fn_name in _CORE_DML_NAMES:
+                if node.args and any(
+                    (isinstance(ch, ast.Name) and ch.id == model_name)
+                    or (isinstance(ch, ast.Attribute) and ch.attr == model_name)
+                    for ch in ast.walk(node.args[0])
+                ):
+                    return True
+                # Table-method form: `DeployEvent.__table__.insert()`
+                if isinstance(fn, ast.Attribute) and any(
+                    isinstance(ch, ast.Name) and ch.id == model_name for ch in ast.walk(fn.value)
+                ):
+                    return True
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            upper = " ".join(node.value.upper().split())
+            t_up = table_name.upper()
+            if re.search(rf"\b(?:INSERT INTO|UPDATE|DELETE FROM)\s+{re.escape(t_up)}\b", upper):
+                return True
+    return False
+
+
 def test_only_deploys_py_writes_deploy_events() -> None:
     """`spec/prd.md` → *Retention*: this table is the product's evidence, kept forever.
 
@@ -314,14 +359,33 @@ def test_only_deploys_py_writes_deploy_events() -> None:
         if relative in DEPLOY_EVENT_WRITERS:
             continue
         source = path.read_text(encoding="utf-8")
-        code = "\n".join(
-            line.split("#", 1)[0]
-            for line in source.splitlines()
-            if not line.lstrip().startswith("#")
-        )
-        if "DeployEvent(" in code or "INSERT INTO deploy_events" in code.upper():
+        if _writes_table(source, model_name="DeployEvent", table_name="deploy_events"):
             offenders.append(relative)
     assert offenders == [], f"these modules write deploy_events directly: {offenders}"
+
+
+def test_a_core_insert_of_deploy_event_is_caught() -> None:
+    """T-9 positive control: SQLAlchemy Core insert/update/delete on DeployEvent is flagged."""
+    assert _writes_table(
+        "from sqlalchemy import insert\nstmt = insert(DeployEvent).values(state='confirmed')\n",
+        model_name="DeployEvent",
+        table_name="deploy_events",
+    )
+    assert _writes_table(
+        "stmt = DeployEvent.__table__.delete()\n",
+        model_name="DeployEvent",
+        table_name="deploy_events",
+    )
+    assert _writes_table(
+        'sql = text("UPDATE deploy_events SET state = :s")\n',
+        model_name="DeployEvent",
+        table_name="deploy_events",
+    )
+    assert not _writes_table(
+        "stmt = select(DeployEvent).where(DeployEvent.device_id == dev)\n",
+        model_name="DeployEvent",
+        table_name="deploy_events",
+    )
 
 
 def test_the_writer_module_exists_and_is_the_one_named() -> None:

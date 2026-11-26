@@ -141,8 +141,8 @@ export function EnrollBoard({
     try {
       for (let i = 1; i <= count; i += 1) {
         const res = await (project
-          ? api.createEnrollmentToken(groupId, project)
-          : api.createEnrollmentToken(groupId))
+          ? api.issueEnrollmentToken(groupId, project)
+          : api.issueEnrollmentToken(groupId))
         mintedRows.push({
           token: res.token,
           suggested_name: `${prefix}${String(i).padStart(2, '0')}`,

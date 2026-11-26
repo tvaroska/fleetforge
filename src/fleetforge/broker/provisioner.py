@@ -1,4 +1,4 @@
-"""The broker-credential seam: one Protocol, two adapters. **CRITICAL.**
+"""The broker-credential Port and Adapters: one Protocol, two adapters. **CRITICAL.**
 
 `CRITICAL.md` → *Mosquitto ACL configuration / dynsec provisioning*: "Two pattern
 rules are the entire fleet authz. A wrong pattern lets any device impersonate any
@@ -19,9 +19,10 @@ already been through `fleetforge.identity.is_valid_device_id`.
 against a live broker; the Python suite can only check the files
 (`tests/test_broker_config.py`).
 
-**The password exists in exactly one place: the enrollment response body.** It is not
-stored in Postgres, not cached, not logged. Dynsec keeps its own hash. Losing it means
-re-enrolling, which is what `config.enroll_retry_window_s` exists for.
+**The plaintext password exists in exactly one place: the enrollment response body.**
+Postgres stores only its SHA-256 digest (`devices.mqtt_password_hash`, used for device
+Basic auth on `/v1/devices/{id}/secrets` and `/relay`), never plaintext, and dynsec keeps
+its own PBKDF2 hash. Losing it means re-enrolling (`config.enroll_retry_window_s`).
 
 Two adapters, the same local-vs-real shape `R0-be-6` uses for MinIO/GCS:
 
