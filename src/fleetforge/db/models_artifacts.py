@@ -38,6 +38,7 @@ class Artifact(Base):
         CheckConstraint("sha256 ~ '^[0-9a-f]{64}$'", name="sha256_format"),
         CheckConstraint("size_bytes > 0", name="size_positive"),
         Index("ix_artifacts_kind_target", "kind", "target"),
+        Index("ix_artifacts_sim_status", "sim_status"),
     )
 
     sha256: Mapped[str] = mapped_column(Text, primary_key=True)
@@ -53,6 +54,8 @@ class Artifact(Base):
     sim_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
     sim_runner: Mapped[str | None] = mapped_column(Text, nullable=True)
     sim_ran_at: Mapped[dt.datetime | None] = mapped_column(TimestampTZ, nullable=True)
+    sim_lease_owner: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sim_lease_expires_at: Mapped[dt.datetime | None] = mapped_column(TimestampTZ, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(
         TimestampTZ, nullable=False, server_default=text("now()")
     )

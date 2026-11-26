@@ -510,6 +510,49 @@ services:
         limits:
           memory: 64M
 
+  # Optional R9/R10 worker services (`docker compose --profile workers up`) (`A-28`, `A-34`).
+  builder:
+    image: fleetforge:dev
+    container_name: fleetforge-builder
+    profiles: ["workers"]
+    restart: unless-stopped
+    command: ["python", "-m", "fleetforge.builder", "--backend", "docker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgresql+asyncpg://fleetforge:fleetforge@postgres:5432/fleetforge
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_BUCKET: ${S3_BUCKET:-fleetforge}
+      S3_ACCESS_KEY: ${MINIO_ROOT_USER:-fleetforge}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-fleetforge-dev-only}
+      ARTIFACT_SIGNING_KEY: ${ARTIFACT_SIGNING_KEY:-}
+      ARTIFACT_SIGNING_PUBLIC_KEYS: ${ARTIFACT_SIGNING_PUBLIC_KEYS:-}
+    networks:
+      - backend
+
+  sim-worker:
+    image: fleetforge:dev
+    container_name: fleetforge-sim-worker
+    profiles: ["workers"]
+    restart: unless-stopped
+    command: ["python", "-m", "fleetforge.sim_worker", "--backend", "qemu"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgresql+asyncpg://fleetforge:fleetforge@postgres:5432/fleetforge
+      S3_ENDPOINT_URL: http://minio:9000
+      S3_BUCKET: ${S3_BUCKET:-fleetforge}
+      S3_ACCESS_KEY: ${MINIO_ROOT_USER:-fleetforge}
+      S3_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-fleetforge-dev-only}
+    networks:
+      - backend
+
 networks:
   frontend:
   backend:

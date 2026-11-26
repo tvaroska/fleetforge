@@ -243,7 +243,9 @@ class TestBuildSecurityAndCacheKey:
         from cryptography.hazmat.primitives.asymmetric import rsa
         from cryptography.x509.oid import NameOID
 
-        import fleetforge.builds as builds_mod
+        import fleetforge.build_adapters as build_adapters_mod
+
+        assert build_adapters_mod is not None
 
         key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
         subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "127.0.0.1")])
@@ -305,9 +307,11 @@ class TestBuildSecurityAndCacheKey:
             _ = field_name
             return url
 
-        monkeypatch.setattr(builds_mod, "sanitize_git_repo_url", lambda u, **_kw: u)
+        import fleetforge.build_adapters as build_adapters_mod
+
+        monkeypatch.setattr(build_adapters_mod, "sanitize_git_repo_url", lambda u, **_kw: u)
         monkeypatch.setattr(
-            builds_mod, "resolve_and_validate_public_https_url", _allow_loopback_in_test
+            build_adapters_mod, "resolve_and_validate_public_https_url", _allow_loopback_in_test
         )
 
         try:
@@ -442,6 +446,132 @@ class TestBuildSecurityAndCacheKey:
         )
         assert app_bytes.startswith(b"\xe9\x00\x02\x20firmware-app-bytes")
         assert any("[idf] compiling firmware" in line for line in lines)
+
+    async def test_runner_executes_exactly_the_sandboxed_command(self, tmp_path: Path) -> None:
+        """T-18 (`M1a`/`M1b`/`M1c`): `compile_source` passes the exact hardened Docker argv."""
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        argv_log = tmp_path / "argv.json"
+        fake_docker = tmp_path / "fake-docker-argv"
+        fake_docker.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, pathlib, sys\n"
+            f"pathlib.Path({str(argv_log)!r}).write_text(json.dumps(sys.argv), encoding='utf-8')\n"
+            f"bdir = pathlib.Path({str(work_dir)!r}) / 'build'\n"
+            "bdir.mkdir(exist_ok=True)\n"
+            "(bdir / 'app.bin').write_bytes(b'\\xe9\\x00\\x02\\x20ok')\n"
+            "(bdir / 'project_description.json').write_text(json.dumps({'app_bin': 'app.bin'}))\n",
+            encoding="utf-8",
+        )
+        fake_docker.chmod(fake_docker.stat().st_mode | stat.S_IXUSR)
+
+        runner = SandboxedIdfContainerRunner(docker_bin_override=str(fake_docker))
+        out = await runner.compile_source(
+            work_dir=work_dir,
+            target="esp32s3",
+            partition_layout="ab-4m-v1",
+            idf_image=PINNED_IDF_IMAGES["esp32s3"],
+        )
+        assert out == b"\xe9\x00\x02\x20ok"
+        recorded = json.loads(argv_log.read_text(encoding="utf-8"))
+        assert "--name" in recorded
+        name_idx = recorded.index("--name")
+        container_name = recorded[name_idx + 1]
+        assert container_name.startswith("ff-build-")
+        expected = build_sandboxed_docker_cmd(
+            docker_bin=str(fake_docker),
+            work_dir=work_dir,
+            target="esp32s3",
+            idf_image=PINNED_IDF_IMAGES["esp32s3"],
+            partition_layout="ab-4m-v1",
+            container_name=container_name,
+        )
+        assert recorded == expected
+        for flag in (
+            "--rm",
+            "--network=none",
+            "--cap-drop=ALL",
+            "--security-opt=no-new-privileges",
+            "--pids-limit=256",
+            "--memory=2g",
+            "--cpus=2",
+            "--user=65534:65534",
+            "--read-only",
+            "--tmpfs=/tmp:rw,noexec,nosuid,size=512m",
+        ):
+            assert flag in recorded, f"missing hardened Docker flag {flag!r}"
+        assert "--privileged" not in recorded
+
+    def test_diff_rolling_log_streams_tail_past_256k_cap(self) -> None:
+        from fleetforge.api.routers.builds import _diff_rolling_log
+
+        assert _diff_rolling_log("", "hello\n") == "hello\n"
+        assert _diff_rolling_log("hello\n", "hello\nworld\n") == "world\n"
+        assert _diff_rolling_log("hello\n", "hello\n") == ""
+        cap = 262_144
+        base = "".join(f"line-{i:06d}\n" for i in range(25_000))[-cap:]
+        added = "[error] fatal linker failure at end of build\n"
+        rolled = (base + added)[-cap:]
+        assert len(base) == cap
+        assert len(rolled) == cap
+        assert _diff_rolling_log(base, rolled) == added
+
+    async def test_compile_source_handles_oversized_stdout_lines_without_crashing(
+        self, tmp_path: Path
+    ) -> None:
+        """A-28: a >64 KiB stdout line with no newline never triggers StreamReader LimitOverrunError."""
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        fake_docker = tmp_path / "fake-docker-bigline"
+        fake_docker.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, pathlib, sys\n"
+            "sys.stdout.write('A' * 100000 + 'END_BIG_LINE\\n')\n"
+            "sys.stdout.flush()\n"
+            f"bdir = pathlib.Path({str(work_dir)!r}) / 'build'\n"
+            "bdir.mkdir(exist_ok=True)\n"
+            "(bdir / 'app.bin').write_bytes(b'\\xe9\\x00\\x02\\x20bigline-ok')\n"
+            "(bdir / 'project_description.json').write_text(json.dumps({'app_bin': 'app.bin'}))\n",
+            encoding="utf-8",
+        )
+        fake_docker.chmod(fake_docker.stat().st_mode | stat.S_IXUSR)
+
+        collected: list[str] = []
+
+        async def _sink(chunk: str) -> None:
+            collected.append(chunk)
+
+        runner = SandboxedIdfContainerRunner(docker_bin_override=str(fake_docker))
+        out = await runner.compile_source(
+            work_dir=work_dir,
+            target="esp32",
+            partition_layout="ab-4m-v1",
+            idf_image=PINNED_IDF_IMAGES["esp32"],
+            on_log=_sink,
+        )
+        assert out == b"\xe9\x00\x02\x20bigline-ok"
+        joined = "".join(collected)
+        assert "END_BIG_LINE" in joined
+        assert len(joined) >= 100_000
+
+    async def test_real_container_build_of_the_agent(self, tmp_path: Path) -> None:
+        """A-27: opt-in real Docker ESP-IDF build of `agent/` using `SandboxedIdfContainerRunner`."""
+        if os.environ.get("FF_RUN_REAL_DOCKER_TESTS") != "1":
+            pytest.skip("real Docker container build test is opt-in via FF_RUN_REAL_DOCKER_TESTS=1")
+        if not shutil.which("docker"):
+            pytest.fail("FF_RUN_REAL_DOCKER_TESTS=1 set but `docker` is not installed")
+        agent_src = Path(__file__).resolve().parents[1] / "agent"
+        work_dir = tmp_path / "agent-work"
+        shutil.copytree(agent_src, work_dir, ignore=shutil.ignore_patterns("build", "dist"))
+        runner = SandboxedIdfContainerRunner(timeout_s=600.0)
+        app_bytes = await runner.compile_source(
+            work_dir=work_dir,
+            target="esp32",
+            partition_layout="ab-4m-v1",
+            idf_image=PINNED_IDF_IMAGES["esp32"],
+        )
+        assert len(app_bytes) > 65_536
+        assert app_bytes[:1] == b"\xe9"
 
     async def test_container_runner_rejects_missing_or_escaping_project_description(
         self, tmp_path: Path
@@ -608,7 +738,7 @@ class TestBuildPipelineApiAndWorker:
 
             # Stream logs via SSE `/logs/stream` for the completed build -> delivers chunks + done:true.
             sse_resp = await client.get(
-                f"/v1/projects/default/builds/{build_id}/logs/stream?poll_s=0.05",
+                f"/v1/projects/default/builds/{build_id}/logs/stream?poll_s=0.1",
                 headers=headers,
             )
             assert sse_resp.status_code == 200
@@ -1037,3 +1167,166 @@ class TestBuildPipelineApiAndWorker:
             assert body["status"] == "failed"
             assert body["artifact_sha256"] is None
             assert "merged" in (body["error_detail"] or "").lower()
+
+    async def test_two_workers_never_execute_the_same_job(
+        self,
+        env: dict[str, Any],
+    ) -> None:
+        """A-28: atomic `UPDATE ... FOR UPDATE SKIP LOCKED RETURNING id` ensures two concurrent
+        workers never double-claim or double-execute the same queued build job."""
+        import asyncio
+
+        class _SlowCountingRunner:
+            def __init__(self) -> None:
+                self.calls = 0
+                self._inner = StubBuildRunner()
+
+            async def compile_source(self, **kwargs: Any) -> bytes:
+                self.calls += 1
+                await asyncio.sleep(0.15)
+                return await self._inner.compile_source(**kwargs)
+
+        slow_runner = _SlowCountingRunner()
+        headers = {"Authorization": f"Bearer {env['token']}"}
+        async with client_for(env["app"], base_url="https://testserver") as client:
+            queued = await client.post(
+                "/v1/projects/default/builds",
+                headers=headers,
+                json={
+                    "repo_url": str(env["repo_dir"]),
+                    "git_ref": "v2.1.0",
+                    "target": "esp32s3",
+                    "version": "4.0.0-race",
+                    "partition_layout": "ab-4m-v1",
+                },
+            )
+            assert queued.status_code == 201, queued.text
+
+        res_a, res_b = await asyncio.gather(
+            builder.run_once(
+                env["sessionmaker"],
+                env["store"],
+                env["settings"],
+                source_fetcher=env["fetcher"],
+                build_runner=slow_runner,
+                worker_id="worker-a",
+            ),
+            builder.run_once(
+                env["sessionmaker"],
+                env["store"],
+                env["settings"],
+                source_fetcher=env["fetcher"],
+                build_runner=slow_runner,
+                worker_id="worker-b",
+            ),
+        )
+        all_done = res_a + res_b
+        assert len(all_done) == 1
+        assert all_done[0].status == "succeeded"
+        assert slow_runner.calls == 1
+
+    async def test_a_job_whose_lease_expired_is_requeued(
+        self,
+        env: dict[str, Any],
+    ) -> None:
+        """A-28: a `running` build job whose lease expired is reaped back to `queued` and completed."""
+        import datetime as dt
+
+        from fleetforge.clock import now_utc
+
+        headers = {"Authorization": f"Bearer {env['token']}"}
+        async with client_for(env["app"], base_url="https://testserver") as client:
+            queued = await client.post(
+                "/v1/projects/default/builds",
+                headers=headers,
+                json={
+                    "repo_url": str(env["repo_dir"]),
+                    "git_ref": "v2.1.0",
+                    "target": "esp32s3",
+                    "version": "4.1.0-expired",
+                    "partition_layout": "ab-4m-v1",
+                },
+            )
+            assert queued.status_code == 201, queued.text
+            job_id = queued.json()["id"]
+
+        async with env["sessionmaker"]() as s:
+            row = await s.get(BuildJob, job_id)
+            assert row is not None
+            row.status = "running"
+            row.lease_owner = "dead-worker-1"
+            row.lease_expires_at = now_utc() - dt.timedelta(seconds=60)
+            await s.commit()
+
+        done = await builder.run_once(
+            env["sessionmaker"],
+            env["store"],
+            env["settings"],
+            source_fetcher=env["fetcher"],
+            build_runner=env["runner"],
+            worker_id="live-worker-2",
+        )
+        assert len(done) == 1
+        assert str(done[0].id) == job_id
+        assert done[0].status == "succeeded"
+        assert done[0].lease_owner is None
+        assert done[0].lease_expires_at is None
+
+    async def test_log_keeps_the_tail_when_capped(
+        self,
+        env: dict[str, Any],
+    ) -> None:
+        """A-31: when build logs exceed `MAX_BUILD_LOG_CHARS`, the tail (including final errors) is kept."""
+        from fleetforge.builds import MAX_BUILD_LOG_CHARS
+
+        class _NoisyBuildRunner:
+            async def compile_source(self, **kwargs: Any) -> bytes:
+                on_log = kwargs.get("on_log")
+                if on_log is not None:
+                    await on_log("HEAD_SENTINEL_FIRST_LINE\n")
+                    filler = ("x" * 4095) + "\n"
+                    for _ in range((MAX_BUILD_LOG_CHARS // 4096) + 4):
+                        await on_log(filler)
+                    await on_log("TAIL_SENTINEL_FINAL_ERROR\n")
+                raise BuildError("compile failed at tail")
+
+        headers = {"Authorization": f"Bearer {env['token']}"}
+        env["app"].dependency_overrides[get_build_runner] = lambda: _NoisyBuildRunner()
+        async with client_for(env["app"], base_url="https://testserver") as client:
+            resp = await client.post(
+                "/v1/projects/default/builds?run_inline=true",
+                headers=headers,
+                json={
+                    "repo_url": str(env["repo_dir"]),
+                    "git_ref": "v2.1.0",
+                    "target": "esp32s3",
+                    "version": "4.2.0-logtail",
+                },
+            )
+            assert resp.status_code == 201, resp.text
+            job_id = resp.json()["id"]
+            detail = (
+                await client.get(f"/v1/projects/default/builds/{job_id}", headers=headers)
+            ).json()
+            log_text = detail["log_text"]
+            assert len(log_text) <= MAX_BUILD_LOG_CHARS
+            assert "TAIL_SENTINEL_FINAL_ERROR" in log_text
+            assert "compile failed at tail" in log_text
+            assert "HEAD_SENTINEL_FIRST_LINE" not in log_text
+
+            # A-31: poll_s < 0.1 is rejected and concurrent SSE stream cap returns 503.
+            too_fast = await client.get(
+                f"/v1/projects/default/builds/{job_id}/logs/stream?poll_s=0.02",
+                headers=headers,
+            )
+            assert too_fast.status_code == 422
+
+            env["app"].state.build_log_streams = env["settings"].sse_max_clients
+            try:
+                saturated = await client.get(
+                    f"/v1/projects/default/builds/{job_id}/logs/stream?poll_s=0.1",
+                    headers=headers,
+                )
+                assert saturated.status_code == 503
+            finally:
+                env["app"].state.build_log_streams = 0

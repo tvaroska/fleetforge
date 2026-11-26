@@ -25,6 +25,8 @@ FORBIDDEN_DB_SNIPPETS = (
 )
 MAX_BUNDLE_SKIPS = 2
 MAX_MINIO_SKIPS = 10
+MAX_OPTIN_DOCKER_SKIPS = 1
+MAX_OPTIN_QEMU_SKIPS = 1
 
 
 def is_ci_env(env: Mapping[str, str]) -> bool:
@@ -48,19 +50,23 @@ def validate_pytest_output(output: str, env: Mapping[str, str]) -> list[str]:
     allow_db_skip = env.get("FF_ALLOW_DB_SKIP") == "1"
     if allow_db_skip and is_ci_env(env):
         return ["FF_ALLOW_DB_SKIP=1 is forbidden when CI is set"]
-    if allow_db_skip:
-        return []
 
     errors: list[str] = []
-    for snippet in FORBIDDEN_DB_SNIPPETS:
-        if snippet in output:
-            errors.append(
-                f"database-backed tests did not run ({snippet!r} observed in pytest output)"
-            )
+    if not allow_db_skip:
+        for snippet in FORBIDDEN_DB_SNIPPETS:
+            if snippet in output:
+                errors.append(
+                    f"database-backed tests did not run ({snippet!r} observed in pytest output)"
+                )
 
     run_minio = env.get("FF_RUN_MINIO_TESTS") == "1"
+    run_real_docker = env.get("FF_RUN_REAL_DOCKER_TESTS") == "1"
+    run_real_qemu = env.get("FF_RUN_REAL_QEMU_TESTS") == "1"
     bundle_skips = 0
     minio_skips = 0
+    docker_skips = 0
+    qemu_skips = 0
+    db_skips = 0
     parsed_total = 0
 
     for line in output.splitlines():
@@ -71,7 +77,9 @@ def validate_pytest_output(output: str, env: Mapping[str, str]) -> list[str]:
         detail = match.group(2)
         parsed_total += count
 
-        if "tests/test_agent_power_and_size.py" in detail and "no bundle in agent/dist" in detail:
+        if allow_db_skip and any(snippet in detail for snippet in FORBIDDEN_DB_SNIPPETS):
+            db_skips += count
+        elif "tests/test_agent_power_and_size.py" in detail and "no bundle in agent/dist" in detail:
             bundle_skips += count
         elif (
             not run_minio
@@ -82,6 +90,18 @@ def validate_pytest_output(output: str, env: Mapping[str, str]) -> list[str]:
             and "MinIO tests opt-in via FF_RUN_MINIO_TESTS=1" in detail
         ):
             minio_skips += count
+        elif (
+            not run_real_docker
+            and "tests/test_build_pipeline.py" in detail
+            and "opt-in via FF_RUN_REAL_DOCKER_TESTS=1" in detail
+        ):
+            docker_skips += count
+        elif (
+            not run_real_qemu
+            and "tests/test_simulation_gate.py" in detail
+            and "opt-in via FF_RUN_REAL_QEMU_TESTS=1" in detail
+        ):
+            qemu_skips += count
         else:
             errors.append(f"unallowlisted pytest skip: {line.strip()}")
 
@@ -89,6 +109,12 @@ def validate_pytest_output(output: str, env: Mapping[str, str]) -> list[str]:
         errors.append(f"bundle skips ({bundle_skips}) exceeded budget ({MAX_BUNDLE_SKIPS})")
     if minio_skips > MAX_MINIO_SKIPS:
         errors.append(f"MinIO skips ({minio_skips}) exceeded budget ({MAX_MINIO_SKIPS})")
+    if docker_skips > MAX_OPTIN_DOCKER_SKIPS:
+        errors.append(
+            f"opt-in Docker skips ({docker_skips}) exceeded budget ({MAX_OPTIN_DOCKER_SKIPS})"
+        )
+    if qemu_skips > MAX_OPTIN_QEMU_SKIPS:
+        errors.append(f"opt-in QEMU skips ({qemu_skips}) exceeded budget ({MAX_OPTIN_QEMU_SKIPS})")
 
     summary_skipped = _extract_summary_skipped(output)
     if summary_skipped != parsed_total:
@@ -96,9 +122,15 @@ def validate_pytest_output(output: str, env: Mapping[str, str]) -> list[str]:
             f"pytest reported {summary_skipped} skipped tests, "
             f"but -rs lines accounted for {parsed_total} (ensure pytest runs with -rs)"
         )
-    max_total = MAX_BUNDLE_SKIPS if run_minio else (MAX_BUNDLE_SKIPS + MAX_MINIO_SKIPS)
-    if summary_skipped > max_total:
-        errors.append(f"total skipped tests ({summary_skipped}) exceeded budget ({max_total})")
+    max_non_db = (
+        MAX_BUNDLE_SKIPS
+        + (0 if run_minio else MAX_MINIO_SKIPS)
+        + (0 if run_real_docker else MAX_OPTIN_DOCKER_SKIPS)
+        + (0 if run_real_qemu else MAX_OPTIN_QEMU_SKIPS)
+    )
+    non_db_skipped = summary_skipped - (db_skips if allow_db_skip else 0)
+    if non_db_skipped > max_non_db:
+        errors.append(f"total skipped tests ({non_db_skipped}) exceeded budget ({max_non_db})")
 
     return errors
 

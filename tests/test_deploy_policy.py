@@ -965,3 +965,374 @@ class TestStagedCohortDeployPolicyEngine:
                     headers=deploy_hdrs,
                 )
             ).status_code == 204
+
+    async def test_each_halt_condition_names_its_device_and_reason(
+        self,
+        env: dict[str, Any],
+    ) -> None:
+        """T-19: each halt condition (`rolled_back`, `cancelled`, `failed`, `safe_mode`, low heap,
+        fault reset, and `require_sim_passed` on failed sim) names the offending device & reason."""
+        headers = {"Authorization": f"Bearer {env['token']}"}
+        groups = env["groups"]
+
+        async with client_for(env["app"], base_url="https://testserver") as client:
+            # 1. `require_sim_passed` halts when the artifact's simulation verdict is `failed`.
+            bad_sim_img = (
+                b"\xe9\x00\x02\x20"
+                + _VALID_MARKER
+                + b"FF_SIM_BOOT_CRASH: Guru Meditation"
+                + b"\x00" * 64
+            )
+            up_sim = await client.post(
+                "/v1/artifact",
+                params={
+                    "target": "esp32s3",
+                    "version": "2.0.0-simfail",
+                    "partition_layout": "ab-4m-v1",
+                    "simulate": "true",
+                },
+                content=bad_sim_img,
+                headers={
+                    **headers,
+                    "Content-Type": "application/octet-stream",
+                    "Content-Length": str(len(bad_sim_img)),
+                },
+            )
+            assert up_sim.status_code == 201
+            assert up_sim.json()["sim_status"] == "failed"
+
+            pol_sim = (
+                await client.post(
+                    "/v1/projects/default/policies",
+                    headers=headers,
+                    json={
+                        "name": "require-sim-gate",
+                        "match_mode": "tag",
+                        "match_ref": "sim-*",
+                        "ring_group_ids": [str(groups["canary"]), str(groups["prod"])],
+                        "require_sim_passed": True,
+                    },
+                )
+            ).json()
+            ev_sim = (
+                await client.post(
+                    f"/v1/projects/default/policies/{pol_sim['id']}/evaluate",
+                    headers=headers,
+                    json={"version": "2.0.0-simfail"},
+                )
+            ).json()
+            assert ev_sim["status"] == "halted"
+            assert "sim_status='passed'" in (ev_sim["halt_reason"] or "")
+
+            # 2. Device-level halt reasons each name the exact device and cause.
+            cases = [
+                ("2.0.1-rb", "rolled_back", None, "rolled_back"),
+                ("2.0.2-cancel", "cancelled", None, "cancelled"),
+                ("2.0.3-fail", "failed", None, "failed"),
+                ("2.0.4-safe", "confirmed", "safe_mode", "safe_mode"),
+                ("2.0.5-heap", "confirmed", "low_heap", "free_heap 40000 < 100000 bytes"),
+                ("2.0.6-fault", "confirmed", "fault_reset", "fault reset"),
+            ]
+            for ver, ev_state, mutation, expected_substr in cases:
+                img = _app_bin(f"img-{ver}")
+                up = await client.post(
+                    "/v1/artifact",
+                    params={
+                        "target": "esp32s3",
+                        "version": ver,
+                        "partition_layout": "ab-4m-v1",
+                    },
+                    content=img,
+                    headers={
+                        **headers,
+                        "Content-Type": "application/octet-stream",
+                        "Content-Length": str(len(img)),
+                    },
+                )
+                assert up.status_code == 201, up.text
+
+                # Reset canary state cleanly before each sub-case.
+                async with env["sessionmaker"]() as s:
+                    dev = await s.get(Device, "a4cf12b3c001")
+                    assert dev is not None
+                    dev.safe_mode = False
+                    dev.free_heap = 140_000
+                    dev.last_reset_reason = "power_on"
+                    dev.fw_version = ver if ev_state == "confirmed" else "1.0.0"
+                    await s.commit()
+
+                pol = (
+                    await client.post(
+                        "/v1/projects/default/policies",
+                        headers=headers,
+                        json={
+                            "name": f"halt-{ver}",
+                            "match_mode": "tag",
+                            "match_ref": f"never-{ver}",
+                            "ring_group_ids": [str(groups["canary"]), str(groups["prod"])],
+                            "min_free_heap_bytes": 100_000,
+                        },
+                    )
+                ).json()
+                env["publisher"].published.clear()
+                stage_ev = (
+                    await client.post(
+                        f"/v1/projects/default/policies/{pol['id']}/evaluate",
+                        headers=headers,
+                        json={"version": ver},
+                    )
+                ).json()
+                if env["publisher"].published:
+                    cmd_id = env["publisher"].published[0][1]["id"]
+                else:
+                    cmd_id = f"cmd-{ver}"
+                async with env["sessionmaker"]() as s:
+                    if ev_state != "confirmed":
+                        await handle_up_message(
+                            s,
+                            topic="ff/v1/d/a4cf12b3c001/up/status",
+                            payload=json.dumps({"cmd_id": cmd_id, "state": ev_state}).encode(),
+                            retained=False,
+                            received_at=now_utc() + dt.timedelta(seconds=2),
+                            tolerance=2.5,
+                        )
+                    dev = await s.get(Device, "a4cf12b3c001")
+                    assert dev is not None
+                    if mutation == "safe_mode":
+                        dev.safe_mode = True
+                    elif mutation == "low_heap":
+                        dev.free_heap = 40_000
+                    elif mutation == "fault_reset":
+                        dev.last_reset_reason = "panic"
+                        dev.last_seen = now_utc() + dt.timedelta(seconds=3)
+                    await s.commit()
+
+                res = (
+                    await client.post(
+                        f"/v1/projects/default/policies/{pol['id']}/evaluate",
+                        headers=headers,
+                        json={"version": ver},
+                    )
+                ).json()
+                assert res["status"] == "halted", (ver, stage_ev, res)
+                reason = res["halt_reason"] or ""
+                assert "a4cf12b3c001" in reason, (ver, reason)
+                assert expected_substr in reason, (ver, reason)
+
+
+class TestDeployPolicyAndWaveOfflineUnits:
+    """T-18 (`M5d`) & T-19: fast offline unit tests with zero database dependency."""
+
+    def test_matches_deploy_policy_rules(self) -> None:
+        from fleetforge.db.models import DeployPolicy
+        from fleetforge.deploy_policies import matches_deploy_policy
+
+        branch_pol = DeployPolicy(
+            project_id=DEFAULT_PROJECT_ID,
+            name="main-pol",
+            enabled=True,
+            match_mode="branch",
+            match_ref="main",
+            ring_group_ids=[],
+            require_sim_passed=True,
+        )
+        assert matches_deploy_policy(
+            branch_pol, branch="main", tag=None, test_passed=True, sim_status="passed"
+        )
+        assert not matches_deploy_policy(
+            branch_pol, branch="main", tag=None, test_passed=True, sim_status="failed"
+        )
+        assert not matches_deploy_policy(
+            branch_pol, branch="main", tag=None, test_passed=False, sim_status="passed"
+        )
+        assert not matches_deploy_policy(
+            branch_pol, branch="dev", tag=None, test_passed=True, sim_status="passed"
+        )
+        branch_pol.enabled = False
+        assert not matches_deploy_policy(
+            branch_pol, branch="main", tag=None, test_passed=True, sim_status="passed"
+        )
+
+        tag_pol = DeployPolicy(
+            project_id=DEFAULT_PROJECT_ID,
+            name="tag-pol",
+            enabled=True,
+            match_mode="tag",
+            match_ref="v2.*",
+            ring_group_ids=[],
+            require_sim_passed=False,
+        )
+        assert matches_deploy_policy(
+            tag_pol, branch=None, tag="v2.1.0", test_passed=None, sim_status=None
+        )
+        assert not matches_deploy_policy(
+            tag_pol, branch=None, tag="v3.0.0", test_passed=True, sim_status="passed"
+        )
+
+    async def test_detect_ring_halt_offline_conditions(self) -> None:
+        from unittest.mock import AsyncMock
+
+        from fleetforge.deploy_policy_gates import detect_ring_halt
+        from fleetforge.deploys import DeploySnapshot
+
+        now = now_utc()
+        dev = _make_board("a4cf12b3f001", None, now=now, free_heap=120_000)
+        fake_session = AsyncMock()
+        fake_session.execute = AsyncMock()
+
+        # publish_failed is transient broker failure, not a firmware halt.
+        pub_fail = DeploySnapshot(
+            cmd_id="c1",
+            state="failed",
+            at=now,
+            is_terminal=True,
+            artifact_version="2.0.0",
+            from_version="1.0.0",
+            pct=None,
+            detail="broker publish failed",
+            steps=(),
+            sent_by=None,
+            selftest=None,
+            reason="publish_failed",
+        )
+        assert (
+            await detect_ring_halt(
+                fake_session,
+                ring_idx=0,
+                ring_devices=[dev],
+                snapshots={dev.device_id: pub_fail},
+                version="2.0.0",
+                min_free_heap_bytes=100_000,
+            )
+            is None
+        )
+
+        for bad_state in ("rolled_back", "cancelled", "failed"):
+            snap = DeploySnapshot(
+                cmd_id="c2",
+                state=bad_state,
+                at=now,
+                is_terminal=True,
+                artifact_version="2.0.0",
+                from_version="1.0.0",
+                pct=None,
+                detail="selftest timeout",
+                steps=(),
+                sent_by=None,
+                selftest=None,
+                reason="selftest_timeout",
+            )
+            reason = await detect_ring_halt(
+                fake_session,
+                ring_idx=0,
+                ring_devices=[dev],
+                snapshots={dev.device_id: snap},
+                version="2.0.0",
+                min_free_heap_bytes=100_000,
+            )
+            assert reason is not None
+            assert dev.device_id in reason and bad_state in reason
+
+        # Confirmed board with safe_mode or low free_heap or fault reset halts.
+        dev_safe = _make_board("a4cf12b3f002", None, now=now, free_heap=150_000)
+        dev_safe.fw_version = "2.0.0"
+        dev_safe.safe_mode = True
+        r_safe = await detect_ring_halt(
+            fake_session,
+            ring_idx=1,
+            ring_devices=[dev_safe],
+            snapshots={},
+            version="2.0.0",
+            min_free_heap_bytes=100_000,
+        )
+        assert r_safe is not None and "safe_mode" in r_safe and dev_safe.device_id in r_safe
+
+        dev_heap = _make_board("a4cf12b3f003", None, now=now, free_heap=50_000)
+        dev_heap.fw_version = "2.0.0"
+        r_heap = await detect_ring_halt(
+            fake_session,
+            ring_idx=1,
+            ring_devices=[dev_heap],
+            snapshots={},
+            version="2.0.0",
+            min_free_heap_bytes=100_000,
+        )
+        assert r_heap is not None and "50000 < 100000" in r_heap
+
+    def test_select_rollout_wave_enforces_link_and_gateway_airtime_caps(self) -> None:
+        """T-18 (`M5d`) & T-19: verifies LoRa/BLE/Zigbee=1, Thread/Cellular=2, and gateway=3 caps."""
+        from fleetforge.deploy_precheck import ResolvedArtifact
+        from fleetforge.rollout_state import (
+            LINK_AIRTIME_MAX_PARALLEL,
+            PARENT_GATEWAY_MAX_PARALLEL,
+            select_rollout_wave,
+        )
+
+        now = now_utc()
+        settings = settings_for_tests()
+        art = ResolvedArtifact(
+            sha256="a" * 64,
+            size_bytes=1024,
+            partition_layout="ab-4m-v1",
+            has_lib_marker=True,
+            sig=None,
+            artifact_type="app",
+            sim_status="passed",
+        )
+
+        expected_link_caps = {
+            "lora": 1,
+            "ble": 1,
+            "zigbee": 1,
+            "thread": 2,
+            "cellular": 2,
+        }
+        assert LINK_AIRTIME_MAX_PARALLEL == expected_link_caps
+        assert PARENT_GATEWAY_MAX_PARALLEL == 3
+
+        for link_type, expected_cap in expected_link_caps.items():
+            devs = []
+            for idx in range(expected_cap + 2):
+                d = _make_board(f"a4cf12{link_type[:2]}{idx:04x}", None, now=now)
+                d.link_type = link_type
+                devs.append(d)
+            skipped: dict[str, str] = {}
+            wave = select_rollout_wave(
+                eligible=[(d, art, True) for d in devs],
+                all_project_devices=devs,
+                snapshots={},
+                confirmed_targets={"esp32s3"},
+                version="2.0.0",
+                canary=False,
+                max_parallel=10,
+                now=now,
+                settings=settings,
+                skipped=skipped,
+            )
+            assert len(wave) == expected_cap, (link_type, len(wave))
+            assert len(skipped) == 2
+            assert all(f"airtime cap={expected_cap} on {link_type}" in v for v in skipped.values())
+
+        # Parent gateway cap (=3) across 5 wifi children under one gateway.
+        gw_devs = []
+        for idx in range(5):
+            d = _make_board(f"a4cf12aa{idx:04x}", None, now=now)
+            d.link_type = "wifi"
+            d.parent_device_id = "a4cf12000001"
+            gw_devs.append(d)
+        gw_skipped: dict[str, str] = {}
+        gw_wave = select_rollout_wave(
+            eligible=[(d, art, True) for d in gw_devs],
+            all_project_devices=gw_devs,
+            snapshots={},
+            confirmed_targets={"esp32s3"},
+            version="2.0.0",
+            canary=False,
+            max_parallel=10,
+            now=now,
+            settings=settings,
+            skipped=gw_skipped,
+        )
+        assert len(gw_wave) == 3
+        assert len(gw_skipped) == 2
+        assert all("gateway a4cf12000001 airtime cap=3" in v for v in gw_skipped.values())

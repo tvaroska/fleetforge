@@ -330,6 +330,9 @@ class Settings(BaseSettings):
     # public keys; defaults to `signing.DEFAULT_PUBLIC_KEY_RING`).
     artifact_signing_key: str | None = None
     artifact_signing_public_keys: str | None = None
+    # When True, `POST /v1/artifact` queues `app` uploads with `sim_status = 'pending'`
+    # for the external `sim_worker` (`A-28`).
+    auto_queue_simulation: bool = False
 
 
 @lru_cache(maxsize=1)

@@ -180,6 +180,94 @@ async def test_espressif_qemu_sim_runner_executes_flash_image_and_parses_serial(
     assert "Guru Meditation Error" in failed.detail
 
 
+async def test_an_oversized_serial_line_is_a_failed_verdict(tmp_path: Path) -> None:
+    """A-28: a >64 KiB serial line without newline yields `SimStatus.FAILED`, not `LimitOverrunError`."""
+    fake_qemu = tmp_path / "fake-qemu-oversized"
+    fake_qemu.write_text(
+        "#!/usr/bin/env python3\nimport sys\nsys.stdout.write('Z' * 80000)\nsys.stdout.flush()\n",
+        encoding="utf-8",
+    )
+    os.chmod(fake_qemu, stat.S_IRWXU)
+    runner = EspressifQemuSimRunner(timeout_s=5.0, qemu_bin_override=str(fake_qemu))
+    res = await runner.simulate(
+        sha256=hashlib.sha256(VALID_APP_BIN).hexdigest(),
+        target="esp32s3",
+        image=VALID_APP_BIN,
+    )
+    assert res.status == SimStatus.FAILED
+    assert "65536" in res.detail
+
+
+async def test_qemu_timeout_and_silent_exit_are_failed(tmp_path: Path) -> None:
+    """T-18 (`M4`) & A-27: timeout, silent exit, layout offset `0x20000`, and boot-bundle parts."""
+    slow_qemu = tmp_path / "fake-qemu-slow"
+    slow_qemu.write_text(
+        "#!/usr/bin/env python3\nimport time\ntime.sleep(5)\n",
+        encoding="utf-8",
+    )
+    os.chmod(slow_qemu, stat.S_IRWXU)
+    slow_runner = EspressifQemuSimRunner(timeout_s=0.15, qemu_bin_override=str(slow_qemu))
+    timed_out = await slow_runner.simulate(
+        sha256=hashlib.sha256(VALID_APP_BIN).hexdigest(),
+        target="esp32s3",
+        image=VALID_APP_BIN,
+    )
+    assert timed_out.status == SimStatus.FAILED
+    assert "timed out or exited" in timed_out.detail
+
+    silent_qemu = tmp_path / "fake-qemu-silent"
+    silent_qemu.write_text("#!/usr/bin/env python3\nimport sys\nsys.exit(0)\n", encoding="utf-8")
+    os.chmod(silent_qemu, stat.S_IRWXU)
+    silent_runner = EspressifQemuSimRunner(timeout_s=2.0, qemu_bin_override=str(silent_qemu))
+    silent = await silent_runner.simulate(
+        sha256=hashlib.sha256(VALID_APP_BIN).hexdigest(),
+        target="esp32s3",
+        image=VALID_APP_BIN,
+    )
+    assert silent.status == SimStatus.FAILED
+
+    # A-27: `ab-4m-v1` places app at 0x20000 and copies bootloader/partition parts from boot_bundle_dir.
+    bundle = tmp_path / "bundle"
+    bundle.mkdir()
+    (bundle / "bootloader.bin").write_bytes(b"BOOT" * 4)
+    (bundle / "partition-table.bin").write_bytes(b"PART" * 4)
+    (bundle / "manifest.json").write_text(
+        '{"parts": ['
+        '{"name": "bootloader", "offset": "0x1000", "file": "bootloader.bin"},'
+        '{"name": "partition-table", "offset": "0x8000", "file": "partition-table.bin"},'
+        '{"name": "app", "offset": "0x20000", "file": "app.bin"}'
+        "]}",
+        encoding="utf-8",
+    )
+    flash = EspressifQemuSimRunner.build_flash_image(
+        VALID_APP_BIN,
+        partition_layout="ab-4m-v1",
+        boot_bundle_dir=bundle,
+    )
+    assert flash[0x1000:0x1010] == b"BOOT" * 4
+    assert flash[0x8000:0x8010] == b"PART" * 4
+    assert flash[0x20000 : 0x20000 + len(VALID_APP_BIN)] == VALID_APP_BIN
+
+
+async def test_real_qemu_boots_the_agent_bundle() -> None:
+    """A-27: opt-in real Espressif QEMU boot test against a built agent bundle."""
+    if os.environ.get("FF_RUN_REAL_QEMU_TESTS") != "1":
+        pytest.skip("real QEMU boot test is opt-in via FF_RUN_REAL_QEMU_TESTS=1")
+    bundle_dir = Path(__file__).resolve().parents[1] / "agent" / "dist" / "esp32"
+    app_bin = bundle_dir / "fleetforge-agent.bin"
+    if not app_bin.is_file():
+        pytest.fail(f"FF_RUN_REAL_QEMU_TESTS=1 set but {app_bin} is missing")
+    raw = app_bin.read_bytes()
+    runner = EspressifQemuSimRunner(timeout_s=30.0, boot_bundle_dir=bundle_dir)
+    res = await runner.simulate(
+        sha256=hashlib.sha256(raw).hexdigest(),
+        target="esp32",
+        image=raw,
+        partition_layout="ab-4m-v1",
+    )
+    assert res.status == SimStatus.PASSED, res.detail
+
+
 async def test_simulation_gate_precheck_override_audit_log_and_worker_over_postgres(
     admin_app: FastAPI,
     engine: AsyncEngine,
@@ -522,3 +610,88 @@ async def test_viewer_cannot_simulate_without_a_project_parameter(
 
         r_op_sim = await client.post(f"/v1/artifact/{sha_default}/simulate", headers=op_headers)
         assert r_op_sim.status_code == 200, r_op_sim.text
+
+
+async def test_upload_queue_simulation_url_scheme_guard_and_expired_sim_lease_reaper(
+    admin_app: FastAPI,
+    engine: AsyncEngine,
+    clean_tables: None,
+) -> None:
+    """A-28 & D-28: `?queue_simulation=true` queues `sim_status='pending'`, `javascript:` URLs
+    are rejected with 400, and expired `sim_lease_expires_at` rows are reaped and completed."""
+    import datetime as dt
+
+    _ = clean_tables
+    store = MemoryObjectStore()
+    runner = StubSimRunner()
+    settings = settings_for_tests(
+        artifact_signing_key=_PRIV_A,
+        artifact_signing_public_keys=f"{_PUB_A};{_PUB_B}",
+    )
+    admin_app.dependency_overrides[get_settings] = lambda: settings
+    admin_app.dependency_overrides[get_object_store] = lambda: store
+    admin_app.dependency_overrides[get_sim_runner] = lambda: runner
+
+    token = await login_admin(admin_app)
+    headers = {"Authorization": f"Bearer {token}"}
+    sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
+
+    queued_bin = VALID_APP_BIN + b"-queued-sim"
+    queued_sha = hashlib.sha256(queued_bin).hexdigest()
+    async with client_for(admin_app, base_url="https://testserver") as client:
+        for bad_param in ("repo_url", "build_url"):
+            bad = await client.post(
+                "/v1/artifact",
+                params={
+                    "target": "esp32s3",
+                    "version": "1.0.0-xss",
+                    "partition_layout": "ab-4m-v1",
+                    bad_param: "javascript:alert(1)",
+                },
+                headers=headers,
+                content=queued_bin,
+            )
+            assert bad.status_code == 400, (bad_param, bad.text)
+
+        up = await client.post(
+            "/v1/artifact",
+            params={
+                "target": "esp32s3",
+                "version": "1.0.0-queued",
+                "partition_layout": "ab-4m-v1",
+                "queue_simulation": "true",
+                "repo_url": "https://github.com/example/fw",
+                "build_url": "https://ci.example.com/builds/42",
+            },
+            headers=headers,
+            content=queued_bin,
+        )
+        assert up.status_code == 201, up.text
+        assert up.json()["sim_status"] == "pending"
+
+    # Simulate a crashed worker leaving an expired `running` lease; next `run_once` reaps & finishes it.
+    async with sessionmaker() as session:
+        await session.execute(
+            text(
+                "UPDATE artifacts SET sim_status = 'running', sim_lease_owner = 'dead-sim', "
+                "sim_lease_expires_at = :expired WHERE sha256 = :sha"
+            ),
+            {"sha": queued_sha, "expired": now_utc() - dt.timedelta(seconds=60)},
+        )
+        await session.commit()
+
+    processed = await run_once(sessionmaker, store, runner, worker_id="live-sim")
+    assert [(sha, res.status) for sha, res in processed] == [(queued_sha, SimStatus.PASSED)]
+    async with sessionmaker() as session:
+        row = (
+            await session.execute(
+                text(
+                    "SELECT sim_status, sim_lease_owner, sim_lease_expires_at "
+                    "FROM artifacts WHERE sha256 = :sha"
+                ),
+                {"sha": queued_sha},
+            )
+        ).one()
+    assert row.sim_status == "passed"
+    assert row.sim_lease_owner is None
+    assert row.sim_lease_expires_at is None

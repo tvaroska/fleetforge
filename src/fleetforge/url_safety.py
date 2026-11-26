@@ -113,6 +113,25 @@ def validate_git_ref(git_ref: str) -> str:
     return git_ref
 
 
+def validate_http_link_url(url: str, *, field_name: str = "url") -> str:
+    """Validate that an operator-supplied provenance link uses `http://` or `https://`."""
+    trimmed = url.strip()
+    if not trimmed:
+        raise ValueError(f"{field_name} must not be empty")
+    if any(ch <= " " or ch == "\x7f" for ch in trimmed):
+        raise ValueError(f"{field_name} must not contain whitespace or control characters")
+    parsed = urllib.parse.urlsplit(trimmed)
+    if parsed.scheme.lower() not in ("http", "https"):
+        raise ValueError(f"{field_name} must use http:// or https://")
+    if not (parsed.hostname or "").strip():
+        raise ValueError(f"{field_name} must include a hostname")
+    try:
+        _ = parsed.port
+    except ValueError as exc:
+        raise ValueError(f"{field_name} has an invalid port") from exc
+    return trimmed
+
+
 def sanitize_git_repo_url(url: str, *, field_name: str = "repo_url") -> str:
     """Validate a public HTTPS Git URL and strip any query string or fragment."""
     validated = validate_public_https_url(url, field_name=field_name)

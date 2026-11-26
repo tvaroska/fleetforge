@@ -41,6 +41,7 @@ class BuildJob(Base):
     __tablename__ = "build_jobs"
     __table_args__ = (
         Index("ix_build_jobs_project_created_at", "project_id", text("created_at DESC")),
+        Index("ix_build_jobs_status_created_at", "status", "created_at"),
     )
 
     id: Mapped[uuid.UUID] = mapped_column(
@@ -73,6 +74,8 @@ class BuildJob(Base):
     )
     started_at: Mapped[dt.datetime | None] = mapped_column(TimestampTZ, nullable=True)
     finished_at: Mapped[dt.datetime | None] = mapped_column(TimestampTZ, nullable=True)
+    lease_owner: Mapped[str | None] = mapped_column(Text, nullable=True)
+    lease_expires_at: Mapped[dt.datetime | None] = mapped_column(TimestampTZ, nullable=True)
 
 
 class DeployPolicy(Base):

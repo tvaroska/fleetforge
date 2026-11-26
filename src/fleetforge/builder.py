@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import datetime as dt
 import uuid
 from collections.abc import Sequence
 
@@ -15,6 +16,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from fleetforge.builds import (
+    DEFAULT_BUILD_LEASE_TTL_S,
     BuildJob,
     BuildRunner,
     GitShallowSourceFetcher,
@@ -22,21 +24,54 @@ from fleetforge.builds import (
     create_build_runner,
     execute_build_job,
 )
+from fleetforge.clock import now_utc
 from fleetforge.config import Settings, get_settings
 from fleetforge.db.base import get_sessionmaker
 from fleetforge.storage.factory import create_object_store
 from fleetforge.storage.objectstore import ObjectStore
 
-_NEXT_QUEUED_BUILD_SQL = text(
+_REAP_EXPIRED_LEASES_SQL = text(
     """
-    SELECT id
-      FROM build_jobs
-     WHERE status = 'queued'
-     ORDER BY created_at ASC, id ASC
-     FOR UPDATE SKIP LOCKED
-     LIMIT 1
+    UPDATE build_jobs
+       SET status = 'queued',
+           lease_owner = NULL,
+           lease_expires_at = NULL
+     WHERE status = 'running'
+       AND lease_expires_at IS NOT NULL
+       AND lease_expires_at <= :now
+    RETURNING id
     """
 )
+
+_CLAIM_NEXT_QUEUED_BUILD_SQL = text(
+    """
+    UPDATE build_jobs
+       SET status = 'running',
+           started_at = COALESCE(started_at, :now),
+           lease_owner = :worker_id,
+           lease_expires_at = :lease_expires_at
+     WHERE id = (
+         SELECT id
+           FROM build_jobs
+          WHERE status = 'queued'
+          ORDER BY created_at ASC, id ASC
+          FOR UPDATE SKIP LOCKED
+          LIMIT 1
+     )
+    RETURNING id
+    """
+)
+
+
+async def reap_expired_build_leases(
+    session: AsyncSession,
+    *,
+    now: dt.datetime | None = None,
+) -> list[uuid.UUID]:
+    """Return running build jobs whose worker lease expired back to `queued`."""
+    current = now or now_utc()
+    rows = (await session.scalars(_REAP_EXPIRED_LEASES_SQL, {"now": current})).all()
+    return [val if isinstance(val, uuid.UUID) else uuid.UUID(str(val)) for val in rows]
 
 
 async def run_once(
@@ -47,15 +82,32 @@ async def run_once(
     source_fetcher: SourceFetcher | None = None,
     build_runner: BuildRunner | None = None,
     max_jobs: int = 8,
+    worker_id: str | None = None,
+    lease_ttl_s: float = DEFAULT_BUILD_LEASE_TTL_S,
 ) -> list[BuildJob]:
-    """Execute up to `max_jobs` queued build jobs sequentially and return their final rows."""
+    """Reap stale leases, atomically claim up to `max_jobs` queued builds, and execute them."""
     fetcher = source_fetcher or GitShallowSourceFetcher()
     runner = build_runner or create_build_runner()
+    owner = worker_id or f"builder-{uuid.uuid4().hex[:12]}"
     completed: list[BuildJob] = []
 
+    async with sessionmaker() as session:
+        await reap_expired_build_leases(session)
+        await session.commit()
+
     for _ in range(max_jobs):
+        now = now_utc()
+        lease_expires_at = now + dt.timedelta(seconds=max(1.0, lease_ttl_s))
         async with sessionmaker() as session:
-            job_id_val = await session.scalar(_NEXT_QUEUED_BUILD_SQL)
+            job_id_val = await session.scalar(
+                _CLAIM_NEXT_QUEUED_BUILD_SQL,
+                {
+                    "now": now,
+                    "worker_id": owner,
+                    "lease_expires_at": lease_expires_at,
+                },
+            )
+            await session.commit()
         if job_id_val is None:
             break
         job_id = job_id_val if isinstance(job_id_val, uuid.UUID) else uuid.UUID(str(job_id_val))
@@ -66,6 +118,8 @@ async def run_once(
             settings=settings,
             source_fetcher=fetcher,
             build_runner=runner,
+            claimed_worker_id=owner,
+            lease_ttl_s=lease_ttl_s,
         )
         if finished is not None:
             completed.append(finished)
