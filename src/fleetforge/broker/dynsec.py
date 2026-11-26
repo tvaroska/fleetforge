@@ -135,7 +135,7 @@ def delete_client_command(username: str, correlation: str) -> dict[str, Any]:
 
 
 def retained_up_topics(device_id: str) -> tuple[str, ...]:
-    """The three retained uplink topics a decommissioned board's cleanup must clear."""
+    """The retained uplink topics (`RETAINED_UP_CHANNELS`) a decommissioned board's cleanup must clear."""
     return tuple(f"ff/v1/d/{device_id}/up/{ch}" for ch in RETAINED_UP_CHANNELS)
 
 
@@ -199,6 +199,8 @@ class DynsecSession(Protocol):
         self, payload: dict[str, Any], *, expect: str, correlation: str
     ) -> DynsecResponse: ...
 
+    async def clear_retained_up_topics(self, device_id: str, password: str) -> None: ...
+
 
 class MqttDynsecSession:
     """A dynsec control session over one connected `aiomqtt.Client`.
@@ -240,7 +242,7 @@ class MqttDynsecSession:
         raise BrokerProvisioningError(f"dynsec connection closed while awaiting {expect}")
 
     async def clear_retained_up_topics(self, device_id: str, password: str) -> None:
-        """Clear `up/{announce,presence,status}` retained messages as `device_id`.
+        """Clear `up/{announce,presence,status,hb}` retained messages as `device_id`.
 
         `mosquitto/acl` grants `pattern write ff/v1/d/%u/up/#` only to `%u == device_id`,
         so publishing zero-byte retained payloads under a one-time rotated password just
@@ -343,21 +345,20 @@ class DynsecProvisioner:
         """
         try:
             async with asyncio.timeout(self._timeout_s), self._session_factory() as session:
-                if isinstance(session, MqttDynsecSession):
-                    temp_password = generate_broker_password()
-                    correlation = new_correlation()
-                    pw_resp = await session.command(
-                        set_client_password_command(device_id, temp_password, correlation),
-                        expect=SET_CLIENT_PASSWORD,
-                        correlation=correlation,
+                temp_password = generate_broker_password()
+                correlation = new_correlation()
+                pw_resp = await session.command(
+                    set_client_password_command(device_id, temp_password, correlation),
+                    expect=SET_CLIENT_PASSWORD,
+                    correlation=correlation,
+                )
+                if pw_resp.error is None:
+                    await self._run(session, enable_client_command, ENABLE_CLIENT, device_id)
+                    await session.clear_retained_up_topics(device_id, temp_password)
+                elif not is_not_found(pw_resp.error):
+                    raise BrokerProvisioningError(
+                        f"dynsec {SET_CLIENT_PASSWORD} refused: {pw_resp.error}"
                     )
-                    if pw_resp.error is None:
-                        await self._run(session, enable_client_command, ENABLE_CLIENT, device_id)
-                        await session.clear_retained_up_topics(device_id, temp_password)
-                    elif not is_not_found(pw_resp.error):
-                        raise BrokerProvisioningError(
-                            f"dynsec {SET_CLIENT_PASSWORD} refused: {pw_resp.error}"
-                        )
                 await self._delete(session, device_id)
         except TimeoutError as exc:
             raise BrokerProvisioningError(

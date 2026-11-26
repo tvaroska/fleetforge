@@ -19,7 +19,7 @@ import asyncio
 import contextlib
 import logging
 import os
-from collections.abc import AsyncIterator, Iterator
+from collections.abc import AsyncIterator, Iterator, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -42,9 +42,16 @@ from sqlalchemy.ext.asyncio import (
 from fleetforge.api.deps import COOKIE_NAME
 from fleetforge.api.main import create_app
 from fleetforge.auth.hashing import hash_secret
+from fleetforge.broker.commands import encode_command
 from fleetforge.config import Settings, get_settings
 from fleetforge.db.base import get_sessionmaker
-from fleetforge.storage.objectstore import ObjectNotFound
+from fleetforge.storage.objectstore import (
+    ObjectNotFound,
+    ObjectTooLarge,
+    resolve_key,
+    validate_prefix,
+    validate_ttl,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 TEST_DB_NAME = "fleetforge_test"
@@ -403,7 +410,16 @@ class MemoryObjectStore:
     (`ObjectStoreError` → 503) has to be reachable without unplugging MinIO.
     """
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        prefix: str = "",
+        default_ttl_s: int = 1800,
+        max_get_bytes: int = 8 * 1024 * 1024,
+    ) -> None:
+        self._prefix = validate_prefix(prefix)
+        self._default_ttl_s = default_ttl_s
+        self._max_get_bytes = max_get_bytes
         self.objects: dict[str, bytes] = {}
         # (key, data, content_type, cache_control) per put, in order.
         self.puts: list[tuple[str, bytes, str, str | None]] = []
@@ -426,26 +442,36 @@ class MemoryObjectStore:
         content_type: str = "application/octet-stream",
         cache_control: str | None = None,
     ) -> None:
+        resolved = resolve_key(self._prefix, key)
         self._maybe_fail()
         self.puts.append((key, data, content_type, cache_control))
-        self.objects[key] = data
+        self.objects[resolved] = data
 
     async def get(self, key: str) -> bytes:
+        resolved = resolve_key(self._prefix, key)
         self._maybe_fail()
         self.gets.append(key)
         try:
-            return self.objects[key]
+            data = self.objects[resolved]
         except KeyError as exc:
-            raise ObjectNotFound(f"no object at {key}") from exc
+            raise ObjectNotFound(f"no object at {resolved}") from exc
+        if len(data) > self._max_get_bytes:
+            raise ObjectTooLarge(
+                f"object {resolved} is {len(data)} bytes, over the {self._max_get_bytes} cap"
+            )
+        return data
 
     async def signed_url(self, key: str, *, ttl_s: int | None = None) -> str:
+        resolved = resolve_key(self._prefix, key)
+        effective_ttl = validate_ttl(self._default_ttl_s if ttl_s is None else ttl_s)
         self._maybe_fail()
         self.signed_urls.append((key, ttl_s))
-        return f"https://memory.invalid/{key}?ttl={ttl_s}"
+        return f"https://memory.invalid/{resolved}?ttl={effective_ttl}"
 
     async def delete(self, key: str) -> None:
+        resolved = resolve_key(self._prefix, key)
         self._maybe_fail()
-        self.objects.pop(key, None)
+        self.objects.pop(resolved, None)
 
 
 class FakeCommandPublisher:
@@ -469,6 +495,7 @@ class FakeCommandPublisher:
 
     async def publish(self, device_id: str, payload: dict[str, Any]) -> None:
         self._publish_calls += 1
+        encode_command(payload)
         if self.fail_with is not None and (
             self.fail_after_publishes is None or self._publish_calls > self.fail_after_publishes
         ):
@@ -476,6 +503,7 @@ class FakeCommandPublisher:
         self.published.append((device_id, payload))
 
     async def publish_cfg(self, device_id: str, payload: dict[str, Any]) -> None:
+        encode_command(payload)
         if self.fail_with is not None:
             raise self.fail_with
         self.published_cfg.append((device_id, payload))
@@ -485,7 +513,13 @@ class FakeCommandPublisher:
             raise self.fail_with
         self.cleared_cfg.append(device_id)
 
-    async def publish_many(self, items: Any) -> None:
+    async def publish_many(self, items: Sequence[tuple[str, dict[str, Any]]]) -> None:
+        if not isinstance(items, Sequence):
+            raise TypeError("publish_many requires a Sequence, not a one-shot iterator")
+        if not items:
+            return
+        for _, payload in items:
+            encode_command(payload)
         if self.fail_publish_many_with is not None:
             raise self.fail_publish_many_with
         if self.fail_with is not None and self.fail_after_publishes is None:
@@ -493,7 +527,13 @@ class FakeCommandPublisher:
         for device_id, payload in items:
             self.published.append((device_id, payload))
 
-    async def publish_cfg_many(self, items: Any) -> None:
+    async def publish_cfg_many(self, items: Sequence[tuple[str, dict[str, Any]]]) -> None:
+        if not isinstance(items, Sequence):
+            raise TypeError("publish_cfg_many requires a Sequence, not a one-shot iterator")
+        if not items:
+            return
+        for _, payload in items:
+            encode_command(payload)
         if self.fail_with is not None:
             raise self.fail_with
         for device_id, payload in items:

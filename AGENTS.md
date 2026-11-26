@@ -29,3 +29,19 @@ FleetForge is built around **two thin waists** (MQTT control plane + HTTPS artif
 ## 4. Verification Gate
 
 Run `scripts/gate.sh` (or workspace runner `gate test fleetforge`; `scripts/ci_gate.sh` delegates directly to `scripts/gate.sh`) for the unified verification gate: offline `uv.lock` check, single Alembic head check, `ruff` + `mypy` over `src/ tests/ alembic/ agent/tools/ scripts/`, full `pytest -q -rs` with strict skip-allowlist enforcement, and frontend `tsc` + Vitest. Point `TEST_DATABASE_URL` at the shared `btvaroska` k3s CloudNativePG PostgreSQL 17 test environment (with a `createdb`-capable role) so database-backed tests run with **0 DB skips** — do not install local Postgres workarounds on hosts without Docker (`just db-up` on `localhost:5433` is only an optional Docker dev-box fallback). Without PostgreSQL, `pytest` fails fast once (`pytest.exit`); `FF_ALLOW_DB_SKIP=1` is a local-only escape hatch and is refused whenever `CI` is set.
+
+### Test Marker Taxonomy (`pyproject.toml`)
+- `smoke`: fast startup, health, and critical invariant sanity checks.
+- `unit`: pure in-process unit tests with no external services.
+- `port`: parameterized Port conformance suites (`tests/contracts/`) shared by test fakes (`MemoryObjectStore`, `FakeCommandPublisher`, `FakeDynsecSession`) and real adapters (`S3ObjectStore`, `GcsObjectStore`, `MqttCommandPublisher`, `MqttDynsecSession`).
+- `integration`: tests requiring live infrastructure (PostgreSQL 17, MinIO, Mosquitto, Docker, QEMU).
+- `e2e`: full-stack simulated OTA (`scripts/selftest_window_e2e.py`) and real-Chromium Playwright dashboard suites (`frontend/scripts/*-e2e.mjs`), executed automatically in `cloudbuild.yaml`.
+
+## 5. E2E / Staging / Production -> Unit Escape Analysis
+
+Every defect first caught by an E2E suite, k3s staging run, or live production check — after passing the offline gate — must complete this checklist before the fix is closed (recording the classification and regression test path in the commit message and the corresponding `docs/roadmap.md` finding note):
+1. **Classify the root escape cause:** record exactly one primary cause — `missing_unit_case`, `fake_drift`, `env_parity`, or `migration_data`.
+2. **Add a failing-first offline regression test:** write a unit test or `@pytest.mark.port` conformance test in `tests/` (or `tests/contracts/`) that fails against the unpatched code and passes with the fix, so the bug can never escape the offline gate again.
+3. **Reconcile fakes with real Adapters:** when the escape involved `fake_drift`, update the test double (`MemoryObjectStore`, `FakeCommandPublisher`, `FakeDynsecSession`, or `fleetforge.simulator`) to enforce the same preconditions, error types, and side effects as the real adapter — never add `isinstance` branches in production code to work around a forgiving fake.
+4. **Eliminate environment-parity blind spots:** when the escape involved `env_parity` (nginx limits, cookie flags, Mosquitto ACLs, non-root UID, or container image drift), align `cloudbuild.yaml` / `docker/Dockerfile.e2e` / `docker-compose.yml` with production and add a static or CI contract guard in `tests/test_ci_cd.py` or `tests/test_frontend_nginx.py`.
+5. **Verify migration safety on populated data:** any schema or data bug (`migration_data`) must add a populated-rows upgrade/downgrade case in `tests/test_schema.py` against PostgreSQL 17.

@@ -64,11 +64,12 @@ import { createWriteStream, readFileSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 
-const { chromium } = await import(process.env.PLAYWRIGHT_MODULE ?? 'playwright')
+const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || 'playwright')
 
-const BASE = process.argv[2] ?? 'http://localhost:8088'
+const BASE = process.argv[2] ?? process.env.FF_E2E_BASE_URL ?? 'http://localhost:8088'
 const OUT = process.argv[3] ?? '/tmp/ff-r2b-test-3'
 const BREAK = process.env.E2E_BREAK ?? null
+const SIM_PYTHON = process.env.FF_SIM_PYTHON || null
 const ROOT = fileURLToPath(new URL('../../', import.meta.url))
 const RUN = Date.now().toString(36)
 
@@ -202,8 +203,8 @@ function killAll(signal) {
 process.on('exit', () => killAll('SIGKILL'))
 
 function startBoard(board) {
-  const args = [
-    'run', 'python', '-m', 'fleetforge.simulator', 'fleet',
+  const simArgs = [
+    '-m', 'fleetforge.simulator', 'fleet',
     '--count', '1',
     '--prefix', board.prefix,
     '--platform-type', 'esp32s3',
@@ -216,13 +217,14 @@ function startBoard(board) {
     '--api-base', BASE,
   ]
   // `=` is required: argparse reads a bare `-rbtest` as an option.
-  if (board.marker) args.push('--broken-marker=-rbtest')
+  if (board.marker) simArgs.push('--broken-marker=-rbtest')
   // Not secrets, so argv is fine.
-  if (board.sha !== undefined) args.push('--partition-sha', board.sha)
-  if (board.flash !== undefined) args.push('--flash-chip-size', String(board.flash))
+  if (board.sha !== undefined) simArgs.push('--partition-sha', board.sha)
+  if (board.flash !== undefined) simArgs.push('--flash-chip-size', String(board.flash))
+  const [cmd, args] = SIM_PYTHON ? [SIM_PYTHON, simArgs] : ['uv', ['run', 'python', ...simArgs]]
   const log = createWriteStream(board.log)
   // The password goes through the environment, never argv.
-  const child = spawn('uv', args, {
+  const child = spawn(cmd, args, {
     cwd: ROOT,
     env: { ...process.env, PYTHONPATH: 'src', FF_ADMIN_PASSWORD: PASSWORD },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -289,7 +291,14 @@ async function login(page) {
   await page.waitForSelector('input[type=password]')
   await page.fill('input[type=password]', PASSWORD)
   await page.locator('button[type=submit]').click()
-  await page.waitForSelector('[data-testid=device-row]', { timeout: 15_000 })
+  await page.waitForSelector('[data-testid=console-tabs]', { timeout: 15_000 })
+}
+
+async function openTab(page, tab) {
+  const btn = page.locator(`[data-testid="tab-${tab}"]`)
+  if ((await btn.count()) > 0 && (await btn.getAttribute('aria-pressed')) !== 'true') {
+    await btn.click()
+  }
 }
 
 const rowOf = (page, id) => page.locator(`[data-testid=device-row][data-device-id="${id}"]`)
@@ -307,6 +316,7 @@ async function waitForOption(page, id, label, timeoutMs = 25_000) {
 // form, choose the target and layout explicitly (the default layout depends on what the whole
 // dev fleet reports), press Upload.
 async function uploadBuild(page, { file, layout, typeVersion = null }) {
+  await openTab(page, 'builds')
   const form = uploadForm(page)
   await form.locator('input[type=file]').setInputFiles(file)
   const info = form.locator('[data-testid=upload-file-info]')
@@ -332,6 +342,7 @@ async function uploadBuild(page, { file, layout, typeVersion = null }) {
 }
 
 async function openPrecheck(page, id, label) {
+  await openTab(page, 'fleet')
   const cell = cellOf(page, id)
   await cell.locator('select').selectOption(label)
   await cell.getByRole('button', { name: 'Deploy', exact: true }).click()
@@ -606,7 +617,7 @@ const SCENARIOS = [
   },
   {
     id: 'adopt-detected-profile',
-    shotOf: (page) => page.locator('section[aria-labelledby=profiles-heading]'),
+    shotOf: (page) => rowOf(page, BOARDS.detect.id),
     async run(page, notes) {
       const problems = []
       const text = []
@@ -643,6 +654,7 @@ const SCENARIOS = [
           return { problems: [`the detect board never came online announcing unknown + ${DETECTED_SHA} (see ${detect.log})`], text: '' }
 
         // 3. It shows, live.
+        await openTab(page, 'builds')
         const pendingRow = page.locator(rowSel('false'))
         const seen = await pendingRow.waitFor({ timeout: 20_000 }).then(() => true, () => false)
         if (!seen) return { problems: ['no pending profile row appeared without a reload within 20s'], text: '' }
@@ -674,6 +686,7 @@ const SCENARIOS = [
         } else notes.push('refusal step skipped: the good build was not uploaded')
 
         // 5. The upload form never offers `unknown`.
+        await openTab(page, 'builds')
         const options = await uploadForm(page)
           .getByLabel('Partition layout', { exact: true })
           .locator('option')

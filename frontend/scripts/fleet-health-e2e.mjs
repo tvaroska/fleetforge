@@ -44,11 +44,12 @@ import { createWriteStream, readFileSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { fileURLToPath } from 'node:url'
 
-const { chromium } = await import(process.env.PLAYWRIGHT_MODULE ?? 'playwright')
+const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || 'playwright')
 
-const BASE = process.argv[2] ?? 'http://localhost:8088'
+const BASE = process.argv[2] ?? process.env.FF_E2E_BASE_URL ?? 'http://localhost:8088'
 const OUT = process.argv[3] ?? '/tmp/ff-r4-fe-1'
 const BREAK = process.env.E2E_BREAK ?? null
+const SIM_PYTHON = process.env.FF_SIM_PYTHON || null
 const ROOT = fileURLToPath(new URL('../../', import.meta.url))
 const RUN = Date.now().toString(36)
 
@@ -111,8 +112,8 @@ function killAll(signal) {
 process.on('exit', () => killAll('SIGKILL'))
 
 function startBoard(board) {
-  const args = [
-    'run', 'python', '-m', 'fleetforge.simulator', 'fleet',
+  const simArgs = [
+    '-m', 'fleetforge.simulator', 'fleet',
     '--count', '1',
     '--prefix', board.prefix,
     '--platform-type', 'esp32s3',
@@ -121,9 +122,10 @@ function startBoard(board) {
     '--api-base', BASE,
     ...board.extra,
   ]
+  const [cmd, args] = SIM_PYTHON ? [SIM_PYTHON, simArgs] : ['uv', ['run', 'python', ...simArgs]]
   const log = createWriteStream(board.log)
   // The password goes through the environment, never argv.
-  const child = spawn('uv', args, {
+  const child = spawn(cmd, args, {
     cwd: ROOT,
     env: { ...process.env, PYTHONPATH: 'src', FF_ADMIN_PASSWORD: PASSWORD },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -185,7 +187,7 @@ async function login(page) {
   await page.waitForSelector('input[type=password]')
   await page.fill('input[type=password]', PASSWORD)
   await page.locator('button[type=submit]').click()
-  await page.waitForSelector('[data-testid=device-row]', { timeout: 15_000 })
+  await page.waitForSelector('[data-testid=console-tabs]', { timeout: 15_000 })
 }
 
 const rowOf = (page, id) => page.locator(`[data-testid=device-row][data-device-id="${id}"]`)

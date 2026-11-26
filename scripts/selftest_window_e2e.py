@@ -239,8 +239,14 @@ class Api:
             request.add_header("content-type", content_type)
         if self.bearer is not None:
             request.add_header("Authorization", f"Bearer {self.bearer}")
+        host = urllib.parse.urlsplit(self.base).hostname or ""
+        opener = (
+            urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            if host in ("127.0.0.1", "localhost", "::1")
+            else urllib.request.build_opener()
+        )
         try:
-            with urllib.request.urlopen(request, timeout=30) as response:
+            with opener.open(request, timeout=30) as response:
                 raw, status, headers = response.read(), response.status, response.headers
         except urllib.error.HTTPError as error:
             raw, status, headers = error.read(), error.code, error.headers
@@ -320,37 +326,32 @@ class Board:
         return derive_device_id(self.name)
 
 
-def start_board(board: Board, base: str, baseline: str, password: str) -> None:
-    argv = [
-        "uv",
-        "run",
-        "python",
+def simulator_argv(board: Board, base: str, baseline: str) -> list[str]:
+    sim_python = os.environ.get("FF_SIM_PYTHON")
+    prefix = [sim_python] if sim_python else ["uv", "run", "python"]
+    return [
+        *prefix,
         "-m",
         "fleetforge.simulator",
         "fleet",
-        "--count",
-        "1",
-        "--prefix",
-        board.prefix,
-        "--platform-type",
-        TARGET,
-        "--partition-layout",
-        LAYOUT,
-        "--fw-version",
-        baseline,
-        "--heartbeat-interval",
-        "5",
-        "--confirm-timeout",
-        "20",
-        "--duration",
-        "900",  # the safety net: an orphaned simulator exits on its own
-        "--api-base",
-        base,
+        "--count=1",
+        f"--prefix={board.prefix}",
+        f"--platform-type={TARGET}",
+        f"--partition-layout={LAYOUT}",
+        f"--fw-version={baseline}",
+        "--heartbeat-interval=5",
+        "--confirm-timeout=20",
+        "--duration=900",
+        f"--api-base={base}",
         "--capabilities",
         *R5_CAPABILITIES,
         f"--selftest-fail-marker={STFAIL_MARKER}",
         *board.extra,
     ]
+
+
+def start_board(board: Board, base: str, baseline: str, password: str) -> None:
+    argv = simulator_argv(board, base, baseline)
     # The password goes through the environment, never argv.
     env = {**os.environ, "PYTHONPATH": "src", "FF_ADMIN_PASSWORD": password}
     with board.log.open("wb") as log:

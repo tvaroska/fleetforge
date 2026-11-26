@@ -2503,14 +2503,22 @@ def test_gate_fails_when_database_tests_cannot_run() -> None:
     assert violations, "expected skip allowlist to reject a PostgreSQL skip"
     assert any("Cannot reach PostgreSQL" in v for v in violations)
 
-    # Allowlisted non-DB skips (2 absent bundles + 10 opt-in MinIO) pass when FF_RUN_MINIO_TESTS!=1.
+    # Allowlisted non-DB skips (2 absent bundles + 15 opt-in MinIO) pass when FF_RUN_MINIO_TESTS!=1.
     clean_out = (
         "SKIPPED [2] tests/test_agent_power_and_size.py:403: no bundle in agent/dist — run `just agent-build-all`\n"
-        "SKIPPED [4] tests/test_artifact_download_minio.py: MinIO tests opt-in via FF_RUN_MINIO_TESTS=1 (target http://localhost:9000)\n"
-        "SKIPPED [6] tests/test_object_store_minio.py: MinIO tests opt-in via FF_RUN_MINIO_TESTS=1 (target http://localhost:9000)\n"
-        "2625 passed, 12 skipped in 12.34s\n"
+        "SKIPPED [6] tests/test_artifact_download_minio.py: MinIO tests opt-in via FF_RUN_MINIO_TESTS=1 (target http://localhost:9000)\n"
+        "SKIPPED [4] tests/test_object_store_minio.py: MinIO tests opt-in via FF_RUN_MINIO_TESTS=1 (target http://localhost:9000)\n"
+        "SKIPPED [5] tests/contracts/test_object_store_contract.py: MinIO tests opt-in via FF_RUN_MINIO_TESTS=1 (target http://localhost:9000)\n"
+        "2625 passed, 17 skipped in 12.34s\n"
     )
     assert validate_pytest_output(clean_out, {}) == []
+    # Per-file MinIO budget rejects overflow in one suite even when total MinIO skips <= 15.
+    overflow_out = (
+        "SKIPPED [6] tests/contracts/test_object_store_contract.py: "
+        "MinIO tests opt-in via FF_RUN_MINIO_TESTS=1 (target http://localhost:9000)\n"
+        "2625 passed, 6 skipped in 12.34s\n"
+    )
+    assert any("MinIO contract skips" in err for err in validate_pytest_output(overflow_out, {}))
     # When FF_RUN_MINIO_TESTS=1, MinIO skips are no longer allowlisted.
     assert validate_pytest_output(clean_out, {"FF_RUN_MINIO_TESTS": "1"}) != []
     # T-23: FF_ALLOW_DB_SKIP=1 locally still catches unallowlisted non-DB skips.
@@ -2521,3 +2529,39 @@ def test_gate_fails_when_database_tests_cannot_run() -> None:
     )
     assert validate_pytest_output(mixed_bad_out, {"FF_ALLOW_DB_SKIP": "1"}) != []
     assert validate_pytest_output(mutated_skip_out, {"FF_ALLOW_DB_SKIP": "1"}) == []
+
+
+def test_cloudbuild_wires_fullstack_and_playwright_e2e_with_pinned_version() -> None:
+    """T-28 & T-29: Cloud Build runs full-stack OTA E2E and all 4 Playwright suites with matched pin."""
+    repo_root = Path(__file__).resolve().parents[1]
+    cloudbuild = (repo_root / "cloudbuild.yaml").read_text(encoding="utf-8")
+    dockerfile_e2e = (repo_root / "docker" / "Dockerfile.e2e").read_text(encoding="utf-8")
+    pkg = json.loads((repo_root / "frontend" / "package.json").read_text(encoding="utf-8"))
+    pw_ver = pkg["config"]["playwrightVersion"]
+
+    assert f"ARG PLAYWRIGHT_VERSION={pw_ver}" in dockerfile_e2e
+    assert "FROM mcr.microsoft.com/playwright:v${PLAYWRIGHT_VERSION}-noble" in dockerfile_e2e
+    assert "docker/Dockerfile.e2e" in cloudbuild
+    for needle in (
+        "id: verify-fullstack-and-playwright-e2e",
+        "eclipse-mosquitto:2.0.22",
+        "fleetforge.ingestor.main",
+        "scripts/selftest_window_e2e.py",
+        "scripts/update-flow-e2e.mjs",
+        "scripts/fleet-health-e2e.mjs",
+        "scripts/device-log-e2e.mjs",
+        "scripts/commands-e2e.mjs",
+        "- verify-fullstack-and-playwright-e2e",
+    ):
+        assert needle in cloudbuild, f"missing {needle!r} in cloudbuild.yaml"
+
+    for script_name in (
+        "update-flow-e2e.mjs",
+        "fleet-health-e2e.mjs",
+        "device-log-e2e.mjs",
+        "commands-e2e.mjs",
+    ):
+        src = (repo_root / "frontend" / "scripts" / script_name).read_text(encoding="utf-8")
+        assert "process.env.PLAYWRIGHT_MODULE || 'playwright'" in src
+        assert "FF_SIM_PYTHON" in src
+        assert "console-tabs" in src

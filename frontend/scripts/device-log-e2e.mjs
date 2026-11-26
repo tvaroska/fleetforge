@@ -47,13 +47,15 @@ import { spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { createWriteStream, readFileSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const { chromium } = await import(process.env.PLAYWRIGHT_MODULE ?? 'playwright')
+const { chromium } = await import(process.env.PLAYWRIGHT_MODULE || 'playwright')
 
-const BASE = process.argv[2] ?? 'http://localhost:8088'
+const BASE = process.argv[2] ?? process.env.FF_E2E_BASE_URL ?? 'http://localhost:8088'
 const OUT = process.argv[3] ?? '/tmp/ff-r4-fe-2'
 const BREAK = process.env.E2E_BREAK ?? null
+const SIM_PYTHON = process.env.FF_SIM_PYTHON || null
 const ROOT = fileURLToPath(new URL('../../', import.meta.url))
 const RUN = Date.now().toString(36)
 
@@ -116,8 +118,8 @@ function killAll(signal) {
 process.on('exit', () => killAll('SIGKILL'))
 
 function startBoard(board) {
-  const args = [
-    'run', 'python', '-m', 'fleetforge.simulator', 'fleet',
+  const simArgs = [
+    '-m', 'fleetforge.simulator', 'fleet',
     '--count', '1',
     '--prefix', board.prefix,
     '--platform-type', 'esp32s3',
@@ -125,9 +127,10 @@ function startBoard(board) {
     '--duration', '300', // the safety net: an orphaned simulator exits on its own
     '--api-base', BASE,
   ]
+  const [cmd, args] = SIM_PYTHON ? [SIM_PYTHON, simArgs] : ['uv', ['run', 'python', ...simArgs]]
   const log = createWriteStream(board.log)
   // The password goes through the environment, never argv.
-  const child = spawn('uv', args, {
+  const child = spawn(cmd, args, {
     cwd: ROOT,
     env: { ...process.env, PYTHONPATH: 'src', FF_ADMIN_PASSWORD: PASSWORD },
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -156,19 +159,20 @@ const STATE_DIR = process.env.FF_SIM_STATE_DIR ?? '.sim'
 // as that board. The password never enters Node, an argv or a log. A denied publish is
 // silent in MQTT 3.1.1, so setup checks the API after the first one.
 const PUBLISH_PY = [
-  'import json, os, dotenv, paho.mqtt.publish as publish',
-  'dotenv.load_dotenv()',
+  'import json, os, paho.mqtt.publish as publish',
+  'try:\n import dotenv; dotenv.load_dotenv()\nexcept ImportError:\n pass',
   'c = json.load(open(os.environ["FF_PUB_STATE"]))',
-  'publish.single(os.environ["FF_PUB_TOPIC"], os.environ["FF_PUB_MESSAGE"], qos=1, hostname="127.0.0.1", port=int(os.environ.get("FF_MQTT_PORT", "8883")), auth={"username": c["mqtt_username"], "password": c["mqtt_password"]})',
+  'publish.single(os.environ["FF_PUB_TOPIC"], os.environ["FF_PUB_MESSAGE"], qos=1, hostname=os.environ.get("MQTT_HOST", "127.0.0.1"), port=int(os.environ.get("MQTT_PORT") or os.environ.get("FF_MQTT_PORT", "8883")), auth={"username": c["mqtt_username"], "password": c["mqtt_password"]})',
 ].join('\n')
 
 function publishLog(board, payload) {
   return new Promise((resolve, reject) => {
-    const child = spawn('uv', ['run', 'python', '-c', PUBLISH_PY], {
+    const [cmd, args] = SIM_PYTHON ? [SIM_PYTHON, ['-c', PUBLISH_PY]] : ['uv', ['run', 'python', '-c', PUBLISH_PY]]
+    const child = spawn(cmd, args, {
       cwd: ROOT,
       env: {
         ...process.env,
-        FF_PUB_STATE: `${ROOT}${STATE_DIR}/${board.id}.json`,
+        FF_PUB_STATE: path.resolve(ROOT, STATE_DIR, `${board.id}.json`),
         FF_PUB_TOPIC: `ff/v1/d/${board.id}/up/log`,
         FF_PUB_MESSAGE: JSON.stringify(payload),
       },
@@ -238,7 +242,7 @@ async function login(page) {
   await page.waitForSelector('input[type=password]')
   await page.fill('input[type=password]', PASSWORD)
   await page.locator('button[type=submit]').click()
-  await page.waitForSelector('[data-testid=device-row]', { timeout: 15_000 })
+  await page.waitForSelector('[data-testid=console-tabs]', { timeout: 15_000 })
 }
 
 const rowOf = (page, id) => page.locator(`[data-testid=device-row][data-device-id="${id}"]`)

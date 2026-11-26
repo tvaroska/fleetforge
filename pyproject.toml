@@ -44,6 +44,13 @@ asyncio_default_fixture_loop_scope = "session"
 # Tests share the session-scoped loop; the session-scoped engine's connections
 # cannot be awaited from a different loop.
 asyncio_default_test_loop_scope = "session"
+markers = [
+    "smoke: fast sanity checks covering critical startup and health invariants",
+    "unit: pure in-process unit tests with no external services",
+    "port: parameterized Port conformance suites shared by fakes and real adapters",
+    "integration: tests requiring live infrastructure (PostgreSQL, MinIO, broker, Docker, QEMU)",
+    "e2e: full-stack or browser end-to-end verification tests",
+]
 
 [tool.mypy]
 python_version = "3.12"

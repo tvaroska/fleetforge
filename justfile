@@ -184,7 +184,7 @@ capacity-check-prod *args:
 #
 # Play Flow 2 against the dev stack with simulated boards (exit 0 = all seven scenarios pass).
 update-e2e *args:
-    cd frontend && PLAYWRIGHT_MODULE="${PLAYWRIGHT_MODULE:-$(npm root -g)/playwright/index.mjs}" node scripts/update-flow-e2e.mjs {{args}}
+    cd frontend && node scripts/update-flow-e2e.mjs {{args}}
 
 # ── Fleet health end to end (R4-fe-1) ────────────────────────────────────────
 #
@@ -203,7 +203,7 @@ update-e2e *args:
 #
 # Play the Health cell against the dev stack with simulated boards (exit 0 = all four pass).
 health-e2e *args:
-    cd frontend && PLAYWRIGHT_MODULE="${PLAYWRIGHT_MODULE:-$(npm root -g)/playwright/index.mjs}" node scripts/fleet-health-e2e.mjs {{args}}
+    cd frontend && node scripts/fleet-health-e2e.mjs {{args}}
 
 # ── Device log end to end (R4-fe-2) ──────────────────────────────────────────
 #
@@ -225,7 +225,7 @@ health-e2e *args:
 #
 # Play the device log tail against the dev stack with simulated boards (exit 0 = all eight pass).
 log-e2e *args:
-    cd frontend && PLAYWRIGHT_MODULE="${PLAYWRIGHT_MODULE:-$(npm root -g)/playwright/index.mjs}" node scripts/device-log-e2e.mjs {{args}}
+    cd frontend && node scripts/device-log-e2e.mjs {{args}}
 
 # ── Command controls end to end (R5-fe-1) ────────────────────────────────────
 #
@@ -246,7 +246,7 @@ log-e2e *args:
 #
 # Play the R5 command controls against the dev stack with simulated boards (exit 0 = all nine pass).
 commands-e2e *args:
-    cd frontend && PLAYWRIGHT_MODULE="${PLAYWRIGHT_MODULE:-$(npm root -g)/playwright/index.mjs}" node scripts/commands-e2e.mjs {{args}}
+    cd frontend && node scripts/commands-e2e.mjs {{args}}
 
 # ── Self-test rollback and the safe window, simulated (R5-test-1) ────────────
 #

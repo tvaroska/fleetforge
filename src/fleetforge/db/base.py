@@ -27,6 +27,10 @@ from sqlalchemy.orm import DeclarativeBase
 
 from fleetforge.config import get_settings
 
+# Fixed signed int64 session advisory-lock key ("fleetfor" in ASCII) used by
+# `alembic/env.py` so multi-replica `api` rollouts serialize `alembic upgrade head`.
+ALEMBIC_ADVISORY_LOCK_KEY = 0x666C656574666F72
+
 # Every constraint gets a deterministic name, so Alembic autogenerate can compare
 # the models against the database instead of proposing a drop/recreate churn. The
 # acceptance criterion `alembic check` == "No new upgrade operations detected."

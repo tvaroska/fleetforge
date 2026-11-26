@@ -141,3 +141,14 @@ def test_the_script_is_stdlib_only() -> None:
     """It never imports the project (mypy sees scripts/ as a package of its own)."""
     source = SCRIPT.read_text()
     assert not re.search(r"^\s*(from|import)\s+(fleetforge|scripts|lib_quickstart)\b", source, re.M)
+
+
+def test_simulator_argv_respects_ff_sim_python(monkeypatch: pytest.MonkeyPatch) -> None:
+    board = e2e.Board("V", "sw1v", [], Path("/tmp/sim-V.log"))  # noqa: S108
+    monkeypatch.delenv("FF_SIM_PYTHON", raising=False)
+    default_argv = e2e.simulator_argv(board, "http://127.0.0.1:8080", "1.0.0-sw1")
+    assert default_argv[:4] == ["uv", "run", "python", "-m"]
+
+    monkeypatch.setenv("FF_SIM_PYTHON", "/app/.venv/bin/python")
+    ci_argv = e2e.simulator_argv(board, "http://127.0.0.1:8080", "1.0.0-sw1")
+    assert ci_argv[:3] == ["/app/.venv/bin/python", "-m", "fleetforge.simulator"]

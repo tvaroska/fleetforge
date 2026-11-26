@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 import sys
 from logging.config import fileConfig
@@ -7,12 +8,15 @@ sys.path.append(os.getcwd())
 sys.path.append(os.path.join(os.getcwd(), "src"))
 
 from alembic import context
-from sqlalchemy import pool
+from sqlalchemy import pool, text
 from sqlalchemy.engine import Connection
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from fleetforge.db import models  # noqa: F401  # imported for its side effect: registers the tables
-from fleetforge.db.base import Base
+from fleetforge.db.base import ALEMBIC_ADVISORY_LOCK_KEY, Base
+
+logger = logging.getLogger("alembic.env")
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
@@ -66,10 +70,36 @@ async def run_async_migrations() -> None:
         poolclass=pool.NullPool,
     )
 
-    async with connectable.connect() as connection:
-        await connection.run_sync(do_run_migrations)
-
-    await connectable.dispose()
+    try:
+        async with connectable.connect() as connection:
+            is_pg = connection.dialect.name == "postgresql"
+            if is_pg:
+                await connection.execute(
+                    text("SELECT pg_advisory_lock(:key)"),
+                    {"key": ALEMBIC_ADVISORY_LOCK_KEY},
+                )
+                # End the autobegin transaction before Alembic opens its own migration
+                # transaction; a session advisory lock stays held across commits.
+                await connection.commit()
+            try:
+                await connection.run_sync(do_run_migrations)
+            finally:
+                if is_pg and not connection.invalidated and not connection.closed:
+                    try:
+                        if connection.in_transaction():
+                            await connection.rollback()
+                        await connection.execute(
+                            text("SELECT pg_advisory_unlock(:key)"),
+                            {"key": ALEMBIC_ADVISORY_LOCK_KEY},
+                        )
+                        await connection.commit()
+                    except (SQLAlchemyError, OSError) as exc:
+                        # NullPool closes the backend session immediately afterwards, which
+                        # also releases any PostgreSQL session advisory lock; never mask the
+                        # primary migration error with a cleanup failure.
+                        logger.warning("advisory unlock skipped after connection error: %s", exc)
+    finally:
+        await connectable.dispose()
 
 
 def run_migrations_online() -> None:

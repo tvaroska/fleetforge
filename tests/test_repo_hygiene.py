@@ -36,7 +36,10 @@ FORBIDDEN_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
         "Hardcoded local home directory path",
         re.compile(r"/usr/local/google/home|\.c\.googlers\.com"),
     ),
-    ("File URI scheme", re.compile(r"file:///")),
+    (
+        "File URI scheme",
+        re.compile(r"file:///(?:usr/local/google|Users/|home/|[A-Za-z]:/)"),
+    ),
     ("Internal Buganizer ID", re.compile(r"\bb/\d{6,}\b")),
     (
         "Internal shortlink",

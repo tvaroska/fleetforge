@@ -1,12 +1,22 @@
 """The migration builds the expected schema, matches the models, and reverses."""
 
+import asyncio
+import contextlib
+import os
+import sys
+import time
+
 import pytest
+from alembic.script import ScriptDirectory
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 
+from fleetforge.db.base import ALEMBIC_ADVISORY_LOCK_KEY
 from tests.conftest import (
+    REPO_ROOT,
     TEST_DB_NAME,
+    alembic_config,
     database_url_for,
     drop_database,
     recreate_database,
@@ -44,6 +54,8 @@ EXPECTED_TABLES = {
 }
 
 MIGRATION_TEST_DB = "fleetforge_migration_test"
+MIGRATION_RACE_TEST_DB = "fleetforge_migration_race_test"
+MIGRATION_POPULATED_TEST_DB = "fleetforge_migration_populated_test"
 
 
 async def _tables_in(url: str) -> set[str]:
@@ -93,6 +105,373 @@ async def test_migration_downgrades_cleanly(engine: AsyncEngine) -> None:
         assert await _tables_in(url) == EXPECTED_TABLES
     finally:
         await drop_database(MIGRATION_TEST_DB)
+
+
+_ADVISORY_LOCK_COUNT_SQL = text(
+    "SELECT count(*) FROM pg_locks "
+    "WHERE locktype = 'advisory' "
+    "AND database = (SELECT oid FROM pg_database WHERE datname = current_database()) "
+    "AND objsubid = 1 "
+    "AND ((classid::bigint << 32) | (objid::bigint & 4294967295)) = :key "
+    "AND granted = :granted"
+)
+
+
+@pytest.mark.integration
+async def test_concurrent_alembic_upgrades_serialize_with_advisory_lock(
+    engine: AsyncEngine,
+) -> None:
+    """T-27: multi-replica `alembic upgrade head` serializes behind `pg_advisory_lock`."""
+    del engine
+    url = database_url_for(MIGRATION_RACE_TEST_DB)
+    sub_env = {**os.environ, "DATABASE_URL": url}
+    cmd = [sys.executable, "-m", "alembic", "-c", str(REPO_ROOT / "alembic.ini"), "upgrade", "head"]
+    expected_head = ScriptDirectory.from_config(alembic_config()).get_current_head()
+    assert expected_head is not None
+
+    await recreate_database(MIGRATION_RACE_TEST_DB)
+    try:
+        # Hold the exact advisory lock on a separate connection and poll pg_locks until the
+        # alembic subprocess is demonstrably queued (`granted = false`) before releasing.
+        lock_engine = create_async_engine(url)
+        try:
+            async with lock_engine.connect() as lock_conn:
+                await lock_conn.execute(
+                    text("SELECT pg_advisory_lock(:key)"),
+                    {"key": ALEMBIC_ADVISORY_LOCK_KEY},
+                )
+                await lock_conn.commit()
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    cwd=str(REPO_ROOT),
+                    env=sub_env,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                unlocked = False
+                try:
+                    deadline = time.monotonic() + 20.0
+                    queued = 0
+                    while time.monotonic() < deadline:
+                        if proc.returncode is not None:
+                            out, err = await proc.communicate()
+                            pytest.fail(
+                                f"alembic exited early ({proc.returncode}) while advisory lock "
+                                f"was held: stdout={out.decode()} stderr={err.decode()}"
+                            )
+                        queued = int(
+                            await lock_conn.scalar(
+                                _ADVISORY_LOCK_COUNT_SQL,
+                                {"key": ALEMBIC_ADVISORY_LOCK_KEY, "granted": False},
+                            )
+                            or 0
+                        )
+                        if queued >= 1:
+                            break
+                        await asyncio.sleep(0.1)
+                    assert queued >= 1, "alembic subprocess never queued on pg_advisory_lock"
+                    assert await _tables_in(url) == set()
+
+                    await lock_conn.execute(
+                        text("SELECT pg_advisory_unlock(:key)"),
+                        {"key": ALEMBIC_ADVISORY_LOCK_KEY},
+                    )
+                    await lock_conn.commit()
+                    unlocked = True
+                    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=60)
+                    assert proc.returncode == 0, (
+                        f"stdout={stdout.decode()} stderr={stderr.decode()}"
+                    )
+                finally:
+                    if not unlocked:
+                        with contextlib.suppress(Exception):  # noqa: BLE001
+                            await lock_conn.execute(
+                                text("SELECT pg_advisory_unlock(:key)"),
+                                {"key": ALEMBIC_ADVISORY_LOCK_KEY},
+                            )
+                            await lock_conn.commit()
+                    if proc.returncode is None:
+                        proc.kill()
+                        await proc.wait()
+        finally:
+            await lock_engine.dispose()
+        assert await _tables_in(url) == EXPECTED_TABLES
+
+        # Race two independent OS processes simultaneously against an empty database.
+        await recreate_database(MIGRATION_RACE_TEST_DB)
+        proc_a = await asyncio.create_subprocess_exec(
+            *cmd,
+            cwd=str(REPO_ROOT),
+            env=sub_env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        proc_b = await asyncio.create_subprocess_exec(
+            *cmd,
+            cwd=str(REPO_ROOT),
+            env=sub_env,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            (out_a, err_a), (out_b, err_b) = await asyncio.wait_for(
+                asyncio.gather(proc_a.communicate(), proc_b.communicate()),
+                timeout=90,
+            )
+        finally:
+            for p in (proc_a, proc_b):
+                if p.returncode is None:
+                    p.kill()
+                    await p.wait()
+        assert proc_a.returncode == 0, f"proc_a failed: {out_a.decode()} {err_a.decode()}"
+        assert proc_b.returncode == 0, f"proc_b failed: {out_b.decode()} {err_b.decode()}"
+        assert await _tables_in(url) == EXPECTED_TABLES
+
+        verify_engine = create_async_engine(url)
+        try:
+            async with verify_engine.connect() as conn:
+                held = await conn.scalar(
+                    _ADVISORY_LOCK_COUNT_SQL,
+                    {"key": ALEMBIC_ADVISORY_LOCK_KEY, "granted": True},
+                )
+                assert held == 0
+                version = await conn.scalar(text("SELECT version_num FROM alembic_version"))
+                assert version == expected_head
+        finally:
+            await verify_engine.dispose()
+    finally:
+        await drop_database(MIGRATION_RACE_TEST_DB)
+
+
+@pytest.mark.integration
+async def test_migration_upgrade_downgrade_with_populated_rows(engine: AsyncEngine) -> None:
+    """T-30: staged `0010 -> 0017 -> head -> 0010 -> head` preserves populated rows and NOT NULL backfills."""
+    del engine
+    url = database_url_for(MIGRATION_POPULATED_TEST_DB)
+    await recreate_database(MIGRATION_POPULATED_TEST_DB)
+    sha_a = "a" * 64
+    sha_b = "b" * 64
+    sha_patch = "c" * 64
+    try:
+        await run_alembic(url, "upgrade", "0010")
+        db_engine = create_async_engine(url)
+        try:
+            # Seed production-shaped rows prior to 0011..0017 NOT NULL backfills.
+            async with db_engine.begin() as conn:
+                project_id = (
+                    await conn.execute(
+                        text(
+                            "INSERT INTO projects (slug, name, description) "
+                            "VALUES ('rover', 'Rover Fleet', 'Field rovers') RETURNING id"
+                        )
+                    )
+                ).scalar_one()
+                user_id = (
+                    await conn.execute(
+                        text(
+                            "INSERT INTO users (username, email, password_hash) "
+                            "VALUES ('operator1', 'op1@example.com', 'hash') RETURNING id"
+                        )
+                    )
+                ).scalar_one()
+                await conn.execute(
+                    text(
+                        "INSERT INTO project_members (project_id, user_id, role) "
+                        "VALUES (:pid, :uid, 'operator')"
+                    ),
+                    {"pid": project_id, "uid": user_id},
+                )
+                group_id = (
+                    await conn.execute(
+                        text(
+                            "INSERT INTO device_groups (project_id, name) "
+                            "VALUES (:pid, 'canary') RETURNING id"
+                        ),
+                        {"pid": project_id},
+                    )
+                ).scalar_one()
+                await conn.execute(
+                    text(
+                        "INSERT INTO devices (device_id, project_id, group_id, platform_type, "
+                        "fw_version, link_type, power_class, partition_layout) "
+                        "VALUES ('a4cf12b3de01', :pid, :gid, 'esp32s3', '1.0.0', 'wifi', "
+                        "'always_on', 'ab-4m-v1')"
+                    ),
+                    {"pid": project_id, "gid": group_id},
+                )
+                await conn.execute(
+                    text(
+                        "INSERT INTO artifacts (sha256, size_bytes, kind, target, partition_layout) "
+                        "VALUES (:sha_a, 65536, 'user_firmware', 'esp32s3', 'ab-4m-v1'), "
+                        "(:sha_b, 65600, 'user_firmware', 'esp32s3', 'ab-4m-v1')"
+                    ),
+                    {"sha_a": sha_a, "sha_b": sha_b},
+                )
+                await conn.execute(
+                    text(
+                        "INSERT INTO artifact_versions (project_id, target, version, sha256) "
+                        "VALUES (:pid, 'esp32s3', '1.0.0', :sha_a)"
+                    ),
+                    {"pid": project_id, "sha_a": sha_a},
+                )
+                await conn.execute(
+                    text(
+                        "INSERT INTO device_logs (device_id, logged_at, received_at, level, text) "
+                        "VALUES ('a4cf12b3de01', now(), now(), 'I', 'booted')"
+                    )
+                )
+                await conn.execute(
+                    text(
+                        "INSERT INTO device_commands (id, device_id, type) "
+                        "VALUES ('cmd001', 'a4cf12b3de01', 'reboot')"
+                    )
+                )
+
+            # Upgrade through 0011 (NOT NULL project/device defaults), 0013 (NOT NULL artifact_type),
+            # 0014..0017 over populated rows, then populate 0011..0017 columns/tables before 0018..0021.
+            await run_alembic(url, "upgrade", "0017")
+
+            async with db_engine.begin() as conn:
+                proj_defaults = (
+                    await conn.execute(
+                        text(
+                            "SELECT track_mode, auto_deploy_target, secrets_rev "
+                            "FROM projects WHERE id = :pid"
+                        ),
+                        {"pid": project_id},
+                    )
+                ).one()
+                assert tuple(proj_defaults) == ("off", "off", 0)
+                art_type = await conn.scalar(
+                    text("SELECT artifact_type FROM artifacts WHERE sha256 = :sha_a"),
+                    {"sha_a": sha_a},
+                )
+                assert art_type == "app"
+
+                await conn.execute(
+                    text(
+                        "INSERT INTO project_secrets (project_id, key, ciphertext) "
+                        "VALUES (:pid, 'WIFI_PASS', 'enc-blob')"
+                    ),
+                    {"pid": project_id},
+                )
+                await conn.execute(
+                    text("UPDATE devices SET safe_mode = true WHERE device_id = 'a4cf12b3de01'")
+                )
+                await conn.execute(
+                    text(
+                        "UPDATE artifacts SET sim_status = 'passed', sim_detail = 'ok' "
+                        "WHERE sha256 = :sha_a"
+                    ),
+                    {"sha_a": sha_a},
+                )
+                build_job_id = (
+                    await conn.execute(
+                        text(
+                            "INSERT INTO build_jobs (project_id, repo_url, git_ref, target, version, "
+                            "idf_image, status) "
+                            "VALUES (:pid, 'https://github.com/example/rover', 'main', 'esp32s3', "
+                            "'1.1.0', 'espressif/idf:v5.5.5', 'queued') RETURNING id"
+                        ),
+                        {"pid": project_id},
+                    )
+                ).scalar_one()
+
+            # Upgrade 0017 -> head over populated build_jobs and non-NULL artifacts.sim_status.
+            await run_alembic(url, "upgrade", "head")
+
+            async with db_engine.begin() as conn:
+                dev_row = (
+                    await conn.execute(
+                        text(
+                            "SELECT fw_version, safe_mode FROM devices "
+                            "WHERE device_id = 'a4cf12b3de01'"
+                        )
+                    )
+                ).one()
+                assert tuple(dev_row) == ("1.0.0", True)
+
+                await conn.execute(
+                    text(
+                        "UPDATE artifacts SET sim_runner = 'qemu', sim_lease_owner = 'sim-1' "
+                        "WHERE sha256 = :sha_a"
+                    ),
+                    {"sha_a": sha_a},
+                )
+                await conn.execute(
+                    text(
+                        "UPDATE build_jobs SET lease_owner = 'builder-1', lease_expires_at = now() "
+                        "WHERE id = :jid"
+                    ),
+                    {"jid": build_job_id},
+                )
+                policy_id = (
+                    await conn.execute(
+                        text(
+                            "INSERT INTO deploy_policies (project_id, name, match_mode, match_ref, "
+                            "ring_group_ids) VALUES (:pid, 'canary-first', 'branch', 'main', "
+                            "ARRAY[:gid]::uuid[]) RETURNING id"
+                        ),
+                        {"pid": project_id, "gid": group_id},
+                    )
+                ).scalar_one()
+                await conn.execute(
+                    text(
+                        "INSERT INTO deploy_policy_runs (policy_id, version) VALUES (:pol, '1.0.0')"
+                    ),
+                    {"pol": policy_id},
+                )
+                await conn.execute(
+                    text(
+                        "INSERT INTO project_rollouts (project_id, version, policy_id) "
+                        "VALUES (:pid, '1.0.0', :pol)"
+                    ),
+                    {"pid": project_id, "pol": policy_id},
+                )
+                await conn.execute(
+                    text(
+                        "INSERT INTO gateway_relays (gateway_id, relay_base_url, cached_artifacts) "
+                        "VALUES ('a4cf12b3de01', 'http://192.168.4.1:8080', ARRAY[:sha_a]::text[])"
+                    ),
+                    {"sha_a": sha_a},
+                )
+                await conn.execute(
+                    text(
+                        "INSERT INTO artifact_deltas (from_sha256, to_sha256, patch_sha256, "
+                        "patch_size_bytes, target_size_bytes) "
+                        "VALUES (:sha_a, :sha_b, :patch, 512, 65600)"
+                    ),
+                    {"sha_a": sha_a, "sha_b": sha_b, "patch": sha_patch},
+                )
+
+            # Downgrade all the way back to 0010 with every table populated, then verify all 9
+            # pre-0011 seeded tables survived intact.
+            await run_alembic(url, "downgrade", "0010")
+
+            async with db_engine.connect() as conn:
+                for table_name, expected_count in (
+                    ("projects", 2),
+                    ("users", 1),
+                    ("project_members", 1),
+                    ("device_groups", 1),
+                    ("devices", 1),
+                    ("artifacts", 2),
+                    ("artifact_versions", 1),
+                    ("device_logs", 1),
+                    ("device_commands", 1),
+                ):
+                    count = await conn.scalar(text(f"SELECT count(*) FROM {table_name}"))  # noqa: S608
+                    assert count == expected_count, (
+                        f"{table_name}: expected {expected_count}, got {count}"
+                    )
+
+            await run_alembic(url, "upgrade", "head")
+            await run_alembic_check(url)
+            assert await _tables_in(url) == EXPECTED_TABLES
+        finally:
+            await db_engine.dispose()
+    finally:
+        await drop_database(MIGRATION_POPULATED_TEST_DB)
 
 
 # ---------------------------------------------------------------------------

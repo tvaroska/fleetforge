@@ -19,6 +19,8 @@ substitutions:
   _TAG: ""
   _PUSH: "auto"
 
+timeout: 1200s
+
 options:
   dynamicSubstitutions: true
   logging: CLOUD_LOGGING_ONLY
@@ -235,10 +237,191 @@ steps:
             "$${IMG}"
         done
 
+  - id: verify-fullstack-and-playwright-e2e
+    name: gcr.io/cloud-builders/docker
+    waitFor:
+      - docker-build-images
+    entrypoint: bash
+    args:
+      - -c
+      - |
+        set -euo pipefail
+        CI_ADMIN_PASSWORD="ci-e2e-admin-password-0123456789"
+        CI_DYNSEC_PASS="ci-e2e-dynsec-pass-012345"
+        CI_INGESTOR_PASS="ci-e2e-ingestor-pass-012345"
+        CI_COMMANDER_PASS="ci-e2e-commander-pass-012345"
+        CI_ARTIFACT_SECRET="ci-e2e-artifact-url-secret-0123456789"
+        CI_SECRETS_KEY="ci-e2e-secrets-encryption-key-012345"
+        CI_DB_URL="postgresql+asyncpg://fleetforge:fleetforge@ci-postgres:5432/fleetforge_e2e"
+
+        cleanup() {
+          local rc=$$?
+          if [[ "$$rc" -ne 0 ]]; then
+            echo "=== E2E FAILURE LOGS ==="
+            docker logs --tail=120 ci-mosquitto 2>&1 || true
+            docker logs --tail=120 fleetforge-api-e2e 2>&1 || true
+            docker logs --tail=120 fleetforge-ingestor-e2e 2>&1 || true
+            docker logs --tail=80 fleetforge-frontend-e2e 2>&1 || true
+          fi
+          docker rm -f \
+            fleetforge-frontend-e2e \
+            fleetforge-ingestor-e2e \
+            fleetforge-api-e2e \
+            ci-mosquitto >/dev/null 2>&1 || true
+          docker volume rm -f ci-mosquitto-data >/dev/null 2>&1 || true
+        }
+        trap cleanup EXIT
+
+        docker exec ci-postgres psql -U fleetforge -d postgres \
+          -c "DROP DATABASE IF EXISTS fleetforge_e2e;" \
+          -c "CREATE DATABASE fleetforge_e2e;"
+
+        echo "Bootstrapping Mosquitto dynsec store (Phase 1)..."
+        docker volume create ci-mosquitto-data >/dev/null
+        docker run --rm --network=cloudbuild \
+          -e MOSQUITTO_ADMIN_USERNAME=ff-dynsec \
+          -e MOSQUITTO_ADMIN_PASSWORD="$${CI_DYNSEC_PASS}" \
+          -v /workspace/mosquitto/bootstrap.sh:/bootstrap.sh:ro \
+          -v ci-mosquitto-data:/mosquitto/data \
+          --entrypoint sh eclipse-mosquitto:2.0.22 /bootstrap.sh
+
+        docker run -d --network=cloudbuild --name ci-mosquitto \
+          -v /workspace/mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro \
+          -v /workspace/mosquitto/conf.d:/mosquitto/config/conf.d:ro \
+          -v /workspace/mosquitto/acl:/mosquitto/config/acl:ro \
+          -v ci-mosquitto-data:/mosquitto/data \
+          eclipse-mosquitto:2.0.22
+
+        echo "Configuring Mosquitto dynsec roles & clients (Phase 2)..."
+        docker run --rm --network=cloudbuild \
+          -e MOSQUITTO_HOST=ci-mosquitto \
+          -e MOSQUITTO_PORT=1883 \
+          -e MOSQUITTO_ADMIN_USERNAME=ff-dynsec \
+          -e MOSQUITTO_ADMIN_PASSWORD="$${CI_DYNSEC_PASS}" \
+          -e MOSQUITTO_INGESTOR_USERNAME=ff-ingestor \
+          -e MOSQUITTO_INGESTOR_PASSWORD="$${CI_INGESTOR_PASS}" \
+          -e MOSQUITTO_COMMANDER_USERNAME=ff-commander \
+          -e MOSQUITTO_COMMANDER_PASSWORD="$${CI_COMMANDER_PASS}" \
+          -v /workspace/mosquitto/configure.sh:/configure.sh:ro \
+          --entrypoint sh eclipse-mosquitto:2.0.22 /configure.sh
+
+        CI_ADMIN_HASH="$$(docker run --rm -e CI_ADMIN_PASSWORD="$${CI_ADMIN_PASSWORD}" \
+          --entrypoint python fleetforge-api:ci \
+          -c "import os; from fleetforge.auth.hashing import hash_secret; print(hash_secret(os.environ['CI_ADMIN_PASSWORD']))")"
+
+        echo "Starting fleetforge-api-e2e (with advisory-locked migrations)..."
+        docker run -d --network=cloudbuild --name fleetforge-api-e2e \
+          -e DATABASE_URL="$${CI_DB_URL}" \
+          -e RUN_MIGRATIONS=true \
+          -e ADMIN_PASSWORD_HASH="$${CI_ADMIN_HASH}" \
+          -e MQTT_HOST=ci-mosquitto \
+          -e MQTT_PORT=1883 \
+          -e MQTT_DYNSEC_USERNAME=ff-dynsec \
+          -e MQTT_DYNSEC_PASSWORD="$${CI_DYNSEC_PASS}" \
+          -e MQTT_COMMAND_USERNAME=ff-commander \
+          -e MQTT_COMMAND_PASSWORD="$${CI_COMMANDER_PASS}" \
+          -e S3_ENDPOINT_URL=http://ci-minio:9000 \
+          -e S3_PUBLIC_ENDPOINT_URL=http://ci-minio:9000 \
+          -e S3_ACCESS_KEY=fleetforge \
+          -e S3_SECRET_KEY=fleetforge-dev-only \
+          -e S3_BUCKET=fleetforge \
+          -e ARTIFACT_URL_SECRET="$${CI_ARTIFACT_SECRET}" \
+          -e SECRETS_ENCRYPTION_KEY="$${CI_SECRETS_KEY}" \
+          -e PUBLIC_BASE_URL=http://127.0.0.1:8080 \
+          fleetforge-api:ci
+
+        for i in $$(seq 1 45); do
+          if docker exec fleetforge-api-e2e curl -fsS http://127.0.0.1:8000/v1/readyz >/dev/null; then
+            echo "fleetforge-api-e2e ready on attempt $$i"
+            break
+          fi
+          if [[ "$$i" -eq 45 ]]; then
+            echo "fleetforge-api-e2e failed to become ready" >&2
+            exit 1
+          fi
+          sleep 1
+        done
+
+        echo "Starting fleetforge-ingestor-e2e and fleetforge-frontend-e2e..."
+        docker run -d --network=cloudbuild --name fleetforge-ingestor-e2e \
+          -e DATABASE_URL="$${CI_DB_URL}" \
+          -e MQTT_HOST=ci-mosquitto \
+          -e MQTT_PORT=1883 \
+          -e MQTT_USERNAME=ff-ingestor \
+          -e MQTT_PASSWORD="$${CI_INGESTOR_PASS}" \
+          -e SECRETS_ENCRYPTION_KEY="$${CI_SECRETS_KEY}" \
+          -e S3_ENDPOINT_URL=http://ci-minio:9000 \
+          -e S3_PUBLIC_ENDPOINT_URL=http://ci-minio:9000 \
+          -e S3_ACCESS_KEY=fleetforge \
+          -e S3_SECRET_KEY=fleetforge-dev-only \
+          -e S3_BUCKET=fleetforge \
+          fleetforge-api:ci \
+          python -m fleetforge.ingestor.main
+
+        docker run -d --network=cloudbuild --name fleetforge-frontend-e2e \
+          --link fleetforge-api-e2e:api \
+          fleetforge-frontend:ci
+
+        for i in $$(seq 1 30); do
+          if docker exec fleetforge-ingestor-e2e test -f /tmp/ingestor-alive \
+            && docker exec fleetforge-frontend-e2e wget -qO- http://127.0.0.1:8080/nginx-health >/dev/null \
+            && docker exec fleetforge-frontend-e2e wget -qO- http://127.0.0.1:8080/v1/readyz >/dev/null; then
+            echo "Full stack (api + ingestor + mosquitto + frontend) ready on attempt $$i"
+            break
+          fi
+          if [[ "$$i" -eq 30 ]]; then
+            echo "Full stack failed to become ready" >&2
+            exit 1
+          fi
+          sleep 1
+        done
+
+        echo "Running T-28 full-stack simulated OTA suite (scripts/selftest_window_e2e.py)..."
+        docker run --rm \
+          --network container:fleetforge-frontend-e2e \
+          -v /workspace:/workspace \
+          -w /workspace \
+          -e PYTHONPATH=/workspace/src \
+          -e FF_SIM_PYTHON=/app/.venv/bin/python \
+          -e FF_SIM_STATE_DIR=/tmp/ff-sim-selftest \
+          -e FF_ADMIN_PASSWORD="$${CI_ADMIN_PASSWORD}" \
+          -e MQTT_HOST=ci-mosquitto \
+          -e MQTT_PORT=1883 \
+          --entrypoint python \
+          fleetforge-api:ci \
+          -u scripts/selftest_window_e2e.py http://127.0.0.1:8080 /tmp/ff-r5-test-1
+
+        echo "Building pinned Playwright + simulator E2E runner image (T-29)..."
+        DOCKER_BUILDKIT=1 docker build \
+          -t fleetforge-e2e-runner:ci \
+          -f docker/Dockerfile.e2e \
+          .
+
+        echo "Running T-29 real-Chromium Playwright E2E suites..."
+        docker run --rm \
+          --network container:fleetforge-frontend-e2e \
+          --shm-size=1g \
+          -v /workspace:/workspace \
+          -w /workspace/frontend \
+          -e FF_ADMIN_PASSWORD="$${CI_ADMIN_PASSWORD}" \
+          -e FF_E2E_BASE_URL=http://127.0.0.1:8080 \
+          -e FF_SIM_STATE_DIR=/tmp/ff-sim-pw \
+          -e MQTT_HOST=ci-mosquitto \
+          -e MQTT_PORT=1883 \
+          fleetforge-e2e-runner:ci \
+          bash -lc '
+            set -euo pipefail
+            node scripts/update-flow-e2e.mjs http://127.0.0.1:8080 /tmp/ff-e2e-update
+            node scripts/fleet-health-e2e.mjs http://127.0.0.1:8080 /tmp/ff-e2e-health
+            node scripts/device-log-e2e.mjs http://127.0.0.1:8080 /tmp/ff-e2e-log
+            node scripts/commands-e2e.mjs http://127.0.0.1:8080 /tmp/ff-e2e-commands
+          '
+
   - id: push-release-images
     name: gcr.io/cloud-builders/docker
     waitFor:
       - verify-nonroot-and-healthcheck
+      - verify-fullstack-and-playwright-e2e
       - trivy-vulnerability-scan
     entrypoint: bash
     args:

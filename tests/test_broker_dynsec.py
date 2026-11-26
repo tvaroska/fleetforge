@@ -1,4 +1,4 @@
-"""The broker-provisioning seam, with **no broker and no database**.
+"""The broker-provisioning Port and Adapter, with **no broker and no database**.
 
 What is provable with no broker is the wire encoding and the state machine — which is
 exactly what the pure/IO split in `broker/dynsec.py` exists for. The **live** end-to-end
@@ -172,14 +172,23 @@ def test_is_already_exists() -> None:
 class FakeDynsecSession:
     """Records commands and answers them from a scripted list of replies."""
 
-    def __init__(self, replies: list[bytes | Exception]) -> None:
+    def __init__(
+        self,
+        replies: list[bytes | Exception],
+        *,
+        clear_fail_with: Exception | None = None,
+    ) -> None:
         self.replies = list(replies)
         self.commands: list[dict[str, Any]] = []
+        self.cleared_retained: list[tuple[str, str]] = []
+        self.clear_fail_with = clear_fail_with
 
     async def command(
         self, payload: dict[str, Any], *, expect: str, correlation: str
     ) -> DynsecResponse:
         self.commands.append(payload)
+        if not self.replies:
+            raise BrokerProvisioningError(f"dynsec connection closed while awaiting {expect}")
         reply = self.replies.pop(0)
         if isinstance(reply, Exception):
             raise reply
@@ -187,6 +196,11 @@ class FakeDynsecSession:
         body = json.loads(reply)
         body["responses"][0]["correlationData"] = correlation
         return parse_response(json.dumps(body).encode(), expect=expect, correlation=correlation)
+
+    async def clear_retained_up_topics(self, device_id: str, password: str) -> None:
+        if self.clear_fail_with is not None:
+            raise self.clear_fail_with
+        self.cleared_retained.append((device_id, password))
 
     def __call__(self) -> "FakeDynsecSession":
         return self
@@ -294,19 +308,46 @@ def test_delete_client_command_and_retained_up_topics() -> None:
 
 
 async def test_remove_client_is_idempotent_when_found_or_already_absent() -> None:
-    session = FakeDynsecSession([_reply(DELETE_CLIENT)])
+    session = FakeDynsecSession(
+        [
+            _reply(SET_CLIENT_PASSWORD),
+            _reply(ENABLE_CLIENT),
+            _reply(DELETE_CLIENT),
+        ]
+    )
     assert await _provisioner(session).remove_client(DEVICE_ID) is True
-    assert [c["command"] for c in session.commands] == [DELETE_CLIENT]
+    assert [c["command"] for c in session.commands] == [
+        SET_CLIENT_PASSWORD,
+        ENABLE_CLIENT,
+        DELETE_CLIENT,
+    ]
+    assert session.cleared_retained == [(DEVICE_ID, session.commands[0]["password"])]
 
-    absent = FakeDynsecSession([_reply(DELETE_CLIENT, error="Client not found")])
+    absent = FakeDynsecSession(
+        [
+            _reply(SET_CLIENT_PASSWORD, error="Client not found"),
+            _reply(DELETE_CLIENT, error="Client not found"),
+        ]
+    )
     assert await _provisioner(absent).remove_client(DEVICE_ID) is True
-    assert [c["command"] for c in absent.commands] == [DELETE_CLIENT]
+    assert [c["command"] for c in absent.commands] == [SET_CLIENT_PASSWORD, DELETE_CLIENT]
+    assert absent.cleared_retained == []
 
 
 async def test_remove_client_raises_on_unexpected_dynsec_error() -> None:
-    session = FakeDynsecSession([_reply(DELETE_CLIENT, error="Permission denied")])
+    pw_refused = FakeDynsecSession([_reply(SET_CLIENT_PASSWORD, error="Permission denied")])
     with pytest.raises(BrokerProvisioningError):
-        await _provisioner(session).remove_client(DEVICE_ID)
+        await _provisioner(pw_refused).remove_client(DEVICE_ID)
+
+    del_refused = FakeDynsecSession(
+        [
+            _reply(SET_CLIENT_PASSWORD),
+            _reply(ENABLE_CLIENT),
+            _reply(DELETE_CLIENT, error="Permission denied"),
+        ]
+    )
+    with pytest.raises(BrokerProvisioningError):
+        await _provisioner(del_refused).remove_client(DEVICE_ID)
 
 
 async def test_null_provisioner_remove_client_logs_warning_and_returns_false() -> None:
