@@ -1618,3 +1618,150 @@ async def test_webhook_url_must_be_public_https(admin_app: FastAPI, clean_tables
             json={"password": "short"},
         )
         assert short_patch.status_code == 422, short_patch.text
+
+
+async def test_update_me_requires_current_password_and_revokes_other_sessions(
+    admin_app: FastAPI, clean_tables: None
+) -> None:
+    """A-35: `PATCH /v1/auth/me` requires `current_password` whenever an expected hash exists
+    (both for `User` rows and bootstrap `admin`) and revokes all sibling `admin_tokens`."""
+    admin_headers_1 = _bearer(await login_admin(admin_app))
+    admin_headers_2 = _bearer(await login_admin(admin_app))
+
+    async with client_for(admin_app, base_url="https://testserver") as client:
+        # Warm both bootstrap admin sessions in the verification cache.
+        assert (await client.get("/v1/auth/me", headers=admin_headers_1)).status_code == 200
+        assert (await client.get("/v1/auth/me", headers=admin_headers_2)).status_code == 200
+
+        # Create a regular user with a local password and open two concurrent sessions.
+        created = await client.post(
+            "/v1/users",
+            headers=admin_headers_1,
+            json={
+                "username": "maya",
+                "email": "maya@example.com",
+                "password": "maya-password-111",
+                "project": "default",
+                "role": "operator",
+            },
+        )
+        assert created.status_code == 201, created.text
+
+        m1 = await client.post(
+            "/v1/auth/login", json={"username": "maya", "password": "maya-password-111"}
+        )
+        m2 = await client.post(
+            "/v1/auth/login", json={"username": "maya", "password": "maya-password-111"}
+        )
+        assert m1.status_code == 200 and m2.status_code == 200
+        maya_s1 = _bearer(m1.cookies["ff_session"])
+        maya_s2 = _bearer(m2.cookies["ff_session"])
+        assert (await client.get("/v1/auth/me", headers=maya_s2)).status_code == 200
+
+        # Omitting current_password must be rejected (400) and leave password & sibling session intact.
+        no_curr = await client.patch(
+            "/v1/auth/me",
+            headers=maya_s1,
+            json={"password": "attacker-password-999"},
+        )
+        assert no_curr.status_code == 400, no_curr.text
+        assert (await client.get("/v1/auth/me", headers=maya_s2)).status_code == 200
+
+        # Self-password bypass via PATCH /v1/users/{own_username} must also be rejected (400).
+        bypass_users = await client.patch(
+            "/v1/users/maya",
+            headers=maya_s1,
+            json={"password": "attacker-password-999"},
+        )
+        assert bypass_users.status_code == 400, bypass_users.text
+        assert (await client.get("/v1/auth/me", headers=maya_s2)).status_code == 200
+
+        # Wrong current_password must be rejected (401) and leave sibling session intact.
+        bad_curr = await client.patch(
+            "/v1/auth/me",
+            headers=maya_s1,
+            json={
+                "current_password": "wrong-password-000",
+                "password": "attacker-password-999",
+            },
+        )
+        assert bad_curr.status_code == 401, bad_curr.text
+        assert (await client.get("/v1/auth/me", headers=maya_s2)).status_code == 200
+
+        # Valid current_password updates password, keeps caller alive, and immediately revokes sibling.
+        ok_change = await client.patch(
+            "/v1/auth/me",
+            headers=maya_s1,
+            json={
+                "current_password": "maya-password-111",
+                "password": "maya-password-222",
+            },
+        )
+        assert ok_change.status_code == 200, ok_change.text
+        assert (await client.get("/v1/auth/me", headers=maya_s1)).status_code == 200
+        assert (await client.get("/v1/auth/me", headers=maya_s2)).status_code == 401
+        assert (
+            await client.post(
+                "/v1/auth/login", json={"username": "maya", "password": "maya-password-111"}
+            )
+        ).status_code == 401
+        assert (
+            await client.post(
+                "/v1/auth/login", json={"username": "maya", "password": "maya-password-222"}
+            )
+        ).status_code == 200
+
+        # Bootstrap admin (`user is None`) also requires current_password and revokes sibling sessions.
+        admin_no_curr = await client.patch(
+            "/v1/auth/me",
+            headers=admin_headers_1,
+            json={"password": "attacker-admin-pw-999"},
+        )
+        assert admin_no_curr.status_code == 400, admin_no_curr.text
+        assert (await client.get("/v1/auth/me", headers=admin_headers_2)).status_code == 200
+
+        admin_ok = await client.patch(
+            "/v1/auth/me",
+            headers=admin_headers_1,
+            json={"current_password": TEST_PASSWORD, "password": "new-admin-password-789"},
+        )
+        assert admin_ok.status_code == 200, admin_ok.text
+        assert (await client.get("/v1/auth/me", headers=admin_headers_1)).status_code == 200
+        assert (await client.get("/v1/auth/me", headers=admin_headers_2)).status_code == 401
+
+        # Pre-bootstrap admin session cannot bypass current_password via PATCH /v1/users/admin either.
+        admin_users_bypass = await client.patch(
+            "/v1/users/admin",
+            headers=admin_headers_1,
+            json={"password": "bypassed-admin-pw-999"},
+        )
+        assert admin_users_bypass.status_code == 400, admin_users_bypass.text
+
+
+async def test_firebase_and_reset_password_rate_limiting_is_atomic(
+    admin_app: FastAPI,
+    clean_tables: None,
+    fb_env: FbEnv,
+) -> None:
+    """A-35: `/v1/auth/firebase` and `/v1/auth/reset-password` use atomic limiter reservations."""
+    from fleetforge.auth.ratelimit import FixedWindowLimiter
+
+    _fake_fb, _ = fb_env
+    admin_app.state.login_limiter = FixedWindowLimiter(per_key=2, per_global=10, window_s=60)
+
+    async with client_for(admin_app, base_url="https://testserver") as client:
+        r1 = await client.post("/v1/auth/firebase", json={"id_token": "x" * 32})
+        r2 = await client.post(
+            "/v1/auth/reset-password",
+            json={"oob_code": "bad-oob-code-1234", "new_password": "new-password-1234"},
+        )
+        assert r1.status_code == 401, r1.text
+        assert r2.status_code == 401, r2.text
+
+        r3 = await client.post("/v1/auth/firebase", json={"id_token": "x" * 32})
+        r4 = await client.post(
+            "/v1/auth/reset-password",
+            json={"oob_code": "bad-oob-code-1234", "new_password": "new-password-1234"},
+        )
+        assert r3.status_code == 429, r3.text
+        assert r4.status_code == 429, r4.text

@@ -402,30 +402,48 @@ class TestSwarmHierarchyEdgeRelayAndAirtimeRollout:
                 assert gateway.child_hits == 2
 
                 # Disconnected UGV reconnects and syncs child statuses + telemetry via `relay-sync`.
+                # A-35: `handle_up_message` emits once per envelope; `relay-sync` must not double-emit.
+                from unittest.mock import patch
+
+                from fleetforge.events import emit as real_emit
+
+                emit_count = 0
+
+                async def _counting_emit(session: Any, event: Any) -> None:
+                    nonlocal emit_count
+                    emit_count += 1
+                    await real_emit(session, event)
+
                 cmd_1 = publisher.published[0][1]["id"]
                 cmd_2 = publisher.published[1][1]["id"]
-                sync_resp = await client.post(
-                    "/v1/devices/a4cf12b30001/relay-sync",
-                    headers=headers,
-                    json={
-                        "cached_artifacts": gateway.cached_digests(),
-                        "children": {
-                            "a4cf12b30011": {
-                                "statuses": [{"cmd_id": cmd_1, "state": "confirmed"}],
-                                "telemetry": [
-                                    {"samples": [{"name": "battery_v", "value": 15.8, "age_ms": 0}]}
-                                ],
-                            },
-                            "a4cf12b30012": {
-                                "statuses": [{"cmd_id": cmd_2, "state": "confirmed"}],
+                with patch("fleetforge.ingestor.handlers.emit", side_effect=_counting_emit):
+                    sync_resp = await client.post(
+                        "/v1/devices/a4cf12b30001/relay-sync",
+                        headers=headers,
+                        json={
+                            "cached_artifacts": gateway.cached_digests(),
+                            "children": {
+                                "a4cf12b30011": {
+                                    "statuses": [{"cmd_id": cmd_1, "state": "confirmed"}],
+                                    "telemetry": [
+                                        {
+                                            "samples": [
+                                                {"name": "battery_v", "value": 15.8, "age_ms": 0}
+                                            ]
+                                        }
+                                    ],
+                                },
+                                "a4cf12b30012": {
+                                    "statuses": [{"cmd_id": cmd_2, "state": "confirmed"}],
+                                },
                             },
                         },
-                    },
-                )
+                    )
                 assert sync_resp.status_code == 200, sync_resp.text
                 sync_body = sync_resp.json()
                 assert sync_body["statuses_recorded"] == 2
                 assert sync_body["telemetry_batches_recorded"] == 1
+                assert emit_count == 3, f"expected 1 emit per envelope (3), got {emit_count}"
                 assert patch_sha in sync_body["cached_artifacts"]
 
                 # Spoofing a device NOT attached to `a4cf12b30001` is refused with 403!

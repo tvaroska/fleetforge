@@ -18,6 +18,7 @@ import json
 import time
 import uuid
 from collections.abc import AsyncIterator
+from pathlib import Path as FsPath
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
@@ -52,6 +53,7 @@ from fleetforge.builds import (
 from fleetforge.clock import now_utc
 from fleetforge.db.models import BuildJob, ProjectRole
 from fleetforge.partition_profiles import load_layout_catalog
+from fleetforge.url_safety import sanitize_git_repo_url, validate_git_ref
 
 router = APIRouter(
     prefix="/v1/projects/{slug}/builds",
@@ -169,11 +171,21 @@ async def create_build(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="repo_url is required when the project has no configured repo_url",
             )
+        allow_local = bool(getattr(source_fetcher, "allow_local_paths", False))
+        if allow_local and FsPath(effective_repo).exists():
+            clean_repo = effective_repo
+        else:
+            try:
+                clean_repo = sanitize_git_repo_url(effective_repo, field_name="repo_url")
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+                ) from None
 
         job = BuildJob(
             project_id=project.id,
-            repo_url=effective_repo,
-            git_ref=body.git_ref.strip(),
+            repo_url=clean_repo,
+            git_ref=body.git_ref,
             target=body.target,
             version=body.version,
             partition_layout=body.partition_layout,
@@ -292,10 +304,20 @@ async def retry_build(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=f"only failed or cancelled builds can be retried (current status: {prev.status})",
             )
+        allow_local = bool(getattr(source_fetcher, "allow_local_paths", False))
+        try:
+            clean_ref = validate_git_ref(prev.git_ref)
+            clean_repo = (
+                prev.repo_url
+                if (allow_local and FsPath(prev.repo_url).exists())
+                else sanitize_git_repo_url(prev.repo_url, field_name="repo_url")
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from None
         retried = BuildJob(
             project_id=project.id,
-            repo_url=prev.repo_url,
-            git_ref=prev.git_ref,
+            repo_url=clean_repo,
+            git_ref=clean_ref,
             target=prev.target,
             version=prev.version,
             partition_layout=prev.partition_layout,

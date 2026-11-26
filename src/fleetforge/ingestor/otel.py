@@ -37,7 +37,11 @@ from fleetforge.db.models import Device, Project
 from fleetforge.deploys import sanitise_device_text
 from fleetforge.ingestor.protocol import LogLine, TelemetrySample
 from fleetforge.secrets_crypto import decrypt_secret
-from fleetforge.url_safety import validate_public_https_url
+from fleetforge.url_safety import (
+    public_https_transport,
+    resolve_and_validate_public_https_url,
+    validate_public_https_url,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +49,7 @@ OTEL_HTTP_TIMEOUT_S = 5.0
 OTEL_QUEUE_MAX = 256
 OTEL_PROJECT_CACHE_TTL_S = 30.0
 
-_ProjectOtelResolved = tuple[str, str, dict[str, str]]
+_ProjectOtelResolved = tuple[str, str, dict[str, str], bool]
 _project_otel_cache: dict[
     tuple[uuid.UUID, str | None, str | None],
     tuple[float, _ProjectOtelResolved | None],
@@ -72,29 +76,50 @@ class OtelExportBatch:
     url: str
     body: dict[str, Any]
     headers: dict[str, str]
+    require_public_https: bool = True
 
 
 _otel_client: httpx.AsyncClient | None = None
+_env_otel_client: httpx.AsyncClient | None = None
 _otel_queue: asyncio.Queue[OtelExportBatch] | None = None
 
 
 def get_otel_client() -> httpx.AsyncClient:
-    """Return the shared, connection-pooled `httpx.AsyncClient` for OTLP/HTTP exports."""
+    """Return the shared, connection-pooled public-only `httpx.AsyncClient` for OTLP/HTTP exports."""
     global _otel_client
     if _otel_client is None or _otel_client.is_closed:
+        limits = httpx.Limits(max_keepalive_connections=8, max_connections=16)
         _otel_client = httpx.AsyncClient(
             timeout=OTEL_HTTP_TIMEOUT_S,
-            limits=httpx.Limits(max_keepalive_connections=8, max_connections=16),
+            follow_redirects=False,
+            trust_env=False,
+            transport=public_https_transport(limits=limits, field_name="otel_endpoint"),
         )
     return _otel_client
 
 
+def _get_env_otel_client() -> httpx.AsyncClient:
+    """Return the shared `httpx.AsyncClient` for operator-configured env OTLP collectors."""
+    global _env_otel_client
+    if _env_otel_client is None or _env_otel_client.is_closed:
+        _env_otel_client = httpx.AsyncClient(
+            timeout=OTEL_HTTP_TIMEOUT_S,
+            follow_redirects=False,
+            trust_env=False,
+            limits=httpx.Limits(max_keepalive_connections=8, max_connections=16),
+        )
+    return _env_otel_client
+
+
 async def close_otel_client() -> None:
-    """Close the shared `httpx.AsyncClient` on ingestor shutdown."""
-    global _otel_client
+    """Close the shared `httpx.AsyncClient` instances on ingestor shutdown."""
+    global _otel_client, _env_otel_client
     if _otel_client is not None and not _otel_client.is_closed:
         await _otel_client.aclose()
     _otel_client = None
+    if _env_otel_client is not None and not _env_otel_client.is_closed:
+        await _env_otel_client.aclose()
+    _env_otel_client = None
 
 
 def get_otel_queue() -> asyncio.Queue[OtelExportBatch]:
@@ -129,9 +154,23 @@ def _enqueue_batch(batch: OtelExportBatch) -> bool:
 
 async def send_otel_batch(batch: OtelExportBatch) -> bool:
     """POST one `OtelExportBatch` using the persistent `httpx.AsyncClient`."""
-    client = get_otel_client()
+    target_url = batch.url
+    if batch.require_public_https:
+        try:
+            target_url = await resolve_and_validate_public_https_url(
+                batch.url, field_name="otel_endpoint"
+            )
+        except ValueError as exc:
+            logger.warning(
+                "otel %s export blocked for device %s: %s",
+                batch.signal,
+                batch.device_id,
+                exc,
+            )
+            return False
+    client = get_otel_client() if batch.require_public_https else _get_env_otel_client()
     try:
-        resp = await client.post(batch.url, json=batch.body, headers=batch.headers)
+        resp = await client.post(target_url, json=batch.body, headers=batch.headers)
         if resp.status_code >= 400:
             logger.warning(
                 "otel %s export for device %s returned HTTP %d",
@@ -415,18 +454,13 @@ def _safe_settings() -> Settings | None:
     return resolved
 
 
-async def _resolve_project_otel(
+async def _resolve_project_otel_with_source(
     session: AsyncSession,
     device: Device,
     *,
     settings: Settings | None = None,
-) -> tuple[str, str, dict[str, str]] | None:
-    """Return `(project_slug, base_endpoint, headers)` if OTel export is enabled, else `None`.
-
-    Caches the resolved project OTel configuration (and decrypted headers) in memory for
-    `OTEL_PROJECT_CACHE_TTL_S` seconds so high-frequency `up/log` and `up/telemetry` packets
-    do not open a DB SAVEPOINT, query `projects`, or run AES-GCM decryption on every message.
-    """
+) -> _ProjectOtelResolved | None:
+    """Return `(project_slug, base_endpoint, headers, is_project_configured)` if enabled."""
     cfg = settings if settings is not None else _safe_settings()
     env_endpoint = (
         cfg.otel_exporter_otlp_endpoint
@@ -469,12 +503,14 @@ async def _resolve_project_otel(
 
     endpoint: str | None = None
     raw_headers: str | None = None
+    is_project_configured = False
 
     if project is not None and project.otel_endpoint:
         try:
             endpoint = validate_public_https_url(project.otel_endpoint, field_name="otel_endpoint")
             if project.otel_headers:
                 raw_headers = decrypt_secret(project.otel_headers, cfg)
+            is_project_configured = True
         except ValueError as exc:
             logger.error(
                 "device %s: invalid or undecryptable project OTel config (%s); skipping OTel export",
@@ -487,11 +523,27 @@ async def _resolve_project_otel(
         raw_headers = env_headers
 
     result: _ProjectOtelResolved | None = (
-        (project_slug, endpoint, parse_otel_headers(raw_headers)) if endpoint else None
+        (project_slug, endpoint, parse_otel_headers(raw_headers), is_project_configured)
+        if endpoint
+        else None
     )
     if settings is None and not in_identity_map:
         _project_otel_cache[cache_key] = (now_mono + OTEL_PROJECT_CACHE_TTL_S, result)
     return result
+
+
+async def _resolve_project_otel(
+    session: AsyncSession,
+    device: Device,
+    *,
+    settings: Settings | None = None,
+) -> tuple[str, str, dict[str, str]] | None:
+    """Return `(project_slug, base_endpoint, headers)` if OTel export is enabled, else `None`."""
+    resolved = await _resolve_project_otel_with_source(session, device, settings=settings)
+    if resolved is None:
+        return None
+    project_slug, endpoint, headers, _ = resolved
+    return project_slug, endpoint, headers
 
 
 async def _build_logs_batch(
@@ -504,10 +556,10 @@ async def _build_logs_batch(
 ) -> OtelExportBatch | None:
     if not lines:
         return None
-    resolved = await _resolve_project_otel(session, device)
+    resolved = await _resolve_project_otel_with_source(session, device)
     if resolved is None:
         return None
-    project_slug, base_endpoint, headers = resolved
+    project_slug, base_endpoint, headers, is_project_configured = resolved
     url = _resolve_endpoint(base_endpoint, "/v1/logs")
     body = build_otlp_logs_payload(
         device=device,
@@ -522,6 +574,7 @@ async def _build_logs_batch(
         url=url,
         body=body,
         headers={"Content-Type": "application/json", **headers},
+        require_public_https=is_project_configured,
     )
 
 
@@ -534,10 +587,10 @@ async def _build_metrics_batch(
 ) -> OtelExportBatch | None:
     if not samples:
         return None
-    resolved = await _resolve_project_otel(session, device)
+    resolved = await _resolve_project_otel_with_source(session, device)
     if resolved is None:
         return None
-    project_slug, base_endpoint, headers = resolved
+    project_slug, base_endpoint, headers, is_project_configured = resolved
     url = _resolve_endpoint(base_endpoint, "/v1/metrics")
     body = build_otlp_metrics_payload(
         device=device,
@@ -551,6 +604,7 @@ async def _build_metrics_batch(
         url=url,
         body=body,
         headers={"Content-Type": "application/json", **headers},
+        require_public_https=is_project_configured,
     )
 
 

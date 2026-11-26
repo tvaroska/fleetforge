@@ -73,7 +73,10 @@ from fleetforge.rollout import (
     matches_project_tracking,
 )
 from fleetforge.secrets_crypto import decrypt_secret, encrypt_secret
-from fleetforge.url_safety import validate_public_https_url
+from fleetforge.url_safety import (
+    public_https_transport,
+    resolve_and_validate_public_https_url,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -212,7 +215,13 @@ async def _trigger_ci_webhook(proj: Project, settings: Settings | None = None) -
     """Best-effort webhook POST to trigger an external CI build when switching refs."""
     if not proj.ci_webhook_url:
         return False
-    webhook_url = validate_public_https_url(proj.ci_webhook_url, field_name="ci_webhook_url")
+    try:
+        webhook_url = await resolve_and_validate_public_https_url(
+            proj.ci_webhook_url, field_name="ci_webhook_url"
+        )
+    except ValueError as exc:
+        logger.warning("CI webhook blocked for project %s: %s", proj.slug, exc)
+        return False
     headers: dict[str, str] = {"Content-Type": "application/json"}
     if proj.ci_webhook_header:
         headers["Authorization"] = decrypt_secret(proj.ci_webhook_header, settings)
@@ -224,7 +233,10 @@ async def _trigger_ci_webhook(proj: Project, settings: Settings | None = None) -
         "auto_deploy_target": proj.auto_deploy_target,
     }
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
+        transport = public_https_transport(field_name="ci_webhook_url")
+        async with httpx.AsyncClient(
+            timeout=5.0, follow_redirects=False, trust_env=False, transport=transport
+        ) as client:
             resp = await client.post(webhook_url, json=payload, headers=headers)
             return 200 <= resp.status_code < 300
     except httpx.HTTPError:
@@ -579,6 +591,18 @@ async def list_project_members(
     )
 
 
+async def _owner_count(session: AsyncSession, project_id: object) -> int:
+    count = await session.scalar(
+        select(func.count())
+        .select_from(ProjectMember)
+        .where(
+            ProjectMember.project_id == project_id,
+            ProjectMember.role == ProjectRole.OWNER.value,
+        )
+    )
+    return int(count or 0)
+
+
 @router.put(
     "/{slug}/members/{username}",
     response_model=ProjectMemberSummary,
@@ -607,15 +631,7 @@ async def upsert_project_member(
         existing = await session.get(ProjectMember, (proj.id, user.id))
         if existing is not None:
             if existing.role == ProjectRole.OWNER.value and body.role != ProjectRole.OWNER:
-                owner_count = await session.scalar(
-                    select(func.count())
-                    .select_from(ProjectMember)
-                    .where(
-                        ProjectMember.project_id == proj.id,
-                        ProjectMember.role == ProjectRole.OWNER.value,
-                    )
-                )
-                if (owner_count or 0) <= 1:
+                if await _owner_count(session, proj.id) <= 1:
                     raise HTTPException(
                         status_code=status.HTTP_409_CONFLICT,
                         detail="cannot demote the last owner of a project",
@@ -673,20 +689,11 @@ async def remove_project_member(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"user {username!r} is not a member of project {slug!r}",
             )
-        if existing.role == ProjectRole.OWNER.value:
-            owner_count = await session.scalar(
-                select(func.count())
-                .select_from(ProjectMember)
-                .where(
-                    ProjectMember.project_id == proj.id,
-                    ProjectMember.role == ProjectRole.OWNER.value,
-                )
+        if existing.role == ProjectRole.OWNER.value and await _owner_count(session, proj.id) <= 1:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="cannot remove the last owner of a project",
             )
-            if (owner_count or 0) <= 1:
-                raise HTTPException(
-                    status_code=status.HTTP_409_CONFLICT,
-                    detail="cannot remove the last owner of a project",
-                )
         await session.delete(existing)
         await session.commit()
 

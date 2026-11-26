@@ -100,6 +100,18 @@ router = APIRouter(prefix="/v1/auth", tags=["auth"])
 REVOKE_SQL = text(
     "UPDATE admin_tokens SET revoked_at = now() WHERE id = :token_id AND revoked_at IS NULL"
 )
+_REVOKE_OTHER_USER_TOKENS_SQL = text(
+    "UPDATE admin_tokens SET revoked_at = now() "
+    "WHERE (user_id = :user_id OR (user_id IS NULL AND subject = :username)) "
+    "AND id != :current_token_id AND revoked_at IS NULL "
+    "RETURNING id"
+)
+_REVOKE_ALL_USER_TOKENS_SQL = text(
+    "UPDATE admin_tokens SET revoked_at = now() "
+    "WHERE (user_id = :user_id OR (user_id IS NULL AND subject = :username)) "
+    "AND revoked_at IS NULL "
+    "RETURNING id"
+)
 
 LimiterDep = Annotated[FixedWindowLimiter, Depends(login_limiter)]
 CacheDep = Annotated[VerifiedSecretCache, Depends(token_cache)]
@@ -436,7 +448,8 @@ async def login_firebase(
 ) -> LoginResponse:
     """Verify an RS256 Firebase ID token and mint an `ff_session` cookie for an invited user."""
     key = client_key(request)
-    if not limiter.allow(key):
+    reservation = limiter.acquire(key)
+    if reservation is None:
         retry_after = limiter.retry_after(key)
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -446,6 +459,7 @@ async def login_firebase(
 
     # The web API key is needed for the revocation lookup; without it, fail closed.
     if not settings.firebase_project_id or not settings.firebase_web_api_key:
+        limiter.release(key, reservation)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Firebase login is not configured",
@@ -459,13 +473,13 @@ async def login_firebase(
             check_revoked=True,
         )
     except FirebaseInvalidCredentials:
-        limiter.record_failure(key)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="invalid credentials",
             headers={"WWW-Authenticate": "Bearer"},
         ) from None
     except FirebaseAuthError:
+        limiter.release(key, reservation)
         logger.exception("firebase ID token verification failure")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -479,10 +493,13 @@ async def login_firebase(
             settings.firebase_superadmin_email_set(),
             key,
             limiter,
+            record_on_reject=False,
         )
         user_id = resolved.id
         subject = resolved.username
         await session.commit()
+
+    limiter.release(key, reservation)
 
     issued = await aissue_token(ADMIN_TOKEN_PREFIX)
     expires_at = now_utc() + dt.timedelta(hours=settings.session_ttl_hours)
@@ -524,10 +541,12 @@ async def reset_password(
     sessionmaker: SessionMakerDep,
     limiter: LimiterDep,
     firebase: FirebaseAuthDep,
+    cache: CacheDep,
 ) -> LoginResponse:
     """Redeem an invited user's Firebase `oobCode`, set `new_password`, and mint `ff_session`."""
     key = client_key(request)
-    if not limiter.allow(key):
+    reservation = limiter.acquire(key)
+    if reservation is None:
         retry_after = limiter.retry_after(key)
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -536,6 +555,7 @@ async def reset_password(
         )
 
     if not settings.firebase_web_api_key:
+        limiter.release(key, reservation)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Firebase login is not configured",
@@ -549,13 +569,13 @@ async def reset_password(
             project_id=settings.firebase_project_id,
         )
     except FirebaseInvalidCredentials:
-        limiter.record_failure(key)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="invalid or expired password reset link",
             headers={"WWW-Authenticate": "Bearer"},
         ) from None
     except FirebaseAuthError:
+        limiter.release(key, reservation)
         logger.exception("firebase password reset failure")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -564,6 +584,7 @@ async def reset_password(
 
     pw_hash = await anyio.to_thread.run_sync(hash_secret, body.new_password, limiter=ARGON2_LIMITER)
 
+    revoked_ids: list[object] = []
     async with sessionmaker() as session:
         resolved = await _resolve_invited_firebase_user(
             session,
@@ -571,12 +592,24 @@ async def reset_password(
             settings.firebase_superadmin_email_set(),
             key,
             limiter,
+            record_on_reject=False,
         )
         resolved.password_hash = pw_hash
         resolved.updated_at = now_utc()
         user_id = resolved.id
         subject = resolved.username
+        res = await session.execute(
+            _REVOKE_ALL_USER_TOKENS_SQL,
+            {"user_id": user_id, "username": subject},
+        )
+        revoked_ids = list(res.scalars().all())
         await session.commit()
+
+    for tid in revoked_ids:
+        if isinstance(tid, uuid.UUID):
+            cache.forget(tid)
+
+    limiter.release(key, reservation)
 
     issued = await aissue_token(ADMIN_TOKEN_PREFIX)
     expires_at = now_utc() + dt.timedelta(hours=settings.session_ttl_hours)
@@ -673,13 +706,10 @@ async def update_me(
     admin: UnpinnedAdminDep,
     settings: SettingsDep,
     sessionmaker: SessionMakerDep,
+    cache: CacheDep,
 ) -> MeResponse:
     """Update the caller's own `User` record (or bootstrap one for `admin`)."""
-    pw_hash = (
-        await anyio.to_thread.run_sync(hash_secret, body.password, limiter=ARGON2_LIMITER)
-        if body.password is not None
-        else None
-    )
+    revoked_ids: list[object] = []
 
     async with sessionmaker() as session:
         user: User | None = None
@@ -688,16 +718,44 @@ async def update_me(
         if user is None:
             user = await session.scalar(select(User).where(User.username == admin.subject))
 
+        if user is None and not admin.is_superadmin:
+            raise FORBIDDEN
+
+        expected_hash = (
+            settings.admin_password_hash
+            if user is None
+            else (
+                user.password_hash
+                or (settings.admin_password_hash if user.username == "admin" else None)
+            )
+        )
+        if body.password is not None and expected_hash is not None:
+            if body.current_password is None:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="current_password is required to change password",
+                )
+            if not await averify_secret(body.current_password, expected_hash):
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="current password is incorrect",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+        elif body.current_password is not None and expected_hash is not None:
+            if not await averify_secret(body.current_password, expected_hash):
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="current password is incorrect",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+
+        pw_hash = (
+            await anyio.to_thread.run_sync(hash_secret, body.password, limiter=ARGON2_LIMITER)
+            if body.password is not None
+            else None
+        )
+
         if user is None:
-            if not admin.is_superadmin:
-                raise FORBIDDEN
-            if body.current_password is not None and settings.admin_password_hash is not None:
-                if not await averify_secret(body.current_password, settings.admin_password_hash):
-                    raise HTTPException(
-                        status_code=status.HTTP_401_UNAUTHORIZED,
-                        detail="current password is incorrect",
-                        headers={"WWW-Authenticate": "Bearer"},
-                    )
             now = now_utc()
             user = User(
                 username=admin.subject,
@@ -714,18 +772,6 @@ async def update_me(
             if tok is not None and tok.user_id is None:
                 tok.user_id = user.id
         else:
-            if body.password is not None and body.current_password is not None:
-                expected_hash = user.password_hash or (
-                    settings.admin_password_hash if user.username == "admin" else None
-                )
-                if expected_hash is not None and not await averify_secret(
-                    body.current_password, expected_hash
-                ):
-                    raise HTTPException(
-                        status_code=status.HTTP_401_UNAUTHORIZED,
-                        detail="current password is incorrect",
-                        headers={"WWW-Authenticate": "Bearer"},
-                    )
             if "email" in body.model_fields_set:
                 user.email = body.email
             if "display_name" in body.model_fields_set:
@@ -733,6 +779,17 @@ async def update_me(
             if pw_hash is not None:
                 user.password_hash = pw_hash
             user.updated_at = now_utc()
+
+        if pw_hash is not None:
+            res = await session.execute(
+                _REVOKE_OTHER_USER_TOKENS_SQL,
+                {
+                    "user_id": user.id,
+                    "username": user.username,
+                    "current_token_id": admin.token_id,
+                },
+            )
+            revoked_ids = list(res.scalars().all())
 
         try:
             await session.commit()
@@ -744,6 +801,10 @@ async def update_me(
             ) from exc
 
         projects = await visible_projects_for(session, admin)
+
+    for tid in revoked_ids:
+        if isinstance(tid, uuid.UUID):
+            cache.forget(tid)
 
     return MeResponse(
         token_id=admin.token_id,

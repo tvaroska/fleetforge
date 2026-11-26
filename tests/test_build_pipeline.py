@@ -126,17 +126,28 @@ class TestBuildSecurityAndCacheKey:
         (tmp_path / "sdkconfig.defaults").write_text("CONFIG_ESP_TASK_WDT_TIMEOUT_S=5\n")
         tree_a, cfg_a = compute_tree_and_config_digests(tmp_path)
         key_a, _ = compute_build_cache_key(
+            project_id="00000000-0000-4000-8000-000000000001",
             idf_image=PINNED_IDF_IMAGES["esp32s3"],
             target="esp32s3",
             partition_layout="ab-4m-v1",
             source_tree_digest=tree_a,
             config_digest=cfg_a,
         )
+        key_other_project, _ = compute_build_cache_key(
+            project_id="00000000-0000-4000-8000-000000000002",
+            idf_image=PINNED_IDF_IMAGES["esp32s3"],
+            target="esp32s3",
+            partition_layout="ab-4m-v1",
+            source_tree_digest=tree_a,
+            config_digest=cfg_a,
+        )
+        assert key_a != key_other_project
 
         # Config-only change alters both tree_digest and config_digest -> distinct cache_key.
         (tmp_path / "sdkconfig.defaults").write_text("CONFIG_ESP_TASK_WDT_TIMEOUT_S=15\n")
         tree_b, cfg_b = compute_tree_and_config_digests(tmp_path)
         key_b, _ = compute_build_cache_key(
+            project_id="00000000-0000-4000-8000-000000000001",
             idf_image=PINNED_IDF_IMAGES["esp32s3"],
             target="esp32s3",
             partition_layout="ab-4m-v1",
@@ -145,6 +156,223 @@ class TestBuildSecurityAndCacheKey:
         )
         assert cfg_a != cfg_b
         assert key_a != key_b
+
+    async def test_tree_digest_covers_directories_named_build(self, tmp_path: Path) -> None:
+        """A-25: `components/build/*` is covered by the tree digest, committed `build/` is stripped."""
+        origin = tmp_path / "origin"
+        _init_git_repo(
+            origin,
+            {
+                "main/main.c": "void app_main(void) {}\n",
+                "components/build/drv.c": "int drv_v(void) { return 1; }\n",
+                "build/00_planted.bin": "not-real-firmware",
+            },
+        )
+        fetcher = GitShallowSourceFetcher(allow_local_paths=True)
+        dest_a = tmp_path / "checkout_a"
+        co_a = await fetcher.fetch(repo_url=str(origin), git_ref="main", dest_dir=dest_a)
+        assert not (dest_a / "build").exists(), "committed top-level build/ must be deleted"
+        assert (dest_a / "components" / "build" / "drv.c").is_file()
+
+        git_bin = shutil.which("git") or "/usr/bin/git"
+        env = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "GIT_AUTHOR_NAME": "Test",
+            "GIT_AUTHOR_EMAIL": "test@example.com",
+            "GIT_COMMITTER_NAME": "Test",
+            "GIT_COMMITTER_EMAIL": "test@example.com",
+        }
+        (origin / "components" / "build" / "drv.c").write_text(
+            "int drv_v(void) { return 2; }\n", encoding="utf-8"
+        )
+        subprocess.run([git_bin, "-C", str(origin), "add", "."], check=True, env=env)  # noqa: S603
+        subprocess.run(  # noqa: S603
+            [git_bin, "-C", str(origin), "commit", "-q", "-m", "update build component"],
+            check=True,
+            env=env,
+        )
+        dest_b = tmp_path / "checkout_b"
+        co_b = await fetcher.fetch(repo_url=str(origin), git_ref="main", dest_dir=dest_b)
+        assert co_a.source_tree_digest != co_b.source_tree_digest
+
+    async def test_git_ref_beginning_with_a_dash_is_rejected(self, tmp_path: Path) -> None:
+        """A-23: leading `-`, whitespace, control chars, and `..` are rejected before Git runs."""
+        from fleetforge.api.schemas_v2 import BuildJobCreate
+
+        origin = tmp_path / "origin"
+        _init_git_repo(origin, {"main/main.c": "void app_main(void) {}\n"})
+        fetcher = GitShallowSourceFetcher(allow_local_paths=True)
+
+        bad_refs = [
+            "--orphan=unborn",
+            "--pathspec-from-file=/etc/passwd",
+            "-b",
+            "main branch",
+            "main\n--upload-pack=id",
+            "main..HEAD",
+            "main'spoof",
+        ]
+        for bad_ref in bad_refs:
+            with pytest.raises(ValueError):
+                BuildJobCreate(
+                    repo_url="https://github.com/example/fw",
+                    git_ref=bad_ref,
+                    target="esp32s3",
+                    version="1.0.0",
+                )
+            with pytest.raises(BuildError):
+                await fetcher.fetch(
+                    repo_url=str(origin),
+                    git_ref=bad_ref,
+                    dest_dir=tmp_path / f"dst_{abs(hash(bad_ref))}",
+                )
+
+    async def test_fetch_does_not_follow_redirects(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A-23: `git fetch` refuses HTTP 302 redirects and never contacts the redirect target."""
+        import datetime as dt
+        import http.server
+        import ssl
+        import threading
+
+        from cryptography import x509
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        from cryptography.x509.oid import NameOID
+
+        import fleetforge.builds as builds_mod
+
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        subject = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "127.0.0.1")])
+        now = dt.datetime.now(dt.UTC)
+        cert = (
+            x509.CertificateBuilder()
+            .subject_name(subject)
+            .issuer_name(subject)
+            .public_key(key.public_key())
+            .serial_number(x509.random_serial_number())
+            .not_valid_before(now - dt.timedelta(minutes=5))
+            .not_valid_after(now + dt.timedelta(hours=1))
+            .add_extension(
+                x509.SubjectAlternativeName(
+                    [x509.IPAddress(__import__("ipaddress").IPv4Address("127.0.0.1"))]
+                ),
+                critical=False,
+            )
+            .sign(key, hashes.SHA256())
+        )
+        cert_file = tmp_path / "cert.pem"
+        key_file = tmp_path / "key.pem"
+        cert_file.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+        key_file.write_bytes(
+            key.private_bytes(
+                serialization.Encoding.PEM,
+                serialization.PrivateFormat.TraditionalOpenSSL,
+                serialization.NoEncryption(),
+            )
+        )
+
+        hits: list[str] = []
+
+        class RedirectHandler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self) -> None:  # noqa: N802
+                hits.append(self.path)
+                if self.path.startswith("/redirect.git"):
+                    self.send_response(302)
+                    self.send_header(
+                        "Location",
+                        f"https://127.0.0.1:{server.server_port}/secret-target.git/info/refs",
+                    )
+                    self.end_headers()
+                    return
+                self.send_response(200)
+                self.end_headers()
+
+            def log_message(self, _fmt: str, *_args: object) -> None:
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), RedirectHandler)
+        ssl_ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        ssl_ctx.load_cert_chain(certfile=str(cert_file), keyfile=str(key_file))
+        server.socket = ssl_ctx.wrap_socket(server.socket, server_side=True)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+
+        async def _allow_loopback_in_test(url: str, *, field_name: str = "url") -> str:
+            _ = field_name
+            return url
+
+        monkeypatch.setattr(builds_mod, "sanitize_git_repo_url", lambda u, **_kw: u)
+        monkeypatch.setattr(
+            builds_mod, "resolve_and_validate_public_https_url", _allow_loopback_in_test
+        )
+
+        try:
+            fetcher = GitShallowSourceFetcher(timeout_s=10.0, ca_bundle=cert_file)
+            with pytest.raises(BuildError):
+                await fetcher.fetch(
+                    repo_url=f"https://127.0.0.1:{server.server_port}/redirect.git",
+                    git_ref="main",
+                    dest_dir=tmp_path / "redirect-dst",
+                )
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=2.0)
+
+        assert any(p.startswith("/redirect.git") for p in hits)
+        assert not any("secret-target" in p for p in hits), f"redirect was followed: {hits}"
+
+    async def test_dns_ssrf_and_otel_client_hardening(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A-23: DNS resolution blocks private/loopback IPs and OTel client disables env proxy."""
+        import socket
+
+        from fleetforge.ingestor.otel import (
+            OtelExportBatch,
+            close_otel_client,
+            get_otel_client,
+            send_otel_batch,
+        )
+        from fleetforge.url_safety import resolve_and_validate_public_https_url
+
+        loop = __import__("asyncio").get_running_loop()
+
+        async def _private_dns(
+            _host: object, _port: object, **_kw: object
+        ) -> list[tuple[Any, ...]]:
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("169.254.169.254", 443))]
+
+        monkeypatch.setattr(loop, "getaddrinfo", _private_dns)
+        with pytest.raises(ValueError, match="loopback, private, link-local"):
+            await resolve_and_validate_public_https_url("https://rebind.example.com/hook")
+
+        batch = OtelExportBatch(
+            signal="logs",
+            device_id="a4cf12b3de01",
+            url="https://rebind.example.com/v1/logs",
+            body={"resourceLogs": []},
+            headers={"Content-Type": "application/json"},
+        )
+        assert await send_otel_batch(batch) is False
+
+        client = get_otel_client()
+        assert client._trust_env is False
+        assert client.follow_redirects is False
+        await close_otel_client()
+
+        async def _public_dns(_host: object, _port: object, **_kw: object) -> list[tuple[Any, ...]]:
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))]
+
+        monkeypatch.setattr(loop, "getaddrinfo", _public_dns)
+        assert (
+            await resolve_and_validate_public_https_url("https://example.com/hook")
+            == "https://example.com/hook"
+        )
 
     async def test_git_shallow_fetcher_strips_dot_git_before_compile(self, tmp_path: Path) -> None:
         origin = tmp_path / "origin"
@@ -191,8 +419,10 @@ class TestBuildSecurityAndCacheKey:
             "fi\n"
             'echo "[idf] compiling firmware"\n'
             f"mkdir -p '{work_dir}/build'\n"
-            f"printf '\\351\\000\\002\\040firmware-app-bytes' > '{work_dir}/build/app.bin'\n"
-            f"printf 'boot' > '{work_dir}/build/bootloader.bin'\n",
+            f"printf 'planted-decoy' > '{work_dir}/build/00_planted.bin'\n"
+            f"printf '\\351\\000\\002\\040firmware-app-bytes' > '{work_dir}/build/my_app.bin'\n"
+            f"printf 'boot' > '{work_dir}/build/bootloader.bin'\n"
+            f"printf '{{\"app_bin\": \"my_app.bin\"}}' > '{work_dir}/build/project_description.json'\n",
             encoding="utf-8",
         )
         fake_docker.chmod(fake_docker.stat().st_mode | stat.S_IXUSR)
@@ -212,6 +442,47 @@ class TestBuildSecurityAndCacheKey:
         )
         assert app_bytes.startswith(b"\xe9\x00\x02\x20firmware-app-bytes")
         assert any("[idf] compiling firmware" in line for line in lines)
+
+    async def test_container_runner_rejects_missing_or_escaping_project_description(
+        self, tmp_path: Path
+    ) -> None:
+        """A-25: fail closed when `project_description.json` is absent or escapes `build/`."""
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        (tmp_path / "outside.bin").write_bytes(b"secret-outside")
+
+        for label, script_body in (
+            (
+                "missing",
+                f"mkdir -p '{work_dir}/build'\nprintf 'planted' > '{work_dir}/build/00_planted.bin'\n",
+            ),
+            (
+                "escape",
+                f"mkdir -p '{work_dir}/build'\n"
+                f"printf '{{\"app_bin\": \"../../outside.bin\"}}' > '{work_dir}/build/project_description.json'\n",
+            ),
+            (
+                "build-symlink",
+                f"ln -s '{tmp_path}' '{work_dir}/build'\n",
+            ),
+            (
+                "app-symlink",
+                f"mkdir -p '{work_dir}/build'\n"
+                f"ln -s '{tmp_path}/outside.bin' '{work_dir}/build/link.bin'\n"
+                f"printf '{{\"app_bin\": \"link.bin\"}}' > '{work_dir}/build/project_description.json'\n",
+            ),
+        ):
+            fake = tmp_path / f"fake-{label}"
+            fake.write_text("#!/bin/sh\n" + script_body, encoding="utf-8")
+            fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+            runner = SandboxedIdfContainerRunner(docker_bin_override=str(fake))
+            with pytest.raises(BuildError):
+                await runner.compile_source(
+                    work_dir=work_dir,
+                    target="esp32c6",
+                    partition_layout="ab-4m-v1",
+                    idf_image=PINNED_IDF_IMAGES["esp32c6"],
+                )
 
 
 class _CountingBuildRunner:
@@ -574,3 +845,195 @@ class TestBuildPipelineApiAndWorker:
                     f"/v1/projects/default/builds/{bid}/retry", headers=allowed_hdrs
                 )
                 assert r_retry.status_code == 201, (idx, r_retry.text)
+
+    async def test_rebuilding_an_existing_version_with_new_bytes_fails_the_job(
+        self,
+        env: dict[str, Any],
+    ) -> None:
+        """A-25: rebuilding an existing `(project, target, version)` with different bytes fails
+        the build job and keeps `artifact_versions` pointing at the original digest; also
+        verifies Git tag vs branch classification (`vendor-fix` is a branch, not a tag) and
+        enqueue URL stripping."""
+        headers = {"Authorization": f"Bearer {env['token']}"}
+        repo_dir: Path = env["repo_dir"]
+        git_bin = shutil.which("git") or "/usr/bin/git"
+        git_env = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "GIT_AUTHOR_NAME": "Test",
+            "GIT_AUTHOR_EMAIL": "test@example.com",
+            "GIT_COMMITTER_NAME": "Test",
+            "GIT_COMMITTER_EMAIL": "test@example.com",
+        }
+
+        async with client_for(env["app"], base_url="https://testserver") as client:
+            # First build succeeds and binds 2.1.0 -> sha1.
+            first = await client.post(
+                "/v1/projects/default/builds?run_inline=true",
+                headers=headers,
+                json={
+                    "repo_url": str(repo_dir),
+                    "git_ref": "v2.1.0",
+                    "target": "esp32s3",
+                    "version": "2.1.0",
+                    "partition_layout": "ab-4m-v1",
+                },
+            )
+            assert first.status_code == 201, first.text
+            first_body = first.json()
+            assert first_body["status"] == "succeeded"
+            original_sha = first_body["artifact_sha256"]
+            assert original_sha is not None
+
+            # Create branch `vendor-fix` (starts with 'v', NOT a tag) with new bytes.
+            subprocess.run(  # noqa: S603
+                [git_bin, "-C", str(repo_dir), "checkout", "-q", "-b", "vendor-fix"],
+                check=True,
+                env=git_env,
+            )
+            (repo_dir / "main" / "main.c").write_text(
+                "void app_main(void) { /* updated */ }\n", encoding="utf-8"
+            )
+            subprocess.run([git_bin, "-C", str(repo_dir), "add", "."], check=True, env=git_env)  # noqa: S603
+            subprocess.run(  # noqa: S603
+                [git_bin, "-C", str(repo_dir), "commit", "-q", "-m", "vendor fix"],
+                check=True,
+                env=git_env,
+            )
+
+            # Rebuilding the existing 2.1.0 version with new bytes MUST fail!
+            conflict = await client.post(
+                "/v1/projects/default/builds?run_inline=true",
+                headers=headers,
+                json={
+                    "repo_url": str(repo_dir),
+                    "git_ref": "vendor-fix",
+                    "target": "esp32s3",
+                    "version": "2.1.0",
+                    "partition_layout": "ab-4m-v1",
+                },
+            )
+            assert conflict.status_code == 201, conflict.text
+            conflict_body = conflict.json()
+            assert conflict_body["status"] == "failed"
+            assert conflict_body["artifact_sha256"] is None
+            assert "already names artifact" in (conflict_body["error_detail"] or "")
+
+            # Under a fresh version label, `vendor-fix` is recorded as a branch, never a tag.
+            fresh = await client.post(
+                "/v1/projects/default/builds?run_inline=true",
+                headers=headers,
+                json={
+                    "repo_url": str(repo_dir),
+                    "git_ref": "vendor-fix",
+                    "target": "esp32s3",
+                    "version": "2.1.1",
+                    "partition_layout": "ab-4m-v1",
+                },
+            )
+            assert fresh.status_code == 201, fresh.text
+            assert fresh.json()["status"] == "succeeded"
+
+            arts = (await client.get("/v1/artifact", headers=headers)).json()["artifacts"]
+            by_ver = {a["version"]: a for a in arts}
+            assert by_ver["2.1.0"]["sha256"] == original_sha
+            assert by_ver["2.1.0"]["tag"] == "v2.1.0"
+            assert by_ver["2.1.0"].get("branch") is None
+            assert by_ver["2.1.1"]["branch"] == "vendor-fix"
+            assert by_ver["2.1.1"].get("tag") is None
+
+            # Annotated tag not starting with 'v' IS classified as a tag by Git.
+            subprocess.run(  # noqa: S603
+                [git_bin, "-C", str(repo_dir), "tag", "-a", "release-2", "-m", "rel 2"],
+                check=True,
+                env=git_env,
+            )
+            tagged = await client.post(
+                "/v1/projects/default/builds?run_inline=true",
+                headers=headers,
+                json={
+                    "repo_url": str(repo_dir),
+                    "git_ref": "release-2",
+                    "target": "esp32s3",
+                    "version": "2.1.1-rel2",
+                    "partition_layout": "ab-4m-v1",
+                },
+            )
+            assert tagged.status_code == 201, tagged.text
+            assert tagged.json()["status"] == "succeeded"
+            arts2 = (await client.get("/v1/artifact", headers=headers)).json()["artifacts"]
+            rel2 = next(a for a in arts2 if a["version"] == "2.1.1-rel2")
+            assert rel2["tag"] == "release-2"
+            assert rel2.get("branch") is None
+
+            # A-23 enqueue checks: bad git_ref -> 422, strip `?token=...`, reject private/credential URLs.
+            dash_ref = await client.post(
+                "/v1/projects/default/builds",
+                headers=headers,
+                json={
+                    "repo_url": "https://github.com/example/fw.git",
+                    "git_ref": "--orphan=unborn",
+                    "target": "esp32s3",
+                    "version": "2.1.2-badref",
+                },
+            )
+            assert dash_ref.status_code == 422, dash_ref.text
+            stripped = await client.post(
+                "/v1/projects/default/builds",
+                headers=headers,
+                json={
+                    "repo_url": "https://github.com/example/fw.git?token=secret123#frag",
+                    "git_ref": "main",
+                    "target": "esp32s3",
+                    "version": "2.1.2",
+                },
+            )
+            assert stripped.status_code == 201, stripped.text
+            assert stripped.json()["repo_url"] == "https://github.com/example/fw.git"
+            assert "secret123" not in stripped.text
+
+            for bad_url in (
+                "http://github.com/example/fw.git",
+                "https://127.0.0.1/fw.git",
+                "https://" + "user:secret" + "@github.com/example/fw.git",
+            ):
+                bad = await client.post(
+                    "/v1/projects/default/builds",
+                    headers=headers,
+                    json={
+                        "repo_url": bad_url,
+                        "git_ref": "main",
+                        "target": "esp32s3",
+                        "version": "2.1.3",
+                    },
+                )
+                assert bad.status_code == 400, (bad_url, bad.text)
+
+    async def test_merged_image_from_build_runner_is_rejected(
+        self,
+        env: dict[str, Any],
+    ) -> None:
+        """A-25: `execute_build_job` runs `detect_merged` and fails if a merged full-flash image is produced."""
+        merged_bytes = (b"\xff" * 0x1000) + b"\xe9\x00\x02\x20" + (b"\x00" * 64)
+
+        class _MergedBuildRunner:
+            async def compile_source(self, **_kwargs: Any) -> bytes:
+                return merged_bytes
+
+        env["app"].dependency_overrides[get_build_runner] = lambda: _MergedBuildRunner()
+        headers = {"Authorization": f"Bearer {env['token']}"}
+        async with client_for(env["app"], base_url="https://testserver") as client:
+            resp = await client.post(
+                "/v1/projects/default/builds?run_inline=true",
+                headers=headers,
+                json={
+                    "repo_url": str(env["repo_dir"]),
+                    "git_ref": "v2.1.0",
+                    "target": "esp32s3",
+                    "version": "9.9.9-merged",
+                },
+            )
+            assert resp.status_code == 201, resp.text
+            body = resp.json()
+            assert body["status"] == "failed"
+            assert body["artifact_sha256"] is None
+            assert "merged" in (body["error_detail"] or "").lower()

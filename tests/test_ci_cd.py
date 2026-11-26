@@ -1421,13 +1421,21 @@ class TestOtelQueueAndRateLimiterAndStagedRollout:
 
         mock_resp = AsyncMock()
         mock_resp.status_code = 204
-        with patch("fleetforge.api.routers.projects.httpx.AsyncClient") as mock_client_cls:
+        with (
+            patch(
+                "fleetforge.api.routers.projects.resolve_and_validate_public_https_url",
+                new=AsyncMock(return_value=proj.ci_webhook_url),
+            ),
+            patch("fleetforge.api.routers.projects.httpx.AsyncClient") as mock_client_cls,
+        ):
             mock_client = AsyncMock()
             mock_client.post = AsyncMock(return_value=mock_resp)
             mock_client_cls.return_value.__aenter__.return_value = mock_client
 
             ok = await _trigger_ci_webhook(proj, settings=settings)
             assert ok is True
+            assert mock_client_cls.call_args.kwargs["trust_env"] is False
+            assert mock_client_cls.call_args.kwargs["follow_redirects"] is False
             mock_client.post.assert_called_once()
             sent_headers = mock_client.post.call_args.kwargs["headers"]
             assert sent_headers["Authorization"] == raw_header

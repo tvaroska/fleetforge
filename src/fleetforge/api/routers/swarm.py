@@ -56,7 +56,6 @@ from fleetforge.db.models import (
     ProjectRole,
 )
 from fleetforge.delta_ota import DELTA_FORMAT, DeltaPatchError, create_delta_patch
-from fleetforge.events import emit
 from fleetforge.ingestor.handlers import handle_up_message
 from fleetforge.presence import is_online
 from fleetforge.storage.blobs import SHA256_HEX, blob_key, digest_bytes, put_blob
@@ -395,7 +394,7 @@ async def sync_gateway_relay(
         for child_id, bundle in body.children.items():
             synced_children.append(child_id)
             if bundle.announce is not None:
-                ev = await handle_up_message(
+                await handle_up_message(
                     session,
                     topic=f"ff/v1/d/{child_id}/up/announce",
                     payload=json.dumps(bundle.announce, separators=(",", ":")).encode("utf-8"),
@@ -403,8 +402,6 @@ async def sync_gateway_relay(
                     received_at=now,
                     tolerance=settings.presence_tolerance,
                 )
-                if ev is not None:
-                    await emit(session, ev)
             for st_item in bundle.statuses:
                 ev = await handle_up_message(
                     session,
@@ -416,7 +413,6 @@ async def sync_gateway_relay(
                 )
                 if ev is not None:
                     statuses_recorded += 1
-                    await emit(session, ev)
             for tel_item in bundle.telemetry:
                 ev = await handle_up_message(
                     session,
@@ -428,7 +424,6 @@ async def sync_gateway_relay(
                 )
                 if ev is not None:
                     telemetry_recorded += 1
-                    await emit(session, ev)
             for log_item in bundle.logs:
                 ev = await handle_up_message(
                     session,
@@ -440,7 +435,6 @@ async def sync_gateway_relay(
                 )
                 if ev is not None:
                     logs_recorded += 1
-                    await emit(session, ev)
 
         relay = await session.get(GatewayRelayState, gateway_id)
         if body.cached_artifacts is not None:

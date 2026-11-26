@@ -55,7 +55,8 @@ CacheDep = Annotated[VerifiedSecretCache, Depends(token_cache)]
 
 _REVOKE_USER_TOKENS_SQL = text(
     "UPDATE admin_tokens SET revoked_at = now() "
-    "WHERE user_id = :user_id AND revoked_at IS NULL RETURNING id"
+    "WHERE (user_id = :user_id OR (user_id IS NULL AND subject = :username)) "
+    "AND revoked_at IS NULL RETURNING id"
 )
 
 
@@ -243,9 +244,16 @@ async def update_user(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"user {username!r} not found",
             )
-        is_self = admin.user_id is not None and user.id == admin.user_id
+        is_self = (admin.user_id is not None and user.id == admin.user_id) or (
+            admin.user_id is None and admin.subject == username
+        )
         if not admin.is_superadmin and not is_self:
             raise FORBIDDEN
+        if is_self and body.password is not None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="use PATCH /v1/auth/me with current_password to change your own password",
+            )
         pw_hash = await _ahash_password(body.password) if body.password is not None else None
         if "email" in body.model_fields_set:
             user.email = body.email
@@ -253,13 +261,19 @@ async def update_user(
             user.display_name = body.display_name
         if pw_hash is not None:
             user.password_hash = pw_hash
+            res = await session.execute(
+                _REVOKE_USER_TOKENS_SQL, {"user_id": user.id, "username": user.username}
+            )
+            revoked_ids.extend(res.scalars().all())
         if body.is_superadmin is not None:
             user.is_superadmin = body.is_superadmin
         if body.disabled is not None:
             if body.disabled:
                 user.disabled_at = now_utc()
-                res = await session.execute(_REVOKE_USER_TOKENS_SQL, {"user_id": user.id})
-                revoked_ids = list(res.scalars().all())
+                res = await session.execute(
+                    _REVOKE_USER_TOKENS_SQL, {"user_id": user.id, "username": user.username}
+                )
+                revoked_ids.extend(res.scalars().all())
             else:
                 user.disabled_at = None
         user.updated_at = now_utc()
@@ -314,7 +328,9 @@ async def delete_user(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="cannot delete your own user account",
             )
-        res = await session.execute(_REVOKE_USER_TOKENS_SQL, {"user_id": user.id})
+        res = await session.execute(
+            _REVOKE_USER_TOKENS_SQL, {"user_id": user.id, "username": user.username}
+        )
         revoked_ids = list(res.scalars().all())
         await session.delete(user)
         await session.commit()

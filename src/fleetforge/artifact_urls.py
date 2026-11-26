@@ -174,6 +174,8 @@ def verify_artifact_url(
         raise ArtifactUrlInvalid("digest is not 64 lowercase hex characters")
     if not sig:
         raise ArtifactUrlInvalid("no signature")
+    if not sig.isascii():
+        raise ArtifactUrlInvalid("signature contains non-ASCII characters")
     if not exp or not _EXP_RE.match(exp):
         # Unparseable is invalid, not expired: we cannot say a link expired when we
         # cannot say when it would have.

@@ -181,6 +181,41 @@ class TestRefusals:
         # The promise that matters: an anonymous caller cannot make us call the store.
         assert store.signed_urls == []
 
+    async def test_a_non_ascii_signature_is_403(
+        self, app: FastAPI, store: MemoryObjectStore
+    ) -> None:
+        """A-35: non-ASCII `?sig=` must return 403, never raise `TypeError` (500) in `hmac.compare_digest`."""
+        response = await get(app, f"/v1/artifact/{SHA256}/bin?exp=9999999999&sig=%C3%A9")
+
+        assert response.status_code == 403, response.text
+        assert store.signed_urls == []
+
+    async def test_expiry_at_exact_now_is_403(
+        self, app: FastAPI, store: MemoryObjectStore, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A-35: a link expiring at exact `now` (`expires_at <= now`) is refused with 403."""
+        import fleetforge.artifact_urls as artifact_urls_mod
+
+        frozen_now = dt.datetime(2026, 11, 25, 12, 0, 0, tzinfo=dt.UTC)
+        link = mint_artifact_url(
+            TEST_PUBLIC_BASE_URL,
+            SHA256,
+            secret=TEST_ARTIFACT_URL_SECRET,
+            ttl_s=60,
+            now=frozen_now - dt.timedelta(seconds=60),
+        )
+        monkeypatch.setattr(artifact_urls_mod, "now_utc", lambda: frozen_now)
+
+        at_boundary = await get(app, path_and_query(link))
+        assert at_boundary.status_code == 403, at_boundary.text
+        assert store.signed_urls == []
+
+        monkeypatch.setattr(
+            artifact_urls_mod, "now_utc", lambda: frozen_now - dt.timedelta(seconds=1)
+        )
+        before_boundary = await get(app, path_and_query(link))
+        assert before_boundary.status_code == 307, before_boundary.text
+
     async def test_a_signature_for_another_digest_is_403(
         self, app: FastAPI, store: MemoryObjectStore
     ) -> None:

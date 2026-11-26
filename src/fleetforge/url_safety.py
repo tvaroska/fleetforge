@@ -7,8 +7,11 @@ must use `https://` and name a public, routable hostname or global IP address.
 
 from __future__ import annotations
 
+import asyncio
 import ipaddress
+import socket
 import urllib.parse
+from typing import Any
 
 _FORBIDDEN_HOSTNAMES = frozenset(
     {
@@ -86,3 +89,110 @@ def validate_public_https_url(url: str, *, field_name: str = "url") -> str:
         _check_ip(ip, field_name)
 
     return trimmed
+
+
+_FORBIDDEN_GIT_REF_CHARS = frozenset("~^:?*[\\'\"`")
+
+
+def validate_git_ref(git_ref: str) -> str:
+    """Validate a Git branch, tag, or commit SHA against option injection and bad ref syntax."""
+    if not git_ref:
+        raise ValueError("git_ref must not be empty")
+    if len(git_ref) > 128:
+        raise ValueError("git_ref must be at most 128 characters")
+    if any(ch.isspace() or ord(ch) < 0x20 or ch == "\x7f" for ch in git_ref):
+        raise ValueError("git_ref must not contain whitespace or control characters")
+    if git_ref.startswith("-"):
+        raise ValueError("git_ref must not start with '-'")
+    if ".." in git_ref or "@{" in git_ref or "//" in git_ref:
+        raise ValueError("git_ref contains a forbidden sequence")
+    if git_ref.startswith("/") or git_ref.endswith("/") or git_ref.endswith("."):
+        raise ValueError("git_ref must not start or end with '/' or end with '.'")
+    if git_ref.endswith(".lock") or any(ch in _FORBIDDEN_GIT_REF_CHARS for ch in git_ref):
+        raise ValueError("git_ref contains forbidden Git reference characters")
+    return git_ref
+
+
+def sanitize_git_repo_url(url: str, *, field_name: str = "repo_url") -> str:
+    """Validate a public HTTPS Git URL and strip any query string or fragment."""
+    validated = validate_public_https_url(url, field_name=field_name)
+    parsed = urllib.parse.urlsplit(validated)
+    return urllib.parse.urlunsplit((parsed.scheme.lower(), parsed.netloc, parsed.path, "", ""))
+
+
+async def resolve_public_host_ips(host: str, port: int, *, field_name: str = "url") -> list[str]:
+    """Resolve `host` asynchronously and verify every returned IP is globally routable."""
+    normalized = host.strip().rstrip(".").lower()
+    try:
+        ip = ipaddress.ip_address(normalized)
+    except ValueError:
+        pass
+    else:
+        _check_ip(ip, field_name)
+        return [str(ip)]
+
+    loop = asyncio.get_running_loop()
+    try:
+        infos = await loop.getaddrinfo(normalized, port, type=socket.SOCK_STREAM)
+    except OSError as exc:
+        raise ValueError(f"{field_name} host {normalized!r} could not be resolved") from exc
+
+    if not infos:
+        raise ValueError(f"{field_name} host {normalized!r} resolved to no addresses")
+
+    validated_ips: list[str] = []
+    for info in infos:
+        addr = info[4][0]
+        if not isinstance(addr, str):
+            raise ValueError(f"{field_name} resolved to an unsupported address")
+        ip_obj = ipaddress.ip_address(addr)
+        _check_ip(ip_obj, field_name)
+        ip_str = str(ip_obj)
+        if ip_str not in validated_ips:
+            validated_ips.append(ip_str)
+    return validated_ips
+
+
+async def resolve_and_validate_public_https_url(url: str, *, field_name: str = "url") -> str:
+    """Validate `url` lexically and verify every DNS-resolved IP address is globally routable."""
+    validated = validate_public_https_url(url, field_name=field_name)
+    parsed = urllib.parse.urlsplit(validated)
+    host = (parsed.hostname or "").strip().rstrip(".").lower()
+    port = parsed.port or 443
+    await resolve_public_host_ips(host, port, field_name=field_name)
+    return validated
+
+
+def public_https_transport(*, limits: Any = None, field_name: str = "url") -> Any:
+    """Return an `httpx.AsyncHTTPTransport` pinning TCP connections to DNS-validated public IPs."""
+    import httpcore
+    import httpx
+
+    class _PublicOnlyNetworkBackend(httpcore.AnyIOBackend):
+        async def connect_tcp(
+            self,
+            host: str,
+            port: int,
+            timeout: float | None = None,
+            local_address: str | None = None,
+            socket_options: Any = None,
+        ) -> httpcore.AsyncNetworkStream:
+            try:
+                ips = await resolve_public_host_ips(host, port, field_name=field_name)
+            except ValueError as exc:
+                raise httpcore.ConnectError(str(exc)) from exc
+            return await super().connect_tcp(
+                ips[0],
+                port,
+                timeout=timeout,
+                local_address=local_address,
+                socket_options=socket_options,
+            )
+
+    transport = (
+        httpx.AsyncHTTPTransport(limits=limits)
+        if limits is not None
+        else httpx.AsyncHTTPTransport()
+    )
+    transport._pool._network_backend = _PublicOnlyNetworkBackend()  # noqa: SLF001
+    return transport

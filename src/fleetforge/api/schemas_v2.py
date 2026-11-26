@@ -6,9 +6,10 @@ import datetime as dt
 import uuid
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from fleetforge.api.schemas_deploys import DeployAccepted
+from fleetforge.url_safety import validate_git_ref
 
 BuildJobStatusLiteral = Literal["queued", "running", "succeeded", "failed", "cancelled"]
 BuildTargetLiteral = Literal["esp32", "esp32s3", "esp32c3", "esp32c6"]
@@ -35,6 +36,11 @@ class BuildJobCreate(BaseModel):
     target: BuildTargetLiteral
     version: str = Field(min_length=1, max_length=64)
     partition_layout: str = Field(default="ab-4m-v1", min_length=1, max_length=32)
+
+    @field_validator("git_ref")
+    @classmethod
+    def _check_git_ref(cls, value: str) -> str:
+        return validate_git_ref(value)
 
 
 class BuildJobSummary(BaseModel):
