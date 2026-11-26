@@ -141,12 +141,11 @@ flashed with a superseded layout.
 implements, `selftest` means the running image has registered a custom self-test, and
 `safe_window` means it has registered a safe-window rule. From R6, `sig` means the running
 image enforces ECDSA P-256 signature verification (`artifact.sig` is mandatory on every
-`stage`). From V3, `delta` means the running image can reconstruct its inactive OTA slot
-from an `artifact.delta` binary patch (`ffdelta-v1`) verified against its active slot
-`from_sha256` and full target `sha256` + `sig`, and `edge_relay` means the device serves a
-local HTTP artifact cache for child nodes whose `parent_device_id` names it. The server
-stores a capability it does not know as-is. A device lists only what is true of the image
-it runs.
+`stage`). From V3, `delta` and `edge_relay` are reserved capability names for binary delta
+OTA (`ffdelta-v1`) and local HTTP artifact caching on parent gateway nodes. Currently only
+the server-side scheduling/delta generation and the standalone C99 decoder (`ff_delta.c`)
+exist; stock ESP32 firmware does not yet announce `delta` or `edge_relay`. The server stores
+a capability it does not know as-is. A device lists only what is true of the image it runs.
 
 `safe_mode` is `true` while the device holds itself in recovery after repeated crashes:
 three `panic`, `int_wdt`, `task_wdt` or `wdt` resets within 60 s on a confirmed image. In
@@ -391,16 +390,22 @@ Types: `stage` · `apply` · `cancel` · `rollback` · `identify` · `reboot` ·
   would treat any artifact as an app, so a server sends a type other than `app` only to a
   device whose `capabilities` names a handler for it. It is unrelated to the command's own
   `type`.
-- **`artifact.delta` is optional (V3)** and sent only when the target device announces
-  `"delta"` in `capabilities` and its running `fw_version` maps to a precomputed binary
-  patch (`ffdelta-v1`) whose `patch_size_bytes < size`:
+- **`artifact.delta` is optional (V3, server side and standalone decoder only)** and sent
+  only when the target device announces `"delta"` in `capabilities` and its running
+  `fw_version` maps to a precomputed binary patch (`ffdelta-v1`) whose
+  `patch_size_bytes < size`:
   `{"url": "…", "from_sha256": "…", "patch_sha256": "…", "size": 4128, "format": "ffdelta-v1"}`.
   `artifact.url`, `artifact.sha256`, `artifact.size` and `artifact.sig` continue to name
-  the full reconstructed target image: the device verifies the active slot against
-  `from_sha256`, applies the patch into its inactive slot, and verifies the reconstructed
-  inactive slot against `artifact.sha256` (and `artifact.sig` when present) before moving
-  the boot pointer. Any device that ignores `artifact.delta` fetches `artifact.url` as
-  usual. Additive under *Evolution rules*, rule 2, with `proto` remaining `1`.
+  the full reconstructed target image. A delta-capable device verifies the active slot
+  against `from_sha256`, applies the patch into its inactive slot, and verifies the
+  reconstructed inactive slot against `artifact.sha256` (and `artifact.sig` when present)
+  before moving the boot pointer. **Failure fallback rule:** if downloading the patch,
+  matching `from_sha256`, decoding the `ffdelta-v1` stream, or verifying the reconstructed
+  `artifact.sha256` / `artifact.sig` fails, the device MUST NOT switch `otadata` and falls
+  back to fetching the full `artifact.url` (or reports `failed` if the full fetch also
+  fails). Any device that ignores `artifact.delta` (including current stock ESP32 firmware)
+  fetches `artifact.url` as usual. Additive under *Evolution rules*, rule 2, with `proto`
+  remaining `1`.
 
 **`apply`, `cancel`, `rollback` and `reboot` (R5).** Each carries its own `id`, like every
 command, and the device deduplicates on it. `apply` and `cancel` also carry `cmd_id`, the
@@ -591,24 +596,29 @@ receipt time.** Device `ts` fields, where present, are for ordering only.
 
 ## Hierarchy (V3)
 
-A drone behind a gateway keeps its own flat `ff/v1/d/{drone_id}/…` subtree; the gateway
-republishes in both directions. The core stays unaware, exactly as with the FPGA
-companion CPU.
+*Implementation status:* server-side `parent_device_id` hierarchy, edge-relay registration
+(`PUT /v1/devices/{gateway_id}/relay`), disconnected replay
+(`POST /v1/devices/{gateway_id}/relay-sync`), airtime-aware rollout caps, and a loopback
+simulator helper (`EdgeRelayGateway`) are implemented. Device-side gateway HTTP relay
+serving, gateway MQTT republishing, and per-child broker ACL entries remain planned and are
+not yet implemented in Mosquitto or stock ESP32 firmware.
 
-The one place the flat namespace needs help is authz: the `%u` pattern ACL grants a
-gateway access only to *its own* subtree. A gateway therefore receives explicit
-additional ACL entries for each child, granted when that child enrols with a
-`parent_device_id`.
+Planned MQTT bridging model: a drone behind a gateway keeps its own flat
+`ff/v1/d/{drone_id}/…` subtree; when implemented, the gateway republishes in both
+directions and receives explicit per-child broker ACL entries when a child enrols with a
+`parent_device_id` (because the `%u` pattern ACL grants a gateway access only to its own
+subtree).
 
 For data-plane artifact delivery (`V3-1`), a gateway registered with a local edge cache
 origin (`PUT /v1/devices/{gateway_id}/relay`) pulls each staged `sha256` (or `patch_sha256`)
 once over the uplink and caches it locally. When the server stages firmware onto a child
-whose `parent_device_id` names that gateway, `artifact.url` (and `artifact.delta.url` when
-present) points at the gateway's edge origin (`<relay_base_url>/v1/artifact/{sha256}/bin?exp=…&sig=…`),
-collapsing swarm airtime while preserving end-to-end SHA-256 and ECDSA P-256 signature
-verification on every child node. When reconnecting after disconnected field operation,
-`POST /v1/devices/{gateway_id}/relay-sync` replays buffered `up/*` envelopes for children
-attached to `gateway_id`.
+whose `parent_device_id` names an online gateway with a registered relay origin,
+`artifact.url` (and `artifact.delta.url` when present) points at the gateway's edge origin
+(`<relay_base_url>/v1/artifact/{sha256}/bin?exp=…&sig=…`), falling back to the direct
+server URL when the gateway is offline, while preserving end-to-end SHA-256 and ECDSA P-256
+signature verification on every child node. When reconnecting after disconnected field
+operation, `POST /v1/devices/{gateway_id}/relay-sync` replays buffered `up/*` envelopes for
+children attached to `gateway_id`.
 
 ## Library marker
 

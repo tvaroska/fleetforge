@@ -361,6 +361,7 @@ static volatile bool s_rollback_decided;
  * Outside s_ctx, which ff_mqtt_run() memsets; never named ff_selftest_* (read by timer context). */
 static volatile bool s_selftest_registered;
 static volatile bool s_boot_classified;
+static bool s_boot_classify_claimed;
 
 /* R5-fw-2. Two parties can decide a held image's fate and they race: the self-test result
  * (selftest_done(), in the ff_selftest task, possibly on the other core) and the confirm
@@ -370,6 +371,16 @@ static volatile bool s_boot_classified;
  * every NVS write happen after the claim, outside the lock, because a flash write must never
  * run inside a portMUX critical section. */
 static portMUX_TYPE s_decide_lock = portMUX_INITIALIZER_UNLOCKED;
+
+static bool claim_boot_classify(void) {
+    portENTER_CRITICAL(&s_decide_lock);
+    bool mine = !s_boot_classified && !s_boot_classify_claimed;
+    if (mine) { s_boot_classify_claimed = true; }
+    portEXIT_CRITICAL(&s_decide_lock);
+    if (!mine) { while (!s_boot_classified) { vTaskDelay(1); } }
+    return mine;
+}
+
 static bool s_confirm_claimed;
 /* R5-fw-5. Under s_decide_lock. The `rollback` command claimed the decision (on_rollback): its
  * own reboot task carries the reboot out, after the safe window, and the deadline's backstop
@@ -2244,7 +2255,8 @@ esp_err_t ff_mqtt_run(const ff_cfg_t *cfg, const ff_cred_t *cred)
 
     /* R5-fw-1 / R5-fw-2 / R5-fw-5 / R5-fw-7: freeze self-test, safe-window, and power class
      * before the first connect builds an announce, and classify the boot transaction once. */
-    if (!s_boot_classified) {
+    const bool claim_boot = claim_boot_classify();
+    if (claim_boot) {
         s_selftest_registered = ff_selftest_freeze();
         ff_identity_note_selftest(s_selftest_registered);
         ff_identity_note_safe_window(ff_safe_window_freeze());
@@ -2252,11 +2264,11 @@ esp_err_t ff_mqtt_run(const ff_cfg_t *cfg, const ff_cred_t *cred)
     ff_sleep_freeze(cfg);
     ff_sec_init(cfg, cred);
 
-    if (!s_boot_classified) {
+    if (claim_boot) {
         ff_txn_init();
         (void)ff_txn_last_reboot_cmd(s_reboot_cmd_id, sizeof(s_reboot_cmd_id));
         classify_txn();
-        s_boot_classified = true;
+        portENTER_CRITICAL(&s_decide_lock); s_boot_classified = true; portEXIT_CRITICAL(&s_decide_lock);
     }
 
     ESP_LOGI(TAG, "connecting to %s as %s", cfg->mqtt_uri, id);
@@ -2279,10 +2291,7 @@ esp_err_t ff_mqtt_run(const ff_cfg_t *cfg, const ff_cred_t *cred)
  * already lives with), and the outbox size. No log, no NVS, no enqueue, no lock of this file,
  * nothing that changes a decision. Never called from the esp_timer task. */
 
-bool ff_mqtt_is_connected(void)
-{
-    return s_ctx.connected && s_acked_this_connection;
-}
+bool ff_mqtt_is_connected(void) { return s_ctx.connected && s_acked_this_connection; }
 
 const char *ff_mqtt_sleep_blocker(void)
 {
@@ -2314,10 +2323,7 @@ const char *ff_mqtt_sleep_blocker(void)
     return NULL;
 }
 
-esp_err_t ff_mqtt_register_cargo_type(const char *type)
-{
-    return ff_identity_note_cargo_type(type);
-}
+esp_err_t ff_mqtt_register_cargo_type(const char *type) { return ff_identity_note_cargo_type(type); }
 
 void ff_mqtt_complete_cargo(const char *cmd_id, const char *type, const char *version)
 {
@@ -2350,13 +2356,15 @@ void ff_mqtt_set_offline_mode(bool offline)
 esp_err_t ff_mqtt_confirm_offline(void)
 {
     if (!s_boot_classified) {
-        s_selftest_registered = ff_selftest_freeze();
-        ff_identity_note_selftest(s_selftest_registered);
-        ff_identity_note_safe_window(ff_safe_window_freeze());
-        ff_txn_init();
-        (void)ff_txn_last_reboot_cmd(s_reboot_cmd_id, sizeof(s_reboot_cmd_id));
-        classify_txn();
-        s_boot_classified = true;
+        if (claim_boot_classify()) {
+            s_selftest_registered = ff_selftest_freeze();
+            ff_identity_note_selftest(s_selftest_registered);
+            ff_identity_note_safe_window(ff_safe_window_freeze());
+            ff_txn_init();
+            (void)ff_txn_last_reboot_cmd(s_reboot_cmd_id, sizeof(s_reboot_cmd_id));
+            classify_txn();
+            portENTER_CRITICAL(&s_decide_lock); s_boot_classified = true; portEXIT_CRITICAL(&s_decide_lock);
+        }
     }
 
     if (!pending_verify() && s_txn.kind != TXN_BOOTED_NEW) {

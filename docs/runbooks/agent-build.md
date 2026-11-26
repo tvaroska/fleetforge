@@ -48,6 +48,24 @@ against the local stack and with no hardware. It is the cheapest way to determin
 firmware change broke the first ten seconds. This is the part no unit test covers and no
 OTA can fix.
 
+## Production signing-key build (`D-23`)
+
+Production bundles must never carry either committed development ECDSA P-256 public key.
+Supply both primary and secondary SubjectPublicKeyInfo PEM public keys so the component
+embeds them via ESP-IDF `EMBED_TXTFILES` and enforces `FF_OTA_PRODUCTION_BUILD=1`:
+
+```bash
+just agent-build esp32 production=1 \
+  primary_pubkey=/path/to/release-primary-pub.pem \
+  secondary_pubkey=/path/to/release-secondary-pub.pem
+```
+
+For standalone ESP-IDF consumer projects, pass `-DFF_OTA_PRODUCTION_BUILD=1
+-DFF_OTA_SIGNING_PUBKEY_PRIMARY_FILE=... -DFF_OTA_SIGNING_PUBKEY_SECONDARY_FILE=...` to
+`idf.py build`. Both CMake (`agent/components/fleetforge/CMakeLists.txt`) and
+`agent/tools/verify_bundle.py --production` refuse empty slots, missing PEM headers, or
+committed dev key markers, and verify that `app.bin` embeds two distinct non-dev public keys.
+
 ## Disk is the number-one failure mode
 
 `espressif/idf:v5.5.5` unpacks to **~8.9 GB**, and the pull needs headroom on top of

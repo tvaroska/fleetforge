@@ -403,3 +403,504 @@ def test_the_mismatch_branch_is_taken_on_inequality(tmp_path: Path) -> None:
         is False
     )
     assert detail_buf.value == b"production ring carries dev key"
+
+
+def _extract_ota_sig_ladder() -> str:
+    """Extract the real signature preprocessor ladder and key-slot helpers from `ff_ota.c`."""
+    raw = FF_OTA_C.read_text(encoding="utf-8")
+    start = raw.index("#define FF_OTA_DEV_PRIMARY_PUBKEY_PEM")
+    end = raw.index("/* The URL the artifact link redirects to.", start)
+    return raw[start:end]
+
+
+def _compile_sig_ladder_case(
+    tmp_path: Path,
+    name: str,
+    prelude_c: str,
+) -> subprocess.CompletedProcess[bytes]:
+    gcc = shutil.which("gcc")
+    assert gcc is not None, "gcc must be available to compile host C verification tests"
+    ladder = _extract_ota_sig_ladder()
+    src = f"""
+#include <stdbool.h>
+#include <stddef.h>
+#include <string.h>
+
+{prelude_c}
+{ladder}
+
+bool exported_requires_sig(void) {{ return ff_ota_requires_signature(); }}
+bool exported_uses_dev_key(void) {{ return ff_ota_uses_dev_signing_key(); }}
+"""
+    so_path = tmp_path / f"libff_ladder_{name}.so"
+    return subprocess.run(  # noqa: S603
+        [
+            gcc,
+            "-O2",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-Wno-unused-function",
+            "-shared",
+            "-fPIC",
+            "-x",
+            "c",
+            "-",
+            "-o",
+            str(so_path),
+        ],
+        input=src.encode("utf-8"),
+        capture_output=True,
+    )
+
+
+def test_the_signature_ladder_under_each_define_set(tmp_path: Path) -> None:
+    """D-23 & D-24: Compile `ff_ota.c`'s un-overridden `#define` ladder & real `ff_ota_uses_dev_signing_key()`."""
+    custom_a = (
+        '"-----BEGIN PUBLIC KEY-----\\n'
+        "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEAAAAAAAAAAAAAAAAAAAAAAAAAAAA\\n"
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==\\n"
+        '-----END PUBLIC KEY-----\\n"'
+    )
+    custom_b = (
+        '"-----BEGIN PUBLIC KEY-----\\n'
+        "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEBBBBBBBBBBBBBBBBBBBBBBBBBBBB\\n"
+        "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB==\\n"
+        '-----END PUBLIC KEY-----\\n"'
+    )
+
+    # 1. Default build (no defines): signature required by default, dev keys active (`M2a`, `M2b`).
+    p_default = _compile_sig_ladder_case(tmp_path, "default", "")
+    assert p_default.returncode == 0, p_default.stderr.decode("utf-8", errors="replace")
+    lib_default = ctypes.CDLL(str(tmp_path / "libff_ladder_default.so"))
+    lib_default.exported_requires_sig.restype = ctypes.c_bool
+    lib_default.exported_uses_dev_key.restype = ctypes.c_bool
+    assert lib_default.exported_requires_sig() is True
+    assert lib_default.exported_uses_dev_key() is True
+
+    # 2. Explicit dev opt-out `CONFIG_FF_OTA_REQUIRE_SIGNATURE=0` (non-prod): disables requirement.
+    p_optout = _compile_sig_ladder_case(
+        tmp_path, "optout", "#define CONFIG_FF_OTA_REQUIRE_SIGNATURE 0\n"
+    )
+    assert p_optout.returncode == 0, p_optout.stderr.decode("utf-8", errors="replace")
+    lib_optout = ctypes.CDLL(str(tmp_path / "libff_ladder_optout.so"))
+    lib_optout.exported_requires_sig.restype = ctypes.c_bool
+    assert lib_optout.exported_requires_sig() is False
+
+    # 3. D-23 regression: Kconfig `string` options default to `""`; under CONFIG_FF_OTA_PRODUCTION_BUILD=1
+    #    the `#error` MUST fire instead of silently compiling with dev keys.
+    p_kconfig_empty = _compile_sig_ladder_case(
+        tmp_path,
+        "kconfig_empty",
+        "#define CONFIG_FF_OTA_PRODUCTION_BUILD 1\n"
+        '#define CONFIG_FF_OTA_SIGNING_PUBKEY_PRIMARY_PEM ""\n'
+        '#define CONFIG_FF_OTA_SIGNING_PUBKEY_SECONDARY_PEM ""\n',
+    )
+    assert p_kconfig_empty.returncode != 0
+    assert b"FF_OTA_PRODUCTION_BUILD" in p_kconfig_empty.stderr
+
+    # 4. Single-slot override under production build MUST fail compile.
+    p_single = _compile_sig_ladder_case(
+        tmp_path,
+        "single_slot",
+        f"#define FF_OTA_PRODUCTION_BUILD 1\n#define FF_OTA_SIGNING_PUBKEY_PRIMARY_PEM {custom_a}\n",
+    )
+    assert p_single.returncode != 0
+
+    # 5. Empty-string macro overrides under production build MUST fail `_Static_assert`.
+    p_empty_macros = _compile_sig_ladder_case(
+        tmp_path,
+        "empty_macros",
+        "#define FF_OTA_PRODUCTION_BUILD 1\n"
+        '#define FF_OTA_SIGNING_PUBKEY_PRIMARY_PEM ""\n'
+        '#define FF_OTA_SIGNING_PUBKEY_SECONDARY_PEM ""\n',
+    )
+    assert p_empty_macros.returncode != 0
+
+    # 6. Production build with both custom PEMs forces signature=1 even if CONFIG_FF_OTA_REQUIRE_SIGNATURE=0.
+    p_prod_ok = _compile_sig_ladder_case(
+        tmp_path,
+        "prod_ok",
+        f"#define CONFIG_FF_OTA_PRODUCTION_BUILD 1\n"
+        f"#define CONFIG_FF_OTA_REQUIRE_SIGNATURE 0\n"
+        f"#define FF_OTA_SIGNING_PUBKEY_PRIMARY_PEM {custom_a}\n"
+        f"#define FF_OTA_SIGNING_PUBKEY_SECONDARY_PEM {custom_b}\n",
+    )
+    assert p_prod_ok.returncode == 0, p_prod_ok.stderr.decode("utf-8", errors="replace")
+    lib_prod_ok = ctypes.CDLL(str(tmp_path / "libff_ladder_prod_ok.so"))
+    lib_prod_ok.exported_requires_sig.restype = ctypes.c_bool
+    lib_prod_ok.exported_uses_dev_key.restype = ctypes.c_bool
+    assert lib_prod_ok.exported_requires_sig() is True
+    assert lib_prod_ok.exported_uses_dev_key() is False
+
+    # 7. EMBED_TXTFILES path (`FF_OTA_EMBEDDED_PUBKEYS=1`) with two custom PEM buffers compiles & clears dev check.
+    p_embed = _compile_sig_ladder_case(
+        tmp_path,
+        "embed_ok",
+        f"#define FF_OTA_PRODUCTION_BUILD 1\n"
+        f"#define FF_OTA_EMBEDDED_PUBKEYS 1\n"
+        f"const char _binary_ff_ota_pubkey_primary_pem_start[] = {custom_a};\n"
+        f"const char _binary_ff_ota_pubkey_secondary_pem_start[] = {custom_b};\n",
+    )
+    assert p_embed.returncode == 0, p_embed.stderr.decode("utf-8", errors="replace")
+    lib_embed = ctypes.CDLL(str(tmp_path / "libff_ladder_embed_ok.so"))
+    lib_embed.exported_requires_sig.restype = ctypes.c_bool
+    lib_embed.exported_uses_dev_key.restype = ctypes.c_bool
+    assert lib_embed.exported_requires_sig() is True
+    assert lib_embed.exported_uses_dev_key() is False
+
+
+def test_cargo_and_dock_paths_pin_their_digest_and_signature_checks(tmp_path: Path) -> None:
+    """D-24: Compile & execute `run_cargo_ota`, `ff_ota_dock_stage`, `ff_mqtt_confirm_offline`, and `secrets_retry_timer_cb`."""
+    gcc = shutil.which("gcc")
+    assert gcc is not None, "gcc must be available to compile host C verification tests"
+
+    ota_raw = FF_OTA_C.read_text(encoding="utf-8")
+    mqtt_raw = FF_MQTT_C.read_text(encoding="utf-8")
+    sec_raw = (COMPONENT_SRC / "ff_sec.c").read_text(encoding="utf-8")
+
+    # Pin download truncation / size mismatch checks in `ota_task` (`ff_ota.c:1092, 1107`).
+    ota_task_code = _ota_task()
+    assert "if (!esp_https_ota_is_complete_data_received(handle))" in ota_task_code
+    assert 'fail(cmd, "truncated download");' in ota_task_code
+    assert "if (cmd->size != 0 && got != cmd->size)" in ota_task_code
+    assert 'fail(cmd, "size mismatch");' in ota_task_code
+
+    fn_hex = extract_c_function(ota_raw, "hex_encode")
+    fn_cargo = extract_c_function(ota_raw, "run_cargo_ota")
+    fn_dock = extract_c_function(ota_raw, "ff_ota_dock_stage")
+    fn_confirm_offline = extract_c_function(mqtt_raw, "ff_mqtt_confirm_offline")
+    fn_sec_retry = extract_c_function(sec_raw, "secrets_retry_timer_cb")
+
+    harness_c = f"""
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+typedef int esp_err_t;
+#define ESP_OK 0
+#define ESP_FAIL -1
+#define ESP_ERR_INVALID_ARG 0x102
+#define ESP_ERR_INVALID_STATE 0x103
+#define ESP_ERR_INVALID_SIZE 0x104
+#define ESP_ERR_NOT_SUPPORTED 0x106
+#define ESP_ERR_INVALID_CRC 0x109
+#define OTA_RESOLVED_URL_MAX 128
+#define OTA_READBACK_CHUNK 64
+#define OTA_HTTP_TIMEOUT_MS 1000
+#define OTA_HTTP_RX_BUFFER 64
+#define OTA_HTTP_TX_BUFFER 64
+#define OTA_MAX_RETRIES 1
+#define OTA_RETRY_BASE_MS 1
+#define HTTP_METHOD_GET 0
+#define FF_STATUS_STAGING 1
+#define FF_STATUS_DOWNLOADING 2
+#define FF_STATUS_VERIFYING 3
+#define FF_STATUS_STAGED 4
+#define FF_STATUS_APPLYING 5
+#define FF_STATUS_REBOOTING 6
+#define FF_STATUS_AWAITING_SAFE_WINDOW 7
+#define FF_STATUS_PCT_NONE -1
+#define FF_DETAIL_APPLY_WAITS "waits"
+#define WHY_REJECTED "rejected"
+#define pdMS_TO_TICKS(ms) (ms)
+
+typedef int portMUX_TYPE;
+#define portENTER_CRITICAL(l) ((void)(l))
+#define portEXIT_CRITICAL(l) ((void)(l))
+#define SECRETS_MAX_RETRY_ROUNDS 5
+
+typedef struct {{
+    char cmd_id[64];
+    char url[128];
+    char sha256[65];
+    char sig[160];
+    char type[32];
+    char version[32];
+    uint32_t size;
+    bool apply_now;
+    uint32_t confirm_timeout_s;
+}} ff_ota_cmd_t;
+
+typedef struct {{ uint32_t address; uint32_t size; char label[17]; }} esp_partition_t;
+typedef uint32_t esp_ota_handle_t;
+typedef esp_err_t (*ff_cargo_write_fn_t)(size_t offset, const uint8_t *data, size_t len, void *ctx);
+typedef esp_err_t (*ff_cargo_finish_fn_t)(size_t total, const char *sha256, const char *ver, void *ctx);
+typedef struct {{
+    char type[32];
+    ff_cargo_write_fn_t write_cb;
+    ff_cargo_finish_fn_t finish_cb;
+    void *ctx;
+}} ff_cargo_handler_t;
+
+typedef struct {{
+    const char *url; int method; void *crt_bundle_attach; int timeout_ms;
+    bool keep_alive_enable; int buffer_size; int buffer_size_tx;
+}} esp_http_client_config_t;
+typedef struct {{ size_t pos; }} mock_http_t;
+typedef mock_http_t *esp_http_client_handle_t;
+
+static void *esp_crt_bundle_attach = NULL;
+static volatile bool s_running = false;
+static char g_last_fail[64];
+static int g_finish_calls = 0;
+static int g_set_boot_calls = 0;
+static bool g_sig_ok = true;
+static uint8_t g_computed_digest[32];
+static uint8_t g_http_body[16] = {{1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16}};
+static mock_http_t g_http_client;
+static esp_partition_t g_slot = {{ 0x200000, 1966080, "ota_1" }};
+
+static bool cancel_requested(void) {{ return false; }}
+static void vTaskDelay(uint32_t t) {{ (void)t; }}
+static void report_cancelled(const ff_ota_cmd_t *c) {{ (void)c; }}
+static void fail(const ff_ota_cmd_t *c, const char *d) {{
+    (void)c; snprintf(g_last_fail, sizeof(g_last_fail), "%s", d ? d : "");
+}}
+static void ff_mqtt_publish_status(const char *id, int st, int pct, const char *d) {{
+    (void)id; (void)st; (void)pct; (void)d;
+}}
+static void ff_mqtt_complete_cargo(const char *id, const char *t, const char *v) {{
+    (void)id; (void)t; (void)v;
+}}
+static esp_err_t resolve_artifact_url(const char *u, char *out) {{
+    snprintf(out, OTA_RESOLVED_URL_MAX, "%s", u); return ESP_OK;
+}}
+static esp_http_client_handle_t esp_http_client_init(const esp_http_client_config_t *c) {{
+    (void)c; g_http_client.pos = 0; return &g_http_client;
+}}
+static esp_err_t esp_http_client_open(esp_http_client_handle_t c, int l) {{ (void)c; (void)l; return ESP_OK; }}
+static int64_t esp_http_client_fetch_headers(esp_http_client_handle_t c) {{ (void)c; return sizeof(g_http_body); }}
+static int g_http_status = 200;
+static int g_write_calls = 0;
+static int esp_http_client_get_status_code(esp_http_client_handle_t c) {{ (void)c; return g_http_status; }}
+static esp_err_t esp_http_client_set_header(esp_http_client_handle_t c, const char *k, const char *v) {{
+    (void)c; (void)k; (void)v; return ESP_OK;
+}}
+static esp_err_t esp_http_client_close(esp_http_client_handle_t c) {{ (void)c; return ESP_OK; }}
+static esp_err_t esp_http_client_cleanup(esp_http_client_handle_t c) {{ (void)c; return ESP_OK; }}
+static bool esp_http_client_is_complete_data_received(esp_http_client_handle_t c) {{
+    return c->pos >= sizeof(g_http_body);
+}}
+static int esp_http_client_read(esp_http_client_handle_t c, char *b, int len) {{
+    size_t rem = sizeof(g_http_body) - c->pos;
+    if (rem == 0) return 0;
+    size_t n = rem < (size_t)len ? rem : (size_t)len;
+    memcpy(b, g_http_body + c->pos, n);
+    c->pos += n;
+    return (int)n;
+}}
+typedef struct {{ int dummy; }} mbedtls_sha256_context;
+static void mbedtls_sha256_init(mbedtls_sha256_context *c) {{ c->dummy = 0; }}
+static int mbedtls_sha256_starts(mbedtls_sha256_context *c, int i) {{ (void)c; (void)i; return 0; }}
+static int mbedtls_sha256_update(mbedtls_sha256_context *c, const uint8_t *d, size_t l) {{ (void)c; (void)d; (void)l; return 0; }}
+static int mbedtls_sha256_finish(mbedtls_sha256_context *c, uint8_t out[32]) {{
+    (void)c; memcpy(out, g_computed_digest, 32); return 0;
+}}
+static void mbedtls_sha256_free(mbedtls_sha256_context *c) {{ (void)c; }}
+static bool verify_artifact_signature(const uint8_t d[32], const char *s, const char **out) {{
+    (void)d; (void)s;
+    if (!g_sig_ok) {{ *out = "signature invalid"; return false; }}
+    return true;
+}}
+static esp_err_t dummy_write_cb(size_t o, const uint8_t *d, size_t l, void *ctx) {{
+    (void)o; (void)d; (void)l; (void)ctx; g_write_calls++; return ESP_OK;
+}}
+static esp_err_t dummy_finish_cb(size_t t, const char *s, const char *v, void *ctx) {{
+    (void)t; (void)s; (void)v; (void)ctx; g_finish_calls++; return ESP_OK;
+}}
+static ff_cargo_handler_t g_cargo = {{ "mcu_fw", dummy_write_cb, dummy_finish_cb, NULL }};
+static const ff_cargo_handler_t *find_cargo_handler(const char *t) {{
+    return strcmp(t, "mcu_fw") == 0 ? &g_cargo : NULL;
+}}
+static const esp_partition_t *choose_target_slot(const ff_ota_cmd_t *c) {{ (void)c; return &g_slot; }}
+static esp_err_t esp_ota_begin(const esp_partition_t *p, size_t l, esp_ota_handle_t *h) {{ (void)p; (void)l; *h = 1; return ESP_OK; }}
+static esp_err_t esp_ota_write(esp_ota_handle_t h, const void *d, size_t l) {{ (void)h; (void)d; (void)l; return ESP_OK; }}
+static esp_err_t esp_ota_abort(esp_ota_handle_t h) {{ (void)h; return ESP_OK; }}
+static esp_err_t esp_ota_end(esp_ota_handle_t h) {{ (void)h; return ESP_OK; }}
+static esp_err_t esp_ota_set_boot_partition(const esp_partition_t *p) {{ (void)p; g_set_boot_calls++; return ESP_OK; }}
+static bool restore_boot_partition(const char *w) {{ (void)w; return true; }}
+static esp_err_t ff_txn_save(const char *id, uint32_t a, uint32_t t) {{ (void)id; (void)a; (void)t; return ESP_OK; }}
+static bool ff_safe_window_is_safe(void) {{ return true; }}
+static esp_err_t partition_digest(const esp_partition_t *p, size_t l, char out[65], uint8_t raw[32]) {{
+    (void)p; (void)l;
+    memcpy(raw, g_computed_digest, 32);
+    static const char HEX[] = "0123456789abcdef";
+    for (int i = 0; i < 32; i++) {{ out[i*2] = HEX[raw[i]>>4]; out[i*2+1] = HEX[raw[i]&0xf]; }}
+    out[64] = '\\0';
+    return ESP_OK;
+}}
+
+{fn_hex}
+{fn_cargo}
+{fn_dock}
+
+/* Stubs for ff_mqtt_confirm_offline (`ff_mqtt.c:2365`) */
+#define TXN_BOOTED_NEW 1
+#define TXN_CONFIRMING 2
+#define DETAIL_SELFTEST_TIMED_OUT "timeout"
+typedef struct {{ int kind; char cmd_id[32]; }} txn_t;
+static portMUX_TYPE s_decide_lock = 0;
+static volatile bool s_boot_classified = true;
+static bool claim_boot_classify(void) {{ return false; }}
+static volatile bool s_rollback_decided = false;
+static bool s_selftest_registered = true;
+static txn_t s_txn = {{ TXN_BOOTED_NEW, "cmd-1" }};
+static char s_reboot_cmd_id[32];
+static bool ff_selftest_freeze(void) {{ return true; }}
+static void ff_identity_note_selftest(bool v) {{ (void)v; }}
+static bool ff_safe_window_freeze(void) {{ return true; }}
+static void ff_identity_note_safe_window(bool v) {{ (void)v; }}
+static void ff_txn_init(void) {{}}
+static esp_err_t ff_txn_last_reboot_cmd(char *b, size_t l) {{ (void)b; (void)l; return ESP_OK; }}
+static void classify_txn(void) {{}}
+static bool pending_verify(void) {{ return true; }}
+static esp_err_t ff_txn_set_detail(const char *id, const char *d) {{ (void)id; (void)d; return ESP_OK; }}
+static void selftest_done(bool ok, const char *r) {{ (void)ok; (void)r; }}
+static esp_err_t ff_selftest_run(void (*cb)(bool, const char *)) {{ (void)cb; return ESP_OK; }}
+
+{fn_confirm_offline}
+
+/* Stubs for secrets_retry_timer_cb (`ff_sec.c:117`) */
+static portMUX_TYPE s_sec_lock = 0;
+static volatile bool s_sync_in_flight = false;
+static volatile uint32_t s_local_rev = 0;
+static volatile uint32_t s_target_rev = 2;
+static volatile uint32_t s_retry_rounds = 0;
+static int g_start_sync_calls = 0;
+static void start_sync_task(void) {{ g_start_sync_calls++; }}
+
+{fn_sec_retry}
+
+int test_cargo_case(bool bad_sha, bool bad_sig, int http_status, char *fail_out, size_t cap) {{
+    memset(g_computed_digest, 0xaa, 32);
+    g_sig_ok = !bad_sig;
+    g_http_status = http_status;
+    g_write_calls = 0;
+    g_finish_calls = 0;
+    g_last_fail[0] = '\\0';
+    ff_ota_cmd_t cmd = {{0}};
+    snprintf(cmd.cmd_id, sizeof(cmd.cmd_id), "c1");
+    snprintf(cmd.url, sizeof(cmd.url), "https://e.test/x");
+    snprintf(cmd.type, sizeof(cmd.type), "mcu_fw");
+    snprintf(cmd.version, sizeof(cmd.version), "1.0");
+    cmd.size = sizeof(g_http_body);
+    memset(cmd.sha256, bad_sha ? 'b' : 'a', 64);
+    cmd.sha256[64] = '\\0';
+    run_cargo_ota(&cmd);
+    snprintf(fail_out, cap, "%s", g_last_fail);
+    return g_finish_calls;
+}}
+
+int test_dock_case(bool is_cargo, bool bad_sha, bool bad_sig, char *fail_out, size_t cap) {{
+    memset(g_computed_digest, 0xaa, 32);
+    g_sig_ok = !bad_sig;
+    g_finish_calls = 0;
+    g_set_boot_calls = 0;
+    g_last_fail[0] = '\\0';
+    ff_ota_cmd_t cmd = {{0}};
+    snprintf(cmd.cmd_id, sizeof(cmd.cmd_id), "d1");
+    snprintf(cmd.type, sizeof(cmd.type), "%s", is_cargo ? "mcu_fw" : "app");
+    snprintf(cmd.version, sizeof(cmd.version), "1.0");
+    cmd.size = sizeof(g_http_body);
+    memset(cmd.sha256, bad_sha ? 'b' : 'a', 64);
+    cmd.sha256[64] = '\\0';
+    (void)ff_ota_dock_stage(&cmd, g_http_body, sizeof(g_http_body));
+    snprintf(fail_out, cap, "%s", g_last_fail);
+    return is_cargo ? g_finish_calls : g_set_boot_calls;
+}}
+
+int test_confirm_offline_rollback_guard(bool rollback_decided) {{
+    s_boot_classified = true;
+    s_selftest_registered = true;
+    s_rollback_decided = rollback_decided;
+    return ff_mqtt_confirm_offline();
+}}
+
+int test_sec_retry_cap(uint32_t initial_rounds) {{
+    s_sync_in_flight = false;
+    s_local_rev = 0;
+    s_target_rev = 2;
+    s_retry_rounds = initial_rounds;
+    g_start_sync_calls = 0;
+    secrets_retry_timer_cb(NULL);
+    return g_start_sync_calls;
+}}
+"""
+    so_path = tmp_path / "libff_cargo_dock_mutants.so"
+    proc = subprocess.run(  # noqa: S603
+        [
+            gcc,
+            "-O2",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-Wno-unused-function",
+            "-shared",
+            "-fPIC",
+            "-x",
+            "c",
+            "-",
+            "-o",
+            str(so_path),
+        ],
+        input=harness_c.encode("utf-8"),
+        capture_output=True,
+    )
+    assert proc.returncode == 0, proc.stderr.decode("utf-8", errors="replace")
+
+    lib = ctypes.CDLL(str(so_path))
+    lib.test_cargo_case.argtypes = [
+        ctypes.c_bool,
+        ctypes.c_bool,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_size_t,
+    ]
+    lib.test_cargo_case.restype = ctypes.c_int
+    lib.test_dock_case.argtypes = [
+        ctypes.c_bool,
+        ctypes.c_bool,
+        ctypes.c_bool,
+        ctypes.c_char_p,
+        ctypes.c_size_t,
+    ]
+    lib.test_dock_case.restype = ctypes.c_int
+    lib.test_confirm_offline_rollback_guard.argtypes = [ctypes.c_bool]
+    lib.test_confirm_offline_rollback_guard.restype = ctypes.c_int
+    lib.test_sec_retry_cap.argtypes = [ctypes.c_uint32]
+    lib.test_sec_retry_cap.restype = ctypes.c_int
+
+    buf = ctypes.create_string_buffer(64)
+    # Cargo OTA: non-200 initial GET, bad sha256, or bad sig MUST NOT invoke finish_cb; valid invokes once.
+    assert lib.test_cargo_case(False, False, 403, buf, 64) == 0
+    assert buf.value == b"cannot open the artifact"
+    assert lib.test_cargo_case(True, False, 200, buf, 64) == 0
+    assert buf.value == b"sha256 mismatch"
+    assert lib.test_cargo_case(False, True, 200, buf, 64) == 0
+    assert buf.value == b"signature invalid"
+    assert lib.test_cargo_case(False, False, 200, buf, 64) == 1
+
+    # Declaration order check: `s_decide_lock` must be declared before `claim_boot_classify` in `ff_mqtt.c`.
+    lock_pos = mqtt_raw.index("static portMUX_TYPE s_decide_lock")
+    claim_pos = mqtt_raw.index("static bool claim_boot_classify(void)")
+    assert lock_pos < claim_pos, "s_decide_lock must be declared before claim_boot_classify()"
+
+    # Dock cargo & dock app: bad sha256 or bad sig MUST NOT invoke finish_cb / set_boot_partition.
+    for is_cargo in (True, False):
+        assert lib.test_dock_case(is_cargo, True, False, buf, 64) == 0
+        assert buf.value == b"sha256 mismatch"
+        assert lib.test_dock_case(is_cargo, False, True, buf, 64) == 0
+        assert buf.value == b"signature invalid"
+        assert lib.test_dock_case(is_cargo, False, False, buf, 64) == 1
+
+    # `ff_mqtt_confirm_offline` refuses when `s_rollback_decided` is true (`ff_mqtt.c:2365`).
+    assert lib.test_confirm_offline_rollback_guard(True) != 0
+    assert lib.test_confirm_offline_rollback_guard(False) == 0
+
+    # `secrets_retry_timer_cb` stops at `SECRETS_MAX_RETRY_ROUNDS` (`ff_sec.c:117`).
+    assert lib.test_sec_retry_cap(4) == 1
+    assert lib.test_sec_retry_cap(5) == 0

@@ -454,18 +454,30 @@ qemu_sha256 := "50813d894756c1448b8742e1d8db21e3cce0f4e85b56fe53e36760b941cb7f17
 #
 # `--output type=local` rather than a bind-mounted `docker run`: BuildKit writes the
 # result as the invoking user, and nothing root-owned lands in the repo.
-agent-build target="esp32" production="0":
-    @echo "Building agent firmware for {{ target }} (this takes a few minutes)…"
+agent-build target="esp32" production="0" primary_pubkey="" secondary_pubkey="":
+    #!/usr/bin/env bash
+    set -euo pipefail
+    echo "Building agent firmware for {{ target }} (this takes a few minutes)…"
     mkdir -p agent/dist/{{ target }}
+    KEY_ARGS=()
+    if [[ -n "{{ primary_pubkey }}" || -n "{{ secondary_pubkey }}" ]]; then
+        if [[ -z "{{ primary_pubkey }}" || -z "{{ secondary_pubkey }}" ]]; then
+            echo "error: pass both primary_pubkey and secondary_pubkey PEM files" >&2
+            exit 2
+        fi
+        KEY_ARGS+=(--build-arg "FF_OTA_SIGNING_PUBKEY_PRIMARY_PEM=$(cat "{{ primary_pubkey }}")")
+        KEY_ARGS+=(--build-arg "FF_OTA_SIGNING_PUBKEY_SECONDARY_PEM=$(cat "{{ secondary_pubkey }}")")
+    fi
     DOCKER_BUILDKIT=1 docker build \
         --target export \
         --output type=local,dest=agent/dist/{{ target }} \
         --build-arg IDF_IMAGE={{ idf_image }} \
         --build-arg IDF_TARGET={{ target }} \
         --build-arg FF_OTA_PRODUCTION_BUILD={{ production }} \
-        --build-arg SOURCE_COMMIT=$(git rev-parse HEAD) \
+        --build-arg SOURCE_COMMIT="$(git rev-parse HEAD)" \
+        "${KEY_ARGS[@]}" \
         agent
-    @just agent-verify {{ target }} {{ if production == "1" { "--production" } else { "" } }}
+    just agent-verify {{ target }} {{ if production == "1" { "--production" } else { "" } }}
 
 agent-build-all:
     #!/usr/bin/env bash

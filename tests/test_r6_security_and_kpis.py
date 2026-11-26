@@ -265,10 +265,12 @@ class TestCFirmwareSecurityAndRangeResumeTripwires:
     def test_ff_ota_uses_partial_http_range_download_and_resume_backoff(self) -> None:
         ota_c = FF_OTA_C.read_text(encoding="utf-8")
 
-        # D-2: `.partial_http_download = true` sends a HEAD pre-request that GET-presigned S3/GCS
-        # URLs refuse with 403; initial download must stay a standard GET and resume via Range GET.
+        # D-2 / D-22: `.partial_http_download = true` sends a HEAD pre-request that GET-presigned
+        # S3/GCS URLs refuse with 403; initial download stays a standard GET and resume uses an
+        # open-ended `Range: bytes=<offset>-` without a dead `.max_http_request_size` cap.
         assert ".partial_http_download = true," not in ota_c
-        assert ".max_http_request_size = OTA_RANGE_CHUNK_BYTES" in ota_c
+        assert "OTA_RANGE_CHUNK_BYTES" not in ota_c
+        assert "max_http_request_size" not in ota_c
         assert ".http_client_init_cb = ota_http_client_init_cb" in ota_c
         assert 'esp_http_client_set_header(s_ota_http_client, "Range", s_resume_range_hdr)' in ota_c
         assert "esp_http_client_close(s_ota_http_client)" in ota_c
@@ -1222,3 +1224,60 @@ def test_production_ring_rejects_both_committed_dev_keys(tmp_path: Path) -> None
         verify_bundle.verify(bdir, production=False)
         with pytest.raises(verify_bundle.BundleError, match="default development OTA signing"):
             verify_bundle.verify(bdir, production=True)
+
+    # D-23: `--production` also rejects empty/single-slot PEMs and accepts 2 distinct custom PEMs.
+    single_dir = tmp_path / "bundle-single-custom"
+    single_dir.mkdir()
+    single_bytes = b"\xe9\x00" + custom_pub_a.encode("utf-8") + b"\x00" * 64
+    (single_dir / "app.bin").write_bytes(single_bytes)
+    resolved_prod = (
+        b"CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y\n"
+        b"CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y\n"
+        b"CONFIG_MBEDTLS_HAVE_TIME_DATE=y\n"
+        b"CONFIG_FF_OTA_REQUIRE_SIGNATURE=y\n"
+    )
+    (single_dir / "sdkconfig.resolved").write_bytes(resolved_prod)
+    single_manifest: dict[str, Any] = {
+        "target": "esp32",
+        "chip_family": "ESP32",
+        "agent_version": "0.7.0",
+        "idf_version": "v5.5.5",
+        "idf_image": "espressif/idf:v5.5.5",
+        "source_commit": "0" * 40,
+        "partition_layout": "ab-4m-v1",
+        "ota_slot_size": 1966080,
+        "config_partition": {"label": "ff_cfg", "offset": 0x12000, "size": 4096},
+        "parts": [
+            {
+                "name": "app",
+                "path": "app.bin",
+                "offset": 0x20000,
+                "size": len(single_bytes),
+                "sha256": hashlib.sha256(single_bytes).hexdigest(),
+            }
+        ],
+        "config_sha256": hashlib.sha256(resolved_prod).hexdigest(),
+    }
+    single_manifest["build_digest"] = make_manifest.build_identity(single_manifest)
+    (single_dir / "manifest.json").write_text(json.dumps(single_manifest), encoding="utf-8")
+    with pytest.raises(verify_bundle.BundleError, match="expected at least 2"):
+        verify_bundle.verify(single_dir, production=True)
+
+    dual_dir = tmp_path / "bundle-dual-custom"
+    dual_dir.mkdir()
+    dual_bytes = b"\xe9\x00" + custom_pub_a.encode("utf-8") + b"\x00" + custom_pub_b.encode("utf-8")
+    (dual_dir / "app.bin").write_bytes(dual_bytes)
+    (dual_dir / "sdkconfig.resolved").write_bytes(resolved_prod)
+    dual_manifest = dict(single_manifest)
+    dual_manifest["parts"] = [
+        {
+            "name": "app",
+            "path": "app.bin",
+            "offset": 0x20000,
+            "size": len(dual_bytes),
+            "sha256": hashlib.sha256(dual_bytes).hexdigest(),
+        }
+    ]
+    dual_manifest["build_digest"] = make_manifest.build_identity(dual_manifest)
+    (dual_dir / "manifest.json").write_text(json.dumps(dual_manifest), encoding="utf-8")
+    verify_bundle.verify(dual_dir, production=True)

@@ -8,6 +8,9 @@ the stale number. Nothing caught it because nothing compared them. This does.
 from __future__ import annotations
 
 import json
+import re
+import shutil
+import subprocess
 import tomllib
 from pathlib import Path
 
@@ -17,6 +20,8 @@ from fleetforge import __version__
 from fleetforge.buildinfo import UNKNOWN, build_info
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+AGENT_DIR = REPO_ROOT / "agent"
+COMPONENT_DIR = AGENT_DIR / "components" / "fleetforge"
 
 
 def _pyproject_version() -> str:
@@ -68,3 +73,58 @@ def test_build_info_reads_baked_provenance(monkeypatch: pytest.MonkeyPatch) -> N
         "commit": "815596b2c0ffee1234567890abcdef0123456789",
         "built_at": "2026-09-23T19:26:56Z",
     }
+
+
+def test_firmware_version_moves_with_component_sources() -> None:
+    """T-22: firmware version stays synchronized across all 3 files and moves when sources change."""
+    version_txt = (AGENT_DIR / "version.txt").read_text(encoding="utf-8").strip()
+    lib_json = str(
+        json.loads((COMPONENT_DIR / "library.json").read_text(encoding="utf-8"))["version"]
+    )
+    header_text = (COMPONENT_DIR / "src" / "ff_lib_version.h").read_text(encoding="utf-8")
+    m = re.search(r'#define FF_LIB_VERSION "([^"]+)"', header_text)
+    assert m is not None
+    assert version_txt == lib_json == m.group(1)
+
+    parts = tuple(int(p) for p in version_txt.split("."))
+    assert parts >= (0, 7, 0), (
+        f"expected firmware version >= 0.7.0 after v0.9.3 fixes, got {version_txt}"
+    )
+
+    # When git history + tags exist, verify firmware source edits past the last tag bumped version.txt.
+    git_bin = shutil.which("git")
+    if git_bin is None:
+        return
+    tag_proc = subprocess.run(  # noqa: S603
+        [git_bin, "-C", str(REPO_ROOT), "describe", "--tags", "--abbrev=0", "HEAD"],
+        capture_output=True,
+        text=True,
+    )
+    if tag_proc.returncode == 0:
+        last_tag = tag_proc.stdout.strip()
+        diff_proc = subprocess.run(  # noqa: S603
+            [
+                git_bin,
+                "-C",
+                str(REPO_ROOT),
+                "diff",
+                "--name-only",
+                last_tag,
+                "--",
+                "agent/components/fleetforge/src/",
+                "agent/main/",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        tag_ver_proc = subprocess.run(  # noqa: S603
+            [git_bin, "-C", str(REPO_ROOT), "show", f"{last_tag}:agent/version.txt"],
+            capture_output=True,
+            text=True,
+        )
+        if diff_proc.returncode == 0 and tag_ver_proc.returncode == 0 and diff_proc.stdout.strip():
+            tag_ver = tag_ver_proc.stdout.strip()
+            assert version_txt != tag_ver, (
+                f"agent firmware sources changed since {last_tag} without bumping agent/version.txt "
+                f"(still {version_txt})"
+            )

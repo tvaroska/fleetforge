@@ -169,7 +169,7 @@ pio run
 Without a clone, replace the `lib_deps` line with a pinned git dependency:
 
 ```ini
-lib_deps = Fleetforge=https://github.com/tvaroska/fleetforge.git#v0.6.0
+lib_deps = Fleetforge=https://github.com/tvaroska/fleetforge.git#v0.7.0
 ```
 
 PlatformIO fetches it from GitHub and the line names a release tag, so it works only once
@@ -186,7 +186,7 @@ needs it repackaged. Build the package from the repository root:
 just lib-arduino-package
 ```
 
-That writes `dist/arduino/Fleetforge-0.6.0.zip`. Then, in the Arduino IDE (2.x):
+That writes `dist/arduino/Fleetforge-0.7.0.zip`. Then, in the Arduino IDE (2.x):
 
 - **Boards Manager:** add `https://espressif.github.io/arduino-esp32/package_esp32_index.json`
   under *File → Preferences → Additional boards manager URLs*, and install **esp32 by

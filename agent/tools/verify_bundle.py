@@ -156,7 +156,9 @@ def verify(bundle_dir: Path, *, production: bool = False) -> dict[str, Any]:
 
     app_bytes = (bundle_dir / app["path"]).read_bytes()
     found_dev_slots = [
-        idx for idx, marker in enumerate(DEFAULT_DEV_SIGNING_PUBKEY_MARKERS) if marker in app_bytes
+        idx
+        for idx, marker in enumerate(DEFAULT_DEV_SIGNING_PUBKEY_MARKERS)
+        if marker in app_bytes or marker in resolved_bytes
     ]
     if found_dev_slots:
         if production:
@@ -166,6 +168,25 @@ def verify(bundle_dir: Path, *, production: bool = False) -> dict[str, Any]:
                 "custom FF_OTA_SIGNING_PUBKEY_PRIMARY_PEM and FF_OTA_SIGNING_PUBKEY_SECONDARY_PEM"
             )
         print("  signing key:  default dev P-256 ring (pass --production to require release keys)")
+    elif production:
+        if "# CONFIG_FF_OTA_REQUIRE_SIGNATURE is not set" in resolved or (
+            "CONFIG_FF_OTA_REQUIRE_SIGNATURE=n" in resolved.splitlines()
+        ):
+            raise BundleError(
+                "production bundle disables CONFIG_FF_OTA_REQUIRE_SIGNATURE in sdkconfig.resolved"
+            )
+        pem_blocks = set(
+            re.findall(
+                rb"-----BEGIN PUBLIC KEY-----\r?\n[A-Za-z0-9+/=\r\n]{40,}-----END PUBLIC KEY-----",
+                app_bytes,
+            )
+        )
+        if len(pem_blocks) < 2:
+            raise BundleError(
+                f"production bundle app.bin embeds {len(pem_blocks)} distinct public key PEM "
+                "block(s); expected at least 2 (primary + secondary rotation ring)"
+            )
+        print(f"  signing key:  {len(pem_blocks)} distinct release P-256 PEM keys verified")
 
     print(
         f"  {manifest['target']} / {manifest['chip_family']}"

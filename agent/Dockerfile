@@ -44,6 +44,8 @@ ARG FF_ROLLBACK_TEST=0
 # an ARTIFACT only: `just agent-publish` refuses it.
 ARG FF_FAULT_TEST=
 ARG FF_OTA_PRODUCTION_BUILD=0
+ARG FF_OTA_SIGNING_PUBKEY_PRIMARY_PEM=""
+ARG FF_OTA_SIGNING_PUBKEY_SECONDARY_PEM=""
 
 WORKDIR /project
 COPY . /project
@@ -51,11 +53,19 @@ COPY . /project
 # No `sdkconfig` exists in here (agent/.dockerignore excludes it), so SDKCONFIG_DEFAULTS
 # is authoritative on every build — see the header of agent/sdkconfig.defaults.
 RUN . $IDF_PATH/export.sh \
+ && KEY_CMAKE_ARGS=() \
+ && if [[ -n "${FF_OTA_SIGNING_PUBKEY_PRIMARY_PEM}" || -n "${FF_OTA_SIGNING_PUBKEY_SECONDARY_PEM}" ]]; then \
+      mkdir -p /tmp/ff_ota_keys \
+      && printf '%s\n' "${FF_OTA_SIGNING_PUBKEY_PRIMARY_PEM}" > /tmp/ff_ota_keys/primary.pem \
+      && printf '%s\n' "${FF_OTA_SIGNING_PUBKEY_SECONDARY_PEM}" > /tmp/ff_ota_keys/secondary.pem \
+      && KEY_CMAKE_ARGS+=(-DFF_OTA_SIGNING_PUBKEY_PRIMARY_FILE=/tmp/ff_ota_keys/primary.pem -DFF_OTA_SIGNING_PUBKEY_SECONDARY_FILE=/tmp/ff_ota_keys/secondary.pem); \
+    fi \
  && idf.py -B build -DIDF_TARGET=${IDF_TARGET} \
       -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.defaults.${IDF_TARGET}" \
       -DFF_ROLLBACK_TEST=${FF_ROLLBACK_TEST} \
       -DFF_FAULT_TEST=${FF_FAULT_TEST} \
       -DFF_OTA_PRODUCTION_BUILD=${FF_OTA_PRODUCTION_BUILD} \
+      "${KEY_CMAKE_ARGS[@]}" \
       build \
  && python3 tools/make_manifest.py \
       --build-dir build --out /out --partitions partitions.csv \

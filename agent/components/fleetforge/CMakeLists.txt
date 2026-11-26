@@ -28,6 +28,20 @@
 # The IDF deps are PRIV_REQUIRES: the public headers need only esp_err.h and
 # freertos/FreeRTOS.h, which every component already has, so nothing here leaks into a
 # consumer's include path.
+set(_ff_embed_txtfiles "")
+set(_ff_use_embedded_pubkeys FALSE)
+if(FF_OTA_SIGNING_PUBKEY_PRIMARY_FILE OR FF_OTA_SIGNING_PUBKEY_SECONDARY_FILE)
+    if(NOT FF_OTA_SIGNING_PUBKEY_PRIMARY_FILE OR NOT FF_OTA_SIGNING_PUBKEY_SECONDARY_FILE)
+        message(FATAL_ERROR "Provide both FF_OTA_SIGNING_PUBKEY_PRIMARY_FILE and FF_OTA_SIGNING_PUBKEY_SECONDARY_FILE")
+    endif()
+    set(_ff_primary_pem_dst "${CMAKE_CURRENT_BINARY_DIR}/ff_ota_pubkey_primary.pem")
+    set(_ff_secondary_pem_dst "${CMAKE_CURRENT_BINARY_DIR}/ff_ota_pubkey_secondary.pem")
+    configure_file("${FF_OTA_SIGNING_PUBKEY_PRIMARY_FILE}" "${_ff_primary_pem_dst}" COPYONLY)
+    configure_file("${FF_OTA_SIGNING_PUBKEY_SECONDARY_FILE}" "${_ff_secondary_pem_dst}" COPYONLY)
+    list(APPEND _ff_embed_txtfiles "${_ff_primary_pem_dst}" "${_ff_secondary_pem_dst}")
+    set(_ff_use_embedded_pubkeys TRUE)
+endif()
+
 idf_component_register(SRCS "src/ff_cfg.c"
                             "src/ff_delta.c"
                             "src/ff_enroll.c"
@@ -51,6 +65,7 @@ idf_component_register(SRCS "src/ff_cfg.c"
                             "src/ff_txn.c"
                        INCLUDE_DIRS "include"
                        PRIV_INCLUDE_DIRS "src"
+                       EMBED_TXTFILES ${_ff_embed_txtfiles}
                        PRIV_REQUIRES esp_eth
                                      esp_hw_support
                                      esp_netif
@@ -83,6 +98,31 @@ if(FF_ROLLBACK_TEST)
     target_compile_definitions(${COMPONENT_LIB} PRIVATE FF_ROLLBACK_TEST=1)
 endif()
 
-if(FF_OTA_PRODUCTION_BUILD)
+if(_ff_use_embedded_pubkeys)
+    target_compile_definitions(${COMPONENT_LIB} PRIVATE FF_OTA_EMBEDDED_PUBKEYS=1)
+endif()
+
+if(FF_OTA_PRODUCTION_BUILD OR CONFIG_FF_OTA_PRODUCTION_BUILD)
     target_compile_definitions(${COMPONENT_LIB} PRIVATE FF_OTA_PRODUCTION_BUILD=1)
+    set(_ff_prod_primary "")
+    set(_ff_prod_secondary "")
+    if(_ff_use_embedded_pubkeys)
+        file(READ "${_ff_primary_pem_dst}" _ff_prod_primary)
+        file(READ "${_ff_secondary_pem_dst}" _ff_prod_secondary)
+    elseif(CONFIG_FF_OTA_SIGNING_PUBKEY_PRIMARY_PEM AND CONFIG_FF_OTA_SIGNING_PUBKEY_SECONDARY_PEM)
+        set(_ff_prod_primary "${CONFIG_FF_OTA_SIGNING_PUBKEY_PRIMARY_PEM}")
+        set(_ff_prod_secondary "${CONFIG_FF_OTA_SIGNING_PUBKEY_SECONDARY_PEM}")
+        target_compile_definitions(${COMPONENT_LIB} PRIVATE FF_OTA_KCONFIG_PUBKEYS_VALID=1)
+    else()
+        message(FATAL_ERROR "FF_OTA_PRODUCTION_BUILD requires both primary and secondary production signing public key PEMs via FF_OTA_SIGNING_PUBKEY_{PRIMARY,SECONDARY}_FILE (EMBED_TXTFILES) or non-empty CONFIG_FF_OTA_SIGNING_PUBKEY_{PRIMARY,SECONDARY}_PEM")
+    endif()
+    foreach(_pem_slot _ff_prod_primary _ff_prod_secondary)
+        set(_pem_val "${${_pem_slot}}")
+        if(NOT _pem_val MATCHES "-----BEGIN PUBLIC KEY-----")
+            message(FATAL_ERROR "FF_OTA_PRODUCTION_BUILD slot ${_pem_slot} must contain a PEM SubjectPublicKeyInfo public key")
+        endif()
+        if(_pem_val MATCHES "bHg1tVC28a9y8SbZY0jis7OKKWxr" OR _pem_val MATCHES "wJct9NbOiOIbnB/ToYTvq02EBrzs")
+            message(FATAL_ERROR "FF_OTA_PRODUCTION_BUILD refuses committed development signing keys in ${_pem_slot}")
+        endif()
+    endforeach()
 endif()

@@ -767,9 +767,9 @@ class StageRunner:
     broken_marker: str | None = None
     # An image whose version carries this fails its registered self-test (R5-be-1).
     selftest_fail_marker: str | None = None
-    # R6-SEC-1 / R6-SEC-2: require `artifact.sig` (`True`) or verify when present (`False`),
-    # against the 2-key public key rotation ring.
-    require_signature: bool = False
+    # R6-SEC-1 / R6-SEC-2 / D-26: require `artifact.sig` (`True`), verify when present (`False`),
+    # or derive from `"sig" in self.identity.capabilities` when `None` (default), matching `ff_identity.c`.
+    require_signature: bool | None = None
     signing_pubkey_ring: tuple[str, ...] = DEFAULT_SIGNING_PUBKEY_RING
     # R6-FW-1: HTTP Range resume retries and initial backoff on mid-stream download errors.
     download_retries: int = 3
@@ -826,6 +826,8 @@ class StageRunner:
                 "an image can fail a self-test only if one is registered: "
                 f"add --capabilities {CAPABILITY_SELFTEST}"
             )
+        if self.require_signature is None:
+            self.require_signature = "sig" in self.identity.capabilities
         self._offline_telemetry = TelemetryBuffer(clock=self.clock)
 
     def set_offline_mode(self, offline: bool) -> None:

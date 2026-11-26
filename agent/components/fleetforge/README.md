@@ -237,7 +237,7 @@ Copy `Basic.ino`, `partitions.csv` and `platformio.ini` from the example (see
 symlink described there, or, without a clone, this line in `platformio.ini`:
 
 ```ini
-lib_deps = Fleetforge=https://github.com/tvaroska/fleetforge.git#v0.6.0
+lib_deps = Fleetforge=https://github.com/tvaroska/fleetforge.git#v0.7.0
 ```
 
 PlatformIO finds the library in the repository's `agent/components/fleetforge` folder. Pin a
@@ -270,7 +270,7 @@ The library does not compile without `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE` (st
 
 ## Version and marker
 
-The library version is `0.6.0`, one number in `agent/version.txt`, `library.json` and
+The library version is `0.7.0`, one number in `agent/version.txt`, `library.json` and
 `src/ff_lib_version.h`. Every image that calls the library carries a 64-byte library marker.
 The server records it at upload, and a build without one needs an explicit override
 (`no_library_marker`) before it deploys. Both Arduino and ESP-IDF builds report the library's

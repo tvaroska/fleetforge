@@ -51,6 +51,7 @@ static volatile uint32_t s_target_rev;
 static volatile uint32_t s_failed_rev;
 static volatile uint32_t s_retry_rounds;
 static volatile bool s_sync_in_flight;
+static portMUX_TYPE s_sec_lock = portMUX_INITIALIZER_UNLOCKED;
 static esp_timer_handle_t s_retry_timer;
 
 static void start_sync_task(void);
@@ -111,14 +112,17 @@ esp_err_t ff_get_secret(const char *key, char *out, size_t cap)
 static void secrets_retry_timer_cb(void *arg)
 {
     (void)arg;
-    if (s_sync_in_flight || s_local_rev >= s_target_rev) {
-        return;
+    bool should_start = false;
+    portENTER_CRITICAL(&s_sec_lock);
+    if (!s_sync_in_flight && s_local_rev < s_target_rev &&
+        s_retry_rounds < SECRETS_MAX_RETRY_ROUNDS) {
+        s_retry_rounds++;
+        should_start = true;
     }
-    if (s_retry_rounds >= SECRETS_MAX_RETRY_ROUNDS) {
-        return;
+    portEXIT_CRITICAL(&s_sec_lock);
+    if (should_start) {
+        start_sync_task();
     }
-    s_retry_rounds++;
-    start_sync_task();
 }
 
 static void schedule_periodic_retry(void)
@@ -253,20 +257,29 @@ static void free_scratch(secrets_scratch_t *scratch)
     }
 }
 
+static void clear_sync_in_flight(bool failed)
+{
+    portENTER_CRITICAL(&s_sec_lock);
+    if (failed) {
+        s_failed_rev = s_target_rev;
+    }
+    s_sync_in_flight = false;
+    portEXIT_CRITICAL(&s_sec_lock);
+}
+
 static void secrets_sync_task(void *arg)
 {
     (void)arg;
     if (s_cfg == NULL || s_cred == NULL || s_cfg->api_base[0] == '\0' ||
         s_cred->device_id[0] == '\0' || s_cred->mqtt_pass[0] == '\0') {
-        s_sync_in_flight = false;
+        clear_sync_in_flight(true);
         vTaskDelete(NULL);
         return;
     }
 
     secrets_scratch_t *scratch = calloc(1, sizeof(*scratch));
     if (scratch == NULL) {
-        s_failed_rev = s_target_rev;
-        s_sync_in_flight = false;
+        clear_sync_in_flight(true);
         schedule_periodic_retry();
         vTaskDelete(NULL);
         return;
@@ -277,7 +290,7 @@ static void secrets_sync_task(void *arg)
     if (written < 0 || (size_t)written >= sizeof(scratch->url)) {
         ESP_LOGE(TAG, "api_base too long for device-secrets URL");
         free_scratch(scratch);
-        s_sync_in_flight = false;
+        clear_sync_in_flight(true);
         vTaskDelete(NULL);
         return;
     }
@@ -289,7 +302,7 @@ static void secrets_sync_task(void *arg)
         mbedtls_base64_encode(scratch->b64, sizeof(scratch->b64) - 1, &b64_len,
                               (const unsigned char *)scratch->raw_cred, (size_t)cred_len) != 0) {
         free_scratch(scratch);
-        s_sync_in_flight = false;
+        clear_sync_in_flight(true);
         vTaskDelete(NULL);
         return;
     }
@@ -310,7 +323,7 @@ static void secrets_sync_task(void *arg)
     esp_http_client_handle_t client = esp_http_client_init(&config);
     if (client == NULL) {
         free_scratch(scratch);
-        s_sync_in_flight = false;
+        clear_sync_in_flight(true);
         schedule_periodic_retry();
         vTaskDelete(NULL);
         return;
@@ -407,7 +420,7 @@ done:
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
     free_scratch(scratch);
-    s_sync_in_flight = false;
+    clear_sync_in_flight(false);
     if (s_local_rev < s_target_rev) {
         schedule_periodic_retry();
     }
@@ -416,14 +429,20 @@ done:
 
 static void start_sync_task(void)
 {
-    if (s_sync_in_flight) {
+    bool claimed = false;
+    portENTER_CRITICAL(&s_sec_lock);
+    if (!s_sync_in_flight) {
+        s_sync_in_flight = true;
+        claimed = true;
+    }
+    portEXIT_CRITICAL(&s_sec_lock);
+    if (!claimed) {
         return;
     }
-    s_sync_in_flight = true;
     if (xTaskCreate(secrets_sync_task, "ff_sec", SECRETS_TASK_STACK, NULL, SECRETS_TASK_PRIO,
                     NULL) != pdPASS) {
         ESP_LOGE(TAG, "cannot start secrets sync task");
-        s_sync_in_flight = false;
+        clear_sync_in_flight(true);
         schedule_periodic_retry();
     }
 }

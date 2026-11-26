@@ -2644,3 +2644,59 @@ async def test_the_window_worker_keeps_running_while_nothing_waits(tmp_path: Pat
             timeout=3 * SAFE_WINDOW_POLL_S,
         )
     assert not stage.reboot.is_set()
+
+
+def test_the_simulated_board_announces_no_capability_the_firmware_lacks() -> None:
+    """D-21: simulator defaults must only announce capabilities implemented in `ff_identity.c`."""
+    identity_c = (
+        Path(__file__).resolve().parents[1]
+        / "agent"
+        / "components"
+        / "fleetforge"
+        / "src"
+        / "ff_identity.c"
+    ).read_text(encoding="utf-8")
+    firmware_caps = set(
+        re.findall(
+            r'cJSON_AddItemToArray\(capabilities,\s*cJSON_CreateString\("([^"]+)"\)\)',
+            identity_c,
+        )
+    )
+    assert {
+        "ota",
+        "apply",
+        "cancel",
+        "rollback",
+        "reboot",
+        "selftest",
+        "safe_window",
+        "sig",
+    } <= firmware_caps
+    assert "delta" not in firmware_caps
+    assert "edge_relay" not in firmware_caps
+
+    default_identity = sim_device.DeviceIdentity(device_id=SIM_ID, fw_version="0.7.0")
+    announced = set(default_identity.capabilities)
+    assert announced <= firmware_caps, (
+        f"simulated board announces capabilities missing from firmware: {sorted(announced - firmware_caps)}"
+    )
+    assert "delta" not in announced
+    assert "edge_relay" not in announced
+
+
+def test_stage_runner_derives_require_signature_from_sig_capability() -> None:
+    """D-26: when omitted, `StageRunner.require_signature` matches `'sig' in capabilities`."""
+    signed_id = sim_device.DeviceIdentity(
+        device_id=SIM_ID, fw_version="0.7.0", capabilities=("ota", "sig")
+    )
+    unsigned_id = sim_device.DeviceIdentity(
+        device_id=SIM_ID, fw_version="0.7.0", capabilities=("ota",)
+    )
+    assert StageRunner(identity=signed_id, link=LinkProfile(LINK_FAST)).require_signature is True
+    assert StageRunner(identity=unsigned_id, link=LinkProfile(LINK_FAST)).require_signature is False
+    assert (
+        StageRunner(
+            identity=signed_id, link=LinkProfile(LINK_FAST), require_signature=False
+        ).require_signature
+        is False
+    )
