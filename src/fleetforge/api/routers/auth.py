@@ -39,15 +39,6 @@ from fleetforge.api.deps import (
     now_utc,
     token_cache,
 )
-from fleetforge.api.routers.auth_tokens import (
-    create_admin_token as create_admin_token,
-)
-from fleetforge.api.routers.auth_tokens import (
-    list_admin_tokens as list_admin_tokens,
-)
-from fleetforge.api.routers.auth_tokens import (
-    revoke_admin_token as revoke_admin_token,
-)
 from fleetforge.api.schemas import (
     PROJECT_SLUG_PATTERN,
     FirebaseLoginRequest,

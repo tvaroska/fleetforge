@@ -19,7 +19,7 @@ from sqlalchemy.exc import OperationalError
 from fleetforge import __version__
 from fleetforge.config import Settings, get_settings
 from fleetforge.db.base import get_sessionmaker
-from tests.conftest import client_for, settings_for_tests
+from tests.conftest import FakeCommandPublisher, client_for, settings_for_tests
 
 
 def deployable_settings(**overrides: object) -> Settings:
@@ -83,7 +83,11 @@ async def test_readyz_ok(app_with_db: FastAPI) -> None:
     async with client_for(app_with_db) as client:
         response = await client.get("/v1/readyz")
     assert response.status_code == 200
-    assert response.json() == {"status": "ready"}
+    assert response.json() == {
+        "status": "ready",
+        "build_backend": "docker",
+        "sim_backend": "qemu",
+    }
 
 
 async def test_readyz_is_503_when_database_is_unreachable(app_no_db: FastAPI) -> None:
@@ -336,14 +340,8 @@ async def test_lifespan_with_settings_starts_and_dispatches_device_events(
         async def run(self) -> None:
             await asyncio.Event().wait()
 
-    published: list[tuple[str, dict[str, Any]]] = []
-
-    class RecordingPublisher:
-        async def publish(self, device_id: str, payload: dict[str, Any]) -> None:
-            published.append((device_id, payload))
-
-        async def publish_many(self, items: Any) -> None:
-            published.extend(items)
+    publisher = FakeCommandPublisher()
+    published = publisher.published
 
     settings = deployable_settings(
         artifact_signing_key=priv_pem,
@@ -352,7 +350,7 @@ async def test_lifespan_with_settings_starts_and_dispatches_device_events(
     )
     app = create_app(settings_override=settings, listener_factory=FakeListener)
     app.dependency_overrides[get_sessionmaker] = lambda: sessionmaker
-    app.dependency_overrides[get_command_publisher] = lambda: RecordingPublisher()
+    app.dependency_overrides[get_command_publisher] = lambda: publisher
 
     async with app.router.lifespan_context(app):
         assert len(captured_on_event) == 1

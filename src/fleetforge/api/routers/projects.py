@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from fleetforge.api.deps import (
     FORBIDDEN,
     AdminDep,
+    AuthContext,
     CommandPublisherDep,
     SessionMakerDep,
     SettingsDep,
@@ -23,10 +24,9 @@ from fleetforge.api.deps import (
     now_utc,
     resolve_project_for_request,
 )
-from fleetforge.api.routers.deploys import _sender
+from fleetforge.api.router_helpers import resolve_deploy_sender as _sender
 from fleetforge.api.schemas import (
     PROJECT_SLUG_PATTERN,
-    SECRET_KEY_PATTERN,
     USERNAME_PATTERN,
     CommandAccepted,
     ProjectCreate,
@@ -38,16 +38,12 @@ from fleetforge.api.schemas import (
     ProjectMemberList,
     ProjectMemberSummary,
     ProjectMemberUpsert,
-    ProjectSecretList,
-    ProjectSecretSummary,
-    ProjectSecretUpsert,
     ProjectSummary,
     ProjectUpdate,
 )
 from fleetforge.broker import (
     CommandPublisher,
     CommandPublishError,
-    cfg_payload,
     new_command_id,
     verb_payload,
 )
@@ -60,18 +56,18 @@ from fleetforge.db.models import (
     Project,
     ProjectMember,
     ProjectRole,
-    ProjectSecret,
     User,
 )
+from fleetforge.deploy_urls import ArtifactUrlNotConfiguredError
 from fleetforge.deploys import latest_deploys
 from fleetforge.device_commands import mark_publish_failed, record_sent
-from fleetforge.ingestor.otel import invalidate_project_otel_cache
 from fleetforge.presence import is_online
 from fleetforge.rollout import (
     close_matching_rollouts,
     deploy_version_to_project_devices,
     matches_project_tracking,
 )
+from fleetforge.rollout_types import RolloutBrokerError, RolloutValidationError
 from fleetforge.secrets_crypto import decrypt_secret, encrypt_secret
 from fleetforge.url_safety import (
     public_https_transport,
@@ -101,9 +97,9 @@ def _project_summary(
         description=proj.description,
         role=role,
         repo_url=proj.repo_url,
-        track_mode=proj.track_mode,
+        track_mode=proj.track_mode,  # type: ignore[arg-type]
         track_ref=proj.track_ref,
-        auto_deploy_target=proj.auto_deploy_target,
+        auto_deploy_target=proj.auto_deploy_target,  # type: ignore[arg-type]
         ci_webhook_url=proj.ci_webhook_url,
         has_ci_webhook_header=bool(proj.ci_webhook_header),
         secrets_rev=proj.secrets_rev,
@@ -244,6 +240,85 @@ async def _trigger_ci_webhook(proj: Project, settings: Settings | None = None) -
         return False
 
 
+def _apply_project_patch_fields(
+    proj: Project,
+    body: ProjectUpdate,
+    fields: set[str],
+    settings: Settings,
+) -> None:
+    """Apply non-null/nullable patch fields onto `proj` in one place (`A-32`)."""
+    for attr in ("name", "track_mode", "auto_deploy_target"):
+        if attr in fields:
+            val = getattr(body, attr)
+            if val is not None:
+                setattr(proj, attr, val)
+    for attr in ("description", "repo_url", "track_ref", "ci_webhook_url", "otel_endpoint"):
+        if attr in fields:
+            setattr(proj, attr, getattr(body, attr))
+    if "ci_webhook_header" in fields:
+        proj.ci_webhook_header = (
+            encrypt_secret(body.ci_webhook_header, settings) if body.ci_webhook_header else None
+        )
+    if "otel_headers" in fields:
+        proj.otel_headers = (
+            encrypt_secret(body.otel_headers, settings) if body.otel_headers else None
+        )
+    proj.updated_at = now_utc()
+
+
+async def _trigger_cd_after_update(
+    session: AsyncSession,
+    *,
+    proj: Project,
+    admin: AuthContext,
+    settings: Settings,
+    publisher: CommandPublisher,
+) -> tuple[list[str] | None, bool | None]:
+    """Deploy matching artifacts or dispatch the project CI webhook after a CD tracking update."""
+    versions = (
+        await session.scalars(
+            select(ArtifactVersion)
+            .where(ArtifactVersion.project_id == proj.id)
+            .order_by(ArtifactVersion.created_at.desc())
+        )
+    ).all()
+    matched_by_target: dict[str, str] = {}
+    for ver in versions:
+        if ver.target in matched_by_target:
+            continue
+        if matches_project_tracking(
+            proj,
+            repo_url=ver.repo_url,
+            branch=ver.branch,
+            commit_sha=ver.commit_sha,
+            tag=ver.tag,
+            test_passed=ver.test_passed,
+        ):
+            matched_by_target[ver.target] = ver.version
+
+    if matched_by_target:
+        deployed_ids: list[str] = []
+        for target_chip, ver_str in matched_by_target.items():
+            deployed_list, _ = await deploy_version_to_project_devices(
+                session,
+                project_id=proj.id,
+                version=ver_str,
+                target_filter=proj.auto_deploy_target,
+                apply="auto",
+                override=(),
+                admin=admin,
+                settings=settings,
+                publisher=publisher,
+                target_chip=target_chip,
+                best_effort_broker=True,
+            )
+            deployed_ids.extend(d.device_id for d in deployed_list)
+        return deployed_ids, None
+    if proj.ci_webhook_url:
+        return None, await _trigger_ci_webhook(proj, settings=settings)
+    return None, None
+
+
 @router.patch(
     "/{slug}",
     response_model=ProjectSummary,
@@ -275,34 +350,8 @@ async def update_project(
             min_role=ProjectRole.OWNER if admin_fields_changed else ProjectRole.OPERATOR,
             required_scope="admin" if admin_fields_changed else "deploy",
         )
-        if "name" in fields and body.name is not None:
-            proj.name = body.name
-        if "description" in fields:
-            proj.description = body.description
-        if "repo_url" in fields:
-            proj.repo_url = body.repo_url
-        if "track_mode" in fields and body.track_mode is not None:
-            proj.track_mode = body.track_mode
-        if "track_ref" in fields:
-            proj.track_ref = body.track_ref
-        if "auto_deploy_target" in fields and body.auto_deploy_target is not None:
-            proj.auto_deploy_target = body.auto_deploy_target
-        if "ci_webhook_url" in fields:
-            proj.ci_webhook_url = body.ci_webhook_url
-        if "ci_webhook_header" in fields:
-            proj.ci_webhook_header = (
-                encrypt_secret(body.ci_webhook_header, settings) if body.ci_webhook_header else None
-            )
-        if "otel_endpoint" in fields:
-            proj.otel_endpoint = body.otel_endpoint
-        if "otel_headers" in fields:
-            proj.otel_headers = (
-                encrypt_secret(body.otel_headers, settings) if body.otel_headers else None
-            )
-        proj.updated_at = now_utc()
+        _apply_project_patch_fields(proj, body, fields, settings)
         await session.commit()
-        if "otel_endpoint" in fields or "otel_headers" in fields:
-            invalidate_project_otel_cache(proj.id)
 
         auto_deployed: list[str] | None = None
         webhook_triggered: bool | None = None
@@ -312,47 +361,18 @@ async def update_project(
             and proj.auto_deploy_target in ("dev", "all")
             and proj.track_ref
         ):
-            versions = (
-                await session.scalars(
-                    select(ArtifactVersion)
-                    .where(ArtifactVersion.project_id == proj.id)
-                    .order_by(ArtifactVersion.created_at.desc())
+            try:
+                auto_deployed, webhook_triggered = await _trigger_cd_after_update(
+                    session, proj=proj, admin=admin, settings=settings, publisher=publisher
                 )
-            ).all()
-            matched_by_target: dict[str, str] = {}
-            for ver in versions:
-                if ver.target in matched_by_target:
-                    continue
-                if matches_project_tracking(
-                    proj,
-                    repo_url=ver.repo_url,
-                    branch=ver.branch,
-                    commit_sha=ver.commit_sha,
-                    tag=ver.tag,
-                    test_passed=ver.test_passed,
-                ):
-                    matched_by_target[ver.target] = ver.version
-
-            if matched_by_target:
-                deployed_ids: list[str] = []
-                for target_chip, ver_str in matched_by_target.items():
-                    deployed_list, _ = await deploy_version_to_project_devices(
-                        session,
-                        project_id=proj.id,
-                        version=ver_str,
-                        target_filter=proj.auto_deploy_target,
-                        apply="auto",
-                        override=(),
-                        admin=admin,
-                        settings=settings,
-                        publisher=publisher,
-                        target_chip=target_chip,
-                        best_effort_broker=True,
-                    )
-                    deployed_ids.extend(d.device_id for d in deployed_list)
-                auto_deployed = deployed_ids
-            elif proj.ci_webhook_url:
-                webhook_triggered = await _trigger_ci_webhook(proj, settings=settings)
+            except RolloutValidationError as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)
+                ) from None
+            except (RolloutBrokerError, ArtifactUrlNotConfiguredError) as exc:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+                ) from None
 
         return _project_summary(
             proj,
@@ -386,21 +406,28 @@ async def deploy_project(
             min_role=ProjectRole.OPERATOR,
             required_scope="deploy",
         )
-        deployed, skipped = await deploy_version_to_project_devices(
-            session,
-            project_id=proj.id,
-            version=body.version,
-            target_filter=body.target_filter,
-            apply=body.apply,
-            override=body.override,
-            admin=admin,
-            settings=settings,
-            publisher=publisher,
-            group_id=body.group_id,
-            best_effort_broker=False,
-            canary=body.canary,
-            max_parallel=body.max_parallel,
-        )
+        try:
+            deployed, skipped = await deploy_version_to_project_devices(
+                session,
+                project_id=proj.id,
+                version=body.version,
+                target_filter=body.target_filter,
+                apply=body.apply,
+                override=body.override,
+                admin=admin,
+                settings=settings,
+                publisher=publisher,
+                group_id=body.group_id,
+                best_effort_broker=False,
+                canary=body.canary,
+                max_parallel=body.max_parallel,
+            )
+        except RolloutValidationError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from None
+        except (RolloutBrokerError, ArtifactUrlNotConfiguredError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+            ) from None
 
     return ProjectDeployAccepted(
         project=slug,
@@ -421,6 +448,59 @@ _PRE_APPLY_CANCEL_STATES = frozenset(
         DeployState.AWAITING_SAFE_WINDOW.value,
     }
 )
+
+
+def _cancel_skip_reason(
+    device: Device,
+    snap: object,
+    version: str | None,
+) -> str | None:
+    """Return why `device` cannot be cohort-cancelled, or `None` if eligible."""
+    if snap is None or getattr(snap, "is_terminal", True) or getattr(snap, "cmd_id", None) is None:
+        return "no in-flight transaction"
+    artifact_version = getattr(snap, "artifact_version", None)
+    if version is not None and artifact_version != version:
+        return f"in-flight version is {artifact_version}, not {version}"
+    state = getattr(snap, "state", None)
+    if state not in _PRE_APPLY_CANCEL_STATES:
+        return f"transaction is at {state}, past the pre-apply cancel window"
+    if CommandType.CANCEL.value not in (device.capabilities or ()):
+        return "device does not announce cancel capability"
+    return None
+
+
+async def _publish_cohort_cancels(
+    session: AsyncSession,
+    *,
+    publisher: CommandPublisher,
+    pending_publishes: list[tuple[Device, str, str, bool]],
+    skipped: dict[str, str],
+) -> list[CommandAccepted]:
+    cancelled: list[CommandAccepted] = []
+    for device, command_id, cmd_id, online in pending_publishes:
+        payload = verb_payload(command_id=command_id, type=CommandType.CANCEL, cmd_id=cmd_id)
+        try:
+            await publisher.publish(device.device_id, payload)
+        except CommandPublishError:
+            logger.exception(
+                "cohort cancel %s for %s could not be published",
+                command_id,
+                device.device_id,
+            )
+            await mark_publish_failed(session, command_id=command_id)
+            await session.commit()
+            skipped[device.device_id] = "broker publish failed"
+            continue
+        cancelled.append(
+            CommandAccepted(
+                command_id=command_id,
+                device_id=device.device_id,
+                type=CommandType.CANCEL.value,
+                cmd_id=cmd_id,
+                device_online=online,
+            )
+        )
+    return cancelled
 
 
 @router.post(
@@ -469,23 +549,10 @@ async def cancel_project_deploy(
         pending_publishes: list[tuple[Device, str, str, bool]] = []
         for device in devices:
             snap = snapshots.get(device.device_id)
-            if snap is None or snap.is_terminal or snap.cmd_id is None:
-                skipped[device.device_id] = "no in-flight transaction"
+            reason = _cancel_skip_reason(device, snap, body.version)
+            if reason is not None or snap is None or snap.cmd_id is None:
+                skipped[device.device_id] = reason or "no in-flight transaction"
                 continue
-            if body.version is not None and snap.artifact_version != body.version:
-                skipped[device.device_id] = (
-                    f"in-flight version is {snap.artifact_version}, not {body.version}"
-                )
-                continue
-            if snap.state not in _PRE_APPLY_CANCEL_STATES:
-                skipped[device.device_id] = (
-                    f"transaction is at {snap.state}, past the pre-apply cancel window"
-                )
-                continue
-            if CommandType.CANCEL.value not in (device.capabilities or ()):
-                skipped[device.device_id] = "device does not announce cancel capability"
-                continue
-
             command_id = new_command_id()
             await record_sent(
                 session,
@@ -514,35 +581,9 @@ async def cancel_project_deploy(
             return ProjectDeployCancelAccepted(project=slug, cancelled=[], skipped=skipped)
 
         await session.commit()
-
-        cancelled: list[CommandAccepted] = []
-        for device, command_id, cmd_id, online in pending_publishes:
-            payload = verb_payload(
-                command_id=command_id,
-                type=CommandType.CANCEL,
-                cmd_id=cmd_id,
-            )
-            try:
-                await publisher.publish(device.device_id, payload)
-            except CommandPublishError:
-                logger.exception(
-                    "cohort cancel %s for %s could not be published",
-                    command_id,
-                    device.device_id,
-                )
-                await mark_publish_failed(session, command_id=command_id)
-                await session.commit()
-                skipped[device.device_id] = "broker publish failed"
-                continue
-            cancelled.append(
-                CommandAccepted(
-                    command_id=command_id,
-                    device_id=device.device_id,
-                    type=CommandType.CANCEL.value,
-                    cmd_id=cmd_id,
-                    device_online=online,
-                )
-            )
+        cancelled = await _publish_cohort_cancels(
+            session, publisher=publisher, pending_publishes=pending_publishes, skipped=skipped
+        )
 
     return ProjectDeployCancelAccepted(
         project=slug,
@@ -654,7 +695,7 @@ async def upsert_project_member(
         display_name=user.display_name,
         email=user.email,
         is_superadmin=user.is_superadmin,
-        role=member.role,
+        role=member.role,  # type: ignore[arg-type]
         created_at=member.created_at,
     )
 
@@ -696,164 +737,3 @@ async def remove_project_member(
             )
         await session.delete(existing)
         await session.commit()
-
-
-async def _publish_project_cfg(
-    sessionmaker: SessionMakerDep,
-    publisher: CommandPublisher,
-    project_id: object,
-    secrets_rev: int,
-) -> None:
-    """Best-effort publish retained `dn/cfg` to all active boards in `project_id`."""
-    async with sessionmaker() as session:
-        devices = (
-            await session.scalars(
-                select(Device).where(
-                    Device.project_id == project_id,
-                    Device.decommissioned_at.is_(None),
-                )
-            )
-        ).all()
-    if not devices:
-        return
-    items = [
-        (
-            dev.device_id,
-            cfg_payload(secrets_rev=secrets_rev, stay_awake=dev.stay_awake),
-        )
-        for dev in devices
-    ]
-    try:
-        await publisher.publish_cfg_many(items)
-    except CommandPublishError:
-        for dev_id, payload in items:
-            try:
-                await publisher.publish_cfg(dev_id, payload)
-            except CommandPublishError:
-                logger.warning(
-                    "dn/cfg publish skipped or failed for %s (secrets_rev=%d)",
-                    dev_id,
-                    secrets_rev,
-                )
-
-
-async def _project_secret_list(session: AsyncSession, proj: Project) -> ProjectSecretList:
-    rows = (
-        await session.scalars(
-            select(ProjectSecret)
-            .where(ProjectSecret.project_id == proj.id)
-            .order_by(ProjectSecret.key)
-        )
-    ).all()
-    return ProjectSecretList(
-        secrets_rev=proj.secrets_rev,
-        secrets=[ProjectSecretSummary(key=r.key, updated_at=r.updated_at) for r in rows],
-    )
-
-
-@router.get(
-    "/{slug}/secrets",
-    response_model=ProjectSecretList,
-    summary="List rotating secret keys configured on a project (values are never returned)",
-)
-async def list_project_secrets(
-    slug: str = Path(pattern=PROJECT_SLUG_PATTERN),
-    *,
-    admin: AdminDep,
-    sessionmaker: SessionMakerDep,
-) -> ProjectSecretList:
-    """List secret keys and timestamps on `slug` (requires project `viewer` or higher)."""
-    async with sessionmaker() as session:
-        proj = await resolve_project_for_request(
-            session, admin, slug, min_role=ProjectRole.VIEWER, required_scope="read"
-        )
-        return await _project_secret_list(session, proj)
-
-
-@router.put(
-    "/{slug}/secrets/{key}",
-    response_model=ProjectSecretList,
-    summary="Create or rotate a project secret and broadcast the bumped secrets_rev on dn/cfg",
-)
-async def upsert_project_secret(
-    slug: str = Path(pattern=PROJECT_SLUG_PATTERN),
-    key: str = Path(pattern=SECRET_KEY_PATTERN),
-    *,
-    body: ProjectSecretUpsert,
-    admin: AdminDep,
-    settings: SettingsDep,
-    sessionmaker: SessionMakerDep,
-    publisher: CommandPublisherDep,
-) -> ProjectSecretList:
-    """Encrypt and store `key` on `slug`, bump `secrets_rev`, and publish retained `dn/cfg`."""
-    async with sessionmaker() as session:
-        proj = await resolve_project_for_request(
-            session,
-            admin,
-            slug,
-            min_role=ProjectRole.OPERATOR,
-            required_scope="deploy",
-        )
-        now = now_utc()
-        ciphertext = encrypt_secret(body.value, settings)
-        existing = await session.get(ProjectSecret, (proj.id, key))
-        if existing is not None:
-            existing.ciphertext = ciphertext
-            existing.updated_at = now
-        else:
-            session.add(
-                ProjectSecret(
-                    project_id=proj.id,
-                    key=key,
-                    ciphertext=ciphertext,
-                    updated_at=now,
-                )
-            )
-        proj.secrets_rev = (proj.secrets_rev or 0) + 1
-        proj.updated_at = now
-        await session.commit()
-        rev, pid = proj.secrets_rev, proj.id
-        summary = await _project_secret_list(session, proj)
-
-    await _publish_project_cfg(sessionmaker, publisher, pid, rev)
-    return summary
-
-
-@router.delete(
-    "/{slug}/secrets/{key}",
-    response_model=ProjectSecretList,
-    summary="Delete a project secret and broadcast the bumped secrets_rev on dn/cfg",
-)
-async def delete_project_secret(
-    slug: str = Path(pattern=PROJECT_SLUG_PATTERN),
-    key: str = Path(pattern=SECRET_KEY_PATTERN),
-    *,
-    admin: AdminDep,
-    sessionmaker: SessionMakerDep,
-    publisher: CommandPublisherDep,
-) -> ProjectSecretList:
-    """Remove `key` from `slug`, bump `secrets_rev`, and publish retained `dn/cfg`."""
-    async with sessionmaker() as session:
-        proj = await resolve_project_for_request(
-            session,
-            admin,
-            slug,
-            min_role=ProjectRole.OPERATOR,
-            required_scope="deploy",
-        )
-        existing = await session.get(ProjectSecret, (proj.id, key))
-        if existing is None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"secret {key!r} not found in project {slug!r}",
-            )
-        now = now_utc()
-        await session.delete(existing)
-        proj.secrets_rev = (proj.secrets_rev or 0) + 1
-        proj.updated_at = now
-        await session.commit()
-        rev, pid = proj.secrets_rev, proj.id
-        summary = await _project_secret_list(session, proj)
-
-    await _publish_project_cfg(sessionmaker, publisher, pid, rev)
-    return summary

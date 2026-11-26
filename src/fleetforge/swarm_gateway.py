@@ -10,6 +10,7 @@ Provides:
 
 from __future__ import annotations
 
+import datetime as dt
 import urllib.parse
 import uuid
 from collections.abc import Callable
@@ -18,8 +19,10 @@ from typing import Any
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from fleetforge.clock import now_utc
 from fleetforge.config import Settings
 from fleetforge.db.models import ArtifactDelta, Device, GatewayRelayState
+from fleetforge.presence import is_online
 
 _FROM_VERSION_SHA_SQL = text(
     """
@@ -52,8 +55,10 @@ async def resolve_parent_relay_url(
     *,
     device: Device,
     needed_sha256: str,
+    now: dt.datetime | None = None,
+    presence_tolerance: float = 2.5,
 ) -> str | None:
-    """Return the parent UGV gateway's `relay_base_url` when `device` routes via a live parent."""
+    """Return the parent UGV gateway's `relay_base_url` when the parent is live and online."""
     parent_id = device.parent_device_id
     if not parent_id:
         return None
@@ -63,6 +68,8 @@ async def resolve_parent_relay_url(
         or parent.decommissioned_at is not None
         or parent.project_id != device.project_id
     ):
+        return None
+    if not is_online(parent, now=now or now_utc(), tolerance=presence_tolerance):
         return None
     relay = await session.get(GatewayRelayState, parent_id)
     if not isinstance(relay, GatewayRelayState):
@@ -119,7 +126,14 @@ async def build_stage_urls_and_delta(
     supports_relay_kwarg: bool = True,
 ) -> tuple[str, dict[str, Any] | None]:
     """Mint `(stage_url, optional_delta_dict)` routing via parent UGV relay when present."""
-    relay_url = await resolve_parent_relay_url(session, device=device, needed_sha256=sha256)
+    check_now = now_utc()
+    relay_url = await resolve_parent_relay_url(
+        session,
+        device=device,
+        needed_sha256=sha256,
+        now=check_now,
+        presence_tolerance=settings.presence_tolerance,
+    )
     url = (
         mint_url(sha256, settings, ttl_s=ttl_s, device=device, relay_base_url=relay_url)
         if supports_relay_kwarg
@@ -135,7 +149,11 @@ async def build_stage_urls_and_delta(
         return url, None
 
     delta_relay = await resolve_parent_relay_url(
-        session, device=device, needed_sha256=delta_row.patch_sha256
+        session,
+        device=device,
+        needed_sha256=delta_row.patch_sha256,
+        now=check_now,
+        presence_tolerance=settings.presence_tolerance,
     )
     delta_url = (
         mint_url(

@@ -29,6 +29,7 @@ from fleetforge.api.deps import (
     cookie_scheme,
     resolve_project_for_request,
 )
+from fleetforge.api.router_helpers import command_summary as command_summary
 from fleetforge.api.schemas import (
     PROJECT_SLUG_PATTERN,
     ArrivalSummary,
@@ -54,11 +55,11 @@ from fleetforge.broker import BrokerProvisioningError, CommandPublishError, cfg_
 from fleetforge.clock import now_utc
 from fleetforge.db.models import Device, DeviceGroup, Project, ProjectRole
 from fleetforge.deploys import DeploySnapshot, latest_deploys
-from fleetforge.device_commands import CommandSnapshot, latest_commands
+from fleetforge.device_commands import latest_commands
 from fleetforge.device_logs import read_tail
 from fleetforge.events import DeviceEvent, EventType, emit
 from fleetforge.faults import fault_counts
-from fleetforge.ingestor.handlers import handle_up_message
+from fleetforge.ingest.handlers import handle_up_message
 from fleetforge.presence import is_online
 from fleetforge.progress import has_already_arrived, latest_progress
 from fleetforge.retention import LOG_MAX_LINES_PER_DEVICE
@@ -167,26 +168,6 @@ def _deploy_summary(
             if snapshot.selftest is not None
             else None
         ),
-    )
-
-
-def command_summary(snapshot: CommandSnapshot | None) -> CommandSummary | None:
-    """A board's newest command and its first answer, or `None` (R5-be-2). Field by field."""
-    if snapshot is None:
-        return None
-    return CommandSummary(
-        command_id=snapshot.command_id,
-        type=snapshot.type,
-        cmd_id=snapshot.cmd_id,
-        sent_at=snapshot.sent_at,
-        sent_by=(
-            DeploySender(subject=snapshot.sent_by.subject, credential=snapshot.sent_by.credential)
-            if snapshot.sent_by is not None
-            else None
-        ),
-        result=snapshot.result,
-        detail=snapshot.detail,
-        answered_at=snapshot.answered_at,
     )
 
 
@@ -754,7 +735,6 @@ async def dock_sync_device(
             retained=False,
             received_at=now,
             tolerance=settings.presence_tolerance,
-            settings=settings,
         )
 
         statuses_recorded = 0
@@ -766,7 +746,6 @@ async def dock_sync_device(
                 retained=False,
                 received_at=now,
                 tolerance=settings.presence_tolerance,
-                settings=settings,
             )
             if ev is not None:
                 statuses_recorded += 1
@@ -780,7 +759,6 @@ async def dock_sync_device(
                 retained=False,
                 received_at=now,
                 tolerance=settings.presence_tolerance,
-                settings=settings,
             )
             if ev is not None:
                 telemetry_batches_recorded += 1
@@ -794,7 +772,6 @@ async def dock_sync_device(
                 retained=False,
                 received_at=now,
                 tolerance=settings.presence_tolerance,
-                settings=settings,
             )
             if ev is not None:
                 log_batches_recorded += 1

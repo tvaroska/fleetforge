@@ -56,7 +56,6 @@ re-`put`-able; the reverse order would leave a row naming bytes that do not exis
 """
 
 import logging
-import re
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
@@ -89,9 +88,11 @@ from fleetforge.partition_profiles import (
     LayoutCatalog,
     load_layout_catalog,
 )
+from fleetforge.rollout_types import VERSION_PATTERN as VERSION_PATTERN
 from fleetforge.signing import SigningKeyRing, is_valid_sig_format
 from fleetforge.storage.blobs import digest_bytes, put_blob
 from fleetforge.storage.objectstore import ObjectStoreError
+from fleetforge.url_safety import validate_http_link_url
 
 logger = logging.getLogger(__name__)
 
@@ -100,12 +101,6 @@ router = APIRouter(
     tags=["artifacts"],
     dependencies=[Depends(bearer_scheme), Depends(cookie_scheme)],
 )
-
-# The label a human types. Bounded and **rejected, never normalised** (`identity.py`'s
-# rule): it travels into a `dn/cmd` JSON payload (`spec/device-protocol.md`) and a
-# dashboard list, so `1.5.0` and `1.5.0 ` must not become two spellings of one release.
-# No semver requirement — the vocabulary is the user's; a date or a CI number is fine.
-VERSION_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}\Z")
 
 # Read the body in chunks rather than one `await request.body()`, so the cap can be
 # enforced as the bytes arrive instead of after they are all in memory.
@@ -148,17 +143,20 @@ _LIST_SQL = text(
 _ARTIFACT_UPSERT_SQL = text(
     """
     INSERT INTO artifacts (
-        sha256, size_bytes, kind, artifact_type, target, partition_layout, has_lib_marker, sig
+        sha256, size_bytes, kind, artifact_type, target, partition_layout, has_lib_marker, sig,
+        sim_status
     )
     VALUES (
         :sha256, :size_bytes, :kind, :artifact_type, :target, :partition_layout,
-        :has_lib_marker, :sig
+        :has_lib_marker, :sig, :sim_status
     )
     ON CONFLICT (sha256) DO UPDATE
        SET has_lib_marker = COALESCE(artifacts.has_lib_marker, EXCLUDED.has_lib_marker),
-           sig = COALESCE(artifacts.sig, EXCLUDED.sig)
+           sig = COALESCE(artifacts.sig, EXCLUDED.sig),
+           sim_status = COALESCE(artifacts.sim_status, EXCLUDED.sim_status)
      WHERE artifacts.has_lib_marker IS NULL
         OR (artifacts.sig IS NULL AND EXCLUDED.sig IS NOT NULL)
+        OR (artifacts.sim_status IS NULL AND EXCLUDED.sim_status IS NOT NULL)
     """
 )
 
@@ -376,6 +374,10 @@ async def upload_artifact(
         bool,
         Query(description="Run pre-flight R9 simulation immediately on upload"),
     ] = False,
+    queue_simulation: Annotated[
+        bool,
+        Query(description="Queue pre-flight R9 simulation (`sim_status='pending'`) for sim_worker"),
+    ] = False,
 ) -> ArtifactUploaded:
     """Store an opaque firmware blob and label it `(target, version)`.
 
@@ -394,6 +396,13 @@ async def upload_artifact(
                 "'-', starting with a letter or digit"
             ),
         )
+    try:
+        if repo_url is not None:
+            repo_url = validate_http_link_url(repo_url, field_name="repo_url")
+        if build_url is not None:
+            build_url = validate_http_link_url(build_url, field_name="build_url")
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from None
 
     # Before the body: the limit is what the Content-Length check needs.
     async with sessionmaker() as session:
@@ -504,6 +513,10 @@ async def upload_artifact(
                 artifact_type=artifact_type,
             )
 
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtext(:sha256))"),
+            {"sha256": digest},
+        )
         try:
             await put_blob(store, data)
         except ObjectStoreError:
@@ -515,6 +528,15 @@ async def upload_artifact(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=STORE_UNAVAILABLE
             ) from None
 
+        initial_sim_status = (
+            "pending"
+            if (
+                not simulate
+                and artifact_type == "app"
+                and (queue_simulation or settings.auto_queue_simulation)
+            )
+            else None
+        )
         await session.execute(
             _ARTIFACT_UPSERT_SQL,
             {
@@ -526,6 +548,7 @@ async def upload_artifact(
                 "partition_layout": stored_layout,
                 "has_lib_marker": has_lib_marker,
                 "sig": verified_sig,
+                "sim_status": initial_sim_status,
             },
         )
         stored_blob = (await session.execute(_ARTIFACT_SELECT_SQL, {"sha256": digest})).one()

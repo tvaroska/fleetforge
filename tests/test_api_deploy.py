@@ -1708,8 +1708,9 @@ class TestNoSchedulerLivesHere:
         assert self._source("storage/urlcache.py").count("store.signed_url(") == 1
 
     def test_the_deploy_router_mints_exactly_one_url(self) -> None:
-        """And the mint has one call site too, for the same reason."""
-        assert self._source("api/routers/deploys.py").count("mint_artifact_url(") == 1
+        """And the mint has one call site too (`deploy_urls.py`), never duplicated in routers."""
+        assert self._source("deploy_urls.py").count("mint_artifact_url(") == 1
+        assert self._source("api/routers/deploys.py").count("mint_artifact_url(") == 0
 
     @pytest.mark.parametrize(
         "sentence",

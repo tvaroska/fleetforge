@@ -1,8 +1,8 @@
 """`POST /v1/devices/{device_id}/deploy` — stage a version onto one board. R1-be-2.
 
 `spec/flows.md` Flow 2: resolve the label against the device's chip, run pure pre-checks
-(`deploy_precheck.py`), mint a short-lived local HMAC URL (`_artifact_url` is the sole
-`mint_artifact_url` call site), record `requested`, commit, and publish `stage`.
+(`deploy_precheck.py`), mint a short-lived local HMAC URL via `fleetforge.deploy_urls`
+(the sole `mint_artifact_url` call site), record `requested`, commit, and publish `stage`.
 """
 
 import logging
@@ -16,7 +16,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from fleetforge.api.deps import (
     AdminDep,
-    AuthContext,
     CommandPublisherDep,
     SessionMakerDep,
     SettingsDep,
@@ -25,7 +24,7 @@ from fleetforge.api.deps import (
     cookie_scheme,
     resolve_project_for_request,
 )
-from fleetforge.api.routers.artifacts import VERSION_PATTERN
+from fleetforge.api.router_helpers import resolve_deploy_sender as _sender
 from fleetforge.api.schemas import (
     PROJECT_SLUG_PATTERN,
     DeployAccepted,
@@ -34,7 +33,6 @@ from fleetforge.api.schemas import (
     DeployRequest,
     PrecheckFinding,
 )
-from fleetforge.artifact_urls import mint_artifact_url
 from fleetforge.broker import (
     CommandPublisher,
     CommandPublishError,
@@ -43,7 +41,7 @@ from fleetforge.broker import (
 )
 from fleetforge.clock import now_utc
 from fleetforge.config import Settings
-from fleetforge.db.models import AdminToken, Device, ProjectRole
+from fleetforge.db.models import Device, ProjectRole
 from fleetforge.deploy_precheck import (
     NO_ARTIFACT_FOR_TARGET,
     Finding,
@@ -53,8 +51,17 @@ from fleetforge.deploy_precheck import (
     unmet_gates,
     warnings,
 )
+from fleetforge.deploy_urls import (
+    LOW_HEAP_HTTP_FALLBACK_BYTES as LOW_HEAP_HTTP_FALLBACK_BYTES,
+)
+from fleetforge.deploy_urls import (
+    URL_NOT_CONFIGURED as URL_NOT_CONFIGURED,
+)
+from fleetforge.deploy_urls import (
+    ArtifactUrlNotConfiguredError,
+    mint_deploy_artifact_url,
+)
 from fleetforge.deploys import (
-    DeploySender,
     deploy_kpis,
     latest_open_transaction,
     record_publish_failure,
@@ -80,6 +87,7 @@ from fleetforge.rollout import (
 from fleetforge.rollout import (
     republish_open_requested_on_wake as republish_open_requested_on_wake,
 )
+from fleetforge.rollout_types import VERSION_PATTERN
 from fleetforge.signing import SigningKeyRing
 from fleetforge.swarm_gateway import build_stage_urls_and_delta
 
@@ -104,24 +112,6 @@ _ARTIFACT_FOR_TARGET_SQL = text(
     """
 )
 
-URL_NOT_CONFIGURED = (
-    "this server cannot hand out firmware download links, so no board could fetch the "
-    "image; the server log names what is missing. Nothing was deployed."
-)
-
-
-async def _sender(session: AsyncSession, admin: AuthContext) -> DeploySender:
-    """The sender record: one PK read for the token's label (never fail a deploy over it)."""
-    token = await session.get(AdminToken, admin.token_id)
-    return DeploySender(
-        subject=admin.subject,
-        token_id=str(admin.token_id),
-        credential=token.name if token is not None else None,
-    )
-
-
-LOW_HEAP_HTTP_FALLBACK_BYTES = 65536
-
 
 def _artifact_url(
     sha256: str,
@@ -131,59 +121,19 @@ def _artifact_url(
     device: Device | None = None,
     relay_base_url: str | None = None,
 ) -> str:
-    """Mint the public (or parent-gateway edge-relay) download URL for `sha256`. **The only mint site.**
-
-    Local HMAC, no I/O and nothing to fail transiently (R1-be-3): the URL points at this
-    server's `GET /v1/artifact/{sha256}/bin` (or the parent UGV gateway's edge cache in `V3-1`),
-    and the object store is only reached when redeemed. `artifact_urls.py` owns the shape and
-    the signing rules; nothing here builds a path or a query string by hand.
-    """
-    base_url = relay_base_url.rstrip("/") if relay_base_url else _public_base_url(settings)
-    use_http = (
-        device is not None
-        and device.free_heap is not None
-        and 0 < device.free_heap < LOW_HEAP_HTTP_FALLBACK_BYTES
-        and base_url.startswith("https://")
-    )
-    if use_http:
-        base_url = "http://" + base_url.removeprefix("https://")
-    url = mint_artifact_url(
-        base_url,
-        sha256,
-        secret=_url_secret(settings),
-        ttl_s=ttl_s if ttl_s is not None else settings.signed_url_ttl_s,
-    )
-    return f"{url}&proto=http" if use_http else url
-
-
-def _url_secret(settings: Settings) -> str:
-    """`artifact_url_secret`, or a 503 that names neither setting in the body."""
-    if not settings.artifact_url_secret:
-        logger.error(
-            "ARTIFACT_URL_SECRET is not set: a deploy cannot mint a download URL, so "
-            "POST /v1/devices/{id}/deploy answers 503. Mint one with `just artifact-secret`."
+    """Translate `deploy_urls.mint_deploy_artifact_url` configuration gaps to HTTP 503."""
+    try:
+        return mint_deploy_artifact_url(
+            sha256,
+            settings,
+            ttl_s=ttl_s,
+            device=device,
+            relay_base_url=relay_base_url,
         )
+    except ArtifactUrlNotConfiguredError as exc:
         raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=URL_NOT_CONFIGURED
-        )
-    return settings.artifact_url_secret
-
-
-def _public_base_url(settings: Settings) -> str:
-    """`public_base_url`, or the same 503.
-
-    Separate from the secret because the operator's fix is different — one is minted,
-    the other is the origin a board can reach — and the log line has to say which.
-    """
-    if not settings.public_base_url:
-        logger.error(
-            "PUBLIC_BASE_URL is not set: a deploy cannot build an absolute download URL, "
-            "so POST /v1/devices/{id}/deploy answers 503. Set the origin a DEVICE reaches."
-        )
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=URL_NOT_CONFIGURED
-        )
-    return settings.public_base_url
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from None
 
 
 @router.get(

@@ -7,7 +7,7 @@ issuance (`/v1/enrollment-tokens`); R0-be-4 added the device-facing `POST /v1/en
 — the one **unauthenticated write** endpoint, whose credential is the token in its
 body; R0-be-5 added the SSE event stream (`GET /v1/events`) and the fleet read model
 (`GET /v1/devices`) it tells clients to re-read. R0-be-6 added the artifact object-store
-seam (`ObjectStoreDep`). R0-infra-2 added the prebuilt agent images (`/v1/agent/*`) and
+port (`ObjectStoreDep`). R0-infra-2 added the prebuilt agent images (`/v1/agent/*`) and
 S0-infra-6 moved them into that same store: `app.state.agent_catalog` is a lazy
 `CatalogCache`, not a directory scan, so the object store is now what **onboarding**
 depends on as well as R1 — hence the startup WARNING when neither backend is configured.
@@ -40,6 +40,7 @@ The login cookie is same-origin by construction, which is also why
 import asyncio
 import contextlib
 import logging
+import os
 from collections.abc import AsyncIterator, Callable
 from typing import Annotated, Any
 
@@ -78,6 +79,7 @@ from fleetforge.api.routers import (
     partition_profiles,
     policies,
     progress,
+    project_secrets,
     projects,
     swarm,
     users,
@@ -333,6 +335,7 @@ def create_app(
     app.include_router(auth.router)
     app.include_router(auth_tokens.router)
     app.include_router(projects.router)
+    app.include_router(project_secrets.router)
     app.include_router(builds.router)
     app.include_router(policies.router)
     app.include_router(groups.router)
@@ -407,7 +410,13 @@ def create_app(
                 status_code=503,
                 content={"status": "not-ready", "detail": "; ".join(reasons), "missing": missing},
             )
-        return {"status": "ready"}
+        build_mode = (os.environ.get("FF_BUILD_BACKEND") or "auto").strip().lower()
+        sim_mode = (os.environ.get("FF_SIM_BACKEND") or "auto").strip().lower()
+        return {
+            "status": "ready",
+            "build_backend": "docker" if build_mode in ("auto", "docker") else build_mode,
+            "sim_backend": "qemu" if sim_mode in ("auto", "qemu") else sim_mode,
+        }
 
     return app
 

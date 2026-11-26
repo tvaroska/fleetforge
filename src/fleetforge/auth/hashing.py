@@ -17,7 +17,7 @@ Two non-obvious constraints shape this module, both about the `api` container's
 **Never call the sync forms from a coroutine.** `hash`/`verify` are blocking C calls
 of roughly 40 ms; on the event loop they stall every concurrent request, including
 the SSE stream R0-be-5 adds and `spec/prd.md`'s "<= 2 s to reflect a state change".
-Request handlers use `ahash_secret` / `averify_secret`.
+Request handlers offload `hash_secret` under `ARGON2_LIMITER` or call `averify_secret`.
 
 **Never log a secret, a password or a PHC string.** A token *id* is the only part of
 a credential that may appear in a log line.
@@ -61,13 +61,6 @@ def verify_secret(secret: str, phc: str) -> bool:
         return ARGON2.verify(phc, secret)
     except (VerificationError, InvalidHashError):
         return False
-
-
-async def ahash_secret(secret: str) -> str:
-    """`hash_secret` off the event loop, under `ARGON2_LIMITER`."""
-    async with ARGON2_LIMITER:
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(_ARGON2_EXECUTOR, hash_secret, secret)
 
 
 async def averify_secret(secret: str, phc: str) -> bool:

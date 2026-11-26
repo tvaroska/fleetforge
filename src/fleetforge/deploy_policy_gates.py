@@ -4,16 +4,15 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
-from typing import Literal
 
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from fleetforge.api.schemas_v2 import PolicyRingStatus
 from fleetforge.db.models import DeployPolicy, DeployPolicyRun, Device
 from fleetforge.deploys import DeploySnapshot
 from fleetforge.faults import fault_counts, is_fault
 from fleetforge.rollout_state import close_matching_rollouts
+from fleetforge.rollout_types import PolicyRingStatus, RingStatusLiteral
 
 _HISTORICAL_VERSION_HALT_SQL = text(
     """
@@ -45,8 +44,6 @@ _HISTORICAL_VERSION_HALT_SINCE_SQL = text(
      ORDER BY device_id, at DESC, id DESC
     """
 )
-
-RingStatusLiteral = Literal["pending", "in_progress", "soaking", "promoted", "halted", "empty"]
 
 
 def device_confirmed_version(dev: Device, snap: DeploySnapshot | None, version: str) -> bool:

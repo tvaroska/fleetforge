@@ -41,8 +41,8 @@ from fleetforge import retention
 from fleetforge.clock import now_utc
 from fleetforge.config import get_settings
 from fleetforge.db.base import get_engine, get_sessionmaker
-from fleetforge.ingestor import otel
-from fleetforge.ingestor.handlers import handle_up_message
+from fleetforge.ingest import otel
+from fleetforge.ingest.handlers import handle_up_message
 from fleetforge.storage.factory import create_object_store, object_store_configured
 from fleetforge.storage.objectstore import ObjectStore
 
@@ -258,9 +258,11 @@ async def sweep_once(
         async with sessionmaker() as session:
             if store is None:
                 result = await retention.sweep(session, now=now_utc())
+                await session.commit()
             else:
-                result = await retention.sweep(session, now=now_utc(), store=store)
-            await session.commit()
+                result = await retention.sweep(
+                    session, now=now_utc(), store=store, prune_orphans=True
+                )
     except (SQLAlchemyError, OSError) as exc:
         logger.error("retention sweep failed: %s", exc)
         return None

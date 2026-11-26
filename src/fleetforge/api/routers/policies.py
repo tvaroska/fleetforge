@@ -28,7 +28,6 @@ from fleetforge.api.deps import (
     cookie_scheme,
     resolve_project_for_request,
 )
-from fleetforge.api.routers.artifacts import VERSION_PATTERN
 from fleetforge.api.schemas import PROJECT_SLUG_PATTERN
 from fleetforge.api.schemas_v2 import (
     DeployPolicyCreate,
@@ -41,6 +40,12 @@ from fleetforge.api.schemas_v2 import (
 from fleetforge.clock import now_utc
 from fleetforge.db.models import DeployPolicy, DeviceGroup, ProjectRole
 from fleetforge.deploy_policies import evaluate_policy_for_version
+from fleetforge.deploy_urls import ArtifactUrlNotConfiguredError
+from fleetforge.rollout_types import (
+    VERSION_PATTERN,
+    RolloutBrokerError,
+    RolloutValidationError,
+)
 
 router = APIRouter(
     prefix="/v1/projects/{slug}/policies",
@@ -319,13 +324,20 @@ async def evaluate_policy(
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND, detail="deploy policy not found"
             )
-        return await evaluate_policy_for_version(
-            session,
-            policy=row,
-            version=body.version,
-            settings=settings,
-            publisher=publisher,
-            admin=admin,
-            republish_in_flight=True,
-            resume=body.resume,
-        )
+        try:
+            return await evaluate_policy_for_version(
+                session,
+                policy=row,
+                version=body.version,
+                settings=settings,
+                publisher=publisher,
+                admin=admin,
+                republish_in_flight=True,
+                resume=body.resume,
+            )
+        except RolloutValidationError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from None
+        except (RolloutBrokerError, ArtifactUrlNotConfiguredError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+            ) from None

@@ -173,51 +173,24 @@ _PRUNE_ARTIFACT_VERSIONS_SQL = text(
     """
 )
 
-# Identify user_firmware artifacts whose backing object-store blobs and DB rows are
-# eligible for garbage collection once no surviving artifact_versions row, builds.outputs
-# entry, or open deploy_events intent references them. Never touches agent_* bundle rows.
-_FIND_ORPHAN_ARTIFACTS_SQL = text(
-    """
-    SELECT a.sha256
-      FROM artifacts a
-     WHERE a.kind = 'user_firmware'
-       AND NOT EXISTS (
-           SELECT 1
-             FROM artifact_versions av
-            WHERE av.sha256 = a.sha256
-       )
-       AND NOT EXISTS (
-           SELECT 1
-             FROM builds b,
-                  jsonb_each(b.outputs) AS kv
-            WHERE kv.value ->> 'sha256' = a.sha256
-       )
-       AND NOT EXISTS (
-           SELECT 1
-             FROM deploy_events req
-            WHERE req.state = 'requested'
-              AND req.cmd_id IS NOT NULL
-              AND req.detail ->> 'sha256' = a.sha256
-              AND NOT EXISTS (
-                  SELECT 1
-                    FROM deploy_events term
-                   WHERE term.device_id = req.device_id
-                     AND term.cmd_id = req.cmd_id
-                     AND term.is_terminal
-              )
-       )
-    """
-)
-
-_DELETE_ORPHAN_ARTIFACT_SQL = text(
+# Atomically delete unreferenced `user_firmware` and `delta_patch` artifact rows and
+# return their digests (`A-30`, `A-31`). Never touches `agent_*` bundle rows or any
+# artifact referenced by `artifact_versions`, `artifact_deltas`, `builds.outputs`, or an
+# open `deploy_events` intent. Committed BEFORE object-store blob deletion so a concurrent
+# re-label can never have a live blob unlinked underneath it.
+_DELETE_ORPHAN_ARTIFACTS_SQL = text(
     """
     DELETE FROM artifacts a
-     WHERE a.sha256 = :sha256
-       AND a.kind = 'user_firmware'
+     WHERE a.kind IN ('user_firmware', 'delta_patch')
        AND NOT EXISTS (
            SELECT 1
              FROM artifact_versions av
             WHERE av.sha256 = a.sha256
+       )
+       AND NOT EXISTS (
+           SELECT 1
+             FROM artifact_deltas ad
+            WHERE ad.patch_sha256 = a.sha256
        )
        AND NOT EXISTS (
            SELECT 1
@@ -276,6 +249,10 @@ _CAP_TELEMETRY_SQL = text(
        )
     """
 )
+
+
+_ARTIFACT_GC_LOCK_SQL = text("SELECT pg_advisory_xact_lock(hashtext(:sha256))")
+_ARTIFACT_EXISTS_SQL = text("SELECT 1 FROM artifacts WHERE sha256 = :sha256")
 
 
 @dataclass(frozen=True, slots=True)
@@ -349,19 +326,29 @@ async def sweep(
         await session.execute(_PRUNE_ARTIFACT_VERSIONS_SQL, {"version_cap": version_cap})
     )
     deleted_orphans: list[str] = []
-    if store is not None:
-        candidate_orphans = [
-            str(sha) for sha in (await session.scalars(_FIND_ORPHAN_ARTIFACTS_SQL)).all()
-        ]
-        for sha256 in candidate_orphans:
-            try:
-                await store.delete(blob_key(sha256))
-            except ObjectStoreError as exc:
-                logger.warning("retention blob delete failed for %s: %s", sha256, exc)
-                continue
-            removed = await session.scalar(_DELETE_ORPHAN_ARTIFACT_SQL, {"sha256": sha256})
-            if removed is not None:
-                deleted_orphans.append(str(removed))
+    if prune_orphans and store is not None:
+        # Two passes: pass 1 deletes orphan `user_firmware` rows (cascading their
+        # `artifact_deltas` rows), pass 2 deletes any `delta_patch` rows now unreferenced.
+        for _ in range(2):
+            removed_batch = [
+                str(sha) for sha in (await session.scalars(_DELETE_ORPHAN_ARTIFACTS_SQL)).all()
+            ]
+            if not removed_batch:
+                break
+            deleted_orphans.extend(removed_batch)
+        # Commit DB deletes BEFORE touching object storage so no live artifact row can ever
+        # lose its backing blob (`A-31`), then serialize each blob unlink against concurrent
+        # re-uploads via a per-digest advisory lock and re-verify row absence.
+        await session.commit()
+        for sha256 in deleted_orphans:
+            await session.execute(_ARTIFACT_GC_LOCK_SQL, {"sha256": sha256})
+            still_absent = (await session.scalar(_ARTIFACT_EXISTS_SQL, {"sha256": sha256})) is None
+            if still_absent:
+                try:
+                    await store.delete(blob_key(sha256))
+                except ObjectStoreError as exc:
+                    logger.warning("retention blob delete failed for %s: %s", sha256, exc)
+            await session.commit()
     return SweepResult(
         logs=logs,
         telemetry_expired=telemetry_expired,

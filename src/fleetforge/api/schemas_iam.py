@@ -231,9 +231,9 @@ class ProjectSummary(BaseModel):
     description: str | None
     role: str = "owner"
     repo_url: str | None = None
-    track_mode: str = "off"
+    track_mode: TrackMode = "off"
     track_ref: str | None = None
-    auto_deploy_target: str = "off"
+    auto_deploy_target: AutoDeployTarget = "off"
     ci_webhook_url: str | None = None
     has_ci_webhook_header: bool = False
     secrets_rev: int = 0
@@ -282,7 +282,7 @@ class ProjectMemberSummary(BaseModel):
     display_name: str | None
     email: str | None = None
     is_superadmin: bool = False
-    role: str
+    role: Literal["owner", "operator", "viewer"]
     created_at: dt.datetime
 
 

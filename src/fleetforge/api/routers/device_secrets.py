@@ -14,49 +14,28 @@ Why HTTPS pull instead of putting plaintext secret values in `dn/cfg` on MQTT:
   decrypted secrets over TLS.
 """
 
-import base64
-import binascii
-import hashlib
-import hmac
 import logging
 
 from fastapi import APIRouter, HTTPException, Request, status
 from sqlalchemy import select
 
 from fleetforge.api.deps import SessionMakerDep, SettingsDep
+from fleetforge.api.router_helpers import (
+    INVALID_DEVICE_CREDENTIAL as INVALID_DEVICE_CREDENTIAL,
+)
+from fleetforge.api.router_helpers import (
+    authenticate_device_basic,
+)
+from fleetforge.api.router_helpers import (
+    parse_device_basic_auth as _parse_basic_auth,
+)
 from fleetforge.api.schemas import DeviceSecretsResponse
-from fleetforge.db.models import Device, Project, ProjectSecret
-from fleetforge.identity import is_valid_device_id
+from fleetforge.db.models import Project, ProjectSecret
 from fleetforge.secrets_crypto import decrypt_secret
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/v1", tags=["devices"])
-
-INVALID_DEVICE_CREDENTIAL = HTTPException(
-    status_code=status.HTTP_401_UNAUTHORIZED,
-    detail="invalid device credentials",
-    headers={"WWW-Authenticate": "Basic"},
-)
-
-
-def _parse_basic_auth(auth_header: str | None) -> tuple[str, str] | None:
-    """Extract `(device_id, mqtt_password)` from an HTTP Basic `Authorization` header."""
-    if not auth_header:
-        return None
-    scheme, _, param = auth_header.strip().partition(" ")
-    if scheme.lower() != "basic" or not param:
-        return None
-    try:
-        decoded = base64.b64decode(param.strip(), validate=True).decode("utf-8")
-    except (binascii.Error, UnicodeDecodeError):
-        return None
-    if ":" not in decoded:
-        return None
-    device_id, password = decoded.split(":", 1)
-    if not is_valid_device_id(device_id) or not password:
-        return None
-    return device_id, password
 
 
 @router.get(
@@ -70,26 +49,15 @@ async def get_device_secrets(
     sessionmaker: SessionMakerDep,
 ) -> DeviceSecretsResponse:
     """Return the device's project `secrets_rev` and decrypted key-value secrets."""
-    parsed = _parse_basic_auth(request.headers.get("Authorization"))
+    auth_header = request.headers.get("Authorization")
+    parsed = _parse_basic_auth(auth_header)
     if parsed is None:
         raise INVALID_DEVICE_CREDENTIAL
-    device_id, password = parsed
-    candidate_hash = hashlib.sha256(password.encode("utf-8")).hexdigest()
+    device_id, _ = parsed
 
     async with sessionmaker() as session:
-        device = (
-            await session.scalars(
-                select(Device).where(
-                    Device.device_id == device_id,
-                    Device.decommissioned_at.is_(None),
-                )
-            )
-        ).one_or_none()
-        if (
-            device is None
-            or not device.mqtt_password_hash
-            or not hmac.compare_digest(candidate_hash, device.mqtt_password_hash)
-        ):
+        device = await authenticate_device_basic(session, auth_header)
+        if device is None:
             logger.info("device-secrets rejected for device_id=%s", device_id)
             raise INVALID_DEVICE_CREDENTIAL
 

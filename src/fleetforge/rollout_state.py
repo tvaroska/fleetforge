@@ -16,7 +16,6 @@ from typing import Any
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from fleetforge.api.schemas_deploys import DeployAccepted
 from fleetforge.broker import CommandPublisher, NullCommandPublisher
 from fleetforge.clock import now_utc
 from fleetforge.config import Settings
@@ -24,6 +23,7 @@ from fleetforge.db.models import DeployPolicy, DeployPolicyRun, Device, Project,
 from fleetforge.deploy_precheck import ResolvedArtifact
 from fleetforge.deploys import DeploySender, DeploySnapshot
 from fleetforge.presence import is_online
+from fleetforge.rollout_types import DeployAccepted
 
 DEFAULT_ROLLOUT_MAX_PARALLEL = 5
 LINK_AIRTIME_MAX_PARALLEL: dict[str, int] = {
@@ -151,6 +151,143 @@ def is_cohort_halt_snapshot(
     return False
 
 
+def _is_stalled_in_flight(
+    dev: Device,
+    snap: DeploySnapshot | None,
+    *,
+    now: dt.datetime,
+    settings: Settings,
+) -> bool:
+    if snap is None or snap.is_terminal:
+        return False
+    if is_online(dev, now=now, tolerance=settings.presence_tolerance):
+        return False
+    return (now - snap.at).total_seconds() >= settings.confirm_timeout_s
+
+
+def _canary_priority(
+    item: tuple[Device, ResolvedArtifact, bool],
+    *,
+    snapshots: dict[str, DeploySnapshot],
+    version: str,
+    now: dt.datetime,
+    settings: Settings,
+) -> tuple[int, int, int, int, str]:
+    dev, _, online = item
+    snap = snapshots.get(dev.device_id)
+    in_flight_this_ver = (
+        snap is not None
+        and snap.artifact_version == version
+        and not snap.is_terminal
+        and not _is_stalled_in_flight(dev, snap, now=now, settings=settings)
+    )
+    return (
+        0 if in_flight_this_ver else 1,
+        0 if online else 1,
+        0 if dev.is_dev else 1,
+        0 if str(dev.power_class) == "always_on" else 1,
+        dev.device_id,
+    )
+
+
+def _select_post_canary(
+    *,
+    eligible: list[tuple[Device, ResolvedArtifact, bool]],
+    all_project_devices: list[Device],
+    snapshots: dict[str, DeploySnapshot],
+    confirmed_targets: set[str],
+    version: str,
+    canary: bool,
+    now: dt.datetime,
+    settings: Settings,
+    skipped: dict[str, str],
+) -> list[tuple[Device, ResolvedArtifact, bool]]:
+    by_target: dict[str, list[tuple[Device, ResolvedArtifact, bool]]] = {}
+    for item in eligible:
+        by_target.setdefault(item[0].platform_type, []).append(item)
+
+    post_canary: list[tuple[Device, ResolvedArtifact, bool]] = []
+    for plat in sorted(by_target):
+        plat_ordered = sorted(
+            by_target[plat],
+            key=lambda it: _canary_priority(
+                it, snapshots=snapshots, version=version, now=now, settings=settings
+            ),
+        )
+        if not canary or plat in confirmed_targets:
+            post_canary.extend(plat_ordered)
+            continue
+        plat_eligible_ids = {d.device_id for d, _, _ in plat_ordered}
+        existing_canary = next(
+            (
+                d.device_id
+                for d in all_project_devices
+                if d.platform_type == plat
+                and d.device_id not in plat_eligible_ids
+                and (snap := snapshots.get(d.device_id)) is not None
+                and snap.artifact_version == version
+                and not snap.is_terminal
+                and not _is_stalled_in_flight(d, snap, now=now, settings=settings)
+            ),
+            None,
+        )
+        if existing_canary is not None:
+            for dev, _, _ in plat_ordered:
+                skipped[dev.device_id] = (
+                    f"waiting for canary {existing_canary} to confirm {version}"
+                )
+        elif len(plat_ordered) > 1:
+            canary_item = plat_ordered[0]
+            canary_id = canary_item[0].device_id
+            for dev, _, _ in plat_ordered[1:]:
+                skipped[dev.device_id] = f"waiting for canary {canary_id} to confirm {version}"
+            post_canary.append(canary_item)
+        else:
+            post_canary.extend(plat_ordered)
+    return post_canary
+
+
+def _count_active_in_flight(
+    *,
+    all_project_devices: list[Device],
+    eligible_ids: set[str],
+    snapshots: dict[str, DeploySnapshot],
+    version: str,
+    now: dt.datetime,
+    settings: Settings,
+    airtime_devices: list[Device] | None = None,
+) -> tuple[int, dict[str, int], dict[str, int]]:
+    """Count in-flight boards: `max_parallel` for `version`, and radio/gateway airtime across ALL versions (`A-30`)."""
+    active_in_flight = 0
+    in_flight_by_link: dict[str, int] = {}
+    in_flight_by_parent: dict[str, int] = {}
+    cohort_ids = {d.device_id for d in all_project_devices}
+    scan_devices = airtime_devices if airtime_devices is not None else all_project_devices
+    for d in scan_devices:
+        snap = snapshots.get(d.device_id)
+        if (
+            snap is None
+            or snap.is_terminal
+            or _is_stalled_in_flight(d, snap, now=now, settings=settings)
+        ):
+            continue
+        if snap.state == "requested" and not is_online(
+            d, now=now, tolerance=settings.presence_tolerance
+        ):
+            continue
+        if snap.artifact_version == version:
+            if d.device_id in eligible_ids:
+                continue
+            if d.device_id in cohort_ids:
+                active_in_flight += 1
+        in_flight_by_link[d.link_type] = in_flight_by_link.get(d.link_type, 0) + 1
+        if d.parent_device_id:
+            in_flight_by_parent[d.parent_device_id] = (
+                in_flight_by_parent.get(d.parent_device_id, 0) + 1
+            )
+    return active_in_flight, in_flight_by_link, in_flight_by_parent
+
+
 def select_rollout_wave(
     *,
     eligible: list[tuple[Device, ResolvedArtifact, bool]],
@@ -163,112 +300,47 @@ def select_rollout_wave(
     now: dt.datetime,
     settings: Settings,
     skipped: dict[str, str],
+    airtime_devices: list[Device] | None = None,
 ) -> list[tuple[Device, ResolvedArtifact, bool]]:
     """Select canary / bounded wave candidates respecting link and parent-gateway airtime caps."""
-
-    def _is_stalled_in_flight(dev: Device, snap: DeploySnapshot | None) -> bool:
-        if snap is None or snap.artifact_version != version or snap.is_terminal:
-            return False
-        if is_online(dev, now=now, tolerance=settings.presence_tolerance):
-            return False
-        return (now - snap.at).total_seconds() >= settings.confirm_timeout_s
-
-    def _canary_priority(
-        item: tuple[Device, ResolvedArtifact, bool],
-    ) -> tuple[int, int, int, int, str]:
-        dev, _, online = item
-        snap = snapshots.get(dev.device_id)
-        in_flight_this_ver = (
-            snap is not None
-            and snap.artifact_version == version
-            and not snap.is_terminal
-            and not _is_stalled_in_flight(dev, snap)
-        )
-        return (
-            0 if in_flight_this_ver else 1,
-            0 if online else 1,
-            0 if dev.is_dev else 1,
-            0 if str(dev.power_class) == "always_on" else 1,
-            dev.device_id,
-        )
-
-    by_target: dict[str, list[tuple[Device, ResolvedArtifact, bool]]] = {}
-    for item in eligible:
-        by_target.setdefault(item[0].platform_type, []).append(item)
-
-    post_canary: list[tuple[Device, ResolvedArtifact, bool]] = []
-    for plat in sorted(by_target):
-        plat_ordered = sorted(by_target[plat], key=_canary_priority)
-        plat_eligible_ids = {d.device_id for d, _, _ in plat_ordered}
-        existing_plat_canary = next(
-            (
-                d.device_id
-                for d in all_project_devices
-                if d.platform_type == plat
-                and d.device_id not in plat_eligible_ids
-                and (snap := snapshots.get(d.device_id)) is not None
-                and snap.artifact_version == version
-                and not snap.is_terminal
-                and not _is_stalled_in_flight(d, snap)
-            ),
-            None,
-        )
-        if canary and plat not in confirmed_targets:
-            if existing_plat_canary is not None:
-                for dev, _, _ in plat_ordered:
-                    skipped[dev.device_id] = (
-                        f"waiting for canary {existing_plat_canary} to confirm {version}"
-                    )
-            elif len(plat_ordered) > 1:
-                canary_item = plat_ordered[0]
-                canary_id = canary_item[0].device_id
-                for dev, _, _ in plat_ordered[1:]:
-                    skipped[dev.device_id] = f"waiting for canary {canary_id} to confirm {version}"
-                post_canary.append(canary_item)
-            else:
-                post_canary.extend(plat_ordered)
-        else:
-            post_canary.extend(plat_ordered)
-
+    post_canary = _select_post_canary(
+        eligible=eligible,
+        all_project_devices=all_project_devices,
+        snapshots=snapshots,
+        confirmed_targets=confirmed_targets,
+        version=version,
+        canary=canary,
+        now=now,
+        settings=settings,
+        skipped=skipped,
+    )
     if not post_canary:
         return []
 
     eligible_ids = {dev.device_id for dev, _, _ in post_canary}
-    active_in_flight = 0
-    in_flight_by_link: dict[str, int] = {}
-    in_flight_by_parent: dict[str, int] = {}
-    for d in all_project_devices:
-        if d.device_id in eligible_ids:
-            continue
-        snap = snapshots.get(d.device_id)
-        if (
-            snap is not None
-            and snap.artifact_version == version
-            and not snap.is_terminal
-            and not _is_stalled_in_flight(d, snap)
-            and (
-                snap.state != "requested"
-                or is_online(d, now=now, tolerance=settings.presence_tolerance)
-            )
-        ):
-            active_in_flight += 1
-            in_flight_by_link[d.link_type] = in_flight_by_link.get(d.link_type, 0) + 1
-            if d.parent_device_id:
-                in_flight_by_parent[d.parent_device_id] = (
-                    in_flight_by_parent.get(d.parent_device_id, 0) + 1
-                )
+    active_in_flight, in_flight_by_link, in_flight_by_parent = _count_active_in_flight(
+        all_project_devices=all_project_devices,
+        eligible_ids=eligible_ids,
+        snapshots=snapshots,
+        version=version,
+        now=now,
+        settings=settings,
+        airtime_devices=airtime_devices,
+    )
 
     effective_cap = max(1, max_parallel)
-    ordered = sorted(post_canary, key=_canary_priority)
+    ordered = sorted(
+        post_canary,
+        key=lambda it: _canary_priority(
+            it, snapshots=snapshots, version=version, now=now, settings=settings
+        ),
+    )
     wave_items: list[tuple[Device, ResolvedArtifact, bool]] = []
     for dev, found_art, online in ordered:
         if active_in_flight >= effective_cap:
             skipped[dev.device_id] = f"queued for next wave (max_parallel={effective_cap})"
             continue
-        link_cap = min(
-            effective_cap,
-            LINK_AIRTIME_MAX_PARALLEL.get(dev.link_type, effective_cap),
-        )
+        link_cap = min(effective_cap, LINK_AIRTIME_MAX_PARALLEL.get(dev.link_type, effective_cap))
         if in_flight_by_link.get(dev.link_type, 0) >= link_cap:
             skipped[dev.device_id] = (
                 f"queued for next wave (airtime cap={link_cap} on {dev.link_type} link)"

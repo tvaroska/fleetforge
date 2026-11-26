@@ -17,6 +17,9 @@ from pydantic import (
 )
 
 from fleetforge.partition_profiles import MAX_PROFILE_SLOT_SIZE
+from fleetforge.rollout_types import DeployAccepted as DeployAccepted
+
+SimStatusLiteral = Literal["pending", "running", "passed", "failed", "skipped"]
 
 _CI_OPTIONAL_FIELDS = frozenset(
     {
@@ -41,7 +44,7 @@ class ArtifactSimulateResponse(BaseModel):
 
     sha256: str
     target: str | None
-    sim_status: Literal["pending", "running", "passed", "failed", "skipped"]
+    sim_status: SimStatusLiteral
     sim_detail: str | None
     sim_runner: str | None = None
     sim_ran_at: dt.datetime
@@ -66,7 +69,7 @@ class ArtifactUploaded(BaseModel):
     build_url: str | None = None
     test_passed: bool | None = None
     auto_deployed_devices: list[str] | None = None
-    sim_status: str | None = None
+    sim_status: SimStatusLiteral | None = None
     sim_detail: str | None = None
     sim_runner: str | None = None
     sim_ran_at: dt.datetime | None = None
@@ -108,7 +111,7 @@ class ArtifactSummary(BaseModel):
     tag: str | None = None
     build_url: str | None = None
     test_passed: bool | None = None
-    sim_status: str | None = None
+    sim_status: SimStatusLiteral | None = None
     sim_detail: str | None = None
     sim_runner: str | None = None
     sim_ran_at: dt.datetime | None = None
@@ -166,19 +169,6 @@ class DeployRequest(BaseModel):
     )
 
 
-class DeployAccepted(BaseModel):
-    """What `POST /v1/devices/{device_id}/deploy` returns with 202."""
-
-    cmd_id: str
-    device_id: str
-    version: str
-    sha256: str
-    size_bytes: int
-    apply: str
-    reused: bool
-    device_online: bool
-
-
 class ProjectDeployRequest(BaseModel):
     """`POST /v1/projects/{slug}/deploy`: deploy one version across compatible project boards."""
 
@@ -209,7 +199,7 @@ class ProjectDeployAccepted(BaseModel):
 
     project: str
     version: str
-    target_filter: str
+    target_filter: Literal["all", "dev"]
     deployed: list[DeployAccepted]
     skipped: dict[str, str] = Field(default_factory=dict)
 

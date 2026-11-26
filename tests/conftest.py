@@ -463,9 +463,15 @@ class FakeCommandPublisher:
         self.published_cfg: list[tuple[str, dict[str, Any]]] = []
         self.cleared_cfg: list[str] = []
         self.fail_with: Exception | None = None
+        self.fail_publish_many_with: Exception | None = None
+        self.fail_after_publishes: int | None = None
+        self._publish_calls = 0
 
     async def publish(self, device_id: str, payload: dict[str, Any]) -> None:
-        if self.fail_with is not None:
+        self._publish_calls += 1
+        if self.fail_with is not None and (
+            self.fail_after_publishes is None or self._publish_calls > self.fail_after_publishes
+        ):
             raise self.fail_with
         self.published.append((device_id, payload))
 
@@ -480,7 +486,9 @@ class FakeCommandPublisher:
         self.cleared_cfg.append(device_id)
 
     async def publish_many(self, items: Any) -> None:
-        if self.fail_with is not None:
+        if self.fail_publish_many_with is not None:
+            raise self.fail_publish_many_with
+        if self.fail_with is not None and self.fail_after_publishes is None:
             raise self.fail_with
         for device_id, payload in items:
             self.published.append((device_id, payload))

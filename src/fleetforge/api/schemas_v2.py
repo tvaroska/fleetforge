@@ -8,13 +8,23 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from fleetforge.api.schemas_deploys import DeployAccepted
+from fleetforge.rollout_types import (
+    DeployAccepted as DeployAccepted,
+)
+from fleetforge.rollout_types import (
+    DeployPolicyEvaluation as DeployPolicyEvaluation,
+)
+from fleetforge.rollout_types import (
+    PolicyEvalStatusLiteral as PolicyEvalStatusLiteral,
+)
+from fleetforge.rollout_types import (
+    PolicyRingStatus as PolicyRingStatus,
+)
 from fleetforge.url_safety import validate_git_ref
 
 BuildJobStatusLiteral = Literal["queued", "running", "succeeded", "failed", "cancelled"]
 BuildTargetLiteral = Literal["esp32", "esp32s3", "esp32c3", "esp32c6"]
 PolicyMatchModeLiteral = Literal["branch", "tag"]
-PolicyEvalStatusLiteral = Literal["in_progress", "soaking", "halted", "completed", "skipped"]
 
 
 class BuildJobCreate(BaseModel):
@@ -141,28 +151,6 @@ class DeployPolicyEvaluateRequest(BaseModel):
 
     version: str = Field(min_length=1, max_length=64)
     resume: bool = False
-
-
-class PolicyRingStatus(BaseModel):
-    """Status of one group cohort ring within a `DeployPolicyEvaluation` (`R11-1`)."""
-
-    ring_index: int
-    group_id: uuid.UUID
-    status: Literal["pending", "in_progress", "soaking", "promoted", "halted", "empty"]
-    total_devices: int
-    confirmed_devices: int
-    in_flight_devices: int
-
-
-class DeployPolicyEvaluation(BaseModel):
-    """Result of evaluating or promoting a `DeployPolicy` on a firmware version (`R11-1`)."""
-
-    policy_id: uuid.UUID
-    version: str
-    status: PolicyEvalStatusLiteral
-    halt_reason: str | None
-    rings: list[PolicyRingStatus]
-    deployed: list[DeployAccepted]
 
 
 class GatewayRelayConfigRequest(BaseModel):

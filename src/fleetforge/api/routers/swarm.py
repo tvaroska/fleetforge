@@ -14,15 +14,19 @@ Routes:
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
 import logging
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, status
 from sqlalchemy import select, text
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from fleetforge.api.deps import (
     AdminDep,
+    AuthContext,
     ObjectStoreDep,
     SessionMakerDep,
     SettingsDep,
@@ -30,9 +34,13 @@ from fleetforge.api.deps import (
     bearer_scheme,
     check_project_access,
     cookie_scheme,
+    require_admin,
     resolve_project_for_request,
 )
-from fleetforge.api.routers.deploys import _artifact_url
+from fleetforge.api.router_helpers import (
+    INVALID_DEVICE_CREDENTIAL,
+    authenticate_device_basic,
+)
 from fleetforge.api.schemas import PROJECT_SLUG_PATTERN
 from fleetforge.api.schemas_v2 import (
     ArtifactDeltaList,
@@ -56,7 +64,8 @@ from fleetforge.db.models import (
     ProjectRole,
 )
 from fleetforge.delta_ota import DELTA_FORMAT, DeltaPatchError, create_delta_patch
-from fleetforge.ingestor.handlers import handle_up_message
+from fleetforge.deploy_urls import ArtifactUrlNotConfiguredError, mint_deploy_artifact_url
+from fleetforge.ingest.handlers import handle_up_message
 from fleetforge.presence import is_online
 from fleetforge.storage.blobs import SHA256_HEX, blob_key, digest_bytes, put_blob
 from fleetforge.storage.objectstore import ObjectNotFound, ObjectStoreError
@@ -225,15 +234,76 @@ async def get_project_swarm(
     )
 
 
+async def _optional_admin(
+    request: Request,
+    sessionmaker: SessionMakerDep,
+    settings: SettingsDep,
+) -> AuthContext | None:
+    """Allow HTTP Basic device credentials to bypass operator token auth on gateway routes (`A-30`)."""
+    auth_header = request.headers.get("authorization")
+    if auth_header and auth_header.strip().lower().startswith("basic "):
+        return None
+    override = request.app.dependency_overrides.get(require_admin)
+    if override is not None:
+        resolved = override()
+        if inspect.isawaitable(resolved):
+            resolved = await resolved
+        return resolved if isinstance(resolved, AuthContext) else None
+    return await require_admin(request, sessionmaker, settings)
+
+
+OptionalAdminDep = Annotated[AuthContext | None, Depends(_optional_admin)]
+
+
+async def _authorize_gateway_or_operator(
+    session: AsyncSession,
+    *,
+    request: Request,
+    gateway_id: str,
+    admin: AuthContext | None,
+) -> Device:
+    """Authenticate either an operator `deploy` token or the gateway's own HTTP Basic credential."""
+    if admin is None:
+        authed_device = await authenticate_device_basic(
+            session, request.headers.get("authorization")
+        )
+        if authed_device is None:
+            raise INVALID_DEVICE_CREDENTIAL
+        if authed_device.device_id != gateway_id:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="device credentials do not match gateway_id",
+            )
+        return authed_device
+
+    gateway = await session.get(Device, gateway_id)
+    if gateway is None or gateway.decommissioned_at is not None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"no such device: {gateway_id}"
+        )
+    await check_project_access(
+        session,
+        admin,
+        gateway.project_id,
+        min_role=ProjectRole.OPERATOR,
+        required_scope="deploy",
+        not_found=HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=f"no such device: {gateway_id}"
+        ),
+    )
+    return gateway
+
+
 @router.put(
     "/devices/{gateway_id}/relay",
     response_model=GatewayRelaySummary,
     summary="Register or update a UGV gateway's edge artifact cache and list upstream pulls",
 )
 async def upsert_gateway_relay(
+    request: Request,
     gateway_id: str,
     body: GatewayRelayConfigRequest,
-    admin: AdminDep,
+    admin: OptionalAdminDep,
     sessionmaker: SessionMakerDep,
     settings: SettingsDep,
 ) -> GatewayRelaySummary:
@@ -253,20 +323,8 @@ async def upsert_gateway_relay(
             clean_cached.append(sha)
 
     async with sessionmaker() as session:
-        gateway = await session.get(Device, gateway_id)
-        if gateway is None or gateway.decommissioned_at is not None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail=f"no such device: {gateway_id}"
-            )
-        await check_project_access(
-            session,
-            admin,
-            gateway.project_id,
-            min_role=ProjectRole.OPERATOR,
-            required_scope="deploy",
-            not_found=HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail=f"no such device: {gateway_id}"
-            ),
+        gateway = await _authorize_gateway_or_operator(
+            session, request=request, gateway_id=gateway_id, admin=admin
         )
         now = now_utc()
         relay = await session.get(GatewayRelayState, gateway_id)
@@ -316,11 +374,17 @@ async def upsert_gateway_relay(
             for row in art_rows:
                 sha_str = str(row.sha256)
                 if sha_str not in cached_set:
+                    try:
+                        pull_url = mint_deploy_artifact_url(sha_str, settings)
+                    except ArtifactUrlNotConfiguredError as exc:
+                        raise HTTPException(
+                            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+                        ) from None
                     needed_pulls.append(
                         GatewayArtifactPull(
                             sha256=sha_str,
                             size_bytes=int(row.size_bytes),
-                            url=_artifact_url(sha_str, settings),
+                            url=pull_url,
                         )
                     )
 
@@ -343,9 +407,10 @@ async def upsert_gateway_relay(
     summary="Replay offline child `up/*` envelopes buffered by a UGV edge-relay gateway",
 )
 async def sync_gateway_relay(
+    request: Request,
     gateway_id: str,
     body: GatewayRelaySyncRequest,
-    admin: AdminDep,
+    admin: OptionalAdminDep,
     sessionmaker: SessionMakerDep,
     settings: SettingsDep,
 ) -> GatewayRelaySyncResponse:
@@ -356,20 +421,8 @@ async def sync_gateway_relay(
     synced_children: list[str] = []
 
     async with sessionmaker() as session:
-        gateway = await session.get(Device, gateway_id)
-        if gateway is None or gateway.decommissioned_at is not None:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail=f"no such device: {gateway_id}"
-            )
-        await check_project_access(
-            session,
-            admin,
-            gateway.project_id,
-            min_role=ProjectRole.OPERATOR,
-            required_scope="deploy",
-            not_found=HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND, detail=f"no such device: {gateway_id}"
-            ),
+        gateway = await _authorize_gateway_or_operator(
+            session, request=request, gateway_id=gateway_id, admin=admin
         )
 
         # Validate every child belongs to `gateway_id` BEFORE replaying any envelope.
@@ -525,7 +578,7 @@ async def create_artifact_delta(
         ) from None
 
     try:
-        patch_bytes = create_delta_patch(base_bytes, target_bytes)
+        patch_bytes = await asyncio.to_thread(create_delta_patch, base_bytes, target_bytes)
     except DeltaPatchError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)

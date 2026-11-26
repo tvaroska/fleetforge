@@ -504,7 +504,7 @@ async def check_project_access(
     """
     hidden = not_found if not_found is not None else FORBIDDEN
 
-    # 1. Visibility: the pin, then membership.
+    # Visibility: the pin, then membership.
     if admin.project_id is not None and admin.project_id != target_project_id:
         raise hidden
 
@@ -518,10 +518,10 @@ async def check_project_access(
             if member is None:
                 raise hidden
 
-    # 2. Scope.
+    # Scope.
     _enforce_scope(admin, min_role=min_role, required_scope=required_scope)
 
-    # 3. Role.
+    # Role.
     if member is not None and ROLE_RANK.get(member.role, 0) < ROLE_RANK[min_role.value]:
         raise FORBIDDEN
 

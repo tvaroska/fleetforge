@@ -14,7 +14,7 @@ R5-spec-1 Patch A2 is the wire; R5-fw-4/5 built the agent half. Admin-only, like
 No request body: the transaction is in the path and the command's `id` is server-minted.
 202 with `CommandAccepted`. A separate module rather than more routes in `deploys.py` /
 `devices.py` (DECISIONS R5-be-2): those two carry source tripwires scoped to the deploy path,
-and the verb seam is its own thing.
+and the verb contract is its own thing.
 
 **The server requests; it never forces.** It gates only what it alone knows, in this order:
 
@@ -59,8 +59,8 @@ from fleetforge.api.deps import (
     check_project_access,
     cookie_scheme,
 )
-from fleetforge.api.routers.deploys import _sender
-from fleetforge.api.routers.devices import command_summary
+from fleetforge.api.router_helpers import command_summary
+from fleetforge.api.router_helpers import resolve_deploy_sender as _sender
 from fleetforge.api.schemas import CommandAccepted, CommandRecord
 from fleetforge.broker import CommandPublisher, CommandPublishError, new_command_id, verb_payload
 from fleetforge.clock import now_utc

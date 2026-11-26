@@ -25,6 +25,7 @@ from __future__ import annotations
 import ctypes
 import hashlib
 import shutil
+import struct
 import subprocess
 import urllib.parse
 from pathlib import Path
@@ -44,7 +45,8 @@ from fleetforge.db.models import DEFAULT_PROJECT_ID, Device, DeviceGroup
 from fleetforge.delta_ota import DeltaPatchError, apply_delta_patch, create_delta_patch
 from fleetforge.lib_marker import MAGIC
 from fleetforge.signing import generate_keypair
-from fleetforge.simulator.gateway import EdgeRelayGateway, fetch_and_apply_stage
+from fleetforge.simulator.errors import SimulatorError
+from fleetforge.simulator.gateway import EdgeRelayGateway, apply_ffdelta_v1, fetch_and_apply_stage
 from fleetforge.storage.blobs import blob_key
 from tests.conftest import (
     FakeCommandPublisher,
@@ -184,6 +186,132 @@ class TestBinaryDeltaCodecAndHostCFirmware:
             ctypes.byref(written),
         )
         assert rc_bounds == -4
+
+    def test_host_gcc_ff_delta_c_rejects_hostile_patches(self, tmp_path: Path) -> None:
+        """D-24: shared hostile `ffdelta-v1` vector table rejected across Python, C (`ff_delta.c`), and simulator."""
+        _run_hostile_delta_vectors(tmp_path)
+
+    def test_malformed_patches_are_rejected_by_python_and_c(self, tmp_path: Path) -> None:
+        """T-18: malformed patches fail in Python (`apply_delta_patch`), C (`ff_delta.c`), and simulator."""
+        _run_hostile_delta_vectors(tmp_path)
+
+
+def _compile_ff_delta(tmp_path: Path) -> ctypes.CDLL:
+    gcc = shutil.which("gcc")
+    assert gcc is not None, "gcc is required for host firmware verification tests"
+    so_path = tmp_path / "libff_delta_hostile.so"
+    subprocess.run(  # noqa: S603
+        [
+            gcc,
+            "-std=c99",
+            "-O2",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-shared",
+            "-fPIC",
+            f"-I{FF_DELTA_H_DIR}",
+            str(FF_DELTA_C),
+            "-o",
+            str(so_path),
+        ],
+        check=True,
+    )
+    lib = ctypes.CDLL(str(so_path))
+    lib.ff_delta_apply_in_memory.argtypes = [
+        ctypes.c_char_p,
+        ctypes.c_size_t,
+        ctypes.c_char_p,
+        ctypes.c_char_p,
+        ctypes.c_size_t,
+        ctypes.c_char_p,
+        ctypes.c_size_t,
+        ctypes.POINTER(ctypes.c_size_t),
+    ]
+    lib.ff_delta_apply_in_memory.restype = ctypes.c_int
+    return lib
+
+
+def _run_hostile_delta_vectors(tmp_path: Path) -> None:
+    lib = _compile_ff_delta(tmp_path)
+    base = b"ABCDEFGHIJKLMNOP"  # 16 bytes
+    base_digest = hashlib.sha256(base).digest()
+    target = b"ABCDEF0123456789"
+    target_digest = hashlib.sha256(target).digest()
+    target_hex = target_digest.hex()
+
+    def _hdr(
+        *,
+        magic: bytes = b"FFDLTA01",
+        from_d: bytes = base_digest,
+        to_d: bytes = target_digest,
+        size: int = len(target),
+    ) -> bytes:
+        return magic + from_d + to_d + struct.pack(">I", size)
+
+    # Shared hostile vectors covering M3a (OP_COPY OOB read / wraparound), M3b (short write),
+    # bad magic, zero target size, wrong base hash, bad opcode, truncated ops, trailing bytes.
+    vectors: list[tuple[str, bytes, int]] = [
+        ("bad_magic", _hdr(magic=b"BADMAGIC") + b"\x00", -2),
+        ("short_header", b"FFDLTA01" + b"\x00" * 10, -2),
+        ("zero_target_size", _hdr(size=0) + b"\x00", -2),
+        ("wrong_from_hash", _hdr(from_d=b"\x00" * 32) + b"\x00", -3),
+        # M3a: src_off < base_len, but src_off + len > base_len (heap overread!)
+        ("copy_overread_past_base", _hdr() + b"\x01" + struct.pack(">II", 12, 8) + b"\x00", -4),
+        # src_off > base_len
+        ("copy_src_off_past_base", _hdr() + b"\x01" + struct.pack(">II", 32, 4) + b"\x00", -4),
+        # uint32 wraparound: src_off + len wraps to small int if unchecked
+        ("copy_u32_wrap", _hdr() + b"\x01" + struct.pack(">II", 0xFFFFFFFC, 8) + b"\x00", -4),
+        ("copy_zero_len", _hdr() + b"\x01" + struct.pack(">II", 0, 0) + b"\x00", -4),
+        # OP_COPY writing past target_size
+        ("copy_past_target", _hdr(size=4) + b"\x01" + struct.pack(">II", 0, 8) + b"\x00", -4),
+        ("copy_truncated", _hdr() + b"\x01\x00\x00\x00", -6),
+        ("insert_zero_len", _hdr() + b"\x02" + struct.pack(">I", 0) + b"\x00", -6),
+        ("insert_truncated_hdr", _hdr() + b"\x02\x00\x00", -6),
+        ("insert_truncated_payload", _hdr() + b"\x02" + struct.pack(">I", 10) + b"abc", -6),
+        ("insert_past_target", _hdr(size=4) + b"\x02" + struct.pack(">I", 8) + b"12345678\x00", -4),
+        ("unknown_opcode", _hdr() + b"\x99\x00", -5),
+        ("missing_end_opcode", _hdr() + b"\x01" + struct.pack(">II", 0, 16), -6),
+        (
+            "trailing_bytes_after_end",
+            _hdr() + b"\x01" + struct.pack(">II", 0, 16) + b"\x00\x99",
+            -6,
+        ),
+        # M3b: valid opcodes + OP_END, but written (4) != hdr.target_size (16)
+        (
+            "short_written_vs_target_size",
+            _hdr(size=16) + b"\x01" + struct.pack(">II", 0, 4) + b"\x00",
+            -7,
+        ),
+    ]
+
+    for name, patch_bytes, expected_c_rc in vectors:
+        with pytest.raises(DeltaPatchError, match=r".+"):
+            apply_delta_patch(base, patch_bytes, expected_to_sha256=target_hex)
+        with pytest.raises(SimulatorError, match=r".+"):
+            apply_ffdelta_v1(base, patch_bytes, expected_to_sha256=target_hex)
+        out_buf = ctypes.create_string_buffer(64)
+        written = ctypes.c_size_t(0)
+        rc = lib.ff_delta_apply_in_memory(
+            base,
+            len(base),
+            base_digest,
+            patch_bytes,
+            len(patch_bytes),
+            out_buf,
+            64,
+            ctypes.byref(written),
+        )
+        assert rc == expected_c_rc, f"vector {name!r}: expected C rc {expected_c_rc}, got {rc}"
+
+    # Verify stage-digest binding (`T-18` `delta_ota.py:132`): valid patch targeting `target` MUST fail
+    # if `expected_to_sha256` names a different digest.
+    good_patch = create_delta_patch(base, target)
+    wrong_to_hex = "0" * 64
+    with pytest.raises(DeltaPatchError, match="target digest disagrees"):
+        apply_delta_patch(base, good_patch, expected_to_sha256=wrong_to_hex)
+    with pytest.raises(SimulatorError, match="to_sha256"):
+        apply_ffdelta_v1(base, good_patch, expected_to_sha256=wrong_to_hex)
 
 
 class TestSwarmHierarchyEdgeRelayAndAirtimeRollout:
@@ -416,7 +544,7 @@ class TestSwarmHierarchyEdgeRelayAndAirtimeRollout:
 
                 cmd_1 = publisher.published[0][1]["id"]
                 cmd_2 = publisher.published[1][1]["id"]
-                with patch("fleetforge.ingestor.handlers.emit", side_effect=_counting_emit):
+                with patch("fleetforge.ingest.handlers.emit", side_effect=_counting_emit):
                     sync_resp = await client.post(
                         "/v1/devices/a4cf12b30001/relay-sync",
                         headers=headers,
@@ -627,3 +755,202 @@ class TestSwarmHierarchyEdgeRelayAndAirtimeRollout:
                 json={"from_sha256": sha1},
             )
             assert r_ok.status_code == 201, r_ok.text
+
+    async def test_offline_gateway_falls_back_to_the_direct_url(
+        self,
+        env: dict[str, Any],
+    ) -> None:
+        """A-30: when a parent gateway is offline, child deploys fall back to the direct URL;
+        gateways can also authenticate `/relay` and `/relay-sync` via per-device HTTP Basic."""
+        import base64
+        import datetime as dt
+
+        headers = {"Authorization": f"Bearer {env['token']}"}
+        publisher: FakeCommandPublisher = env["publisher"]
+        now = now_utc()
+        gw_pw = "gw-mqtt-secret-pw"
+        gw_pw_hash = hashlib.sha256(gw_pw.encode("utf-8")).hexdigest()
+        other_pw_hash = hashlib.sha256(b"other-pw").hexdigest()
+
+        async with env["sessionmaker"]() as s:
+            grp = DeviceGroup(project_id=DEFAULT_PROJECT_ID, name="offline-gw-swarm")
+            s.add(grp)
+            await s.flush()
+            ugv = Device(
+                device_id="a4cf12b30301",
+                name="ugv-offline",
+                project_id=DEFAULT_PROJECT_ID,
+                platform_type="esp32s3",
+                fw_version="2.0.0",
+                partition_layout="ab-4m-v1",
+                ota_slot_size=1966080,
+                rollback_capable=True,
+                capabilities=["ota", "sig", "edge_relay"],
+                link_type="wifi",
+                power_class="always_on",
+                presence_reported=False,
+                last_seen=now - dt.timedelta(hours=2),
+                mqtt_password_hash=gw_pw_hash,
+            )
+            child = Device(
+                device_id="a4cf12b30311",
+                name="child-direct-fallback",
+                project_id=DEFAULT_PROJECT_ID,
+                group_id=grp.id,
+                parent_device_id=ugv.device_id,
+                platform_type="esp32c6",
+                fw_version="1.0.0",
+                partition_layout="ab-4m-v1",
+                ota_slot_size=1966080,
+                rollback_capable=True,
+                capabilities=["ota", "sig"],
+                link_type="wifi",
+                power_class="always_on",
+                presence_reported=True,
+                last_seen=now,
+                mqtt_password_hash=other_pw_hash,
+            )
+            s.add_all([ugv, child])
+            await s.commit()
+            gid = grp.id
+
+        gw_basic = base64.b64encode(f"a4cf12b30301:{gw_pw}".encode()).decode("ascii")
+        other_basic = base64.b64encode(b"a4cf12b30311:other-pw").decode("ascii")
+        bad_basic = base64.b64encode(b"a4cf12b30301:wrong-pw").decode("ascii")
+
+        fw = _realistic_firmware("1.4.0")
+        async with client_for(env["app"], base_url="https://testserver") as client:
+            up = await client.post(
+                "/v1/artifact",
+                params={"target": "esp32c6", "version": "1.4.0", "partition_layout": "ab-4m-v1"},
+                content=fw,
+                headers={
+                    **headers,
+                    "Content-Type": "application/octet-stream",
+                    "Content-Length": str(len(fw)),
+                },
+            )
+            assert up.status_code == 201
+
+            # Bad Basic password -> 401; valid Basic creds for a DIFFERENT device -> 403.
+            assert (
+                await client.put(
+                    "/v1/devices/a4cf12b30301/relay",
+                    headers={"Authorization": f"Basic {bad_basic}"},
+                    json={"relay_base_url": "http://10.20.30.40:8080", "cached_artifacts": []},
+                )
+            ).status_code == 401
+            assert (
+                await client.put(
+                    "/v1/devices/a4cf12b30301/relay",
+                    headers={"Authorization": f"Basic {other_basic}"},
+                    json={"relay_base_url": "http://10.20.30.40:8080", "cached_artifacts": []},
+                )
+            ).status_code == 403
+
+            # Gateway registers its relay using its own per-device Basic credential -> 200!
+            reg = await client.put(
+                "/v1/devices/a4cf12b30301/relay",
+                headers={"Authorization": f"Basic {gw_basic}"},
+                json={"relay_base_url": "http://10.20.30.40:8080", "cached_artifacts": []},
+            )
+            assert reg.status_code == 200, reg.text
+
+            # Because parent gateway `a4cf12b30301` is OFFLINE, child deploy falls back to direct URL!
+            roll = await client.post(
+                "/v1/projects/default/deploy",
+                headers=headers,
+                json={"version": "1.4.0", "group_id": str(gid), "canary": False, "max_parallel": 5},
+            )
+            assert roll.status_code == 202, roll.text
+            assert len(publisher.published) == 1
+            staged_url = str(publisher.published[0][1]["artifact"]["url"])
+            assert staged_url.startswith(env["settings"].public_base_url)
+            assert not staged_url.startswith("http://10.20.30.40:8080")
+
+            # Gateway can also authenticate `POST /relay-sync` via its own Basic credential.
+            sync = await client.post(
+                "/v1/devices/a4cf12b30301/relay-sync",
+                headers={"Authorization": f"Basic {gw_basic}"},
+                json={"children": {"a4cf12b30311": {"statuses": []}}},
+            )
+            assert sync.status_code == 200, sync.text
+
+    async def test_airtime_cap_counts_in_flight_boards_of_other_versions(
+        self,
+        env: dict[str, Any],
+    ) -> None:
+        """A-30: a `lora` board actively downloading `1.2.0` occupies the link's airtime cap=1
+        so rolling out `1.3.0` onto a second `lora` board waits instead of saturating the radio."""
+        from fleetforge.deploys import DeploySender, record_observed_status, record_requested
+
+        headers = {"Authorization": f"Bearer {env['token']}"}
+        now = now_utc()
+        async with env["sessionmaker"]() as s:
+            lora_grp = DeviceGroup(project_id=DEFAULT_PROJECT_ID, name="lora-cross-ver")
+            s.add(lora_grp)
+            await s.flush()
+            for idx in (1, 2):
+                s.add(
+                    Device(
+                        device_id=f"a4cf12b3040{idx}",
+                        project_id=DEFAULT_PROJECT_ID,
+                        group_id=lora_grp.id,
+                        platform_type="esp32c6",
+                        fw_version="1.0.0",
+                        partition_layout="ab-4m-v1",
+                        ota_slot_size=1966080,
+                        rollback_capable=True,
+                        capabilities=["ota", "sig"],
+                        link_type="lora",
+                        power_class="always_on",
+                        presence_reported=True,
+                        last_seen=now,
+                    )
+                )
+            await s.flush()
+            await record_requested(
+                s,
+                device_id="a4cf12b30401",
+                cmd_id="cmd-older-ver",
+                artifact_version="1.2.0",
+                from_version="1.0.0",
+                sha256="a" * 64,
+                size_bytes=4096,
+                target="esp32c6",
+                apply="auto",
+                sent_by=DeploySender("admin", "tok-1", None),
+            )
+            await record_observed_status(
+                s,
+                device_id="a4cf12b30401",
+                cmd_id="cmd-older-ver",
+                state="downloading",
+                pct=40,
+                at=now,
+            )
+            await s.commit()
+            gid = lora_grp.id
+
+        fw = _realistic_firmware("1.3.0")
+        async with client_for(env["app"], base_url="https://testserver") as client:
+            up = await client.post(
+                "/v1/artifact",
+                params={"target": "esp32c6", "version": "1.3.0", "partition_layout": "ab-4m-v1"},
+                content=fw,
+                headers={
+                    **headers,
+                    "Content-Type": "application/octet-stream",
+                    "Content-Length": str(len(fw)),
+                },
+            )
+            assert up.status_code == 201
+            roll = await client.post(
+                "/v1/projects/default/deploy",
+                headers=headers,
+                json={"version": "1.3.0", "group_id": str(gid), "canary": False, "max_parallel": 5},
+            )
+            assert roll.status_code == 202, roll.text
+            body = roll.json()
+            assert body["deployed"] == []
+            assert "airtime cap=1 on lora link" in body["skipped"]["a4cf12b30402"]

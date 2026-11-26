@@ -9,41 +9,27 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any
 
 from fastapi import FastAPI
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
 from fleetforge.api.deps import get_command_publisher, get_object_store, get_settings
+from fleetforge.broker import CommandPublishError
 from fleetforge.clock import now_utc
 from fleetforge.db.models import Device
-from fleetforge.ingestor.handlers import handle_up_message
+from fleetforge.ingest.handlers import handle_up_message
 from fleetforge.rollout import advance_project_rollout_on_confirm, reconcile_open_rollouts
 from fleetforge.signing import generate_keypair, sign_digest
-from tests.conftest import MemoryObjectStore, client_for, login_admin, settings_for_tests
+from tests.conftest import (
+    FakeCommandPublisher,
+    MemoryObjectStore,
+    client_for,
+    login_admin,
+    settings_for_tests,
+)
 
 _PRIV_A, _PUB_A = generate_keypair()
 _PRIV_B, _PUB_B = generate_keypair()
-
-
-class RecordingCommandPublisher:
-    def __init__(self) -> None:
-        self.published: list[tuple[str, dict[str, Any]]] = []
-
-    async def publish(self, device_id: str, payload: dict[str, Any]) -> None:
-        self.published.append((device_id, payload))
-
-    async def publish_many(self, items: Any) -> None:
-        self.published.extend(items)
-
-    async def publish_cfg(self, device_id: str, payload: dict[str, Any]) -> None:
-        self.published.append((device_id, payload))
-
-    async def publish_cfg_many(self, items: Any) -> None:
-        self.published.extend(items)
-
-    async def clear_cfg(self, device_id: str) -> None:
-        self.published.append((device_id, {}))
 
 
 async def test_project_cohort_rollout_canary_waves_halt_and_rbac_over_postgres(
@@ -57,7 +43,7 @@ async def test_project_cohort_rollout_canary_waves_halt_and_rbac_over_postgres(
     4. `handle_up_message` (`rolled_back`) on one Wave 2 board halts further wave promotion.
     """
     store = MemoryObjectStore()
-    publisher = RecordingCommandPublisher()
+    publisher = FakeCommandPublisher()
     settings = settings_for_tests(
         s3_endpoint_url="http://minio:9000",
         s3_bucket="fleetforge",
@@ -310,7 +296,7 @@ async def test_reconcile_does_not_restage_a_superseded_version(
     ticks and replayed confirm events for 1.0.0 must never downgrade or flip any board."""
     _ = clean_tables
     store = MemoryObjectStore()
-    publisher = RecordingCommandPublisher()
+    publisher = FakeCommandPublisher()
     settings = settings_for_tests(
         s3_endpoint_url="http://minio:9000",
         s3_bucket="fleetforge",
@@ -478,4 +464,263 @@ async def test_reconcile_does_not_restage_a_superseded_version(
                 publisher=publisher,
             )
         assert replayed == []
+        assert publisher.published == []
+
+
+async def test_publish_failure_recovery_mid_wave_cleanup_and_per_target_canary_over_postgres(
+    admin_app: FastAPI, engine: AsyncEngine, clean_tables: None
+) -> None:
+    """T-21 / A-3: PostgreSQL-backed rollout edge cases (migrated from mock-session unit tests):
+    1. Mid-wave broker failure closes EVERY remaining unpublished intent with `publish_failed`
+       before answering HTTP 503.
+    2. A server-authored `publish_failed` never halts a subsequent retry of the cohort.
+    3. Confirming canary on `esp32c6` unlocks Wave 2 for `esp32c6`, while `esp32s3` still
+       stages only its single canary first.
+    4. A stalled offline downloader does not starve online boards, and `POST /deploy/cancel`
+       halts background `advance_project_rollout_on_confirm`.
+    """
+    import datetime as dt
+
+    from sqlalchemy import text
+
+    from fleetforge.deploys import latest_deploys
+    from fleetforge.lib_marker import MAGIC
+
+    _ = clean_tables
+    store = MemoryObjectStore()
+    publisher = FakeCommandPublisher()
+    settings = settings_for_tests(
+        s3_endpoint_url="http://minio:9000",
+        s3_bucket="fleetforge",
+        artifact_url_secret="s" * 32,
+        public_base_url="https://fleet.example.com",
+        mqtt_command_username="ff-commander",
+        mqtt_command_password="pw",
+        confirm_timeout_s=120,
+        artifact_signing_key=_PRIV_A,
+        artifact_signing_public_keys=f"{_PUB_A};{_PUB_B}",
+    )
+    admin_app.dependency_overrides[get_settings] = lambda: settings
+    admin_app.dependency_overrides[get_object_store] = lambda: store
+    admin_app.dependency_overrides[get_command_publisher] = lambda: publisher
+
+    token = await login_admin(admin_app)
+    headers = {"Authorization": f"Bearer {token}"}
+    sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
+    marker = MAGIC + b"\x01\x00\x00\x00" + b"0.7.0\x00".ljust(32, b"\x00") + b"\x00" * 12
+
+    async with client_for(admin_app, base_url="https://testserver") as client:
+        p = await client.post(
+            "/v1/projects",
+            headers=headers,
+            json={"slug": "edge-fleet", "name": "Edge Fleet"},
+        )
+        assert p.status_code == 201, p.text
+        proj_id = p.json()["id"]
+
+        for target in ("esp32c6", "esp32s3"):
+            fw = b"\xe9\x00\x00\x00" + marker + f"{target}-1.2.0".encode() * 32
+            sha = hashlib.sha256(fw).hexdigest()
+            up = await client.post(
+                "/v1/artifact",
+                params={
+                    "project": "edge-fleet",
+                    "target": target,
+                    "version": "1.2.0",
+                    "partition_layout": "ab-4m-v1",
+                    "sig": sign_digest(sha, _PRIV_A),
+                },
+                headers=headers,
+                content=fw,
+            )
+            assert up.status_code == 201, up.text
+
+        now = now_utc()
+        async with sessionmaker() as s:
+            s.add_all(
+                [
+                    Device(
+                        device_id=f"a4cf12b3ee0{idx}",
+                        project_id=proj_id,
+                        platform_type="esp32c6",
+                        fw_version="1.0.0",
+                        partition_layout="ab-4m-v1",
+                        ota_slot_size=1966080,
+                        rollback_capable=True,
+                        capabilities=["ota", "sig", "cancel"],
+                        link_type="wifi",
+                        power_class="always_on",
+                        is_dev=(idx == 1),
+                        presence_reported=True,
+                        last_seen=now,
+                    )
+                    for idx in (1, 2, 3)
+                ]
+            )
+            await s.commit()
+
+        # 1. Mid-wave broker failure: batch fails, board 1 succeeds, boards 2 & 3 get publish_failed -> 503.
+        publisher.fail_publish_many_with = CommandPublishError("batch failed")
+        publisher.fail_with = CommandPublishError("broker dropped mid-wave")
+        publisher.fail_after_publishes = 1
+        r_fail = await client.post(
+            "/v1/projects/edge-fleet/deploy",
+            headers=headers,
+            json={"version": "1.2.0", "target_filter": "all", "canary": False, "max_parallel": 3},
+        )
+        assert r_fail.status_code == 503, r_fail.text
+
+        async with sessionmaker() as s:
+            snaps = await latest_deploys(
+                s, device_ids=["a4cf12b3ee01", "a4cf12b3ee02", "a4cf12b3ee03"]
+            )
+        assert snaps["a4cf12b3ee01"].state == "requested"
+        assert snaps["a4cf12b3ee02"].state == "failed"
+        assert snaps["a4cf12b3ee02"].reason == "publish_failed"
+        assert snaps["a4cf12b3ee03"].state == "failed"
+        assert snaps["a4cf12b3ee03"].reason == "publish_failed"
+
+        # 2. Retry succeeds (server-authored `publish_failed` does NOT halt the cohort!).
+        publisher.fail_publish_many_with = None
+        publisher.fail_with = None
+        publisher.fail_after_publishes = None
+        publisher.published.clear()
+
+        # Confirm board 1 (`esp32c6` canary) and seed two `esp32s3` boards (`ee04` canary, `ee05` fleet).
+        c6_canary_cmd = snaps["a4cf12b3ee01"].cmd_id
+        assert c6_canary_cmd is not None
+        async with sessionmaker() as s:
+            await handle_up_message(
+                s,
+                topic="ff/v1/d/a4cf12b3ee01/up/announce",
+                payload=json.dumps(
+                    {
+                        "device_id": "a4cf12b3ee01",
+                        "platform_type": "esp32c6",
+                        "fw_version": "1.2.0",
+                        "partition_layout": "ab-4m-v1",
+                        "ota_slot_size": 1966080,
+                        "rollback_capable": True,
+                        "capabilities": ["ota", "sig", "cancel"],
+                    }
+                ).encode(),
+                retained=True,
+                received_at=now_utc(),
+                tolerance=settings.presence_tolerance,
+            )
+            await handle_up_message(
+                s,
+                topic="ff/v1/d/a4cf12b3ee01/up/status",
+                payload=json.dumps({"cmd_id": c6_canary_cmd, "state": "confirmed"}).encode(),
+                retained=True,
+                received_at=now_utc(),
+                tolerance=settings.presence_tolerance,
+            )
+            s.add_all(
+                [
+                    Device(
+                        device_id="a4cf12b3ee04",
+                        project_id=proj_id,
+                        platform_type="esp32s3",
+                        fw_version="1.0.0",
+                        partition_layout="ab-4m-v1",
+                        ota_slot_size=1966080,
+                        rollback_capable=True,
+                        capabilities=["ota", "sig", "cancel"],
+                        link_type="wifi",
+                        power_class="always_on",
+                        is_dev=True,
+                        presence_reported=True,
+                        last_seen=now,
+                    ),
+                    Device(
+                        device_id="a4cf12b3ee05",
+                        project_id=proj_id,
+                        platform_type="esp32s3",
+                        fw_version="1.0.0",
+                        partition_layout="ab-4m-v1",
+                        ota_slot_size=1966080,
+                        rollback_capable=True,
+                        capabilities=["ota", "sig", "cancel"],
+                        link_type="wifi",
+                        power_class="always_on",
+                        is_dev=False,
+                        presence_reported=True,
+                        last_seen=now,
+                    ),
+                ]
+            )
+            await s.commit()
+
+        # 3. Per-target canary: `esp32c6` boards (`ee02`, `ee03`) both stage, while `esp32s3` stages ONLY `ee04`!
+        r_retry = await client.post(
+            "/v1/projects/edge-fleet/deploy",
+            headers=headers,
+            json={"version": "1.2.0", "target_filter": "all", "canary": True, "max_parallel": 5},
+        )
+        assert r_retry.status_code == 202, r_retry.text
+        retry_body = r_retry.json()
+        assert {d["device_id"] for d in retry_body["deployed"]} == {
+            "a4cf12b3ee02",
+            "a4cf12b3ee03",
+            "a4cf12b3ee04",
+        }
+        assert "waiting for canary a4cf12b3ee04" in retry_body["skipped"]["a4cf12b3ee05"]
+
+        # 4. Stalled offline board + cohort cancel (`POST /deploy/cancel`) halts auto-advancement.
+        ee02_cmd = next(
+            d["cmd_id"] for d in retry_body["deployed"] if d["device_id"] == "a4cf12b3ee02"
+        )
+        async with sessionmaker() as s:
+            await s.execute(
+                text(
+                    "UPDATE devices SET presence_reported = false, last_seen = :stale "
+                    "WHERE device_id = 'a4cf12b3ee02'"
+                ),
+                {"stale": now - dt.timedelta(minutes=10)},
+            )
+            await handle_up_message(
+                s,
+                topic="ff/v1/d/a4cf12b3ee02/up/status",
+                payload=json.dumps(
+                    {"cmd_id": ee02_cmd, "state": "downloading", "pct": 25}
+                ).encode(),
+                retained=False,
+                received_at=now - dt.timedelta(minutes=10),
+                tolerance=settings.presence_tolerance,
+            )
+            await s.commit()
+
+        r_cancel = await client.post(
+            "/v1/projects/edge-fleet/deploy/cancel",
+            headers=headers,
+            json={"version": "1.2.0"},
+        )
+        assert r_cancel.status_code == 202, r_cancel.text
+        cancelled_ids = {c["device_id"] for c in r_cancel.json()["cancelled"]}
+        assert "a4cf12b3ee02" in cancelled_ids
+
+        # Board `ee02` reports `cancelled`; subsequent confirm advance must stay halted!
+        publisher.published.clear()
+        async with sessionmaker() as s:
+            await handle_up_message(
+                s,
+                topic="ff/v1/d/a4cf12b3ee02/up/status",
+                payload=json.dumps(
+                    {"cmd_id": ee02_cmd, "state": "cancelled", "detail": "cancelled by operator"}
+                ).encode(),
+                retained=False,
+                received_at=now_utc(),
+                tolerance=settings.presence_tolerance,
+            )
+            await s.commit()
+        async with sessionmaker() as s:
+            adv = await advance_project_rollout_on_confirm(
+                s,
+                device_id="a4cf12b3ee01",
+                cmd_id=c6_canary_cmd,
+                settings=settings,
+                publisher=publisher,
+            )
+        assert adv == []
         assert publisher.published == []

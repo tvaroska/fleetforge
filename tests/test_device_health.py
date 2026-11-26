@@ -30,7 +30,7 @@ from typing import Any
 import pytest
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from fleetforge import device_logs, faults, retention, telemetry_store
 from fleetforge.db.models import (
@@ -917,40 +917,109 @@ async def test_the_sweep_prunes_artifact_versions_preserving_running_and_previou
 
 
 async def test_the_sweep_garbage_collects_unreferenced_user_firmware_artifacts_and_blobs(
-    session: AsyncSession,
+    engine: AsyncEngine,
+    clean_tables: None,
 ) -> None:
     from unittest.mock import AsyncMock
 
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
     from fleetforge.storage.blobs import blob_key
 
-    await seed_device(session)
+    _ = clean_tables
+    sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
     sha_kept = "a" * 64
     sha_orphan = "b" * 64
     sha_agent = "c" * 64
-    await session.execute(
-        text(
-            "INSERT INTO artifacts (sha256, size_bytes, kind, target, partition_layout) VALUES "
-            "(:kept, 1024, 'user_firmware', 'esp32c6', 'ab-4m-v1'), "
-            "(:orphan, 1024, 'user_firmware', 'esp32c6', 'ab-4m-v1'), "
-            "(:agent, 1024, 'agent_app', 'esp32c6', 'ab-4m-v1')"
-        ),
-        {"kept": sha_kept, "orphan": sha_orphan, "agent": sha_agent},
-    )
-    await session.execute(
-        text(
-            "INSERT INTO artifact_versions (target, version, sha256, created_at) VALUES "
-            "('esp32c6', 'v1', :orphan, :old), "
-            "('esp32c6', 'v2', :kept, :new)"
-        ),
-        {"orphan": sha_orphan, "kept": sha_kept, "old": NOW - dt.timedelta(days=5), "new": NOW},
-    )
+    async with sessionmaker() as s:
+        await seed_device(s)
+        await s.execute(
+            text(
+                "INSERT INTO artifacts (sha256, size_bytes, kind, target, partition_layout) VALUES "
+                "(:kept, 1024, 'user_firmware', 'esp32c6', 'ab-4m-v1'), "
+                "(:orphan, 1024, 'user_firmware', 'esp32c6', 'ab-4m-v1'), "
+                "(:agent, 1024, 'agent_app', 'esp32c6', 'ab-4m-v1')"
+            ),
+            {"kept": sha_kept, "orphan": sha_orphan, "agent": sha_agent},
+        )
+        await s.execute(
+            text(
+                "INSERT INTO artifact_versions (target, version, sha256, created_at) VALUES "
+                "('esp32c6', 'v1', :orphan, :old), "
+                "('esp32c6', 'v2', :kept, :new)"
+            ),
+            {
+                "orphan": sha_orphan,
+                "kept": sha_kept,
+                "old": NOW - dt.timedelta(days=5),
+                "new": NOW,
+            },
+        )
+        await s.commit()
+
     fake_store = AsyncMock()
-    result = await retention.sweep(session, now=NOW, version_cap=1, store=fake_store)
+    async with sessionmaker() as s:
+        result = await retention.sweep(
+            s, now=NOW, version_cap=1, store=fake_store, prune_orphans=True
+        )
     assert result.artifact_versions == 1
     assert result.artifacts == 1
     fake_store.delete.assert_awaited_once_with(blob_key(sha_orphan))
-    remaining = set((await session.scalars(text("SELECT sha256 FROM artifacts"))).all())
+    async with sessionmaker() as s:
+        remaining = set((await s.scalars(text("SELECT sha256 FROM artifacts"))).all())
     assert remaining == {sha_kept, sha_agent}
+
+
+async def test_retention_commits_db_delete_before_unlinking_blob(
+    engine: AsyncEngine,
+    clean_tables: None,
+) -> None:
+    """A-31: the `artifacts` DELETE is committed and visible to a second DB connection
+    BEFORE `store.delete(blob_key)` runs, and `delta_patch` orphans are reclaimed too."""
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from fleetforge.storage.blobs import blob_key
+
+    _ = clean_tables
+    sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
+    sha_orphan = "d" * 64
+    sha_delta = "e" * 64
+    async with sessionmaker() as s:
+        await s.execute(
+            text(
+                "INSERT INTO artifacts (sha256, size_bytes, kind, target, partition_layout, artifact_type) VALUES "
+                "(:orphan, 2048, 'user_firmware', 'esp32c6', 'ab-4m-v1', 'app'), "
+                "(:delta, 256, 'delta_patch', NULL, NULL, 'delta_patch')"
+            ),
+            {"orphan": sha_orphan, "delta": sha_delta},
+        )
+        await s.commit()
+
+    observed_committed_at_unlink: dict[str, bool] = {}
+
+    class VerifyingDeleteStore:
+        async def delete(self, key: str) -> None:
+            sha = key.rsplit("/", 1)[-1]
+            async with sessionmaker() as observer:
+                still_present = await observer.scalar(
+                    text("SELECT sha256 FROM artifacts WHERE sha256 = :sha"),
+                    {"sha": sha},
+                )
+            observed_committed_at_unlink[key] = still_present is None
+
+    async with sessionmaker() as s:
+        res = await retention.sweep(
+            s,
+            now=NOW,
+            store=VerifyingDeleteStore(),  # type: ignore[arg-type]
+            prune_orphans=True,
+        )
+
+    assert res.artifacts == 2
+    assert observed_committed_at_unlink == {
+        blob_key(sha_orphan): True,
+        blob_key(sha_delta): True,
+    }
 
 
 async def test_reads_hide_expired_rows_before_any_sweep(session: AsyncSession) -> None:

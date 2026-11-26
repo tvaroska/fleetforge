@@ -1,39 +1,24 @@
-"""Multi-ring staged cohort deploy policy engine (`R11-1`, `A-22`).
+"""Multi-ring staged cohort deploy policy engine (`R11-1`, `A-22`, `A-29`, `A-32`).
 
 Maps Git branch or tag-glob provenance (`match_mode`, `match_ref`) to an ordered list of
 `device_groups.id` cohort rings (for example `[canary, staging, prod]`) and gates every
-wave and ring-to-ring promotion on:
-- Persisted per-`(policy_id, version)` run state (`deploy_policy_runs`) so a halt survives
-  later device events until an operator passes `resume=True` explicitly.
-- Valid, non-empty rings: a deleted group or a ring with zero compatible devices halts.
-- Zero `rolled_back`, `cancelled`, or non-`publish_failed` `failed` outcomes on `version`
-  (current or historical since the last resume) across any policy ring.
-- Zero boards entering `safe_mode` or recording fault resets (`panic`, `task_wdt`,
-  `brownout`) after confirming `version` (via `up/status` or `up/announce`).
-- Known, sufficient `free_heap` when `min_free_heap_bytes` is configured (unknown health
-  never passes the gate), optional `require_sim_passed`, and `min_soak_s` counted from
-  first ring completeness.
+wave and ring-to-ring promotion on persisted halt memory, ring validity, rollback/fault
+absence, known `free_heap`, optional simulation pass, and first-completeness soak timing.
 """
 
 from __future__ import annotations
 
+import datetime as dt
 import fnmatch
 import uuid
 
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from fleetforge.api.deps import AuthContext
-from fleetforge.api.schemas_deploys import DeployAccepted
-from fleetforge.api.schemas_v2 import (
-    DeployPolicyEvaluation,
-    PolicyEvalStatusLiteral,
-    PolicyRingStatus,
-)
 from fleetforge.broker import CommandPublisher, NullCommandPublisher
 from fleetforge.clock import now_utc
 from fleetforge.config import Settings
-from fleetforge.db.models import DeployPolicy, Device, DeviceGroup, Project
+from fleetforge.db.models import DeployPolicy, DeployPolicyRun, Device, DeviceGroup, Project
 from fleetforge.deploy_policy_gates import (
     RingStatusLiteral as RingStatusLiteral,
 )
@@ -64,9 +49,16 @@ from fleetforge.deploy_policy_gates import (
 from fleetforge.deploy_policy_gates import (
     persist_halt as _persist_halt,
 )
-from fleetforge.deploys import latest_deploys
+from fleetforge.deploys import DeploySnapshot, latest_deploys
 from fleetforge.rollout import deploy_version_to_project_devices
 from fleetforge.rollout_state import close_matching_rollouts
+from fleetforge.rollout_types import (
+    ActorContext,
+    DeployAccepted,
+    DeployPolicyEvaluation,
+    PolicyEvalStatusLiteral,
+    PolicyRingStatus,
+)
 
 _VERSION_TARGETS_SQL = text(
     """
@@ -103,6 +95,303 @@ def matches_deploy_policy(
     return False
 
 
+async def _load_ring_context(
+    session: AsyncSession,
+    *,
+    policy: DeployPolicy,
+    eligible_targets: set[str],
+) -> tuple[
+    list[uuid.UUID],
+    set[uuid.UUID],
+    dict[uuid.UUID, list[Device]],
+    list[str],
+    dict[str, DeploySnapshot],
+]:
+    ring_ids = list(policy.ring_group_ids)
+    existing_group_ids = set(
+        (
+            await session.scalars(
+                select(DeviceGroup.id).where(
+                    DeviceGroup.project_id == policy.project_id,
+                    DeviceGroup.id.in_(ring_ids),
+                )
+            )
+        ).all()
+    )
+    devices_rows = list(
+        (
+            await session.scalars(
+                select(Device)
+                .where(
+                    Device.project_id == policy.project_id,
+                    Device.decommissioned_at.is_(None),
+                    Device.group_id.in_(ring_ids),
+                )
+                .order_by(Device.device_id)
+            )
+        ).all()
+    )
+    by_group: dict[uuid.UUID, list[Device]] = {gid: [] for gid in ring_ids}
+    for dev in devices_rows:
+        if (
+            dev.group_id is not None
+            and dev.group_id in by_group
+            and dev.platform_type in eligible_targets
+        ):
+            by_group[dev.group_id].append(dev)
+    all_ring_device_ids = [d.device_id for d in devices_rows]
+    snapshots = (
+        await latest_deploys(session, device_ids=all_ring_device_ids) if all_ring_device_ids else {}
+    )
+    return ring_ids, existing_group_ids, by_group, all_ring_device_ids, snapshots
+
+
+async def _handle_prior_halt(
+    session: AsyncSession,
+    *,
+    policy: DeployPolicy,
+    run: DeployPolicyRun | None,
+    version: str,
+    ring_ids: list[uuid.UUID],
+    by_group: dict[uuid.UUID, list[Device]],
+    all_ring_device_ids: list[str],
+    snapshots: dict[str, DeploySnapshot],
+    admin: ActorContext | None,
+    resume: bool,
+    now: dt.datetime,
+) -> DeployPolicyEvaluation | None:
+    if run is None or run.status != "halted":
+        return None
+    if not resume:
+        halted_idx = run.halted_ring_index if run.halted_ring_index is not None else 0
+        return DeployPolicyEvaluation(
+            policy_id=policy.id,
+            version=version,
+            status="halted",
+            halt_reason=run.halt_reason or f"ring {halted_idx} halted",
+            rings=_build_halted_rings(ring_ids, by_group, snapshots, version, halted_idx),
+            deployed=[],
+        )
+    prior_halts = await _historical_version_halts(
+        session, device_ids=all_ring_device_ids, version=version, since=None
+    )
+    resume_watermark = max(
+        [
+            now,
+            *(snap.at for snap in snapshots.values()),
+            *(ev_at for _, ev_at in prior_halts.values()),
+        ]
+    )
+    run.status = "active"
+    run.halted_ring_index = None
+    run.halt_reason = None
+    run.halted_at = None
+    run.resumed_at = resume_watermark
+    run.resumed_by = admin.subject if admin is not None else None
+    run.updated_at = now
+    return None
+
+
+async def _scan_ring_halts(
+    session: AsyncSession,
+    *,
+    policy: DeployPolicy,
+    version: str,
+    ring_ids: list[uuid.UUID],
+    by_group: dict[uuid.UUID, list[Device]],
+    snapshots: dict[str, DeploySnapshot],
+    historical_halts: dict[str, tuple[str, dt.datetime]],
+    artifact_created_at: dt.datetime | None,
+    resumed_at: dt.datetime | None,
+) -> tuple[int, str] | None:
+    for idx, gid in enumerate(ring_ids):
+        reason = await _detect_ring_halt(
+            session,
+            ring_idx=idx,
+            ring_devices=by_group.get(gid, []),
+            snapshots=snapshots,
+            version=version,
+            min_free_heap_bytes=policy.min_free_heap_bytes,
+            historical_halts=historical_halts,
+            artifact_created_at=artifact_created_at,
+            resumed_at=resumed_at,
+        )
+        if reason is not None:
+            return idx, reason
+    return None
+
+
+def _record_ring_completion_time(
+    *,
+    run: DeployPolicyRun | None,
+    ring_idx: int,
+    confirmed_devs: list[Device],
+    snapshots: dict[str, DeploySnapshot],
+    version: str,
+    now: dt.datetime,
+) -> dt.datetime:
+    ring_key = str(ring_idx)
+    recorded_ts = (
+        _parse_iso_timestamp(run.ring_completed_at.get(ring_key))
+        if run is not None and isinstance(run.ring_completed_at, dict)
+        else None
+    )
+    if recorded_ts is not None:
+        return recorded_ts
+    confirm_times = [
+        snap.at
+        for d in confirmed_devs
+        if (snap := snapshots.get(d.device_id)) is not None
+        and snap.artifact_version == version
+        and snap.state == "confirmed"
+    ]
+    completed_at = max(confirm_times) if len(confirm_times) == len(confirmed_devs) else now
+    if run is not None:
+        updated_map = dict(run.ring_completed_at or {})
+        updated_map[ring_key] = completed_at.isoformat()
+        run.ring_completed_at = updated_map
+        run.updated_at = now
+    return completed_at
+
+
+async def _advance_rings(
+    session: AsyncSession,
+    *,
+    policy: DeployPolicy,
+    run: DeployPolicyRun | None,
+    version: str,
+    ring_ids: list[uuid.UUID],
+    existing_group_ids: set[uuid.UUID],
+    by_group: dict[uuid.UUID, list[Device]],
+    snapshots: dict[str, DeploySnapshot],
+    resumed_at: dt.datetime | None,
+    admin: ActorContext | None,
+    settings: Settings,
+    publisher: CommandPublisher,
+    republish_in_flight: bool,
+    now: dt.datetime,
+) -> tuple[PolicyEvalStatusLiteral, str | None, list[PolicyRingStatus], list[DeployAccepted]]:
+    ring_statuses: list[PolicyRingStatus] = []
+    deployed_all: list[DeployAccepted] = []
+    for idx, gid in enumerate(ring_ids):
+        r_devs = by_group.get(gid, [])
+        if gid not in existing_group_ids or not r_devs:
+            missing_reason = (
+                f"ring {idx} halted: group {gid} was deleted"
+                if gid not in existing_group_ids
+                else f"ring {idx} halted: group {gid} has no compatible devices for version {version}"
+            )
+            await _persist_halt(
+                session,
+                policy=policy,
+                run=run,
+                version=version,
+                ring_idx=idx,
+                reason=missing_reason,
+                now=now,
+            )
+            return (
+                "halted",
+                missing_reason,
+                _build_halted_rings(ring_ids, by_group, snapshots, version, idx),
+                [],
+            )
+
+        confirmed_devs = [
+            d for d in r_devs if _device_confirmed_version(d, snapshots.get(d.device_id), version)
+        ]
+        in_flight_devs = [
+            d for d in r_devs if _device_in_flight_version(snapshots.get(d.device_id), version)
+        ]
+        unknown_heap_devs = (
+            [d for d in confirmed_devs if d.free_heap is None]
+            if policy.min_free_heap_bytes is not None
+            else []
+        )
+
+        if len(confirmed_devs) < len(r_devs):
+            staged_now: list[DeployAccepted] = []
+            if not unknown_heap_devs:
+                override_codes = ("sim_failed",) if not policy.require_sim_passed else ()
+                staged_now, _ = await deploy_version_to_project_devices(
+                    session,
+                    project_id=policy.project_id,
+                    version=version,
+                    target_filter="all",
+                    apply="auto",
+                    override=override_codes,
+                    admin=admin,
+                    settings=settings,
+                    publisher=publisher,
+                    group_id=gid,
+                    best_effort_broker=True,
+                    canary=True,
+                    max_parallel=policy.max_parallel,
+                    republish_in_flight=republish_in_flight,
+                    policy_id=policy.id,
+                    ignore_halts_before=resumed_at,
+                )
+            deployed_all.extend(staged_now)
+            in_flight_total = len(
+                {d.device_id for d in in_flight_devs} | {item.device_id for item in staged_now}
+            )
+            ring_statuses.append(
+                PolicyRingStatus(
+                    ring_index=idx,
+                    group_id=gid,
+                    status="in_progress",
+                    total_devices=len(r_devs),
+                    confirmed_devices=len(confirmed_devs),
+                    in_flight_devices=in_flight_total,
+                )
+            )
+            ring_statuses.extend(
+                _pending_tail_rings(
+                    ring_ids, idx + 1, by_group, snapshots, version, count_confirmed=True
+                )
+            )
+            return "in_progress", None, ring_statuses, deployed_all
+
+        completed_at = _record_ring_completion_time(
+            run=run,
+            ring_idx=idx,
+            confirmed_devs=confirmed_devs,
+            snapshots=snapshots,
+            version=version,
+            now=now,
+        )
+        still_soaking = bool(unknown_heap_devs) or (
+            policy.min_soak_s > 0 and (now - completed_at).total_seconds() < policy.min_soak_s
+        )
+        if still_soaking:
+            ring_statuses.append(
+                PolicyRingStatus(
+                    ring_index=idx,
+                    group_id=gid,
+                    status="soaking",
+                    total_devices=len(r_devs),
+                    confirmed_devices=len(confirmed_devs),
+                    in_flight_devices=0,
+                )
+            )
+            ring_statuses.extend(
+                _pending_tail_rings(ring_ids, idx + 1, by_group, snapshots, version)
+            )
+            return "soaking", None, ring_statuses, deployed_all
+
+        ring_statuses.append(
+            PolicyRingStatus(
+                ring_index=idx,
+                group_id=gid,
+                status="promoted",
+                total_devices=len(r_devs),
+                confirmed_devices=len(confirmed_devs),
+                in_flight_devices=0,
+            )
+        )
+    return "completed", None, ring_statuses, deployed_all
+
+
 async def evaluate_policy_for_version(
     session: AsyncSession,
     *,
@@ -110,7 +399,7 @@ async def evaluate_policy_for_version(
     version: str,
     settings: Settings,
     publisher: CommandPublisher,
-    admin: AuthContext | None = None,
+    admin: ActorContext | None = None,
     republish_in_flight: bool = False,
     resume: bool = False,
 ) -> DeployPolicyEvaluation:
@@ -157,7 +446,6 @@ async def evaluate_policy_for_version(
             deployed=[],
         )
 
-    # Lock the project row BEFORE reading run state, devices, or snapshots (`A-22`).
     if isinstance(session, AsyncSession):
         await session.execute(
             select(Project.id).where(Project.id == policy.project_id).with_for_update()
@@ -165,285 +453,83 @@ async def evaluate_policy_for_version(
 
     now = now_utc()
     run = await _load_or_create_run(session, policy_id=policy.id, version=version, now=now)
-
-    ring_ids = list(policy.ring_group_ids)
-    existing_group_ids = set(
-        (
-            await session.scalars(
-                select(DeviceGroup.id).where(
-                    DeviceGroup.project_id == policy.project_id,
-                    DeviceGroup.id.in_(ring_ids),
-                )
-            )
-        ).all()
+    (
+        ring_ids,
+        existing_group_ids,
+        by_group,
+        all_ring_device_ids,
+        snapshots,
+    ) = await _load_ring_context(session, policy=policy, eligible_targets=eligible_targets)
+    prior_halted = await _handle_prior_halt(
+        session,
+        policy=policy,
+        run=run,
+        version=version,
+        ring_ids=ring_ids,
+        by_group=by_group,
+        all_ring_device_ids=all_ring_device_ids,
+        snapshots=snapshots,
+        admin=admin,
+        resume=resume,
+        now=now,
     )
-    devices_rows = list(
-        (
-            await session.scalars(
-                select(Device)
-                .where(
-                    Device.project_id == policy.project_id,
-                    Device.decommissioned_at.is_(None),
-                    Device.group_id.in_(ring_ids),
-                )
-                .order_by(Device.device_id)
-            )
-        ).all()
-    )
-    by_group: dict[uuid.UUID, list[Device]] = {gid: [] for gid in ring_ids}
-    for dev in devices_rows:
-        if (
-            dev.group_id is not None
-            and dev.group_id in by_group
-            and dev.platform_type in eligible_targets
-        ):
-            by_group[dev.group_id].append(dev)
-
-    all_ring_device_ids = [d.device_id for d in devices_rows]
-    snapshots = (
-        await latest_deploys(session, device_ids=all_ring_device_ids) if all_ring_device_ids else {}
-    )
-
-    if run is not None and run.status == "halted":
-        if not resume:
-            halted_idx = run.halted_ring_index if run.halted_ring_index is not None else 0
-            return DeployPolicyEvaluation(
-                policy_id=policy.id,
-                version=version,
-                status="halted",
-                halt_reason=run.halt_reason or f"ring {halted_idx} halted",
-                rings=_build_halted_rings(ring_ids, by_group, snapshots, version, halted_idx),
-                deployed=[],
-            )
-        prior_halts = await _historical_version_halts(
-            session,
-            device_ids=all_ring_device_ids,
-            version=version,
-            since=None,
-        )
-        # Anchor resume past existing events so small ingestor/API clock skew never re-trips it.
-        resume_watermark = max(
-            [
-                now,
-                *(snap.at for snap in snapshots.values()),
-                *(ev_at for _, ev_at in prior_halts.values()),
-            ]
-        )
-        run.status = "active"
-        run.halted_ring_index = None
-        run.halt_reason = None
-        run.halted_at = None
-        run.resumed_at = resume_watermark
-        run.resumed_by = admin.subject if admin is not None else None
-        run.updated_at = now
+    if prior_halted is not None:
+        return prior_halted
 
     resumed_at = run.resumed_at if run is not None else None
     historical_halts = await _historical_version_halts(
-        session,
-        device_ids=all_ring_device_ids,
-        version=version,
-        since=resumed_at,
+        session, device_ids=all_ring_device_ids, version=version, since=resumed_at
     )
     created_times = [
         r.created_at for r in target_rows if getattr(r, "created_at", None) is not None
     ]
-    artifact_created_at = min(created_times) if created_times else None
-
-    halted_ring_idx: int | None = None
-    halt_reason: str | None = None
-    for idx, gid in enumerate(ring_ids):
-        reason = await _detect_ring_halt(
-            session,
-            ring_idx=idx,
-            ring_devices=by_group.get(gid, []),
-            snapshots=snapshots,
-            version=version,
-            min_free_heap_bytes=policy.min_free_heap_bytes,
-            historical_halts=historical_halts,
-            artifact_created_at=artifact_created_at,
-            resumed_at=resumed_at,
-        )
-        if reason is not None:
-            halted_ring_idx = idx
-            halt_reason = reason
-            break
-
-    if halted_ring_idx is not None and halt_reason is not None:
+    halted = await _scan_ring_halts(
+        session,
+        policy=policy,
+        version=version,
+        ring_ids=ring_ids,
+        by_group=by_group,
+        snapshots=snapshots,
+        historical_halts=historical_halts,
+        artifact_created_at=min(created_times) if created_times else None,
+        resumed_at=resumed_at,
+    )
+    if halted is not None:
+        halted_idx, pre_halt_reason = halted
         await _persist_halt(
             session,
             policy=policy,
             run=run,
             version=version,
-            ring_idx=halted_ring_idx,
-            reason=halt_reason,
+            ring_idx=halted_idx,
+            reason=pre_halt_reason,
             now=now,
         )
         return DeployPolicyEvaluation(
             policy_id=policy.id,
             version=version,
             status="halted",
-            halt_reason=halt_reason,
-            rings=_build_halted_rings(ring_ids, by_group, snapshots, version, halted_ring_idx),
+            halt_reason=pre_halt_reason,
+            rings=_build_halted_rings(ring_ids, by_group, snapshots, version, halted_idx),
             deployed=[],
         )
 
-    ring_statuses: list[PolicyRingStatus] = []
-    deployed_all: list[DeployAccepted] = []
-    overall_status: PolicyEvalStatusLiteral = "completed"
-
-    for idx, gid in enumerate(ring_ids):
-        r_devs = by_group.get(gid, [])
-        if gid not in existing_group_ids or not r_devs:
-            missing_reason = (
-                f"ring {idx} halted: group {gid} was deleted"
-                if gid not in existing_group_ids
-                else f"ring {idx} halted: group {gid} has no compatible devices for version {version}"
-            )
-            await _persist_halt(
-                session,
-                policy=policy,
-                run=run,
-                version=version,
-                ring_idx=idx,
-                reason=missing_reason,
-                now=now,
-            )
-            return DeployPolicyEvaluation(
-                policy_id=policy.id,
-                version=version,
-                status="halted",
-                halt_reason=missing_reason,
-                rings=_build_halted_rings(ring_ids, by_group, snapshots, version, idx),
-                deployed=[],
-            )
-
-        confirmed_devs = [
-            d for d in r_devs if _device_confirmed_version(d, snapshots.get(d.device_id), version)
-        ]
-        in_flight_devs = [
-            d for d in r_devs if _device_in_flight_version(snapshots.get(d.device_id), version)
-        ]
-        unknown_heap_devs = (
-            [d for d in confirmed_devs if d.free_heap is None]
-            if policy.min_free_heap_bytes is not None
-            else []
-        )
-
-        if len(confirmed_devs) < len(r_devs):
-            if unknown_heap_devs:
-                # Unknown free_heap on an already-confirmed board does not pass the heap gate:
-                # hold further waves inside this ring until telemetry proves healthy heap.
-                staged_now: list[DeployAccepted] = []
-            else:
-                override_codes = ("sim_failed",) if not policy.require_sim_passed else ()
-                staged_now, _ = await deploy_version_to_project_devices(
-                    session,
-                    project_id=policy.project_id,
-                    version=version,
-                    target_filter="all",
-                    apply="auto",
-                    override=override_codes,
-                    admin=admin,
-                    settings=settings,
-                    publisher=publisher,
-                    group_id=gid,
-                    best_effort_broker=True,
-                    canary=True,
-                    max_parallel=policy.max_parallel,
-                    republish_in_flight=republish_in_flight,
-                    policy_id=policy.id,
-                    ignore_halts_before=resumed_at,
-                )
-            deployed_all.extend(staged_now)
-            newly_staged_ids = {item.device_id for item in staged_now}
-            in_flight_total = len({d.device_id for d in in_flight_devs} | newly_staged_ids)
-            ring_statuses.append(
-                PolicyRingStatus(
-                    ring_index=idx,
-                    group_id=gid,
-                    status="in_progress",
-                    total_devices=len(r_devs),
-                    confirmed_devices=len(confirmed_devs),
-                    in_flight_devices=in_flight_total,
-                )
-            )
-            ring_statuses.extend(
-                _pending_tail_rings(
-                    ring_ids, idx + 1, by_group, snapshots, version, count_confirmed=True
-                )
-            )
-            overall_status = "in_progress"
-            break
-
-        if unknown_heap_devs:
-            # Unknown free_heap on a confirmed board never passes `min_free_heap_bytes`.
-            ring_statuses.append(
-                PolicyRingStatus(
-                    ring_index=idx,
-                    group_id=gid,
-                    status="soaking",
-                    total_devices=len(r_devs),
-                    confirmed_devices=len(confirmed_devs),
-                    in_flight_devices=0,
-                )
-            )
-            ring_statuses.extend(
-                _pending_tail_rings(ring_ids, idx + 1, by_group, snapshots, version)
-            )
-            overall_status = "soaking"
-            break
-
-        ring_key = str(idx)
-        recorded_ts = (
-            _parse_iso_timestamp(run.ring_completed_at.get(ring_key))
-            if run is not None and isinstance(run.ring_completed_at, dict)
-            else None
-        )
-        if recorded_ts is None:
-            confirm_times = [
-                snap.at
-                for d in confirmed_devs
-                if (snap := snapshots.get(d.device_id)) is not None
-                and snap.artifact_version == version
-                and snap.state == "confirmed"
-            ]
-            completed_at = max(confirm_times) if len(confirm_times) == len(confirmed_devs) else now
-            if run is not None:
-                updated_map = dict(run.ring_completed_at or {})
-                updated_map[ring_key] = completed_at.isoformat()
-                run.ring_completed_at = updated_map
-                run.updated_at = now
-        else:
-            completed_at = recorded_ts
-
-        if policy.min_soak_s > 0 and (now - completed_at).total_seconds() < policy.min_soak_s:
-            ring_statuses.append(
-                PolicyRingStatus(
-                    ring_index=idx,
-                    group_id=gid,
-                    status="soaking",
-                    total_devices=len(r_devs),
-                    confirmed_devices=len(confirmed_devs),
-                    in_flight_devices=0,
-                )
-            )
-            ring_statuses.extend(
-                _pending_tail_rings(ring_ids, idx + 1, by_group, snapshots, version)
-            )
-            overall_status = "soaking"
-            break
-
-        ring_statuses.append(
-            PolicyRingStatus(
-                ring_index=idx,
-                group_id=gid,
-                status="promoted",
-                total_devices=len(r_devs),
-                confirmed_devices=len(confirmed_devs),
-                in_flight_devices=0,
-            )
-        )
-
+    overall_status, halt_reason, ring_statuses, deployed_all = await _advance_rings(
+        session,
+        policy=policy,
+        run=run,
+        version=version,
+        ring_ids=ring_ids,
+        existing_group_ids=existing_group_ids,
+        by_group=by_group,
+        snapshots=snapshots,
+        resumed_at=resumed_at,
+        admin=admin,
+        settings=settings,
+        publisher=publisher,
+        republish_in_flight=republish_in_flight,
+        now=now,
+    )
     if overall_status == "completed":
         if run is not None:
             run.status = "completed"
@@ -459,15 +545,14 @@ async def evaluate_policy_for_version(
             status_value="completed",
             reason=None,
         )
-
-    if isinstance(session, AsyncSession):
+    if overall_status != "halted" and isinstance(session, AsyncSession):
         await session.commit()
 
     return DeployPolicyEvaluation(
         policy_id=policy.id,
         version=version,
         status=overall_status,
-        halt_reason=None,
+        halt_reason=halt_reason,
         rings=ring_statuses,
         deployed=deployed_all,
     )
@@ -526,7 +611,7 @@ async def trigger_matching_policies_on_upload(
     tag: str | None,
     test_passed: bool | None,
     sim_status: str | None,
-    admin: AuthContext | None,
+    admin: ActorContext | None,
     settings: Settings,
     publisher: CommandPublisher,
 ) -> list[str]:

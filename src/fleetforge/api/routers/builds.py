@@ -21,7 +21,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path as FsPath
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Path, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Path, Query, Request, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 
@@ -36,7 +36,6 @@ from fleetforge.api.deps import (
     cookie_scheme,
     resolve_project_for_request,
 )
-from fleetforge.api.routers.artifacts import VERSION_PATTERN
 from fleetforge.api.schemas import (
     PROJECT_SLUG_PATTERN,
     BuildJobCreate,
@@ -53,6 +52,7 @@ from fleetforge.builds import (
 from fleetforge.clock import now_utc
 from fleetforge.db.models import BuildJob, ProjectRole
 from fleetforge.partition_profiles import load_layout_catalog
+from fleetforge.rollout_types import VERSION_PATTERN
 from fleetforge.url_safety import sanitize_git_repo_url, validate_git_ref
 
 router = APIRouter(
@@ -262,6 +262,8 @@ async def cancel_build(
                 detail=f"build job is already {job.status}",
             )
         job.status = BuildStatus.CANCELLED.value
+        job.lease_owner = None
+        job.lease_expires_at = None
         job.finished_at = now_utc()
         await session.commit()
         await session.refresh(job)
@@ -345,19 +347,42 @@ async def retry_build(
     return _to_summary(retried)
 
 
+def _diff_rolling_log(prev: str, curr: str) -> str:
+    """Compute newly appended bytes even after `right(log_text || chunk, cap)` rolls past 256 KiB."""
+    if curr == prev:
+        return ""
+    if not prev:
+        return curr
+    if curr.startswith(prev):
+        return curr[len(prev) :]
+    anchor_len = min(len(prev), max(1, min(64, len(curr) // 4)))
+    anchor = prev[-anchor_len:]
+    pos = curr.rfind(anchor)
+    while pos != -1:
+        end = pos + anchor_len
+        if prev.endswith(curr[:end]):
+            return curr[end:]
+        pos = curr.rfind(anchor, 0, pos)
+    return curr
+
+
 @router.get(
     "/{build_id}/logs/stream",
     response_class=StreamingResponse,
     summary="Stream live build logs over Server-Sent Events (SSE)",
-    responses={200: {"content": {"text/event-stream": {}}}},
+    responses={
+        200: {"content": {"text/event-stream": {}}},
+        503: {"description": "Too many concurrent build log stream clients"},
+    },
 )
 async def stream_build_logs(
+    request: Request,
     slug: Annotated[str, Path(pattern=PROJECT_SLUG_PATTERN)],
     build_id: uuid.UUID,
     admin: AdminDep,
     settings: SettingsDep,
     sessionmaker: SessionMakerDep,
-    poll_s: Annotated[float, Query(ge=0.02, le=5.0)] = 0.2,
+    poll_s: Annotated[float, Query(ge=0.1, le=5.0)] = 0.25,
 ) -> StreamingResponse:
     async with sessionmaker() as session:
         project = await resolve_project_for_request(
@@ -371,39 +396,56 @@ async def stream_build_logs(
         if initial is None or initial.project_id != project.id:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="build job not found")
 
+    active_streams = int(getattr(request.app.state, "build_log_streams", 0))
+    if active_streams >= settings.sse_max_clients:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="too many build log stream clients",
+            headers={"Retry-After": "5"},
+        )
+    request.app.state.build_log_streams = active_streams + 1
+
     async def body() -> AsyncIterator[bytes]:
-        yield b": connected\nretry: 1000\n\n"
-        offset = 0
-        last_status: str | None = None
-        deadline = time.monotonic() + float(settings.sse_max_stream_s)
+        try:
+            yield b": connected\nretry: 1000\n\n"
+            last_log = ""
+            offset = 0
+            last_status: str | None = None
+            deadline = time.monotonic() + float(settings.sse_max_stream_s)
 
-        while time.monotonic() < deadline:
-            async with sessionmaker() as poll_session:
-                current = await poll_session.get(BuildJob, build_id)
-            if current is None:
-                break
-
-            log_now = current.log_text or ""
-            chunk = log_now[offset:]
-            done = current.status in TERMINAL_BUILD_STATUSES
-            if chunk or current.status != last_status or done:
-                offset = len(log_now)
-                last_status = current.status
-                frame = json.dumps(
-                    {
-                        "build_id": str(build_id),
-                        "status": current.status,
-                        "offset": offset,
-                        "chunk": chunk,
-                        "done": done,
-                        "artifact_sha256": current.artifact_sha256,
-                        "error_detail": current.error_detail,
-                    }
-                )
-                yield f"data: {frame}\n\n".encode()
-                if done:
+            while time.monotonic() < deadline:
+                if await request.is_disconnected():
                     break
-            await asyncio.sleep(poll_s)
+                async with sessionmaker() as poll_session:
+                    current = await poll_session.get(BuildJob, build_id)
+                if current is None:
+                    break
+
+                log_now = current.log_text or ""
+                chunk = _diff_rolling_log(last_log, log_now)
+                done = current.status in TERMINAL_BUILD_STATUSES
+                if chunk or current.status != last_status or done:
+                    last_log = log_now
+                    offset += len(chunk)
+                    last_status = current.status
+                    frame = json.dumps(
+                        {
+                            "build_id": str(build_id),
+                            "status": current.status,
+                            "offset": offset,
+                            "chunk": chunk,
+                            "done": done,
+                            "artifact_sha256": current.artifact_sha256,
+                            "error_detail": current.error_detail,
+                        }
+                    )
+                    yield f"data: {frame}\n\n".encode()
+                    if done:
+                        break
+                await asyncio.sleep(poll_s)
+        finally:
+            current_active = int(getattr(request.app.state, "build_log_streams", 1))
+            request.app.state.build_log_streams = max(0, current_active - 1)
 
     return StreamingResponse(
         body(),
