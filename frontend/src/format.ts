@@ -61,3 +61,22 @@ export function formatBytes(n: number): string {
   if (n < 1048576) return `${(n / 1024).toFixed(1)} KiB`
   return `${(n / 1048576).toFixed(1)} MiB`
 }
+
+/**
+ * Returns a canonical `http:` or `https:` href for an external link, or `null` for
+ * unsafe schemes (`javascript:`, `data:`, `vbscript:`), relative paths, or invalid URLs.
+ */
+export function safeHttpHref(raw: string | null | undefined): string | null {
+  if (typeof raw !== 'string') return null
+  const trimmed = raw.trim()
+  if (trimmed === '') return null
+  try {
+    const parsed = new URL(trimmed)
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return null
+    }
+    return parsed.href
+  } catch {
+    return null
+  }
+}

@@ -10,7 +10,7 @@
 //    a negative or NaN duration as `0 s`.
 
 import { describe, expect, it } from 'vitest'
-import { formatAgo, formatBytes, formatDuration, formatWhen } from './format'
+import { formatAgo, formatBytes, formatDuration, formatWhen, safeHttpHref } from './format'
 
 const NOW = Date.parse('2026-09-10T12:00:00Z')
 const ago = (seconds: number) => new Date(NOW - seconds * 1000).toISOString()
@@ -79,5 +79,31 @@ describe('formatBytes', () => {
   it('reads a negative or NaN count as a dash', () => {
     expect(formatBytes(Number.NaN)).toBe('—')
     expect(formatBytes(-1)).toBe('—')
+  })
+})
+
+describe('safeHttpHref', () => {
+  it('accepts http and https URLs', () => {
+    expect(safeHttpHref('https://github.com/org/repo/actions/runs/1')).toBe(
+      'https://github.com/org/repo/actions/runs/1',
+    )
+    expect(safeHttpHref('http://ci.example.com/builds/42')).toBe('http://ci.example.com/builds/42')
+    expect(safeHttpHref('  HTTPS://github.com/org/repo  ')).toBe('https://github.com/org/repo')
+  })
+
+  it('rejects javascript, data, vbscript, relative, and malformed URLs', () => {
+    expect(safeHttpHref('javascript:alert(1)')).toBeNull()
+    expect(safeHttpHref('JAVASCRIPT:alert(1)')).toBeNull()
+    expect(safeHttpHref('java\tscript:alert(1)')).toBeNull()
+    expect(safeHttpHref('data:text/html,<script>alert(1)</script>')).toBeNull()
+    expect(safeHttpHref('vbscript:msgbox(1)')).toBeNull()
+    expect(safeHttpHref('file:' + '///etc/passwd')).toBeNull()
+    expect(safeHttpHref('/relative/path')).toBeNull()
+    expect(safeHttpHref('//evil.example/path')).toBeNull()
+    expect(safeHttpHref('not a url')).toBeNull()
+    expect(safeHttpHref('')).toBeNull()
+    expect(safeHttpHref('   ')).toBeNull()
+    expect(safeHttpHref(null)).toBeNull()
+    expect(safeHttpHref(undefined)).toBeNull()
   })
 })

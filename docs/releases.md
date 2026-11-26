@@ -71,27 +71,27 @@ The first functioning app: *I can register a board and see it online*. No code-d
 - **Add:** `fleetforge push` CLI (`src/fleetforge/cli.py`) plus Google Cloud Build ([`examples/cloudbuild-fleetforge.yaml`](examples/cloudbuild-fleetforge.yaml)) and GitHub Actions ([`examples/github-actions-fleetforge.yml`](examples/github-actions-fleetforge.yml)) workflow examples that build & push firmware with provenance on branch/tag.
 - **You can now:** push a tag or branch → a deployable, commit-linked version appears automatically.
 
-### R9 — Advisory simulation gate
-- **Add:** `pytest-embedded` + Espressif QEMU boots the artifact and runs the **R5 self-test** *before* deploy. Warn + override in the UI.
-- **You can now:** catch bad builds before any device receives it.
+### R9 — Advisory simulation gate (shipped)
+- **Add:** `EspressifQemuSimRunner` + `sim_worker` boots the artifact in Espressif QEMU and captures the **R5 self-test** verdict (`passed`/`failed`/`skipped`) *before* deploy (`POST /v1/artifact/{sha256}/simulate` or `?queue_simulation=true`). Warn + override in the UI.
+- **You can now:** catch bad builds before any device receives it when a QEMU worker is enabled.
 - *Moved out of v1: at 5 boards, auto-rollback already makes a bad build cheap. Sim earns its keep once builds arrive automatically from CI (R8) and nobody is watching each one.*
 
-### R10 — Build from source (server-side compile)
-- **Add:** the server clones a repo at a ref and builds the artifact itself — pinned ESP-IDF toolchain containers per target (esp32/S3/C3/C6), queued builds, streamed build logs, build cache.
-- **You can now:** point Fleetforge at a repo and get a deployable artifact — no local toolchain, no CI required.
-- ⚠️ **This reverses a v1 non-goal** ("the server never builds"). Two things follow: artifacts stay *opaque to the core* (the builder is a producer feeding the same upload API, not a special path) and **building a repo is arbitrary code execution on the server**. Thus, the build step must be sandboxed and resource-capped from its first commit.
-- **Toolchain:** native `idf.py` projects first. PlatformIO second. Pin the IDF version per project or builds stop being reproducible.
+### R10 — Build from source (server-side compile, shipped)
+- **Add:** `builder` worker clones a repo at a validated ref (`GitShallowSourceFetcher`) and compiles inside pinned, networkless ESP-IDF containers (`SandboxedIdfContainerRunner`) for esp32/S3/C3/C6, with queued builds, SSE streamed build logs, and source-tree build cache.
+- **You can now:** point Fleetforge at a repo and get a deployable artifact when a builder worker with Docker is enabled.
+- ⚠️ **This reverses a v1 non-goal** ("the server never builds"). Two things follow: artifacts stay *opaque to the core* (the builder is a producer feeding the same artifact store, not a special path) and **building a repo is arbitrary code execution on the server**. Thus, the build step is sandboxed (`--network=none`, `--read-only`, `--cap-drop=ALL`, non-root) and resource-capped.
+- **Toolchain:** native `idf.py` projects first. PlatformIO second. Pin the IDF image digest so builds stay reproducible.
 
-### R11 — Deploy policy & staged project rollouts (shipped via CUJ-2)
-- **Add:** per-project continuous deployment tracking (`track_mode`: `off` | `branch` | `tag` | `commit`, `track_ref`, and `auto_deploy_target`: `off` | `dev` | `all`, gated on `test_passed != false`), plus staged project/group rollouts (`POST /v1/projects/{slug}/deploy`) with automatic rollback halt, Wave 1 canary gating (`canary=True`), and Wave 2 bounded concurrency (`max_parallel`, progressed automatically via `ff_events` on `confirmed`).
-- **You can now:** continuously deploy your dev board or staged project cohort while everything else stays manual or canary-gated.
+### R11 — Deploy policy & staged project rollouts (shipped)
+- **Add:** multi-ring cohort deploy policies (`POST /v1/projects/{slug}/policies`, soak timers, `min_free_heap_bytes`, `require_sim_passed`, persisted `deploy_policy_runs`), per-project continuous deployment tracking (`track_mode`: `off` | `branch` | `tag` | `commit`, `track_ref`, and `auto_deploy_target`: `off` | `dev` | `all`, gated on `test_passed != false`), plus staged project/group rollouts (`POST /v1/projects/{slug}/deploy`) with automatic rollback halt, Wave 1 canary gating (`canary=True`), and Wave 2 bounded concurrency (`max_parallel`, progressed automatically via `ff_events` on `confirmed`).
+- **You can now:** promote firmware ring by ring across cohorts with soak and health gates while everything else stays manual or canary-gated.
 - ⚠️ *Sequencing:* auto-deploy is only as safe as its rollback. Per-device auto-rollback (R2) makes it survivable. Canary makes it comfortable.
 
 ---
 
-## V3 — robotic swarm: one ground vehicle (gateway) + many flying drones
+## V3 — robotic swarm: one ground vehicle (gateway) + many flying drones (server side & standalone C decoder shipped)
 
-*The first genuinely homogeneous fleet, and the first hierarchy: a gateway acting as edge relay for many drones, groups & bulk deploy, airtime-aware scheduling, delta updates. Ordering and tasks in [features/groups-deploy.md](features/groups-deploy.md).*
+*Hierarchy (`parent_device_id`), edge-relay gateway API (`/relay`, `/relay-sync`), airtime-aware scheduling (`lora`/`ble`/`thread`/`cellular` and per-gateway concurrency caps), and `ffdelta-v1` binary delta OTA (server side and standalone C decoder `ff_delta.c` only; on-device streaming delta OTA and gateway MQTT republishing/per-child broker ACLs remain planned). Ordering and tasks in [features/groups-deploy.md](features/groups-deploy.md).*
 
 ## Beyond
 See [roadmap.md](roadmap.md) → *Beyond V3*.

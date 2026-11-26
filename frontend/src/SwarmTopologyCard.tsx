@@ -1,11 +1,15 @@
-import { useEffect, useState, type FormEvent } from 'react'
-import {
-  ApiError,
-  api,
-  type ArtifactSummary,
-  type SwarmTopologyResponse,
-} from './api'
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
+import { api, type ArtifactSummary, type SwarmTopologyResponse } from './api'
 import { type Artifacts } from './deploy'
+import {
+  LOAD_IDLE,
+  LOAD_PENDING,
+  LOAD_READY,
+  loadErrorMessage,
+  loadFailed,
+  resolveLoadError,
+  type LoadState,
+} from './loadState'
 import { shortSha } from './profiles'
 
 export function SwarmTopologyCard({
@@ -19,12 +23,20 @@ export function SwarmTopologyCard({
   artifacts: Artifacts
   onSessionExpired: () => void
 }) {
+  const [loadState, setLoadState] = useState<LoadState>(LOAD_IDLE)
   const [topology, setTopology] = useState<SwarmTopologyResponse | null>(null)
   const [fromSha, setFromSha] = useState('')
   const [toSha, setToSha] = useState('')
   const [busy, setBusy] = useState(false)
   const [statusMsg, setStatusMsg] = useState<string | null>(null)
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
+
+  const mountedRef = useRef(true)
+  const projectSlugRef = useRef(projectSlug)
+  projectSlugRef.current = projectSlug
+  const onSessionExpiredRef = useRef(onSessionExpired)
+  onSessionExpiredRef.current = onSessionExpired
+  const loadSeqRef = useRef(0)
 
   const artifactRows: ArtifactSummary[] = []
   for (const list of artifacts.byTarget.values()) {
@@ -35,37 +47,53 @@ export function SwarmTopologyCard({
     }
   }
 
-  async function refreshTopology() {
+  useEffect(() => {
+    mountedRef.current = true
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
+
+  const refreshTopology = useCallback(async (showLoading = false) => {
+    const slug = projectSlugRef.current
+    const seq = ++loadSeqRef.current
+    if (showLoading) {
+      setLoadState(LOAD_PENDING)
+      setErrorMsg(null)
+    }
     try {
-      const res = await api.getSwarmTopology(projectSlug)
+      const res = await api.getSwarmTopology(slug)
+      if (!mountedRef.current || projectSlugRef.current !== slug || seq !== loadSeqRef.current) {
+        return
+      }
       setTopology(res)
+      setLoadState(LOAD_READY)
     } catch (err) {
-      if (err instanceof ApiError && err.isUnauthorized) {
-        onSessionExpired()
+      if (!mountedRef.current || projectSlugRef.current !== slug || seq !== loadSeqRef.current) {
+        return
+      }
+      const msg = resolveLoadError(
+        err,
+        'Could not load swarm topology',
+        onSessionExpiredRef.current,
+      )
+      if (msg !== null) {
+        setLoadState(loadFailed(msg))
       }
     }
-  }
+  }, [])
+
+  useEffect(() => {
+    setTopology(null)
+    setStatusMsg(null)
+    setErrorMsg(null)
+    setLoadState(LOAD_IDLE)
+  }, [projectSlug])
 
   useEffect(() => {
     if (!active) return
-    let cancelled = false
-    api
-      .getSwarmTopology(projectSlug)
-      .then((res) => {
-        if (!cancelled) {
-          setTopology(res)
-        }
-      })
-      .catch((err: unknown) => {
-        if (cancelled) return
-        if (err instanceof ApiError && err.isUnauthorized) {
-          onSessionExpired()
-        }
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [active, projectSlug, onSessionExpired])
+    void refreshTopology(true)
+  }, [active, projectSlug, refreshTopology])
 
   async function handleGenerateDelta(e: FormEvent) {
     e.preventDefault()
@@ -85,15 +113,18 @@ export function SwarmTopologyCard({
       )
       await refreshTopology()
     } catch (err) {
-      if (err instanceof ApiError && err.isUnauthorized) {
-        onSessionExpired()
-        return
+      const msg = resolveLoadError(err, 'Delta generation failed', onSessionExpiredRef.current)
+      if (msg !== null) {
+        setErrorMsg(msg)
       }
-      setErrorMsg(err instanceof Error ? err.message : 'Delta generation failed')
     } finally {
       setBusy(false)
     }
   }
+
+  const displayError = errorMsg ?? loadErrorMessage(loadState)
+  const gateways = topology?.gateways ?? []
+  const deltas = topology?.deltas ?? []
 
   return (
     <section
@@ -164,13 +195,35 @@ export function SwarmTopologyCard({
           {statusMsg}
         </p>
       )}
-      {errorMsg !== null && (
+      {displayError !== null && (
         <p className="bad" role="alert" data-testid="swarm-delta-error">
-          {errorMsg}
+          {displayError}
+          {loadState.status === 'error' && (
+            <>
+              {' '}
+              <button
+                type="button"
+                data-testid="swarm-retry-btn"
+                onClick={() => void refreshTopology(true)}
+              >
+                Retry
+              </button>
+            </>
+          )}
+        </p>
+      )}
+      {loadState.status === 'loading' && topology === null && (
+        <p className="muted" aria-busy="true" data-testid="swarm-loading">
+          Loading swarm topology…
+        </p>
+      )}
+      {loadState.status === 'loaded' && gateways.length === 0 && deltas.length === 0 && (
+        <p className="muted" data-testid="swarm-empty">
+          No UGV edge-relay gateways or binary deltas registered yet.
         </p>
       )}
 
-      {(topology?.gateways ?? []).length > 0 && (
+      {gateways.length > 0 && (
         <table data-testid="swarm-gateways-table">
           <thead>
             <tr>
@@ -181,7 +234,7 @@ export function SwarmTopologyCard({
             </tr>
           </thead>
           <tbody>
-            {(topology?.gateways ?? []).map((gw) => (
+            {gateways.map((gw) => (
               <tr key={gw.gateway_id} data-testid="swarm-gateway-row">
                 <td>
                   <strong>{gw.name ?? gw.gateway_id}</strong>{' '}
@@ -208,7 +261,7 @@ export function SwarmTopologyCard({
         </table>
       )}
 
-      {(topology?.deltas ?? []).length > 0 && (
+      {deltas.length > 0 && (
         <table data-testid="artifact-deltas-table">
           <thead>
             <tr>
@@ -219,7 +272,7 @@ export function SwarmTopologyCard({
             </tr>
           </thead>
           <tbody>
-            {(topology?.deltas ?? []).map((d) => (
+            {deltas.map((d) => (
               <tr key={`${d.from_sha256}->${d.to_sha256}`} data-testid="artifact-delta-row">
                 <td>
                   <code>{shortSha(d.from_sha256)}</code> → <code>{shortSha(d.to_sha256)}</code>

@@ -5,18 +5,18 @@
 //
 // The rules this file keeps (each one a decision recorded in DECISIONS.md):
 //
-// 1. **No percentage, no progress bar.** `pct` is a transition log, not a feed; nothing
-//    here reads it.
-// 2. **`awaiting_safe_window` gets no deadline and no stall, ever.** It may last forever
-//    (the device owns the reboot). Elapsed time is a fact and is shown; "stuck" is not.
-// 3. **The client never authors an outcome.** `terminal` is the server's `is_terminal`,
-//    never re-derived from state names. A stall sentence states the BOARD's own rule
-//    and when it has passed; it never changes the state label, the verdict or styling.
-// 4. **Open vocabulary.** Every state lookup is a `Record` with a fallback. An unknown
-//    state renders as itself and gets no deadline and no stall.
-// 5. **Never print `null`, `undefined`, `NaN` or `%`.** Unknown versions get words,
-//    unparseable times get no offset, and every elapsed time is clamped at 0 (the
-//    browser clock is compared against server receipt times).
+// - **No percentage, no progress bar.** `pct` is a transition log, not a feed; nothing
+//   here reads it.
+// - **`awaiting_safe_window` gets no deadline and no stall, ever.** It may last forever
+//   (the device owns the reboot). Elapsed time is a fact and is shown; "stuck" is not.
+// - **The client never authors an outcome.** `terminal` is the server's `is_terminal`,
+//   never re-derived from state names. A stall sentence states the BOARD's own rule
+//   and when it has passed; it never changes the state label, the verdict or styling.
+// - **Open vocabulary.** Every state lookup is a `Record` with a fallback. An unknown
+//   state renders as itself and gets no deadline and no stall.
+// - **Never print `null`, `undefined`, `NaN` or `%`.** Unknown versions get words,
+//   unparseable times get no offset, and every elapsed time is clamped at 0 (the
+//   browser clock is compared against server receipt times).
 
 import { type DeploySummary, type DeviceSummary } from './api'
 import { DEPLOY_STATE_LABELS, deployStateLabel, safeWindowWait } from './deploy'

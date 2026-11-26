@@ -1,16 +1,27 @@
-import { useEffect, useRef, useState, type FormEvent } from 'react'
+import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import {
-  ApiError,
   api,
+  type BuildJobDetail,
   type BuildJobSummary,
   type BuildTarget,
   type PartitionProfileSummary,
 } from './api'
 import { type EventSourceFactory } from './fleet'
 import { formatWhen } from './format'
+import {
+  LOAD_IDLE,
+  LOAD_PENDING,
+  LOAD_READY,
+  loadErrorMessage,
+  loadFailed,
+  resolveLoadError,
+  type LoadState,
+} from './loadState'
 import { shortSha } from './profiles'
 
 const TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'cancelled'])
+
+export const BUILD_POLL_INTERVAL_MS = 2000
 
 export function BuildPipelineCard({
   projectSlug,
@@ -27,6 +38,8 @@ export function BuildPipelineCard({
   onSessionExpired: () => void
   createEventSource?: EventSourceFactory
 }) {
+  const [loadState, setLoadState] = useState<LoadState>(LOAD_IDLE)
+  const [sessionExpired, setSessionExpired] = useState(false)
   const [builds, setBuilds] = useState<BuildJobSummary[]>([])
   const [repoUrl, setRepoUrl] = useState('')
   const [gitRef, setGitRef] = useState('main')
@@ -39,7 +52,23 @@ export function BuildPipelineCard({
   const [selectedBuildId, setSelectedBuildId] = useState<string | null>(null)
   const [logText, setLogText] = useState('')
   const [streaming, setStreaming] = useState(false)
+
   const streamRef = useRef<{ close: () => void } | null>(null)
+  const mountedRef = useRef(true)
+  const projectSlugRef = useRef(projectSlug)
+  projectSlugRef.current = projectSlug
+  const buildsRef = useRef(builds)
+  buildsRef.current = builds
+  const selectedBuildIdRef = useRef(selectedBuildId)
+  selectedBuildIdRef.current = selectedBuildId
+  const streamingRef = useRef(streaming)
+  streamingRef.current = streaming
+  const onArtifactsChangedRef = useRef(onArtifactsChanged)
+  onArtifactsChangedRef.current = onArtifactsChanged
+  const onSessionExpiredRef = useRef(onSessionExpired)
+  onSessionExpiredRef.current = onSessionExpired
+  const notifiedSucceededRef = useRef<Set<string>>(new Set())
+  const listSeqRef = useRef(0)
 
   const layoutOptions = Array.from(
     new Set([
@@ -50,49 +79,175 @@ export function BuildPipelineCard({
     ]),
   )
 
-  async function refreshBuilds() {
-    try {
-      const res = await api.listBuilds(projectSlug)
-      setBuilds(res.builds ?? [])
-    } catch (err) {
-      if (err instanceof ApiError && err.isUnauthorized) {
-        onSessionExpired()
+  const notifyIfSucceeded = useCallback((buildId: string, status: BuildJobSummary['status']) => {
+    if (status === 'succeeded' && !notifiedSucceededRef.current.has(buildId)) {
+      notifiedSucceededRef.current.add(buildId)
+      onArtifactsChangedRef.current()
+    }
+  }, [])
+
+  const handleUnauthorized = useCallback(() => {
+    setSessionExpired(true)
+    onSessionExpiredRef.current()
+  }, [])
+
+  const refreshBuilds = useCallback(
+    async (opts: { showLoading?: boolean; seedSucceeded?: boolean } = {}) => {
+      const slug = projectSlugRef.current
+      const seq = ++listSeqRef.current
+      if (opts.showLoading) {
+        setLoadState(LOAD_PENDING)
+        setErrorMsg(null)
       }
-    }
-  }
+      try {
+        const res = await api.listBuilds(slug)
+        if (!mountedRef.current || projectSlugRef.current !== slug || seq !== listSeqRef.current) {
+          return
+        }
+        const nextBuilds = res.builds ?? []
+        if (opts.seedSucceeded) {
+          for (const b of nextBuilds) {
+            if (b.status === 'succeeded') {
+              notifiedSucceededRef.current.add(b.id)
+            }
+          }
+        } else {
+          for (const b of nextBuilds) {
+            notifyIfSucceeded(b.id, b.status)
+          }
+        }
+        setBuilds(nextBuilds)
+        setLoadState(LOAD_READY)
+      } catch (err) {
+        if (!mountedRef.current || projectSlugRef.current !== slug || seq !== listSeqRef.current) {
+          return
+        }
+        const msg = resolveLoadError(err, 'Could not load build jobs', handleUnauthorized)
+        if (msg !== null) {
+          setLoadState(loadFailed(msg))
+        }
+      }
+    },
+    [handleUnauthorized, notifyIfSucceeded],
+  )
+
+  const syncSelectedBuild = useCallback(
+    async (buildId: string): Promise<BuildJobDetail | null> => {
+      const slug = projectSlugRef.current
+      try {
+        const detail = await api.getBuild(slug, buildId)
+        if (!mountedRef.current || projectSlugRef.current !== slug) return null
+        if (selectedBuildIdRef.current === buildId) {
+          setLogText(detail.log_text ?? '')
+        }
+        const { log_text: _logText, ...summary } = detail
+        void _logText
+        setBuilds((prev) => {
+          const exists = prev.some((b) => b.id === buildId)
+          return exists
+            ? prev.map((b) => (b.id === buildId ? { ...b, ...summary } : b))
+            : [summary, ...prev]
+        })
+        notifyIfSucceeded(buildId, detail.status)
+        return detail
+      } catch (err) {
+        if (!mountedRef.current || projectSlugRef.current !== slug) return null
+        const msg = resolveLoadError(err, 'Could not refresh build details', handleUnauthorized)
+        if (msg !== null) {
+          setErrorMsg(msg)
+        }
+        return null
+      }
+    },
+    [handleUnauthorized, notifyIfSucceeded],
+  )
 
   useEffect(() => {
-    if (!active) return
-    let cancelled = false
-    api
-      .listBuilds(projectSlug)
-      .then((res) => {
-        if (!cancelled) {
-          setBuilds(res.builds ?? [])
-        }
-      })
-      .catch((err: unknown) => {
-        if (cancelled) return
-        if (err instanceof ApiError && err.isUnauthorized) {
-          onSessionExpired()
-        }
-      })
+    mountedRef.current = true
     return () => {
-      cancelled = true
-    }
-  }, [active, projectSlug, onSessionExpired])
-
-  useEffect(() => {
-    return () => {
+      mountedRef.current = false
       streamRef.current?.close()
       streamRef.current = null
     }
   }, [])
 
+  useEffect(() => {
+    streamRef.current?.close()
+    streamRef.current = null
+    setStreaming(false)
+    streamingRef.current = false
+    setBuilds([])
+    setSelectedBuildId(null)
+    selectedBuildIdRef.current = null
+    setLogText('')
+    setStatusMsg(null)
+    setErrorMsg(null)
+    setSessionExpired(false)
+    notifiedSucceededRef.current.clear()
+    setLoadState(LOAD_IDLE)
+  }, [projectSlug])
+
+  useEffect(() => {
+    if (!active) {
+      streamRef.current?.close()
+      streamRef.current = null
+      setStreaming(false)
+      streamingRef.current = false
+      return
+    }
+    setSessionExpired(false)
+    void refreshBuilds({ showLoading: true, seedSucceeded: true })
+  }, [active, projectSlug, refreshBuilds])
+
+  const hasNonTerminalBuild = builds.some((b) => !TERMINAL_STATUSES.has(b.status))
+  const selectedBuild =
+    selectedBuildId !== null ? (builds.find((b) => b.id === selectedBuildId) ?? null) : null
+  const selectedIsNonTerminal =
+    selectedBuildId !== null &&
+    (selectedBuild === null || !TERMINAL_STATUSES.has(selectedBuild.status))
+  const shouldPoll = active && !sessionExpired && (hasNonTerminalBuild || selectedIsNonTerminal)
+
+  useEffect(() => {
+    if (!shouldPoll) return
+    let stopped = false
+    let inFlight = false
+    const timer = globalThis.setInterval(() => {
+      if (stopped || inFlight) return
+      inFlight = true
+      const tasks: Array<Promise<unknown>> = []
+      const currentSelected = selectedBuildIdRef.current
+      const currentSelectedRow =
+        currentSelected !== null
+          ? (buildsRef.current.find((b) => b.id === currentSelected) ?? null)
+          : null
+      const needsDetail =
+        currentSelected !== null &&
+        !streamingRef.current &&
+        (currentSelectedRow === null || !TERMINAL_STATUSES.has(currentSelectedRow.status))
+      if (needsDetail) {
+        tasks.push(syncSelectedBuild(currentSelected))
+      }
+      const hasOtherNonTerminal = buildsRef.current.some(
+        (b) => (!needsDetail || b.id !== currentSelected) && !TERMINAL_STATUSES.has(b.status),
+      )
+      if (hasOtherNonTerminal) {
+        tasks.push(refreshBuilds())
+      }
+      void Promise.all(tasks).finally(() => {
+        inFlight = false
+      })
+    }, BUILD_POLL_INTERVAL_MS)
+    return () => {
+      stopped = true
+      globalThis.clearInterval(timer)
+    }
+  }, [shouldPoll, projectSlug, refreshBuilds, syncSelectedBuild])
+
   function openLogStream(buildId: string) {
     streamRef.current?.close()
     streamRef.current = null
     setSelectedBuildId(buildId)
+    selectedBuildIdRef.current = buildId
     setLogText('')
     const url = `/v1/projects/${encodeURIComponent(projectSlug)}/builds/${encodeURIComponent(buildId)}/logs/stream`
     const factory =
@@ -102,16 +257,14 @@ export function BuildPipelineCard({
         : null)
 
     if (!factory) {
-      void api
-        .getBuild(projectSlug, buildId)
-        .then((detail) => {
-          setLogText(detail.log_text ?? '')
-        })
-        .catch(() => {})
+      setStreaming(false)
+      streamingRef.current = false
+      void syncSelectedBuild(buildId)
       return
     }
 
     setStreaming(true)
+    streamingRef.current = true
     const es = factory(url)
     streamRef.current = es
     es.onmessage = (ev: MessageEvent) => {
@@ -142,10 +295,11 @@ export function BuildPipelineCard({
         }
         if (frame.done) {
           setStreaming(false)
+          streamingRef.current = false
           es.close()
           streamRef.current = null
           if (frame.status === 'succeeded') {
-            onArtifactsChanged()
+            notifyIfSucceeded(buildId, 'succeeded')
           }
           void refreshBuilds()
         }
@@ -155,14 +309,10 @@ export function BuildPipelineCard({
     }
     es.onerror = () => {
       setStreaming(false)
+      streamingRef.current = false
       es.close()
       streamRef.current = null
-      void api
-        .getBuild(projectSlug, buildId)
-        .then((detail) => {
-          setLogText(detail.log_text ?? '')
-        })
-        .catch(() => {})
+      void syncSelectedBuild(buildId)
     }
   }
 
@@ -185,16 +335,15 @@ export function BuildPipelineCard({
         `Queued ${created.target} build ${created.version} @ ${created.git_ref} (${created.status}).`,
       )
       setVersion('')
-      openLogStream(created.id)
       if (created.status === 'succeeded') {
-        onArtifactsChanged()
+        notifyIfSucceeded(created.id, 'succeeded')
       }
+      openLogStream(created.id)
     } catch (err) {
-      if (err instanceof ApiError && err.isUnauthorized) {
-        onSessionExpired()
-        return
+      const msg = resolveLoadError(err, 'Failed to queue container build', handleUnauthorized)
+      if (msg !== null) {
+        setErrorMsg(msg)
       }
-      setErrorMsg(err instanceof Error ? err.message : 'Failed to queue container build')
     } finally {
       setBusy(false)
     }
@@ -208,11 +357,10 @@ export function BuildPipelineCard({
       setBuilds((prev) => prev.map((b) => (b.id === buildId ? updated : b)))
       setStatusMsg(`Cancelled build ${updated.version}.`)
     } catch (err) {
-      if (err instanceof ApiError && err.isUnauthorized) {
-        onSessionExpired()
-        return
+      const msg = resolveLoadError(err, 'Cancel build failed', handleUnauthorized)
+      if (msg !== null) {
+        setErrorMsg(msg)
       }
-      setErrorMsg(err instanceof Error ? err.message : 'Cancel build failed')
     } finally {
       setBusy(false)
     }
@@ -227,15 +375,16 @@ export function BuildPipelineCard({
       setStatusMsg(`Re-queued build ${retried.version} @ ${retried.git_ref}.`)
       openLogStream(retried.id)
     } catch (err) {
-      if (err instanceof ApiError && err.isUnauthorized) {
-        onSessionExpired()
-        return
+      const msg = resolveLoadError(err, 'Retry build failed', handleUnauthorized)
+      if (msg !== null) {
+        setErrorMsg(msg)
       }
-      setErrorMsg(err instanceof Error ? err.message : 'Retry build failed')
     } finally {
       setBusy(false)
     }
   }
+
+  const displayError = errorMsg ?? loadErrorMessage(loadState)
 
   return (
     <section
@@ -332,9 +481,31 @@ export function BuildPipelineCard({
           {statusMsg}
         </p>
       )}
-      {errorMsg !== null && (
+      {displayError !== null && (
         <p className="bad" role="alert" data-testid="build-pipeline-error">
-          {errorMsg}
+          {displayError}
+          {loadState.status === 'error' && (
+            <>
+              {' '}
+              <button
+                type="button"
+                data-testid="build-pipeline-retry-btn"
+                onClick={() => void refreshBuilds({ showLoading: true })}
+              >
+                Retry
+              </button>
+            </>
+          )}
+        </p>
+      )}
+      {loadState.status === 'loading' && builds.length === 0 && (
+        <p className="muted" aria-busy="true" data-testid="build-pipeline-loading">
+          Loading build jobs…
+        </p>
+      )}
+      {loadState.status === 'loaded' && builds.length === 0 && (
+        <p className="muted" data-testid="build-pipeline-empty">
+          No container builds queued yet.
         </p>
       )}
       {builds.length > 0 && (

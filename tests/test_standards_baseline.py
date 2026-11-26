@@ -210,6 +210,14 @@ class StandardsBaselineTest(unittest.TestCase):
             "New numbered-step or banner comments; comments explain why, not what",
         )
 
+    def test_narration_debt_is_current(self) -> None:
+        self.assertEqual(
+            self.state["narration_comments"],
+            self.debt["narration_comments"],
+            f"Narration comment count improved; lower 'narration_comments' in {DEBT_PATH.name} "
+            f"from {self.debt['narration_comments']} to {self.state['narration_comments']}",
+        )
+
     def test_config_gaps_catches_disable_error_code_and_extend_ignore(self) -> None:
         clean_toml: dict[str, Any] = {
             "project": {"requires-python": ">=3.12"},

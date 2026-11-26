@@ -4,25 +4,25 @@
 // on the server side (`fleetforge/events.py`, `fleetforge/presence.py`,
 // `api/routers/devices.py`), and each is easy to "optimise" away:
 //
-// 1. **The event is a hint; `GET /v1/devices` is the record.** A frame on the stream
-//    means "something changed, go re-read". Nothing here ever patches a row from an
-//    SSE payload, and nothing here ever recomputes `online` from `last_seen` — the
-//    tolerance rule lives once, in `fleetforge.presence.is_online`. `DeviceEvent`
-//    carries an `online` snapshot for other consumers; the browser reads it as a
-//    trigger and nothing more.
+// - **The event is a hint; `GET /v1/devices` is the record.** A frame on the stream
+//   means "something changed, go re-read". Nothing here ever patches a row from an
+//   SSE payload, and nothing here ever recomputes `online` from `last_seen` — the
+//   tolerance rule lives once, in `fleetforge.presence.is_online`. `DeviceEvent`
+//   carries an `online` snapshot for other consumers; the browser reads it as a
+//   trigger and nothing more.
 //
-// 2. **A sleepy board goes offline with NO event at all.** Its presence is
-//    `now - last_seen < 2.5 x expected_wake_interval_s`, evaluated on read by the
-//    server; nothing publishes when that timer expires. So the list is ALSO re-read on
-//    a plain interval, not only on frames. A purely event-driven dashboard shows a dead
-//    sleepy board as online forever and passes every unit test you would think to write.
+// - **A sleepy board goes offline with NO event at all.** Its presence is
+//   `now - last_seen < 2.5 x expected_wake_interval_s`, evaluated on read by the
+//   server; nothing publishes when that timer expires. So the list is ALSO re-read on
+//   a plain interval, not only on frames. A purely event-driven dashboard shows a dead
+//   sleepy board as online forever and passes every unit test you would think to write.
 //
-// 3. **`EventSource` CLOSED is not `EventSource` CONNECTING.** Per spec, a non-200
-//    response (401 when the cookie dies, 503 when `sse_max_clients` is exhausted) puts
-//    the object in CLOSED permanently: `onerror` fires once and the browser never
-//    reconnects. A network blip instead leaves it CONNECTING and the browser retries
-//    itself. Treating the two alike either gives up on a transient blip or spins
-//    against a 401.
+// - **`EventSource` CLOSED is not `EventSource` CONNECTING.** Per spec, a non-200
+//   response (401 when the cookie dies, 503 when `sse_max_clients` is exhausted) puts
+//   the object in CLOSED permanently: `onerror` fires once and the browser never
+//   reconnects. A network blip instead leaves it CONNECTING and the browser retries
+//   itself. Treating the two alike either gives up on a transient blip or spins
+//   against a 401.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError, api, type ArrivalSummary, type DeviceSummary } from './api'

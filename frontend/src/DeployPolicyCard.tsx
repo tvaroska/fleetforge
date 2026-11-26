@@ -1,12 +1,20 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import {
-  ApiError,
   api,
   type DeployPolicyEvaluation,
   type DeployPolicySummary,
   type DeviceGroupSummary,
   type PolicyMatchMode,
 } from './api'
+import {
+  LOAD_IDLE,
+  LOAD_PENDING,
+  LOAD_READY,
+  loadErrorMessage,
+  loadFailed,
+  resolveLoadError,
+  type LoadState,
+} from './loadState'
 
 export function DeployPolicyCard({
   projectSlug,
@@ -21,6 +29,8 @@ export function DeployPolicyCard({
   onDeployed: () => void
   onSessionExpired: () => void
 }) {
+  const [loadState, setLoadState] = useState<LoadState>(LOAD_IDLE)
+  const [reloadSeq, setReloadSeq] = useState(0)
   const [policies, setPolicies] = useState<DeployPolicySummary[]>([])
   const [name, setName] = useState('')
   const [matchMode, setMatchMode] = useState<PolicyMatchMode>('tag')
@@ -34,6 +44,7 @@ export function DeployPolicyCard({
   const [evalResultByPolicy, setEvalResultByPolicy] = useState<
     Record<string, DeployPolicyEvaluation>
   >({})
+  const [pendingEval, setPendingEval] = useState<{ policyId: string; version: string } | null>(null)
   const [busy, setBusy] = useState(false)
   const [statusMsg, setStatusMsg] = useState<string | null>(null)
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
@@ -41,25 +52,37 @@ export function DeployPolicyCard({
   const groupNameById = new Map(groups.map((g) => [g.id, g.name]))
 
   useEffect(() => {
+    setPolicies([])
+    setPendingEval(null)
+    setEvalResultByPolicy({})
+    setStatusMsg(null)
+    setErrorMsg(null)
+    setLoadState(LOAD_IDLE)
+  }, [projectSlug])
+
+  useEffect(() => {
     if (!active) return
     let cancelled = false
+    setLoadState(LOAD_PENDING)
+    setErrorMsg(null)
     api
       .listPolicies(projectSlug)
       .then((res) => {
-        if (!cancelled) {
-          setPolicies(res.policies ?? [])
-        }
+        if (cancelled) return
+        setPolicies(res.policies ?? [])
+        setLoadState(LOAD_READY)
       })
       .catch((err: unknown) => {
         if (cancelled) return
-        if (err instanceof ApiError && err.isUnauthorized) {
-          onSessionExpired()
+        const msg = resolveLoadError(err, 'Could not load deploy policies', onSessionExpired)
+        if (msg !== null) {
+          setLoadState(loadFailed(msg))
         }
       })
     return () => {
       cancelled = true
     }
-  }, [active, projectSlug, onSessionExpired])
+  }, [active, projectSlug, onSessionExpired, reloadSeq])
 
   function addRing(groupId: string) {
     if (!groupId || selectedRings.includes(groupId)) return
@@ -94,11 +117,10 @@ export function DeployPolicyCard({
       setSelectedRings([])
       setStatusMsg(`Created multi-ring policy "${created.name}".`)
     } catch (err) {
-      if (err instanceof ApiError && err.isUnauthorized) {
-        onSessionExpired()
-        return
+      const msg = resolveLoadError(err, 'Failed to create deploy policy', onSessionExpired)
+      if (msg !== null) {
+        setErrorMsg(msg)
       }
-      setErrorMsg(err instanceof Error ? err.message : 'Failed to create deploy policy')
     } finally {
       setBusy(false)
     }
@@ -113,11 +135,10 @@ export function DeployPolicyCard({
       })
       setPolicies((prev) => prev.map((p) => (p.id === policy.id ? updated : p)))
     } catch (err) {
-      if (err instanceof ApiError && err.isUnauthorized) {
-        onSessionExpired()
-        return
+      const msg = resolveLoadError(err, 'Failed to update deploy policy', onSessionExpired)
+      if (msg !== null) {
+        setErrorMsg(msg)
       }
-      setErrorMsg(err instanceof Error ? err.message : 'Failed to update deploy policy')
     } finally {
       setBusy(false)
     }
@@ -129,39 +150,41 @@ export function DeployPolicyCard({
     try {
       await api.deletePolicy(projectSlug, policyId)
       setPolicies((prev) => prev.filter((p) => p.id !== policyId))
+      setPendingEval((prev) => (prev?.policyId === policyId ? null : prev))
       setStatusMsg('Deleted deploy policy.')
     } catch (err) {
-      if (err instanceof ApiError && err.isUnauthorized) {
-        onSessionExpired()
-        return
+      const msg = resolveLoadError(err, 'Failed to delete deploy policy', onSessionExpired)
+      if (msg !== null) {
+        setErrorMsg(msg)
       }
-      setErrorMsg(err instanceof Error ? err.message : 'Failed to delete deploy policy')
     } finally {
       setBusy(false)
     }
   }
 
-  async function handleEvaluate(policyId: string) {
-    const version = (evalVersionByPolicy[policyId] ?? '').trim()
-    if (!version) return
+  async function handleEvaluate(policyId: string, version: string) {
+    const trimmed = version.trim()
+    if (!trimmed) return
     setBusy(true)
     setErrorMsg(null)
     try {
-      const result = await api.evaluatePolicy(projectSlug, policyId, version)
+      const result = await api.evaluatePolicy(projectSlug, policyId, trimmed)
       setEvalResultByPolicy((prev) => ({ ...prev, [policyId]: result }))
+      setPendingEval(null)
       if (result.deployed.length > 0) {
         onDeployed()
       }
     } catch (err) {
-      if (err instanceof ApiError && err.isUnauthorized) {
-        onSessionExpired()
-        return
+      const msg = resolveLoadError(err, 'Policy evaluation failed', onSessionExpired)
+      if (msg !== null) {
+        setErrorMsg(msg)
       }
-      setErrorMsg(err instanceof Error ? err.message : 'Policy evaluation failed')
     } finally {
       setBusy(false)
     }
   }
+
+  const displayError = errorMsg ?? loadErrorMessage(loadState)
 
   return (
     <section
@@ -314,9 +337,31 @@ export function DeployPolicyCard({
           {statusMsg}
         </p>
       )}
-      {errorMsg !== null && (
+      {displayError !== null && (
         <p className="bad" role="alert" data-testid="policy-error">
-          {errorMsg}
+          {displayError}
+          {loadState.status === 'error' && (
+            <>
+              {' '}
+              <button
+                type="button"
+                data-testid="policy-retry-btn"
+                onClick={() => setReloadSeq((n) => n + 1)}
+              >
+                Retry
+              </button>
+            </>
+          )}
+        </p>
+      )}
+      {loadState.status === 'loading' && policies.length === 0 && (
+        <p className="muted" aria-busy="true" data-testid="policy-loading">
+          Loading deploy policies…
+        </p>
+      )}
+      {loadState.status === 'loaded' && policies.length === 0 && (
+        <p className="muted" data-testid="policy-empty">
+          No deploy policies configured yet.
         </p>
       )}
       {policies.length > 0 && (
@@ -333,6 +378,8 @@ export function DeployPolicyCard({
           <tbody>
             {policies.map((p) => {
               const ev = evalResultByPolicy[p.id]
+              const draftVersion = (evalVersionByPolicy[p.id] ?? '').trim()
+              const isConfirmingEval = pendingEval?.policyId === p.id
               return (
                 <tr key={p.id} data-testid="deploy-policy-row">
                   <td>
@@ -366,18 +413,45 @@ export function DeployPolicyCard({
                       placeholder="version"
                       style={{ width: '6rem' }}
                       value={evalVersionByPolicy[p.id] ?? ''}
-                      onChange={(e) =>
-                        setEvalVersionByPolicy((prev) => ({ ...prev, [p.id]: e.target.value }))
-                      }
+                      onChange={(e) => {
+                        const nextVal = e.target.value
+                        setEvalVersionByPolicy((prev) => ({ ...prev, [p.id]: nextVal }))
+                        setPendingEval((prev) => (prev?.policyId === p.id ? null : prev))
+                      }}
                     />{' '}
-                    <button
-                      type="button"
-                      data-testid="evaluate-policy-btn"
-                      disabled={busy || !(evalVersionByPolicy[p.id] ?? '').trim()}
-                      onClick={() => void handleEvaluate(p.id)}
-                    >
-                      Evaluate
-                    </button>{' '}
+                    {isConfirmingEval ? (
+                      <span data-testid="confirm-evaluate-policy">
+                        <button
+                          type="button"
+                          className="bad"
+                          data-testid="confirm-evaluate-policy-btn"
+                          disabled={busy || !pendingEval.version}
+                          onClick={() => void handleEvaluate(p.id, pendingEval.version)}
+                        >
+                          Confirm evaluate
+                        </button>{' '}
+                        <button
+                          type="button"
+                          data-testid="cancel-evaluate-policy-btn"
+                          disabled={busy}
+                          onClick={() => setPendingEval(null)}
+                        >
+                          Cancel
+                        </button>
+                      </span>
+                    ) : (
+                      <button
+                        type="button"
+                        data-testid="evaluate-policy-btn"
+                        disabled={busy || !draftVersion}
+                        onClick={() => {
+                          if (!draftVersion) return
+                          setPendingEval({ policyId: p.id, version: draftVersion })
+                        }}
+                      >
+                        Evaluate
+                      </button>
+                    )}{' '}
                     <button
                       type="button"
                       data-testid="toggle-policy-btn"

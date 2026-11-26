@@ -9,33 +9,33 @@
 //
 // Rules this file keeps, each one inherited from an earlier decision:
 //
-// 1. `good` only while the board's announce still equals the confirmed artifact; otherwise
-//    the drift wording, never `good`, never "running" (R2-fe-1). The verdict itself is
-//    `deploy.ts::deployOutcome`, reused unchanged. "back on X" only when the announce is X.
-// 2. A card exists only when the SERVER says the transaction is terminal (`is_terminal`).
-// 3. The state vocabulary is open: an unknown terminal state still gets a card, labelled
-//    `DEPLOY_STATE_LABELS[state] ?? state`, and every lookup has a fallback.
-// 4. Nothing here is announced to assistive tech: the card re-renders every second, so it
-//    carries no `role` and no `aria-live` (the component's concern, stated here too).
-// 5. Device-controlled text (`detail`) is only ever placed in a string a component renders
-//    as text, and is never interpreted. It is also used as a lookup key, so the lookup is
-//    `Object.hasOwn`, never a bare index (`constructor` is a legal thing for a board to say).
-// 6. No `null`, `undefined`, `NaN` or `%` in any string, and no progress number: `pct` is a
-//    transition log (`DeployCell.tsx`).
-// 7. No arrow characters: R2-fe-1's tests forbid one beside a verdict, so before and after
-//    are two rows.
-// 8. `sendAgain` (R2b-fe-11) is set only for a failure before the reboot, with a known
-//    version, whose entry says the same build can survive (`resend`). Never after a
-//    rollback. The button is offered exactly when the next action says to send it again
-//    (a test pins `resend === /send it again/i.test(next)` for every entry). It opens the
-//    pre-check and never posts (`DeployCell.tsx`).
+// - `good` only while the board's announce still equals the confirmed artifact; otherwise
+//   the drift wording, never `good`, never "running" (R2-fe-1). The verdict itself is
+//   `deploy.ts::deployOutcome`, reused unchanged. "back on X" only when the announce is X.
+// - A card exists only when the SERVER says the transaction is terminal (`is_terminal`).
+// - The state vocabulary is open: an unknown terminal state still gets a card, labelled
+//   `DEPLOY_STATE_LABELS[state] ?? state`, and every lookup has a fallback.
+// - Nothing here is announced to assistive tech: the card re-renders every second, so it
+//   carries no `role` and no `aria-live` (the component's concern, stated here too).
+// - Device-controlled text (`detail`) is only ever placed in a string a component renders
+//   as text, and is never interpreted. It is also used as a lookup key, so the lookup is
+//   `Object.hasOwn`, never a bare index (`constructor` is a legal thing for a board to say).
+// - No `null`, `undefined`, `NaN` or `%` in any string, and no progress number: `pct` is a
+//   transition log (`DeployCell.tsx`).
+// - No arrow characters: R2-fe-1's tests forbid one beside a verdict, so before and after
+//   are two rows.
+// - `sendAgain` (R2b-fe-11) is set only for a failure before the reboot, with a known
+//   version, whose entry says the same build can survive (`resend`). Never after a
+//   rollback. The button is offered exactly when the next action says to send it again
+//   (a test pins `resend === /send it again/i.test(next)` for every entry). It opens the
+//   pre-check and never posts (`DeployCell.tsx`).
 //
-// 9. The self-test outcome (R5-fe-1) is read ONLY from `deploy.selftest`, which the server
-//    parses (R5-be-1). This file never parses the self-test grammar out of `detail`; an
-//    older API (no `selftest`) gets no `Self-test` row, whatever the detail says.
-// 10. `cancelled` (R5) is an operator's choice, not a failure: no tone, no next action, no
-//    Send again. A command rollback (`deploy.ts::isCommandRollback`) is not blamed on the
-//    image either.
+// - The self-test outcome (R5-fe-1) is read ONLY from `deploy.selftest`, which the server
+//   parses (R5-be-1). This file never parses the self-test grammar out of `detail`; an
+//   older API (no `selftest`) gets no `Self-test` row, whatever the detail says.
+// - `cancelled` (R5) is an operator's choice, not a failure: no tone, no next action, no
+//   Send again. A command rollback (`deploy.ts::isCommandRollback`) is not blamed on the
+//   image either.
 //
 // Not here, on purpose:
 // * `Sent by` is server-authored text (R2b-be-4), rendered as text; absent when not recorded.

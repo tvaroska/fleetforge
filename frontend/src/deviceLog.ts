@@ -4,22 +4,22 @@
 //
 // The rules that shape this file.
 //
-// 1. **The server's order is the order.** The API answers newest first, `(logged_at DESC,
-//    id DESC)`, and only the last 7 days. Nothing here sorts.
-// 2. **A gap sits BELOW the line that carries it.** `dropped` on a line is the number of
-//    lines lost immediately before it, so in a newest-first list the loss is between that
-//    line and the next older one.
-// 3. **`text: null` is a gap marker**, a batch that lost lines and had none usable. It is a
-//    gap row, never an empty line.
-// 4. **`level` is an open vocabulary.** The ESP-IDF letters are labelled; anything else
-//    renders as itself.
-// 5. **The hint is the selected board's `last_seen`.** An `up/log` batch moves it (the
-//    ingestor touches it before decoding), and `useFleet` re-reads the fleet when a frame
-//    arrives. So the hook re-reads when that string changes: no new EventSource (each one
-//    costs an API `sse_max_clients` slot), no poll of its own, and nothing is ever read
-//    from an SSE body (`fleet.ts` rule 1).
-// 6. **Lines belong to the board they were read for.** State is stored with its device id
-//    and a different id reads as "loading", so board A's lines never show under board B.
+// - **The server's order is the order.** The API answers newest first, `(logged_at DESC,
+//   id DESC)`, and only the last 7 days. Nothing here sorts.
+// - **A gap sits BELOW the line that carries it.** `dropped` on a line is the number of
+//   lines lost immediately before it, so in a newest-first list the loss is between that
+//   line and the next older one.
+// - **`text: null` is a gap marker**, a batch that lost lines and had none usable. It is a
+//   gap row, never an empty line.
+// - **`level` is an open vocabulary.** The ESP-IDF letters are labelled; anything else
+//   renders as itself.
+// - **The hint is the selected board's `last_seen`.** An `up/log` batch moves it (the
+//   ingestor touches it before decoding), and `useFleet` re-reads the fleet when a frame
+//   arrives. So the hook re-reads when that string changes: no new EventSource (each one
+//   costs an API `sse_max_clients` slot), no poll of its own, and nothing is ever read
+//   from an SSE body (`fleet.ts` rule 1).
+// - **Lines belong to the board they were read for.** State is stored with its device id
+//   and a different id reads as "loading", so board A's lines never show under board B.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError, api, type DeviceLogLine } from './api'

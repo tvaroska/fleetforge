@@ -13,25 +13,25 @@
 //
 // Rules:
 //
-// 1. **Judged against a baseline, never the browser clock.** Every timestamp on a
-//    `DeviceSummary` is a server receipt time on one clock (models.py rule 3). Comparing them
-//    to `Date.now()` would make the answer depend on the operator's clock skew. Instead the
-//    panel compares the row to a snapshot of the fleet taken at an anchor moment (the start
-//    of the flash, or the first watch when nothing was flashed here).
-// 2. **The re-flash trap.** Re-flashing a known, online board: its stale row still says
-//    `online: true` with the OLD `enrolled_at` until `/v1/enroll` runs (the re-enrol resets
-//    presence and `broker_provisioned_at`, and leaves `last_seen` untouched). Without the
-//    baseline comparison the card would say "On the fleet" before the new image has booted.
-//    So after a flash, Enrolled needs a NEW `enrolled_at` and a credential in dynsec, and On
-//    the fleet needs `online` plus `last_seen > enrolled_at` — the board spoke to the broker
-//    after THIS enrolment (the same idea as `progress.py::has_already_arrived`).
-// 3. **`online` is read as-is** (`fleet.ts` rule 1). `last_seen > enrolled_at` only proves
-//    "spoke after this enrolment"; it never stands in for presence.
-// 4. **Only Enrolled and On the fleet.** Arrival stages are not used for Network up / Clock
-//    set: arrival filtering makes them a poor per-session signal.
-// 5. **Merged, not forked.** `boardConsole.ts`'s classifier and `summarizeConsole` are
-//    unchanged; `mergeServerView` adds the server's milestones to the console's summary and
-//    re-applies the furthest-reached rule.
+// - **Judged against a baseline, never the browser clock.** Every timestamp on a
+//   `DeviceSummary` is a server receipt time on one clock (models.py rule 3). Comparing them
+//   to `Date.now()` would make the answer depend on the operator's clock skew. Instead the
+//   panel compares the row to a snapshot of the fleet taken at an anchor moment (the start
+//   of the flash, or the first watch when nothing was flashed here).
+// - **The re-flash trap.** Re-flashing a known, online board: its stale row still says
+//   `online: true` with the OLD `enrolled_at` until `/v1/enroll` runs (the re-enrol resets
+//   presence and `broker_provisioned_at`, and leaves `last_seen` untouched). Without the
+//   baseline comparison the card would say "On the fleet" before the new image has booted.
+//   So after a flash, Enrolled needs a NEW `enrolled_at` and a credential in dynsec, and On
+//   the fleet needs `online` plus `last_seen > enrolled_at` — the board spoke to the broker
+//   after THIS enrolment (the same idea as `progress.py::has_already_arrived`).
+// - **`online` is read as-is** (`fleet.ts` rule 1). `last_seen > enrolled_at` only proves
+//   "spoke after this enrolment"; it never stands in for presence.
+// - **Only Enrolled and On the fleet.** Arrival stages are not used for Network up / Clock
+//   set: arrival filtering makes them a poor per-session signal.
+// - **Merged, not forked.** `boardConsole.ts`'s classifier and `summarizeConsole` are
+//   unchanged; `mergeServerView` adds the server's milestones to the console's summary and
+//   re-applies the furthest-reached rule.
 
 import { type DeviceSummary } from './api'
 import {

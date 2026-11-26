@@ -3,20 +3,20 @@
 //
 // The rules this file keeps:
 //
-// 1. **Offers are gated by the board's own announced `capabilities`**, never by a guess
-//    about its agent version. A board that announces none of `apply` / `cancel` / `reboot`
-//    (a legacy `['ota']` agent) is offered nothing. The offer reads the server's read model
-//    (`deploy.state`, `deploy.is_terminal`) and never re-derives server state; when the
-//    board or server disagrees with an offer (a race), the board's answer or the server's
-//    409 sentence is what the operator sees.
-// 2. **Nothing expires a command.** `result: null` is "sent, no answer yet" — and possibly
-//    never (an old agent, an answer lost to a reboot). No timeout, no spinner, no "stuck".
-//    A `deferred` answer waits for the board's safe moment, which may be indefinite.
-// 3. **Device text is text.** `result` and `detail` come from the board: matched by
-//    `Object.hasOwn` lookups (a board may say `constructor`), rendered verbatim otherwise.
-// 4. **Open vocabulary.** `type` and `result` are looked up with a fallback to the raw
-//    value, so a REST/CI `rollback` or a newer agent's answer still renders.
-// 5. Never `null`, `undefined` or `NaN` in a string.
+// - **Offers are gated by the board's own announced `capabilities`**, never by a guess
+//   about its agent version. A board that announces none of `apply` / `cancel` / `reboot`
+//   (a legacy `['ota']` agent) is offered nothing. The offer reads the server's read model
+//   (`deploy.state`, `deploy.is_terminal`) and never re-derives server state; when the
+//   board or server disagrees with an offer (a race), the board's answer or the server's
+//   409 sentence is what the operator sees.
+// - **Nothing expires a command.** `result: null` is "sent, no answer yet" — and possibly
+//   never (an old agent, an answer lost to a reboot). No timeout, no spinner, no "stuck".
+//   A `deferred` answer waits for the board's safe moment, which may be indefinite.
+// - **Device text is text.** `result` and `detail` come from the board: matched by
+//   `Object.hasOwn` lookups (a board may say `constructor`), rendered verbatim otherwise.
+// - **Open vocabulary.** `type` and `result` are looked up with a fallback to the raw
+//   value, so a REST/CI `rollback` or a newer agent's answer still renders.
+// - Never `null`, `undefined` or `NaN` in a string.
 //
 // Rollback is deliberately NOT offered here (DECISIONS 2026-10-16, R5-fe-1): it is the
 // destructive verb and the task asked for Apply and Reboot. Its REST route stays for

@@ -4,16 +4,16 @@
 //
 // Four rules shape this file.
 //
-// 1. **The header is advisory, the server is the authority.** The first bytes of the file
-//    pre-fill target and version (`appImage.ts`) and a chip mismatch is refused HERE, in
-//    the browser. The server never checks a target against the bytes and this must not
-//    pretend it does. There is deliberately no client-side version regex: the server's
-//    `VERSION_PATTERN` sentence is the one authority, rendered verbatim.
-// 2. **Target is a select, never free text.** A typo'd target is accepted by the server
-//    and then matches no board, so the build silently never shows in any Deploy list.
-// 3. **Nothing here fetches on mount** and nothing is stored: no localStorage, no URL
-//    beyond target/version/layout, never a log of the File.
-// 4. **No progress bar.** `fetch` has no upload progress and this app has no bars.
+// - **The header is advisory, the server is the authority.** The first bytes of the file
+//   pre-fill target and version (`appImage.ts`) and a chip mismatch is refused HERE, in
+//   the browser. The server never checks a target against the bytes and this must not
+//   pretend it does. There is deliberately no client-side version regex: the server's
+//   `VERSION_PATTERN` sentence is the one authority, rendered verbatim.
+// - **Target is a select, never free text.** A typo'd target is accepted by the server
+//   and then matches no board, so the build silently never shows in any Deploy list.
+// - **Nothing here fetches on mount** and nothing is stored: no localStorage, no URL
+//   beyond target/version/layout, never a log of the File.
+// - **No progress bar.** `fetch` has no upload progress and this app has no bars.
 //
 // Layouts come from the adopted partition profiles (R3-fe-1), never from what boards
 // announce: a board on an unnamed map announces `unknown`, which is not a name.

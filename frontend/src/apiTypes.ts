@@ -46,7 +46,7 @@ export type ProjectSummary = {
   slug: string
   name: string
   description: string | null
-  role: string | null
+  role: string
   repo_url?: string | null
   track_mode?: TrackMode
   track_ref?: string | null
@@ -63,12 +63,12 @@ export type ProjectSummary = {
 }
 
 export type ProjectUpdate = {
-  name?: string
+  name?: string | null
   description?: string | null
   repo_url?: string | null
-  track_mode?: TrackMode
+  track_mode?: TrackMode | null
   track_ref?: string | null
-  auto_deploy_target?: AutoDeployTarget
+  auto_deploy_target?: AutoDeployTarget | null
   ci_webhook_url?: string | null
   ci_webhook_header?: string | null
   otel_endpoint?: string | null
@@ -264,9 +264,9 @@ export type CommandAccepted = {
 export type DeviceUpdate = {
   name?: string | null
   group_id?: string | null
-  project?: string
-  is_dev?: boolean
-  stay_awake?: boolean
+  project?: string | null
+  is_dev?: boolean | null
+  stay_awake?: boolean | null
 }
 
 export type DeploySender = { subject: string; credential: string | null }
@@ -408,10 +408,10 @@ export type ArtifactUploaded = {
   size_bytes: number
   target: string
   version: string
-  partition_layout: string
+  partition_layout: string | null
   artifact_type?: string
   created: boolean
-  has_lib_marker?: boolean
+  has_lib_marker?: boolean | null
   sig?: string | null
   repo_url?: string | null
   branch?: string | null
@@ -492,7 +492,7 @@ export type PartitionProfileSummary = {
 
 export type PartitionProfileList = { profiles: PartitionProfileSummary[] }
 
-export type PartitionProfileAdopt = { layout_id: string; ota_slot_size?: number }
+export type PartitionProfileAdopt = { layout_id: string; ota_slot_size?: number | null }
 
 export type BuildJobStatus = 'queued' | 'running' | 'succeeded' | 'failed' | 'cancelled'
 

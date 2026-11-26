@@ -108,11 +108,28 @@ def test_claude_md_symlink_and_spine_caps() -> None:
         "AGENTS.md must stay strictly below 24 KB truncation cap"
     )
     assert critical_md.is_file()
+    assert critical_md.stat().st_size <= 5_000, (
+        f"CRITICAL.md must stay <= 5,000 bytes (got {critical_md.stat().st_size})"
+    )
     assert readme_md.is_file()
     assert decisions_md.is_file()
     assert decisions_md.stat().st_size <= 25_000, "DECISIONS.md must stay <= 25 KB"
     assert claude_md.is_symlink(), "CLAUDE.md must be a symlink to AGENTS.md"
     assert claude_md.readlink().as_posix() == "AGENTS.md"
+
+
+def test_uv_lock_uses_public_pypi_registry_only() -> None:
+    """T-23: `uv.lock` must only reference public PyPI registries and distribution hosts."""
+    uv_lock = REPO_ROOT / "uv.lock"
+    assert uv_lock.is_file(), "uv.lock is required"
+    text = uv_lock.read_text(encoding="utf-8")
+    registries = set(re.findall(r'registry\s*=\s*"([^"]+)"', text))
+    assert registries == {"https://pypi.org/simple"}, (
+        f"uv.lock must only reference https://pypi.org/simple, found: {sorted(registries)}"
+    )
+    urls = set(re.findall(r'url\s*=\s*"([^"]+)"', text))
+    non_pypi = sorted(u for u in urls if not u.startswith("https://files.pythonhosted.org/"))
+    assert not non_pypi, f"uv.lock contains non-PyPI package URLs: {non_pypi[:5]}"
 
 
 def test_zero_internal_customer_or_machine_path_leaks() -> None:

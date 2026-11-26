@@ -4,13 +4,13 @@
 //
 // Two rules shape this file.
 //
-// 1. **The state vocabulary is open.** `deploy_events.state` is TEXT with no CHECK and
-//    the server's `DeployState` is explicitly advisory, so a board running an agent
-//    newer than this dashboard can report a state nobody here has heard of. The labels
-//    below are therefore a lookup WITH A FALLBACK — deliberately not a `switch`, the
-//    same idiom and the same reason as `FleetView.tsx`'s `STAGE_LABELS`.
+// - **The state vocabulary is open.** `deploy_events.state` is TEXT with no CHECK and
+//   the server's `DeployState` is explicitly advisory, so a board running an agent
+//   newer than this dashboard can report a state nobody here has heard of. The labels
+//   below are therefore a lookup WITH A FALLBACK — deliberately not a `switch`, the
+//   same idiom and the same reason as `FleetView.tsx`'s `STAGE_LABELS`.
 //
-// 2. **Nothing here expires a deploy.** `awaiting_safe_window` may last forever: a
+// - **Nothing here expires a deploy.** `awaiting_safe_window` may last forever: a
 //    vehicle in motion, a drone in the air. The device owns the reboot
 //    (`design/architecture.md` principle 5), the server has no sweeper, and this client
 //    must not invent one — no timeout, no "stuck?" badge after N minutes, no spinner.

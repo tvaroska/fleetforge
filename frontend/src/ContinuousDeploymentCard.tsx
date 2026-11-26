@@ -1,5 +1,14 @@
 import { useEffect, useState, type FormEvent } from 'react'
-import { ApiError, api, type AutoDeployTarget, type TrackMode } from './api'
+import { api, type AutoDeployTarget, type TrackMode } from './api'
+import {
+  LOAD_PENDING,
+  LOAD_READY,
+  isLoaded,
+  loadErrorMessage,
+  loadFailed,
+  resolveLoadError,
+  type LoadState,
+} from './loadState'
 
 export function ContinuousDeploymentCard({
   projectSlug,
@@ -10,6 +19,8 @@ export function ContinuousDeploymentCard({
   onDeployed: () => void
   onSessionExpired: () => void
 }) {
+  const [loadState, setLoadState] = useState<LoadState>(LOAD_PENDING)
+  const [reloadSeq, setReloadSeq] = useState(0)
   const [repoUrl, setRepoUrl] = useState('')
   const [trackMode, setTrackMode] = useState<TrackMode>('off')
   const [trackRef, setTrackRef] = useState('')
@@ -22,8 +33,13 @@ export function ContinuousDeploymentCard({
   const [webhookWarning, setWebhookWarning] = useState<string | null>(null)
   const [errorMsg, setErrorMsg] = useState<string | null>(null)
 
+  const loaded = isLoaded(loadState)
+  const loadError = loadErrorMessage(loadState)
+  const displayError = errorMsg ?? loadError
+
   useEffect(() => {
     let cancelled = false
+    setLoadState(LOAD_PENDING)
     setStatusMsg(null)
     setWebhookWarning(null)
     setErrorMsg(null)
@@ -32,7 +48,12 @@ export function ContinuousDeploymentCard({
       .then((res) => {
         if (cancelled) return
         const found = res.projects?.find((p) => p.slug === projectSlug)
-        if (!found) return
+        if (!found) {
+          const msg = `Could not find project "${projectSlug}" settings.`
+          setLoadState(loadFailed(msg))
+          setErrorMsg(msg)
+          return
+        }
         setRepoUrl(found.repo_url ?? '')
         setTrackMode(found.track_mode ?? 'off')
         setTrackRef(found.track_ref ?? '')
@@ -44,20 +65,29 @@ export function ContinuousDeploymentCard({
         setWebhookUrl(found.ci_webhook_url ?? '')
         setHasWebhookHeader(Boolean(found.has_ci_webhook_header))
         setWebhookHeader('')
+        setLoadState(LOAD_READY)
       })
       .catch((err: unknown) => {
         if (cancelled) return
-        if (err instanceof ApiError && err.isUnauthorized) {
-          onSessionExpired()
+        const msg = resolveLoadError(
+          err,
+          'Could not load continuous deployment settings',
+          onSessionExpired,
+        )
+        if (msg !== null) {
+          setLoadState(loadFailed(msg))
+          setErrorMsg(msg)
         }
       })
     return () => {
       cancelled = true
     }
-  }, [projectSlug, onSessionExpired])
+  }, [projectSlug, onSessionExpired, reloadSeq])
 
   async function save(e: FormEvent) {
     e.preventDefault()
+    // Never overwrite server settings with blank/off defaults while the initial load is pending or failed.
+    if (!loaded || busy) return
     setBusy(true)
     setStatusMsg(null)
     setWebhookWarning(null)
@@ -99,11 +129,10 @@ export function ContinuousDeploymentCard({
         )
       }
     } catch (err) {
-      if (err instanceof ApiError && err.isUnauthorized) {
-        onSessionExpired()
-        return
+      const msg = resolveLoadError(err, 'Could not update CD settings', onSessionExpired)
+      if (msg !== null) {
+        setErrorMsg(msg)
       }
-      setErrorMsg(err instanceof Error ? err.message : 'Could not update CD settings')
     } finally {
       setBusy(false)
     }
@@ -122,6 +151,11 @@ export function ContinuousDeploymentCard({
         switch the tracked ref to an already-uploaded build), Fleetforge automatically stages it to
         your <code>dev</code> boards or the entire project fleet.
       </p>
+      {loadState.status === 'loading' && (
+        <p className="muted" aria-busy="true" data-testid="cd-loading">
+          Loading continuous deployment settings…
+        </p>
+      )}
       <form className="compact-form" onSubmit={(e) => void save(e)}>
         <div className="form-grid form-grid-3">
           <label>
@@ -130,7 +164,7 @@ export function ContinuousDeploymentCard({
               aria-label="Track mode"
               value={trackMode}
               onChange={(e) => setTrackMode(e.target.value as TrackMode)}
-              disabled={busy}
+              disabled={busy || !loaded}
             >
               <option value="off">off (manual deploy)</option>
               <option value="branch">branch (e.g. main)</option>
@@ -152,7 +186,7 @@ export function ContinuousDeploymentCard({
               }
               value={trackRef}
               onChange={(e) => setTrackRef(e.target.value)}
-              disabled={busy || trackMode === 'off'}
+              disabled={busy || !loaded || trackMode === 'off'}
             />
           </label>
           <label>
@@ -161,7 +195,7 @@ export function ContinuousDeploymentCard({
               aria-label="Auto-deploy target"
               value={autoTarget}
               onChange={(e) => setAutoTarget(e.target.value as AutoDeployTarget)}
-              disabled={busy || trackMode === 'off'}
+              disabled={busy || !loaded || trackMode === 'off'}
             >
               <option value="dev">dev boards only</option>
               <option value="all">all project boards</option>
@@ -178,7 +212,7 @@ export function ContinuousDeploymentCard({
               placeholder="https://github.com/org/eink-firmware"
               value={repoUrl}
               onChange={(e) => setRepoUrl(e.target.value)}
-              disabled={busy}
+              disabled={busy || !loaded}
             />
           </label>
           <label>
@@ -189,7 +223,7 @@ export function ContinuousDeploymentCard({
               placeholder="https://api.github.com/repos/org/eink-firmware/dispatches"
               value={webhookUrl}
               onChange={(e) => setWebhookUrl(e.target.value)}
-              disabled={busy}
+              disabled={busy || !loaded}
             />
           </label>
           <label>
@@ -202,14 +236,14 @@ export function ContinuousDeploymentCard({
               }
               value={webhookHeader}
               onChange={(e) => setWebhookHeader(e.target.value)}
-              disabled={busy}
+              disabled={busy || !loaded}
             />
           </label>
         </div>
         <p>
           <button
             type="submit"
-            disabled={busy || (trackMode !== 'off' && trackRef.trim() === '')}
+            disabled={busy || !loaded || (trackMode !== 'off' && trackRef.trim() === '')}
           >
             {busy ? 'Saving…' : 'Save & sync tracking'}
           </button>
@@ -225,9 +259,21 @@ export function ContinuousDeploymentCard({
           {webhookWarning}
         </p>
       )}
-      {errorMsg !== null && (
+      {displayError !== null && (
         <p className="bad" role="alert" data-testid="cd-error">
-          {errorMsg}
+          {displayError}
+          {loadState.status === 'error' && (
+            <>
+              {' '}
+              <button
+                type="button"
+                data-testid="cd-retry-btn"
+                onClick={() => setReloadSeq((n) => n + 1)}
+              >
+                Retry
+              </button>
+            </>
+          )}
         </p>
       )}
     </section>

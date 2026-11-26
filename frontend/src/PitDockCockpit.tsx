@@ -2,14 +2,14 @@
 //
 // Designed for Tab 3 (`3. ADD BOARD & DOCK`) during 90-second competition pit turnarounds
 // and contested-RF carrier-deck operations:
-// 1. Top EMCON Posture Banner (`data-testid="emcon-posture-banner"`): explicit radio lock
-//    pills (`802.11 Wi-Fi: OFF`, `Improv BLE: OFF`, `Shared NimBLE GATT: LIVE`), Pit Cache
-//    status, and queued dock bundle counter.
-// 2. Pinned Live Mini-Fleet & Peer Mesh Strip (`data-testid="pit-mini-fleet-strip"`): shows
-//    live `fw_version`, `link_type`, and Peer Mesh `sub_versions` Skew Detection (`! SKEW`)
-//    when any peer node's `fw_version` or `sub_versions` (e.g. `batteries_csv`) disagrees
-//    with the mesh target.
-// 3. 3-Column Pit Turnaround Grid:
+// - Top EMCON Posture Banner (`data-testid="emcon-posture-banner"`): explicit radio lock
+//   pills (`802.11 Wi-Fi: OFF`, `Improv BLE: OFF`, `Shared NimBLE GATT: LIVE`), Pit Cache
+//   status, and queued dock bundle counter.
+// - Pinned Live Mini-Fleet & Peer Mesh Strip (`data-testid="pit-mini-fleet-strip"`): shows
+//   live `fw_version`, `link_type`, and Peer Mesh `sub_versions` Skew Detection (`! SKEW`)
+//   when any peer node's `fw_version` or `sub_versions` (e.g. `batteries_csv`) disagrees
+//   with the mesh target.
+// - 3-Column Pit Turnaround Grid:
 //    - Panel 1: Auto-Drained Field Rings & Cloud Replay (`api.dockSync` + receipt).
 //    - Panel 2: Stage Signed Bundle over USB-C Dock (`app` or `data_partition` with Safe Window).
 //    - Panel 3: Peripheral `ff_selftest` Verification (`SX1262 915MHz LoRa SPI`,

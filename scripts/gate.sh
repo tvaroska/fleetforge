@@ -50,7 +50,7 @@ assert len(heads) == 1, f"expected a single Alembic head, found {heads}"
 
 PYTEST_OUT="$(mktemp /tmp/fleetforge-pytest.XXXXXX)"
 trap 'rm -f "${PYTEST_OUT}"' EXIT
-"${PYTEST_BIN}" -q -rs -p no:cacheprovider | tee "${PYTEST_OUT}"
+"${PYTEST_BIN}" -q -rs --durations=15 -p no:cacheprovider | tee "${PYTEST_OUT}"
 
 "${PYTHON_BIN}" scripts/check_pytest_skips.py "${PYTEST_OUT}"
 
@@ -59,5 +59,6 @@ if [[ "${FF_SKIP_FRONTEND_GATE:-0}" != "1" ]] && command -v npm >/dev/null 2>&1 
     cd "${REPO_ROOT}/frontend"
     npm run typecheck
     npm test
+    npm run build
   )
 fi

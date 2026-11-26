@@ -1,30 +1,30 @@
 // The flashing engine: every rule about what may be written to a board, and in what order.
 //
-// No DOM API and no esptool-js — the port lives behind the `BoardFlasher` seam
-// (`flasher.ts`), so all of this runs in jsdom against a fake. Four rules shape it, and
+// No DOM API and no esptool-js — the port lives behind the `BoardFlasher` port
+// (`flasher.ts`), so all of this runs in jsdom against a fake. Five rules shape it, and
 // each one is a board that would otherwise be bricked, mis-flashed or silently inert:
 //
-// 1. **Every address comes from the manifest.** `builds[].parts[].offset` and
-//    `config_partition.offset`, never a constant: the bootloader is at 0x1000 on ESP32
-//    and 0x0 on the RISC-V parts, and a hardcoded offset flashes cleanly and never boots.
-//    `planWrite` is the only place a `FlashPart` is constructed, and `flash.test.tsx`
-//    asserts the addresses against the manifest fixture.
-// 2. **Nothing is written that has not been checked.** Chip family, flash size, the
-//    presence of a config partition, and the sha256 + length of every downloaded part —
-//    all before a single byte goes to the chip.
-// 3. **The enrollment token is minted LAST and revoked on failure.** It is single-use and
-//    it is a fleet-join credential: minting it before the checks means every failed
-//    attempt spends one, and leaving a live one baked into a half-flashed board means an
-//    orphan credential nobody is tracking. The plaintext lives in a local variable for the
-//    length of one call — never in React state, never in the log, never in the DOM.
-// 4. **The port is always released.** `close()` in a `finally`, whatever happened.
-// 5. **The flasher erases nothing.** `writeFlash` erases the sectors it writes and not one
-//    byte more. NVS is off limits: the cached RF calibration lives there, in IDF's `phy`
-//    namespace, and a board that loses it re-runs the cold full calibration — the largest
-//    current draw in startup — on every boot. Clearing the stored broker credential is the
-//    AGENT's job: `ff_store_sync_token` erases the `ff` namespace when the `ff_cfg` token
-//    changes, which this flasher guarantees on every flash because it mints a fresh one
-//    (rule 3). `assertLeavesNvsAlone` below is the guard. S0-fw-4; `agent/main/ff_store.c`.
+// - **Every address comes from the manifest.** `builds[].parts[].offset` and
+//   `config_partition.offset`, never a constant: the bootloader is at 0x1000 on ESP32
+//   and 0x0 on the RISC-V parts, and a hardcoded offset flashes cleanly and never boots.
+//   `planWrite` is the only place a `FlashPart` is constructed, and `flash.test.tsx`
+//   asserts the addresses against the manifest fixture.
+// - **Nothing is written that has not been checked.** Chip family, flash size, the
+//   presence of a config partition, and the sha256 + length of every downloaded part —
+//   all before a single byte goes to the chip.
+// - **The enrollment token is minted LAST and revoked on failure.** It is single-use and
+//   it is a fleet-join credential: minting it before the checks means every failed
+//   attempt spends one, and leaving a live one baked into a half-flashed board means an
+//   orphan credential nobody is tracking. The plaintext lives in a local variable for the
+//   length of one call — never in React state, never in the log, never in the DOM.
+// - **The port is always released.** `close()` in a `finally`, whatever happened.
+// - **The flasher erases nothing.** `writeFlash` erases the sectors it writes and not one
+//   byte more. NVS is off limits: the cached RF calibration lives there, in IDF's `phy`
+//   namespace, and a board that loses it re-runs the cold full calibration — the largest
+//   current draw in startup — on every boot. Clearing the stored broker credential is the
+//   AGENT's job: `ff_store_sync_token` erases the `ff` namespace when the `ff_cfg` token
+//   changes, which this flasher guarantees on every flash because it mints a fresh one.
+//   `assertLeavesNvsAlone` below is the guard. S0-fw-4; `agent/main/ff_store.c`.
 
 import { useCallback, useRef, useState } from 'react'
 import {
@@ -423,22 +423,20 @@ export function useFlashBoard({
       let lastPart: number | null = null
 
       try {
-        // 1. Validate before anything is minted or downloaded — the ordering rule
-        //    `POST /v1/enroll`, the simulator and `ff_cfg.py` all follow.
+        // Validate before anything is minted or downloaded — the ordering rule
+        // `POST /v1/enroll`, the simulator and `ff_cfg.py` all follow.
         setStep('Checking the configuration…')
         const fields = buildFfCfgFields(request.config)
         validateFfCfg(fields)
 
-        // 2. The manifest, and the checks that depend on the chip.
+        // Check manifest compatibility against the detected chip before downloading.
         setStep('Reading the agent manifest…')
         const manifest = await api.agentManifest()
         const selected = selectBuild(manifest, detected)
         checkFlashable(selected, detected)
         setBuild(selected)
 
-        // 3. Download and verify every part BEFORE minting. A truncated or garbled
-        //    download is the failure that actually happens, and catching it here means
-        //    the retry costs no token.
+        // Download and verify every part BEFORE minting so a garbled download costs no token.
         const downloaded = new Map<string, Uint8Array>()
         for (const part of selected.parts) {
           setStep(`Downloading ${part.name}…`)
@@ -447,7 +445,7 @@ export function useFlashBoard({
           downloaded.set(part.name, bytes)
         }
 
-        // 4. Mint last. Single-use: every attempt that got this far will write it.
+        // Mint last: single-use credential only once every check and part download succeeded.
         setStep('Minting an enrollment token…')
         const groupId = request.groupId ?? null
         const issued = await (project

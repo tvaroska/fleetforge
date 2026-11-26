@@ -4,12 +4,12 @@
 //
 // Two rules shape this file.
 //
-// 1. **The server is the gate.** `effectiveLayout` mirrors `LayoutCatalog.resolve`
-//    (R3-be-2 D7) for DISPLAY and for the upload form's default only. Whether a deploy is
-//    allowed is the pre-check's answer, never this file's.
-// 2. **There is no event type for profiles.** They change on an operator action or on a
-//    board's announce, so the hook re-reads on mount, after an adopt (`reload`), and when
-//    `hint` changes (`useFleet().announceSeq`). No second EventSource and no poll.
+// - **The server is the gate.** `effectiveLayout` mirrors `LayoutCatalog.resolve`
+//   (R3-be-2 D7) for DISPLAY and for the upload form's default only. Whether a deploy is
+//   allowed is the pre-check's answer, never this file's.
+// - **There is no event type for profiles.** They change on an operator action or on a
+//   board's announce, so the hook re-reads on mount, after an adopt (`reload`), and when
+//   `hint` changes (`useFleet().announceSeq`). No second EventSource and no poll.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError, api, type DeviceSummary, type PartitionProfileSummary } from './api'

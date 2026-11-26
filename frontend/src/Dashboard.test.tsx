@@ -892,5 +892,58 @@ describe('Dashboard', () => {
         'Cancelled in-flight 1.5.0 deploy on 1 board(s).',
       )
     })
+
+    it('rejects javascript: and other non-HTTP build_url and repo_url links (D-28)', async () => {
+      vi.spyOn(globalThis, 'fetch').mockImplementation(async (input?: unknown) => {
+        const url = String(input)
+        if (url === '/v1/artifact') {
+          return json({
+            artifacts: [
+              {
+                target: 'esp32c6',
+                version: '1.5.1',
+                sha256: 'c'.repeat(64),
+                size_bytes: 230_000,
+                partition_layout: 'ab-4m-v1',
+                created_at: '2026-10-09T10:00:00Z',
+                build_url: 'javascript:alert(document.domain)',
+                repo_url: 'javascript:alert(1)',
+              },
+              {
+                target: 'esp32s3',
+                version: '1.5.2',
+                sha256: 'd'.repeat(64),
+                size_bytes: 230_000,
+                partition_layout: 'ab-4m-v1',
+                created_at: '2026-10-09T11:00:00Z',
+                build_url: 'data:text/html,<script>alert(1)</script>',
+                repo_url: '/relative/repo',
+              },
+            ],
+          })
+        }
+        if (url === '/v1/devices') return json({ devices: [device()], arrivals: [] })
+        if (url === '/v1/partition-profiles') return json({ profiles: [] })
+        if (url === '/v1/enrollment-tokens') return json({ tokens: [] })
+        if (url === '/v1/agent/manifest') return json(agentManifest)
+        if (url.startsWith('/v1/groups')) return json({ groups: [] })
+        return json({})
+      })
+
+      renderDashboard()
+      await userEvent.click(screen.getByTestId('tab-builds'))
+
+      const catalog = screen.getByTestId('uploaded-builds')
+      const rows = await within(catalog).findAllByTestId('uploaded-build-row')
+      expect(rows).toHaveLength(2)
+      expect(within(catalog).queryByTestId('build-ci-link')).not.toBeInTheDocument()
+      expect(within(catalog).queryByTestId('build-repo-link')).not.toBeInTheDocument()
+
+      const anchors = Array.from(catalog.querySelectorAll('a'))
+      for (const anchor of anchors) {
+        const href = anchor.getAttribute('href') ?? ''
+        expect(href.toLowerCase()).not.toMatch(/^\s*(javascript|data|vbscript):/)
+      }
+    })
   })
 })
