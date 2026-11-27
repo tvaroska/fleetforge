@@ -618,7 +618,7 @@ wheels = [
 
 [[package]]
 name = "fleetforge"
-version = "0.9.2"
+version = "0.9.5"
 source = { editable = "." }
 dependencies = [
     { name = "aiomqtt" },
