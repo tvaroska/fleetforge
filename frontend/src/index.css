@@ -12,6 +12,7 @@
 
 :root {
   color-scheme: dark;
+  scroll-padding-top: 4.5rem;
 
   --ff-bg: #0c0c0c;
   --ff-panel: #141414;
@@ -66,7 +67,7 @@ body {
 }
 
 main {
-  max-width: 84rem;
+  max-width: 96rem;
   margin: 0 auto;
   padding: 2rem 1.5rem 4rem;
 }
@@ -528,7 +529,7 @@ textarea.log {
 .status-strip {
   position: sticky;
   top: 0;
-  z-index: 1;
+  z-index: 10;
   background: var(--ff-panel);
   border: 2px solid var(--ff-line);
   box-shadow: 3px 3px 0 var(--ff-line);
@@ -950,21 +951,44 @@ textarea.log {
   align-items: start;
 }
 
-@media (min-width: 1100px) {
-  .workbench-split {
-    grid-template-columns: minmax(0, 58fr) minmax(0, 42fr);
-  }
+.workbench-master,
+.workbench-inspector-col {
+  min-width: 0;
+}
+
+.workbench-master .console-card {
+  min-width: 0;
+  overflow-x: visible;
+}
+
+.fleet-table-scroll {
+  width: 100%;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+[data-testid='deploy-cell'] select {
+  max-width: 12rem;
 }
 
 .device-inspector {
-  position: sticky;
-  top: 3.5rem;
   background: var(--ff-panel);
   border: 2px solid var(--ff-line-hi);
   box-shadow: 4px 4px 0 var(--ff-line);
   padding: 1rem 1.25rem;
-  max-height: calc(100vh - 5rem);
-  overflow-y: auto;
+}
+
+@media (min-width: 1520px) {
+  .workbench-split {
+    grid-template-columns: minmax(0, 64fr) minmax(0, 36fr);
+  }
+
+  .device-inspector {
+    position: sticky;
+    top: 4rem;
+    max-height: calc(100vh - 5rem);
+    overflow-y: auto;
+  }
 }
 
 .release-ribbon {

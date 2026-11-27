@@ -281,50 +281,52 @@ export function FleetTable({
             onSetFreezeSortOnHover={setFreezeSortOnHover}
           />
 
-          <table>
-            <thead>
-              <tr>
-                <th scope="col">Status</th>
-                <th scope="col">Device</th>
-                <th scope="col">Platform</th>
-                <th scope="col">Firmware</th>
-                <th scope="col">Last seen</th>
-                <th scope="col">Health</th>
-                <th scope="col">Power</th>
-                <th scope="col">Deploy</th>
-              </tr>
-            </thead>
-            <tbody
-              onMouseEnter={() => setHoveringTable(true)}
-              onMouseLeave={() => setHoveringTable(false)}
-            >
-              {displayedDevices.map((device) => {
-                const groupLabel =
-                  groupBy === 'ring'
-                    ? `Ring: ${device.group_id ? (groupNameById.get(device.group_id) ?? device.group_id) : 'ungrouped'}`
-                    : groupBy === 'parent'
-                      ? `Parent: ${device.parent_device_id ?? 'direct'}`
-                      : null
-                return (
-                  <FleetDeviceRow
-                    key={device.device_id}
-                    device={device}
-                    now={now}
-                    artifacts={artifacts.byTarget.get(device.platform_type) ?? []}
-                    artifactsLoaded={artifacts.loaded}
-                    onDeployed={refresh}
-                    onSessionExpired={onSessionExpired}
-                    selected={device.device_id === selectedDeviceId}
-                    onSelect={onSelect}
-                    versions={versions}
-                    onGoToBuilds={onGoToBuilds}
-                    groups={groups}
-                    groupByLabel={groupLabel}
-                  />
-                )
-              })}
-            </tbody>
-          </table>
+          <div className="fleet-table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th scope="col">Status</th>
+                  <th scope="col">Device</th>
+                  <th scope="col">Platform</th>
+                  <th scope="col">Firmware</th>
+                  <th scope="col">Last seen</th>
+                  <th scope="col">Health</th>
+                  <th scope="col">Power</th>
+                  <th scope="col">Deploy</th>
+                </tr>
+              </thead>
+              <tbody
+                onMouseEnter={() => setHoveringTable(true)}
+                onMouseLeave={() => setHoveringTable(false)}
+              >
+                {displayedDevices.map((device) => {
+                  const groupLabel =
+                    groupBy === 'ring'
+                      ? `Ring: ${device.group_id ? (groupNameById.get(device.group_id) ?? device.group_id) : 'ungrouped'}`
+                      : groupBy === 'parent'
+                        ? `Parent: ${device.parent_device_id ?? 'direct'}`
+                        : null
+                  return (
+                    <FleetDeviceRow
+                      key={device.device_id}
+                      device={device}
+                      now={now}
+                      artifacts={artifacts.byTarget.get(device.platform_type) ?? []}
+                      artifactsLoaded={artifacts.loaded}
+                      onDeployed={refresh}
+                      onSessionExpired={onSessionExpired}
+                      selected={device.device_id === selectedDeviceId}
+                      onSelect={onSelect}
+                      versions={versions}
+                      onGoToBuilds={onGoToBuilds}
+                      groups={groups}
+                      groupByLabel={groupLabel}
+                    />
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
         </>
       )}
     </section>

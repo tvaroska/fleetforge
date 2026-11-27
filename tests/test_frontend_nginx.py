@@ -82,3 +82,42 @@ def test_security_headers_cover_server_assets_and_shell_and_artifact_logs_omit_q
     art_dl = _block("location ^~ /v1/artifact/ {")
     assert "json_combined_no_query" in art_dl
     assert "proxy_pass http://api:8000" in art_dl
+
+
+def _css_block(css: str, header: str) -> str:
+    start = css.index(header)
+    depth = 0
+    for i in range(css.index("{", start), len(css)):
+        if css[i] == "{":
+            depth += 1
+        elif css[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return css[start : i + 1]
+    raise AssertionError(f"unterminated CSS block: {header}")
+
+
+def test_workbench_fleet_table_scroll_containment_and_sticky_header_clearance() -> None:
+    """`R-095` (`missing_unit_case`): prevent Fleet table overflow under `.device-inspector`
+    or sticky `.status-strip` pointer interception in Chromium Playwright viewports."""
+    repo_root = Path(__file__).resolve().parent.parent
+    css = (repo_root / "frontend" / "src" / "index.css").read_text(encoding="utf-8")
+    fleet_tsx = (repo_root / "frontend" / "src" / "FleetView.tsx").read_text(encoding="utf-8")
+
+    root_block = _css_block(css, ":root {")
+    assert "scroll-padding-top:" in root_block
+
+    assert '<div className="fleet-table-scroll">' in fleet_tsx
+    scroll_block = _css_block(css, ".fleet-table-scroll {")
+    assert "overflow-x: auto;" in scroll_block
+
+    card_block = _css_block(css, ".workbench-master .console-card {")
+    assert "min-width: 0;" in card_block
+    assert "overflow-x: visible;" in card_block
+
+    assert "min-width: 0;" in _css_block(css, ".workbench-master,\n.workbench-inspector-col {")
+    assert "max-width:" in _css_block(css, "[data-testid='deploy-cell'] select {")
+    assert "@media (min-width: 1100px)" not in css
+    wide_split = _css_block(css, "@media (min-width: 1520px) {")
+    assert ".workbench-split" in wide_split
+    assert "position: sticky;" in wide_split
