@@ -367,17 +367,40 @@ def test_cloudbuild_wires_fullstack_and_playwright_e2e_with_pinned_version() -> 
 def test_offline_wheel_packages_contracts_and_imports_under_isolated_python(
     tmp_path: Path,
 ) -> None:
-    """`D-10`/`D-29`: `uv build --wheel --offline` bundles `contracts/*.json` under `-I -S`."""
+    """`D-10`/`D-29`/`R-095`: cold-cache `--no-build-isolation` wheel build bundles `contracts/*.json`."""
     import shutil
     import sysconfig
+    import tomllib
     import zipfile
 
     uv_bin = shutil.which("uv")
     assert uv_bin is not None
     repo_root = Path(__file__).resolve().parents[1]
+    pyproject_data = tomllib.loads((repo_root / "pyproject.toml").read_text(encoding="utf-8"))
+    dev_deps = pyproject_data.get("dependency-groups", {}).get("dev", [])
+    assert any(str(dep).startswith("hatchling") for dep in dev_deps), (
+        "pyproject.toml [dependency-groups].dev must pin hatchling so "
+        "`uv sync --frozen --no-install-project` in Cloud Build can build wheels offline"
+    )
+
     out_dir = tmp_path / "dist"
+    cold_cache = tmp_path / "cold-uv-cache"
+    cold_cache.mkdir()
     proc_build = subprocess.run(  # noqa: S603
-        [uv_bin, "build", "--wheel", "--offline", "--no-config", "--out-dir", str(out_dir)],
+        [
+            uv_bin,
+            "build",
+            "--wheel",
+            "--offline",
+            "--no-config",
+            "--no-build-isolation",
+            "--python",
+            sys.executable,
+            "--cache-dir",
+            str(cold_cache),
+            "--out-dir",
+            str(out_dir),
+        ],
         cwd=repo_root,
         capture_output=True,
         text=True,

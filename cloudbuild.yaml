@@ -20,7 +20,7 @@ substitutions:
   _PUSH: "auto"
   _RUN_DEEP_VERIFICATION: "false"
 
-timeout: 1200s
+timeout: 1800s
 
 options:
   dynamicSubstitutions: true

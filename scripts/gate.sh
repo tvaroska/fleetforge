@@ -52,9 +52,10 @@ assert len(heads) == 1, f"expected a single Alembic head, found {heads}"
 
 PYTEST_OUT="$(mktemp /tmp/fleetforge-pytest.XXXXXX)"
 trap 'rm -f "${PYTEST_OUT}"' EXIT
+FF_WORKERS="${FF_PYTEST_WORKERS:-4}"
 XDIST_ARGS=()
-if [[ -n "${FF_PYTEST_WORKERS:-}" ]]; then
-  XDIST_ARGS=(-n "${FF_PYTEST_WORKERS}")
+if [[ -n "${FF_WORKERS}" && "${FF_WORKERS}" != "0" && "${FF_WORKERS}" != "1" ]]; then
+  XDIST_ARGS=(-n "${FF_WORKERS}")
 fi
 "${PYTEST_BIN}" -q -rs --durations=15 -p no:cacheprovider "${XDIST_ARGS[@]}" --cov=fleetforge --cov-report=term-missing:skip-covered | tee "${PYTEST_OUT}"
 
