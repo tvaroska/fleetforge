@@ -28,7 +28,6 @@ from fleetforge.simulator.board_state import (
     CONFIRM_AUTO,
     CONFIRM_MODES,
     DEFAULT_CONFIRM_TIMEOUT_S,
-    DEFAULT_SIGNING_PUBKEY_RING,
     RESET_REASON_SW,
     SAFE_WINDOW_AUTO,
     SAFE_WINDOW_FILE_PREFIX,
@@ -55,6 +54,7 @@ from fleetforge.simulator.board_state import (
     encode,
     redact_url,
     redacted_command,
+    resolve_signing_pubkey_ring,
     up_topic,
 )
 from fleetforge.simulator.dock_ops import (
@@ -100,7 +100,7 @@ class StageRunner:
     broken_marker: str | None = None
     selftest_fail_marker: str | None = None
     require_signature: bool | None = None
-    signing_pubkey_ring: tuple[str, ...] = DEFAULT_SIGNING_PUBKEY_RING
+    signing_pubkey_ring: tuple[str, ...] = field(default_factory=resolve_signing_pubkey_ring)
     download_retries: int = 3
     download_backoff_s: float = 0.005
     cargo_handlers: dict[str, Callable[[bytes, str | None], None]] = field(default_factory=dict)

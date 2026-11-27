@@ -11,6 +11,7 @@ import base64
 import binascii
 import hashlib
 import json
+import os
 import random
 import re
 import urllib.parse
@@ -55,6 +56,40 @@ DEFAULT_SIGNING_PUBKEY_RING: tuple[str, ...] = (
     SIGNING_PUBKEY_PRIMARY_PEM,
     SIGNING_PUBKEY_SECONDARY_PEM,
 )
+
+
+def _decode_env_pem_text(raw: str) -> str:
+    text = raw.strip().replace("\\n", "\n")
+    if text.startswith("-----BEGIN "):
+        return text
+    try:
+        decoded = base64.b64decode(text, validate=True).decode("utf-8").strip()
+    except (binascii.Error, UnicodeDecodeError):
+        return text
+    return decoded if decoded.startswith("-----BEGIN ") else text
+
+
+def _canonical_p256_pub_pem(raw_item: str) -> str:
+    candidate = _decode_env_pem_text(raw_item)
+    pub = serialization.load_pem_public_key((candidate + "\n").encode("utf-8"))
+    if not isinstance(pub, ec.EllipticCurvePublicKey):
+        raise SimulatorError("ARTIFACT_SIGNING_PUBLIC_KEYS must contain P-256 public keys")
+    return pub.public_bytes(
+        serialization.Encoding.PEM,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    ).decode("utf-8")
+
+
+def resolve_signing_pubkey_ring(raw: str | None = None) -> tuple[str, ...]:
+    """Resolve trusted P-256 public keys from `raw` or `$ARTIFACT_SIGNING_PUBLIC_KEYS`."""
+    env_val = raw if raw is not None else os.environ.get("ARTIFACT_SIGNING_PUBLIC_KEYS")
+    if not env_val or not env_val.strip():
+        return DEFAULT_SIGNING_PUBKEY_RING
+    text = _decode_env_pem_text(env_val)
+    blocks = re.findall(r"-----BEGIN PUBLIC KEY-----.*?-----END PUBLIC KEY-----", text, re.DOTALL)
+    candidates = blocks if blocks else [p.strip() for p in text.split(";") if p.strip()]
+    parsed = list(dict.fromkeys(_canonical_p256_pub_pem(item) for item in candidates))
+    return (*parsed, *DEFAULT_SIGNING_PUBKEY_RING) if parsed else DEFAULT_SIGNING_PUBKEY_RING
 
 
 def _is_valid_artifact_sig(sig: object) -> bool:

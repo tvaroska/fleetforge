@@ -348,9 +348,12 @@ def test_cloudbuild_wires_fullstack_and_playwright_e2e_with_pinned_version() -> 
         "scripts/fleet-health-e2e.mjs",
         "scripts/device-log-e2e.mjs",
         "scripts/commands-e2e.mjs",
+        "ARTIFACT_SIGNING_KEY=",
+        "ARTIFACT_SIGNING_PUBLIC_KEYS=",
         "- verify-fullstack-and-playwright-e2e",
     ):
         assert needle in cloudbuild, f"missing {needle!r} in cloudbuild.yaml"
+    assert cloudbuild.count("ARTIFACT_SIGNING_PUBLIC_KEYS=") >= 3
 
     for script_name in (
         "update-flow-e2e.mjs",
@@ -362,6 +365,65 @@ def test_cloudbuild_wires_fullstack_and_playwright_e2e_with_pinned_version() -> 
         assert "process.env.PLAYWRIGHT_MODULE || 'playwright'" in src
         assert "FF_SIM_PYTHON" in src
         assert "console-tabs" in src
+
+
+def test_ephemeral_ci_signing_ring_satisfies_precheck_and_simulator_stage_runner(
+    monkeypatch: Any,
+) -> None:
+    """`R-095` (`env_parity`): ephemeral P-256 CI keys satisfy `unmet_gates` and `StageRunner`."""
+    import base64
+    import hashlib
+
+    from fleetforge.db.models import Device, LinkType, PowerClass
+    from fleetforge.deploy_precheck import ResolvedArtifact, unmet_gates
+    from fleetforge.signing import SigningKeyRing, generate_keypair
+    from fleetforge.simulator.board_state import (
+        LINK_FAST,
+        DeviceIdentity,
+        LinkProfile,
+        _verify_artifact_sig,
+    )
+    from fleetforge.simulator.stage_runner import StageRunner
+
+    priv1, pub1 = generate_keypair()
+    _, pub2 = generate_keypair()
+    pub_ring_b64 = base64.b64encode(f"{pub1}\n{pub2}".encode()).decode("ascii")
+    priv_b64 = base64.b64encode(priv1.encode()).decode("ascii")
+
+    server_ring = SigningKeyRing.from_config(private_key=priv_b64, public_keys=pub_ring_b64)
+    assert server_ring.can_sign and not server_ring.uses_dev_keys
+
+    digest = hashlib.sha256(b"ci-e2e-firmware").hexdigest()
+    sig = server_ring.sign_digest(digest)
+    assert server_ring.verify_digest(digest, sig)
+    assert not server_ring.signed_by_dev_key(digest, sig)
+
+    device = Device(
+        device_id="62f5319f3988",
+        platform_type="esp32s3",
+        link_type=LinkType.WIFI,
+        power_class=PowerClass.ALWAYS_ON,
+        capabilities=["ota", "apply", "cancel", "rollback", "reboot", "selftest"],
+        partition_layout="ab-4m-v1",
+        ota_slot_size=1966080,
+    )
+    resolved = ResolvedArtifact(
+        sha256=digest,
+        size_bytes=36928,
+        partition_layout="ab-4m-v1",
+        has_lib_marker=True,
+        sig=sig,
+        is_signed=True,
+        uses_dev_key_ring=False,
+    )
+    assert unmet_gates(device, override=(), artifact=resolved) == []
+
+    monkeypatch.setenv("ARTIFACT_SIGNING_PUBLIC_KEYS", pub_ring_b64)
+    runner = StageRunner(
+        identity=DeviceIdentity(device_id="62f5319f3988", capabilities=("ota",)),
+        link=LinkProfile(LINK_FAST, 0),
+    )
+    assert _verify_artifact_sig(digest, sig, runner.signing_pubkey_ring)
 
 
 def test_offline_wheel_packages_contracts_and_imports_under_isolated_python(
