@@ -72,7 +72,7 @@ export function describePreflight(input: {
       online: device.online,
       lastSeen: device.last_seen,
       updating:
-        device.deploy !== null && !device.deploy.is_terminal
+        device.deploy != null && !device.deploy.is_terminal
           ? (DEPLOY_STATE_LABELS[device.deploy.state] ?? device.deploy.state)
           : null,
       install,

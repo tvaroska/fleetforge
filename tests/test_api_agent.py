@@ -27,7 +27,7 @@ from fleetforge.firmware.publish import publish_bundle, read_index
 from fleetforge.storage.blobs import blob_key
 from fleetforge.storage.objectstore import ObjectStoreError
 from tests.conftest import MemoryObjectStore, client_for, login_admin
-from tests.test_firmware_catalog import PART_FILES, write_bundle
+from tests.support_catalog import PART_FILES, write_bundle
 
 
 @pytest.fixture

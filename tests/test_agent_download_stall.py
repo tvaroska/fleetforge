@@ -28,15 +28,14 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from tests.agent_src import extract_c_function
-from tests.test_agent_txn import FF_OTA_C, _function_body
-from tests.test_ff_cfg import _code
+from tests.agent_src import COMPONENT_SRC, find_c_function, read_c_family
+from tests.agent_test_helpers import _code, _function_body
 
 PERFORM_LOOP = "while ((err = esp_https_ota_perform(handle))"
 
 
 def _ota_task() -> str:
-    return _function_body(_code(FF_OTA_C), "ota_task")
+    return _function_body(_code(read_c_family("ff_ota")), "ota_task")
 
 
 def _define(source: str, name: str) -> int:
@@ -66,7 +65,11 @@ def _stall_branch(task: str) -> str:
 
 
 def test_the_stall_budget_is_bounded_and_longer_than_two_reads() -> None:
-    source = _code(FF_OTA_C)
+    source = _code(
+        (COMPONENT_SRC / "ff_ota_internal.h").read_text(encoding="utf-8")
+        + "\n"
+        + read_c_family("ff_ota")
+    )
     stall = _define(source, "OTA_STALL_MS")
     timeout = _define(source, "OTA_HTTP_TIMEOUT_MS")
     assert stall >= 2 * timeout, "one slow read must never trip the guard"
@@ -114,14 +117,17 @@ def test_done_still_frees_the_update_slot() -> None:
 
 
 def test_a_resume_requests_the_rest_of_the_image(tmp_path: Path) -> None:
-    """D-22: resuming a >64 KiB app OTA sends open-ended `bytes=<offset>-` and finishes full image."""
+    """D-22: resuming a >200 KiB app OTA mid-stream sends open-ended `bytes=<offset>-` and reassembles the full image."""
     gcc = shutil.which("gcc")
     assert gcc is not None, "gcc is required for host firmware resume tests"
 
-    raw = FF_OTA_C.read_text(encoding="utf-8")
+    raw = read_c_family("ff_ota")
     assert "OTA_RANGE_CHUNK_BYTES" not in raw
     assert "max_http_request_size" not in raw
-    fn_resume = extract_c_function(raw, "resume_range_perform")
+    _, fn_resume = find_c_function("resume_range_perform")
+
+    image = bytes((i * 131 + 17) % 256 for i in range(262_144))
+    drop_offset = 70_000
 
     harness_c = f"""
 #include <inttypes.h>
@@ -153,9 +159,12 @@ static const char *TAG = "ff-ota-test";
 static esp_http_client_handle_t s_ota_http_client = (void *)1;
 static char s_resume_range_hdr[48];
 static char g_last_range_header[48];
-static int g_image_len_read = 10000;
-static int g_total_image_size = 200000;
-static int g_range_end_limit = 200000;
+static const uint8_t *g_origin_image = NULL;
+static uint8_t *g_flash_slot = NULL;
+static int g_image_len_read = 0;
+static int g_http_cursor = 0;
+static int g_total_image_size = 0;
+static int g_range_end_limit = 0;
 static int g_close_calls = 0;
 
 static bool cancel_requested(void) {{ return false; }}
@@ -176,29 +185,38 @@ static esp_err_t esp_http_client_set_header(esp_http_client_handle_t c, const ch
         snprintf(g_last_range_header, sizeof(g_last_range_header), "%s", v);
         int start = 0, end = -1;
         if (sscanf(v, "bytes=%d-%d", &start, &end) == 2 && end >= start) {{
+            g_http_cursor = start;
             g_range_end_limit = end + 1;
-        }} else {{
+        }} else if (sscanf(v, "bytes=%d-", &start) == 1 && start >= 0) {{
+            g_http_cursor = start;
             g_range_end_limit = g_total_image_size;
         }}
     }}
     return ESP_OK;
 }}
 static esp_err_t esp_http_client_open(esp_http_client_handle_t c, int len) {{ (void)c; (void)len; return ESP_OK; }}
-static int64_t esp_http_client_fetch_headers(esp_http_client_handle_t c) {{ (void)c; return g_range_end_limit - g_image_len_read; }}
+static int64_t esp_http_client_fetch_headers(esp_http_client_handle_t c) {{ (void)c; return g_range_end_limit - g_http_cursor; }}
 static int esp_http_client_get_status_code(esp_http_client_handle_t c) {{ (void)c; return 206; }}
 static esp_err_t esp_https_ota_perform(esp_https_ota_handle_t h) {{
     (void)h;
-    int remaining = g_range_end_limit - g_image_len_read;
+    int remaining = g_range_end_limit - g_http_cursor;
     if (remaining <= 0) return ESP_OK;
     int step = remaining > 16384 ? 16384 : remaining;
+    memcpy(g_flash_slot + g_image_len_read, g_origin_image + g_http_cursor, (size_t)step);
+    g_http_cursor += step;
     g_image_len_read += step;
     return g_image_len_read < g_range_end_limit ? ESP_ERR_HTTPS_OTA_IN_PROGRESS : ESP_OK;
 }}
 
 {fn_resume}
 
-int run_resume_case(int start_offset, int total_size, char *range_out, size_t range_cap, int *final_len) {{
+int run_resume_case(const uint8_t *origin, uint8_t *flash_out, int start_offset, int total_size,
+                    char *range_out, size_t range_cap, int *final_len) {{
+    g_origin_image = origin;
+    g_flash_slot = flash_out;
+    memcpy(g_flash_slot, origin, (size_t)start_offset);
     g_image_len_read = start_offset;
+    g_http_cursor = start_offset;
     g_total_image_size = total_size;
     g_range_end_limit = total_size;
     g_last_range_header[0] = '\\0';
@@ -237,6 +255,8 @@ int run_resume_case(int start_offset, int total_size, char *range_out, size_t ra
 
     lib = ctypes.CDLL(str(so_path))
     lib.run_resume_case.argtypes = [
+        ctypes.c_char_p,
+        ctypes.c_char_p,
         ctypes.c_int,
         ctypes.c_int,
         ctypes.c_char_p,
@@ -245,12 +265,23 @@ int run_resume_case(int start_offset, int total_size, char *range_out, size_t ra
     ]
     lib.run_resume_case.restype = ctypes.c_int
 
+    flash_buf = ctypes.create_string_buffer(len(image))
     range_buf = ctypes.create_string_buffer(48)
     final_len = ctypes.c_int(0)
-    rc = lib.run_resume_case(10_000, 200_000, range_buf, 48, ctypes.byref(final_len))
+    rc = lib.run_resume_case(
+        image,
+        flash_buf,
+        drop_offset,
+        len(image),
+        range_buf,
+        48,
+        ctypes.byref(final_len),
+    )
     assert rc == 0
-    assert range_buf.value == b"bytes=10000-"
-    assert final_len.value == 200_000
+    assert range_buf.value == f"bytes={drop_offset}-".encode("ascii")
+    assert final_len.value == len(image)
+    assert len(image) > 200 * 1024
+    assert hashlib.sha256(flash_buf.raw).hexdigest() == hashlib.sha256(image).hexdigest()
 
 
 def test_cargo_resume_closes_client_on_unexpected_200(tmp_path: Path) -> None:
@@ -258,9 +289,8 @@ def test_cargo_resume_closes_client_on_unexpected_200(tmp_path: Path) -> None:
     gcc = shutil.which("gcc")
     assert gcc is not None, "gcc is required for host cargo resume tests"
 
-    raw = FF_OTA_C.read_text(encoding="utf-8")
-    fn_hex = extract_c_function(raw, "hex_encode")
-    fn_cargo = extract_c_function(raw, "run_cargo_ota")
+    _, fn_hex = find_c_function("hex_encode")
+    _, fn_cargo = find_c_function("run_cargo_ota")
 
     payload = bytes((i * 31 + 7) % 256 for i in range(12_288))
     expected_sha = hashlib.sha256(payload).hexdigest()

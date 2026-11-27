@@ -12,9 +12,15 @@ from pathlib import Path
 import pytest
 
 from fleetforge.signing import DEFAULT_PRIMARY_PUBLIC_KEY_PEM
-from tests.agent_src import COMPONENT_SRC, c_call_sites, extract_c_function
-from tests.test_agent_txn import FF_MQTT_C, FF_OTA_C, _function_body
-from tests.test_ff_cfg import _code
+from tests.agent_src import (
+    COMPONENT_SRC,
+    c_call_sites,
+    c_call_sites_in_family,
+    extract_c_function,
+    find_c_function,
+    read_c_family,
+)
+from tests.agent_test_helpers import FF_MQTT_C, FF_OTA_C, _code, _function_body
 
 PARENTHESISED_GUARDED_RE = re.compile(
     r"\(\s*(?:esp_ota_set_boot_partition|ff_txn_save|ff_selftest_run"
@@ -23,7 +29,7 @@ PARENTHESISED_GUARDED_RE = re.compile(
 
 
 def _ota_task() -> str:
-    return _function_body(_code(FF_OTA_C), "ota_task")
+    return _function_body(_code(read_c_family("ff_ota")), "ota_task")
 
 
 def test_the_digest_is_checked_before_the_boot_pointer_moves() -> None:
@@ -39,12 +45,11 @@ def test_a_mismatch_aborts_and_never_touches_the_boot_partition() -> None:
     assert "esp_https_ota_abort(handle)" in branch
     assert "restore_boot_partition" not in branch
     assert "esp_https_ota_finish" not in branch
-    assert "strcasecmp(digest" not in _code(FF_OTA_C)
+    assert "strcasecmp(digest" not in _code(read_c_family("ff_ota"))
 
 
 def test_the_boot_partition_is_set_only_by_the_undo() -> None:
-    raw_ota = FF_OTA_C.read_text(encoding="utf-8")
-    assert c_call_sites(raw_ota, "esp_ota_set_boot_partition") == [
+    assert c_call_sites_in_family("ff_ota", "esp_ota_set_boot_partition") == [
         "ff_ota_dock_stage",
         "restore_boot_partition",
     ]
@@ -78,7 +83,9 @@ def test_no_parenthesised_call_bypasses_a_guard() -> None:
 
 
 def test_flash_encryption_is_a_compile_error() -> None:
-    assert re.search(r"#if CONFIG_SECURE_FLASH_ENC_ENABLED\s*\n\s*#error ", _code(FF_OTA_C))
+    assert re.search(
+        r"#if CONFIG_SECURE_FLASH_ENC_ENABLED\s*\n\s*#error ", _code(read_c_family("ff_ota"))
+    )
 
 
 def test_the_slot_size_is_checked_before_anything_is_fetched() -> None:
@@ -88,7 +95,7 @@ def test_the_slot_size_is_checked_before_anything_is_fetched() -> None:
 
 
 def test_a_malformed_digest_is_refused_at_the_seam() -> None:
-    mqtt = _code(FF_MQTT_C)
+    mqtt = _code(read_c_family("ff_mqtt"))
     stage = _function_body(mqtt, "on_stage")
     assert stage.index("is_lowercase_sha256(") < stage.index("ff_ota_start(")
     assert '"artifact sha256 malformed"' in stage
@@ -101,11 +108,7 @@ def _compile_verify_harness(tmp_path: Path, *, prod_build: bool = False) -> ctyp
     gcc = shutil.which("gcc")
     assert gcc is not None, "gcc must be available to compile host C verification tests"
 
-    ota_raw = FF_OTA_C.read_text(encoding="utf-8")
-    mqtt_raw = FF_MQTT_C.read_text(encoding="utf-8")
-
-    # Pin exact condition polarities in `ota_task` and `ff_ota_dock_stage` so 1-line flips fail.
-    ota_code = _code(FF_OTA_C)
+    ota_code = _code(read_c_family("ff_ota"))
     assert "if (strcmp(digest, cmd->sha256) != 0)" in _function_body(ota_code, "ota_task")
     assert "if (!verify_artifact_signature(digest_raw, cmd->sig, &sig_detail))" in _function_body(
         ota_code, "ota_task"
@@ -115,11 +118,14 @@ def _compile_verify_harness(tmp_path: Path, *, prod_build: bool = False) -> ctyp
         ota_code, "ff_ota_dock_stage"
     )
 
-    fn_sha256 = extract_c_function(mqtt_raw, "is_lowercase_sha256")
-    fn_pending = extract_c_function(mqtt_raw, "pending_verify")
-    fn_ota_state = extract_c_function(ota_raw, "ota_state_name")
-    fn_choose_slot = extract_c_function(ota_raw, "choose_target_slot")
-    fn_verify_sig = extract_c_function(ota_raw, "verify_artifact_signature")
+    _, fn_sha256 = find_c_function("is_lowercase_sha256")
+    fn_pending = extract_c_function(FF_MQTT_C.read_text(encoding="utf-8"), "pending_verify")
+    fn_ota_state = extract_c_function(FF_OTA_C.read_text(encoding="utf-8"), "ota_state_name")
+    _, fn_choose_slot = find_c_function("choose_target_slot")
+    fn_verify_sig = extract_c_function(
+        (COMPONENT_SRC / "ff_ota_verify.c").read_text(encoding="utf-8"),
+        "verify_artifact_signature",
+    )
 
     prod_define = "#define FF_OTA_PRODUCTION_BUILD 1\n" if prod_build else ""
     dev_pem_escaped = DEFAULT_PRIMARY_PUBLIC_KEY_PEM.replace("\n", "\\n")
@@ -406,8 +412,8 @@ def test_the_mismatch_branch_is_taken_on_inequality(tmp_path: Path) -> None:
 
 
 def _extract_ota_sig_ladder() -> str:
-    """Extract the real signature preprocessor ladder and key-slot helpers from `ff_ota.c`."""
-    raw = FF_OTA_C.read_text(encoding="utf-8")
+    """Extract the real signature preprocessor ladder and key-slot helpers from the `ff_ota` family."""
+    raw = read_c_family("ff_ota")
     start = raw.index("#define FF_OTA_DEV_PRIMARY_PUBKEY_PEM")
     end = raw.index("/* The URL the artifact link redirects to.", start)
     return raw[start:end]
@@ -555,8 +561,6 @@ def test_cargo_and_dock_paths_pin_their_digest_and_signature_checks(tmp_path: Pa
     gcc = shutil.which("gcc")
     assert gcc is not None, "gcc must be available to compile host C verification tests"
 
-    ota_raw = FF_OTA_C.read_text(encoding="utf-8")
-    mqtt_raw = FF_MQTT_C.read_text(encoding="utf-8")
     sec_raw = (COMPONENT_SRC / "ff_sec.c").read_text(encoding="utf-8")
 
     # Pin download truncation / size mismatch checks in `ota_task` (`ff_ota.c:1092, 1107`).
@@ -566,10 +570,10 @@ def test_cargo_and_dock_paths_pin_their_digest_and_signature_checks(tmp_path: Pa
     assert "if (cmd->size != 0 && got != cmd->size)" in ota_task_code
     assert 'fail(cmd, "size mismatch");' in ota_task_code
 
-    fn_hex = extract_c_function(ota_raw, "hex_encode")
-    fn_cargo = extract_c_function(ota_raw, "run_cargo_ota")
-    fn_dock = extract_c_function(ota_raw, "ff_ota_dock_stage")
-    fn_confirm_offline = extract_c_function(mqtt_raw, "ff_mqtt_confirm_offline")
+    _, fn_hex = find_c_function("hex_encode")
+    _, fn_cargo = find_c_function("run_cargo_ota")
+    _, fn_dock = find_c_function("ff_ota_dock_stage")
+    _, fn_confirm_offline = find_c_function("ff_mqtt_confirm_offline")
     fn_sec_retry = extract_c_function(sec_raw, "secrets_retry_timer_cb")
 
     harness_c = f"""
@@ -887,8 +891,9 @@ int test_sec_retry_cap(uint32_t initial_rounds) {{
     assert lib.test_cargo_case(False, False, 200, buf, 64) == 1
 
     # Declaration order check: `s_decide_lock` must be declared before `claim_boot_classify` in `ff_mqtt.c`.
-    lock_pos = mqtt_raw.index("static portMUX_TYPE s_decide_lock")
-    claim_pos = mqtt_raw.index("static bool claim_boot_classify(void)")
+    mqtt_main_raw = FF_MQTT_C.read_text(encoding="utf-8")
+    lock_pos = mqtt_main_raw.index("portMUX_TYPE s_decide_lock")
+    claim_pos = mqtt_main_raw.index("static bool claim_boot_classify(void)")
     assert lock_pos < claim_pos, "s_decide_lock must be declared before claim_boot_classify()"
 
     # Dock cargo & dock app: bad sha256 or bad sig MUST NOT invoke finish_cb / set_boot_partition.
@@ -913,8 +918,8 @@ def test_improv_ble_and_mqtt_parse_hardening(tmp_path: Path) -> None:
     gcc = shutil.which("gcc")
     assert gcc is not None, "gcc must be available to compile host C verification tests"
 
-    wifi_raw = (COMPONENT_SRC / "ff_net_wifi.c").read_text(encoding="utf-8")
-    mqtt_raw = FF_MQTT_C.read_text(encoding="utf-8")
+    wifi_raw = read_c_family("ff_net_wifi")
+    mqtt_raw = read_c_family("ff_mqtt")
     cfg_raw = (COMPONENT_SRC / "ff_cfg.c").read_text(encoding="utf-8")
 
     # D-8 static invariants: encrypted write flag + link check + window rate cap + flashed-first priority.
@@ -923,7 +928,7 @@ def test_improv_ble_and_mqtt_parse_hardening(tmp_path: Path) -> None:
     assert "IMPROV_BLE_MAX_OPENS_PER_BOOT" in wifi_raw
     assert "IMPROV_BLE_COOLDOWN_US" in wifi_raw
     assert "static uint8_t s_improv_state = IMPROV_STATE_AUTH_REQUIRED;" in wifi_raw
-    overlay_body = extract_c_function(wifi_raw, "load_nvs_net_overlay")
+    _, overlay_body = find_c_function("load_nvs_net_overlay")
     assert overlay_body.index("cfg->nets[i]") < overlay_body.index("nvs_open(")
 
     # D-15 static invariants: total_data_len guard, bounded size cast, hb_s cap, shared s_decide_lock.
@@ -931,7 +936,7 @@ def test_improv_ble_and_mqtt_parse_hardening(tmp_path: Path) -> None:
     assert "artifact size invalid" in mqtt_raw
     assert "out->hb_s > 86400" in cfg_raw
     assert "ctx->cfg->hb_s <= 86400" in mqtt_raw
-    confirm_cb = extract_c_function(mqtt_raw, "confirm_timeout_cb")
+    _, confirm_cb = find_c_function("confirm_timeout_cb")
     assert "session_confirmed = s_ctx.session_confirmed;" in confirm_cb
     assert confirm_cb.index("portENTER_CRITICAL(&s_decide_lock)") < confirm_cb.index(
         "s_ctx.session_confirmed"
@@ -939,9 +944,9 @@ def test_improv_ble_and_mqtt_parse_hardening(tmp_path: Path) -> None:
     assert "s_venue_offline" not in mqtt_raw
 
     # Compile real `improv_rpc_fail`, `improv_handle_rpc_command`, and `ff_net_wifi_improv_authorize` under host gcc.
-    fn_rpc_fail = extract_c_function(wifi_raw, "improv_rpc_fail")
-    fn_rpc = extract_c_function(wifi_raw, "improv_handle_rpc_command")
-    fn_auth = extract_c_function(wifi_raw, "ff_net_wifi_improv_authorize")
+    _, fn_rpc_fail = find_c_function("improv_rpc_fail")
+    _, fn_rpc = find_c_function("improv_handle_rpc_command")
+    _, fn_auth = find_c_function("ff_net_wifi_improv_authorize")
     harness_c = f"""
 #include <stdbool.h>
 #include <stddef.h>

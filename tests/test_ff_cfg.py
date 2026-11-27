@@ -37,22 +37,26 @@ from typing import Any, cast
 
 import pytest
 
-from tests.agent_src import AGENT_DIR, COMPONENT_INCLUDE, COMPONENT_SRC
+from tests.agent_src import AGENT_DIR, COMPONENT_INCLUDE, COMPONENT_SRC, read_c_family
+from tests.agent_test_helpers import (
+    DEVICE_PROTOCOL,
+    FF_CFG_C,
+    FF_IDENTITY_C,
+    FF_OTA_C,
+    _code,
+    spec_hb_keys,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 FF_CFG_PY = AGENT_DIR / "tools" / "ff_cfg.py"
-FF_CFG_C = COMPONENT_SRC / "ff_cfg.c"
 FF_CFG_H = COMPONENT_INCLUDE / "ff_cfg.h"
-FF_IDENTITY_C = COMPONENT_SRC / "ff_identity.c"
 FF_IDENTITY_H = COMPONENT_INCLUDE / "ff_identity.h"
 # The `up/status` vocabulary is component-private since R3-fw-2 (src/, not include/).
 FF_MQTT_INTERNAL_H = COMPONENT_SRC / "ff_mqtt_internal.h"
-FF_OTA_C = COMPONENT_SRC / "ff_ota.c"
 # The third implementation and the vector both writers are pinned to (R0-fe-3).
 FF_CFG_TS = REPO_ROOT / "frontend" / "src" / "ffcfg.ts"
 FF_CFG_VECTOR = REPO_ROOT / "frontend" / "src" / "ffcfg.vector.json"
 FF_CFG_NETS_VECTOR = REPO_ROOT / "frontend" / "src" / "ffcfg.nets.vector.json"
-DEVICE_PROTOCOL = REPO_ROOT / "spec" / "device-protocol.md"
 # R5-spec-1's proposal: Patch A3 (the `cancelled` line of the up/status machine) lives here
 # until the owner pastes it into the spec.
 SELF_TEST_DOC = REPO_ROOT / "docs" / "features" / "self-test.md"
@@ -84,18 +88,6 @@ ff_cfg = _load_module()
 
 def _blob(fields: dict[str, object] | None = None) -> bytes:
     return cast(bytes, ff_cfg.encode(dict(MINIMAL) if fields is None else fields))
-
-
-def _code(path: Path) -> str:
-    """C source with comments removed.
-
-    The comments in these files quote the shapes they exist to forbid — `ff_identity.c`
-    says in prose that a nested `{"token":…, "identity":{…}}` would be a fleet recall — so
-    a grep for a forbidden spelling has to look at code, not at the explanation of why the
-    code is written the way it is.
-    """
-    source = path.read_text()
-    return re.sub(r"/\*.*?\*/|//[^\n]*", "", source, flags=re.DOTALL)
 
 
 class TestEncode:
@@ -496,9 +488,6 @@ class TestAnnounceMatchesTheSpec:
 
     def test_heartbeat_carries_the_spec_fields(self) -> None:
         """Every key of the spec's hb example, parsed (R4-fw-1), not a hard-coded list."""
-        # Imported here: test_heartbeat_health imports `_code` from this module.
-        from tests.test_heartbeat_health import spec_hb_keys
-
         source = _code(FF_IDENTITY_C)
         keys = spec_hb_keys()
         assert "min_free_heap" in keys
@@ -544,7 +533,8 @@ class TestTheReportedVersionIsTheRunningOne:
     def test_the_ota_path_cannot_report_a_version(self) -> None:
         """`ff_ota_cmd_t::version` is the version the SERVER asked for. It reaches one log
         line and dies there: ff_ota.c neither builds an identity payload nor knows how."""
-        source = _code(FF_OTA_C)
+        assert FF_OTA_C.is_file()
+        source = _code(read_c_family("ff_ota"))
         assert '"fw_version"' not in source
         assert "ff_identity" not in source
 

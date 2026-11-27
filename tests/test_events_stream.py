@@ -641,3 +641,41 @@ async def test_a_deploy_frame_from_an_older_ingestor_is_still_forwarded() -> Non
     with hub.subscribe() as subscription:
         a_listener(hub)._on_notify(None, 1, "ff_events", payload)
         assert subscription.queue.get_nowait() == payload
+
+
+@pytest.mark.unit
+async def test_internal_client_error_during_ping_reconnects_instead_of_dying(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Escape-analysis (`missing_unit_case`): `pg_terminate_backend` racing `SELECT 1` keepalive
+    raises `asyncpg.InternalClientError` (not `PostgresError`/`InterfaceError`); `run()` must
+    catch it, end attached streams (`None` sentinel), and reconnect instead of dying."""
+    monkeypatch.setattr(eventstream, "RECONNECT_INITIAL_DELAY", 0.01)
+    hub = EventHub(queue_size=4, max_subscribers=4)
+    listener = PostgresEventListener("postgresql://unused/db", hub, ping_s=0.1)
+    attempts = 0
+    reconnected = asyncio.Event()
+
+    async def fake_listen_once() -> None:
+        nonlocal attempts
+        attempts += 1
+        listener.ready.set()
+        if attempts == 1:
+            raise eventstream.asyncpg.InternalClientError(
+                "cannot switch to state 15; another operation (2) is in progress"
+            )
+        reconnected.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(listener, "_listen_once", fake_listen_once)
+    with hub.subscribe() as subscription:
+        task = asyncio.create_task(listener.run())
+        try:
+            assert await asyncio.wait_for(subscription.queue.get(), timeout=2.0) is None
+            await asyncio.wait_for(reconnected.wait(), timeout=2.0)
+            assert attempts == 2
+            assert listener.ready.is_set()
+        finally:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task

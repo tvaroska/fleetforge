@@ -1,3 +1,4 @@
+// @vitest-environment node
 // The NVS wipe aims at whatever this parser says `nvs` is, so a wrong answer here erases
 // the wrong region of a real board's flash. These tests are about the ways the bytes can
 // be something other than the happy case.

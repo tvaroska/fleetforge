@@ -17,6 +17,7 @@ Environment names are the field names uppercased and unprefixed (`DATABASE_URL`,
 from functools import lru_cache
 from typing import Literal
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -108,6 +109,10 @@ class Settings(BaseSettings):
     # `fleetforge.presence.is_online`, never its own literal. `always_on` presence
     # needs no number — it is the retained LWT value.
     presence_tolerance: float = 2.5
+    # Per-device MQTT ingest token-bucket rate budget (`A-15`, `0` disables throttling).
+    # Critical lifecycle/OTA channels (`announce`, `status`, `ack`, `presence`) are exempt.
+    ingest_device_rate_per_min: int = Field(default=120, ge=0)
+    ingest_device_burst: int = Field(default=30, ge=0)
 
     # --- Device enrollment (R0-be-4) -----------------------------------------
     # How long after a burn the SAME device_id may re-present the SAME token and get
@@ -256,7 +261,7 @@ class Settings(BaseSettings):
 
     # --- Agent bundles in the object store (S0-infra-6) ------------------------
     # The bundles are artifacts now, not image contents: the app image ships no firmware
-    # at all and the flasher reads parts out of the store above, through the same seam
+    # at all and the flasher reads parts out of the store above, through the same Port
     # R1's user artifacts use. So the S3_*/GCS_* settings are what onboarding depends on,
     # not just deploy. `AGENT_IMAGES_DIR` is gone; a stale one left in an env file is
     # harmless (`extra="ignore"`).

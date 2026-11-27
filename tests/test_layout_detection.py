@@ -23,14 +23,15 @@ import re
 from pathlib import Path
 
 from fleetforge.firmware.manifest import BUILTIN_LAYOUTS, UNKNOWN_PARTITION_LAYOUT
-from tests.agent_src import COMPONENT_SRC
-from tests.test_agent_board_measurements import _csv_fingerprint
-from tests.test_agent_txn import _function_body
-from tests.test_ff_cfg import _code
+from tests.agent_src import COMPONENT_SRC, read_c_family
+from tests.agent_test_helpers import (
+    FF_IDENTITY_C,
+    _code,
+    _csv_fingerprint,
+    _function_body,
+)
 
-FF_IDENTITY_C = COMPONENT_SRC / "ff_identity.c"
 FF_IDENTITY_INTERNAL_H = COMPONENT_SRC / "ff_identity_internal.h"
-FF_OTA_C = COMPONENT_SRC / "ff_ota.c"
 WRONG_LAYOUT_CSV = Path(__file__).resolve().parent / "fixtures" / "wrong-layout-partitions.csv"
 
 
@@ -129,7 +130,7 @@ def test_ff_ota_does_not_compile_without_rollback() -> None:
     guard = re.search(
         r'#include "sdkconfig\.h".*?#if !CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE\s*\n'
         r'\s*#error "([^"]+)"\s*\n\s*#endif',
-        _code(FF_OTA_C),
+        _code(read_c_family("ff_ota")),
         re.DOTALL,
     )
     assert guard is not None

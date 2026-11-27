@@ -1,3 +1,4 @@
+// @vitest-environment node
 // R2b-fe-3: a failed flash write says what failed and what to try first (cable, port, a
 // lower baud), and names the flash chip only when the failure repeats at the lowest baud.
 

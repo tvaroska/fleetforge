@@ -1,14 +1,5 @@
-// The judgement behind the update result card (R2b-fe-10). What a regression would cost:
-//
-// 1. `good` claimed for a board that has since announced something else (R2-fe-1's trap).
-// 2. A card for a transaction the server has not finished.
-// 3. A rollback or failure with no reason, or with the wrong next action ("send it again"
-//    after a rollback is the one thing the spec forbids).
-// 4. `failed before reboot` claimed when the steps do not prove no reboot happened.
-// 5. A device-controlled `detail` reaching a prototype key (`constructor`).
-// 6. `null`, `undefined`, `NaN`, `%` or an arrow in any string.
-// 7. (R2b-fe-11) The Send again version offered after a rollback, an unproven reboot or a
-//    build defect.
+// @vitest-environment node
+// The judgement behind the update result card (R2b-fe-10).
 
 import { describe, expect, it } from 'vitest'
 import { type DeploySummary } from './api'
@@ -35,6 +26,8 @@ function deploy(overrides: Partial<DeploySummary> = {}): DeploySummary {
     from_version: '1.4.2',
     pct: null,
     detail: null,
+    steps: [],
+    confirm_timeout_s: 300,
     ...overrides,
   }
 }
@@ -155,7 +148,7 @@ describe('deployResult — rolled back', () => {
   it('says "in time" without the board’s window', () => {
     const { confirm_timeout_s: _drop, ...bare } = rolled
     void _drop
-    const result = must(deployResult(bare, { fw_version: '1.4.2' }, versions, NOW))
+    const result = must(deployResult(bare as DeploySummary, { fw_version: '1.4.2' }, versions, NOW))
     expect(result.reason).toContain('does not reconnect in time')
     expect(result.reason).not.toContain('within')
   })

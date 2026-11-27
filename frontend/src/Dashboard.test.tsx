@@ -10,7 +10,10 @@ import { type EventSourceLike } from './fleet'
 import { type BoardFlasher, type FlasherFactory } from './flasher'
 
 const ui = { version: '0.4.2', commit: 'unknown', builtAt: 'unknown' }
-const health = { phase: 'ok', health: { status: 'ok', version: '0.4.2' } } as const
+const health = {
+  phase: 'ok',
+  health: { status: 'ok', version: '0.4.2', commit: 'unknown', built_at: 'unknown' },
+} as const
 
 function device(over: Partial<DeviceSummary> = {}): DeviceSummary {
   return {
@@ -242,6 +245,8 @@ describe('Dashboard', () => {
           from_version: '1.4.2',
           pct: null,
           detail: null,
+          steps: [],
+          confirm_timeout_s: 300,
         },
       }),
     ])
@@ -618,7 +623,7 @@ describe('Dashboard', () => {
 
       renderDashboard()
 
-      // 1. Device group selector in Fleet table row
+      // Device group selector in Fleet table row
       const groupSelect = await screen.findByTestId('device-group-select')
       expect(groupSelect).toBeInTheDocument()
       expect(groupSelect).toHaveValue('')
@@ -626,7 +631,7 @@ describe('Dashboard', () => {
       await waitFor(() => expect(updatedDevicePayload).not.toBeNull())
       expect(updatedDevicePayload).toEqual({ group_id: 'grp-canary' })
 
-      // 2. Target group selector in Uploaded builds
+      // Target group selector in Uploaded builds
       await userEvent.click(screen.getByTestId('tab-builds'))
       const targetGroupSelect = await screen.findByLabelText('Target group')
       expect(targetGroupSelect).toBeInTheDocument()

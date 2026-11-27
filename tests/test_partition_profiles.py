@@ -26,7 +26,7 @@ from fleetforge.partition_profiles import (
     note_detected,
 )
 from tests.conftest import capture_logs
-from tests.test_ingestor import ANNOUNCE, DEVICE_ID, NOW, publish, reload, seed_device
+from tests.support_ingestor import ANNOUNCE, DEVICE_ID, NOW, publish, reload, seed_device
 
 # tests/fixtures/wrong-layout-partitions.csv: slots of 1835008, matches no builtin layout.
 WRONG_SHA = "47db53920359cfb4581532a293d8e563401f3abe37f9b282cc713039ac937c4c"

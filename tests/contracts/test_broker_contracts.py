@@ -40,8 +40,7 @@ from fleetforge.broker.dynsec import (
 )
 from fleetforge.broker.publisher import CFG_RETAIN, QOS, RETAIN, MqttCommandPublisher
 from tests.conftest import FakeCommandPublisher
-from tests.test_broker_commands import FakeMqttClient
-from tests.test_broker_dynsec import FakeDynsecSession
+from tests.doubles import FakeDynsecSession, FakeMqttClient
 
 pytestmark = pytest.mark.port
 

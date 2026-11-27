@@ -86,7 +86,7 @@ export function formatWindow(windowS: number): string {
 export function describeFaults(f: FaultResets | null | undefined): string | null {
   if (f === null || f === undefined) return null
   const parts = (['panic', 'task_wdt', 'brownout'] as const)
-    .filter((name) => f[name] > 0)
+    .filter((name) => (f[name] ?? 0) > 0)
     .map((name) => `${name} ×${f[name]}`)
   return parts.length === 0 ? null : `${parts.join(', ')} in ${formatWindow(f.window_s)}`
 }

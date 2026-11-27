@@ -25,19 +25,19 @@ spellings these tests forbid.
 import re
 from typing import Any
 
-from tests.test_agent_txn import FF_MQTT_C, FF_OTA_C, _function_body
-from tests.test_ff_cfg import _code
+from tests.agent_src import COMPONENT_SRC, c_call_sites_in_family, read_c_family
+from tests.agent_test_helpers import _code, _function_body
 
-FF_OTA_H = FF_OTA_C.with_name("ff_ota.h")
+FF_OTA_H = COMPONENT_SRC / "ff_ota.h"
 PREDICATE_CALL = "if (ff_ota_is_handling("
 
 
 def _on_stage() -> str:
-    return _function_body(_code(FF_MQTT_C), "on_stage")
+    return _function_body(_code(read_c_family("ff_mqtt")), "on_stage")
 
 
 def _predicate() -> str:
-    return _function_body(_code(FF_OTA_C), "ff_ota_is_handling")
+    return _function_body(_code(read_c_family("ff_ota")), "ff_ota_is_handling")
 
 
 def test_the_predicate_is_declared_by_the_module_that_owns_the_update() -> None:
@@ -101,7 +101,7 @@ def test_the_in_flight_answer_comes_first_and_does_not_fall_through() -> None:
 
 
 def test_the_running_id_has_one_writer_before_the_flag_goes_up() -> None:
-    source = _code(FF_OTA_C)
+    source = _code(read_c_family("ff_ota"))
     writes = [
         match.start()
         for match in re.finditer(
@@ -121,7 +121,7 @@ def test_the_running_id_has_one_writer_before_the_flag_goes_up() -> None:
 
 
 def test_ff_ota_start_still_refuses_while_running() -> None:
-    start = _function_body(_code(FF_OTA_C), "ff_ota_start")
+    start = _function_body(_code(read_c_family("ff_ota")), "ff_ota_start")
     guard = start.index("if (s_running)")
     assert "return ESP_ERR_INVALID_STATE;" in start[guard : start.index("}", guard)]
 
@@ -143,8 +143,7 @@ async def test_stage_id_survives_its_own_reboot(
         LinkProfile,
         run_always_on,
     )
-    from tests.agent_src import c_call_sites
-    from tests.test_simulator import (
+    from tests.doubles import (
         FIRMWARE,
         FakeClient,
         FakeHttpResponse,
@@ -155,10 +154,8 @@ async def test_stage_id_survives_its_own_reboot(
         statuses,
     )
 
-    assert "ota_task" in c_call_sites(
-        FF_OTA_C.read_text(encoding="utf-8"), "ff_txn_note_reboot_cmd"
-    )
-    task_body = _function_body(_code(FF_OTA_C), "ota_task")
+    assert "ota_task" in c_call_sites_in_family("ff_ota", "ff_txn_note_reboot_cmd")
+    task_body = _function_body(_code(read_c_family("ff_ota")), "ota_task")
     assert task_body.index("ff_txn_note_reboot_cmd(cmd->cmd_id)") < task_body.index("esp_restart()")
 
     stage_body = _on_stage()

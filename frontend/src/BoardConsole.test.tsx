@@ -1,11 +1,5 @@
-// What this defends:
-//
-// 1. **The operator never has to reach for `screen`.** The panel opens the port, shows the
-//    boot, and drives a checklist to "On the fleet".
-// 2. **A board that stops short is diagnosed by name**, not left as silence.
-// 3. **Release really releases.** If this regresses, the next `screen` gets "Resource
-//    busy" and the operator blames their cable.
-// 4. **One port at a time**, and the port goes back on unmount.
+// BoardConsolePanel integration tests: port open/checklist, stall diagnosis, port release,
+// single-session ownership, and unmount cleanup.
 
 import { act, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -542,7 +536,7 @@ describe('BoardConsolePanel — the diagnostic bundle', () => {
     const user = userEvent.setup()
     const writeText = vi.fn().mockResolvedValue(undefined)
     // The repo's clipboard idiom (`EnrollBoard.test.tsx`): jsdom has no clipboard, and
-    // there is deliberately no injected seam for one. `defineProperty` rather than
+    // there is deliberately no injected adapter for one. `defineProperty` rather than
     // `Object.assign` because `userEvent.setup()` has already installed its own stub
     // behind a getter.
     Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })

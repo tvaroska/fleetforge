@@ -29,7 +29,7 @@ from fleetforge.clock import now_utc
 from fleetforge.db.models import TERMINAL_DEPLOY_STATES, DeployEvent, DeployState, Device
 from fleetforge.storage.blobs import blob_key
 from tests.conftest import FakeCommandPublisher, MemoryObjectStore, client_for, login_admin
-from tests.test_api_deploy import (
+from tests.support_deploy import (
     DEVICE_ID,
     IMAGE,
     OTHER_DEVICE_ID,

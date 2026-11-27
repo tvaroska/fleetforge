@@ -1,3 +1,4 @@
+// @vitest-environment node
 // The client check mirrors `PROFILE_LAYOUT_ID_PATTERN` and the reserved-name sentence in
 // api/schemas.py. The server stays authoritative; these pin the sentences an operator reads
 // before any round trip.

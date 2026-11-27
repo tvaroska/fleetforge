@@ -28,10 +28,13 @@ venv/
 .ruff_cache/
 htmlcov/
 .coverage
+.coverage.*
+coverage.xml
 
 # Node / dashboard
 node_modules/
 dist/
+frontend/coverage/
 
 # System
 .DS_Store

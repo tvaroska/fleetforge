@@ -3,11 +3,16 @@
 // Plaintext `ffa_...` API tokens follow the exact same rule as `EnrollBoard.tsx`:
 // shown once in component state after POST, never stored in localStorage or URLs.
 
-import { useCallback, useEffect, useState, type FormEvent, type ReactNode } from 'react'
+import { useCallback, useEffect, useState, type ReactNode } from 'react'
+import { ApiTokensSection } from './access/ApiTokensSection'
+import { MyAccountSection } from './access/MyAccountSection'
+import { ProjectMembersSection } from './access/ProjectMembersSection'
+import { ProjectSecretsSection } from './access/ProjectSecretsSection'
+import { UsersAdminSection } from './access/UsersAdminSection'
+import { type PendingConfirm } from './access/types'
 import {
   ApiError,
   api,
-  type AdminTokenIssued,
   type AdminTokenSummary,
   type DeviceGroupSummary,
   type DeviceSummary,
@@ -17,29 +22,6 @@ import {
   type ProjectSummary,
   type UserSummary,
 } from './api'
-import { formatWhen } from './format'
-
-// The user row is saved either way; the API reports whether the setup email went out.
-function emailDeliveryError(
-  delivery: UserSummary['email_delivery'],
-  failedMessage: string,
-): string | null {
-  if (delivery === 'failed') {
-    return failedMessage
-  }
-  if (delivery === 'not_configured') {
-    return 'Firebase is not configured on the server; no email was sent.'
-  }
-  return null
-}
-
-type PendingConfirm =
-  | { kind: 'remove-member'; username: string }
-  | { kind: 'revoke-token'; id: string; name: string }
-  | { kind: 'disable-user'; username: string }
-  | { kind: 'delete-user'; username: string }
-  | { kind: 'delete-secret'; key: string }
-  | { kind: 'delete-group'; id: string; name: string }
 
 export function ProjectAccess({
   me,
@@ -69,89 +51,27 @@ export function ProjectAccess({
         id: p.id,
         slug: p.slug,
         name: p.name,
-        description: p.description,
+        description: p.description ?? null,
         role: p.role,
         created_at: '',
+        updated_at: '',
       })) ?? [],
   )
   const [members, setMembers] = useState<ProjectMemberSummary[] | null>(null)
   const [tokens, setTokens] = useState<AdminTokenSummary[] | null>(null)
   const [users, setUsers] = useState<UserSummary[] | null>(null)
-  const [issuedToken, setIssuedToken] = useState<AdminTokenIssued | null>(null)
-  const [copiedToken, setCopiedToken] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
-  // Destructive actions ask first; one pending question for the whole drawer.
   const [pending, setPending] = useState<PendingConfirm | null>(null)
 
-  // New project form (superadmin only)
-  const [newSlug, setNewSlug] = useState('')
-  const [newName, setNewName] = useState('')
-
-  // Invite / create user form (superadmin only)
-  const [inviteUsername, setInviteUsername] = useState('')
-  const [inviteEmail, setInviteEmail] = useState('')
-  const [inviteDisplayName, setInviteDisplayName] = useState('')
-  const [invitePassword, setInvitePassword] = useState('')
-  const [inviteSendEmail, setInviteSendEmail] = useState(true)
-  const [inviteSuperadmin, setInviteSuperadmin] = useState(false)
-  const [inviteProjectRole, setInviteProjectRole] = useState<'' | 'owner' | 'operator' | 'viewer'>('')
-
-  // Edit existing user state (superadmin only)
-  const [editingUser, setEditingUser] = useState<string | null>(null)
-  const [editDisplayName, setEditDisplayName] = useState('')
-  const [editEmail, setEditEmail] = useState('')
-  const [editPassword, setEditPassword] = useState('')
-  const [editSuperadmin, setEditSuperadmin] = useState(false)
-  const [userNotice, setUserNotice] = useState<string | null>(null)
-
-  // Self-service profile & password ("My account")
-  const [selfDisplayName, setSelfDisplayName] = useState(me.display_name ?? '')
-  const [selfEmail, setSelfEmail] = useState(me.email ?? '')
-  const [selfCurrentPassword, setSelfCurrentPassword] = useState('')
-  const [selfNewPassword, setSelfNewPassword] = useState('')
-  const [selfHasPassword, setSelfHasPassword] = useState(Boolean(me.has_local_password))
-  const [selfStatus, setSelfStatus] = useState<string | null>(null)
-
-  // Add member form
-  const [memberUsername, setMemberUsername] = useState('')
-  const [memberRole, setMemberRole] = useState<'owner' | 'operator' | 'viewer'>('operator')
-
-  // Issue API token form
-  const [tokenName, setTokenName] = useState('')
-  const [tokenScope, setTokenScope] = useState('deploy')
-  const [tokenPinned, setTokenPinned] = useState(true)
-  const [tokenTtlDays, setTokenTtlDays] = useState('')
-  const [tokenEnrollScope, setTokenEnrollScope] = useState(false)
-
-  // Rotating Device Secrets (SEC-fe-1) & OTel (OTEL-be-1)
   const [secretsRev, setSecretsRev] = useState<number>(0)
   const [secrets, setSecrets] = useState<ProjectSecretSummary[]>([])
-  const [secretKey, setSecretKey] = useState('')
-  const [secretValue, setSecretValue] = useState('')
   const [otelEndpoint, setOtelEndpoint] = useState('')
-  const [otelHeaders, setOtelHeaders] = useState('')
-  const [clearOtelHeaders, setClearOtelHeaders] = useState(false)
-  const [otelStatus, setOtelStatus] = useState<string | null>(null)
-
-  // Device groups (cohorts)
   const [groups, setGroups] = useState<DeviceGroupSummary[]>([])
-  const [groupName, setGroupName] = useState('')
-  const [groupDesc, setGroupDesc] = useState('')
 
-  // A stale question about another project's member must not survive a switch or a close.
   useEffect(() => {
     setPending(null)
-    setOtelStatus(null)
-    setUserNotice(null)
-    setSelfStatus(null)
   }, [activeProject, open])
-
-  useEffect(() => {
-    setSelfDisplayName(me.display_name ?? '')
-    setSelfEmail(me.email ?? '')
-    setSelfHasPassword(Boolean(me.has_local_password))
-  }, [me.display_name, me.email, me.has_local_password])
 
   const handle = useCallback(
     (err: unknown) => {
@@ -201,378 +121,25 @@ export function ProjectAccess({
     }
   }, [open, refreshDrawer])
 
-  async function handleCreateProject(event: FormEvent) {
-    event.preventDefault()
-    setBusy(true)
-    setError(null)
-    try {
-      const created = await api.createProject({ slug: newSlug.trim(), name: newName.trim() })
-      setNewSlug('')
-      setNewName('')
-      await refreshDrawer()
-      onSelectProject(created.slug)
-    } catch (err) {
-      handle(err)
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  async function handleInviteUser(event: FormEvent) {
-    event.preventDefault()
-    setBusy(true)
-    setError(null)
-    setUserNotice(null)
-    try {
-      const payload: Parameters<typeof api.createUser>[0] = {
-        username: inviteUsername.trim(),
-        email: inviteEmail.trim() || null,
-        display_name: inviteDisplayName.trim() || null,
-        password: invitePassword !== '' ? invitePassword : null,
-        is_superadmin: inviteSuperadmin,
-        send_invite_email: inviteEmail.trim() !== '' && inviteSendEmail,
-      }
-      if (inviteProjectRole !== '') {
-        payload.project = activeProject
-        payload.role = inviteProjectRole
-      }
-      const created = await api.createUser(payload)
-      setInviteUsername('')
-      setInviteEmail('')
-      setInviteDisplayName('')
-      setInvitePassword('')
-      setInviteSuperadmin(false)
-      setInviteProjectRole('')
-      await refreshDrawer()
-      const deliveryError = emailDeliveryError(
-        created.email_delivery,
-        'User saved, but the setup email could not be sent. Try "Send reset email" again.',
-      )
-      if (deliveryError !== null) {
-        setError(deliveryError)
-      } else {
-        setUserNotice(`Saved user ${created.username}.`)
-      }
-    } catch (err) {
-      handle(err)
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  function startEditUser(user: UserSummary) {
-    setEditingUser(user.username)
-    setEditDisplayName(user.display_name ?? '')
-    setEditEmail(user.email ?? '')
-    setEditPassword('')
-    setEditSuperadmin(user.is_superadmin)
-    setError(null)
-    setUserNotice(null)
-  }
-
-  async function handleSaveUserEdit(event: FormEvent) {
-    event.preventDefault()
-    if (!editingUser) {
-      return
-    }
-    setBusy(true)
-    setError(null)
-    setUserNotice(null)
-    try {
-      const patch: Parameters<typeof api.updateUser>[1] = {
-        display_name: editDisplayName.trim() || null,
-        email: editEmail.trim() || null,
-        is_superadmin: editSuperadmin,
-      }
-      if (editPassword !== '') {
-        patch.password = editPassword
-      }
-      const updated = await api.updateUser(editingUser, patch)
-      setEditingUser(null)
-      setEditPassword('')
-      await refreshDrawer()
-      setUserNotice(
-        `Updated ${updated.username}${editPassword !== '' ? ' (password updated)' : ''}.`,
-      )
-    } catch (err) {
-      handle(err)
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  async function handleDeleteUser(username: string) {
-    setBusy(true)
-    setError(null)
-    setUserNotice(null)
-    try {
-      await api.deleteUser(username)
-      if (editingUser === username) {
-        setEditingUser(null)
-      }
-      await refreshDrawer()
-      setUserNotice(`Deleted user ${username}.`)
-    } catch (err) {
-      handle(err)
-    } finally {
-      setBusy(false)
-      setPending(null)
-    }
-  }
-
-  async function handleSaveSelfProfile(event: FormEvent) {
-    event.preventDefault()
-    setBusy(true)
-    setError(null)
-    setSelfStatus(null)
-    try {
-      const body: Parameters<typeof api.updateMe>[0] = {
-        display_name: selfDisplayName.trim() || null,
-        email: selfEmail.trim() || null,
-      }
-      if (selfNewPassword !== '') {
-        body.password = selfNewPassword
-        if (selfCurrentPassword !== '') {
-          body.current_password = selfCurrentPassword
-        }
-      }
-      const updated = await api.updateMe(body)
-      setSelfDisplayName(updated.display_name ?? '')
-      setSelfEmail(updated.email ?? '')
-      setSelfHasPassword(Boolean(updated.has_local_password))
-      setSelfCurrentPassword('')
-      setSelfNewPassword('')
-      setSelfStatus(
-        selfNewPassword !== ''
-          ? 'Account profile and password updated.'
-          : 'Account profile updated.',
-      )
-      if (me.is_superadmin) {
-        await refreshDrawer()
-      }
-    } catch (err) {
-      handle(err)
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  async function handleToggleUserDisabled(user: UserSummary) {
-    setError(null)
-    try {
-      await api.updateUser(user.username, { disabled: user.disabled_at === null })
-      await refreshDrawer()
-    } catch (err) {
-      handle(err)
-    } finally {
-      setPending(null)
-    }
-  }
-
-  async function handleSendPasswordReset(user: UserSummary) {
-    setError(null)
-    try {
-      const updated = await api.updateUser(user.username, { send_password_reset: true })
-      const deliveryError = emailDeliveryError(
-        updated.email_delivery,
-        'The password reset email could not be sent.',
-      )
-      if (deliveryError !== null) {
-        setError(deliveryError)
-      }
-    } catch (err) {
-      handle(err)
-    }
-  }
-
-  async function handleAddMember(event: FormEvent) {
-    event.preventDefault()
-    setBusy(true)
-    setError(null)
-    try {
-      await api.upsertProjectMember(activeProject, memberUsername.trim(), { role: memberRole })
-      setMemberUsername('')
-      await refreshDrawer()
-    } catch (err) {
-      handle(err)
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  async function handleRemoveMember(username: string) {
-    setError(null)
-    try {
-      await api.removeProjectMember(activeProject, username)
-      await refreshDrawer()
-    } catch (err) {
-      handle(err)
-    } finally {
-      setPending(null)
-    }
-  }
-
-  async function handleIssueToken(event: FormEvent) {
-    event.preventDefault()
-    setBusy(true)
-    setError(null)
-    try {
-      const baseScopes =
-        tokenScope === 'admin'
-          ? ['admin']
-          : tokenScope === 'read'
-            ? ['read']
-            : ['read', 'write:artifacts', 'deploy']
-      const scopes =
-        tokenEnrollScope && !baseScopes.includes('enroll')
-          ? [...baseScopes, 'enroll']
-          : baseScopes
-      const payload: Parameters<typeof api.issueAdminToken>[0] = {
-        name: tokenName.trim(),
-        project: tokenPinned ? activeProject : null,
-        scopes,
-      }
-      if (tokenTtlDays !== '') {
-        payload.expires_in_days = Number(tokenTtlDays)
-      }
-      const issued = await api.issueAdminToken(payload)
-      setTokenName('')
-      setTokenTtlDays('')
-      setTokenEnrollScope(false)
-      setCopiedToken(false)
-      setIssuedToken(issued)
-      await refreshDrawer()
-    } catch (err) {
-      handle(err)
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  async function handleRevokeToken(id: string) {
-    setError(null)
-    try {
-      await api.revokeAdminToken(id)
-      setIssuedToken((curr) => (curr?.id === id ? null : curr))
-      await refreshDrawer()
-    } catch (err) {
-      handle(err)
-    } finally {
-      setPending(null)
-    }
-  }
-
-  async function handleUpsertSecret(event: FormEvent) {
-    event.preventDefault()
-    setBusy(true)
-    setError(null)
-    try {
-      const res = await api.upsertProjectSecret(
-        activeProject,
-        secretKey.trim(),
-        secretValue,
-      )
-      setSecretKey('')
-      setSecretValue('')
-      setSecretsRev(res.secrets_rev ?? secretsRev + 1)
-      setSecrets(res.secrets ?? [])
-    } catch (err) {
-      handle(err)
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  async function handleDeleteSecret(key: string) {
-    setBusy(true)
-    setError(null)
-    try {
-      const res = await api.deleteProjectSecret(activeProject, key)
-      setSecretsRev(res.secrets_rev ?? secretsRev + 1)
-      setSecrets(res.secrets ?? [])
-    } catch (err) {
-      handle(err)
-    } finally {
-      setBusy(false)
-      setPending(null)
-    }
-  }
-
-  async function handleSaveOtel(event: FormEvent) {
-    event.preventDefault()
-    setBusy(true)
-    setError(null)
-    setOtelStatus(null)
-    try {
-      const patch: { otel_endpoint?: string | null; otel_headers?: string | null } = {
-        otel_endpoint: otelEndpoint.trim() || null,
-      }
-      if (clearOtelHeaders) {
-        patch.otel_headers = ''
-      } else if (otelHeaders.trim() !== '') {
-        patch.otel_headers = otelHeaders.trim()
-      }
-      const updated = await api.updateProject(activeProject, patch)
-      setOtelHeaders('')
-      setClearOtelHeaders(false)
-      setOtelStatus(
-        updated.otel_endpoint
-          ? `Forwarding device logs & metrics to ${updated.otel_endpoint}.`
-          : 'OpenTelemetry forwarding turned off.',
-      )
-      await refreshDrawer()
-    } catch (err) {
-      handle(err)
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  async function handleCreateGroup(event: FormEvent) {
-    event.preventDefault()
-    if (!groupName.trim()) {
-      return
-    }
-    setBusy(true)
-    setError(null)
-    try {
-      await api.createGroup(
-        { name: groupName.trim(), description: groupDesc.trim() || null },
-        activeProject !== 'default' ? activeProject : undefined,
-      )
-      setGroupName('')
-      setGroupDesc('')
-      await refreshDrawer()
-    } catch (err) {
-      handle(err)
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  async function handleDeleteGroup(groupId: string) {
-    setError(null)
-    try {
-      await api.deleteGroup(groupId)
-      await refreshDrawer()
-    } catch (err) {
-      handle(err)
-    } finally {
-      setPending(null)
-    }
-  }
-
-  const options =
+  const options: ProjectSummary[] =
     projects.length > 0
       ? projects
-      : [{ id: 'default', slug: activeProject, name: activeProject, description: null, role: 'owner', created_at: '' }]
+      : [
+          {
+            id: 'default',
+            slug: activeProject,
+            name: activeProject,
+            description: null,
+            role: 'owner',
+            created_at: '',
+            updated_at: '',
+          },
+        ]
   const activeOption = options.find((p) => p.slug === activeProject) ?? options[0]
   const activeRole = activeOption?.role ?? 'owner'
-  const canManage = me.is_superadmin || activeRole === 'owner'
+  const canManage = Boolean(me.is_superadmin) || activeRole === 'owner'
   const isViewer = !me.is_superadmin && activeRole === 'viewer'
   const projectBoards = devices ?? []
-  const syncedBoards = projectBoards.filter((d) => (d.secrets_rev ?? 0) >= secretsRev)
-  const laggingBoards = projectBoards.filter((d) => (d.secrets_rev ?? 0) < secretsRev)
 
   return (
     <section aria-label="Project and access" data-testid="project-access">
@@ -627,953 +194,85 @@ export function ProjectAccess({
             <div className="console-card">
               <h2>Project access · {activeProject}</h2>
 
-              <h3>Members of {activeProject}</h3>
-              {members === null ? (
-                <p aria-busy="true">Loading members…</p>
-              ) : members.length === 0 ? (
-                <p className="muted">No explicit project members (superadmins have owner access).</p>
-              ) : (
-                <table>
-                  <thead>
-                    <tr>
-                      <th scope="col">User</th>
-                      <th scope="col">Role</th>
-                      <th scope="col" />
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {members.map((m) => (
-                      <tr key={m.username}>
-                        <td>
-                          <code>{m.username}</code>
-                          {m.display_name ? ` (${m.display_name})` : ''}
-                        </td>
-                        <td>{m.role}</td>
-                        <td>
-                          <button
-                            type="button"
-                            aria-label={`Remove ${m.username}`}
-                            disabled={busy || isViewer}
-                            onClick={() => setPending({ kind: 'remove-member', username: m.username })}
-                          >
-                            Remove
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-              {pending?.kind === 'remove-member' && (
-                <p data-testid="confirm-remove-member">
-                  Remove {pending.username} from {activeProject}? They lose access to its boards.{' '}
-                  <button
-                    type="button"
-                    disabled={busy}
-                    onClick={() => void handleRemoveMember(pending.username)}
-                  >
-                    Yes, remove {pending.username}
-                  </button>{' '}
-                  <button type="button" onClick={() => setPending(null)}>
-                    Keep
-                  </button>
-                </p>
-              )}
-              <form className="compact-form" onSubmit={(e) => void handleAddMember(e)}>
-                <div className="form-grid">
-                  <label>
-                    Username
-                    <input
-                      type="text"
-                      aria-label="Member username"
-                      list="fleetforge-known-users"
-                      value={memberUsername}
-                      onChange={(e) => setMemberUsername(e.target.value)}
-                      placeholder="username"
-                      disabled={busy || isViewer}
-                      required
-                    />
-                    {users !== null && users.length > 0 && (
-                      <datalist id="fleetforge-known-users">
-                        {users.map((u) => (
-                          <option key={u.username} value={u.username}>
-                            {u.display_name
-                              ? `${u.display_name}${u.email ? ` <${u.email}>` : ''}`
-                              : (u.email ?? u.username)}
-                          </option>
-                        ))}
-                      </datalist>
-                    )}
-                  </label>
-                  <label>
-                    Role
-                    <select
-                      aria-label="Member role"
-                      value={memberRole}
-                      onChange={(e) =>
-                        setMemberRole(e.target.value as 'owner' | 'operator' | 'viewer')
-                      }
-                      disabled={busy || isViewer}
-                    >
-                      <option value="owner">owner</option>
-                      <option value="operator">operator</option>
-                      <option value="viewer">viewer</option>
-                    </select>
-                  </label>
-                </div>
-                <p>
-                  <button type="submit" disabled={busy || isViewer || !memberUsername.trim()}>
-                    Save member
-                  </button>
-                </p>
-              </form>
+              <ProjectMembersSection
+                activeProject={activeProject}
+                members={members}
+                users={users}
+                busy={busy}
+                isViewer={isViewer}
+                pending={pending}
+                onSetBusy={setBusy}
+                onSetError={setError}
+                onSetPending={setPending}
+                onRefresh={refreshDrawer}
+                onHandleError={handle}
+              />
 
-              <h3>API tokens (CLI / CI)</h3>
-              <form className="compact-form" onSubmit={(e) => void handleIssueToken(e)}>
-                <div className="form-grid form-grid-3">
-                  <label>
-                    Token label
-                    <input
-                      type="text"
-                      aria-label="Token label"
-                      value={tokenName}
-                      onChange={(e) => setTokenName(e.target.value)}
-                      placeholder="github-actions"
-                      disabled={busy || isViewer}
-                      required
-                    />
-                  </label>
-                  <label>
-                    Preset
-                    <select
-                      aria-label="Token preset"
-                      value={tokenScope}
-                      onChange={(e) => setTokenScope(e.target.value)}
-                      disabled={busy || isViewer}
-                    >
-                      <option value="deploy">CI deploy (read + write:artifacts + deploy)</option>
-                      <option value="read">Read-only (read)</option>
-                      <option value="admin">Full access (admin)</option>
-                    </select>
-                  </label>
-                  <label>
-                    TTL (days)
-                    <select
-                      aria-label="TTL (days)"
-                      data-testid="token-ttl-select"
-                      value={tokenTtlDays}
-                      onChange={(e) => setTokenTtlDays(e.target.value)}
-                      disabled={busy || isViewer}
-                    >
-                      <option value="">Never</option>
-                      <option value="7">7d</option>
-                      <option value="30">30d</option>
-                      <option value="90">90d</option>
-                      <option value="365">365d</option>
-                    </select>
-                  </label>
-                </div>
-                <p>
-                  <label className="choice">
-                    <input
-                      type="checkbox"
-                      checked={tokenPinned}
-                      onChange={(e) => setTokenPinned(e.target.checked)}
-                      disabled={busy || isViewer}
-                    />{' '}
-                    Pin to <code>{activeProject}</code>
-                  </label>{' '}
-                  <label className="choice">
-                    <input
-                      type="checkbox"
-                      aria-label="Include enroll scope"
-                      data-testid="token-enroll-scope"
-                      checked={tokenEnrollScope}
-                      onChange={(e) => setTokenEnrollScope(e.target.checked)}
-                      disabled={busy || isViewer}
-                    />{' '}
-                    Include <code>enroll</code> scope
-                  </label>
-                </p>
-                <p>
-                  <button type="submit" disabled={busy || isViewer || !tokenName.trim()}>
-                    Issue API token
-                  </button>
-                </p>
-              </form>
+              <ApiTokensSection
+                activeProject={activeProject}
+                tokens={tokens}
+                busy={busy}
+                isViewer={isViewer}
+                pending={pending}
+                onSetBusy={setBusy}
+                onSetError={setError}
+                onSetPending={setPending}
+                onRefresh={refreshDrawer}
+                onHandleError={handle}
+              />
 
-              {issuedToken !== null && (
-                <div className="issued" role="alert">
-                  <p className="warn">Copy this API token now — it is shown once:</p>
-                  <code data-testid="issued-admin-token">{issuedToken.token}</code>{' '}
-                  <button
-                    type="button"
-                    data-testid="copy-issued-token"
-                    onClick={() => {
-                      void navigator.clipboard?.writeText?.(issuedToken.token)?.catch(() => {})
-                      setCopiedToken(true)
-                    }}
-                  >
-                    {copiedToken ? 'Copied' : 'Copy token'}
-                  </button>{' '}
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setIssuedToken(null)
-                      setCopiedToken(false)
-                    }}
-                  >
-                    Done
-                  </button>
-                </div>
-              )}
+              <ProjectSecretsSection
+                activeProject={activeProject}
+                open={open}
+                hasOtelHeaders={Boolean(activeOption?.has_otel_headers)}
+                canManage={canManage}
+                isViewer={isViewer}
+                busy={busy}
+                pending={pending}
+                secretsRev={secretsRev}
+                secrets={secrets}
+                projectBoards={projectBoards}
+                otelEndpoint={otelEndpoint}
+                groups={groups}
+                onSetBusy={setBusy}
+                onSetError={setError}
+                onSetPending={setPending}
+                onSetSecretsState={(rev, items) => {
+                  setSecretsRev(rev)
+                  setSecrets(items)
+                }}
+                onSetOtelEndpoint={setOtelEndpoint}
+                onRefresh={refreshDrawer}
+                onHandleError={handle}
+              />
 
-              {tokens !== null && tokens.length > 0 && (
-                <table>
-                  <thead>
-                    <tr>
-                      <th scope="col">Label</th>
-                      <th scope="col">Project</th>
-                      <th scope="col">Scopes</th>
-                      <th scope="col">Created</th>
-                      <th scope="col">Lifecycle</th>
-                      <th scope="col" />
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {tokens.map((t) => (
-                      <tr key={t.id} data-testid="admin-token-row">
-                        <td>{t.name}</td>
-                        <td>{t.project_slug ?? 'all'}</td>
-                        <td>
-                          <code>{t.scopes.join(', ')}</code>
-                        </td>
-                        <td>{formatWhen(t.created_at)}</td>
-                        <td>
-                          {t.last_used_at ? (
-                            <span data-testid="token-last-used">
-                              used {formatWhen(t.last_used_at)}
-                            </span>
-                          ) : (
-                            <span className="muted">unused</span>
-                          )}
-                          {t.expires_at ? (
-                            <>
-                              {' · '}
-                              <span data-testid="token-expires-at">
-                                exp {formatWhen(t.expires_at)}
-                              </span>
-                            </>
-                          ) : null}
-                        </td>
-                        <td>
-                          {t.revoked_at === null ? (
-                            <button
-                              type="button"
-                              aria-label={`Revoke ${t.name}`}
-                              disabled={busy || isViewer}
-                              onClick={() =>
-                                setPending({ kind: 'revoke-token', id: t.id, name: t.name })
-                              }
-                            >
-                              Revoke
-                            </button>
-                          ) : (
-                            <span className="muted">revoked</span>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-              {pending?.kind === 'revoke-token' && (
-                <p data-testid="confirm-revoke-token">
-                  Revoke {pending.name}? Anything using it stops working at once.{' '}
-                  <button
-                    type="button"
-                    disabled={busy}
-                    onClick={() => void handleRevokeToken(pending.id)}
-                  >
-                    Revoke token
-                  </button>{' '}
-                  <button type="button" onClick={() => setPending(null)}>
-                    Keep
-                  </button>
-                </p>
-              )}
-
-              <h3>
-                Device secrets (NVS <code>ff_sec</code>) ·{' '}
-                <span className="badge muted" data-testid="project-secrets-rev">
-                  rev {secretsRev}
-                </span>
-              </h3>
-              <p className="muted">
-                Encrypted key-value secrets synced over HTTPS to boards in{' '}
-                <code>{activeProject}</code> whenever <code>dn/cfg.secrets_rev</code> advances
-                (read on the board with <code>Fleetforge.getSecret(key, buf, len)</code>).
-              </p>
-              <p className="muted" data-testid="secrets-convergence">
-                <strong>
-                  {syncedBoards.length}/{projectBoards.length} synced to rev {secretsRev}
-                </strong>
-                {laggingBoards.length > 0 && (
-                  <span data-testid="secrets-lagging-boards">
-                    {' '}
-                    · Pending sync:{' '}
-                    {laggingBoards
-                      .map((d) => `${d.name ?? d.device_id} (rev ${d.secrets_rev ?? 0})`)
-                      .join(', ')}
-                  </span>
-                )}
-              </p>
-              {secrets.length > 0 && (
-                <table data-testid="project-secrets-table">
-                  <thead>
-                    <tr>
-                      <th scope="col">Key</th>
-                      <th scope="col">Updated</th>
-                      <th scope="col" />
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {secrets.map((s) => (
-                      <tr key={s.key} data-testid="project-secret-row">
-                        <td>
-                          <code>{s.key}</code>
-                        </td>
-                        <td>{formatWhen(s.updated_at)}</td>
-                        <td>
-                          <button
-                            type="button"
-                            aria-label={`Delete secret ${s.key}`}
-                            disabled={busy || isViewer}
-                            onClick={() => setPending({ kind: 'delete-secret', key: s.key })}
-                          >
-                            Delete
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-              {pending?.kind === 'delete-secret' && (
-                <p data-testid="confirm-delete-secret">
-                  Delete secret <code>{pending.key}</code>? Boards will erase it on next sync.{' '}
-                  <button
-                    type="button"
-                    disabled={busy}
-                    onClick={() => void handleDeleteSecret(pending.key)}
-                  >
-                    Yes, delete {pending.key}
-                  </button>{' '}
-                  <button type="button" onClick={() => setPending(null)}>
-                    Keep
-                  </button>
-                </p>
-              )}
-              <form className="compact-form" onSubmit={(e) => void handleUpsertSecret(e)}>
-                <div className="form-grid">
-                  <label>
-                    Secret key
-                    <input
-                      type="text"
-                      aria-label="Secret key"
-                      value={secretKey}
-                      onChange={(e) => setSecretKey(e.target.value)}
-                      placeholder="API_KEY"
-                      disabled={busy || isViewer}
-                    />
-                  </label>
-                  <label>
-                    Secret value
-                    <input
-                      type="password"
-                      aria-label="Secret value"
-                      value={secretValue}
-                      onChange={(e) => setSecretValue(e.target.value)}
-                      placeholder="sk-live-..."
-                      disabled={busy || isViewer}
-                    />
-                  </label>
-                </div>
-                <p>
-                  <button
-                    type="submit"
-                    disabled={busy || isViewer || !secretKey.trim() || !secretValue}
-                  >
-                    Save / Rotate secret
-                  </button>
-                </p>
-              </form>
-
-              <h3>OpenTelemetry export (OTLP/HTTP)</h3>
-              <p className="muted">
-                Forward board <code>up/log</code> lines and <code>up/telemetry</code> metrics as
-                OpenTelemetry <code>LogRecord</code>s and <code>Gauge</code>s with{' '}
-                <code>service.name={activeProject}</code>.
-              </p>
-              <form className="compact-form" onSubmit={(e) => void handleSaveOtel(e)}>
-                <div className="form-grid">
-                  <label>
-                    OTLP/HTTP endpoint
-                    <input
-                      type="text"
-                      aria-label="OTLP/HTTP endpoint"
-                      value={otelEndpoint}
-                      onChange={(e) => setOtelEndpoint(e.target.value)}
-                      placeholder="https://otlp.example.com"
-                      disabled={busy || isViewer}
-                    />
-                  </label>
-                  <label>
-                    OTLP headers (optional)
-                    <input
-                      type="password"
-                      aria-label="OTLP headers"
-                      value={otelHeaders}
-                      onChange={(e) => setOtelHeaders(e.target.value)}
-                      placeholder={
-                        activeOption?.has_otel_headers
-                          ? '(configured — enter to replace)'
-                          : 'Authorization=Bearer ...'
-                      }
-                      disabled={busy || isViewer || clearOtelHeaders}
-                    />
-                  </label>
-                </div>
-                <p>
-                  <label className="choice">
-                    <input
-                      type="checkbox"
-                      aria-label="Clear saved headers"
-                      data-testid="clear-otel-headers"
-                      checked={clearOtelHeaders}
-                      onChange={(e) => setClearOtelHeaders(e.target.checked)}
-                      disabled={busy || isViewer}
-                    />{' '}
-                    Clear saved headers
-                  </label>
-                </p>
-                <p>
-                  <button type="submit" disabled={busy || isViewer}>
-                    Save OTel settings
-                  </button>
-                </p>
-              </form>
-              {otelStatus !== null && (
-                <p className="ok" data-testid="otel-status">
-                  {otelStatus}
-                </p>
-              )}
-
-              <h3>Device groups (cohorts)</h3>
-              <p className="muted">
-                Named release rings (e.g. <code>canary</code>, <code>prod</code>) or sub-locations in{' '}
-                <code>{activeProject}</code> for targeted rollouts.
-              </p>
-              {groups.length > 0 && (
-                <table data-testid="project-groups-table">
-                  <thead>
-                    <tr>
-                      <th scope="col">Name</th>
-                      <th scope="col">Description</th>
-                      <th scope="col" />
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {groups.map((g) => (
-                      <tr key={g.id} data-testid="project-group-row">
-                        <td>
-                          <code>{g.name}</code>
-                        </td>
-                        <td>{g.description ?? <span className="muted">—</span>}</td>
-                        <td>
-                          {canManage && (
-                            <button
-                              type="button"
-                              aria-label={`Delete group ${g.name}`}
-                              disabled={busy}
-                              onClick={() =>
-                                setPending({ kind: 'delete-group', id: g.id, name: g.name })
-                              }
-                            >
-                              Delete
-                            </button>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              )}
-              {pending?.kind === 'delete-group' && (
-                <p data-testid="confirm-delete-group">
-                  Delete group <code>{pending.name}</code>? Boards in it become ungrouped.{' '}
-                  <button
-                    type="button"
-                    disabled={busy}
-                    onClick={() => void handleDeleteGroup(pending.id)}
-                  >
-                    Yes, delete {pending.name}
-                  </button>{' '}
-                  <button type="button" onClick={() => setPending(null)}>
-                    Keep
-                  </button>
-                </p>
-              )}
-              {canManage && (
-                <form className="compact-form" onSubmit={(e) => void handleCreateGroup(e)}>
-                  <div className="form-grid">
-                    <label>
-                      Group name
-                      <input
-                        type="text"
-                        aria-label="Group name"
-                        value={groupName}
-                        onChange={(e) => setGroupName(e.target.value)}
-                        placeholder="canary"
-                        disabled={busy}
-                        required
-                      />
-                    </label>
-                    <label>
-                      Description (optional)
-                      <input
-                        type="text"
-                        aria-label="Group description"
-                        value={groupDesc}
-                        onChange={(e) => setGroupDesc(e.target.value)}
-                        placeholder="Canary test cohort"
-                        disabled={busy}
-                      />
-                    </label>
-                  </div>
-                  <p>
-                    <button type="submit" disabled={busy || !groupName.trim()}>
-                      Create group
-                    </button>
-                  </p>
-                </form>
-              )}
-
-              {!me.project_id && (
-                <div data-testid="my-account-card">
-                  <h3>
-                    My account · <code>{me.subject}</code>{' '}
-                    <span className="badge muted">
-                      {me.is_superadmin ? 'superadmin (full capability)' : activeRole}
-                    </span>{' '}
-                    <span className="badge muted">
-                      {selfHasPassword ? 'local password set' : 'Firebase / env login'}
-                    </span>
-                  </h3>
-                  <form className="compact-form" onSubmit={(e) => void handleSaveSelfProfile(e)}>
-                    <div className="form-grid">
-                      <label>
-                        Display name
-                        <input
-                          type="text"
-                          aria-label="My display name"
-                          value={selfDisplayName}
-                          onChange={(e) => setSelfDisplayName(e.target.value)}
-                          placeholder="Your name"
-                          disabled={busy}
-                        />
-                      </label>
-                      <label>
-                        Email
-                        <input
-                          type="email"
-                          aria-label="My email"
-                          value={selfEmail}
-                          onChange={(e) => setSelfEmail(e.target.value)}
-                          placeholder="you@example.com"
-                          disabled={busy}
-                        />
-                      </label>
-                      <label>
-                        Current password (optional)
-                        <input
-                          type="password"
-                          aria-label="Current password"
-                          value={selfCurrentPassword}
-                          onChange={(e) => setSelfCurrentPassword(e.target.value)}
-                          placeholder="Current password"
-                          disabled={busy}
-                        />
-                      </label>
-                      <label>
-                        New password (min 8 chars)
-                        <input
-                          type="password"
-                          aria-label="New password"
-                          value={selfNewPassword}
-                          onChange={(e) => setSelfNewPassword(e.target.value)}
-                          placeholder="Leave blank to keep current"
-                          disabled={busy}
-                        />
-                      </label>
-                    </div>
-                    <p>
-                      <button type="submit" disabled={busy}>
-                        Save my account
-                      </button>
-                    </p>
-                  </form>
-                  {selfStatus !== null && (
-                    <p className="ok" data-testid="self-status">
-                      {selfStatus}
-                    </p>
-                  )}
-                </div>
-              )}
+              <MyAccountSection
+                me={me}
+                activeProject={activeProject}
+                open={open}
+                activeRole={activeRole}
+                busy={busy}
+                onSetBusy={setBusy}
+                onSetError={setError}
+                onRefresh={refreshDrawer}
+                onHandleError={handle}
+              />
             </div>
 
-            {me.is_superadmin && (
-              <div className="console-card">
-                <h2>Instance admin</h2>
-                <form className="compact-form" onSubmit={(e) => void handleCreateProject(e)}>
-                  <h3>Create project</h3>
-                  <div className="form-grid">
-                    <label>
-                      Slug
-                      <input
-                        type="text"
-                        aria-label="New project slug"
-                        value={newSlug}
-                        onChange={(e) => setNewSlug(e.target.value)}
-                        placeholder="home-lab"
-                        disabled={busy}
-                        required
-                      />
-                    </label>
-                    <label>
-                      Name
-                      <input
-                        type="text"
-                        aria-label="New project name"
-                        value={newName}
-                        onChange={(e) => setNewName(e.target.value)}
-                        placeholder="Home Lab"
-                        disabled={busy}
-                        required
-                      />
-                    </label>
-                  </div>
-                  <p>
-                    <button type="submit" disabled={busy || !newSlug.trim() || !newName.trim()}>
-                      Create project
-                    </button>
-                  </p>
-                </form>
-
-                <h3>Invited users (Firebase &amp; local)</h3>
-                {userNotice !== null && (
-                  <p className="ok" data-testid="user-notice">
-                    {userNotice}
-                  </p>
-                )}
-                <form className="compact-form" onSubmit={(e) => void handleInviteUser(e)}>
-                  <div className="form-grid">
-                    <label>
-                      Username
-                      <input
-                        type="text"
-                        aria-label="Invite username"
-                        value={inviteUsername}
-                        onChange={(e) => setInviteUsername(e.target.value)}
-                        placeholder="alice"
-                        disabled={busy}
-                        required
-                      />
-                    </label>
-                    <label>
-                      Email (Firebase invite)
-                      <input
-                        type="email"
-                        aria-label="Invite email"
-                        value={inviteEmail}
-                        onChange={(e) => setInviteEmail(e.target.value)}
-                        placeholder="alice@example.com"
-                        disabled={busy}
-                      />
-                    </label>
-                    <label>
-                      Display name
-                      <input
-                        type="text"
-                        aria-label="Invite display name"
-                        value={inviteDisplayName}
-                        onChange={(e) => setInviteDisplayName(e.target.value)}
-                        placeholder="Alice Smith"
-                        disabled={busy}
-                      />
-                    </label>
-                    <label>
-                      Local password (optional if email set)
-                      <input
-                        type="password"
-                        aria-label="Invite local password"
-                        value={invitePassword}
-                        onChange={(e) => setInvitePassword(e.target.value)}
-                        disabled={busy}
-                      />
-                    </label>
-                    <label>
-                      Initial role in {activeProject}
-                      <select
-                        aria-label="Invite project role"
-                        value={inviteProjectRole}
-                        onChange={(e) =>
-                          setInviteProjectRole(
-                            e.target.value as '' | 'owner' | 'operator' | 'viewer',
-                          )
-                        }
-                        disabled={busy}
-                      >
-                        <option value="">None (grant later)</option>
-                        <option value="owner">owner</option>
-                        <option value="operator">operator</option>
-                        <option value="viewer">viewer</option>
-                      </select>
-                    </label>
-                  </div>
-                  <p>
-                    <label className="choice">
-                      <input
-                        type="checkbox"
-                        checked={inviteSendEmail}
-                        onChange={(e) => setInviteSendEmail(e.target.checked)}
-                        disabled={busy || inviteEmail.trim() === ''}
-                      />{' '}
-                      Send Firebase password-setup email
-                    </label>
-                    <label className="choice">
-                      <input
-                        type="checkbox"
-                        checked={inviteSuperadmin}
-                        onChange={(e) => setInviteSuperadmin(e.target.checked)}
-                        disabled={busy}
-                      />{' '}
-                      Superadmin
-                    </label>
-                  </p>
-                  <p>
-                    <button
-                      type="submit"
-                      disabled={
-                        busy ||
-                        !inviteUsername.trim() ||
-                        (inviteEmail.trim() === '' && invitePassword === '')
-                      }
-                    >
-                      Invite user
-                    </button>
-                  </p>
-                </form>
-
-                {users !== null && users.length > 0 && (
-                  <table>
-                    <thead>
-                      <tr>
-                        <th scope="col">User</th>
-                        <th scope="col">Email</th>
-                        <th scope="col">Auth</th>
-                        <th scope="col">Status</th>
-                        <th scope="col" />
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {users.map((u) => (
-                        <tr key={u.id}>
-                          <td>
-                            <code>{u.username}</code>
-                            {u.display_name ? ` (${u.display_name})` : ''}
-                            {u.is_superadmin ? ' · superadmin' : ''}
-                            {u.projects && u.projects.length > 0 ? (
-                              <span className="muted">
-                                {' · '}
-                                {u.projects.map((p) => `${p.project_slug}:${p.role}`).join(', ')}
-                              </span>
-                            ) : null}
-                          </td>
-                          <td>{u.email ?? '—'}</td>
-                          <td>
-                            {u.firebase_uid && u.has_local_password
-                              ? 'firebase + password'
-                              : u.firebase_uid
-                                ? 'firebase linked'
-                                : u.email
-                                  ? u.has_local_password
-                                    ? 'invited + password'
-                                    : 'firebase invited'
-                                  : 'local'}
-                          </td>
-                          <td>{u.disabled_at ? 'disabled' : 'active'}</td>
-                          <td>
-                            <button
-                              type="button"
-                              aria-label={`Edit ${u.username}`}
-                              disabled={busy}
-                              onClick={() =>
-                                editingUser === u.username
-                                  ? setEditingUser(null)
-                                  : startEditUser(u)
-                              }
-                            >
-                              {editingUser === u.username ? 'Close' : 'Edit'}
-                            </button>{' '}
-                            {u.email && (
-                              <>
-                                <button
-                                  type="button"
-                                  onClick={() => void handleSendPasswordReset(u)}
-                                >
-                                  Send reset email
-                                </button>{' '}
-                              </>
-                            )}
-                            <button
-                              type="button"
-                              aria-label={`${u.disabled_at ? 'Enable' : 'Disable'} ${u.username}`}
-                              disabled={busy}
-                              onClick={() =>
-                                u.disabled_at
-                                  ? void handleToggleUserDisabled(u)
-                                  : setPending({ kind: 'disable-user', username: u.username })
-                              }
-                            >
-                              {u.disabled_at ? 'Enable' : 'Disable'}
-                            </button>{' '}
-                            <button
-                              type="button"
-                              aria-label={`Delete ${u.username}`}
-                              disabled={busy || u.username === me.subject}
-                              onClick={() =>
-                                setPending({ kind: 'delete-user', username: u.username })
-                              }
-                            >
-                              Delete
-                            </button>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                )}
-                {editingUser !== null && (
-                  <form
-                    className="compact-form"
-                    data-testid={`edit-user-${editingUser}`}
-                    onSubmit={(e) => void handleSaveUserEdit(e)}
-                  >
-                    <h4>
-                      Edit user <code>{editingUser}</code>
-                    </h4>
-                    <div className="form-grid">
-                      <label>
-                        Display name
-                        <input
-                          type="text"
-                          aria-label="Edit user display name"
-                          value={editDisplayName}
-                          onChange={(e) => setEditDisplayName(e.target.value)}
-                          placeholder="Full name"
-                          disabled={busy}
-                        />
-                      </label>
-                      <label>
-                        Email
-                        <input
-                          type="email"
-                          aria-label="Edit user email"
-                          value={editEmail}
-                          onChange={(e) => setEditEmail(e.target.value)}
-                          placeholder="user@example.com"
-                          disabled={busy}
-                        />
-                      </label>
-                      <label>
-                        Set / reset password
-                        <input
-                          type="password"
-                          aria-label="Edit user password"
-                          value={editPassword}
-                          onChange={(e) => setEditPassword(e.target.value)}
-                          placeholder="Leave blank to keep existing"
-                          disabled={busy}
-                        />
-                      </label>
-                    </div>
-                    <p>
-                      <label className="choice">
-                        <input
-                          type="checkbox"
-                          aria-label="Edit user superadmin"
-                          checked={editSuperadmin}
-                          onChange={(e) => setEditSuperadmin(e.target.checked)}
-                          disabled={busy}
-                        />{' '}
-                        Superadmin (full capability across all projects &amp; users)
-                      </label>
-                    </p>
-                    <p>
-                      <button type="submit" disabled={busy}>
-                        Save user
-                      </button>{' '}
-                      <button
-                        type="button"
-                        disabled={busy}
-                        onClick={() => setEditingUser(null)}
-                      >
-                        Cancel
-                      </button>
-                    </p>
-                  </form>
-                )}
-                {pending?.kind === 'disable-user' && (
-                  <p data-testid="confirm-disable-user">
-                    Disable {pending.username}? They are signed out at once.{' '}
-                    <button
-                      type="button"
-                      disabled={busy}
-                      onClick={() => {
-                        const target = users?.find((u) => u.username === pending.username)
-                        if (target) {
-                          void handleToggleUserDisabled(target)
-                        } else {
-                          setPending(null)
-                        }
-                      }}
-                    >
-                      Yes, disable {pending.username}
-                    </button>{' '}
-                    <button type="button" onClick={() => setPending(null)}>
-                      Keep
-                    </button>
-                  </p>
-                )}
-                {pending?.kind === 'delete-user' && (
-                  <p data-testid="confirm-delete-user">
-                    Delete user <code>{pending.username}</code> permanently? All their sessions and
-                    project memberships are removed at once.{' '}
-                    <button
-                      type="button"
-                      disabled={busy}
-                      onClick={() => void handleDeleteUser(pending.username)}
-                    >
-                      Yes, delete {pending.username}
-                    </button>{' '}
-                    <button type="button" onClick={() => setPending(null)}>
-                      Keep
-                    </button>
-                  </p>
-                )}
-              </div>
-            )}
+            <UsersAdminSection
+              me={me}
+              activeProject={activeProject}
+              open={open}
+              busy={busy}
+              pending={pending}
+              users={users}
+              onSetBusy={setBusy}
+              onSetError={setError}
+              onSetPending={setPending}
+              onSelectProject={onSelectProject}
+              onRefresh={refreshDrawer}
+              onHandleError={handle}
+            />
           </div>
         </div>
       )}

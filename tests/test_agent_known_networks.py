@@ -27,14 +27,17 @@ very spellings these tests forbid.
 import re
 from pathlib import Path
 
-from tests.agent_src import AGENT_MAIN_C, COMPONENT_SRC
-from tests.test_agent_txn import _function_body
-from tests.test_ff_cfg import FF_CFG_C, FF_IDENTITY_C, _code
+from tests.agent_src import AGENT_MAIN_C, COMPONENT_SRC, read_c_family
+from tests.agent_test_helpers import FF_CFG_C, FF_IDENTITY_C, _code, _function_body
 
 FF_NET_C = COMPONENT_SRC / "ff_net.c"
 # ff_net_ssid() is component-private since R3-fw-2: only ff_identity.c reports it.
 FF_NET_INTERNAL_H = COMPONENT_SRC / "ff_net_internal.h"
-FF_NET_WIFI_C = COMPONENT_SRC / "ff_net_wifi.c"
+
+
+def _wifi() -> str:
+    return _code(read_c_family("ff_net_wifi"))
+
 
 LOG_CALL = re.compile(r"ESP_LOG[EWIDV]\((.*?)\);", re.DOTALL)
 
@@ -77,16 +80,15 @@ class TestTheReader:
 
     def test_the_old_single_network_struct_members_are_gone(self) -> None:
         """One source of truth: nets[0] IS the top-level ssid/psk."""
-        for path in (FF_CFG_C, FF_NET_WIFI_C, FF_IDENTITY_C):
-            source = _code(path)
+        for source in (_code(FF_CFG_C), _wifi(), _code(FF_IDENTITY_C)):
             assert "cfg->ssid" not in source
             assert "cfg->psk" not in source
 
 
 class TestNoPassphraseIsLogged:
-    def _offending(self, path: Path) -> list[str]:
+    def _offending(self, source: Path | str) -> list[str]:
         bad = []
-        for call in LOG_CALL.findall(_code(path)):
+        for call in LOG_CALL.findall(_code(source)):
             without_lengths = re.sub(r"strlen\([^()]*\)", "", call)
             if "psk" in without_lengths or "password" in without_lengths:
                 bad.append(call)
@@ -96,7 +98,7 @@ class TestNoPassphraseIsLogged:
         assert self._offending(FF_CFG_C) == []
 
     def test_the_wifi_adapter_never_logs_one(self) -> None:
-        assert self._offending(FF_NET_WIFI_C) == []
+        assert self._offending(read_c_family("ff_net_wifi")) == []
 
     def test_the_lengths_line_survives(self) -> None:
         assert "passphrase %u chars (never printed)" in _code(FF_CFG_C)
@@ -104,12 +106,12 @@ class TestNoPassphraseIsLogged:
 
 class TestSelection:
     def test_a_scan_is_started_only_from_begin_cycle(self) -> None:
-        source = _code(FF_NET_WIFI_C)
+        source = _wifi()
         assert source.count("esp_wifi_scan_start(") == 1
         assert "esp_wifi_scan_start(" in _function_body(source, "begin_cycle")
 
     def test_begin_cycle_is_never_reached_from_the_path_with_an_address(self) -> None:
-        source = _code(FF_NET_WIFI_C)
+        source = _wifi()
         assert "begin_cycle(" not in _function_body(source, "on_got_ip")
         assert "begin_cycle(" not in _function_body(source, "try_candidate")
         assert "begin_cycle(" not in _function_body(source, "on_dhcp_timeout")
@@ -120,21 +122,21 @@ class TestSelection:
         }
 
     def test_sta_connected_never_scans(self) -> None:
-        handler = _function_body(_code(FF_NET_WIFI_C), "on_wifi_event")
+        handler = _function_body(_wifi(), "on_wifi_event")
         connected = handler[handler.index("WIFI_EVENT_STA_CONNECTED") :]
         connected = connected[: connected.index("return;")]
         assert "begin_cycle(" not in connected
         assert "esp_wifi_scan_start(" not in connected
 
     def test_the_single_network_path_is_guarded_off_the_scan(self) -> None:
-        handler = _function_body(_code(FF_NET_WIFI_C), "on_wifi_event")
+        handler = _function_body(_wifi(), "on_wifi_event")
         start = handler[handler.index("WIFI_EVENT_STA_START") :]
         start = start[: start.index("return;")]
         assert "s_net_count > 1" in start
         assert "esp_wifi_connect();" in start, "one network connects directly, no scan"
 
     def test_scan_results_are_read_one_record_at_a_time_and_freed(self) -> None:
-        source = _code(FF_NET_WIFI_C)
+        source = _wifi()
         body = _function_body(source, "on_scan_done")
         assert "esp_wifi_scan_get_ap_record(" in body
         assert "esp_wifi_clear_ap_list(" in body
@@ -143,12 +145,12 @@ class TestSelection:
         assert "return" not in body[: body.index("esp_wifi_clear_ap_list(")]
 
     def test_the_candidate_takes_the_strongest_ap_of_that_ssid(self) -> None:
-        body = _function_body(_code(FF_NET_WIFI_C), "try_candidate")
+        body = _function_body(_wifi(), "try_candidate")
         assert "WIFI_ALL_CHANNEL_SCAN" in body
         assert "WIFI_CONNECT_AP_BY_SIGNAL" in body
 
     def test_the_dhcp_watchdog_never_drops_a_link_with_an_address(self) -> None:
-        source = _code(FF_NET_WIFI_C)
+        source = _wifi()
         body = _function_body(source, "on_dhcp_timeout")
         assert "s_have_ip" in body
         assert body.index("s_have_ip") < body.index("esp_wifi_disconnect(")
@@ -159,7 +161,7 @@ class TestTheConsoleContract:
     """frontend/src/boardConsole.ts classifies these exact strings."""
 
     def test_the_phrases_the_classifier_keys_on(self) -> None:
-        source = _code(FF_NET_WIFI_C)
+        source = _wifi()
         assert '"no known network in range (' in source
         assert "carries no ssid" in source
         assert '"disconnected (reason %d)' in source

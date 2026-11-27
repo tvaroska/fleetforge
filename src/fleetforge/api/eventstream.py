@@ -259,7 +259,12 @@ class PostgresEventListener:
             # would kill this task for the life of the process, and the symptom is
             # the one this module exists to prevent — a stream that connects and
             # stays empty forever, with nothing unhealthy anywhere.
-            except (asyncpg.PostgresError, asyncpg.InterfaceError, OSError) as exc:
+            except (
+                asyncpg.PostgresError,
+                asyncpg.InterfaceError,
+                asyncpg.InternalClientError,
+                OSError,
+            ) as exc:
                 logger.warning("ff_events listener error (%s); reconnecting in %.0fs", exc, delay)
             else:
                 delay = RECONNECT_INITIAL_DELAY

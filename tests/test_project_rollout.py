@@ -1,4 +1,4 @@
-"""Database-backed staged project cohort rollout and RBAC integration tests (`T-4`).
+"""Database-backed staged project cohort rollout and RBAC integration tests (`T-4`, `T-10`).
 
 Drives `POST /v1/projects/{slug}/deploy`, `handle_up_message`, and `advance_project_rollout_on_confirm`
 against a real migrated PostgreSQL database (`0 skipped`), exercising `SELECT ... FOR UPDATE`,
@@ -7,18 +7,32 @@ per-target canary gating, bounded wave concurrency, `rolled_back` auto-halt, and
 
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
 import json
+import uuid
+from types import SimpleNamespace
+from typing import Any
+from unittest.mock import AsyncMock, patch
 
 from fastapi import FastAPI
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
 
-from fleetforge.api.deps import get_command_publisher, get_object_store, get_settings
+from fleetforge.api.deps import AuthContext, get_command_publisher, get_object_store, get_settings
 from fleetforge.broker import CommandPublishError
 from fleetforge.clock import now_utc
 from fleetforge.db.models import Device
+from fleetforge.deploys import DeploySender, DeploySnapshot, RequestedRollout, latest_deploys
+from fleetforge.firmware.manifest import BUILTIN_LAYOUTS
 from fleetforge.ingest.handlers import handle_up_message
-from fleetforge.rollout import advance_project_rollout_on_confirm, reconcile_open_rollouts
+from fleetforge.lib_marker import MAGIC
+from fleetforge.partition_profiles import LayoutCatalog
+from fleetforge.rollout import (
+    advance_project_rollout_on_confirm,
+    deploy_version_to_project_devices,
+    reconcile_open_rollouts,
+)
 from fleetforge.signing import generate_keypair, sign_digest
 from tests.conftest import (
     FakeCommandPublisher,
@@ -32,16 +46,59 @@ _PRIV_A, _PUB_A = generate_keypair()
 _PRIV_B, _PUB_B = generate_keypair()
 
 
+def _make_rollout_device(
+    proj_id: uuid.UUID,
+    idx: int,
+    now: dt.datetime,
+    *,
+    prefix: str = "a4cf12b3de0",
+    platform_type: str = "esp32c6",
+    fw: str = "1.0.0",
+    is_dev: bool = False,
+    caps: list[str] | None = None,
+) -> Device:
+    return Device(
+        device_id=f"{prefix}{idx}",
+        project_id=proj_id,
+        platform_type=platform_type,
+        fw_version=fw,
+        partition_layout="ab-4m-v1",
+        ota_slot_size=1966080,
+        rollback_capable=True,
+        capabilities=caps if caps is not None else ["ota"],
+        link_type="wifi",
+        power_class="always_on",
+        is_dev=is_dev,
+        presence_reported=True,
+        last_seen=now,
+    )
+
+
+def _mock_rollout_session(devices: list[Device]) -> Any:
+    dev_by_id = {d.device_id: d for d in devices}
+    session = AsyncMock()
+    session.scalars = AsyncMock(return_value=SimpleNamespace(all=lambda: devices))
+    session.get = AsyncMock(
+        side_effect=lambda model, key: (
+            dev_by_id.get(str(key)) if model is Device else SimpleNamespace(name="ci-token")
+        )
+    )
+    art_row = SimpleNamespace(
+        sha256="c" * 64,
+        size_bytes=2048,
+        partition_layout="ab-4m-v1",
+        has_lib_marker=True,
+        sig="ecdsa-p256-sha256:AA==",
+    )
+    session.execute = AsyncMock(return_value=SimpleNamespace(first=lambda: art_row))
+    return session
+
+
 async def test_project_cohort_rollout_canary_waves_halt_and_rbac_over_postgres(
     admin_app: FastAPI, engine: AsyncEngine, clean_tables: None
 ) -> None:
-    """T-4: end-to-end PostgreSQL cohort rollout:
-    1. Viewer & cross-project tokens are refused (`403`) on `POST /v1/projects/{slug}/deploy`.
-    2. Canary wave stages ONLY the `is_dev=True` canary board (`max_parallel=2, canary=True`).
-    3. `handle_up_message` (`confirmed`) + `advance_project_rollout_on_confirm` stages Wave 2
-       (`max_parallel=2` -> 2 fleet boards, 1 remaining queued).
-    4. `handle_up_message` (`rolled_back`) on one Wave 2 board halts further wave promotion.
-    """
+    """T-4: end-to-end PostgreSQL cohort rollout covering RBAC, canary, waves, and auto-halt."""
+    _ = clean_tables
     store = MemoryObjectStore()
     publisher = FakeCommandPublisher()
     settings = settings_for_tests(
@@ -62,7 +119,6 @@ async def test_project_cohort_rollout_canary_waves_halt_and_rbac_over_postgres(
     super_headers = {"Authorization": f"Bearer {super_token}"}
 
     async with client_for(admin_app, base_url="https://testserver") as client:
-        # Create project `rover-fleet` and a second project `other-proj`
         r_proj = await client.post(
             "/v1/projects",
             headers=super_headers,
@@ -78,7 +134,6 @@ async def test_project_cohort_rollout_canary_waves_halt_and_rbac_over_postgres(
         )
         assert r_other.status_code == 201, r_other.text
 
-        # Create a viewer user on `rover-fleet` and verify 403 on `/deploy`
         r_viewer = await client.post(
             "/v1/users",
             headers=super_headers,
@@ -97,7 +152,6 @@ async def test_project_cohort_rollout_canary_waves_halt_and_rbac_over_postgres(
         assert viewer_login.status_code == 200
         viewer_headers = {"Authorization": f"Bearer {viewer_login.cookies['ff_session']}"}
 
-        # Mint a token pinned to `other-proj` with `deploy` scope -> must get 403 on `rover-fleet`
         r_wrong_tok = await client.post(
             "/v1/auth/tokens",
             headers=super_headers,
@@ -106,7 +160,6 @@ async def test_project_cohort_rollout_canary_waves_halt_and_rbac_over_postgres(
         assert r_wrong_tok.status_code == 201
         wrong_proj_headers = {"Authorization": f"Bearer {r_wrong_tok.json()['token']}"}
 
-        # Mint a valid `deploy`-scoped token pinned to `rover-fleet`
         r_deploy_tok = await client.post(
             "/v1/auth/tokens",
             headers=super_headers,
@@ -118,9 +171,6 @@ async def test_project_cohort_rollout_canary_waves_halt_and_rbac_over_postgres(
         )
         assert r_deploy_tok.status_code == 201
         deploy_headers = {"Authorization": f"Bearer {r_deploy_tok.json()['token']}"}
-
-        # Upload signed firmware `3.0.0` for `esp32c6` into `rover-fleet`
-        from fleetforge.lib_marker import MAGIC
 
         marker = MAGIC + b"\x01\x00\x00\x00" + b"0.6.0\x00".ljust(32, b"\x00") + b"\x00" * 12
         fw_bytes = b"\xe9\x00\x00\x00" + marker + b"firmware-payload" * 32
@@ -140,31 +190,25 @@ async def test_project_cohort_rollout_canary_waves_halt_and_rbac_over_postgres(
         )
         assert r_up.status_code == 201, r_up.text
 
-        # Seed 4 online `esp32c6` boards (board 1 = dev canary; boards 2, 3, 4 = fleet)
         now = now_utc()
         sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
         async with sessionmaker() as session:
-            for idx in (1, 2, 3, 4):
-                session.add(
-                    Device(
-                        device_id=f"a4cf12b3de2{idx}",
-                        project_id=proj_id,
-                        platform_type="esp32c6",
-                        fw_version="2.9.0",
-                        partition_layout="ab-4m-v1",
-                        ota_slot_size=1966080,
-                        rollback_capable=True,
-                        capabilities=["ota", "sig", "cancel"],
-                        link_type="wifi",
-                        power_class="always_on",
+            session.add_all(
+                [
+                    _make_rollout_device(
+                        proj_id,
+                        idx,
+                        now,
+                        prefix="a4cf12b3de2",
+                        fw="2.9.0",
                         is_dev=(idx == 1),
-                        presence_reported=True,
-                        last_seen=now,
+                        caps=["ota", "sig", "cancel"],
                     )
-                )
+                    for idx in (1, 2, 3, 4)
+                ]
+            )
             await session.commit()
 
-        # RBAC checks: viewer gets 403, cross-project token gets 403
         for forbidden_hdrs in (viewer_headers, wrong_proj_headers):
             r_forb = await client.post(
                 "/v1/projects/rover-fleet/deploy",
@@ -178,7 +222,6 @@ async def test_project_cohort_rollout_canary_waves_halt_and_rbac_over_postgres(
             )
             assert r_forb.status_code == 403, r_forb.text
 
-        # Wave 1 (Canary): only `a4cf12b3de21` stages; boards 2, 3, 4 wait for canary
         r_w1 = await client.post(
             "/v1/projects/rover-fleet/deploy",
             headers=deploy_headers,
@@ -191,7 +234,6 @@ async def test_project_cohort_rollout_canary_waves_halt_and_rbac_over_postgres(
         assert set(w1["skipped"]) == {"a4cf12b3de22", "a4cf12b3de23", "a4cf12b3de24"}
         assert all("waiting for canary a4cf12b3de21" in msg for msg in w1["skipped"].values())
 
-        # Canary confirms via real ingestor `handle_up_message` -> `advance_project_rollout_on_confirm`
         publisher.published.clear()
         async with sessionmaker() as session:
             await handle_up_message(
@@ -232,12 +274,10 @@ async def test_project_cohort_rollout_canary_waves_halt_and_rbac_over_postgres(
                 settings=settings,
                 publisher=publisher,
             )
-        # Wave 2 stages max_parallel=2 fleet boards (`de22`, `de23`), leaving `de24` queued for Wave 3!
         assert [d.device_id for d in advanced] == ["a4cf12b3de22", "a4cf12b3de23"]
         de22_cmd_id = advanced[0].cmd_id
         de23_cmd_id = advanced[1].cmd_id
 
-        # Board `de22` rolls back on `3.0.0`, while `de23` confirms -> cohort MUST auto-halt (`de24` NOT staged)!
         publisher.published.clear()
         async with sessionmaker() as session:
             await handle_up_message(
@@ -277,7 +317,6 @@ async def test_project_cohort_rollout_canary_waves_halt_and_rbac_over_postgres(
         assert halted_advance == []
         assert publisher.published == []
 
-        # Re-POSTing `/v1/projects/rover-fleet/deploy` for `3.0.0` also halts cleanly!
         r_halted = await client.post(
             "/v1/projects/rover-fleet/deploy",
             headers=deploy_headers,
@@ -292,8 +331,7 @@ async def test_project_cohort_rollout_canary_waves_halt_and_rbac_over_postgres(
 async def test_reconcile_does_not_restage_a_superseded_version(
     admin_app: FastAPI, engine: AsyncEngine, clean_tables: None
 ) -> None:
-    """A-21: after rolling out 1.0.0 and then 2.0.0 across four boards, repeated reconcile
-    ticks and replayed confirm events for 1.0.0 must never downgrade or flip any board."""
+    """A-21: reconcile ticks and replayed confirm events for superseded versions never downgrade."""
     _ = clean_tables
     store = MemoryObjectStore()
     publisher = FakeCommandPublisher()
@@ -314,9 +352,6 @@ async def test_reconcile_does_not_restage_a_superseded_version(
     token = await login_admin(admin_app)
     headers = {"Authorization": f"Bearer {token}"}
     sessionmaker = async_sessionmaker(engine, expire_on_commit=False)
-
-    from fleetforge.lib_marker import MAGIC
-
     marker = MAGIC + b"\x01\x00\x00\x00" + b"0.6.0\x00".ljust(32, b"\x00") + b"\x00" * 12
 
     async with client_for(admin_app, base_url="https://testserver") as client:
@@ -328,7 +363,7 @@ async def test_reconcile_does_not_restage_a_superseded_version(
         assert proj_resp.status_code == 201, proj_resp.text
         proj_id = proj_resp.json()["id"]
 
-        for ver in ("1.0.0", "2.0.0"):
+        for ver in ("1.0.0", "2.0.0", "2.5.0", "3.0.0"):
             fw = b"\xe9\x00\x00\x00" + marker + f"fw-{ver}".encode() * 32
             sha = hashlib.sha256(fw).hexdigest()
             up = await client.post(
@@ -348,24 +383,20 @@ async def test_reconcile_does_not_restage_a_superseded_version(
         now = now_utc()
         board_ids = [f"a4cf12b3de3{i}" for i in (1, 2, 3, 4)]
         async with sessionmaker() as s:
-            for idx, did in enumerate(board_ids):
-                s.add(
-                    Device(
-                        device_id=did,
-                        project_id=proj_id,
-                        platform_type="esp32c6",
-                        fw_version="0.9.0",
-                        partition_layout="ab-4m-v1",
-                        ota_slot_size=1966080,
-                        rollback_capable=True,
-                        capabilities=["ota", "sig", "cancel"],
-                        link_type="wifi",
-                        power_class="always_on",
-                        is_dev=(idx == 0),
-                        presence_reported=True,
-                        last_seen=now,
+            s.add_all(
+                [
+                    _make_rollout_device(
+                        proj_id,
+                        i,
+                        now,
+                        prefix="a4cf12b3de3",
+                        fw="0.9.0",
+                        is_dev=(i == 1),
+                        caps=["ota", "sig", "cancel"],
                     )
-                )
+                    for i in (1, 2, 3, 4)
+                ]
+            )
             await s.commit()
 
         async def _confirm(did: str, cmd_id: str, ver: str) -> None:
@@ -400,7 +431,6 @@ async def test_reconcile_does_not_restage_a_superseded_version(
                 )
                 await s.commit()
 
-        # Roll out 1.0.0: canary -> missed confirm recovered by reconcile -> rest confirm 1.0.0.
         r1 = await client.post(
             "/v1/projects/reconcile-fleet/deploy",
             headers=headers,
@@ -417,14 +447,12 @@ async def test_reconcile_does_not_restage_a_superseded_version(
         for item in recovered_v1:
             await _confirm(item.device_id, item.cmd_id, "1.0.0")
 
-        # Next reconcile tick closes 1.0.0 as completed with zero new commands.
         publisher.published.clear()
         async with sessionmaker() as s:
             done_v1 = await reconcile_open_rollouts(s, settings=settings, publisher=publisher)
         assert done_v1 == []
         assert publisher.published == []
 
-        # Roll out 2.0.0 across all four boards.
         r2 = await client.post(
             "/v1/projects/reconcile-fleet/deploy",
             headers=headers,
@@ -447,7 +475,6 @@ async def test_reconcile_does_not_restage_a_superseded_version(
         for item in wave2_v2:
             await _confirm(item.device_id, item.cmd_id, "2.0.0")
 
-        # Six reconcile ticks + a replayed 1.0.0 confirm must produce ZERO downgrades or flips.
         publisher.published.clear()
         for _ in range(6):
             async with sessionmaker() as s:
@@ -466,26 +493,45 @@ async def test_reconcile_does_not_restage_a_superseded_version(
         assert replayed == []
         assert publisher.published == []
 
+        r25 = await client.post(
+            "/v1/projects/reconcile-fleet/deploy",
+            headers=headers,
+            json={"version": "2.5.0", "target_filter": "all", "canary": True, "max_parallel": 5},
+        )
+        assert r25.status_code == 202, r25.text
+        v25_canary_cmd = r25.json()["deployed"][0]["cmd_id"]
+        await _confirm(board_ids[0], v25_canary_cmd, "2.5.0")
+
+        r30 = await client.post(
+            "/v1/projects/reconcile-fleet/deploy",
+            headers=headers,
+            json={"version": "3.0.0", "target_filter": "all", "canary": True, "max_parallel": 5},
+        )
+        assert r30.status_code == 202, r30.text
+
+        async with sessionmaker() as s:
+            status_25 = await s.scalar(
+                text(
+                    "SELECT status FROM project_rollouts "
+                    "WHERE project_id = (:pid)::uuid AND version = '2.5.0'"
+                ),
+                {"pid": proj_id},
+            )
+        assert status_25 == "superseded"
+
+        publisher.published.clear()
+        async with sessionmaker() as s:
+            reconciled_after_30 = await reconcile_open_rollouts(
+                s, settings=settings, publisher=publisher
+            )
+        assert reconciled_after_30 == []
+        assert publisher.published == []
+
 
 async def test_publish_failure_recovery_mid_wave_cleanup_and_per_target_canary_over_postgres(
     admin_app: FastAPI, engine: AsyncEngine, clean_tables: None
 ) -> None:
-    """T-21 / A-3: PostgreSQL-backed rollout edge cases (migrated from mock-session unit tests):
-    1. Mid-wave broker failure closes EVERY remaining unpublished intent with `publish_failed`
-       before answering HTTP 503.
-    2. A server-authored `publish_failed` never halts a subsequent retry of the cohort.
-    3. Confirming canary on `esp32c6` unlocks Wave 2 for `esp32c6`, while `esp32s3` still
-       stages only its single canary first.
-    4. A stalled offline downloader does not starve online boards, and `POST /deploy/cancel`
-       halts background `advance_project_rollout_on_confirm`.
-    """
-    import datetime as dt
-
-    from sqlalchemy import text
-
-    from fleetforge.deploys import latest_deploys
-    from fleetforge.lib_marker import MAGIC
-
+    """T-21 / A-3: mid-wave broker failure cleanup, retry recovery, per-target canary, and cancel halt."""
     _ = clean_tables
     store = MemoryObjectStore()
     publisher = FakeCommandPublisher()
@@ -539,27 +585,20 @@ async def test_publish_failure_recovery_mid_wave_cleanup_and_per_target_canary_o
         async with sessionmaker() as s:
             s.add_all(
                 [
-                    Device(
-                        device_id=f"a4cf12b3ee0{idx}",
-                        project_id=proj_id,
-                        platform_type="esp32c6",
-                        fw_version="1.0.0",
-                        partition_layout="ab-4m-v1",
-                        ota_slot_size=1966080,
-                        rollback_capable=True,
-                        capabilities=["ota", "sig", "cancel"],
-                        link_type="wifi",
-                        power_class="always_on",
+                    _make_rollout_device(
+                        proj_id,
+                        idx,
+                        now,
+                        prefix="a4cf12b3ee0",
                         is_dev=(idx == 1),
-                        presence_reported=True,
-                        last_seen=now,
+                        caps=["ota", "sig", "cancel"],
                     )
                     for idx in (1, 2, 3)
                 ]
             )
             await s.commit()
 
-        # 1. Mid-wave broker failure: batch fails, board 1 succeeds, boards 2 & 3 get publish_failed -> 503.
+        # Mid-wave broker failure: batch fails, board 1 succeeds, boards 2 & 3 get publish_failed -> 503.
         publisher.fail_publish_many_with = CommandPublishError("batch failed")
         publisher.fail_with = CommandPublishError("broker dropped mid-wave")
         publisher.fail_after_publishes = 1
@@ -580,13 +619,12 @@ async def test_publish_failure_recovery_mid_wave_cleanup_and_per_target_canary_o
         assert snaps["a4cf12b3ee03"].state == "failed"
         assert snaps["a4cf12b3ee03"].reason == "publish_failed"
 
-        # 2. Retry succeeds (server-authored `publish_failed` does NOT halt the cohort!).
+        # Retry succeeds because server-authored `publish_failed` does not halt the cohort.
         publisher.fail_publish_many_with = None
         publisher.fail_with = None
         publisher.fail_after_publishes = None
         publisher.published.clear()
 
-        # Confirm board 1 (`esp32c6` canary) and seed two `esp32s3` boards (`ee04` canary, `ee05` fleet).
         c6_canary_cmd = snaps["a4cf12b3ee01"].cmd_id
         assert c6_canary_cmd is not None
         async with sessionmaker() as s:
@@ -618,41 +656,21 @@ async def test_publish_failure_recovery_mid_wave_cleanup_and_per_target_canary_o
             )
             s.add_all(
                 [
-                    Device(
-                        device_id="a4cf12b3ee04",
-                        project_id=proj_id,
+                    _make_rollout_device(
+                        proj_id,
+                        idx,
+                        now,
+                        prefix="a4cf12b3ee0",
                         platform_type="esp32s3",
-                        fw_version="1.0.0",
-                        partition_layout="ab-4m-v1",
-                        ota_slot_size=1966080,
-                        rollback_capable=True,
-                        capabilities=["ota", "sig", "cancel"],
-                        link_type="wifi",
-                        power_class="always_on",
-                        is_dev=True,
-                        presence_reported=True,
-                        last_seen=now,
-                    ),
-                    Device(
-                        device_id="a4cf12b3ee05",
-                        project_id=proj_id,
-                        platform_type="esp32s3",
-                        fw_version="1.0.0",
-                        partition_layout="ab-4m-v1",
-                        ota_slot_size=1966080,
-                        rollback_capable=True,
-                        capabilities=["ota", "sig", "cancel"],
-                        link_type="wifi",
-                        power_class="always_on",
-                        is_dev=False,
-                        presence_reported=True,
-                        last_seen=now,
-                    ),
+                        is_dev=(idx == 4),
+                        caps=["ota", "sig", "cancel"],
+                    )
+                    for idx in (4, 5)
                 ]
             )
             await s.commit()
 
-        # 3. Per-target canary: `esp32c6` boards (`ee02`, `ee03`) both stage, while `esp32s3` stages ONLY `ee04`!
+        # Per-target canary: `esp32c6` boards (`ee02`, `ee03`) stage, while `esp32s3` stages ONLY `ee04`.
         r_retry = await client.post(
             "/v1/projects/edge-fleet/deploy",
             headers=headers,
@@ -667,7 +685,7 @@ async def test_publish_failure_recovery_mid_wave_cleanup_and_per_target_canary_o
         }
         assert "waiting for canary a4cf12b3ee04" in retry_body["skipped"]["a4cf12b3ee05"]
 
-        # 4. Stalled offline board + cohort cancel (`POST /deploy/cancel`) halts auto-advancement.
+        # Stalled offline board + cohort cancel (`POST /deploy/cancel`) halts auto-advancement.
         ee02_cmd = next(
             d["cmd_id"] for d in retry_body["deployed"] if d["device_id"] == "a4cf12b3ee02"
         )
@@ -700,7 +718,6 @@ async def test_publish_failure_recovery_mid_wave_cleanup_and_per_target_canary_o
         cancelled_ids = {c["device_id"] for c in r_cancel.json()["cancelled"]}
         assert "a4cf12b3ee02" in cancelled_ids
 
-        # Board `ee02` reports `cancelled`; subsequent confirm advance must stay halted!
         publisher.published.clear()
         async with sessionmaker() as s:
             await handle_up_message(
@@ -724,3 +741,176 @@ async def test_publish_failure_recovery_mid_wave_cleanup_and_per_target_canary_o
             )
         assert adv == []
         assert publisher.published == []
+
+
+async def test_staged_cohort_rollout_canary_wave_and_auto_halt() -> None:
+    proj_id = uuid.uuid4()
+    now = dt.datetime.now(dt.UTC)
+    devices = [_make_rollout_device(proj_id, i, now, is_dev=(i == 2)) for i in range(1, 8)]
+    session = _mock_rollout_session(devices)
+
+    admin = AuthContext(
+        token_id=uuid.uuid4(),
+        subject="ci",
+        expires_at=now + dt.timedelta(hours=1),
+        scopes=("deploy",),
+        is_superadmin=True,
+    )
+    settings = settings_for_tests(
+        artifact_url_secret="s" * 32,
+        public_base_url="https://fleet.example.com",
+    )
+    publisher = AsyncMock()
+    catalog = LayoutCatalog(layouts=BUILTIN_LAYOUTS, by_fingerprint={}, pending=frozenset())
+
+    def _snap(state: str, detail: str | None = None) -> DeploySnapshot:
+        return DeploySnapshot(
+            cmd_id="cmd-1",
+            state=state,
+            at=now,
+            is_terminal=True,
+            artifact_version="1.2.0",
+            from_version="1.0.0",
+            pct=None,
+            detail=detail,
+            steps=(),
+            sent_by=None,
+            selftest=None,
+        )
+
+    with (
+        patch("fleetforge.rollout.load_layout_catalog", return_value=catalog),
+        patch("fleetforge.rollout.latest_open_transaction", return_value=None),
+        patch("fleetforge.rollout.record_requested", AsyncMock()),
+    ):
+        with patch("fleetforge.rollout.latest_deploys", return_value={}):
+            deployed, skipped = await deploy_version_to_project_devices(
+                session,
+                project_id=proj_id,
+                version="1.2.0",
+                target_filter="all",
+                apply="auto",
+                override=(),
+                admin=admin,
+                settings=settings,
+                publisher=publisher,
+                canary=True,
+                max_parallel=3,
+            )
+            assert [d.device_id for d in deployed] == ["a4cf12b3de02"]
+            assert len(skipped) == 6
+            assert all("waiting for canary a4cf12b3de02" in msg for msg in skipped.values())
+
+        devices[1].fw_version = "1.2.0"
+        with patch(
+            "fleetforge.rollout.latest_deploys",
+            return_value={"a4cf12b3de02": _snap("confirmed")},
+        ):
+            deployed2, skipped2 = await deploy_version_to_project_devices(
+                session,
+                project_id=proj_id,
+                version="1.2.0",
+                target_filter="all",
+                apply="auto",
+                override=(),
+                admin=admin,
+                settings=settings,
+                publisher=publisher,
+                canary=True,
+                max_parallel=3,
+            )
+            assert len(deployed2) == 3
+            assert sum("queued for next wave" in msg for msg in skipped2.values()) == 3
+
+        with patch(
+            "fleetforge.rollout.latest_deploys",
+            return_value={"a4cf12b3de02": _snap("rolled_back", "confirm timer expired")},
+        ):
+            deployed3, skipped3 = await deploy_version_to_project_devices(
+                session,
+                project_id=proj_id,
+                version="1.2.0",
+                target_filter="all",
+                apply="auto",
+                override=(),
+                admin=admin,
+                settings=settings,
+                publisher=publisher,
+                canary=True,
+                max_parallel=3,
+            )
+            assert deployed3 == []
+            assert all("rollout halted" in msg for msg in skipped3.values())
+
+
+async def test_advance_project_rollout_on_confirm_progresses_waves_without_republishing_in_flight() -> (
+    None
+):
+    proj_id = uuid.uuid4()
+    now = dt.datetime.now(dt.UTC)
+    devices = [_make_rollout_device(proj_id, i, now, is_dev=(i == 1)) for i in range(1, 6)]
+    session = _mock_rollout_session(devices)
+    settings = settings_for_tests(
+        artifact_url_secret="s" * 32,
+        public_base_url="https://fleet.example.com",
+    )
+    publisher = AsyncMock()
+    catalog = LayoutCatalog(layouts=BUILTIN_LAYOUTS, by_fingerprint={}, pending=frozenset())
+    rollout_req = RequestedRollout(
+        artifact_version="1.2.0",
+        apply="auto",
+        sent_by=DeploySender(subject="ci", token_id="tok-1", credential="ci-token"),
+        rollout={
+            "target_filter": "all",
+            "canary": True,
+            "max_parallel": 2,
+            "override": [],
+            "target_chip": "esp32c6",
+        },
+    )
+
+    with (
+        patch("fleetforge.rollout.requested_rollout", return_value=rollout_req),
+        patch("fleetforge.rollout.load_layout_catalog", return_value=catalog),
+        patch("fleetforge.rollout.latest_open_transaction", return_value=None),
+        patch("fleetforge.rollout.record_requested", AsyncMock()),
+        patch(
+            "fleetforge.rollout.latest_deploys",
+            return_value={
+                "a4cf12b3de01": DeploySnapshot(
+                    cmd_id="cmd-1",
+                    state="confirmed",
+                    at=now,
+                    is_terminal=True,
+                    artifact_version="1.2.0",
+                    from_version="1.0.0",
+                    pct=None,
+                    detail=None,
+                    steps=(),
+                    sent_by=None,
+                    selftest=None,
+                ),
+                "a4cf12b3de02": DeploySnapshot(
+                    cmd_id="cmd-2",
+                    state="downloading",
+                    at=now,
+                    is_terminal=False,
+                    artifact_version="1.2.0",
+                    from_version="1.0.0",
+                    pct=50,
+                    detail=None,
+                    steps=(),
+                    sent_by=None,
+                    selftest=None,
+                ),
+            },
+        ),
+    ):
+        advanced = await advance_project_rollout_on_confirm(
+            session,
+            device=devices[0],
+            cmd_id="cmd-1",
+            settings=settings,
+            publisher=publisher,
+        )
+        assert [d.device_id for d in advanced] == ["a4cf12b3de03"]

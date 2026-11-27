@@ -22,30 +22,33 @@ Same idiom as `test_agent_txn.py`: comment-stripped C text, brace-matched bodies
 
 from __future__ import annotations
 
-import hashlib
 import re
-from pathlib import Path
 
-from tests.agent_src import AGENT_DIR, COMPONENT_CMAKE, COMPONENT_SRC
-from tests.test_agent_txn import _function_body
-from tests.test_ff_cfg import _code
+from tests.agent_src import AGENT_DIR, COMPONENT_CMAKE, COMPONENT_SRC, read_c_family
+from tests.agent_test_helpers import (
+    DEVICE_PROTOCOL,
+    FF_IDENTITY_C,
+    FF_TXN_C,
+    FF_TXN_H,
+    VERSION_TXT,
+    _code,
+    _csv_fingerprint,
+    _function_body,
+)
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-FF_IDENTITY_C = COMPONENT_SRC / "ff_identity.c"
 # The rollback_capable writers and the NVS keys are component-private since R3-fw-2: a
 # firmware that could call them could CLAIM rollback_capable, which is measured.
 FF_IDENTITY_INTERNAL_H = COMPONENT_SRC / "ff_identity_internal.h"
-FF_MQTT_C = COMPONENT_SRC / "ff_mqtt.c"
 FF_STORE_C = COMPONENT_SRC / "ff_store.c"
 FF_STORE_INTERNAL_H = COMPONENT_SRC / "ff_store_internal.h"
-FF_TXN_C = COMPONENT_SRC / "ff_txn.c"
-FF_TXN_H = COMPONENT_SRC / "ff_txn.h"
 CMAKELISTS = COMPONENT_CMAKE
 PARTITIONS_CSV = AGENT_DIR / "partitions.csv"
-VERSION_TXT = AGENT_DIR / "version.txt"
-DEVICE_PROTOCOL = REPO_ROOT / "spec" / "device-protocol.md"
 
 AB_4M_V1_SHA256 = "1fa67e6bbd034e434d04e9d6f4f52bbe899361602cd498573eb3bde97d1559ed"
+
+
+def _mqtt() -> str:
+    return _code(read_c_family("ff_mqtt"))
 
 
 def _announce() -> str:
@@ -100,39 +103,6 @@ def test_the_fingerprint_follows_the_geometry_only_rule() -> None:
     assert "mbedtls_sha256_finish" in body
 
 
-def _csv_fingerprint(path: Path) -> str:
-    """The board-profiles.md reproduction recipe, verbatim in effect."""
-    types = {"app": 0, "data": 1}
-    subtypes = {
-        "app": {"factory": 0, "test": 0x20, **{f"ota_{i}": 0x10 + i for i in range(16)}},
-        "data": {
-            "ota": 0,
-            "phy": 1,
-            "nvs": 2,
-            "coredump": 3,
-            "nvs_keys": 4,
-            "efuse": 5,
-            "undefined": 6,
-            "esphttpd": 0x80,
-            "fat": 0x81,
-            "spiffs": 0x82,
-            "littlefs": 0x83,
-        },
-    }
-    rows = []
-    for line in path.read_text().splitlines():
-        line = line.split("#")[0].strip()
-        if not line:
-            continue
-        fields = [field.strip() for field in line.split(",")]
-        subtype = (
-            int(fields[2], 0) if fields[2].startswith("0x") else subtypes[fields[1]][fields[2]]
-        )
-        rows.append((types[fields[1]], subtype, int(fields[3], 0), int(fields[4], 0)))
-    serial = "".join(f"{t}:{s}:{o}:{z}\n" for t, s, o, z in sorted(rows, key=lambda r: r[2]))
-    return hashlib.sha256(serial.encode()).hexdigest()
-
-
 def test_the_worked_ab_4m_v1_value_is_reproducible_from_the_csv() -> None:
     """The host-side twin of the QEMU `board:` line: the same rule over the checked-in
     table gives the value the spec's *Partition layouts* table prints."""
@@ -162,7 +132,7 @@ def test_rollback_capable_is_true_or_null_never_false() -> None:
 
 
 def test_it_is_observed_at_classification_from_pending_verify_before_the_record() -> None:
-    mqtt = _code(FF_MQTT_C)
+    mqtt = _mqtt()
     classify = _function_body(mqtt, "classify_txn")
     assert "pending_verify()" in classify
     assert "ff_identity_note_rollback_capable()" in classify
@@ -178,7 +148,7 @@ def test_it_is_observed_at_classification_from_pending_verify_before_the_record(
 def test_the_confirm_and_rollback_path_stays_free_of_the_observation() -> None:
     """Those run from esp_timer or right before a reboot; no NVS write belongs there, and a
     rollback is not evidence (mark_app_invalid writes INVALID from any state)."""
-    mqtt = _code(FF_MQTT_C)
+    mqtt = _mqtt()
     for name in (
         "confirm_timeout_cb",
         "rollback_now_cb",
@@ -225,7 +195,7 @@ def test_the_note_writes_nvs_only_once() -> None:
 
 
 def test_new_at_target_is_classified_and_the_stale_fallthrough_remains() -> None:
-    classify = _function_body(_code(FF_MQTT_C), "classify_txn")
+    classify = _function_body(_mqtt(), "classify_txn")
     assert "state == ESP_OTA_IMG_NEW" in classify
     assert "TXN_BOOTED_NEW" in classify
     assert "DETAIL_BOOTED_NEW" in classify
@@ -237,7 +207,7 @@ def test_new_at_target_is_classified_and_the_stale_fallthrough_remains() -> None
 
 
 def test_new_at_target_confirms_only_after_a_mark_valid_from_new() -> None:
-    mqtt = _code(FF_MQTT_C)
+    mqtt = _mqtt()
     existing = "else if (confirm_this_image() && s_txn.kind == TXN_CONFIRMING)"
     new = "s_txn.kind == TXN_BOOTED_NEW && accept_unverified_image()"
     assert existing in mqtt, "the R2-be-1 confirm line must stay byte-identical"
@@ -256,7 +226,7 @@ def test_new_at_target_confirms_only_after_a_mark_valid_from_new() -> None:
 
 
 def test_new_at_target_never_promises_a_rollback_deadline() -> None:
-    body = _function_body(_code(FF_MQTT_C), "report_txn_on_connect")
+    body = _function_body(_mqtt(), "report_txn_on_connect")
     booted_new = body[body.index("case TXN_BOOTED_NEW:") :]
     booted_new = booted_new[: booted_new.index("break;")]
     assert "FF_STATUS_CONFIRMING" not in booted_new

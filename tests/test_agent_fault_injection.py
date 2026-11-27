@@ -24,8 +24,7 @@ import re
 from pathlib import Path
 
 from tests.agent_src import AGENT_DIR, AGENT_MAIN_C, COMPONENT_CMAKE, MAIN_CMAKE, agent_sources
-from tests.test_agent_txn import _function_body
-from tests.test_ff_cfg import _code
+from tests.agent_test_helpers import _cmake_code, _code, _function_body
 
 ROOT = Path(__file__).resolve().parent.parent
 AGENT = AGENT_DIR
@@ -34,11 +33,6 @@ DOCKERFILE = AGENT / "Dockerfile"
 JUSTFILE = ROOT / "justfile"
 
 FAULT_DEFINES = ("FF_FAULT_TEST_BOOTLOOP", "FF_FAULT_TEST_HANG")
-
-
-def _cmake_code(path: Path) -> str:
-    """CMake text with `#` comments removed (none of these files puts `#` in a string)."""
-    return "\n".join(line.split("#", 1)[0].rstrip() for line in path.read_text().splitlines())
 
 
 def _fault_block(cmake: str) -> str:

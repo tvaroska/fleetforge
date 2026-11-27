@@ -40,51 +40,36 @@ from tests.agent_src import (
     FF_SELFTEST_INTERNAL_H,
     IDF_EXAMPLE_MAIN_C,
     agent_sources,
+    c_call_sites_in_family,
+    read_c_family,
 )
-from tests.test_agent_txn import _function_body
-from tests.test_arduino_library import _ff_calls
-from tests.test_ff_cfg import _code
-from tests.test_ota_component import _declared_functions
-
-FF_MQTT_C = COMPONENT_SRC / "ff_mqtt.c"
+from tests.agent_test_helpers import (
+    FF_IDENTITY_C,
+    TIMER_CONTEXT,
+    _code,
+    _declared_functions,
+    _ff_calls,
+    _function_body,
+    _member_body,
+    _published,
+)
 
 PUBLIC_FUNCTIONS = {"ff_set_selftest", "ff_selftest_report"}
 PRIVATE_HOOKS = ("ff_selftest_freeze", "ff_selftest_run")
-# The esp_timer callbacks and the arming that runs before NVS: never a place for the
-# self-test, not in fw-2 either.
-# R5-fw-5: start_rollback_gate() is called from confirm_timeout_cb, so it is timer context too.
-TIMER_CONTEXT = (
-    "confirm_timeout_cb",
-    "rollback_now_cb",
-    "ff_mqtt_arm_confirm_timer",
-    "start_rollback_gate",
-)
 
 
 def _src() -> str:
     return _code(FF_SELFTEST_C)
 
 
+def _mqtt() -> str:
+    return _code(read_c_family("ff_mqtt"))
+
+
 def _define(name: str) -> int:
     match = re.search(rf"^#define {name} (\d+)$", _src(), re.M)
     assert match is not None, name
     return int(match.group(1))
-
-
-def _member_body(code: str, signature: str) -> str:
-    """The body of a C++ member whose parameter list `_function_body` cannot match (it
-    stops at the first `)`, and `void (*test)()` has three)."""
-    match = re.search(re.escape(signature) + r"\s*\{", code)
-    assert match is not None, signature
-    depth = 0
-    for index in range(match.end() - 1, len(code)):
-        if code[index] == "{":
-            depth += 1
-        elif code[index] == "}":
-            depth -= 1
-            if depth == 0:
-                return code[match.end() : index]
-    raise AssertionError(f"unbalanced braces in {signature}")
 
 
 class TestTheMakerHeader:
@@ -231,11 +216,8 @@ class TestTheSessionWiring:
     def test_one_freeze_before_the_first_connect(self) -> None:
         """The gate flag and the capability are set from the freeze, before the first
         connect: never at the ack (DECISIONS R5-fw-2, the no-deadline window)."""
-        from tests.agent_src import c_call_sites
-
-        raw = FF_MQTT_C.read_text(encoding="utf-8")
-        code = _code(FF_MQTT_C)
-        assert c_call_sites(raw, "ff_selftest_freeze") == [
+        code = _mqtt()
+        assert c_call_sites_in_family("ff_mqtt", "ff_selftest_freeze") == [
             "ff_mqtt_confirm_offline",
             "ff_mqtt_run",
         ]
@@ -254,7 +236,7 @@ class TestTheSessionWiring:
     def test_never_from_timer_context(self) -> None:
         """Durable: fw-2 may call ff_selftest_run from mqtt_event_handler, never from
         these (esp_timer task, or before NVS)."""
-        code = _code(FF_MQTT_C)
+        code = _mqtt()
         for name in TIMER_CONTEXT:
             body = _function_body(code, name)
             assert "ff_selftest_" not in body, name
@@ -263,7 +245,6 @@ class TestTheSessionWiring:
         assert "ff_selftest" not in _code(AGENT_MAIN_C)
 
 
-FF_IDENTITY_C = COMPONENT_SRC / "ff_identity.c"
 FF_IDENTITY_INTERNAL_H = COMPONENT_SRC / "ff_identity_internal.h"
 # Pinned elsewhere (tests/test_agent_txn.py, tests/test_agent_board_measurements.py) by
 # their FIRST occurrence: the done callback must not repeat them.
@@ -287,18 +268,12 @@ TIMER_FORBIDDEN = (
 )
 
 
-def _published() -> str:
-    match = re.search(r"case MQTT_EVENT_PUBLISHED:(.*?)\bcase\b", _code(FF_MQTT_C), re.S)
-    assert match is not None
-    return match.group(1)
-
-
 def _done() -> str:
-    return _function_body(_code(FF_MQTT_C), "selftest_done")
+    return _function_body(_mqtt(), "selftest_done")
 
 
 def _mqtt_define(name: str) -> str:
-    match = re.search(rf"^#define {name} (.+)$", _code(FF_MQTT_C), re.M)
+    match = re.search(rf"^#define {name} (.+)$", _mqtt(), re.M)
     assert match is not None, name
     return match.group(1).strip()
 
@@ -308,9 +283,7 @@ class TestTheHold:
     only its pass confirms (CRITICAL.md: the device-side confirm timer / rollback path)."""
 
     def test_one_run_from_the_ack_branch_between_the_guards(self) -> None:
-        from tests.agent_src import c_call_sites
-
-        assert c_call_sites(FF_MQTT_C.read_text(encoding="utf-8"), "ff_selftest_run") == [
+        assert c_call_sites_in_family("ff_mqtt", "ff_selftest_run") == [
             "ff_mqtt_confirm_offline",
             "mqtt_event_handler",
         ]
@@ -346,13 +319,13 @@ class TestTheHold:
             assert forbidden not in tail, forbidden
 
     def test_the_deadline_still_applies_to_a_held_image(self) -> None:
-        body = _function_body(_code(FF_MQTT_C), "confirm_timeout_cb")
+        body = _function_body(_mqtt(), "confirm_timeout_cb")
         assert "if (!pending_verify())" in body
         assert "session_confirmed = s_ctx.session_confirmed;" in body
         assert "if (session_confirmed && !s_selftest_registered)" in body
         assert "s_ctx.session_confirmed || !pending_verify()" not in body
         # Today's line, byte for byte (the quickstart's R phase greps it), and the new one.
-        source = FF_MQTT_C.read_text()
+        source = read_c_family("ff_mqtt")
         assert (
             '"no working session %d s after an OTA boot — marking this image invalid "\n'
             '                      "and rolling back to the previous slot"'
@@ -362,10 +335,10 @@ class TestTheHold:
         )
 
     def test_the_deadline_claims_under_the_decision_lock(self) -> None:
-        code = _code(FF_MQTT_C)
-        assert "static portMUX_TYPE s_decide_lock = portMUX_INITIALIZER_UNLOCKED;" in code
-        assert "static bool s_confirm_claimed;" in code
-        assert "static volatile bool s_selftest_registered;" in code
+        code = _mqtt()
+        assert "portMUX_TYPE s_decide_lock = portMUX_INITIALIZER_UNLOCKED;" in code
+        assert "bool s_confirm_claimed;" in code
+        assert "volatile bool s_selftest_registered;" in code
         body = _function_body(code, "confirm_timeout_cb")
         enter = body.index("portENTER_CRITICAL(&s_decide_lock)")
         claim = body.index("s_rollback_decided = true;")
@@ -433,16 +406,14 @@ class TestTheHold:
         assert "FF_STATUS_ROLLING_BACK" in body and "s_ctx.connected" in body
 
     def test_only_the_session_stores_a_detail(self) -> None:
-        from tests.agent_src import c_call_sites
-
-        assert c_call_sites(FF_MQTT_C.read_text(encoding="utf-8"), "ff_txn_set_detail") == [
+        assert c_call_sites_in_family("ff_mqtt", "ff_txn_set_detail") == [
             "ff_mqtt_confirm_offline",
             "mqtt_event_handler",
             "selftest_done",
             "store_rollback_head",
         ]
         for path in agent_sources():
-            if path.name not in ("ff_mqtt.c", "ff_txn.c", "ff_txn.h"):
+            if not path.name.startswith("ff_mqtt") and path.name not in ("ff_txn.c", "ff_txn.h"):
                 assert "ff_txn_set_detail" not in _code(path), path.name
 
     def test_the_detail_grammar(self) -> None:
@@ -458,18 +429,18 @@ class TestTheHold:
         assert len("selftest timed out; returned to ota_0") <= 63
 
     def test_the_head_shortens_the_reason_only(self) -> None:
-        body = _function_body(_code(FF_MQTT_C), "selftest_failed_head")
+        body = _function_body(_mqtt(), "selftest_failed_head")
         assert "strlen(DETAIL_SELFTEST_FAILED) + strlen(DETAIL_RETURNED_TO) + label_len" in body
         assert "DETAIL_MAX - fixed" in body
         assert 'snprintf(out, len, DETAIL_SELFTEST_FAILED "%.*s", budget, reason);' in body
         empty = body.index("reason[0] == '\\0'")
         assert empty < body.index("reason = DETAIL_NO_REASON;") < body.index("snprintf(")
-        compose = _function_body(_code(FF_MQTT_C), "compose_returned_detail")
+        compose = _function_body(_mqtt(), "compose_returned_detail")
         assert '"%.*s" DETAIL_RETURNED_TO "%s"' in compose
         assert "strlen(DETAIL_SELFTEST_FAILED)" in compose, "never cut below the prefix"
 
     def test_classify_composes_only_under_the_prefix(self) -> None:
-        body = _function_body(_code(FF_MQTT_C), "classify_txn")
+        body = _function_body(_mqtt(), "classify_txn")
         prefix = "strncmp(rec.detail, DETAIL_SELFTEST_PREFIX, strlen(DETAIL_SELFTEST_PREFIX))"
         assert body.count(prefix) == 2
         valid = body.index("state == ESP_OTA_IMG_VALID")
@@ -494,9 +465,7 @@ class TestTheHold:
         note = _function_body(identity, "ff_identity_note_selftest")
         assert "s_selftest_registered = registered;" in note
         assert "void ff_identity_note_selftest(bool registered);" in _code(FF_IDENTITY_INTERNAL_H)
-        from tests.agent_src import c_call_sites
-
-        assert c_call_sites(FF_MQTT_C.read_text(encoding="utf-8"), "ff_identity_note_selftest") == [
+        assert c_call_sites_in_family("ff_mqtt", "ff_identity_note_selftest") == [
             "ff_mqtt_confirm_offline",
             "ff_mqtt_run",
         ]

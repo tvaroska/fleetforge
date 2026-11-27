@@ -16,14 +16,9 @@ from fleetforge.announce_fields import RESET_REASON_MAX_CHARS, normalize_reset_r
 from tests.agent_src import (
     AGENT_MAIN_C,
     ARDUINO_WRAPPER_CPP,
-    COMPONENT_SRC,
     IDF_EXAMPLE_START_C,
 )
-from tests.test_agent_txn import _function_body
-from tests.test_ff_cfg import _code
-from tests.test_library_marker import DEVICE_PROTOCOL
-
-FF_IDENTITY_C = COMPONENT_SRC / "ff_identity.c"
+from tests.agent_test_helpers import DEVICE_PROTOCOL, FF_IDENTITY_C, _code, _function_body
 
 
 def _spec_names() -> list[str]:

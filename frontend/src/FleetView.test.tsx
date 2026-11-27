@@ -1,12 +1,5 @@
-// What these tests defend, in order of how much a regression would cost:
-//
-// 1. Presence is rendered from the server's `online`, with an accessible name — the
-//    status is not colour-only, and it is not recomputed from `last_seen` here.
-// 2. `fw_version` is on screen. It is how an operator knows an OTA landed, and it is
-//    the field the task line names.
-// 3. A 401 on the first read bounces to login rather than rendering as a page error.
-//
-// The refresh rules themselves live in `fleet.test.tsx`; this file is rendering.
+// FleetView rendering tests: accessible server-derived presence, visible `fw_version`,
+// and 401 login bounce. Refresh rules live in `fleet.test.tsx`.
 
 import { fireEvent, render, screen, within } from '@testing-library/react'
 import { act } from 'react'

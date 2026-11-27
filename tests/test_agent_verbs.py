@@ -28,12 +28,16 @@ Comments are stripped before any grep (`_code`), the idiom of the other agent tr
 
 import re
 
-from tests.agent_src import COMPONENT_SRC
-from tests.test_agent_txn import FF_MQTT_C, FF_OTA_C, FF_TXN_C, FF_TXN_H, _function_body
-from tests.test_ff_cfg import _code
+from tests.agent_src import COMPONENT_SRC, c_call_sites_in_family, read_c_family
+from tests.agent_test_helpers import (
+    FF_IDENTITY_C,
+    FF_TXN_C,
+    FF_TXN_H,
+    _code,
+    _function_body,
+)
 
 FF_OTA_H = COMPONENT_SRC / "ff_ota.h"
-FF_IDENTITY_C = COMPONENT_SRC / "ff_identity.c"
 FF_MQTT_INTERNAL_H = COMPONENT_SRC / "ff_mqtt_internal.h"
 
 VERBS = ("on_apply", "on_cancel", "on_rollback", "on_reboot")
@@ -52,11 +56,11 @@ CHANGES = (
 
 
 def _mqtt() -> str:
-    return _code(FF_MQTT_C)
+    return _code(read_c_family("ff_mqtt"))
 
 
 def _ota() -> str:
-    return _code(FF_OTA_C)
+    return _code(read_c_family("ff_ota"))
 
 
 def _body(name: str) -> str:
@@ -71,7 +75,7 @@ class TestTheWire:
     def test_the_ack_topic_is_built_beside_the_others(self) -> None:
         run = _body("ff_mqtt_run")
         assert 'TOPIC_ROOT "/%s/up/ack"' in run
-        assert "char topic_ack[TOPIC_MAX];" in _mqtt()
+        assert "char topic_ack[TOPIC_MAX];" in _mqtt() + _code(FF_MQTT_INTERNAL_H)
 
     def test_the_body_keys_in_order_with_explicit_nulls(self) -> None:
         body = _body("enqueue_ack")
@@ -205,7 +209,7 @@ class TestNeverRebootInsideDelivery:
         assert run.index("ff_txn_init();") < load < run.index("classify_txn();")
         assert load < run.index("esp_mqtt_client_start(")
         # Outside s_ctx, which ff_mqtt_run() memsets.
-        assert "static char s_reboot_cmd_id[FF_TXN_MAX_CMD_ID];" in _mqtt()
+        assert "char s_reboot_cmd_id[FF_TXN_MAX_CMD_ID];" in _mqtt()
 
     def test_a_command_with_that_id_is_a_duplicate(self) -> None:
         body = _body("on_command")
@@ -453,16 +457,13 @@ class TestFfOta:
         assert leave < body.index("staged_phase(cmd_id, NULL, 0)") < body.index("cancel_staged(")
 
     def test_the_undo_still_has_one_boot_switch(self) -> None:
-        from tests.agent_src import c_call_sites
-
-        raw_ota = FF_OTA_C.read_text(encoding="utf-8")
         ota = _ota()
-        assert c_call_sites(raw_ota, "esp_ota_set_boot_partition") == [
+        assert c_call_sites_in_family("ff_ota", "esp_ota_set_boot_partition") == [
             "ff_ota_dock_stage",
             "restore_boot_partition",
         ]
-        assert "static bool restore_boot_partition(const char *why)" in ota
-        assert c_call_sites(raw_ota, "restore_boot_partition") == [
+        assert "bool restore_boot_partition(const char *why)" in ota
+        assert c_call_sites_in_family("ff_ota", "restore_boot_partition") == [
             "cancel_staged",
             "ff_ota_dock_stage",
             "ota_task",

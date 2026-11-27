@@ -1,100 +1,66 @@
-"""The ingest path, against the migrated test database.
+"""Core MQTT ingestor path, readiness capability summary, and per-device rate budget (`A-15`, `T-10`).
 
-Every case is named for the failure it prevents. Three of them are the ones that
-matter most, and each has a comment saying why:
-
-* an unregistered device must create **nothing** — the enrollment boundary;
-* a retained replay must not advance `last_seen` — otherwise an ingestor restart
-  marks the entire dead fleet alive;
-* `presence{"online":false}` must not advance `last_seen` — that message comes from
-  the broker's LWT, not the board.
+`up/status`, `up/ack`, `reset_reason`, and deploy KPI accounting tests live in
+`tests/test_ingestor_telemetry_and_logs.py`.
 """
+
+from __future__ import annotations
 
 import asyncio
 import datetime as dt
 import json
 import logging
 from collections.abc import AsyncIterator
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import asyncpg
 import pytest
 from sqlalchemy import func, select, text
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
-from fleetforge import device_commands
 from fleetforge.db.base import asyncpg_dsn
-from fleetforge.db.models import DeployEvent, Device, DeviceCommand
-from fleetforge.deploys import DeploySender, counts_in_deploy_kpis, record_requested
+from fleetforge.db.models import DeployEvent, Device
 from fleetforge.events import EVENTS_CHANNEL, DeviceEvent, EventType
-from fleetforge.ingestor.handlers import handle_up_message
-from fleetforge.selftest_outcome import SelfTestOutcome
-from tests.conftest import TEST_DB_NAME, capture_logs, database_url_for
-
-DEVICE_ID = "a4cf12b3de90"
-NOW = dt.datetime(2026, 9, 8, 12, 0, tzinfo=dt.UTC)
-TOLERANCE = 2.5
-
-ANNOUNCE = {
-    "proto": 1,
-    "device_id": DEVICE_ID,
-    "platform_type": "esp32c6",
-    "fw_version": "1.4.2",
-    "agent_version": "0.3.0",
-    "link_type": "wifi",
-    "power_class": "always_on",
-    "partition_layout": "ab-4m-v1",
-    "ota_slot_size": 1966080,
-    "capabilities": ["ota", "selftest"],
-}
-
-
-async def seed_device(
-    session: AsyncSession, device_id: str = DEVICE_ID, **overrides: object
-) -> Device:
-    values: dict[str, object] = {
-        "device_id": device_id,
-        "platform_type": "esp32c6",
-        "link_type": "wifi",
-        "power_class": "always_on",
-    }
-    values.update(overrides)
-    device = Device(**values)
-    session.add(device)
-    await session.flush()
-    return device
-
-
-async def publish(
-    session: AsyncSession,
-    channel: str,
-    body: object = None,
-    *,
-    device_id: str = DEVICE_ID,
-    retained: bool = False,
-    at: dt.datetime = NOW,
-    raw: bytes | None = None,
-    topic: str | None = None,
-) -> DeviceEvent | None:
-    """Drive one message through the handler with sensible defaults."""
-    payload = raw if raw is not None else json.dumps(body).encode()
-    return await handle_up_message(
-        session,
-        topic=topic if topic is not None else f"ff/v1/d/{device_id}/up/{channel}",
-        payload=payload,
-        retained=retained,
-        received_at=at,
-        tolerance=TOLERANCE,
-    )
-
-
-async def reload(session: AsyncSession, device_id: str = DEVICE_ID) -> Device:
-    device = await session.scalar(select(Device).where(Device.device_id == device_id))
-    assert device is not None
-    await session.refresh(device)
-    return device
-
-
-# --- announce ---------------------------------------------------------------
+from fleetforge.ingest.handlers import handle_up_message
+from fleetforge.ingest.rate_budget import DeviceIngestRateLimiter
+from fleetforge.ingestor import main as ingestor_main
+from fleetforge.ingestor.main import (
+    handle_message,
+    ingestor_capabilities_status,
+    log_ingestor_readiness,
+    touch_heartbeat,
+)
+from fleetforge.ingestor.protocol import (
+    AnnouncePayload,
+    HeartbeatPayload,
+    PresencePayload,
+    StatusPayload,
+    decode,
+)
+from tests.conftest import TEST_DB_NAME, capture_logs, database_url_for, settings_for_tests
+from tests.support_ingestor import (
+    ANNOUNCE as ANNOUNCE,
+)
+from tests.support_ingestor import (
+    DEVICE_ID as DEVICE_ID,
+)
+from tests.support_ingestor import (
+    NOW as NOW,
+)
+from tests.support_ingestor import (
+    TOLERANCE as TOLERANCE,
+)
+from tests.support_ingestor import (
+    publish as publish,
+)
+from tests.support_ingestor import (
+    reload as reload,
+)
+from tests.support_ingestor import (
+    seed_device as seed_device,
+)
 
 
 async def test_announce_updates_identity(session: AsyncSession) -> None:
@@ -241,9 +207,6 @@ async def test_unknown_link_type_is_written_through(session: AsyncSession) -> No
     assert (await reload(session)).link_type == "satellite"
 
 
-# --- ssid / known_networks (R2b-be-5) ----------------------------------------
-
-
 async def test_announce_stores_the_network_the_board_is_on(session: AsyncSession) -> None:
     await seed_device(session)
 
@@ -255,11 +218,7 @@ async def test_announce_stores_the_network_the_board_is_on(session: AsyncSession
 
 
 async def test_the_network_is_written_as_a_pair_on_every_announce(session: AsyncSession) -> None:
-    """Absent means "not reported", not "no change": a stale network is a wrong row.
-
-    A board that moved reports it next session; one that OTAs back to a pre-0.4.6
-    agent stops sending the keys, and must not keep saying "on: home".
-    """
+    """Absent means 'not reported', not 'no change'."""
     await seed_device(session)
 
     await publish(session, "announce", {**ANNOUNCE, "ssid": "shed", "known_networks": 2})
@@ -294,8 +253,7 @@ async def test_ethernet_reports_no_network(session: AsyncSession) -> None:
 async def test_a_malformed_network_never_loses_the_announce(
     session: AsyncSession, ssid: object, known_networks: object
 ) -> None:
-    """A `ValidationError` would drop the `fw_version` that says the OTA landed — and,
-    the announce being retained, drop it again on every reconnect."""
+    """A `ValidationError` would drop the `fw_version` that says the OTA landed."""
     await seed_device(session, ssid="shed", known_networks=2)
 
     event = await publish(
@@ -313,8 +271,8 @@ async def test_a_malformed_network_never_loses_the_announce(
 @pytest.mark.parametrize(
     "raw_ssid",
     [
-        b'"a\\u0000b"',  # NUL: PostgreSQL refuses it in TEXT and rolls the whole write back
-        b'"\\ud800"',  # a lone surrogate: valid JSON, not encodable as UTF-8
+        b'"a\\u0000b"',
+        b'"\\ud800"',
         b'"tab\\there"',
     ],
 )
@@ -366,8 +324,6 @@ async def test_a_retained_announce_also_writes_the_network(session: AsyncSession
     assert device.last_seen is None
 
 
-# --- board measurements (R2b-be-6) -------------------------------------------
-
 SHA = "1fa67e6bbd034e434d04e9d6f4f52bbe899361602cd498573eb3bde97d1559ed"
 MEASURED = {"flash_chip_size": 4194304, "partition_table_sha256": SHA, "rollback_capable": True}
 
@@ -387,9 +343,7 @@ async def test_announce_stores_the_board_measurements(session: AsyncSession) -> 
 async def test_the_measurements_are_written_as_a_triple_on_every_announce(
     session: AsyncSession,
 ) -> None:
-    """Absent means "unknown", not "no change": a board that OTAs back to an agent that
-    does not send the keys must not keep a reading it no longer vouches for. It is also
-    the fail-open direction for R2b-be-7's gate: NULL never refuses."""
+    """Absent means 'unknown', not 'no change'."""
     await seed_device(session)
 
     await publish(session, "announce", {**ANNOUNCE, **MEASURED})
@@ -436,8 +390,6 @@ async def test_malformed_measurements_never_lose_the_announce(
 async def test_measurements_the_database_would_refuse_are_stored_as_null(
     session: AsyncSession,
 ) -> None:
-    """A size past int64 makes asyncpg raise; a NUL makes PostgreSQL raise. Either
-    would roll back the whole announce. Raw bytes, so the test reads like the wire."""
     await seed_device(session)
     raw = (
         b'{"proto":1,"device_id":"' + DEVICE_ID.encode() + b'","fw_version":"9.9.11",'
@@ -494,9 +446,6 @@ async def test_a_retained_announce_also_writes_the_measurements(session: AsyncSe
     assert device.last_seen is None
 
 
-# --- presence ---------------------------------------------------------------
-
-
 async def test_presence_true_then_false_sets_reported_presence(session: AsyncSession) -> None:
     await seed_device(session)
 
@@ -516,11 +465,7 @@ async def test_presence_true_then_false_sets_reported_presence(session: AsyncSes
 async def test_offline_presence_never_advances_last_seen(
     session: AsyncSession, power_class: str, extra: dict[str, object]
 ) -> None:
-    """The LWT is published by the broker, not the board.
-
-    For a `sleepy` device this is the difference between a bricked e-paper frame
-    reading dead and reading alive forever: its LWT fires on every normal sleep.
-    """
+    """The LWT is published by the broker, not the board."""
     seen = NOW - dt.timedelta(hours=3)
     await seed_device(
         session, device_id=DEVICE_ID, power_class=power_class, last_seen=seen, **extra
@@ -538,9 +483,6 @@ async def test_presence_without_online_is_dropped(session: AsyncSession) -> None
 
     assert await publish(session, "presence", {"note": "hello"}) is None
     assert (await reload(session)).presence_reported is None
-
-
-# --- retained replay --------------------------------------------------------
 
 
 async def test_retained_replay_applies_state_but_not_liveness(session: AsyncSession) -> None:
@@ -562,18 +504,11 @@ async def test_retained_replay_applies_state_but_not_liveness(session: AsyncSess
 async def test_retained_replay_on_another_channel_is_ignored(
     session: AsyncSession, channel: str
 ) -> None:
-    """A channel that only proves liveness has nothing to say when it is a replay.
-
-    `up/status` is the exception and is ingested retained — see
-    `test_a_retained_status_does_not_prove_liveness`.
-    """
+    """A channel that only proves liveness has nothing to say when it is a replay."""
     await seed_device(session)
 
     assert await publish(session, channel, {"anything": 1}, retained=True) is None
     assert (await reload(session)).last_seen is None
-
-
-# --- heartbeat and last_seen ------------------------------------------------
 
 
 async def test_heartbeat_advances_last_seen_and_fw_version(session: AsyncSession) -> None:
@@ -601,11 +536,6 @@ async def test_last_seen_is_monotonic(session: AsyncSession) -> None:
 
 @pytest.mark.parametrize("channel", ["telemetry", "log", "some-future-channel"])
 async def test_other_channels_only_prove_liveness(session: AsyncSession, channel: str) -> None:
-    """R4 owns telemetry and log; an unknown channel is a future agent's.
-
-    `status` is deliberately **not** in this list any more: R1-be-4 made it the one
-    channel that writes `deploy_events`.
-    """
     await seed_device(session)
 
     event = await publish(session, channel, {"state": "confirmed", "anything": 1})
@@ -624,484 +554,6 @@ async def test_sleepy_device_online_is_derived_from_last_seen(session: AsyncSess
 
     assert event is not None
     assert event.online is True
-
-
-# --- up/status → deploy_events (R1-be-4) --------------------------------------
-
-CMD_ID = "01J9Z0000000000000000DEPL0"
-
-
-async def seed_intent(
-    session: AsyncSession,
-    *,
-    device_id: str = DEVICE_ID,
-    cmd_id: str = CMD_ID,
-    artifact_version: str = "1.5.0",
-    from_version: str | None = "1.4.2",
-) -> None:
-    """The server-authored `requested` row, written by the shipped writer.
-
-    Built through `deploys.record_requested` rather than by hand so the tests exercise
-    the same row shape the API produces — the version columns an observed row copies
-    are only correct if both halves agree.
-    """
-    await record_requested(
-        session,
-        device_id=device_id,
-        cmd_id=cmd_id,
-        artifact_version=artifact_version,
-        from_version=from_version,
-        sha256="a" * 64,
-        size_bytes=1966080,
-        target="esp32c6",
-        apply="immediate",
-        sent_by=DeploySender(subject="admin", token_id="t", credential=None),
-    )
-
-
-async def deploy_rows(session: AsyncSession, cmd_id: str = CMD_ID) -> list[DeployEvent]:
-    return list(
-        (
-            await session.scalars(
-                select(DeployEvent).where(DeployEvent.cmd_id == cmd_id).order_by(DeployEvent.id)
-            )
-        ).all()
-    )
-
-
-async def test_the_whole_walk_is_recorded_as_transitions(session: AsyncSession) -> None:
-    """Every state the board reports becomes a row, and none of them ends the transaction."""
-    await seed_device(session)
-    await seed_intent(session)
-
-    walk = ["staging", "downloading", "verifying", "staged", "applying", "rebooting"]
-    for pct, state in enumerate(walk):
-        event = await publish(session, "status", {"cmd_id": CMD_ID, "state": state, "pct": pct})
-        assert event is not None
-        assert event.type is EventType.DEVICE_DEPLOY
-        assert event.cmd_id == CMD_ID
-        assert event.state == state
-        assert event.is_terminal is False
-        assert event.detail is None
-
-    rows = await deploy_rows(session)
-    assert [row.state for row in rows] == ["requested", *walk]
-    assert [row.is_terminal for row in rows] == [False] * 7
-    assert {row.artifact_version for row in rows} == {"1.5.0"}
-
-
-async def test_confirmed_is_terminal_and_carries_the_intended_versions(
-    session: AsyncSession,
-) -> None:
-    """Without the versions off the `requested` row, R6's delivery-success KPI is uncomputable."""
-    await seed_device(session)
-    await seed_intent(session)
-
-    await publish(session, "status", {"cmd_id": CMD_ID, "state": "confirmed", "pct": 100})
-
-    row = (await deploy_rows(session))[-1]
-    assert row.state == "confirmed"
-    assert row.is_terminal is True
-    assert row.artifact_version == "1.5.0"
-    assert row.from_version == "1.4.2"
-    assert row.detail == {"pct": 100}
-    assert row.at == NOW
-
-
-@pytest.mark.parametrize("state", ["failed", "rolled_back"])
-async def test_failure_and_rollback_are_terminal(session: AsyncSession, state: str) -> None:
-    """A table that only records successes is a KPI that only measures them.
-
-    `rolled_back` is a fleet-safety **save**, not a loss — it still ends the transaction.
-    """
-    await seed_device(session)
-    await seed_intent(session)
-
-    await publish(session, "status", {"cmd_id": CMD_ID, "state": state, "detail": "boom"})
-
-    row = (await deploy_rows(session))[-1]
-    assert row.state == state
-    assert row.is_terminal is True
-    assert row.detail == {"detail": "boom"}
-
-
-async def test_a_retained_replay_writes_no_second_row(session: AsyncSession) -> None:
-    """`up/status` is retained and the ingestor re-subscribes: without dedupe, every
-    restart duplicates the KPI rows forever."""
-    await seed_device(session)
-    await seed_intent(session)
-    body = {"cmd_id": CMD_ID, "state": "confirmed", "pct": 100}
-
-    first = await publish(session, "status", body)
-    replay = await publish(session, "status", body, retained=True)
-    again = await publish(session, "status", body, retained=True)
-
-    assert first is not None and first.type is EventType.DEVICE_DEPLOY
-    assert replay is not None and replay.type is EventType.DEVICE_SEEN
-    assert again is not None and again.type is EventType.DEVICE_SEEN
-    assert [row.state for row in await deploy_rows(session)] == ["requested", "confirmed"]
-
-
-# The R2 walks (R2-be-1): what a board reports AFTER the apply reboot. The server needed
-# no change for these — the point of the tests is that the whole walk, as the agent and
-# the simulator now emit it, lands as one transaction with exactly one terminal row.
-
-PRE_REBOOT_WALK = ["staging", "downloading", "verifying", "staged", "applying", "rebooting"]
-
-
-async def test_the_confirm_walk_ends_in_one_terminal_row(session: AsyncSession) -> None:
-    await seed_device(session)
-    await seed_intent(session)
-
-    for state in [*PRE_REBOOT_WALK, "confirming"]:
-        await publish(session, "status", {"cmd_id": CMD_ID, "state": state, "pct": None})
-    await publish(session, "status", {"cmd_id": CMD_ID, "state": "confirmed", "pct": 100})
-
-    rows = await deploy_rows(session)
-    assert [row.state for row in rows] == ["requested", *PRE_REBOOT_WALK, "confirming", "confirmed"]
-    assert [row.state for row in rows if row.is_terminal] == ["confirmed"]
-    for row in rows[-2:]:
-        assert (row.artifact_version, row.from_version) == ("1.5.0", "1.4.2")
-
-
-async def test_the_rollback_walk_ends_in_one_terminal_row(session: AsyncSession) -> None:
-    """`rolling_back` comes from the bad image, `rolled_back` from the one it returned to —
-    one transaction either way, because both carry the cmd_id the record kept."""
-    await seed_device(session)
-    await seed_intent(session)
-    detail = "returned to ota_0; ota_1 did not confirm"
-
-    for state in [*PRE_REBOOT_WALK, "confirming", "rolling_back"]:
-        await publish(session, "status", {"cmd_id": CMD_ID, "state": state})
-    await publish(session, "status", {"cmd_id": CMD_ID, "state": "rolled_back", "detail": detail})
-
-    rows = await deploy_rows(session)
-    assert [row.state for row in rows][-3:] == ["confirming", "rolling_back", "rolled_back"]
-    assert [row.state for row in rows if row.is_terminal] == ["rolled_back"]
-    rolled = rows[-1]
-    assert (rolled.artifact_version, rolled.from_version) == ("1.5.0", "1.4.2")
-    assert rolled.detail == {"detail": detail}
-    assert rows[-2].artifact_version == "1.5.0"
-
-
-async def test_the_old_images_retained_rolled_back_is_recorded_once(session: AsyncSession) -> None:
-    """The board republishes `rolled_back` after any reset before its PUBACK, and the
-    broker replays the retained copy on every ingestor restart. One row, forever."""
-    await seed_device(session)
-    await seed_intent(session)
-    body = {"cmd_id": CMD_ID, "state": "rolled_back", "detail": "returned to ota_0"}
-
-    await publish(session, "status", body)
-    await publish(session, "status", body)  # republished by the next boot
-    replay = await publish(session, "status", body, retained=True)
-
-    assert replay is not None and replay.type is EventType.DEVICE_SEEN
-    assert [row.state for row in await deploy_rows(session)] == ["requested", "rolled_back"]
-
-
-async def test_a_retained_status_does_not_prove_liveness(session: AsyncSession) -> None:
-    """The replay of a dead board's last status must not mark the fleet alive."""
-    await seed_device(session)
-    await seed_intent(session)
-
-    await publish(session, "status", {"cmd_id": CMD_ID, "state": "staged"}, retained=True)
-    assert (await reload(session)).last_seen is None
-    assert len(await deploy_rows(session)) == 2, "the state is still recorded"
-
-    await publish(session, "status", {"cmd_id": CMD_ID, "state": "applying"})
-    assert (await reload(session)).last_seen == NOW
-
-
-async def test_the_wire_may_not_author_the_servers_own_state(session: AsyncSession) -> None:
-    """A board claiming `requested` is a firmware bug or a forgery. Never a row."""
-    await seed_device(session)
-    await seed_intent(session)
-
-    with capture_logs() as records:
-        event = await publish(session, "status", {"cmd_id": CMD_ID, "state": "requested"})
-
-    assert [row.state for row in await deploy_rows(session)] == ["requested"]
-    assert event is not None
-    assert event.type is EventType.DEVICE_SEEN
-    warnings = [r for r in records if r.levelno >= logging.WARNING]
-    assert warnings, "the forgery attempt must be visible in the log"
-    assert any("requested" in r.getMessage() for r in warnings)
-
-
-async def test_status_from_an_unregistered_device_writes_nothing(session: AsyncSession) -> None:
-    """`deploy_events.device_id` is an FK with `ON DELETE RESTRICT`: an insert here
-    would raise `IntegrityError` and be swallowed as "ingest failed"."""
-    before = await session.scalar(select(func.count()).select_from(DeployEvent))
-
-    event = await publish(
-        session,
-        "status",
-        {"cmd_id": CMD_ID, "state": "confirmed"},
-        device_id="ffffffffffff",
-    )
-
-    assert event is None
-    assert await session.scalar(select(func.count()).select_from(DeployEvent)) == before
-
-
-async def test_status_from_a_decommissioned_device_writes_nothing(session: AsyncSession) -> None:
-    await seed_device(session, decommissioned_at=NOW - dt.timedelta(days=1))
-    before = await session.scalar(select(func.count()).select_from(DeployEvent))
-
-    for retained in (False, True):
-        assert (
-            await publish(
-                session, "status", {"cmd_id": CMD_ID, "state": "confirmed"}, retained=retained
-            )
-            is None
-        )
-    assert await session.scalar(select(func.count()).select_from(DeployEvent)) == before
-
-
-async def test_a_status_with_no_cmd_id_only_proves_liveness(session: AsyncSession) -> None:
-    """`idle` with no transaction would otherwise be a row per boot in a forever table."""
-    await seed_device(session)
-
-    event = await publish(session, "status", {"state": "idle"})
-
-    assert event is not None
-    assert event.type is EventType.DEVICE_SEEN
-    assert (await reload(session)).last_seen == NOW
-    assert await session.scalar(select(func.count()).select_from(DeployEvent)) == 0
-
-
-async def test_an_unmapped_cmd_id_is_still_recorded(session: AsyncSession) -> None:
-    """A transaction from before a database rebuild is an outcome too. Versions NULL."""
-    await seed_device(session)
-
-    event = await publish(session, "status", {"cmd_id": "unknown-cmd", "state": "confirmed"})
-
-    assert event is not None
-    assert event.type is EventType.DEVICE_DEPLOY
-    row = (await deploy_rows(session, "unknown-cmd"))[0]
-    assert row.is_terminal is True
-    assert row.artifact_version is None
-    assert row.from_version is None
-
-
-async def test_an_unknown_state_is_recorded_and_is_not_terminal(session: AsyncSession) -> None:
-    """The ingest path never rejects on vocabulary — but only the set ends a transaction."""
-    await seed_device(session)
-    await seed_intent(session)
-
-    await publish(session, "status", {"cmd_id": CMD_ID, "state": "teleporting"})
-
-    row = (await deploy_rows(session))[-1]
-    assert row.state == "teleporting"
-    assert row.is_terminal is False
-
-
-@pytest.mark.parametrize("raw", [b"not json", b'{"state": 42}', b'{"cmd_id": []}'])
-async def test_unusable_status_payloads_write_nothing(session: AsyncSession, raw: bytes) -> None:
-    await seed_device(session)
-    await seed_intent(session)
-
-    await publish(session, "status", raw=raw)
-
-    assert [row.state for row in await deploy_rows(session)] == ["requested"]
-
-
-async def test_odd_but_usable_fields_are_coerced_not_dropped(session: AsyncSession) -> None:
-    """A retained message that fails validation is an outcome lost on every reconnect."""
-    await seed_device(session)
-    await seed_intent(session)
-
-    await publish(
-        session,
-        "status",
-        {"cmd_id": CMD_ID, "state": "confirmed", "pct": "42", "detail": {"a": 1}, "extra": True},
-    )
-
-    row = (await deploy_rows(session))[-1]
-    assert row.state == "confirmed"
-    assert row.detail == {"detail": "{'a': 1}"}, "pct was not an int, the state still landed"
-
-
-async def test_detail_is_sanitised_truncated_and_url_redacted(session: AsyncSession) -> None:
-    """Device-controlled text in a table kept forever; the signed URL is a credential."""
-    await seed_device(session)
-    await seed_intent(session)
-
-    event = await publish(
-        session,
-        "status",
-        {
-            "cmd_id": CMD_ID,
-            "state": "failed",
-            "detail": "get https://host/v1/artifact/ab/bin?sig=secret failed\nline two "
-            + "x" * 300,
-        },
-    )
-
-    detail = (await deploy_rows(session))[-1].detail
-    assert isinstance(detail, dict)
-    stored = detail["detail"]
-    assert len(stored) == 200
-    assert "http" not in stored
-    assert "sig=secret" not in stored
-    assert "<url>" in stored
-    assert "\n" not in stored
-    # R4-be-2: the frame carries the stored, redacted copy, never the wire's.
-    assert event is not None
-    assert event.detail == stored
-    assert "sig=secret" not in event.model_dump_json()
-    assert "host/v1" not in event.model_dump_json()
-
-
-async def test_a_deploy_event_carries_the_transaction_and_a_terminal_detail(
-    session: AsyncSession,
-) -> None:
-    """R4-be-2: `detail` only on a terminal row; non-terminal chatter never rides the frame."""
-    await seed_device(session)
-    await seed_intent(session)
-
-    walking = await publish(
-        session, "status", {"cmd_id": CMD_ID, "state": "downloading", "detail": "chunk 3"}
-    )
-    failed = await publish(
-        session, "status", {"cmd_id": CMD_ID, "state": "failed", "detail": "boom"}
-    )
-    odd = await publish(session, "status", {"cmd_id": CMD_ID, "state": "teleporting"})
-
-    assert walking is not None and walking.detail is None and walking.is_terminal is False
-    assert failed is not None
-    assert (failed.cmd_id, failed.state, failed.is_terminal, failed.detail) == (
-        CMD_ID,
-        "failed",
-        True,
-        "boom",
-    )
-    assert odd is not None and odd.state == "teleporting" and odd.is_terminal is False
-
-
-async def test_a_terminal_row_carries_the_selftest_outcome(session: AsyncSession) -> None:
-    """R5-be-1: parsed from the stored detail, on a terminal row of the right state only."""
-    await seed_device(session)
-    await seed_intent(session)
-
-    walking = await publish(
-        session,
-        "status",
-        {"cmd_id": CMD_ID, "state": "rolling_back", "detail": "selftest failed: boom"},
-    )
-    failed = await publish(
-        session,
-        "status",
-        {
-            "cmd_id": CMD_ID,
-            "state": "rolled_back",
-            "detail": "selftest failed: boom; returned to ota_1",
-        },
-    )
-    replay = await publish(
-        session,
-        "status",
-        {
-            "cmd_id": CMD_ID,
-            "state": "rolled_back",
-            "detail": "selftest failed: boom; returned to ota_1",
-        },
-        retained=True,
-    )
-
-    assert walking is not None and walking.selftest is None
-    assert failed is not None
-    assert failed.selftest == SelfTestOutcome("failed", "boom", "ota_1")
-    assert replay is None or replay.selftest is None
-
-
-async def test_a_passed_selftest_rides_the_confirmed_frame(session: AsyncSession) -> None:
-    await seed_device(session)
-    await seed_intent(session)
-
-    event = await publish(
-        session,
-        "status",
-        {"cmd_id": CMD_ID, "state": "confirmed", "detail": "selftest passed", "pct": 100},
-    )
-
-    assert event is not None
-    assert event.selftest == SelfTestOutcome("passed", None, None)
-    assert json.loads(event.model_dump_json())["selftest"] == {
-        "outcome": "passed",
-        "reason": None,
-        "returned_to": None,
-    }
-
-
-async def test_the_selftest_reason_is_the_stored_redacted_copy(session: AsyncSession) -> None:
-    await seed_device(session)
-    await seed_intent(session)
-
-    event = await publish(
-        session,
-        "status",
-        {
-            "cmd_id": CMD_ID,
-            "state": "rolled_back",
-            "detail": "selftest failed: https://host/x?sig=secret boom; returned to ota_0",
-        },
-    )
-
-    assert event is not None and event.selftest is not None
-    assert event.selftest.reason == "<url> boom"
-    assert "sig=secret" not in event.model_dump_json()
-
-
-async def test_a_confirmed_without_selftest_words_has_a_null_selftest(
-    session: AsyncSession,
-) -> None:
-    await seed_device(session)
-    await seed_intent(session)
-
-    event = await publish(
-        session, "status", {"cmd_id": CMD_ID, "state": "confirmed", "detail": "ok"}
-    )
-
-    assert event is not None and event.is_terminal is True and event.selftest is None
-
-
-async def test_a_terminal_row_without_detail_has_a_null_detail(session: AsyncSession) -> None:
-    await seed_device(session)
-    await seed_intent(session)
-
-    event = await publish(session, "status", {"cmd_id": CMD_ID, "state": "confirmed"})
-
-    assert event is not None
-    assert event.is_terminal is True
-    assert event.detail is None
-
-
-async def test_non_deploy_events_carry_no_transaction_fields(session: AsyncSession) -> None:
-    """A deduped replay, a status with no cmd_id, and a heartbeat all leave the four null."""
-    await seed_device(session)
-    await seed_intent(session)
-    body = {"cmd_id": CMD_ID, "state": "confirmed", "detail": "ok"}
-    await publish(session, "status", body)
-
-    events = [
-        await publish(session, "status", body, retained=True),
-        await publish(session, "status", {"state": "idle"}),
-        await publish(session, "heartbeat", {"fw_version": "1.4.2"}),
-    ]
-
-    for event in events:
-        assert event is not None
-        assert event.type is not EventType.DEVICE_DEPLOY
-        assert (event.cmd_id, event.state, event.is_terminal, event.detail) == (
-            None,
-            None,
-            None,
-            None,
-        )
-
-
-# --- garbage in ---------------------------------------------------------------
 
 
 @pytest.mark.parametrize(
@@ -1133,7 +585,7 @@ async def test_empty_payload_is_the_retained_clear_and_is_silent(session: AsyncS
 @pytest.mark.parametrize(
     "topic",
     [
-        "ff/v1/d/A4CF12B3DE90/up/hb",  # uppercase MAC — the CHECK's format rule
+        "ff/v1/d/A4CF12B3DE90/up/hb",
         "ff/v1/d/xyz/up/hb",
         "ff/v2/d/a4cf12b3de90/up/hb",
         "ff/v1/d/a4cf12b3de90/dn/cmd",
@@ -1149,16 +601,9 @@ async def test_bad_topics_write_nothing(session: AsyncSession, topic: str) -> No
     assert (await reload(session)).last_seen is None
 
 
-# --- the NOTIFY itself --------------------------------------------------------
-
-
 @pytest.fixture
 async def listener() -> AsyncIterator[asyncpg.Connection]:
-    """A raw asyncpg connection LISTENing on `ff_events`.
-
-    `LISTEN` cannot share a pooled connection, which is also how R0-be-5 will have to
-    do it: one dedicated connection per API worker.
-    """
+    """A raw asyncpg connection LISTENing on `ff_events`."""
     dsn = asyncpg_dsn(database_url_for(TEST_DB_NAME))
     connection = await asyncpg.connect(dsn)
     try:
@@ -1170,11 +615,7 @@ async def listener() -> AsyncIterator[asyncpg.Connection]:
 async def test_notify_is_delivered_on_commit_and_never_on_rollback(
     engine: AsyncEngine, listener: asyncpg.Connection
 ) -> None:
-    """The property R0-be-5 depends on: transactional delivery, real committed rows.
-
-    The rolled-back `session` fixture would hide it entirely, so this test commits and
-    cleans up after itself.
-    """
+    """Transactional delivery on `ff_events`: committed rows notify, rolled-back rows do not."""
     device_id = "dddddddddd10"
     received: asyncio.Queue[str] = asyncio.Queue()
     await listener.add_listener(EVENTS_CHANNEL, lambda *args: received.put_nowait(args[-1]))
@@ -1189,8 +630,6 @@ async def test_notify_is_delivered_on_commit_and_never_on_rollback(
                 {"d": device_id},
             )
 
-        # A rolled-back ingest must announce nothing: SSE can never report a row the
-        # database does not have.
         async with AsyncSession(engine) as rolled_back:
             await publish(rolled_back, "hb", {"fw_version": "9.9.9"}, device_id=device_id)
             await rolled_back.rollback()
@@ -1205,424 +644,20 @@ async def test_notify_is_delivered_on_commit_and_never_on_rollback(
         assert payload["type"] == "device.heartbeat"
         assert payload["device_id"] == device_id
         assert payload["fw_version"] == "1.4.2"
-        assert payload["online"] is False, "no presence message yet, so always_on is offline"
+        assert payload["online"] is False
         assert received.empty(), "the rolled-back transaction must have emitted nothing"
-
-        # The envelope R0-be-5 parses is the one this module ships.
         assert DeviceEvent.model_validate(payload).device_id == device_id
     finally:
-        # The listener connection is closed by its fixture; only the committed row
-        # needs undoing, since this test does not get the rollback fixture.
         async with engine.begin() as cleanup:
             await cleanup.execute(
                 text("DELETE FROM devices WHERE device_id = :d"), {"d": device_id}
             )
 
 
-# ---------------------------------------------------------------------------
-# reset_reason (S0-fw-6): logged on a live announce; stored since R4-be-1
-# (tests/test_device_health.py covers the column, the faults and the SSE field)
-# ---------------------------------------------------------------------------
-
-
-def _reset_reason_lines(records: list[logging.LogRecord]) -> list[str]:
-    return [r.getMessage() for r in records if "announced reset_reason=" in r.getMessage()]
-
-
-async def test_a_live_announce_logs_its_reset_reason(session: AsyncSession) -> None:
-    await seed_device(session)
-    with capture_logs() as records:
-        event = await publish(session, "announce", {**ANNOUNCE, "reset_reason": "panic"})
-
-    assert event is not None
-    assert _reset_reason_lines(records) == [f"device {DEVICE_ID} announced reset_reason=panic"]
-
-
-async def test_a_retained_announce_does_not_log_a_reset_reason(session: AsyncSession) -> None:
-    """A replay repeats an old boot's reason on every ingestor reconnect."""
-    await seed_device(session)
-    with capture_logs() as records:
-        event = await publish(
-            session, "announce", {**ANNOUNCE, "reset_reason": "panic"}, retained=True
-        )
-
-        assert event is not None
-        assert _reset_reason_lines(records) == []
-        # The capture works (else the check above is vacuous): a live one is logged.
-        await publish(session, "announce", {**ANNOUNCE, "reset_reason": "sw"})
-
-    assert _reset_reason_lines(records) == [f"device {DEVICE_ID} announced reset_reason=sw"]
-
-
-async def test_an_unknown_reset_reason_is_logged_as_is(session: AsyncSession) -> None:
-    """*Evolution rules*, rule 2: a name from a later IDF is never refused."""
-    await seed_device(session)
-    with capture_logs() as records:
-        await publish(session, "announce", {**ANNOUNCE, "reset_reason": "new_in_idf_6"})
-
-    assert _reset_reason_lines(records) == [
-        f"device {DEVICE_ID} announced reset_reason=new_in_idf_6"
-    ]
-
-
-@pytest.mark.parametrize(
-    "value",
-    [7, True, ["sw"], {"r": "sw"}, "x" * 17, "sw\nfake log line", None],
-)
-async def test_a_malformed_reset_reason_logs_null_and_keeps_the_announce(
-    session: AsyncSession, value: object
-) -> None:
-    await seed_device(session)
-    with capture_logs() as records:
-        event = await publish(
-            session, "announce", {**ANNOUNCE, "fw_version": "9.9.9", "reset_reason": value}
-        )
-
-    assert event is not None
-    assert (await reload(session)).fw_version == "9.9.9"
-    assert _reset_reason_lines(records) == [f"device {DEVICE_ID} announced reset_reason=null"]
-
-
-async def test_an_absent_reset_reason_logs_null(session: AsyncSession) -> None:
-    """Every agent <= 0.5.0."""
-    await seed_device(session)
-    with capture_logs() as records:
-        await publish(session, "announce", ANNOUNCE)
-
-    assert _reset_reason_lines(records) == [f"device {DEVICE_ID} announced reset_reason=null"]
-
-
-def test_reset_reason_is_stored_on_every_announce_not_only_when_present() -> None:
-    """R4-be-1: a column exists, and `ANNOUNCE_FIELDS` ("only when present") leaves it out
-    because `store.py::_reset_values` writes it on every announce, absent meaning NULL."""
-    from fleetforge.ingestor.store import ANNOUNCE_FIELDS
-
-    assert "reset_reason" not in ANNOUNCE_FIELDS
-    assert "last_reset_reason" not in ANNOUNCE_FIELDS
-    assert "last_reset_reason" in Device.__table__.columns
-
-
-# --- up/ack → device_commands (R5-be-2) ---------------------------------------
-
-COMMAND_ID = "c0ffee00c0ffee00c0ffee00c0ffee00"
-OTHER_ID = "a4cf12b3de91"
-
-
-async def seed_command(
-    session: AsyncSession,
-    *,
-    command_id: str = COMMAND_ID,
-    device_id: str = DEVICE_ID,
-    type: str = "apply",
-    cmd_id: str | None = CMD_ID,
-) -> None:
-    """What `POST …/apply` writes before it publishes, through the shipped writer."""
-    await device_commands.record_sent(
-        session,
-        command_id=command_id,
-        device_id=device_id,
-        type=type,
-        cmd_id=cmd_id,
-        sent_by=DeploySender(subject="admin", token_id="t", credential=None),
-    )
-
-
-def ack(**overrides: object) -> dict[str, object]:
-    body: dict[str, object] = {
-        "id": COMMAND_ID,
-        "type": "apply",
-        "result": "accepted",
-        "cmd_id": CMD_ID,
-        "detail": None,
-    }
-    body.update(overrides)
-    return body
-
-
-async def command_row(session: AsyncSession, command_id: str = COMMAND_ID) -> DeviceCommand:
-    row = await session.scalar(select(DeviceCommand).where(DeviceCommand.id == command_id))
-    assert row is not None
-    await session.refresh(row)
-    return row
-
-
-async def deploy_row_count(session: AsyncSession) -> int:
-    return int(await session.scalar(select(func.count()).select_from(DeployEvent)) or 0)
-
-
-async def test_a_live_ack_records_the_answer_and_emits_device_command(
-    session: AsyncSession,
-) -> None:
-    await seed_device(session)
-    await seed_command(session)
-
-    event = await publish(session, "ack", ack())
-
-    assert event is not None
-    assert event.type is EventType.DEVICE_COMMAND
-    assert event.command_id == COMMAND_ID
-    assert event.cmd_id is None  # the deploy fields stay null on a command frame
-    row = await command_row(session)
-    assert (row.result, row.answer_cmd_id, row.answer_detail, row.answered_at) == (
-        "accepted",
-        CMD_ID,
-        None,
-        NOW,
-    )
-    assert (await reload(session)).last_seen == NOW
-    assert await deploy_row_count(session) == 0
-
-
-async def test_the_first_answer_wins(session: AsyncSession) -> None:
-    """A QoS-1 duplicate, or a second answer, changes nothing and is not news."""
-    await seed_device(session)
-    await seed_command(session)
-    await publish(session, "ack", ack())
-
-    later = NOW + dt.timedelta(seconds=5)
-    event = await publish(session, "ack", ack(result="refused", detail="late"), at=later)
-
-    assert event is not None
-    assert event.type is EventType.DEVICE_SEEN
-    assert event.command_id is None
-    row = await command_row(session)
-    assert (row.result, row.answer_detail, row.answered_at) == ("accepted", None, NOW)
-    assert (await reload(session)).last_seen == later
-
-
-async def test_a_board_cannot_answer_another_boards_command(session: AsyncSession) -> None:
-    await seed_device(session)
-    await seed_device(session, OTHER_ID)
-    await seed_command(session)
-
-    event = await publish(session, "ack", ack(), device_id=OTHER_ID)
-
-    assert event is not None
-    assert event.type is EventType.DEVICE_SEEN
-    assert (await command_row(session)).result is None
-
-
-async def test_an_unknown_id_creates_no_row_and_logs_only_its_length(
-    session: AsyncSession,
-) -> None:
-    await seed_device(session)
-
-    with capture_logs() as records:
-        event = await publish(session, "ack", ack(id="bogus-id-from-a-hand-built-command"))
-
-    assert event is not None
-    assert event.type is EventType.DEVICE_SEEN
-    assert await session.scalar(select(func.count()).select_from(DeviceCommand)) == 0
-    lines = [r.getMessage() for r in records if "did not send" in r.getMessage()]
-    assert lines == [
-        f"device {DEVICE_ID} answered (accepted) a command id this server did not send it "
-        "(34 chars); no row created"
-    ]
-    assert not any("bogus" in r.getMessage() for r in records)
-
-
-async def test_a_type_mismatch_is_not_recorded(session: AsyncSession) -> None:
-    await seed_device(session)
-    await seed_command(session, type="reboot", cmd_id=None)
-
-    with capture_logs() as records:
-        event = await publish(session, "ack", ack(type="apply"))
-
-    assert event is not None
-    assert event.type is EventType.DEVICE_SEEN
-    assert (await command_row(session)).result is None
-    assert any(r.levelno == logging.WARNING and "another type" in r.getMessage() for r in records)
-
-
-async def test_a_retained_ack_is_ignored_and_proves_nothing(session: AsyncSession) -> None:
-    await seed_device(session)
-    await seed_command(session)
-
-    event = await publish(session, "ack", ack(), retained=True)
-
-    assert event is None
-    assert (await command_row(session)).result is None
-    assert (await reload(session)).last_seen is None
-
-
-async def test_an_oversized_ack_is_dropped_but_proves_liveness(session: AsyncSession) -> None:
-    await seed_device(session)
-    await seed_command(session)
-
-    event = await publish(session, "ack", ack(detail="x" * 2000))
-
-    assert event is not None
-    assert event.type is EventType.DEVICE_SEEN
-    assert (await command_row(session)).result is None
-    assert (await reload(session)).last_seen == NOW
-
-
-@pytest.mark.parametrize(
-    "raw",
-    [b"not json", b"[]", b'{"id": 42}', b'{"id": "c", "result": ["x"]}'],
-)
-async def test_a_malformed_ack_is_dropped_quietly(session: AsyncSession, raw: bytes) -> None:
-    await seed_device(session)
-    await seed_command(session)
-
-    event = await publish(session, "ack", raw=raw)
-
-    assert event is not None
-    assert event.type is EventType.DEVICE_SEEN
-    assert (await command_row(session)).result is None
-
-
-@pytest.mark.parametrize("result", ["", "   ", "x" * 17, "bad\nline", None])
-async def test_an_unusable_result_is_not_an_answer(
-    session: AsyncSession, result: str | None
-) -> None:
-    await seed_device(session)
-    await seed_command(session)
-
-    await publish(session, "ack", ack(result=result))
-
-    assert (await command_row(session)).result is None
-
-
-async def test_an_open_result_vocabulary_is_stored_as_sent(session: AsyncSession) -> None:
-    """`AckResult` is advisory: a newer agent's value is recorded, not lost."""
-    await seed_device(session)
-    await seed_command(session)
-
-    await publish(session, "ack", ack(result="postponed"))
-
-    assert (await command_row(session)).result == "postponed"
-
-
-async def test_the_detail_is_stored_sanitised_and_never_logged(session: AsyncSession) -> None:
-    await seed_device(session)
-    await seed_command(session)
-    secret = "https://downloads.test/v1/artifact/x/bin?exp=1&sig=abc"
-
-    with capture_logs() as records:
-        await publish(session, "ack", ack(result="refused", detail=f"nope\x1b[31m {secret} tail"))
-
-    assert (await command_row(session)).answer_detail == "nope[31m <url> tail"
-    assert records, "the capture is not vacuous"
-    assert not any("nope" in r.getMessage() or "sig=" in r.getMessage() for r in records)
-
-
-async def test_an_overlong_answer_cmd_id_is_stored_as_null(session: AsyncSession) -> None:
-    await seed_device(session)
-    await seed_command(session)
-
-    await publish(session, "ack", ack(cmd_id="c" * 65))
-
-    row = await command_row(session)
-    assert (row.result, row.answer_cmd_id) == ("accepted", None)
-
-
-async def test_a_publish_failed_command_takes_no_answer(session: AsyncSession) -> None:
-    await seed_device(session)
-    await seed_command(session)
-    await device_commands.mark_publish_failed(session, command_id=COMMAND_ID)
-
-    event = await publish(session, "ack", ack())
-
-    assert event is not None
-    assert event.type is EventType.DEVICE_SEEN
-    assert (await command_row(session)).result is None
-
-
-async def test_an_ack_from_an_unregistered_device_writes_nothing(session: AsyncSession) -> None:
-    event = await publish(session, "ack", ack())
-    assert event is None
-    assert await session.scalar(select(func.count()).select_from(DeviceCommand)) == 0
-
-
-async def test_no_ack_ever_writes_a_deploy_row(session: AsyncSession) -> None:
-    """The ack is not a transaction state: not for an accepted apply, not for a refusal."""
-    await seed_device(session)
-    await seed_intent(session)
-    await seed_command(session)
-    await seed_command(session, command_id="r" * 32, type="rollback", cmd_id=None)
-    before = await deploy_row_count(session)
-
-    await publish(session, "ack", ack())
-    await publish(
-        session,
-        "ack",
-        ack(id="r" * 32, type="rollback", result="refused", cmd_id=None, detail="cancel first"),
-    )
-    await publish(session, "ack", ack(id="unknown"))
-
-    assert await deploy_row_count(session) == before == 1
-
-
-# --- cancelled and the KPI rule (R5-be-2) ----------------------------------------
-
-
-async def test_cancelled_is_recorded_as_terminal(session: AsyncSession) -> None:
-    await seed_device(session)
-    await seed_intent(session)
-
-    event = await publish(session, "status", {"cmd_id": CMD_ID, "state": "cancelled"})
-
-    assert event is not None
-    assert event.type is EventType.DEVICE_DEPLOY
-    assert event.is_terminal is True
-    row = (await deploy_rows(session))[-1]
-    assert (row.state, row.is_terminal, row.artifact_version) == ("cancelled", True, "1.5.0")
-    assert counts_in_deploy_kpis(terminal_state=row.state, has_requested_row=True) is False
-
-
-async def test_a_rollback_commands_own_transaction_is_recorded_and_out_of_the_kpis(
-    session: AsyncSession,
-) -> None:
-    """D5: a rollback of a confirmed image reports under the command's own id. No
-    `requested` row exists, so the versions are NULL and the transaction counts nowhere."""
-    await seed_device(session)
-    await seed_command(session, type="rollback", cmd_id=None)
-
-    await publish(session, "status", {"cmd_id": COMMAND_ID, "state": "rolling_back"})
-    event = await publish(
-        session,
-        "status",
-        {
-            "cmd_id": COMMAND_ID,
-            "state": "rolled_back",
-            "detail": "rolled back by command; returned to ota_0",
-        },
-    )
-
-    rows = await deploy_rows(session, COMMAND_ID)
-    assert [(r.state, r.is_terminal) for r in rows] == [
-        ("rolling_back", False),
-        ("rolled_back", True),
-    ]
-    assert rows[-1].artifact_version is None
-    assert event is not None
-    assert event.selftest is None  # a command rollback is not a self-test outcome
-    assert counts_in_deploy_kpis(terminal_state="rolled_back", has_requested_row=False) is False
-
-
-@pytest.mark.parametrize(
-    ("state", "has_requested", "counts"),
-    [
-        ("confirmed", True, True),
-        ("rolled_back", True, True),
-        ("failed", True, True),
-        ("cancelled", True, False),
-        ("confirmed", False, False),
-        ("rolled_back", False, False),
-        ("failed", False, False),
-        ("cancelled", False, False),
-    ],
-)
-def test_counts_in_deploy_kpis(state: str, has_requested: bool, counts: bool) -> None:
-    assert counts_in_deploy_kpis(terminal_state=state, has_requested_row=has_requested) is counts
-
-
 async def test_announce_safe_mode_is_stored_and_cleared_when_absent(
     session: AsyncSession,
 ) -> None:
-    """D-3: `up/announce.safe_mode` persists on `devices.safe_mode`, clears to `False` when
-    absent on a later announce, and ignores non-boolean values without dropping the announce."""
+    """D-3: `up/announce.safe_mode` persists on `devices.safe_mode` and clears when absent."""
     await seed_device(session)
 
     await publish(
@@ -1639,7 +674,6 @@ async def test_announce_safe_mode_is_stored_and_cleared_when_absent(
     assert dev is not None
     assert dev.safe_mode is True
 
-    # Malformed `safe_mode` (string `"true"`) normalises to `False` (absent/invalid -> False)
     await publish(
         session,
         "announce",
@@ -1654,7 +688,6 @@ async def test_announce_safe_mode_is_stored_and_cleared_when_absent(
     assert dev.fw_version == "1.4.1"
     assert dev.safe_mode is False
 
-    # Re-enter safe mode, then send normal announce omitting `safe_mode` -> cleared to `False`
     await publish(
         session,
         "announce",
@@ -1686,19 +719,6 @@ async def test_deeply_nested_payload_is_dropped_not_raised(
     engine: AsyncEngine, session: AsyncSession
 ) -> None:
     """A-1: 20 KB or deeply nested retained payloads return None and never exit `handle_message`."""
-    from types import SimpleNamespace
-
-    from sqlalchemy.ext.asyncio import async_sessionmaker
-
-    from fleetforge.ingestor.main import handle_message
-    from fleetforge.ingestor.protocol import (
-        AnnouncePayload,
-        HeartbeatPayload,
-        PresencePayload,
-        StatusPayload,
-        decode,
-    )
-
     await seed_device(session)
     await session.commit()
     sm = async_sessionmaker(engine, expire_on_commit=False)
@@ -1721,9 +741,172 @@ async def test_deeply_nested_payload_is_dropped_not_raised(
             )
             await handle_message(fake_msg, sm, 2.5)  # type: ignore[arg-type]
 
-    # Overlong cmd_id / state strings are bounded and coerced to None instead of bloating rows.
     overlong_status = json.dumps({"cmd_id": "x" * 500, "state": "y" * 500}).encode("utf-8")
     parsed = decode(StatusPayload, f"ff/v1/d/{DEVICE_ID}/up/status", overlong_status)
     assert parsed is not None
     assert parsed.cmd_id is None
     assert parsed.state is None
+
+
+def test_ingestor_readiness_lists_disabled_optional_capabilities(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A-15: startup readiness reports disabled optional capabilities and writes JSON heartbeat."""
+    minimal = settings_for_tests(
+        s3_endpoint_url=None,
+        s3_bucket=None,
+        gcs_bucket=None,
+        otel_exporter_otlp_endpoint=None,
+        ingest_device_rate_per_min=120,
+        ingest_device_burst=30,
+    )
+    with capture_logs("fleetforge.ingestor") as records:
+        status = log_ingestor_readiness(minimal)
+
+    assert status["status"] == "alive"
+    assert status["enabled_capabilities"] == [
+        "mqtt_up_ingest",
+        "retention_sweep",
+        "device_rate_budget",
+    ]
+    assert status["disabled_capabilities"] == [
+        "object_store_orphan_gc",
+        "global_otlp_export",
+    ]
+    assert status["rate_budget"] == {"rate_per_min": 120, "burst": 30}
+    assert any(
+        "ingestor readiness enabled=mqtt_up_ingest,retention_sweep,device_rate_budget "
+        "disabled=object_store_orphan_gc,global_otlp_export" in r.getMessage()
+        for r in records
+    )
+
+    hb_file = tmp_path / "ingestor-alive"
+    monkeypatch.setattr(ingestor_main, "HEARTBEAT_PATH", hb_file)
+    touch_heartbeat(status)
+    assert hb_file.is_file()
+    assert json.loads(hb_file.read_text(encoding="utf-8")) == status
+
+    full = settings_for_tests(
+        s3_endpoint_url="http://minio:9000",
+        s3_bucket="fleetforge",
+        otel_exporter_otlp_endpoint="https://otel.example.com",
+        ingest_device_rate_per_min=0,
+        ingest_device_burst=30,
+    )
+    full_status = ingestor_capabilities_status(full)
+    assert full_status["disabled_capabilities"] == ["device_rate_budget"]
+    assert "object_store_orphan_gc" in full_status["enabled_capabilities"]
+    assert "global_otlp_export" in full_status["enabled_capabilities"]
+
+
+async def test_per_device_rate_budget_throttles_noisy_logs_without_dropping_status_or_other_devices() -> (
+    None
+):
+    """A-15: per-device token bucket drops excess `log`/`telemetry`/`hb` before PostgreSQL while
+    never dropping `status`/`announce`/`ack`/`presence` or starving sibling devices."""
+    clock = [100.0]
+    limiter = DeviceIngestRateLimiter(
+        rate_per_min=60,
+        burst=3,
+        max_devices=4,
+        warn_interval_s=30.0,
+        clock=lambda: clock[0],
+    )
+    noisy_id = "a4cf12b3de90"
+    quiet_id = "a4cf12b3de91"
+    session = AsyncMock()
+
+    dispatched: list[tuple[str, str]] = []
+
+    async def fake_dispatch(
+        _session: object,
+        *,
+        channel: str,
+        device_id: str,
+        **_kwargs: object,
+    ) -> tuple[None, EventType, None, bool]:
+        dispatched.append((device_id, channel))
+        return None, EventType.DEVICE_SEEN, None, True
+
+    with (
+        patch("fleetforge.ingest.handlers._dispatch_primary_channel", side_effect=fake_dispatch),
+        capture_logs("fleetforge.ingest.rate_budget") as warn_records,
+    ):
+        for i in range(8):
+            await handle_up_message(
+                session,
+                topic=f"ff/v1/d/{noisy_id}/up/log",
+                payload=json.dumps({"lines": [{"t": i, "lvl": "I", "msg": "spam"}]}).encode(),
+                retained=False,
+                received_at=NOW,
+                tolerance=TOLERANCE,
+                rate_limiter=limiter,
+            )
+        for ch, body in (
+            ("telemetry", {"samples": [{"t": 0, "k": "temp_c", "v": 22.0}]}),
+            ("hb", {"fw_version": "1.4.2"}),
+        ):
+            await handle_up_message(
+                session,
+                topic=f"ff/v1/d/{noisy_id}/up/{ch}",
+                payload=json.dumps(body).encode(),
+                retained=False,
+                received_at=NOW,
+                tolerance=TOLERANCE,
+                rate_limiter=limiter,
+            )
+
+        # Critical lifecycle/OTA channels on the throttled board MUST pass unimpeded!
+        for crit_ch, crit_body in (
+            ("status", {"cmd_id": "cmd-1", "state": "confirmed"}),
+            ("announce", ANNOUNCE),
+            ("ack", {"id": "c1", "type": "apply", "result": "accepted"}),
+            ("presence", {"online": True}),
+        ):
+            await handle_up_message(
+                session,
+                topic=f"ff/v1/d/{noisy_id}/up/{crit_ch}",
+                payload=json.dumps(crit_body).encode(),
+                retained=False,
+                received_at=NOW,
+                tolerance=TOLERANCE,
+                rate_limiter=limiter,
+            )
+
+        # Sibling board is unaffected by noisy_id's exhausted bucket.
+        await handle_up_message(
+            session,
+            topic=f"ff/v1/d/{quiet_id}/up/log",
+            payload=b'{"lines":[{"t":0,"lvl":"I","msg":"ok"}]}',
+            retained=False,
+            received_at=NOW,
+            tolerance=TOLERANCE,
+            rate_limiter=limiter,
+        )
+
+    assert dispatched == [
+        (noisy_id, "log"),
+        (noisy_id, "log"),
+        (noisy_id, "log"),
+        (noisy_id, "status"),
+        (noisy_id, "announce"),
+        (noisy_id, "ack"),
+        (noisy_id, "presence"),
+        (quiet_id, "log"),
+    ]
+    assert limiter.dropped_total == 7
+    assert len(warn_records) == 1
+    assert f"device {noisy_id} exhausted ingest rate budget" in warn_records[0].getMessage()
+
+    # Refill after 2.0s (60/min = 1 token/s -> +2 tokens) and verify LRU bound (`max_devices=4`).
+    clock[0] += 2.0
+    assert limiter.allow(noisy_id, "hb") is True
+    assert limiter.allow(noisy_id, "telemetry") is True
+    assert limiter.allow(noisy_id, "log") is False
+    for idx in range(10):
+        assert limiter.allow(f"b4cf12b3de0{idx}", "hb") is True
+    assert limiter.tracked_devices == 4
+
+    disabled = DeviceIngestRateLimiter(rate_per_min=0, burst=30)
+    assert disabled.enabled is False
+    assert all(disabled.allow(noisy_id, "log") for _ in range(100))

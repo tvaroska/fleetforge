@@ -1,3 +1,4 @@
+// @vitest-environment node
 // `checkChosenPort` — S0-fe-8. The one port choice that is plainly not an ESP32 is a
 // port with no USB id at all: the motherboard's COM1, which is the ONLY thing a Windows
 // chooser lists when the board's bridge has no driver. It must be refused by name, before

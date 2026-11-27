@@ -28,33 +28,29 @@ from tests.agent_src import (
     COMPONENT_INCLUDE,
     COMPONENT_SRC,
     agent_sources,
+    c_call_sites_in_family,
+    read_c_family,
 )
-from tests.test_ff_cfg import _code
+from tests.agent_test_helpers import (
+    FF_MQTT_C,
+    FF_OTA_C,
+    FF_TXN_C,
+    FF_TXN_H,
+    _code,
+    _function_body,
+)
 
-FF_TXN_C = COMPONENT_SRC / "ff_txn.c"
-FF_TXN_H = COMPONENT_SRC / "ff_txn.h"
-FF_MQTT_C = COMPONENT_SRC / "ff_mqtt.c"
-FF_OTA_C = COMPONENT_SRC / "ff_ota.c"
 CMAKELISTS = COMPONENT_CMAKE
 
 
-def _function_body(source: str, name: str) -> str:
-    """The body of C function `name` (its definition, not a prototype), by brace matching.
+def _mqtt() -> str:
+    assert FF_MQTT_C.is_file()
+    return _code(read_c_family("ff_mqtt"))
 
-    A greedy regex would run to the end of the file; a lazy one stops at the first nested
-    `}`. Counting braces is the only honest way to get one function out of C text.
-    """
-    match = re.search(rf"\b{name}\s*\([^;{{)]*\)\s*\{{", source)
-    assert match is not None, f"no definition of {name}()"
-    depth = 0
-    for index in range(match.end() - 1, len(source)):
-        if source[index] == "{":
-            depth += 1
-        elif source[index] == "}":
-            depth -= 1
-            if depth == 0:
-                return source[match.end() : index]
-    raise AssertionError(f"unbalanced braces in {name}()")
+
+def _ota() -> str:
+    assert FF_OTA_C.is_file()
+    return _code(read_c_family("ff_ota"))
 
 
 def test_the_record_is_compiled_in() -> None:
@@ -77,20 +73,20 @@ def test_the_record_has_its_own_namespace_and_never_erases_the_partition() -> No
 def test_the_confirm_timeout_path_never_touches_the_mqtt_client() -> None:
     """The CRITICAL invariant: no esp_mqtt_client_* call (they take the client's lock), and
     the immediate rollback is still there as the fallback."""
-    body = _function_body(_code(FF_MQTT_C), "confirm_timeout_cb")
+    body = _function_body(_mqtt(), "confirm_timeout_cb")
     assert "esp_mqtt_client_" not in body
     assert "enqueue_status" not in body and "ff_mqtt_publish_status" not in body
     assert "esp_ota_mark_app_invalid_rollback_and_reboot()" in body
     assert "ESP_ERROR_CHECK" not in body
     # The grace timer that bounds the report is the rollback itself.
     assert "esp_ota_mark_app_invalid_rollback_and_reboot()" in _function_body(
-        _code(FF_MQTT_C), "rollback_now_cb"
+        _mqtt(), "rollback_now_cb"
     )
 
 
 def test_the_outcome_is_reported_only_by_the_session_that_observed_it() -> None:
-    mqtt = _code(FF_MQTT_C)
-    ota = _code(FF_OTA_C)
+    mqtt = _mqtt()
+    ota = _ota()
     for state in ("FF_STATUS_CONFIRMED", "FF_STATUS_ROLLED_BACK", "FF_STATUS_CONFIRMING"):
         assert state in mqtt, f"ff_mqtt.c never reports {state}"
     for state in (
@@ -103,8 +99,8 @@ def test_the_outcome_is_reported_only_by_the_session_that_observed_it() -> None:
 
 
 def test_confirmed_is_queued_only_on_a_successful_mark_valid() -> None:
-    mqtt = _code(FF_MQTT_C)
-    assert "static bool confirm_this_image(void)" in mqtt
+    mqtt = _mqtt()
+    assert "bool confirm_this_image(void)" in mqtt
     assert "else if (confirm_this_image() && s_txn.kind == TXN_CONFIRMING)" in mqtt
 
 
@@ -112,7 +108,7 @@ def test_a_late_ack_cannot_confirm_an_image_already_rolling_back() -> None:
     """The grace timer opens a window the old code did not have: the rollback decision is
     taken first, the reboot follows up to ROLLBACK_REPORT_GRACE_MS later. An announce ack
     in between must not mark the image valid."""
-    mqtt = _code(FF_MQTT_C)
+    mqtt = _mqtt()
     timeout = _function_body(mqtt, "confirm_timeout_cb")
     assert timeout.index("s_rollback_decided = true;") < timeout.index("esp_timer_start_once(")
     assert mqtt.index("rollback_decided = s_rollback_decided;") < mqtt.index(
@@ -123,10 +119,8 @@ def test_a_late_ack_cannot_confirm_an_image_already_rolling_back() -> None:
 def test_the_transaction_is_recorded_after_verification_and_before_staged() -> None:
     """R2-fw-1 put the digest check before finish() (the boot switch); the record still
     follows finish(), because it is only true once the new slot is bootable."""
-    from tests.agent_src import c_call_sites
-
-    ota = _code(FF_OTA_C)
-    assert c_call_sites(FF_OTA_C.read_text(encoding="utf-8"), "ff_txn_save") == [
+    ota = _ota()
+    assert c_call_sites_in_family("ff_ota", "ff_txn_save") == [
         "ff_ota_dock_stage",
         "ota_task",
     ]
@@ -141,7 +135,7 @@ def test_the_transaction_is_recorded_after_verification_and_before_staged() -> N
 
 def test_the_record_is_cleared_only_for_the_reported_cmd_id() -> None:
     txn = _code(FF_TXN_C)
-    mqtt = _code(FF_MQTT_C)
+    mqtt = _mqtt()
     assert "esp_err_t ff_txn_clear_if(const char *cmd_id)" in txn
     assert "strcmp(stored, cmd_id)" in txn
     assert "ff_txn_clear_if(s_txn.cmd_id)" in mqtt
@@ -161,18 +155,18 @@ def test_the_confirm_timer_is_armed_first_in_app_main() -> None:
 
 
 def test_ff_mqtt_run_no_longer_arms_it() -> None:
-    body = _function_body(_code(FF_MQTT_C), "ff_mqtt_run")
+    body = _function_body(_mqtt(), "ff_mqtt_run")
     assert ARM not in body
     assert "arm_confirm_timeout" not in body
-    assert "arm_confirm_timeout" not in _code(FF_MQTT_C), "the old name is gone"
+    assert "arm_confirm_timeout" not in _mqtt(), "the old name is gone"
 
 
 def test_only_app_main_calls_the_arm() -> None:
     sources = [path for path in agent_sources() if path.suffix == ".c"]
     callers = sorted(path.name for path in sources if f"{ARM}(" in _code(path))
-    assert callers == ["agent_main.c", "ff_mqtt.c"]
-    mqtt = _code(FF_MQTT_C)
-    assert mqtt.count(f"{ARM}(") == 1, "ff_mqtt.c defines it and never calls it"
+    assert len(callers) == 2 and callers[0] == "agent_main.c" and callers[1].startswith("ff_mqtt")
+    mqtt = _mqtt()
+    assert mqtt.count(f"{ARM}(") == 1, "ff_mqtt defines it and never calls it"
     assert f"void {ARM}(void)" in mqtt
     assert f"void {ARM}(void);" in _code(COMPONENT_INCLUDE / "ff_mqtt.h")
 
@@ -180,7 +174,7 @@ def test_only_app_main_calls_the_arm() -> None:
 def test_the_arm_needs_nothing_app_main_has_not_got_yet() -> None:
     """It runs before nvs_ready(), ff_cfg_load() and the mqtt client: esp_timer and otadata
     only. It must stay inert on a serially flashed board (pending_verify())."""
-    body = _function_body(_code(FF_MQTT_C), ARM)
+    body = _function_body(_mqtt(), ARM)
     for forbidden in (
         "nvs_",
         "ff_txn_",
@@ -197,7 +191,7 @@ def test_the_arm_needs_nothing_app_main_has_not_got_yet() -> None:
 
 def test_the_arm_is_idempotent() -> None:
     """A second call would create a second one-shot timer and leak a handle."""
-    body = _function_body(_code(FF_MQTT_C), ARM)
+    body = _function_body(_mqtt(), ARM)
     assert "s_confirm_armed" in body
     assert body.index("s_confirm_armed") < body.index("esp_timer_create")
 
@@ -242,18 +236,15 @@ def test_a_missing_detail_never_makes_a_record_torn() -> None:
 
 
 def test_only_the_session_annotates_the_record() -> None:
-    assert "ff_txn_set_detail(" in _code(FF_MQTT_C)
-    assert "ff_txn_set_detail" not in _code(FF_OTA_C)
+    assert "ff_txn_set_detail(" in _mqtt()
+    assert "ff_txn_set_detail" not in _ota()
     for path in agent_sources():
-        if path.name not in ("ff_mqtt.c", "ff_txn.c", "ff_txn.h"):
+        if not path.name.startswith("ff_mqtt") and path.name not in ("ff_txn.c", "ff_txn.h"):
             assert "ff_txn_set_detail" not in _code(path), path.name
 
 
-# ── R5-fw-3: the stage's confirm deadline crosses the reboot ──────────────────────────
-
-
 def _rollback_test_blocks() -> list[str]:
-    return re.findall(r"#if FF_ROLLBACK_TEST\n(.*?)#endif", FF_MQTT_C.read_text(), re.S)
+    return re.findall(r"#if FF_ROLLBACK_TEST\n(.*?)#endif", read_c_family("ff_mqtt"), re.S)
 
 
 def test_the_record_carries_an_optional_confirm_deadline() -> None:
@@ -290,15 +281,15 @@ def test_a_missing_deadline_never_makes_a_record_torn() -> None:
 
 
 def test_ff_ota_records_the_deadline_without_interpreting_it() -> None:
-    ota = _code(FF_OTA_C)
+    ota = _ota()
     assert "ff_txn_save(cmd->cmd_id, target->address, cmd->confirm_timeout_s)" in ota
-    assert "cJSON" not in ota, "the command seam stays in ff_mqtt.c"
+    assert "cJSON" not in ota, "the command contract stays in ff_mqtt"
     assert "CONFIRM_TIMEOUT" not in ota
     assert "uint32_t confirm_timeout_s;" in _code(COMPONENT_SRC / "ff_ota.h")
 
 
 def test_the_clamp_limits_are_spelled_once() -> None:
-    code = _code(FF_MQTT_C)
+    code = _mqtt()
     assert re.search(r"^#define CONFIRM_TIMEOUT_S 300$", code, re.M)
     assert re.search(r"^#define CONFIRM_TIMEOUT_MIN_S 30$", code, re.M)
     assert re.search(r"^#define CONFIRM_TIMEOUT_MAX_S 3600$", code, re.M)
@@ -316,7 +307,7 @@ def test_the_clamp_limits_are_spelled_once() -> None:
 
 
 def test_the_clamp_compares_before_it_casts() -> None:
-    body = _function_body(_code(FF_MQTT_C), "confirm_timeout_clamp")
+    body = _function_body(_mqtt(), "confirm_timeout_clamp")
     low = body.index("!(requested_s >= CONFIRM_TIMEOUT_MIN_S)")
     high = body.index("requested_s > CONFIRM_TIMEOUT_MAX_S")
     cast = body.index("(uint32_t)requested_s")
@@ -324,16 +315,16 @@ def test_the_clamp_compares_before_it_casts() -> None:
 
 
 def test_the_command_seam_resolves_the_deadline() -> None:
-    body = _function_body(_code(FF_MQTT_C), "on_stage")
+    body = _function_body(_mqtt(), "on_stage")
     default = body.index("cmd.confirm_timeout_s = CONFIRM_TIMEOUT_S;")
     clamped = body.index("confirm_timeout_clamp(confirm->valuedouble)")
     assert default < clamped < body.index("ff_ota_start(&cmd)")
     assert "this firmware uses" not in body
-    assert "%f" not in _code(FF_MQTT_C), "newlib-nano printf may lack float support"
+    assert "%f" not in _mqtt(), "newlib-nano printf may lack float support"
 
 
 def test_the_boot_arm_keeps_the_timer_and_its_origin() -> None:
-    body = _function_body(_code(FF_MQTT_C), ARM)
+    body = _function_body(_mqtt(), ARM)
     assert "s_confirm_timer" in body
     assert "s_confirm_deadline_s = CONFIRM_TIMEOUT_S;" in body
     origin = body.index("s_confirm_origin_us = esp_timer_get_time();")
@@ -347,8 +338,8 @@ REARM = "rearm_confirm_deadline"
 def test_the_rearm_stops_then_starts_and_never_restarts() -> None:
     """esp_timer_restart() checks `armed` outside the list lock in IDF 5.5 and can run the
     callback twice; esp_timer_stop() decides under it."""
-    code = _code(FF_MQTT_C)
-    assert "static volatile uint32_t s_confirm_deadline_s = CONFIRM_TIMEOUT_S;" in code
+    code = _mqtt()
+    assert "volatile uint32_t s_confirm_deadline_s = CONFIRM_TIMEOUT_S;" in code
     assert "esp_timer_restart" not in code
     body = _function_body(code, REARM)
     short = body.index("deadline_s == s_confirm_deadline_s")
@@ -369,7 +360,7 @@ def test_the_rearm_stops_then_starts_and_never_restarts() -> None:
 
 
 def test_only_a_confirming_transaction_rearms() -> None:
-    code = _code(FF_MQTT_C)
+    code = _mqtt()
     classify = _function_body(code, "classify_txn")
     assert classify.count(f"{REARM}(") == 1
     branch_start = classify.index("state == ESP_OTA_IMG_PENDING_VERIFY")
@@ -386,7 +377,7 @@ def test_only_a_confirming_transaction_rearms() -> None:
 
 
 def test_the_timeout_reports_the_deadline_in_force() -> None:
-    body = _function_body(_code(FF_MQTT_C), "confirm_timeout_cb")
+    body = _function_body(_mqtt(), "confirm_timeout_cb")
     assert body.count("(int)s_confirm_deadline_s") == 2
     assert "CONFIRM_TIMEOUT_S" not in body
     hook = [b for b in _rollback_test_blocks() if "ignoring the announce ack" in b]

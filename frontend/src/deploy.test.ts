@@ -1,3 +1,4 @@
+// @vitest-environment node
 // `deployOutcome` is the rule that decides whether a finished deploy may say `good`.
 // Every row of the R2-fe-1 table is pinned here, without rendering.
 
@@ -25,6 +26,8 @@ function deploy(overrides: Partial<DeploySummary> = {}): DeploySummary {
     from_version: '1.4.2',
     pct: 100,
     detail: null,
+    steps: [],
+    confirm_timeout_s: 300,
     ...overrides,
   }
 }
@@ -96,7 +99,7 @@ describe('safeWindowWait (R5-fe-1)', () => {
     ['the apply detail', { detail: 'apply waits for a safe window' }, 'apply'],
     ['the apply detail even after a reboot step', { detail: 'apply waits for a safe window', steps: afterReboot }, 'apply'],
     ['no detail and no reboot step (auto hold)', { detail: null, steps: toStaged }, 'apply'],
-    ['no detail and no steps (older API)', { detail: null }, 'apply'],
+    ['no detail and no steps (older API)', { detail: null, steps: undefined as unknown as DeploySummary['steps'] }, 'apply'],
     ['no detail after a confirming step', { detail: null, steps: afterReboot }, 'rollback'],
     ['a `constructor` detail falls back to the steps', { detail: 'constructor', steps: afterReboot }, 'rollback'],
     ['a `constructor` detail before the reboot', { detail: 'constructor', steps: toStaged }, 'apply'],

@@ -14,12 +14,12 @@
  *    against `applying`.
  */
 
-#include "ff_ota.h"
+#define FF_OTA_INTERNAL_IMPL
+#include "ff_ota_internal.h"
 
 #include <inttypes.h>
 #include <stdlib.h>
 #include <string.h>
-#include <strings.h>
 
 #include "esp_crt_bundle.h"
 #include "esp_http_client.h"
@@ -34,10 +34,6 @@
 #include "ff_txn.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "mbedtls/base64.h"
-#include "mbedtls/md.h"
-#include "mbedtls/pk.h"
-#include "mbedtls/sha256.h"
 #include "sdkconfig.h"
 
 #if CONFIG_SECURE_FLASH_ENC_ENABLED
@@ -62,7 +58,6 @@ static const char *TAG = "ff-ota";
 /* Above the heartbeat (4) so a download cannot starve it, below esp-mqtt's own task. */
 #define OTA_TASK_PRIO 5
 
-#define OTA_HTTP_TIMEOUT_MS 20000
 /* How long the image may stop growing before the download is abandoned (property 5).
  * Wall clock, not a count of empty reads, so it keeps its meaning if OTA_HTTP_TIMEOUT_MS
  * changes, and it also covers the wait for the first body byte. It is checked each time
@@ -70,125 +65,8 @@ static const char *TAG = "ff-ota";
  * 60-80 s after the last byte. 60 s, not less: on metal TCP keepalive (IDF 5 s idle, 5 s
  * interval, 3 probes) ends a socket whose radio is really gone in ~20 s, and it should stay
  * the first responder; this guard is for a far end that is alive and silent (R2-fw-5). */
-#define OTA_STALL_MS 60000
 _Static_assert(OTA_STALL_MS >= 2 * OTA_HTTP_TIMEOUT_MS,
                "one slow read must never trip the stall guard");
-/* Response headers. The 307 to the object store carries a long `Location`. */
-#define OTA_HTTP_RX_BUFFER 4096
-/* THE REQUEST buffer, and the gotcha: IDF defaults it to 512 bytes, while the request line
- * after the redirect contains the whole presigned query string. Too small and the client
- * fails while writing the request, which surfaces as a connection error and reads like a
- * network fault. */
-#define OTA_HTTP_TX_BUFFER 2048
-
-#define OTA_READBACK_CHUNK 4096
-
-/* R6-FW-1 / D-2 / D-22: Resumable HTTP Range download + exponential-backoff retry.
- * Initial transfer opens a standard GET (no HEAD pre-request, which S3/GCS GET-presigned URLs
- * reject with 403), and when a transient socket/link/5xx error drops mid-stream,
- * `resume_range_perform()` retries from the exact byte offset (`Range: bytes=<so_far>-`)
- * with exponential backoff (1 s, 2 s, 4 s) before declaring `download failed`. */
-#define OTA_MAX_RETRIES 3
-#define OTA_RETRY_BASE_MS 1000
-
-#define FF_OTA_DEV_PRIMARY_PUBKEY_PEM \
-    "-----BEGIN PUBLIC KEY-----\n" \
-    "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEbHg1tVC28a9y8SbZY0jis7OKKWxr\n" \
-    "X2+S5g0No7NMyV8nI+vUHHQ8MNQnNSDSPESUAT9m2iLyNC/nM26RvxYV1Q==\n" \
-    "-----END PUBLIC KEY-----\n"
-
-#define FF_OTA_DEV_SECONDARY_PUBKEY_PEM \
-    "-----BEGIN PUBLIC KEY-----\n" \
-    "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEwJct9NbOiOIbnB/ToYTvq02EBrzs\n" \
-    "UAETxsFAAWHFWhxfpL3x0OcIH6yW9q6EhYA3q6vNGIEwC7KPJQXd1ONEqQ==\n" \
-    "-----END PUBLIC KEY-----\n"
-
-#if defined(CONFIG_FF_OTA_PRODUCTION_BUILD) && CONFIG_FF_OTA_PRODUCTION_BUILD && !defined(FF_OTA_PRODUCTION_BUILD)
-#define FF_OTA_PRODUCTION_BUILD 1
-#endif
-
-#if defined(FF_OTA_PRODUCTION_BUILD) && !defined(FF_OTA_EMBEDDED_PUBKEYS) && \
-    !defined(FF_OTA_KCONFIG_PUBKEYS_VALID) && \
-    (!defined(FF_OTA_SIGNING_PUBKEY_PRIMARY_PEM) || \
-     !defined(FF_OTA_SIGNING_PUBKEY_SECONDARY_PEM))
-#error "FF_OTA_PRODUCTION_BUILD requires overriding both primary and secondary signing public keys (via EMBED_TXTFILES, CMake-validated Kconfig PEMs, or FF_OTA_SIGNING_PUBKEY_{PRIMARY,SECONDARY}_PEM)"
-#endif
-
-#if defined(FF_OTA_PRODUCTION_BUILD) && !defined(FF_OTA_EMBEDDED_PUBKEYS) && \
-    !defined(FF_OTA_KCONFIG_PUBKEYS_VALID)
-_Static_assert(sizeof(FF_OTA_SIGNING_PUBKEY_PRIMARY_PEM) > 1 &&
-                   sizeof(FF_OTA_SIGNING_PUBKEY_SECONDARY_PEM) > 1,
-               "FF_OTA_PRODUCTION_BUILD requires non-empty primary and secondary PEM strings");
-#endif
-
-#ifndef FF_OTA_REQUIRE_SIGNATURE
-#if defined(FF_OTA_PRODUCTION_BUILD)
-#define FF_OTA_REQUIRE_SIGNATURE 1
-#elif defined(CONFIG_FF_OTA_REQUIRE_SIGNATURE)
-#define FF_OTA_REQUIRE_SIGNATURE CONFIG_FF_OTA_REQUIRE_SIGNATURE
-#else
-#define FF_OTA_REQUIRE_SIGNATURE 1
-#endif
-#endif
-
-#if defined(FF_OTA_EMBEDDED_PUBKEYS)
-extern const char _binary_ff_ota_pubkey_primary_pem_start[];
-extern const char _binary_ff_ota_pubkey_secondary_pem_start[];
-#endif
-
-#ifndef FF_OTA_SIGNING_PUBKEY_PRIMARY_PEM
-#define FF_OTA_SIGNING_PUBKEY_PRIMARY_PEM FF_OTA_DEV_PRIMARY_PUBKEY_PEM
-#endif
-
-#ifndef FF_OTA_SIGNING_PUBKEY_SECONDARY_PEM
-#define FF_OTA_SIGNING_PUBKEY_SECONDARY_PEM FF_OTA_DEV_SECONDARY_PUBKEY_PEM
-#endif
-
-static const char *const s_signing_pubkey_ring[] = {
-    FF_OTA_SIGNING_PUBKEY_PRIMARY_PEM,
-    FF_OTA_SIGNING_PUBKEY_SECONDARY_PEM,
-};
-
-static const char *signing_pubkey_slot(size_t idx)
-{
-#if defined(FF_OTA_EMBEDDED_PUBKEYS)
-    if (idx < 2) {
-        return idx == 0 ? _binary_ff_ota_pubkey_primary_pem_start
-                        : _binary_ff_ota_pubkey_secondary_pem_start;
-    }
-#endif
-#if defined(CONFIG_FF_OTA_SIGNING_PUBKEY_PRIMARY_PEM)
-    if (idx == 0 && CONFIG_FF_OTA_SIGNING_PUBKEY_PRIMARY_PEM[0] != '\0') {
-        return CONFIG_FF_OTA_SIGNING_PUBKEY_PRIMARY_PEM;
-    }
-#endif
-#if defined(CONFIG_FF_OTA_SIGNING_PUBKEY_SECONDARY_PEM)
-    if (idx == 1 && CONFIG_FF_OTA_SIGNING_PUBKEY_SECONDARY_PEM[0] != '\0') {
-        return CONFIG_FF_OTA_SIGNING_PUBKEY_SECONDARY_PEM;
-    }
-#endif
-    return s_signing_pubkey_ring[idx];
-}
-
-bool ff_ota_requires_signature(void) { return FF_OTA_REQUIRE_SIGNATURE != 0; }
-
-bool ff_ota_uses_dev_signing_key(void)
-{
-    for (size_t i = 0; i < sizeof(s_signing_pubkey_ring) / sizeof(s_signing_pubkey_ring[0]); i++) {
-        const char *pem = signing_pubkey_slot(i);
-        if (pem == NULL || pem[0] == '\0' || strstr(pem, "-----BEGIN PUBLIC KEY-----") == NULL ||
-            strstr(pem, "bHg1tVC28a9y8SbZY0jis7OKKWxr") != NULL ||
-            strstr(pem, "wJct9NbOiOIbnB/ToYTvq02EBrzs") != NULL) {
-            return true;
-        }
-    }
-    return false;
-}
-
-/* The URL the artifact link redirects to. Twice `ff_ota_cmd_t.url` because a presigned S3
- * link is the long one: host + key + ~7 X-Amz-* query parameters. Heap, not stack — the OTA
- * task's 8 KB is already sized for the TLS handshake. */
-#define OTA_RESOLVED_URL_MAX 1024
 
 /* Long enough for two QoS-1 PUBLISHes (`applying`, `rebooting`) to leave the wire before
  * the reboot kills the socket. Without it the last thing the fleet sees is `staged`, and
@@ -197,31 +75,23 @@ bool ff_ota_uses_dev_signing_key(void)
 
 /* One update at a time, for the whole life of the process. Not a mutex: a second `stage`
  * must be REFUSED and reported, not queued behind the first — see ff_ota_start(). */
-static volatile bool s_running;
+volatile bool s_running;
 
 /* The cmd_id of the update `s_running` is about (R2-fw-6), for ff_ota_is_handling().
  * Single writer: ff_ota_start(), immediately BEFORE `s_running = true`. Never cleared and
- * never touched by ota_task, so it is meaningful only while `s_running` is true. Both
- * ff_ota_start() and ff_ota_is_handling() run on the esp-mqtt task (on_stage() in the event
- * handler), so the only variable shared with ota_task is `s_running` itself, which ota_task
- * only ever moves true -> false at `done:`. If that happens between the predicate and
- * ff_ota_start(), the stage simply runs again — the pre-existing behaviour for a finished
- * cmd. No mutex. Not the task's heap copy of the cmd either: that is freed at `done:`. */
+ * never touched by ota_task, so it is meaningful only while `s_running` is true. */
 static char s_running_cmd_id[sizeof(((ff_ota_cmd_t *)0)->cmd_id)];
 _Static_assert(sizeof(s_running_cmd_id) == FF_TXN_MAX_CMD_ID,
                "s_running_cmd_id, ff_ota_cmd_t.cmd_id and the ff_txn record hold the same ids");
 
 /* R5-fw-4. The cancel handshake (property 5). `s_phase` says where the update `s_running` is
  * about stands; `s_cancel` is a cancel accepted for it and not yet acted on. Both, and the
- * true -> false move of `s_running` at `done:`, change only under this lock, so a cancel is
- * decided against one consistent picture: ff_ota_cancel() (esp-mqtt task) either sees the
- * ota task still able to act, or sees it gone and acts itself. Never held across a flash
- * write, a publish or a log line. Meaningful only while `s_running` is true. */
-static portMUX_TYPE s_cancel_lock = portMUX_INITIALIZER_UNLOCKED;
+ * true -> false move of `s_running` at `done:`, change only under this lock. */
+portMUX_TYPE s_cancel_lock = portMUX_INITIALIZER_UNLOCKED;
 static volatile ff_ota_txn_t s_phase = FF_OTA_TXN_NONE;
 static bool s_cancel;
 
-static bool cancel_requested(void)
+bool cancel_requested(void)
 {
     bool requested;
     portENTER_CRITICAL(&s_cancel_lock);
@@ -230,250 +100,22 @@ static bool cancel_requested(void)
     return requested;
 }
 
-/* ota_task's own report of a cancel it carried out: its own task, so an immediate publish
- * (the ff_mqtt_publish_status() contract), exactly like fail(). `cancelled` is terminal and
- * carries no detail. */
-static void report_cancelled(const ff_ota_cmd_t *cmd)
+void report_cancelled(const ff_ota_cmd_t *cmd)
 {
     ESP_LOGW(TAG, "update %s: cancelled by command", cmd->cmd_id);
     ff_mqtt_publish_status(cmd->cmd_id, FF_STATUS_CANCELLED, FF_STATUS_PCT_NONE, NULL);
 }
 
-static void fail(const ff_ota_cmd_t *cmd, const char *detail)
+void fail(const ff_ota_cmd_t *cmd, const char *detail)
 {
     ESP_LOGE(TAG, "update %s failed: %s", cmd->cmd_id, detail);
     ff_mqtt_publish_status(cmd->cmd_id, FF_STATUS_FAILED, FF_STATUS_PCT_NONE, detail);
 }
 
-/* Lowercase hex, by hand rather than through snprintf, for the same reason as
- * ff_store.c::token_fingerprint: no stdio, and nothing a -Werror format check can trip on. */
-static void hex_encode(const uint8_t *digest, size_t len, char *out)
-{
-    static const char HEX[] = "0123456789abcdef";
-    for (size_t i = 0; i < len; i++) {
-        out[i * 2] = HEX[digest[i] >> 4];
-        out[i * 2 + 1] = HEX[digest[i] & 0x0f];
-    }
-    out[len * 2] = '\0';
-}
-
-/* sha256 of the first `length` bytes of `part`, as it is now on flash. */
-static esp_err_t partition_digest(const esp_partition_t *part, size_t length, char out[65],
-                                  uint8_t raw_out[32])
-{
-    uint8_t *buf = malloc(OTA_READBACK_CHUNK);
-    if (buf == NULL) {
-        return ESP_ERR_NO_MEM;
-    }
-
-    mbedtls_sha256_context sha;
-    mbedtls_sha256_init(&sha);
-    esp_err_t err = ESP_OK;
-    if (mbedtls_sha256_starts(&sha, 0) != 0) {
-        err = ESP_FAIL;
-    }
-
-    for (size_t offset = 0; err == ESP_OK && offset < length;) {
-        size_t chunk = length - offset;
-        if (chunk > OTA_READBACK_CHUNK) {
-            chunk = OTA_READBACK_CHUNK;
-        }
-        err = esp_partition_read(part, offset, buf, chunk);
-        if (err == ESP_OK && mbedtls_sha256_update(&sha, buf, chunk) != 0) {
-            err = ESP_FAIL;
-        }
-        offset += chunk;
-    }
-
-    uint8_t digest[32];
-    if (err == ESP_OK && mbedtls_sha256_finish(&sha, digest) != 0) {
-        err = ESP_FAIL;
-    }
-    if (err == ESP_OK) {
-        memcpy(raw_out, digest, sizeof(digest));
-        hex_encode(digest, sizeof(digest), out);
-    }
-
-    mbedtls_sha256_free(&sha);
-    free(buf);
-    return err;
-}
-
-/* R6-SEC-1 / R6-SEC-2: Verify `sig_str` (`ecdsa-p256-sha256:<base64_der>`) against the 32-byte
- * raw SHA-256 digest of the staged slot across all public keys in `s_signing_pubkey_ring`.
- * Returns true when valid (or when unsigned and `!FF_OTA_REQUIRE_SIGNATURE`), false with
- * `*detail_out` set when missing or invalid. */
-static bool verify_artifact_signature(const uint8_t digest_raw[32], const char *sig_str,
-                                      const char **detail_out)
-{
-#if defined(FF_OTA_PRODUCTION_BUILD)
-    if (ff_ota_uses_dev_signing_key()) {
-        *detail_out = "production ring carries dev key";
-        return false;
-    }
-#endif
-    if (sig_str == NULL || sig_str[0] == '\0') {
-#if FF_OTA_REQUIRE_SIGNATURE
-        *detail_out = "signature missing";
-        return false;
-#else
-        return true;
-#endif
-    }
-
-    static const char PREFIX[] = "ecdsa-p256-sha256:";
-    const size_t prefix_len = sizeof(PREFIX) - 1;
-    if (strncmp(sig_str, PREFIX, prefix_len) != 0) {
-        *detail_out = "artifact sig malformed";
-        return false;
-    }
-
-    const char *b64 = sig_str + prefix_len;
-    uint8_t der[96];
-    size_t der_len = 0;
-    if (mbedtls_base64_decode(der, sizeof(der), &der_len, (const unsigned char *)b64,
-                              strlen(b64)) != 0 ||
-        der_len < 8 || der_len > 80 || der[0] != 0x30) {
-        *detail_out = "artifact sig malformed";
-        return false;
-    }
-
-    for (size_t i = 0; i < sizeof(s_signing_pubkey_ring) / sizeof(s_signing_pubkey_ring[0]); i++) {
-        const char *pem = signing_pubkey_slot(i);
-        mbedtls_pk_context pk;
-        mbedtls_pk_init(&pk);
-        int rc = mbedtls_pk_parse_public_key(&pk, (const unsigned char *)pem, strlen(pem) + 1);
-        if (rc == 0) {
-            rc = mbedtls_pk_verify(&pk, MBEDTLS_MD_SHA256, digest_raw, 32, der, der_len);
-        }
-        mbedtls_pk_free(&pk);
-        if (rc == 0) {
-            return true;
-        }
-    }
-
-    *detail_out = "signature invalid";
-    return false;
-}
-
-/* R6-FW-1: Attach `Range: bytes=<offset>-` on HTTP resume attempts after a mid-stream drop,
- * and retry transient chunk errors with exponential backoff (1 s, 2 s, 4 s). */
-static esp_http_client_handle_t s_ota_http_client;
-static char s_resume_range_hdr[48];
-
-static esp_err_t ota_http_client_init_cb(esp_http_client_handle_t client)
-{
-    s_ota_http_client = client;
-    if (s_resume_range_hdr[0] != '\0') {
-        esp_err_t err = esp_http_client_set_header(client, "Range", s_resume_range_hdr);
-        s_resume_range_hdr[0] = '\0';
-        return err;
-    }
-    return ESP_OK;
-}
-
-static esp_err_t resume_range_perform(esp_https_ota_handle_t handle, const ff_ota_cmd_t *cmd,
-                                      int *last_len, int64_t *last_progress_us,
-                                      bool *stalled, bool *cancel_seen)
-{
-    esp_err_t err = ESP_FAIL;
-    for (int attempt = 0; attempt < OTA_MAX_RETRIES; attempt++) {
-        if (cancel_requested()) {
-            *cancel_seen = true;
-            return ESP_ERR_HTTPS_OTA_IN_PROGRESS;
-        }
-        uint32_t delay_ms = (uint32_t)OTA_RETRY_BASE_MS << attempt;
-        int offset = esp_https_ota_get_image_len_read(handle);
-        int start = offset > 0 ? offset : 0;
-        char range_hdr[48];
-        snprintf(range_hdr, sizeof(range_hdr), "bytes=%d-", start);
-        memcpy(s_resume_range_hdr, range_hdr, sizeof(s_resume_range_hdr));
-        ESP_LOGW(TAG, "update %s: transient transfer fault at %d bytes; retry %d/%d in %" PRIu32
-                      " ms (%s)",
-                 cmd->cmd_id, offset, attempt + 1, OTA_MAX_RETRIES, delay_ms, range_hdr);
-        vTaskDelay(pdMS_TO_TICKS(delay_ms));
-        if (cancel_requested()) {
-            *cancel_seen = true;
-            return ESP_ERR_HTTPS_OTA_IN_PROGRESS;
-        }
-        if (s_ota_http_client != NULL) {
-            (void)esp_http_client_close(s_ota_http_client);
-            (void)esp_http_client_set_header(s_ota_http_client, "Range", s_resume_range_hdr);
-            s_resume_range_hdr[0] = '\0';
-            esp_err_t open_err = esp_http_client_open(s_ota_http_client, 0);
-            if (open_err != ESP_OK) {
-                err = open_err;
-                continue;
-            }
-            if (esp_http_client_fetch_headers(s_ota_http_client) < 0) {
-                (void)esp_http_client_close(s_ota_http_client);
-                err = ESP_ERR_INVALID_RESPONSE;
-                continue;
-            }
-            int status = esp_http_client_get_status_code(s_ota_http_client);
-            if (status >= 400 && status < 500 && status != 408 && status != 429) {
-                (void)esp_http_client_close(s_ota_http_client);
-                return ESP_ERR_INVALID_RESPONSE;
-            }
-            if (status != 206 && !(offset <= 0 && status == 200)) {
-                (void)esp_http_client_close(s_ota_http_client);
-                err = ESP_ERR_INVALID_RESPONSE;
-                continue;
-            }
-        }
-        for (;;) {
-            err = esp_https_ota_perform(handle);
-            if (err != ESP_ERR_HTTPS_OTA_IN_PROGRESS) {
-                break;
-            }
-            if (cancel_requested()) {
-                *cancel_seen = true;
-                return err;
-            }
-            int so_far = esp_https_ota_get_image_len_read(handle);
-            int64_t now_us = esp_timer_get_time();
-            if (so_far > offset) {
-                attempt = 0;
-                offset = so_far;
-            }
-            if (so_far > *last_len) {
-                *last_len = so_far;
-                *last_progress_us = now_us;
-            } else if (now_us - *last_progress_us >= (int64_t)OTA_STALL_MS * 1000) {
-                *stalled = true;
-                return err;
-            }
-        }
-        if (err == ESP_OK) {
-            return ESP_OK;
-        }
-    }
-    return err;
-}
-
 /* Point the boot partition at the running slot again, in case a FAILED
  * esp_https_ota_finish() left it anywhere else, or because a `cancel` arrived after finish()
- * moved it (R5-fw-4; `why` is the second half of the log line). Since R2-fw-1 a sha256
- * mismatch never gets here — it is caught before finish() and nothing was moved (property
- * 2) — so for a failure this is the belt-and-braces branch for an image IDF itself
- * refused. Together with `ff_ota_dock_stage`'s manual `esp_ota_end` switch, it is the only
- * call to esp_ota_set_boot_partition() in this file. Logged at ERROR either way.
- *
- * It writes otadata ONLY if the pointer actually moved (R2-fw-2). finish() reaches
- * esp_ota_set_boot_partition() only after esp_ota_end() succeeded, and choose_target_slot()
- * guarantees boot == running when the stage began. So a failed finish() leaves
- * boot == running in every case short of a torn otadata write. "Putting it back" anyway is
- * not a no-op. It is IDF's equal-seq rewrite (property 4): a duplicate entry for the
- * running slot, in state NEW, written over the previous image's entry, and depending on
- * sector parity the known-good image then boots PENDING_VERIFY.
- *
- * When the pointer DID move (a cancel after a successful finish()) the same rewrite is the
- * point, and its side effect is R5-spec-1's named gap: the running image's new entry is NEW,
- * so it boots PENDING_VERIFY once at the next reset and confirms again.
- *
- * Returns true when the boot pointer names the running slot afterwards (it already did, or it
- * was put back), false when that cannot be said. */
-static bool restore_boot_partition(const char *why)
+ * moved it (R5-fw-4). It writes otadata ONLY if the pointer actually moved (R2-fw-2). */
+bool restore_boot_partition(const char *why)
 {
     const esp_partition_t *running = esp_ota_get_running_partition();
     if (running == NULL) {
@@ -503,15 +145,8 @@ static bool restore_boot_partition(const char *why)
     return false;
 }
 
-#define WHY_REJECTED "the staged image was rejected and will NOT be booted"
-#define WHY_CANCELLED "the update was cancelled by command and will NOT be booted"
-
 /* R5-fw-4. The staged-cancel sequence (R5-spec-1 D4), the order load-bearing: the boot pointer
- * back on the running image FIRST, the record cleared only if that worked. A power cut in
- * between leaves a record whose slot is neither running nor invalid, which classify_txn()
- * discards as stale. The reverse order would boot the cancelled image with no record, and it
- * would confirm itself without a word. Nothing else is erased: the staged image stays in its
- * slot, and its otadata entry stays NEW, which no rollback ever returns to. */
+ * back on the running image FIRST, the record cleared only if that worked. */
 static bool cancel_staged(const char *cmd_id)
 {
     if (!restore_boot_partition(WHY_CANCELLED)) {
@@ -521,130 +156,6 @@ static bool cancel_staged(const char *cmd_id)
     return true;
 }
 
-/* Where the `Location` of the one redirect we follow is collected, out of the HTTP event
- * callback (the only public way to read a RESPONSE header out of esp_http_client). */
-typedef struct {
-    char *url; /* OTA_RESOLVED_URL_MAX bytes, or NULL */
-    bool overflow;
-} redirect_capture_t;
-
-static esp_err_t capture_location(esp_http_client_event_t *evt)
-{
-    if (evt->event_id != HTTP_EVENT_ON_HEADER || evt->user_data == NULL) {
-        return ESP_OK;
-    }
-    if (evt->header_key == NULL || strcasecmp(evt->header_key, "Location") != 0) {
-        return ESP_OK;
-    }
-    redirect_capture_t *capture = (redirect_capture_t *)evt->user_data;
-    if (strlcpy(capture->url, evt->header_value, OTA_RESOLVED_URL_MAX) >= OTA_RESOLVED_URL_MAX) {
-        /* Truncated is worse than absent: it would be fetched, fail, and look like the
-         * store was down. */
-        capture->url[0] = '\0';
-        capture->overflow = true;
-    }
-    return ESP_OK;
-}
-
-/* Resolve the artifact link's ONE redirect by hand, and hand esp_https_ota the URL it
- * lands on. `out` is OTA_RESOLVED_URL_MAX bytes and is a CREDENTIAL, exactly like the link
- * it came from.
- *
- * Why not let esp_https_ota follow the 307 itself, since it handles 301/302/303/307/308?
- * Because IDF v5.5.5 rebuilds the `Host` header wrong on a redirect, in two different ways,
- * and an S3-compatible presigned URL SIGNS that header:
- *   - esp_http_client_init() builds it with `_get_host_header(host, port)`, i.e. with the
- *     `:port` suffix whenever the port is not 80/443;
- *   - esp_http_client_set_url() — the redirect path — sets it to
- *     `client->connection_info.host` alone, dropping the port, and only when the host STRING
- *     changed, so a redirect that keeps the host and changes only the port keeps the FIRST
- *     hop's Host verbatim.
- * Either way the object store receives a Host that was never signed and answers
- * `403 SignatureDoesNotMatch`, which esp_https_ota reports as "File not found(403)".
- * Measured against MinIO on :9000 in the QEMU lab (origin :8080 → store :9000, the
- * host-unchanged case) and reproduced exactly with `curl -H 'Host: 10.0.2.2'` against the
- * same presigned URL, which 403s while the correct Host 200s.
- *
- * Production is unaffected today (GCS on :443 signs a portless Host), which is precisely
- * why this had to be fixed rather than left: it is a fault that appears only on a
- * self-hosted store — V2's whole shape — and only on a device.
- *
- * The cost is one header-only round trip on hop one, whose body is empty anyway. */
-static esp_err_t resolve_artifact_url(const char *url, char *out)
-{
-    out[0] = '\0';
-    redirect_capture_t capture = {.url = out, .overflow = false};
-
-    esp_http_client_config_t config = {
-        .url = url,
-        .method = HTTP_METHOD_GET,
-        .crt_bundle_attach = esp_crt_bundle_attach,
-        .timeout_ms = OTA_HTTP_TIMEOUT_MS,
-        .buffer_size = OTA_HTTP_RX_BUFFER,
-        .buffer_size_tx = OTA_HTTP_TX_BUFFER,
-        .disable_auto_redirect = true, /* the point: we want to SEE the Location */
-        .event_handler = capture_location,
-        .user_data = &capture,
-    };
-    esp_http_client_handle_t client = esp_http_client_init(&config);
-    if (client == NULL) {
-        return ESP_ERR_NO_MEM;
-    }
-
-    esp_err_t err = esp_http_client_open(client, 0);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "cannot reach the artifact origin: %s", esp_err_to_name(err));
-        esp_http_client_cleanup(client);
-        return err;
-    }
-    if (esp_http_client_fetch_headers(client) < 0) {
-        ESP_LOGE(TAG, "the artifact origin sent no usable response headers");
-        esp_http_client_close(client);
-        esp_http_client_cleanup(client);
-        return ESP_ERR_INVALID_RESPONSE;
-    }
-
-    int status = esp_http_client_get_status_code(client);
-    esp_http_client_close(client);
-    esp_http_client_cleanup(client);
-
-    if (status == 200) {
-        /* No redirect at all — an origin that serves the bytes itself. Use the link as
-         * given. */
-        if (strlcpy(out, url, OTA_RESOLVED_URL_MAX) >= OTA_RESOLVED_URL_MAX) {
-            return ESP_ERR_INVALID_SIZE;
-        }
-        return ESP_OK;
-    }
-    if (status < 300 || status > 399) {
-        /* 401/403 here is an expired or forged signature, 404 an artifact the store does
-         * not have. The status is the whole diagnosis; the URL is still not logged. */
-        ESP_LOGE(TAG, "the artifact link answered %d", status);
-        return ESP_ERR_INVALID_RESPONSE;
-    }
-    if (capture.overflow) {
-        ESP_LOGE(TAG, "the store's download URL is longer than this firmware's %d-byte "
-                      "buffer",
-                 OTA_RESOLVED_URL_MAX);
-        return ESP_ERR_INVALID_SIZE;
-    }
-    if (out[0] == '\0') {
-        ESP_LOGE(TAG, "the artifact link answered %d with no Location", status);
-        return ESP_ERR_INVALID_RESPONSE;
-    }
-    if (strncasecmp(out, "http://", 7) != 0 && strncasecmp(out, "https://", 8) != 0) {
-        /* A relative Location would have to be resolved against the request URL, and
-         * every store we support returns an absolute one. Refused rather than guessed. */
-        out[0] = '\0';
-        ESP_LOGE(TAG, "the artifact link redirected to a relative Location");
-        return ESP_ERR_INVALID_RESPONSE;
-    }
-    ESP_LOGI(TAG, "artifact link redirected (%d) to the object store", status);
-    return ESP_OK;
-}
-
-/* Same spelling as agent_main.c's boot-facts line, so a refusal and the boot log read
- * alike. */
 static const char *ota_state_name(esp_ota_img_states_t state)
 {
     switch (state) {
@@ -660,13 +171,8 @@ static const char *ota_state_name(esp_ota_img_states_t state)
 
 /* The ONE place the slot is chosen (property 4). Returns the slot to write, or NULL after
  * it has published `failed` itself. Everything here is a read: no otadata write, no erase,
- * no fetch, and no ff_txn call. A refused stage leaves an earlier stage's transaction
- * record exactly as it was, because that image still boots at the next reset and reports
- * against its own cmd_id.
- *
- * The order is load-bearing. A confirming image is refused first, then a waiting staged
- * image, and only then is the next slot computed. */
-static const esp_partition_t *choose_target_slot(const ff_ota_cmd_t *cmd)
+ * no fetch, and no ff_txn call. */
+const esp_partition_t *choose_target_slot(const ff_ota_cmd_t *cmd)
 {
     const esp_partition_t *running = esp_ota_get_running_partition();
     if (running == NULL) {
@@ -674,12 +180,6 @@ static const esp_partition_t *choose_target_slot(const ff_ota_cmd_t *cmd)
         return NULL;
     }
 
-    /* 1. The running image must be confirmed. IDF's esp_ota_begin() refuses this too, but
-     *    only inside the first esp_https_ota_perform(): after `downloading` was published
-     *    and the signed URL was fetched, and reported as "download failed". Refuse ONLY on
-     *    exactly PENDING_VERIFY. A failed read (ESP_ERR_NOT_FOUND on a serially flashed
-     *    board, whose otadata is all 0xFF) is allowed, or no freshly USB-flashed board could
-     *    ever be deployed to. IDF's own check stays the backstop. */
     esp_ota_img_states_t running_state;
     esp_err_t state_err = esp_ota_get_state_partition(running, &running_state);
     if (state_err != ESP_OK) {
@@ -694,11 +194,6 @@ static const esp_partition_t *choose_target_slot(const ff_ota_cmd_t *cmd)
         return NULL;
     }
 
-    /* 2. Never write a slot the boot pointer names. After an `apply: "on_command"` stage
-     *    the boot pointer names the staged slot, and that slot is also the next update
-     *    slot. Writing it would erase an image otadata already points at, and finish()
-     *    would then rewrite the SAME seq over the running image's entry (property 4). So
-     *    refuse until the board reboots into what it staged. */
     const esp_partition_t *boot = esp_ota_get_boot_partition();
     if (boot == NULL) {
         fail(cmd, "cannot read the boot partition");
@@ -717,8 +212,6 @@ static const esp_partition_t *choose_target_slot(const ff_ota_cmd_t *cmd)
         return NULL;
     }
 
-    /* 3. The slot after the running one, sanity-checked. Belt and braces: IDF refuses the
-     *    running slot and non-OTA slots too, but only after this function has returned. */
     const esp_partition_t *target = esp_ota_get_next_update_partition(NULL);
     if (target == NULL) {
         fail(cmd, "no spare ota slot");
@@ -736,214 +229,6 @@ static const esp_partition_t *choose_target_slot(const ff_ota_cmd_t *cmd)
     return target;
 }
 
-/* H5 / R7-cargo-1: Pluggable non-app cargo handlers (`mcu_fw`, `model_weights`, etc.). */
-#define OTA_MAX_CARGO_HANDLERS 8
-typedef struct {
-    char type[32];
-    ff_cargo_write_fn_t write_cb;
-    ff_cargo_finish_fn_t finish_cb;
-    void *ctx;
-} ff_cargo_handler_t;
-
-static ff_cargo_handler_t s_cargo_handlers[OTA_MAX_CARGO_HANDLERS];
-static size_t s_cargo_handler_count;
-
-esp_err_t ff_ota_register_cargo_handler(const char *type, ff_cargo_write_fn_t write_cb,
-                                        ff_cargo_finish_fn_t finish_cb, void *ctx)
-{
-    if (type == NULL || type[0] == '\0' || strcmp(type, "app") == 0 || write_cb == NULL ||
-        finish_cb == NULL || strlen(type) >= sizeof(s_cargo_handlers[0].type)) {
-        return ESP_ERR_INVALID_ARG;
-    }
-    for (size_t i = 0; i < s_cargo_handler_count; i++) {
-        if (strcmp(s_cargo_handlers[i].type, type) == 0) {
-            s_cargo_handlers[i].write_cb = write_cb;
-            s_cargo_handlers[i].finish_cb = finish_cb;
-            s_cargo_handlers[i].ctx = ctx;
-            return ff_mqtt_register_cargo_type(type);
-        }
-    }
-    if (s_cargo_handler_count >= OTA_MAX_CARGO_HANDLERS) {
-        return ESP_ERR_NO_MEM;
-    }
-    strlcpy(s_cargo_handlers[s_cargo_handler_count].type, type,
-            sizeof(s_cargo_handlers[0].type));
-    s_cargo_handlers[s_cargo_handler_count].write_cb = write_cb;
-    s_cargo_handlers[s_cargo_handler_count].finish_cb = finish_cb;
-    s_cargo_handlers[s_cargo_handler_count].ctx = ctx;
-    s_cargo_handler_count++;
-    return ff_mqtt_register_cargo_type(type);
-}
-
-static const ff_cargo_handler_t *find_cargo_handler(const char *type)
-{
-    for (size_t i = 0; i < s_cargo_handler_count; i++) {
-        if (strcmp(s_cargo_handlers[i].type, type) == 0) {
-            return &s_cargo_handlers[i];
-        }
-    }
-    return NULL;
-}
-
-static void run_cargo_ota(const ff_ota_cmd_t *cmd)
-{
-    const ff_cargo_handler_t *handler = find_cargo_handler(cmd->type);
-    if (handler == NULL) {
-        fail(cmd, "unsupported artifact type");
-        return;
-    }
-    char *resolved = malloc(OTA_RESOLVED_URL_MAX);
-    uint8_t *buf = malloc(OTA_READBACK_CHUNK);
-    if (resolved == NULL || buf == NULL) {
-        free(resolved);
-        free(buf);
-        fail(cmd, "out of memory");
-        return;
-    }
-    if (resolve_artifact_url(cmd->url, resolved) != ESP_OK) {
-        free(resolved);
-        free(buf);
-        fail(cmd, "cannot open the artifact");
-        return;
-    }
-    if (cancel_requested()) {
-        free(resolved);
-        free(buf);
-        report_cancelled(cmd);
-        return;
-    }
-
-    esp_http_client_config_t http = {
-        .url = resolved,
-        .method = HTTP_METHOD_GET,
-        .crt_bundle_attach = esp_crt_bundle_attach,
-        .timeout_ms = OTA_HTTP_TIMEOUT_MS,
-        .keep_alive_enable = true,
-        .buffer_size = OTA_HTTP_RX_BUFFER,
-        .buffer_size_tx = OTA_HTTP_TX_BUFFER,
-    };
-    esp_http_client_handle_t client = esp_http_client_init(&http);
-    if (client == NULL || esp_http_client_open(client, 0) != ESP_OK ||
-        esp_http_client_fetch_headers(client) < 0 ||
-        esp_http_client_get_status_code(client) != 200) {
-        if (client != NULL) {
-            esp_http_client_close(client);
-            esp_http_client_cleanup(client);
-        }
-        free(resolved);
-        free(buf);
-        fail(cmd, "cannot open the artifact");
-        return;
-    }
-
-    ff_mqtt_publish_status(cmd->cmd_id, FF_STATUS_DOWNLOADING, 0, NULL);
-
-    mbedtls_sha256_context sha;
-    mbedtls_sha256_init(&sha);
-    (void)mbedtls_sha256_starts(&sha, 0);
-
-    size_t total = 0;
-    bool download_failed = false;
-    bool cancelled = false;
-    int retry_attempt = 0;
-    for (;;) {
-        if (cancel_requested()) {
-            cancelled = true;
-            break;
-        }
-        int r = esp_http_client_read(client, (char *)buf, OTA_READBACK_CHUNK);
-        if (r == 0 && esp_http_client_is_complete_data_received(client)) {
-            break;
-        }
-        if (r <= 0) {
-            if (retry_attempt >= OTA_MAX_RETRIES) {
-                download_failed = true;
-                break;
-            }
-            uint32_t delay_ms = (uint32_t)OTA_RETRY_BASE_MS << retry_attempt;
-            retry_attempt++;
-            char range_hdr[48];
-            snprintf(range_hdr, sizeof(range_hdr), "bytes=%u-", (unsigned)total);
-            esp_http_client_close(client);
-            vTaskDelay(pdMS_TO_TICKS(delay_ms));
-            if (cancel_requested()) {
-                cancelled = true;
-                break;
-            }
-            (void)esp_http_client_set_header(client, "Range", range_hdr);
-            if (esp_http_client_open(client, 0) != ESP_OK ||
-                esp_http_client_fetch_headers(client) < 0) {
-                esp_http_client_close(client);
-                continue;
-            }
-            int st = esp_http_client_get_status_code(client);
-            if (st != 206 && !(total == 0 && st == 200)) {
-                esp_http_client_close(client);
-                if (st >= 400 && st < 500 && st != 408 && st != 429) {
-                    download_failed = true;
-                    break;
-                }
-                continue;
-            }
-            continue;
-        }
-        retry_attempt = 0;
-        if (mbedtls_sha256_update(&sha, buf, (size_t)r) != 0 ||
-            handler->write_cb(total, buf, (size_t)r, handler->ctx) != ESP_OK) {
-            download_failed = true;
-            break;
-        }
-        total += (size_t)r;
-    }
-
-    esp_http_client_close(client);
-    esp_http_client_cleanup(client);
-    free(resolved);
-    free(buf);
-
-    uint8_t digest_raw[32];
-    (void)mbedtls_sha256_finish(&sha, digest_raw);
-    mbedtls_sha256_free(&sha);
-
-    if (cancelled) {
-        report_cancelled(cmd);
-        return;
-    }
-    if (download_failed) {
-        fail(cmd, "download failed");
-        return;
-    }
-    if (cmd->size != 0 && total != cmd->size) {
-        fail(cmd, "size mismatch");
-        return;
-    }
-
-    ff_mqtt_publish_status(cmd->cmd_id, FF_STATUS_VERIFYING, FF_STATUS_PCT_NONE, NULL);
-    char digest_hex[65];
-    hex_encode(digest_raw, sizeof(digest_raw), digest_hex);
-    if (strcmp(digest_hex, cmd->sha256) != 0) {
-        fail(cmd, "sha256 mismatch");
-        return;
-    }
-    const char *sig_detail = "signature invalid";
-    if (!verify_artifact_signature(digest_raw, cmd->sig, &sig_detail)) {
-        fail(cmd, sig_detail);
-        return;
-    }
-    if (cancel_requested()) {
-        report_cancelled(cmd);
-        return;
-    }
-
-    ff_mqtt_publish_status(cmd->cmd_id, FF_STATUS_STAGED, 100, NULL);
-    ff_mqtt_publish_status(cmd->cmd_id, FF_STATUS_APPLYING, 100, NULL);
-    if (handler->finish_cb(total, digest_hex, cmd->version, handler->ctx) != ESP_OK) {
-        fail(cmd, "cargo apply failed");
-        return;
-    }
-    ff_mqtt_complete_cargo(cmd->cmd_id, cmd->type, cmd->version);
-}
-
 static void ota_task(void *arg)
 {
     ff_ota_cmd_t *cmd = (ff_ota_cmd_t *)arg;
@@ -958,20 +243,12 @@ static void ota_task(void *arg)
         goto done;
     }
 
-    /* The slot the download lands in, chosen ONCE and before any I/O (property 4). The
-     * same pointer goes to esp_https_ota below, is hashed, switched to and recorded. It is
-     * read BEFORE finish() moves the boot pointer: after that call `next_update` is the slot
-     * we are running from, and hashing it would verify the old image and pass. */
     const esp_partition_t *target = choose_target_slot(cmd);
     if (target == NULL) {
         goto done;
     }
     ESP_LOGI(TAG, "update %s: writing slot %s at 0x%08" PRIx32 " (%" PRIu32 " bytes)",
              cmd->cmd_id, target->label, target->address, target->size);
-    /* An artifact that cannot fit is refused BEFORE anything is fetched or erased.
-     * Otherwise it is discovered when esp_ota_write() runs off the end of the slot — after
-     * the slot, which holds the previous image, has been erased. `size == 0` means the
-     * server did not say; the digest still covers whatever arrives. */
     if (cmd->size > target->size) {
         ESP_LOGE(TAG, "update %s: the artifact is %u bytes, slot %s holds %" PRIu32,
                  cmd->cmd_id, (unsigned)cmd->size, target->label, target->size);
@@ -988,7 +265,6 @@ static void ota_task(void *arg)
         fail(cmd, "cannot open the artifact");
         goto done;
     }
-    /* Cancel checkpoint 1 (property 5): nothing fetched into the slot yet, nothing to abort. */
     if (cancel_requested()) {
         report_cancelled(cmd);
         goto done;
@@ -996,39 +272,23 @@ static void ota_task(void *arg)
 
     esp_http_client_config_t http = {
         .url = resolved,
-        /* Same posture as ff_enroll.c / ff_progress.c: the Mozilla bundle IDF ships,
-         * because the production origin is Traefik with a Let's Encrypt certificate and
-         * there is no private CA to pin. Passing it also satisfies esp_https_ota's
-         * server-verification check, which is what lets the plaintext QEMU lab origin
-         * work without CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP — a `http://` URL simply never
-         * reaches the TLS layer. */
         .crt_bundle_attach = esp_crt_bundle_attach,
         .timeout_ms = OTA_HTTP_TIMEOUT_MS,
         .keep_alive_enable = true,
         .buffer_size = OTA_HTTP_RX_BUFFER,
         .buffer_size_tx = OTA_HTTP_TX_BUFFER,
-        /* No redirect setting here on purpose: esp_https_ota follows redirects through
-         * esp_http_client_set_redirection() of its own accord, which `disable_auto_redirect`
-         * does not govern. `resolved` is already past the one hop we expect, and a store
-         * that bounces further would hit the Host-header defect described above — so the
-         * fix is to arrive at the final URL, not to try to switch redirects off. */
     };
     s_ota_http_client = NULL;
     s_resume_range_hdr[0] = '\0';
     esp_https_ota_config_t ota_config = {
         .http_config = &http,
         .http_client_init_cb = ota_http_client_init_cb,
-        /* D-2 / D-22: Never set `.partial_http_download = true`: IDF sends an unsigned HEAD
-         * pre-request that S3/GCS GET-presigned URLs refuse with 403. Instead, open a
-         * standard GET and resume interrupted transfers via open-ended `Range: bytes=<offset>-`. */
         .partition = {.staging = target},
     };
 
     esp_https_ota_handle_t handle = NULL;
     esp_err_t err = esp_https_ota_begin(&ota_config, &handle);
     if (err != ESP_OK || handle == NULL) {
-        /* No URL in the detail: it is a credential, and the reason is never the URL's
-         * spelling anyway — it is DNS, a refused connection or a 4xx. */
         fail(cmd, "cannot open the artifact");
         ESP_LOGE(TAG, "esp_https_ota_begin: %s", esp_err_to_name(err));
         goto done;
@@ -1037,21 +297,16 @@ static void ota_task(void *arg)
     ff_mqtt_publish_status(cmd->cmd_id, FF_STATUS_DOWNLOADING, 0, NULL);
 
     int last_logged_pct = -10;
-    /* The stall clock (property 5) starts at `downloading`, so the wait for the first body
-     * byte counts too. */
     int last_len = 0;
     int64_t last_progress_us = esp_timer_get_time();
     bool stalled = false;
     bool cancel_seen = false;
     while ((err = esp_https_ota_perform(handle)) == ESP_ERR_HTTPS_OTA_IN_PROGRESS) {
-        /* Cancel checkpoint 2: once per perform() pass, so a cancel waits at most one read. */
         if (cancel_requested()) {
             cancel_seen = true;
             break;
         }
         int so_far = esp_https_ota_get_image_len_read(handle);
-        /* BEFORE the size-less `continue` below, or a command without a size would never
-         * be guarded. */
         int64_t now_us = esp_timer_get_time();
         if (so_far > last_len) {
             last_len = so_far;
@@ -1061,12 +316,11 @@ static void ota_task(void *arg)
             break;
         }
         if (cmd->size == 0 || so_far < 0) {
-            continue; /* the server did not say how big it is; no percentage to report */
+            continue;
         }
         int pct = (int)(((uint64_t)so_far * 100) / (uint64_t)cmd->size);
         if (pct >= last_logged_pct + 10) {
             last_logged_pct = pct;
-            /* Serial only. See property 1 at the top of this file. */
             ESP_LOGI(TAG, "update %s: %d%% (%d bytes)", cmd->cmd_id, pct, so_far);
         }
     }
@@ -1076,16 +330,11 @@ static void ota_task(void *arg)
                                    &cancel_seen);
     }
 
-    /* Like the stall below, a cancel leaves the loop with `err` still IN_PROGRESS. Abort,
-     * never finish(): otadata and the transaction record are not touched. */
     if (cancel_seen) {
         esp_https_ota_abort(handle);
         report_cancelled(cmd);
         goto done;
     }
-    /* BEFORE the `download failed` branch: after the break `err` is still IN_PROGRESS,
-     * which would read as a failed download. Same posture as that branch: abort, never
-     * finish(), so otadata and the transaction record are not touched. */
     if (stalled) {
         int stalled_s = (int)((esp_timer_get_time() - last_progress_us) / 1000000);
         esp_https_ota_abort(handle);
@@ -1107,8 +356,6 @@ static void ota_task(void *arg)
         goto done;
     }
 
-    /* BEFORE finish(), which frees the handle: reading this afterwards is a
-     * use-after-free that happens to return a plausible number. */
     int read_total = esp_https_ota_get_image_len_read(handle);
     if (read_total < 0) {
         esp_https_ota_abort(handle);
@@ -1126,16 +373,6 @@ static void ota_task(void *arg)
 
     ff_mqtt_publish_status(cmd->cmd_id, FF_STATUS_VERIFYING, FF_STATUS_PCT_NONE, NULL);
 
-    /* THE check, and it happens while the boot pointer still names the running slot.
-     * perform() has returned ESP_OK and every one of the `got` bytes is on flash in
-     * `target` already (property 2), so reading it back here hashes exactly what a reboot
-     * would run. A failure on this side of finish() is an esp_https_ota_abort(): otadata
-     * has not been touched, so there is nothing to undo.
-     *
-     * There is deliberately NO second hash after finish(). Without flash encryption
-     * esp_ota_end() writes nothing more to the slot, and what it does do —
-     * ota_verify_partition(), which re-reads the image and checks IDF's own appended
-     * SHA-256 and checksum — is a second, independent read-back anyway. */
     char digest[65];
     uint8_t digest_raw[32];
     err = partition_digest(target, got, digest, digest_raw);
@@ -1145,20 +382,14 @@ static void ota_task(void *arg)
         fail(cmd, "cannot verify the staged image");
         goto done;
     }
-    /* Exact comparison: the command contract (ff_mqtt.c::on_stage) only lets a 64-character
-     * lowercase digest through, and hex_encode() emits lowercase. */
     if (strcmp(digest, cmd->sha256) != 0) {
         esp_https_ota_abort(handle);
-        /* Both digests are public facts about the artifact — unlike the URL — so they are
-         * printed in full, exactly as the simulator does. */
         ESP_LOGE(TAG, "update %s: sha256 MISMATCH, flash holds %s, the command says %s — "
                       "the boot partition was never moved",
                  cmd->cmd_id, digest, cmd->sha256);
         fail(cmd, "sha256 mismatch");
         goto done;
     }
-    /* R6-SEC-1 / R6-SEC-2: Verify the detached ECDSA P-256 signature against the 2-key
-     * public rotation ring BEFORE moving the boot pointer. */
     const char *sig_detail = "signature invalid";
     if (!verify_artifact_signature(digest_raw, cmd->sig, &sig_detail)) {
         esp_https_ota_abort(handle);
@@ -1167,8 +398,6 @@ static void ota_task(void *arg)
         fail(cmd, sig_detail);
         goto done;
     }
-    /* Cancel checkpoint 3, the last moment a cancel costs nothing: otadata has not moved.
-     * A cancel that lands while finish() runs is caught by checkpoint 4. */
     if (cancel_requested()) {
         esp_https_ota_abort(handle);
         report_cancelled(cmd);
@@ -1178,9 +407,6 @@ static void ota_task(void *arg)
                   "partition",
              cmd->cmd_id, digest, target->label);
 
-    /* IDF's own validation (magic byte, image length, appended SHA-256, secure-boot
-     * signature when it is on) AND the boot-partition switch. finish() frees the handle
-     * on every path, success or not. */
     err = esp_https_ota_finish(handle);
     if (err != ESP_OK) {
         if (err == ESP_ERR_OTA_VALIDATE_FAILED) {
@@ -1189,20 +415,10 @@ static void ota_task(void *arg)
             fail(cmd, "cannot finish the update");
             ESP_LOGE(TAG, "esp_https_ota_finish: %s", esp_err_to_name(err));
         }
-        /* finish() only sets the boot partition on its own success path, but an image
-         * that failed validation must not be left bootable under any reading of that. */
         (void)restore_boot_partition(WHY_REJECTED);
         goto done;
     }
 
-    /* Cancel checkpoint 4. finish() has moved the boot pointer, and nothing is recorded yet.
-     * Under the lock: either a cancel is already here, or the walk moves past it for good
-     * (`staged` can still be cancelled, at the exit below, and so can an apply:auto waiting
-     * for the safe window, at checkpoint 6; `applying` never). A cancel here
-     * puts the pointer back and never saves the record, in both apply modes (D4: cancel is
-     * valid in `verifying`). If the pointer cannot be put back, the image WILL boot at the
-     * next reset, so the transaction carries on as if no cancel had come, record and all,
-     * and its outcome is reported after that reset. */
     bool cancel_now;
     portENTER_CRITICAL(&s_cancel_lock);
     cancel_now = s_cancel;
@@ -1224,17 +440,6 @@ static void ota_task(void *arg)
         portEXIT_CRITICAL(&s_cancel_lock);
     }
 
-    /* The transaction is live from HERE, not from `applying`: finish() has just moved the
-     * boot pointer to `target`, so any reset from now on — our esp_restart(), a power
-     * cut, a watchdog — boots the new image, including after `apply: "on_command"`. The
-     * record is what lets that image (or the one the board falls back to) report the
-     * outcome against this cmd_id. AFTER finish(), never before: a record saved ahead of a
-     * finish() that then fails would name a slot that is not bootable. Written BEFORE the
-     * "staged and bootable" line below, because that line is what an operator waits for
-     * before pulling the plug.
-     * Report-only: a failed save loses the outcome report, never the deploy or the
-     * rollback, so the update carries on. R5-fw-3: the command's confirm deadline rides
-     * along, already clamped by the command contract; this module never interprets it. */
     esp_err_t txn_err = ff_txn_save(cmd->cmd_id, target->address, cmd->confirm_timeout_s);
     if (txn_err != ESP_OK) {
         ESP_LOGE(TAG, "update %s: cannot record the transaction (%s) — the outcome will not "
@@ -1247,14 +452,6 @@ static void ota_task(void *arg)
     ff_mqtt_publish_status(cmd->cmd_id, FF_STATUS_STAGED, 100, NULL);
 
     if (!cmd->apply_now) {
-        /* `apply: "on_command"`. The device owns the reboot (design/architecture.md
-         * principle 5), so this board stays here — the same place the simulator stops —
-         * until the `apply` command (R5-fw-4: the session's reboot is the apply; the boot
-         * pointer already names the slot) or a `cancel`. It stops at `staged`, never
-         * `awaiting_safe_window`: the spec's on_command walk waits for the command, and the
-         * commanded apply's safe-window wait is the session's (ff_mqtt.c, R5-fw-5). Until then,
-         * a further `stage` is refused (choose_target_slot(): the boot pointer no longer names
-         * the running slot). */
         ESP_LOGW(TAG, "update %s: apply=on_command — staged and waiting for the apply "
                       "command (a further stage is refused until this board reboots or the "
                       "update is cancelled)",
@@ -1262,10 +459,6 @@ static void ota_task(void *arg)
         goto done;
     }
 
-    /* R5-fw-5 (property 5): apply:auto waits for the firmware's safe window. Reported only when
-     * the rule says unsafe at first: a board that judges the moment safe goes straight on. The
-     * wait ends at a safe answer or at a cancel; the confirm deadline is not involved (this
-     * image is not the new one). */
     if (!cancel_requested() && !ff_safe_window_is_safe()) {
         ESP_LOGW(TAG, "update %s: %s is staged; the reboot into it waits for a safe window",
                  cmd->cmd_id, target->label);
@@ -1275,9 +468,6 @@ static void ota_task(void *arg)
             vTaskDelay(pdMS_TO_TICKS(FF_SAFE_WINDOW_POLL_MS));
         }
     }
-    /* Cancel checkpoint 6. Under the lock: a cancel that came during the wait is acted on at
-     * `done:` (the staged exit: put back, then the record cleared, then `cancelled`); otherwise
-     * the walk is `applying` from here and a cancel is refused. */
     bool cancel_apply;
     portENTER_CRITICAL(&s_cancel_lock);
     cancel_apply = s_cancel;
@@ -1295,23 +485,14 @@ static void ota_task(void *arg)
                   "PENDING_VERIFY; ff_mqtt confirms it only once the retained announce is "
                   "acknowledged, and rolls back otherwise.",
              cmd->cmd_id, target->label);
-    /* Persist the stage id in FF_TXN_CMD_NAMESPACE so a persistent broker session that
-     * redelivers this stage right after reboot drops it as a duplicate (D-6). */
     (void)ff_txn_note_reboot_cmd(cmd->cmd_id);
     vTaskDelay(pdMS_TO_TICKS(OTA_PUBLISH_DRAIN_MS));
-    /* R5-fw-5: ask the rule once more immediately before reboot; committed (no cancel). */
     while (!ff_safe_window_is_safe()) {
         vTaskDelay(pdMS_TO_TICKS(FF_SAFE_WINDOW_POLL_MS));
     }
     esp_restart(); /* does not return */
 
 done:
-    /* Cancel checkpoint 5, and the end of the update as far as a cancel can see. Under the
-     * lock: a cancel accepted while the staged image was being recorded, or while apply:auto
-     * waited for the safe window (R5-fw-5, checkpoint 6), is acted on HERE; any
-     * other leaves `s_running` false in the same critical section, so from then on
-     * ff_ota_cancel() finds the task gone and cancels a staged image itself. A cancel that
-     * found a path which then ended `failed` is not reported again: `failed` is the truth. */
     for (;;) {
         bool cancel_staged_now;
         portENTER_CRITICAL(&s_cancel_lock);
@@ -1333,9 +514,6 @@ done:
                           "still boots at the next reset",
                      cmd->cmd_id);
         }
-        /* Either way this task is done with the transaction: a further cancel finds
-         * FF_OTA_TXN_NONE (nothing to cancel) until the next pass frees the slot, after which a
-         * staged image still waiting is cancelled by ff_ota_cancel() itself. */
         portENTER_CRITICAL(&s_cancel_lock);
         s_phase = FF_OTA_TXN_NONE;
         portEXIT_CRITICAL(&s_cancel_lock);
@@ -1353,10 +531,6 @@ esp_err_t ff_ota_start(const ff_ota_cmd_t *cmd)
         return ESP_ERR_INVALID_ARG;
     }
     if (s_running) {
-        /* Refused, not queued. Two concurrent writers to one slot corrupt it, and a
-         * deploy that silently waits behind another is a deploy the server cannot
-         * explain. This is a DIFFERENT cmd_id: the same one was dropped by
-         * ff_ota_is_handling(). The caller publishes `failed` for the NEW cmd_id. */
         return ESP_ERR_INVALID_STATE;
     }
 
@@ -1366,10 +540,7 @@ esp_err_t ff_ota_start(const ff_ota_cmd_t *cmd)
     }
     memcpy(copy, cmd, sizeof(*copy));
 
-    /* Before `s_running = true`, so the predicate never sees the flag with a stale id.
-     * cmd_id is NUL-terminated and fits: on_stage() refused a longer one. */
     strlcpy(s_running_cmd_id, cmd->cmd_id, sizeof(s_running_cmd_id));
-    /* R5-fw-4: a fresh transaction, cancellable from its first byte (property 5). */
     portENTER_CRITICAL(&s_cancel_lock);
     s_cancel = false;
     s_phase = FF_OTA_TXN_TRANSFER;
@@ -1391,20 +562,9 @@ bool ff_ota_is_handling(const char *cmd_id)
     if (cmd_id == NULL || cmd_id[0] == '\0') {
         return false;
     }
-    /* 1. In flight. A running update for a DIFFERENT id answers false right here and never
-     *    falls through: between finish() and `done:` the boot pointer already names the
-     *    new slot and the ff_txn record holds the RUNNING update's id, and that id is the
-     *    only one this board is carrying out. */
     if (s_running) {
         return strcmp(cmd_id, s_running_cmd_id) == 0;
     }
-    /* 2. Staged by `apply: "on_command"` and waiting for a reboot: the boot pointer names a
-     *    slot that is not the running one, and the record ota_task saved at `staged` is for
-     *    this id. Both go false by themselves: once the staged image boots, boot == running,
-     *    and a reset mid-download never wrote a record, so a reused id after a reset runs
-     *    again (the recovery path). Read-only — no publish, no otadata write, no ff_txn
-     *    save or clear. ff_txn_load() does clear a TORN record (missing a key), as it does
-     *    at boot; that transaction's report was already lost, so it changes nothing. */
     const esp_partition_t *running = esp_ota_get_running_partition();
     const esp_partition_t *boot = esp_ota_get_boot_partition();
     if (running == NULL || boot == NULL || boot == running) {
@@ -1417,8 +577,6 @@ bool ff_ota_is_handling(const char *cmd_id)
     return strcmp(rec.cmd_id, cmd_id) == 0;
 }
 
-/* R5-fw-4. The staged-and-waiting answer outside the ota task: the boot pointer names another
- * slot, and the record is for that slot (and, when asked, for `cmd_id`). Read-only. */
 static ff_ota_txn_t staged_phase(const char *cmd_id, char *held, size_t held_len)
 {
     const esp_partition_t *running = esp_ota_get_running_partition();
@@ -1426,13 +584,9 @@ static ff_ota_txn_t staged_phase(const char *cmd_id, char *held, size_t held_len
     if (running == NULL || boot == NULL || boot == running) {
         return FF_OTA_TXN_NONE;
     }
-    /* The record, not RAM: a refused second `stage` reuses the running-id slot, and the
-     * staged transaction must stay addressable through it. ff_txn_load() discards a torn
-     * record, as ff_ota_is_handling() and the boot already accept. */
     ff_txn_t rec;
     const bool recorded = ff_txn_load(&rec) == ESP_OK && rec.target_addr == boot->address;
     if (cmd_id == NULL) {
-        /* Any update: whatever the pointer names boots at the next reset. */
         if (recorded && held != NULL) {
             strlcpy(held, rec.cmd_id, held_len);
         }
@@ -1469,7 +623,6 @@ ff_ota_txn_t ff_ota_txn_phase(const char *cmd_id, char *held, size_t held_len)
     portEXIT_CRITICAL(&s_cancel_lock);
 
     if (running && cmd_id == NULL) {
-        /* Until the task has ended the boot pointer may still be moving, cancelled or not. */
         return phase != FF_OTA_TXN_NONE ? phase : FF_OTA_TXN_TRANSFER;
     }
     if (match) {
@@ -1481,7 +634,6 @@ ff_ota_txn_t ff_ota_txn_phase(const char *cmd_id, char *held, size_t held_len)
         }
         return phase;
     }
-    /* Not the update in flight (or none is): an earlier stage may still wait for a reboot. */
     return staged_phase(cmd_id, held, held != NULL ? held_len : 0);
 }
 
@@ -1492,21 +644,17 @@ esp_err_t ff_ota_cancel(const char *cmd_id, bool *reported)
     }
     *reported = false;
 
-    /* 1. The update in flight: decided under the lock that ota_task's checkpoints and its
-     *    `done:` read (property 5), so the request is acted on by exactly one party. */
     bool in_flight = false;
     esp_err_t rc = ESP_ERR_NOT_FOUND;
     portENTER_CRITICAL(&s_cancel_lock);
     if (s_running && strcmp(cmd_id, s_running_cmd_id) == 0) {
         in_flight = true;
         if (s_phase == FF_OTA_TXN_APPLYING) {
-            /* Released (apply:auto past its safe window, R5-fw-5): about to reboot into it, and
-             * `rollback` is the verb. TRANSFER, STAGED and AWAITING are cancellable. */
             rc = ESP_ERR_INVALID_STATE;
         } else if (s_phase == FF_OTA_TXN_NONE) {
-            rc = ESP_ERR_NOT_FOUND; /* the task has already ended this transaction */
+            rc = ESP_ERR_NOT_FOUND;
         } else {
-            s_cancel = true; /* idempotent: a second cancel finds it set and is the same */
+            s_cancel = true;
             *reported = true;
             rc = ESP_OK;
         }
@@ -1516,8 +664,6 @@ esp_err_t ff_ota_cancel(const char *cmd_id, bool *reported)
         return rc;
     }
 
-    /* 2. Staged by `apply: "on_command"` and waiting, with the ota task gone: cancelled here,
-     *    in the caller's task (a flash write, never under the lock). */
     if (staged_phase(cmd_id, NULL, 0) != FF_OTA_TXN_STAGED) {
         return ESP_ERR_NOT_FOUND;
     }
@@ -1534,112 +680,4 @@ bool ff_ota_in_flight(void)
     const bool in_flight = s_running;
     portEXIT_CRITICAL(&s_cancel_lock);
     return in_flight;
-}
-
-esp_err_t ff_ota_dock_stage(const ff_ota_cmd_t *cmd, const uint8_t *data, size_t len)
-{
-    if (cmd == NULL || data == NULL || len == 0) {
-        return ESP_ERR_INVALID_ARG;
-    }
-    bool busy;
-    portENTER_CRITICAL(&s_cancel_lock);
-    busy = s_running;
-    if (!busy) {
-        s_running = true;
-    }
-    portEXIT_CRITICAL(&s_cancel_lock);
-    if (busy) {
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    esp_err_t rc = ESP_OK;
-    ff_mqtt_publish_status(cmd->cmd_id, FF_STATUS_STAGING, 0, NULL);
-    if (cmd->size != 0 && len != cmd->size) {
-        fail(cmd, "size mismatch"); rc = ESP_ERR_INVALID_SIZE; goto done;
-    }
-    if (cmd->type[0] != '\0' && strcmp(cmd->type, "app") != 0) {
-        const ff_cargo_handler_t *handler = find_cargo_handler(cmd->type);
-        if (handler == NULL) {
-            fail(cmd, "unsupported artifact type"); rc = ESP_ERR_NOT_SUPPORTED; goto done;
-        }
-        ff_mqtt_publish_status(cmd->cmd_id, FF_STATUS_DOWNLOADING, 0, NULL);
-        uint8_t digest_raw[32];
-        mbedtls_sha256_context sha;
-        mbedtls_sha256_init(&sha);
-        (void)mbedtls_sha256_starts(&sha, 0);
-        (void)mbedtls_sha256_update(&sha, data, len);
-        (void)mbedtls_sha256_finish(&sha, digest_raw);
-        mbedtls_sha256_free(&sha);
-        ff_mqtt_publish_status(cmd->cmd_id, FF_STATUS_VERIFYING, FF_STATUS_PCT_NONE, NULL);
-        char digest_hex[65];
-        hex_encode(digest_raw, sizeof(digest_raw), digest_hex);
-        if (strcmp(digest_hex, cmd->sha256) != 0) {
-            fail(cmd, "sha256 mismatch"); rc = ESP_ERR_INVALID_CRC; goto done;
-        }
-        const char *sig_detail = "signature invalid";
-        if (!verify_artifact_signature(digest_raw, cmd->sig, &sig_detail)) {
-            fail(cmd, sig_detail); rc = ESP_ERR_INVALID_STATE; goto done;
-        }
-        if (handler->write_cb(0, data, len, handler->ctx) != ESP_OK) {
-            fail(cmd, "download failed"); rc = ESP_FAIL; goto done;
-        }
-        ff_mqtt_publish_status(cmd->cmd_id, FF_STATUS_STAGED, 100, NULL);
-        ff_mqtt_publish_status(cmd->cmd_id, FF_STATUS_APPLYING, 100, NULL);
-        if (handler->finish_cb(len, digest_hex, cmd->version, handler->ctx) != ESP_OK) {
-            fail(cmd, "cargo apply failed"); rc = ESP_FAIL; goto done;
-        }
-        ff_mqtt_complete_cargo(cmd->cmd_id, cmd->type, cmd->version);
-        goto done;
-    }
-
-    const esp_partition_t *target = choose_target_slot(cmd);
-    if (target == NULL) {
-        rc = ESP_ERR_INVALID_STATE; goto done;
-    }
-    if (len > target->size) {
-        fail(cmd, "artifact larger than the ota slot"); rc = ESP_ERR_INVALID_SIZE; goto done;
-    }
-    esp_ota_handle_t ota_handle = 0;
-    if (esp_ota_begin(target, len, &ota_handle) != ESP_OK) {
-        fail(cmd, "cannot open the artifact"); rc = ESP_FAIL; goto done;
-    }
-    ff_mqtt_publish_status(cmd->cmd_id, FF_STATUS_DOWNLOADING, 0, NULL);
-    if (esp_ota_write(ota_handle, data, len) != ESP_OK) {
-        (void)esp_ota_abort(ota_handle);
-        fail(cmd, "download failed"); rc = ESP_FAIL; goto done;
-    }
-    ff_mqtt_publish_status(cmd->cmd_id, FF_STATUS_VERIFYING, FF_STATUS_PCT_NONE, NULL);
-    char digest[65];
-    uint8_t digest_raw[32];
-    if (partition_digest(target, len, digest, digest_raw) != ESP_OK) {
-        (void)esp_ota_abort(ota_handle);
-        fail(cmd, "cannot verify the staged image"); rc = ESP_FAIL; goto done;
-    }
-    if (strcmp(digest, cmd->sha256) != 0) {
-        (void)esp_ota_abort(ota_handle);
-        fail(cmd, "sha256 mismatch"); rc = ESP_ERR_INVALID_CRC; goto done;
-    }
-    const char *sig_detail = "signature invalid";
-    if (!verify_artifact_signature(digest_raw, cmd->sig, &sig_detail)) {
-        (void)esp_ota_abort(ota_handle);
-        fail(cmd, sig_detail); rc = ESP_ERR_INVALID_STATE; goto done;
-    }
-    if (esp_ota_end(ota_handle) != ESP_OK ||
-        ff_txn_save(cmd->cmd_id, target->address, cmd->confirm_timeout_s) != ESP_OK) {
-        fail(cmd, "cannot finish the update");
-        rc = ESP_FAIL; goto done;
-    }
-    if (esp_ota_set_boot_partition(target) != ESP_OK) {
-        (void)ff_txn_clear_if(cmd->cmd_id);
-        fail(cmd, "cannot finish the update");
-        (void)restore_boot_partition(WHY_REJECTED);
-        rc = ESP_FAIL; goto done;
-    }
-    /* Caller owns reboot timing after dock staging; stop honestly at `staged`. */
-    ff_mqtt_publish_status(cmd->cmd_id, FF_STATUS_STAGED, 100, NULL);
-done:
-    portENTER_CRITICAL(&s_cancel_lock);
-    s_running = false;
-    portEXIT_CRITICAL(&s_cancel_lock);
-    return rc;
 }

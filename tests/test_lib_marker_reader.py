@@ -23,7 +23,7 @@ import pytest
 
 from fleetforge.lib_marker import MAGIC, MARKER_SIZE, LibMarker, find_marker
 from fleetforge.merged_image import detect_merged
-from tests.test_library_marker import _firmware_magic, _spec_magic
+from tests.agent_test_helpers import _firmware_magic, _spec_magic
 
 FIXTURES = Path(__file__).parent / "fixtures" / "firmware"
 LIBRARY_BUILDS = ["esp32.basic.app.head.bin", "esp32.agent.app.head.bin"]

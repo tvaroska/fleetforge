@@ -16,7 +16,7 @@ export const LAST_ON_TITLE =
   'The network it was on when it was last seen. The server cannot tell out of range from powered off.'
 
 export function networkPlace(d: Pick<DeviceSummary, 'online' | 'ssid'>): NetworkPlace | null {
-  if (d.ssid === null) return null
+  if (d.ssid == null) return null
   return { label: d.online ? 'on:' : 'last on:', ssid: d.ssid, current: d.online }
 }
 

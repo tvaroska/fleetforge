@@ -52,23 +52,29 @@ from tests.agent_src import (
     LIB_QEMU_PLATFORMIO_INI,
     LIB_VERSION_H,
     LIBRARY_JSON,
+    read_c_family,
 )
-from tests.test_agent_partitions import (
+from tests.agent_test_helpers import (
     _FINGERPRINT_DATA_SUBTYPES,
-    _FINGERPRINT_TYPES,
+    ARDUINO_LAYOUT_SHA256,
+    BOOT_SEQUENCE_ORDER,
+    DEVICE_PROTOCOL,
+    FF_IDENTITY_C,
+    HAZARDS,
     OTA_SLOT_SIZE,
+    VERSION_TXT,
+    _begin_body,
+    _code,
+    _declared_functions,
+    _ff_calls,
+    _fingerprint,
+    _function_body,
+    _public_headers,
     _rows,
 )
-from tests.test_agent_txn import _function_body
-from tests.test_ff_cfg import _code
-from tests.test_ota_component import HAZARDS, _declared_functions, _public_headers
 
-REPO_ROOT = AGENT_DIR.parent
-VERSION_TXT = AGENT_DIR / "version.txt"
-DEVICE_PROTOCOL = REPO_ROOT / "spec" / "device-protocol.md"
 TOOLS_DIR = AGENT_DIR / "tools"
 LIB_BUNDLE_PY = TOOLS_DIR / "lib_bundle.py"
-FF_IDENTITY_C = COMPONENT_SRC / "ff_identity.c"
 FF_IDENTITY_INTERNAL_H = COMPONENT_SRC / "ff_identity_internal.h"
 
 # design/decisions/arduino-gets-its-own-layout-id.md, retyped. (name, type, subtype, offset,
@@ -81,8 +87,6 @@ ADR_ROWS = [
     ("ff_cfg", "data", "0x40", 0x3D0000, 0x1000),
     ("coredump", "data", "coredump", 0x3F0000, 0x10000),
 ]
-# spec/device-protocol.md -> Partition layouts, retyped.
-ARDUINO_LAYOUT_SHA256 = "05528998ae17fb6a7a5741443f9a7a4720c766f370fefc30814cbc3e391c1fc4"
 
 # The pinned toolchain: pioarduino 55.03.312-1 = Arduino-ESP32 3.3.12 on ESP-IDF v5.5.5.
 PINNED_PLATFORM = (
@@ -95,25 +99,6 @@ PINNED_PLATFORM = (
 _SUBTYPES = {**_FINGERPRINT_DATA_SUBTYPES, "coredump": 3}
 
 
-# agent_main.c's boot sequence, as the tokens a consumer's task must contain in this order.
-# Shared with tests/test_worked_example.py (the ESP-IDF example's fleetforge_start.c).
-BOOT_SEQUENCE_ORDER = (
-    "nvs_ready(",
-    "ff_cfg_load(",
-    "ff_store_sync_token(",
-    "ff_progress_init(",
-    "ff_identity_init(",
-    "esp_netif_init(",
-    "esp_event_loop_create_default(",
-    "ff_net_bring_up(",
-    "FF_PROGRESS_LINK_UP",
-    "ff_time_sync(",
-    "FF_PROGRESS_TIME_SYNCED",
-    "ff_store_load(",
-    "ff_mqtt_run(",
-)
-
-
 def _subtype(ptype: str, subtype: str) -> int:
     if subtype.startswith("0x") or subtype.isdigit():
         return int(subtype, 0)
@@ -124,35 +109,8 @@ def _subtype(ptype: str, subtype: str) -> int:
     return _SUBTYPES[subtype]
 
 
-def _fingerprint(rows: list[tuple[str, str, str, int, int]]) -> str:
-    lines = "".join(
-        f"{_FINGERPRINT_TYPES[ptype]}:{_subtype(ptype, subtype)}:{offset}:{size}\n"
-        for _name, ptype, subtype, offset, size in sorted(rows, key=lambda row: row[3])
-    )
-    return hashlib.sha256(lines.encode("ascii")).hexdigest()
-
-
 def _wrapper() -> str:
     return _code(ARDUINO_WRAPPER_CPP)
-
-
-def _begin_body() -> str:
-    source = _wrapper()
-    match = re.search(r"\bbool\s+FleetforgeClass::begin\s*\([^)]*\)\s*\{", source)
-    assert match is not None, "no FleetforgeClass::begin definition in Fleetforge.cpp"
-    depth = 0
-    for index in range(match.end() - 1, len(source)):
-        if source[index] == "{":
-            depth += 1
-        elif source[index] == "}":
-            depth -= 1
-            if depth == 0:
-                return source[match.end() : index]
-    raise AssertionError("unbalanced braces in begin()")
-
-
-def _ff_calls(code: str) -> list[str]:
-    return re.findall(r"\b(ff_[a-z0-9_]+)\s*\(", code)
 
 
 def _ini(path: Path) -> configparser.ConfigParser:
@@ -393,7 +351,7 @@ class TestTheRollbackPosture:
                 callers.append(path.name)
         assert callers == ["Fleetforge.cpp"]
         assert len(re.findall(r"\bff_identity_set_app_versions\s*\(", _begin_body())) == 1
-        assert "ff_identity" not in _code(COMPONENT_SRC / "ff_ota.c")
+        assert "ff_identity" not in _code(read_c_family("ff_ota"))
 
     def test_the_example_calls_begin_first(self) -> None:
         sketch = _code(EXAMPLE_INO)

@@ -41,15 +41,19 @@ from tests.agent_src import (
     FF_SAFE_WINDOW_H,
     FF_SAFE_WINDOW_INTERNAL_H,
     IDF_EXAMPLE_MAIN_C,
+    c_call_sites_in_family,
+    read_c_family,
 )
-from tests.test_agent_txn import FF_MQTT_C, FF_OTA_C, _function_body
-from tests.test_arduino_library import _ff_calls
-from tests.test_ff_cfg import _code
-from tests.test_ota_component import _declared_functions
-from tests.test_selftest import _member_body
+from tests.agent_test_helpers import (
+    FF_IDENTITY_C,
+    _code,
+    _declared_functions,
+    _ff_calls,
+    _function_body,
+    _member_body,
+)
 
 FF_MQTT_INTERNAL_H = COMPONENT_SRC / "ff_mqtt_internal.h"
-FF_IDENTITY_C = COMPONENT_SRC / "ff_identity.c"
 FF_OTA_H = COMPONENT_SRC / "ff_ota.h"
 
 PRIVATE_HOOKS = ("ff_safe_window_freeze", "ff_safe_window_registered", "ff_safe_window_is_safe")
@@ -61,11 +65,11 @@ def _src() -> str:
 
 
 def _mqtt() -> str:
-    return _code(FF_MQTT_C)
+    return _code(read_c_family("ff_mqtt"))
 
 
 def _ota() -> str:
-    return _code(FF_OTA_C)
+    return _code(read_c_family("ff_ota"))
 
 
 def _body(name: str) -> str:
@@ -253,7 +257,7 @@ class TestTheTimerSide:
         assert first < waiting < awaiting < detail < rolling < grace < recheck < reboot
         assert "kind == TXN_CONFIRMING || kind == TXN_BOOTED_NEW" in body
         assert "FF_STATUS_APPLYING" not in body
-        assert "the rollback is decided and waits for a safe window" in FF_MQTT_C.read_text()
+        assert "the rollback is decided and waits for a safe window" in read_c_family("ff_mqtt")
 
     def test_the_gate_never_touches_the_confirm_timer(self) -> None:
         """D10: the deadline is never paused, extended or re-armed by the wait."""
@@ -338,7 +342,7 @@ class TestTheCommandReboot:
         ):
             assert enter < idle.index(reset) < leave, reset
         assert "esp_restart" not in idle
-        assert "the deferred apply was cancelled — no reboot" in FF_MQTT_C.read_text()
+        assert "the deferred apply was cancelled — no reboot" in read_c_family("ff_mqtt")
 
 
 class TestTheVerbs:
@@ -502,14 +506,11 @@ class TestTheCapability:
         )
         note = _function_body(identity, "ff_identity_note_safe_window")
         assert "s_safe_window_registered = registered;" in note
-        from tests.agent_src import c_call_sites
-
-        raw_mqtt = FF_MQTT_C.read_text(encoding="utf-8")
-        assert c_call_sites(raw_mqtt, "ff_identity_note_safe_window") == [
+        assert c_call_sites_in_family("ff_mqtt", "ff_identity_note_safe_window") == [
             "ff_mqtt_confirm_offline",
             "ff_mqtt_run",
         ]
-        assert c_call_sites(raw_mqtt, "ff_safe_window_freeze") == [
+        assert c_call_sites_in_family("ff_mqtt", "ff_safe_window_freeze") == [
             "ff_mqtt_confirm_offline",
             "ff_mqtt_run",
         ]

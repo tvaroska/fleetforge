@@ -1,18 +1,6 @@
-// What these tests defend, in order of how much a regression would cost:
-//
-// 1. **Presence comes from `GET /v1/devices`, never from the SSE payload.** The frame
-//    carries an `online` snapshot; patching a row from it looks like a free
-//    optimisation and makes the dashboard disagree with the server about a board.
-// 2. **The interval re-read exists.** A sleepy board goes offline with NO event at all,
-//    so a purely event-driven list shows a dead board as online forever — and passes
-//    every test you would naturally write. Test 5 is the one that fails if it is deleted.
-// 3. **The EventSource is closed on unmount.** `sse_max_clients` is 20 per API worker
-//    and React StrictMode mounts twice; a leaked source turns ~20 reloads into a 503
-//    with no visible cause.
-// 4. **CLOSED is not CONNECTING.** A 401/503 leaves EventSource permanently closed and
-//    needs a manual, backed-off reconnect; a network blip must be left to the browser.
-// 5. **A dead API is not a dead session** — that distinction stops an operator re-typing
-//    the admin password at a server that is simply down.
+// Fleet hook & SSE lifecycle tests: server-authoritative presence, interval re-reads for
+// sleepy boards, EventSource unmount cleanup, permanent-close backoff, and 401 vs dead-API
+// distinction.
 
 import { render, screen } from '@testing-library/react'
 import { act } from 'react'

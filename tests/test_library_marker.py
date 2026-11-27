@@ -32,15 +32,19 @@ from tests.agent_src import (
     COMPONENT_SRC,
     LIBRARY_JSON,
 )
-from tests.test_agent_txn import _function_body
-from tests.test_ff_cfg import _code
+from tests.agent_test_helpers import (
+    DEVICE_PROTOCOL,
+    FF_IDENTITY_C,
+    _code,
+    _firmware_magic,
+    _function_body,
+    _spec_magic,
+)
 
 REPO_ROOT = AGENT_DIR.parent
-DEVICE_PROTOCOL = REPO_ROOT / "spec" / "device-protocol.md"
 ARDUINO_PACKAGE_PY = REPO_ROOT / "scripts" / "arduino_package.py"
 FF_MARKER_C = COMPONENT_SRC / "ff_marker.c"
 FF_MARKER_H = COMPONENT_SRC / "ff_marker.h"
-FF_IDENTITY_C = COMPONENT_SRC / "ff_identity.c"
 
 # Spellings that would keep the marker in an image that never references it. Not bare
 # `retain`: ff_mqtt.c publishes the announce with MQTT retain.
@@ -66,21 +70,6 @@ ANNOUNCE = {
     "ota_slot_size": 1966080,
     "capabilities": ["ota"],
 }
-
-
-def _spec_magic() -> bytes:
-    text = DEVICE_PROTOCOL.read_text()
-    section = text[text.index("## Library marker") : text.index("## Evolution rules")]
-    match = re.search(r"hex `([0-9a-f]{32})`", section)
-    assert match is not None, "the spec's Library marker table has no magic"
-    return bytes.fromhex(match.group(1))
-
-
-def _firmware_magic() -> bytes:
-    match = re.search(r"\.magic\s*=\s*\{([^}]*)\}", _code(FF_MARKER_C))
-    assert match is not None, "ff_marker.c has no .magic initializer"
-    values = re.findall(r"0x([0-9a-fA-F]{2})\b", match.group(1))
-    return bytes(int(value, 16) for value in values)
 
 
 class TestTheMarkerIsTheSpec:

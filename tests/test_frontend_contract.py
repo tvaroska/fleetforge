@@ -8,6 +8,7 @@ against `/v1/openapi.json`:
 
 from __future__ import annotations
 
+import importlib.util
 import re
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,7 @@ from fleetforge.api.main import create_app
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FRONTEND_SRC = REPO_ROOT / "frontend" / "src"
+GENERATOR_SCRIPT = REPO_ROOT / "scripts" / "generate_openapi_ts.py"
 
 _TS_OBJECT_OPEN_RE = re.compile(
     r"^export\s+type\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*\{",
@@ -317,3 +319,12 @@ def test_nullability_and_enums_agree_with_openapi() -> None:
                 )
 
     assert not mismatches, "OpenAPI <-> TypeScript contract drift:\n" + "\n".join(mismatches)
+
+
+def test_generated_openapi_ts_matches_fastapi_schema() -> None:
+    """D-10: `scripts/generate_openapi_ts.py --check` confirms zero drift in `apiGenerated.ts`."""
+    spec = importlib.util.spec_from_file_location("generate_openapi_ts", GENERATOR_SCRIPT)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module.main(["--check"]) == 0

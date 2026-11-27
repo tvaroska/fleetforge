@@ -51,9 +51,17 @@ from fleetforge.ingestor.protocol import (
     decode,
 )
 from tests.conftest import capture_logs
-from tests.test_heartbeat_health import spec_hb_example
-from tests.test_ingestor import ANNOUNCE, DEVICE_ID, NOW, publish, reload, seed_device
-from tests.test_telemetry import _json_fence_after, _telemetry_example
+from tests.support_ingestor import (
+    ANNOUNCE,
+    DEVICE_ID,
+    NOW,
+    json_fence_after,
+    publish,
+    reload,
+    seed_device,
+    spec_hb_example,
+    telemetry_example,
+)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DEVICE_PROTOCOL = REPO_ROOT / "spec" / "device-protocol.md"
@@ -427,7 +435,7 @@ async def test_the_example_batch_is_stored_with_device_relative_times(
     session: AsyncSession,
 ) -> None:
     await seed_device(session)
-    await publish(session, "telemetry", json.loads(_telemetry_example()))
+    await publish(session, "telemetry", json.loads(telemetry_example()))
     assert await telemetry_rows(session) == [
         ("morse_loops", 41.0, NOW - ms(13600)),
         ("morse_loops", 42.0, NOW - ms(6800)),
@@ -441,7 +449,7 @@ async def test_the_example_batch_is_stored_with_device_relative_times(
 
 async def test_a_backlog_never_overwrites_a_newer_latest_value(session: AsyncSession) -> None:
     await seed_device(session)
-    await publish(session, "telemetry", json.loads(_telemetry_example()))
+    await publish(session, "telemetry", json.loads(telemetry_example()))
     stale = {"samples": [{"age_ms": 60_000, "name": "battery_v", "value": 1.0}]}
     await publish(session, "telemetry", stale, at=at(10))
     assert (await metric_rows(session))["battery_v"] == (3.71, NOW)
@@ -479,7 +487,7 @@ async def test_telemetry_that_must_not_be_stored_is_not(
 ) -> None:
     if registered:
         await seed_device(session)
-    body = json.loads(_telemetry_example())
+    body = json.loads(telemetry_example())
     await publish(session, "telemetry", body, raw=raw, retained=retained)
     assert await session.scalar(select(func.count()).select_from(DeviceTelemetry)) == 0
     assert await session.scalar(select(func.count()).select_from(DeviceMetric)) == 0
@@ -490,16 +498,11 @@ def test_the_telemetry_age_limit_is_the_retention_window() -> None:
     assert dt.timedelta(milliseconds=LOG_MAX_AGE_MS) == retention.LOG_RETENTION
 
 
-# ---------------------------------------------------------------------------
-# log storage
-# ---------------------------------------------------------------------------
-
-
 def log_example() -> str:
     """The spec's `up/log` example once Patch A is applied, the proposal's A2 copy until then."""
     if LOG_SPEC_HEADING in DEVICE_PROTOCOL.read_text().splitlines():
-        return _json_fence_after(DEVICE_PROTOCOL.read_text(), LOG_SPEC_HEADING)
-    return _json_fence_after(FEATURE_DOC.read_text(), LOG_SPEC_HEADING)
+        return json_fence_after(DEVICE_PROTOCOL.read_text(), LOG_SPEC_HEADING)
+    return json_fence_after(FEATURE_DOC.read_text(), LOG_SPEC_HEADING)
 
 
 def log_summaries(records: list[Any]) -> list[str]:

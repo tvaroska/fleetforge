@@ -11,17 +11,23 @@ serves the agent, the ESP-IDF example and the Arduino library. The simulator's
 
 from __future__ import annotations
 
-import json
 import re
 
 from fleetforge.ingestor.protocol import HeartbeatPayload, decode
 from fleetforge.simulator.device import DeviceIdentity
-from tests.agent_src import COMPONENT_SRC
-from tests.test_agent_txn import _function_body
-from tests.test_ff_cfg import _code
-from tests.test_library_marker import DEVICE_PROTOCOL
+from tests.agent_test_helpers import (
+    DEVICE_PROTOCOL,
+    FF_IDENTITY_C,
+    _code,
+    _function_body,
+)
+from tests.agent_test_helpers import (
+    spec_hb_example as spec_hb_example,
+)
+from tests.agent_test_helpers import (
+    spec_hb_keys as spec_hb_keys,
+)
 
-FF_IDENTITY_C = COMPONENT_SRC / "ff_identity.c"
 HB_TOPIC = "ff/v1/d/a4cf12b3de90/up/hb"
 
 
@@ -31,17 +37,6 @@ def _spec_hb_example_text() -> str:
     start = text.index("### `up/hb` — heartbeat")
     fence = text.index("```json\n", start) + len("```json\n")
     return text[fence : text.index("```", fence)].strip()
-
-
-def spec_hb_example() -> dict[str, object]:
-    """The spec's `up/hb` example, parsed. Shared with `test_ff_cfg.py`."""
-    example = json.loads(_spec_hb_example_text())
-    assert isinstance(example, dict) and example, "the spec's up/hb example could not be parsed"
-    return example
-
-
-def spec_hb_keys() -> list[str]:
-    return list(spec_hb_example())
 
 
 def _heartbeat_body() -> str:

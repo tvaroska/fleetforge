@@ -1,37 +1,25 @@
 """MQTT ingestor — the SOLE MQTT subscriber (`design/production.md`).
 
-It subscribes to every `up/` topic, derives presence from what arrives, writes the
-device row and emits one `ff_events` notification per ingested message; the API
-workers `LISTEN` on that channel and fan out over SSE (R0-be-5). **This process must
-never run with more than one instance**: N subscribers would ingest every message N
-times and split the SSE audience.
-
-It also runs the retention sweep (R4-be-1, `retention_loop`): hourly, in its own task and
-its own transactions, independent of the broker session. Being the single instance is
-exactly why it lives here and not in the api's N workers.
-
-Three things it deliberately does not do. It never `INSERT`s a device — the only way
-into the registry is a burned enrollment token (`ingestor/store.py`). It never
-publishes to `dn/*` — commands come from the API. And it never runs migrations
-(`RUN_MIGRATIONS` is unset for this service in `docker-compose.yml`: two processes
-racing `alembic upgrade head` is a deadlock waiting for a slow migration), so it
-connects to a database the api has already migrated.
-
-`DATABASE_URL` is mandatory here: `get_settings()` raises and the container exits
-with a readable message. That is the opposite of `create_app()`'s deliberate
-tolerance — the api must still serve `/v1/healthz` to say why it is unhappy, while an
-ingestor with no database has nothing to offer.
+Subscribes to `ff/v1/d/+/up/#`, enforces per-device MQTT rate budgets (`A-15`), writes device
+and deploy state, emits `ff_events` notifications for SSE fan-out (`R0-be-5`), runs hourly
+retention sweeps (`R4-be-1`), and writes structured JSON liveness + capability readiness into
+`HEARTBEAT_PATH` (`A-15`).
 
 Run it with `python -m fleetforge.ingestor.main`.
 """
 
+from __future__ import annotations
+
 import asyncio
 import contextlib
+import json
 import logging
 import os
 import signal
 import time
+from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 import aiomqtt
 from sqlalchemy.exc import SQLAlchemyError
@@ -43,46 +31,86 @@ from fleetforge.config import Settings, get_settings
 from fleetforge.db.base import get_engine, get_sessionmaker
 from fleetforge.ingest import otel
 from fleetforge.ingest.handlers import handle_up_message
+from fleetforge.ingest.rate_budget import DeviceIngestRateLimiter
 from fleetforge.storage.factory import create_object_store, object_store_configured
 from fleetforge.storage.objectstore import ObjectStore
 
 logger = logging.getLogger("fleetforge.ingestor")
 
-# Every device-to-server topic. `spec/device-protocol.md` → *Topic namespace*:
-# `ff/v1/d/{device_id}/up/{channel}`; the up channels are QoS 1.
 UP_TOPIC_FILTER = "ff/v1/d/+/up/#"
 UP_TOPIC_QOS = 1
-
-# A stable client id plus `clean_session=False` means the broker keeps this
-# subscription and any undelivered QoS-1 messages across an ingestor restart —
-# the same durability property the device side relies on.
 CLIENT_ID = "fleetforge-ingestor"
-
-# Liveness for a process with no HTTP server: touch a file, and let the container
-# healthcheck compare its mtime against now (stale after 120 s).
 HEARTBEAT_PATH = Path(os.environ.get("INGESTOR_HEARTBEAT_FILE", "/tmp/ingestor-alive"))  # noqa: S108
-
-# The file is touched on a timer while the broker session is up, NOT only when a
-# device speaks (S0-infra-8): a 3-15 board hobbyist fleet is idle most of the time,
-# and a probe keyed on traffic sat red for 27 hours over a healthy process. Four
-# ticks per probe window, so one late tick cannot flip it.
 HEARTBEAT_INTERVAL = 30.0
-# ...but a timer alone would stay green over a consumer wedged inside one message
-# (a hung database write keeps the broker session up). A message in flight longer
-# than this stops the ticks; nothing legitimate takes a minute at 25 devices.
 STALL_LIMIT = 60.0
-
 RECONNECT_INITIAL_DELAY = 1.0
 RECONNECT_MAX_DELAY = 30.0
 
 
-def touch_heartbeat() -> None:
-    """Bump the liveness file's mtime, never failing the caller."""
+def ingestor_capabilities_status(settings: Settings) -> dict[str, Any]:
+    """Return enabled vs disabled ingestor capabilities (`A-15`)."""
+    enabled: list[str] = ["mqtt_up_ingest", "retention_sweep"]
+    disabled: list[str] = []
+
+    optional = (
+        ("object_store_orphan_gc", object_store_configured(settings)),
+        (
+            "global_otlp_export",
+            bool(
+                settings.otel_exporter_otlp_endpoint
+                and settings.otel_exporter_otlp_endpoint.strip()
+            ),
+        ),
+        (
+            "device_rate_budget",
+            settings.ingest_device_rate_per_min > 0 and settings.ingest_device_burst > 0,
+        ),
+    )
+    for name, is_enabled in optional:
+        if is_enabled:
+            enabled.append(name)
+        else:
+            disabled.append(name)
+
+    return {
+        "status": "alive",
+        "enabled_capabilities": enabled,
+        "disabled_capabilities": disabled,
+        "rate_budget": {
+            "rate_per_min": settings.ingest_device_rate_per_min,
+            "burst": settings.ingest_device_burst,
+        },
+    }
+
+
+def log_ingestor_readiness(settings: Settings) -> dict[str, Any]:
+    """Log a single structured readiness summary line on startup (`A-15`)."""
+    status = ingestor_capabilities_status(settings)
+    logger.info(
+        "ingestor readiness enabled=%s disabled=%s",
+        ",".join(status["enabled_capabilities"]) or "none",
+        ",".join(status["disabled_capabilities"]) or "none",
+    )
+    return status
+
+
+def touch_heartbeat(status_payload: Mapping[str, Any] | None = None) -> None:
+    """Write compact JSON readiness to `HEARTBEAT_PATH` and update its mtime, never raising."""
+    payload = dict(status_payload) if status_payload is not None else {"status": "alive"}
+    encoded = (json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n").encode("utf-8")
+    now_ts = time.time()
     try:
-        HEARTBEAT_PATH.touch()
-        os.utime(HEARTBEAT_PATH, (time.time(), time.time()))
-    except OSError as exc:  # pragma: no cover - a full or read-only /tmp
-        logger.warning("heartbeat: cannot touch %s: %s", HEARTBEAT_PATH, exc)
+        tmp_path = HEARTBEAT_PATH.with_name(f".{HEARTBEAT_PATH.name}.{os.getpid()}.tmp")
+        tmp_path.write_bytes(encoded)
+        os.utime(tmp_path, (now_ts, now_ts))
+        os.replace(tmp_path, HEARTBEAT_PATH)
+        os.utime(HEARTBEAT_PATH, (now_ts, now_ts))
+    except OSError:
+        try:
+            HEARTBEAT_PATH.write_bytes(encoded)
+            os.utime(HEARTBEAT_PATH, (now_ts, now_ts))
+        except OSError as exc:  # pragma: no cover - full or read-only /tmp
+            logger.warning("heartbeat: cannot touch %s: %s", HEARTBEAT_PATH, exc)
 
 
 class Consumer:
@@ -95,18 +123,17 @@ class Consumer:
         return self.busy_since is not None and now - self.busy_since > STALL_LIMIT
 
 
-async def keep_alive(consumer: Consumer) -> None:
-    """Touch the heartbeat every `HEARTBEAT_INTERVAL` until cancelled, unless stalled.
-
-    Runs only inside a broker session, so liveness means "connected and consuming":
-    a dropped connection ends the session and cancels this, and a wedged consumer
-    stops the ticks; either way the file goes stale and the probe turns red.
-    """
+async def keep_alive(
+    consumer: Consumer,
+    *,
+    status_payload: Mapping[str, Any] | None = None,
+) -> None:
+    """Touch `HEARTBEAT_PATH` every `HEARTBEAT_INTERVAL` until cancelled, unless stalled."""
     while True:
         if consumer.stalled(time.monotonic()):
             logger.warning("heartbeat: one message in flight > %.0fs; not touching", STALL_LIMIT)
         else:
-            touch_heartbeat()
+            touch_heartbeat(status_payload)
         await asyncio.sleep(HEARTBEAT_INTERVAL)
 
 
@@ -116,22 +143,9 @@ async def handle_message(
     tolerance: float,
     *,
     settings: Settings | None = None,
+    rate_limiter: DeviceIngestRateLimiter | None = None,
 ) -> None:
-    """Handle one inbound device message; never raise.
-
-    Payload *length* is logged, never the payload body: logs are not a data store, and
-    telemetry bodies get large from R4.
-
-    One message must not kill the process, and neither must a database outage — a
-    failed write returns normally, so the session's `keep_alive` keeps ticking.
-    Liveness here means "connected to the broker and consuming"; restarting the
-    container does not fix Postgres, and a crash-loop would only add reconnect churn
-    to the outage.
-    There is no manual ack (paho acks a QoS-1 message when it reaches the callback and
-    aiomqtt exposes no way to defer that), so a failed write is lost — which is why
-    the retained `announce`/`presence` state re-syncs on the next reconnect and
-    heartbeats repeat every 60 s.
-    """
+    """Handle one inbound device message; never raise."""
     received_at = now_utc()
     topic = message.topic.value
     payload = message.payload if isinstance(message.payload, bytes | bytearray) else b""
@@ -143,9 +157,6 @@ async def handle_message(
         len(payload),
     )
     try:
-        # One session, one transaction, one message. Sequential processing gives
-        # per-device ordering for free; at 25 devices on a 60 s heartbeat
-        # (`spec/prd.md` → *Capacity*) there is no throughput problem to solve.
         async with sessionmaker() as session:
             event = await handle_up_message(
                 session,
@@ -155,6 +166,7 @@ async def handle_message(
                 received_at=received_at,
                 tolerance=tolerance,
                 settings=settings,
+                rate_limiter=rate_limiter,
             )
             await session.commit()
         if event is not None:
@@ -178,15 +190,10 @@ async def run_once(
     password: str | None = None,
     *,
     settings: Settings | None = None,
+    rate_limiter: DeviceIngestRateLimiter | None = None,
 ) -> None:
-    """Connect, subscribe and consume until the connection drops.
-
-    `username`/`password` are this process's own broker credential (R0-sec-1): a
-    read-only dynsec role scoped to `ff/v1/d/+/up/#`, never the API's dynsec admin.
-    Both `None` connects anonymously, which the broker refuses — the reconnect loop
-    in `run` then repeats "Not authorized" forever, which is the intended loud
-    failure. The username is logged; the password never is.
-    """
+    """Connect, subscribe, and consume until the connection drops."""
+    readiness = ingestor_capabilities_status(settings) if settings is not None else None
     async with aiomqtt.Client(
         hostname=hostname,
         port=port,
@@ -205,12 +212,18 @@ async def run_once(
         await client.subscribe(UP_TOPIC_FILTER, qos=UP_TOPIC_QOS)
         logger.info("subscribed to %s (qos %d)", UP_TOPIC_FILTER, UP_TOPIC_QOS)
         consumer = Consumer()
-        ticker = asyncio.create_task(keep_alive(consumer))
+        ticker = asyncio.create_task(keep_alive(consumer, status_payload=readiness))
         try:
             async for message in client.messages:
                 consumer.busy_since = time.monotonic()
                 try:
-                    await handle_message(message, sessionmaker, tolerance, settings=settings)
+                    await handle_message(
+                        message,
+                        sessionmaker,
+                        tolerance,
+                        settings=settings,
+                        rate_limiter=rate_limiter,
+                    )
                 finally:
                     consumer.busy_since = None
         finally:
@@ -228,18 +241,26 @@ async def run(
     password: str | None = None,
     *,
     settings: Settings | None = None,
+    rate_limiter: DeviceIngestRateLimiter | None = None,
 ) -> None:
-    """Consume forever, reconnecting with capped exponential backoff.
-
-    A broker restart must never take the ingestor down with it: an ingestor that
-    exits on a dropped connection turns a five-second broker blip into a
-    fleet-visibility outage that lasts until someone notices the container.
-    """
+    """Consume forever, reconnecting with capped exponential backoff."""
+    limiter = (
+        rate_limiter
+        if rate_limiter is not None
+        else DeviceIngestRateLimiter.from_settings(settings)
+    )
     delay = RECONNECT_INITIAL_DELAY
     while True:
         try:
             await run_once(
-                hostname, port, sessionmaker, tolerance, username, password, settings=settings
+                hostname,
+                port,
+                sessionmaker,
+                tolerance,
+                username,
+                password,
+                settings=settings,
+                rate_limiter=limiter,
             )
             logger.warning("broker connection closed; reconnecting")
         except aiomqtt.MqttError as exc:
@@ -258,11 +279,7 @@ async def sweep_once(
     always_log: bool = False,
     store: ObjectStore | None = None,
 ) -> retention.SweepResult | None:
-    """One retention pass in its own session and transaction; `None` if it failed.
-
-    Never raises for a database or network failure: the next pass retries, and the
-    read predicates keep expired rows hidden meanwhile. Counts are logged, never rows.
-    """
+    """One retention pass in its own session and transaction; `None` if it failed."""
     try:
         async with sessionmaker() as session:
             if store is None:
@@ -301,11 +318,7 @@ async def retention_loop(
     interval_s: float = retention.SWEEP_INTERVAL_S,
     store: ObjectStore | None = None,
 ) -> None:
-    """Sweep once at start (always logged), then every `interval_s`, until cancelled.
-
-    Its own task, so a broker outage does not stop retention and a slow sweep does not
-    stall ingestion; it never touches the liveness file.
-    """
+    """Sweep once at start (always logged), then every `interval_s`, until cancelled."""
     await sweep_once(sessionmaker, always_log=True, store=store)
     while True:
         await asyncio.sleep(interval_s)
@@ -313,7 +326,7 @@ async def retention_loop(
 
 
 async def main() -> None:
-    """Entrypoint: wire SIGTERM/SIGINT to a clean shutdown, then run."""
+    """Entrypoint: log readiness, wire SIGTERM/SIGINT to a clean shutdown, then run."""
     logging.basicConfig(
         level=logging.INFO,
         format='{"ts":"%(asctime)s","level":"%(levelname)s","logger":"%(name)s","msg":"%(message)s"}',
@@ -322,6 +335,9 @@ async def main() -> None:
     )
     settings = get_settings()
     sessionmaker = get_sessionmaker()
+    readiness = log_ingestor_readiness(settings)
+    touch_heartbeat(readiness)
+    rate_limiter = DeviceIngestRateLimiter.from_settings(settings)
 
     loop = asyncio.get_running_loop()
     task = asyncio.create_task(
@@ -333,6 +349,7 @@ async def main() -> None:
             settings.mqtt_username,
             settings.mqtt_password,
             settings=settings,
+            rate_limiter=rate_limiter,
         )
     )
 
@@ -340,8 +357,6 @@ async def main() -> None:
     sweeper = asyncio.create_task(retention_loop(sessionmaker, store=object_store))
     otel_worker = asyncio.create_task(otel.otel_export_loop())
 
-    # `docker compose down` sends SIGTERM; cancelling the task lets aiomqtt send a
-    # proper DISCONNECT instead of leaving a half-open session on the broker.
     for sig in (signal.SIGTERM, signal.SIGINT):
         with contextlib.suppress(NotImplementedError):
             loop.add_signal_handler(sig, task.cancel)
@@ -356,7 +371,6 @@ async def main() -> None:
         await otel_worker
     await otel.flush_otel_queue()
     await otel.close_otel_client()
-    # Close the pool rather than leaving connections for the server to reap.
     await get_engine().dispose()
     logger.info("ingestor stopped")
 

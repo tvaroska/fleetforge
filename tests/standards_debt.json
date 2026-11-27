@@ -9,18 +9,6 @@
     "ruff:PLR0915",
     "ruff:RUF"
   ],
-  "oversized_files": {
-    "agent/components/fleetforge/src/ff_mqtt.c": 2237,
-    "agent/components/fleetforge/src/ff_net_wifi.c": 1132,
-    "agent/components/fleetforge/src/ff_ota.c": 1540,
-    "frontend/src/DeviceInspector.tsx": 929,
-    "frontend/src/FlashBoard.tsx": 887,
-    "frontend/src/FleetView.tsx": 1016,
-    "frontend/src/ProjectAccess.tsx": 1532,
-    "frontend/src/boardConsole.ts": 1177,
-    "scripts/lib_quickstart.py": 1949,
-    "scripts/selftest_window_e2e.py": 858,
-    "src/fleetforge/simulator/device.py": 2202
-  },
+  "oversized_files": {},
   "narration_comments": 0
 }

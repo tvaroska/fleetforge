@@ -1,3 +1,4 @@
+// @vitest-environment node
 // The pre-flight card's rules, with no DOM.
 
 import { describe, expect, it } from 'vitest'
@@ -42,6 +43,8 @@ const deploy = (over: Partial<DeploySummary> = {}): DeploySummary => ({
   from_version: '1.4.2',
   pct: null,
   detail: null,
+  steps: [],
+  confirm_timeout_s: 300,
   ...over,
 })
 const arrival = (over: Partial<ArrivalSummary> = {}): ArrivalSummary => ({

@@ -1,33 +1,15 @@
-"""`POST /v1/devices/{device_id}/deploy` — the orchestration endpoint. R1-be-2.
+"""`POST /v1/devices/{device_id}/deploy` — the orchestration endpoint (`R1-be-2`, `T-10`).
 
 `spec/flows.md` Flow 2, with the broker and the object store replaced by the fakes in
-`conftest.py`. The properties worth holding, one class each:
-
-* **The command on the wire is the spec's, and the signed URL lives only there.** The
-  URL is a bearer credential: it must not appear in `deploy_events.detail`, in a log
-  record, or in the response body. Those three assertions are the point of this suite.
-* **Record the intent, then act.** A `requested` row exists before the publish, and a
-  publish that fails closes the transaction with the one terminal state the server may
-  author — so a broker outage is never reported as a deploy still in flight.
-* **A retry is the same transaction.** Same device, same bytes, inside the signed-URL
-  window: same `cmd_id`, `reused: true`, and **no second row** — the board deduplicates
-  on the id and downloads once.
-* **A board that cannot take the image is refused before anything is signed.** Wrong
-  chip is a 404 (the label exists, just not for this target); layout, slot size and the
-  missing `ota` capability are 409s, all of them naming the value that did not match.
-* **`device_online` is reported, never enforced.** The QoS-1 command waits in the
-  device's persistent session; refusing to deploy to a sleeping board would be wrong.
+`conftest.py`. Precheck, gate overrides, library-marker checks, and no-scheduler source
+tripwires live in `tests/test_api_deploy_precheck.py`.
 """
 
-import ast
-import hashlib
-import inspect
-import re
+from __future__ import annotations
+
 from collections.abc import AsyncIterator, Iterator
-from pathlib import Path
 from typing import Any
 
-import httpx
 import pytest
 from fastapi import FastAPI
 from sqlalchemy import delete, text
@@ -39,7 +21,6 @@ from fleetforge.auth.tokens import ADMIN_TOKEN_PREFIX, parse_token
 from fleetforge.broker import CommandPublishError
 from fleetforge.clock import now_utc
 from fleetforge.db.models import TERMINAL_DEPLOY_STATES, DeployEvent, DeployState, Device
-from fleetforge.signing import generate_keypair, sign_digest
 from fleetforge.storage.blobs import blob_key
 from fleetforge.storage.objectstore import ObjectStoreError
 from tests.conftest import (
@@ -51,32 +32,28 @@ from tests.conftest import (
     login_admin,
     settings_for_tests,
 )
-
-DEVICE_ID = "a4cf12b3de90"
-OTHER_DEVICE_ID = "a4cf12b3de91"
-IMAGE = b"\xe9\x06\x02\x20" + b"firmware bytes, opaque to the server" * 37
-OTHER_IMAGE = IMAGE + b"!"
-SHA256 = hashlib.sha256(IMAGE).hexdigest()
-OTHER_SHA256 = hashlib.sha256(OTHER_IMAGE).hexdigest()
-_RELEASE_PRIV_1, _RELEASE_PUB_1 = generate_keypair()
-_RELEASE_PRIV_2, _RELEASE_PUB_2 = generate_keypair()
-TEST_RELEASE_PUBLIC_RING = f"{_RELEASE_PUB_1};{_RELEASE_PUB_2}"
-TEST_SIG = sign_digest(SHA256, _RELEASE_PRIV_1)
-OTHER_TEST_SIG = sign_digest(OTHER_SHA256, _RELEASE_PRIV_1)
-VERSION = "1.5.0"
-TARGET = "esp32"
-LAYOUT = "ab-4m-v1"
-# spec/device-protocol.md → Partition layouts, retyped (R2b-be-7).
-AB_SHA = "1fa67e6bbd034e434d04e9d6f4f52bbe899361602cd498573eb3bde97d1559ed"
-ARDUINO_SHA = "05528998ae17fb6a7a5741443f9a7a4720c766f370fefc30814cbc3e391c1fc4"
-# tests/fixtures/wrong-layout-partitions.csv: matches no builtin layout (R3-fw-5, R3-be-2).
-WRONG_SHA = "47db53920359cfb4581532a293d8e563401f3abe37f9b282cc713039ac937c4c"
-# Read from the defaults rather than retyped: the URL's lifetime is also the reuse
-# window, and a literal here would keep passing while the setting drifted.
-TTL_S = settings_for_tests().signed_url_ttl_s
-CONFIRM_TIMEOUT_S = settings_for_tests().confirm_timeout_s
-# R1-be-3: the origin a device is told to fetch from. Ours now, not the store's.
-PUBLIC_BASE_URL = settings_for_tests().public_base_url
+from tests.support_deploy import (
+    CONFIRM_TIMEOUT_S,
+    DEVICE_ID,
+    IMAGE,
+    LAYOUT,
+    OTHER_DEVICE_ID,
+    OTHER_IMAGE,
+    OTHER_SHA256,
+    PUBLIC_BASE_URL,
+    RELEASE_PRIV_1,
+    SHA256,
+    TARGET,
+    TEST_RELEASE_PUBLIC_RING,
+    TEST_SIG,
+    TTL_S,
+    VERSION,
+    add_artifact,
+    add_device,
+    deploy,
+    events,
+    precheck,
+)
 
 
 @pytest.fixture
@@ -85,7 +62,7 @@ def store(admin_app: FastAPI) -> Iterator[MemoryObjectStore]:
     store.objects[blob_key(SHA256)] = IMAGE
     store.objects[blob_key(OTHER_SHA256)] = OTHER_IMAGE
     release_settings = settings_for_tests(
-        artifact_signing_key=_RELEASE_PRIV_1,
+        artifact_signing_key=RELEASE_PRIV_1,
         artifact_signing_public_keys=TEST_RELEASE_PUBLIC_RING,
     )
     admin_app.dependency_overrides[get_settings] = lambda: release_settings
@@ -104,11 +81,7 @@ def publisher(admin_app: FastAPI) -> Iterator[FakeCommandPublisher]:
 
 @pytest.fixture
 async def db(engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
-    """Committed writes, cleaned up afterwards — the endpoint opens its own session.
-
-    `deploy_events` first: its FK to `devices` is `ON DELETE RESTRICT`, which is the
-    whole point of it.
-    """
+    """Committed writes, cleaned up afterwards — the endpoint opens its own session."""
     async with AsyncSession(engine, expire_on_commit=False) as session:
         try:
             yield session
@@ -118,135 +91,21 @@ async def db(engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
             await session.execute(delete(Device))
             await session.execute(text("DELETE FROM artifact_versions"))
             await session.execute(text("DELETE FROM artifacts"))
-            # R3-be-2: operator and detected profiles; never the builtins.
             await session.execute(text("DELETE FROM partition_profiles WHERE origin <> 'builtin'"))
             await session.commit()
 
 
-async def add_device(session: AsyncSession, device_id: str = DEVICE_ID, **overrides: Any) -> Device:
-    values: dict[str, Any] = {
-        "device_id": device_id,
-        "platform_type": TARGET,
-        "link_type": "wifi",
-        "power_class": "always_on",
-        "fw_version": "1.4.2",
-        "partition_layout": LAYOUT,
-        "ota_slot_size": 1966080,
-        "capabilities": ["ota"],
-        "presence_reported": True,
-        "last_seen": now_utc(),
-    }
-    values.update(overrides)
-    device = Device(**values)
-    session.add(device)
-    await session.commit()
-    return device
-
-
-_DEFAULT_SIG = object()
-
-
-async def add_artifact(
-    session: AsyncSession,
-    *,
-    sha256: str = SHA256,
-    size_bytes: int = len(IMAGE),
-    target: str = TARGET,
-    version: str = VERSION,
-    layout: str | None = LAYOUT,
-    has_lib_marker: bool | None = None,
-    sig: str | None | object = _DEFAULT_SIG,
-) -> None:
-    """Insert the artifact and its label directly — `test_api_artifact_upload.py` owns POST.
-
-    `has_lib_marker` defaults to NULL, an artifact uploaded before R3-be-1: never warns.
-    `sig` defaults to a release-ring ECDSA P-256 signature for `sha256`; pass `sig=None`
-    explicitly to exercise `unsigned_artifact` / `signature_required_by_device`.
-    """
-    resolved_sig: str | None
-    if sig is _DEFAULT_SIG:
-        if sha256 == SHA256:
-            resolved_sig = TEST_SIG
-        elif sha256 == OTHER_SHA256:
-            resolved_sig = OTHER_TEST_SIG
-        else:
-            resolved_sig = sign_digest(sha256, _RELEASE_PRIV_1)
-    else:
-        resolved_sig = sig  # type: ignore[assignment]
-    await session.execute(
-        text(
-            "INSERT INTO artifacts (sha256, size_bytes, kind, target, partition_layout, "
-            "has_lib_marker, sig) "
-            "VALUES (:sha256, :size_bytes, 'user_firmware', :target, :layout, :marker, :sig) "
-            "ON CONFLICT (sha256) DO NOTHING"
-        ),
-        {
-            "sha256": sha256,
-            "size_bytes": size_bytes,
-            "target": target,
-            "layout": layout,
-            "marker": has_lib_marker,
-            "sig": resolved_sig,
-        },
-    )
-    await session.execute(
-        text(
-            "INSERT INTO artifact_versions (target, version, sha256) "
-            "VALUES (:target, :version, :sha256)"
-        ),
-        {"target": target, "version": version, "sha256": sha256},
-    )
-    await session.commit()
-
-
-async def deploy(
-    app: FastAPI,
-    token: str,
-    device_id: str = DEVICE_ID,
-    **body: Any,
-) -> httpx.Response:
-    payload: dict[str, Any] = {"version": VERSION}
-    payload.update(body)
-    async with client_for(app, base_url="https://testserver") as client:
-        return await client.post(
-            f"/v1/devices/{device_id}/deploy",
-            json=payload,
-            headers={"authorization": f"Bearer {token}"},
-        )
-
-
-async def precheck(
-    app: FastAPI,
-    token: str,
-    device_id: str = DEVICE_ID,
-    **body: Any,
-) -> httpx.Response:
-    payload: dict[str, Any] = {"version": VERSION}
-    payload.update(body)
-    async with client_for(app, base_url="https://testserver") as client:
-        return await client.post(
-            f"/v1/devices/{device_id}/deploy/precheck",
-            json=payload,
-            headers={"authorization": f"Bearer {token}"},
-        )
-
-
-async def events(session: AsyncSession) -> list[dict[str, Any]]:
-    rows = (
-        await session.execute(
-            text(
-                "SELECT cmd_id, state, is_terminal, from_version, artifact_version, detail "
-                "FROM deploy_events ORDER BY id"
-            )
-        )
-    ).all()
-    return [dict(row._mapping) for row in rows]  # noqa: SLF001 - the documented Row accessor
+def token_id_of(token: str) -> Any:
+    parts = parse_token(token, ADMIN_TOKEN_PREFIX)
+    assert parts is not None
+    return parts.token_id
 
 
 class TestAuth:
     async def test_unauthenticated_is_401_and_publishes_nothing(
         self, admin_app: FastAPI, db: AsyncSession, store: MemoryObjectStore, publisher: Any
     ) -> None:
+        _ = store
         await add_device(db)
         await add_artifact(db)
 
@@ -267,6 +126,7 @@ class TestTheCommandOnTheWire:
         store: MemoryObjectStore,
         publisher: FakeCommandPublisher,
     ) -> None:
+        _ = store
         await add_device(db)
         await add_artifact(db)
         token = await login_admin(admin_app)
@@ -285,10 +145,7 @@ class TestTheCommandOnTheWire:
 
         (device_id, payload) = publisher.published[0]
         assert device_id == DEVICE_ID
-        # The URL is minted here and varies by `exp`, so it is checked by shape below
-        # and compared out of the payload equality.
         url = payload["artifact"].pop("url")
-        # Exactly the spec's keys — an extra one reaches a flash-baked agent.
         assert payload == {
             "id": body["cmd_id"],
             "type": "stage",
@@ -301,7 +158,6 @@ class TestTheCommandOnTheWire:
             "apply": "auto",
             "confirm_timeout_s": CONFIRM_TIMEOUT_S,
         }
-        # R1-be-3: our origin and our signature, not the store's presigned URL.
         assert url.startswith(f"{PUBLIC_BASE_URL}/v1/artifact/{SHA256}/bin?")
         assert "exp=" in url
         assert "sig=" in url
@@ -313,7 +169,7 @@ class TestTheCommandOnTheWire:
         store: MemoryObjectStore,
         publisher: FakeCommandPublisher,
     ) -> None:
-        # R5-be-2: the board must announce the `apply` verb, or `on_command` is refused.
+        _ = store
         await add_device(db, capabilities=["ota", "apply"])
         await add_artifact(db)
         token = await login_admin(admin_app)
@@ -330,8 +186,8 @@ class TestTheCommandOnTheWire:
         store: MemoryObjectStore,
         publisher: FakeCommandPublisher,
     ) -> None:
-        """R5-be-2 / R5-spec-1 D9: a pre-R5 agent ignores `apply`, so the stage would wait
-        at `staged` until the board restarts. Refused before anything is minted or written."""
+        """R5-be-2 / R5-spec-1 D9: a pre-R5 agent ignores `apply`; refused before mint/write."""
+        _ = store
         await add_device(db, capabilities=["ota"])
         await add_artifact(db)
         token = await login_admin(admin_app)
@@ -354,6 +210,7 @@ class TestTheCommandOnTheWire:
         store: MemoryObjectStore,
         publisher: FakeCommandPublisher,
     ) -> None:
+        _ = store
         await add_device(db, capabilities=["ota"])
         await add_artifact(db)
         token = await login_admin(admin_app)
@@ -370,6 +227,7 @@ class TestTheCommandOnTheWire:
         store: MemoryObjectStore,
         publisher: FakeCommandPublisher,
     ) -> None:
+        _ = store
         await add_device(db, capabilities=["ota"])
         await add_artifact(db)
         token = await login_admin(admin_app)
@@ -391,6 +249,7 @@ class TestTheCommandOnTheWire:
         store: MemoryObjectStore,
         publisher: FakeCommandPublisher,
     ) -> None:
+        _ = store
         await add_device(db)
         await add_artifact(db)
         token = await login_admin(admin_app)
@@ -407,11 +266,7 @@ class TestTheCommandOnTheWire:
         store: MemoryObjectStore,
         publisher: FakeCommandPublisher,
     ) -> None:
-        """R1-be-3: the deploy path mints the link; it does not ask the store for one.
-
-        Verified rather than pattern-matched — a URL the download endpoint would refuse
-        is a board that reports `download_failed` an hour after the deploy looked fine.
-        """
+        """R1-be-3: the deploy path mints the link; it does not ask the store for one."""
         await add_device(db)
         await add_artifact(db)
         token = await login_admin(admin_app)
@@ -424,10 +279,7 @@ class TestTheCommandOnTheWire:
         assert verify_artifact_url(
             SHA256, exp=fields["exp"], sig=fields["sig"], secret=TEST_ARTIFACT_URL_SECRET
         ) == pytest.approx(int(now_utc().timestamp()) + TTL_S, abs=5)
-
-        # The store is never asked to sign anything on the deploy path any more.
         assert store.signed_urls == []
-        # And the blob key stays an implementation detail of the download side.
         assert blob_key(SHA256) not in url
 
     async def test_a_deploy_without_a_url_secret_is_503_and_costs_no_row(
@@ -437,11 +289,8 @@ class TestTheCommandOnTheWire:
         store: MemoryObjectStore,
         publisher: FakeCommandPublisher,
     ) -> None:
-        """R1-be-3. Replaces "the store cannot sign" — the mint is local now.
-
-        A 202 whose URL no board can redeem is the lie `NullCommandPublisher` refuses to
-        tell, so the refusal happens before any row exists.
-        """
+        """R1-be-3: missing URL secret refuses before any row is written."""
+        _ = store
         await add_device(db)
         await add_artifact(db)
         token = await login_admin(admin_app)
@@ -454,7 +303,6 @@ class TestTheCommandOnTheWire:
         assert response.status_code == 503
         assert publisher.published == []
         assert await events(db) == [], "a deploy that could not mint a URL never happened"
-        # Neither the missing setting nor the secret is named to the caller.
         assert "ARTIFACT_URL_SECRET" not in response.text
 
 
@@ -466,6 +314,7 @@ class TestTheUrlIsACredential:
         store: MemoryObjectStore,
         publisher: FakeCommandPublisher,
     ) -> None:
+        _ = (store, publisher)
         await add_device(db)
         await add_artifact(db)
         token = await login_admin(admin_app)
@@ -482,6 +331,7 @@ class TestTheUrlIsACredential:
         store: MemoryObjectStore,
         publisher: FakeCommandPublisher,
     ) -> None:
+        _ = (store, publisher)
         await add_device(db)
         await add_artifact(db)
         token = await login_admin(admin_app)
@@ -510,6 +360,7 @@ class TestTheUrlIsACredential:
         store: MemoryObjectStore,
         publisher: FakeCommandPublisher,
     ) -> None:
+        _ = store
         await add_device(db)
         await add_artifact(db)
         token = await login_admin(admin_app)
@@ -519,8 +370,6 @@ class TestTheUrlIsACredential:
 
         messages = [record.getMessage() for record in records]
         assert messages, "capture_logs caught nothing — the assertions below would be vacuous"
-        # The whole URL, and the signature on its own: R1-be-3 made the URL ours, so a
-        # search for the *store's* hostname would now pass while leaking everything.
         url = publisher.last["artifact"]["url"]
         sig = url.split("sig=", 1)[1]
         assert not any(url in message or sig in message for message in messages)
@@ -535,6 +384,7 @@ class TestRecordsTheIntent:
         store: MemoryObjectStore,
         publisher: FakeCommandPublisher,
     ) -> None:
+        _ = (store, publisher)
         await add_device(db)
         await add_artifact(db)
         token = await login_admin(admin_app)
@@ -553,12 +403,6 @@ class TestRecordsTheIntent:
         assert DeployState.REQUESTED not in TERMINAL_DEPLOY_STATES
 
 
-def token_id_of(token: str) -> Any:
-    parts = parse_token(token, ADMIN_TOKEN_PREFIX)
-    assert parts is not None
-    return parts.token_id
-
-
 class TestRecordsTheSender:
     """R2b-be-4: who sent it is `detail.sent_by` on the `requested` row. No column."""
 
@@ -569,6 +413,7 @@ class TestRecordsTheSender:
         store: MemoryObjectStore,
         publisher: FakeCommandPublisher,
     ) -> None:
+        _ = (store, publisher)
         await add_device(db)
         await add_artifact(db)
         token = await login_admin(admin_app)
@@ -588,6 +433,7 @@ class TestRecordsTheSender:
         store: MemoryObjectStore,
         publisher: FakeCommandPublisher,
     ) -> None:
+        _ = (store, publisher)
         await add_device(db)
         await add_artifact(db)
         first_token = await login_admin(admin_app)
@@ -608,6 +454,7 @@ class TestRecordsTheSender:
         store: MemoryObjectStore,
         publisher: FakeCommandPublisher,
     ) -> None:
+        _ = store
         await add_device(db)
         await add_artifact(db)
         token = await login_admin(admin_app)
@@ -627,6 +474,7 @@ class TestARetryIsTheSameTransaction:
         store: MemoryObjectStore,
         publisher: FakeCommandPublisher,
     ) -> None:
+        _ = store
         await add_device(db)
         await add_artifact(db)
         token = await login_admin(admin_app)
@@ -639,7 +487,6 @@ class TestARetryIsTheSameTransaction:
         assert first.json()["reused"] is False
         assert second.json()["reused"] is True
         assert len(await events(db)) == 1, "a retry is the same intent, not a second one"
-        # Republished, though: the first URL may never have arrived.
         assert len(publisher.published) == 2
 
     async def test_a_different_artifact_is_a_new_transaction(
@@ -649,6 +496,7 @@ class TestARetryIsTheSameTransaction:
         store: MemoryObjectStore,
         publisher: FakeCommandPublisher,
     ) -> None:
+        _ = (store, publisher)
         await add_device(db)
         await add_artifact(db)
         await add_artifact(db, sha256=OTHER_SHA256, size_bytes=len(OTHER_IMAGE), version="1.6.0")
@@ -669,6 +517,7 @@ class TestARetryIsTheSameTransaction:
         publisher: FakeCommandPublisher,
     ) -> None:
         """Once the device reports a terminal state, the next POST is a fresh deploy."""
+        _ = (store, publisher)
         await add_device(db)
         await add_artifact(db)
         token = await login_admin(admin_app)
@@ -696,9 +545,8 @@ class TestARetryIsTheSameTransaction:
         store: MemoryObjectStore,
         publisher: FakeCommandPublisher,
     ) -> None:
-        """R5-be-2 closes R5-fw-4 gap (c): `cancelled` is terminal, so re-deploying the
-        cancelled version mints a new `cmd_id` and writes a new `requested` row — the board
-        would otherwise drop the re-sent id as a duplicate, or re-run a cancelled stage."""
+        """R5-be-2 closes R5-fw-4 gap (c): `cancelled` is terminal, so re-deploying mints a new id."""
+        _ = (store, publisher)
         await add_device(db, capabilities=["ota", "apply", "cancel"])
         await add_artifact(db)
         token = await login_admin(admin_app)
@@ -729,6 +577,7 @@ class TestARetryIsTheSameTransaction:
         publisher: FakeCommandPublisher,
     ) -> None:
         """Past the TTL the first URL has expired, so the old id would be a lie."""
+        _ = (store, publisher)
         await add_device(db)
         await add_artifact(db)
         token = await login_admin(admin_app)
@@ -750,6 +599,7 @@ class TestARetryIsTheSameTransaction:
         store: MemoryObjectStore,
         publisher: FakeCommandPublisher,
     ) -> None:
+        _ = (store, publisher)
         await add_device(db)
         await add_device(db, OTHER_DEVICE_ID)
         await add_artifact(db)
@@ -770,6 +620,7 @@ class TestRefusals:
         store: MemoryObjectStore,
         publisher: FakeCommandPublisher,
     ) -> None:
+        _ = (db, store)
         token = await login_admin(admin_app)
 
         response = await deploy(admin_app, token, version="../../etc/passwd")
@@ -784,6 +635,7 @@ class TestRefusals:
         store: MemoryObjectStore,
         publisher: FakeCommandPublisher,
     ) -> None:
+        _ = store
         await add_artifact(db)
         token = await login_admin(admin_app)
 
@@ -799,6 +651,7 @@ class TestRefusals:
         store: MemoryObjectStore,
         publisher: FakeCommandPublisher,
     ) -> None:
+        _ = store
         await add_device(db, decommissioned_at=now_utc())
         await add_artifact(db)
         token = await login_admin(admin_app)
@@ -815,7 +668,8 @@ class TestRefusals:
         store: MemoryObjectStore,
         publisher: FakeCommandPublisher,
     ) -> None:
-        """The label exists — just not for this board's chip. `target` is never a request field."""
+        """The label exists — just not for this board's chip."""
+        _ = store
         await add_device(db, platform_type="esp32c6")
         await add_artifact(db)
         token = await login_admin(admin_app)
@@ -833,6 +687,7 @@ class TestRefusals:
         store: MemoryObjectStore,
         publisher: FakeCommandPublisher,
     ) -> None:
+        _ = store
         await add_device(db, partition_layout="ab-4m-arduino-v1")
         await add_artifact(db)
         token = await login_admin(admin_app)
@@ -851,6 +706,7 @@ class TestRefusals:
         store: MemoryObjectStore,
         publisher: FakeCommandPublisher,
     ) -> None:
+        _ = store
         await add_device(db, ota_slot_size=100)
         await add_artifact(db)
         token = await login_admin(admin_app)
@@ -868,6 +724,7 @@ class TestRefusals:
         store: MemoryObjectStore,
         publisher: FakeCommandPublisher,
     ) -> None:
+        _ = store
         await add_device(db, capabilities=["telemetry"])
         await add_artifact(db)
         token = await login_admin(admin_app)
@@ -886,6 +743,7 @@ class TestRefusals:
         publisher: FakeCommandPublisher,
     ) -> None:
         """Unknown layout and unknown slot size are not a mismatch — only a *conflict* is."""
+        _ = (store, publisher)
         await add_device(db, partition_layout=None, ota_slot_size=None)
         await add_artifact(db)
         token = await login_admin(admin_app)
@@ -899,6 +757,7 @@ class TestRefusals:
         store: MemoryObjectStore,
         publisher: FakeCommandPublisher,
     ) -> None:
+        _ = (store, publisher)
         await add_device(db, capabilities=[])
         await add_artifact(db)
         token = await login_admin(admin_app)
@@ -916,16 +775,7 @@ class TestFailuresDownstream:
         store: MemoryObjectStore,
         publisher: FakeCommandPublisher,
     ) -> None:
-        """R1-be-3 changed this, deliberately — it used to be a 503. DECISIONS.md.
-
-        The deploy path no longer talks to the object store at all: the URL is minted
-        locally and signed upstream only when a board actually asks for the bytes. So a
-        store outage is no longer detected here. That is the honest trade: nothing in
-        the four-verb seam can check existence cheaply (`get` downloads 1.9 MB), the
-        `artifacts` row is already the evidence the bytes were stored, and
-        `GET /v1/artifact/{sha}/bin` answers the outage with its own 503 at the moment
-        it is true rather than at the moment the operator clicked deploy.
-        """
+        """R1-be-3: the deploy path no longer talks to the four-verb object store Port."""
         await add_device(db)
         await add_artifact(db)
         token = await login_admin(admin_app)
@@ -944,6 +794,7 @@ class TestFailuresDownstream:
         store: MemoryObjectStore,
         publisher: FakeCommandPublisher,
     ) -> None:
+        _ = store
         await add_device(db)
         await add_artifact(db)
         token = await login_admin(admin_app)
@@ -967,6 +818,7 @@ class TestFailuresDownstream:
         publisher: FakeCommandPublisher,
     ) -> None:
         """And it counts as a *loss* for fleet safety, which is why nothing else may use it."""
+        _ = (admin_app, db, store, publisher)
         assert DeployState.FAILED in TERMINAL_DEPLOY_STATES
 
 
@@ -981,6 +833,7 @@ class TestPresenceIsReportedNotEnforced:
         presence_reported: bool,
     ) -> None:
         """The QoS-1 command waits in the device's persistent session."""
+        _ = store
         await add_device(db, presence_reported=presence_reported)
         await add_artifact(db)
         token = await login_admin(admin_app)
@@ -990,753 +843,3 @@ class TestPresenceIsReportedNotEnforced:
         assert response.status_code == 202
         assert response.json()["device_online"] is presence_reported
         assert len(publisher.published) == 1
-
-
-class TestPrecheck:
-    """R2b-be-2: a dry run that answers what `POST /deploy` would refuse, and sends nothing."""
-
-    async def test_a_clean_board_is_deployable(
-        self,
-        admin_app: FastAPI,
-        db: AsyncSession,
-        store: MemoryObjectStore,
-        publisher: FakeCommandPublisher,
-    ) -> None:
-        await add_device(db)
-        await add_artifact(db)
-        token = await login_admin(admin_app)
-
-        response = await precheck(admin_app, token)
-
-        assert response.status_code == 200
-        body = response.json()
-        assert body["deployable"] is True
-        assert body["refusals"] == []
-        assert body["warnings"] == []
-        assert body["from_version"] == "1.4.2"
-        assert body["sha256"] == SHA256
-        assert body["size_bytes"] == len(IMAGE)
-        assert body["artifact_partition_layout"] == LAYOUT
-        assert body["device_partition_layout"] == LAYOUT
-        assert body["device_partition_profile"] == LAYOUT
-        assert body["confirm_timeout_s"] == CONFIRM_TIMEOUT_S
-        assert body["device_online"] is True
-
-    @pytest.mark.parametrize(
-        ("overrides", "code", "deploy_status"),
-        [
-            ({"partition_layout": "ab-4m-arduino-v1"}, "layout_mismatch", 409),
-            ({"partition_layout": "unknown"}, "unsupported_layout", 409),
-            ({"ota_slot_size": 100}, "slot_too_small", 409),
-            ({"capabilities": ["telemetry"]}, "no_ota_capability", 409),
-            ({"platform_type": "esp32c6"}, "no_artifact_for_target", 404),
-            ({"partition_table_sha256": ARDUINO_SHA}, "partition_table_mismatch", 409),
-        ],
-    )
-    async def test_every_refusal_matches_the_deploy_word_for_word(
-        self,
-        admin_app: FastAPI,
-        db: AsyncSession,
-        store: MemoryObjectStore,
-        publisher: FakeCommandPublisher,
-        overrides: dict[str, Any],
-        code: str,
-        deploy_status: int,
-    ) -> None:
-        await add_device(db, **overrides)
-        await add_artifact(db)
-        token = await login_admin(admin_app)
-
-        checked = await precheck(admin_app, token)
-        sent = await deploy(admin_app, token)
-
-        assert checked.status_code == 200
-        body = checked.json()
-        assert body["deployable"] is False
-        assert body["refusals"][0]["code"] == code
-        assert sent.status_code == deploy_status
-        assert sent.json()["detail"] == body["refusals"][0]["message"]
-
-    async def test_all_reasons_arrive_at_once_in_order(
-        self,
-        admin_app: FastAPI,
-        db: AsyncSession,
-        store: MemoryObjectStore,
-        publisher: FakeCommandPublisher,
-    ) -> None:
-        await add_device(
-            db, partition_layout="ab-4m-arduino-v1", ota_slot_size=100, capabilities=["telemetry"]
-        )
-        await add_artifact(db)
-        token = await login_admin(admin_app)
-
-        body = (await precheck(admin_app, token)).json()
-
-        assert [r["code"] for r in body["refusals"]] == [
-            "layout_mismatch",
-            "slot_too_small",
-            "no_ota_capability",
-        ]
-
-    async def test_an_unknown_board_is_deployable_only_once_its_map_is_adopted(
-        self,
-        admin_app: FastAPI,
-        db: AsyncSession,
-        store: MemoryObjectStore,
-        publisher: FakeCommandPublisher,
-    ) -> None:
-        """R3-be-2 end to end: a board on a map nobody knew announces `unknown`; its map is
-        recorded pending; it is refused (and nothing is written) until an operator names
-        the map; then an image uploaded for that name is deployable to it."""
-        await add_device(
-            db,
-            partition_layout="unknown",
-            ota_slot_size=1835008,
-            partition_table_sha256=WRONG_SHA,
-        )
-        await db.execute(
-            text(
-                "INSERT INTO partition_profiles (partition_table_sha256, origin, ota_slot_size) "
-                "VALUES (:sha, 'detected', 1835008)"
-            ),
-            {"sha": WRONG_SHA},
-        )
-        await db.commit()
-        await add_artifact(db, version="be2-a")
-        token = await login_admin(admin_app)
-
-        refused = (await precheck(admin_app, token, version="be2-a")).json()
-        assert refused["deployable"] is False
-        assert [r["code"] for r in refused["refusals"]] == ["unsupported_layout"]
-        message = refused["refusals"][0]["message"]
-        assert message.startswith("this device's flash map is not a layout this server supports")
-        assert "recorded as a detected profile" in message
-        assert refused["device_partition_profile"] is None
-        sent = await deploy(admin_app, token, version="be2-a")
-        assert sent.status_code == 409
-        assert sent.json()["detail"] == message
-        assert await events(db) == []
-        assert publisher.published == []
-
-        async with client_for(admin_app, base_url="https://testserver") as client:
-            adopted = await client.patch(
-                f"/v1/partition-profiles/{WRONG_SHA}",
-                json={"layout_id": "be2-map"},
-                headers={"authorization": f"Bearer {token}"},
-            )
-        assert adopted.status_code == 200, adopted.text
-        await add_artifact(db, sha256=OTHER_SHA256, version="be2-b", layout="be2-map")
-
-        ok = (await precheck(admin_app, token, version="be2-b")).json()
-        assert ok["deployable"] is True, ok["refusals"]
-        assert ok["refusals"] == []
-        assert ok["device_partition_profile"] == "be2-map"
-        assert ok["device_partition_layout"] == "unknown"
-        wrong = (await precheck(admin_app, token, version="be2-a")).json()
-        assert [r["code"] for r in wrong["refusals"]] == ["layout_mismatch"]
-        assert "runs partition layout be2-map" in wrong["refusals"][0]["message"]
-
-        accepted = await deploy(admin_app, token, version="be2-b")
-        assert accepted.status_code == 202, accepted.text
-        assert [e["state"] for e in await events(db)] == ["requested"]
-        assert publisher.last["artifact"]["sha256"] == OTHER_SHA256
-
-    @pytest.mark.parametrize(
-        ("overrides", "codes"),
-        [
-            ({"presence_reported": False}, ["offline"]),
-            ({"presence_reported": None, "last_seen": None}, ["never_connected"]),
-            (
-                {"power_class": "sleepy", "expected_wake_interval_s": 60, "last_seen": "now"},
-                ["sleepy"],
-            ),
-        ],
-    )
-    async def test_warnings_are_reported_and_do_not_block(
-        self,
-        admin_app: FastAPI,
-        db: AsyncSession,
-        store: MemoryObjectStore,
-        publisher: FakeCommandPublisher,
-        overrides: dict[str, Any],
-        codes: list[str],
-    ) -> None:
-        resolved: dict[str, Any] = {
-            k: (now_utc() if k == "last_seen" and v == "now" else v) for k, v in overrides.items()
-        }
-        await add_device(db, **resolved)
-        await add_artifact(db)
-        token = await login_admin(admin_app)
-
-        body = (await precheck(admin_app, token)).json()
-
-        assert body["deployable"] is True
-        assert [w["code"] for w in body["warnings"]] == codes
-
-    async def test_a_malformed_version_is_400_with_the_deploys_sentence(
-        self, admin_app: FastAPI, db: AsyncSession, publisher: FakeCommandPublisher
-    ) -> None:
-        await add_device(db)
-        token = await login_admin(admin_app)
-
-        checked = await precheck(admin_app, token, version="../x")
-        sent = await deploy(admin_app, token, version="../x")
-
-        assert checked.status_code == 400
-        assert checked.json()["detail"] == sent.json()["detail"]
-
-    async def test_an_unknown_device_is_404(
-        self, admin_app: FastAPI, db: AsyncSession, publisher: FakeCommandPublisher
-    ) -> None:
-        token = await login_admin(admin_app)
-
-        response = await precheck(admin_app, token, device_id="ffffffffffff")
-
-        assert response.status_code == 404
-        assert "ffffffffffff" in response.json()["detail"]
-
-    async def test_a_decommissioned_device_is_404(
-        self, admin_app: FastAPI, db: AsyncSession, publisher: FakeCommandPublisher
-    ) -> None:
-        await add_device(db, decommissioned_at=now_utc())
-        await add_artifact(db)
-        token = await login_admin(admin_app)
-
-        assert (await precheck(admin_app, token)).status_code == 404
-
-    async def test_it_needs_an_admin(
-        self, admin_app: FastAPI, db: AsyncSession, publisher: FakeCommandPublisher
-    ) -> None:
-        async with client_for(admin_app, base_url="https://testserver") as client:
-            response = await client.post(
-                f"/v1/devices/{DEVICE_ID}/deploy/precheck", json={"version": VERSION}
-            )
-
-        assert response.status_code == 401
-
-
-class TestTheGate:
-    """R2b-be-7: `rollback_incapable` gates `/deploy` unless `override` names it.
-
-    Refusals are never overridable; a gated deploy writes no row and publishes nothing.
-    """
-
-    async def test_the_precheck_reports_the_gating_warning(
-        self,
-        admin_app: FastAPI,
-        db: AsyncSession,
-        store: MemoryObjectStore,
-        publisher: FakeCommandPublisher,
-    ) -> None:
-        await add_device(db, rollback_capable=False)
-        await add_artifact(db)
-        token = await login_admin(admin_app)
-
-        response = await precheck(admin_app, token)
-
-        assert response.status_code == 200
-        body = response.json()
-        assert body["deployable"] is True
-        assert body["refusals"] == []
-        assert [(w["code"], w["needs_override"]) for w in body["warnings"]] == [
-            ("rollback_incapable", True)
-        ]
-        assert "cannot roll back" in body["warnings"][0]["message"]
-
-    async def test_a_deploy_without_the_override_is_409_with_the_warnings_sentence(
-        self,
-        admin_app: FastAPI,
-        db: AsyncSession,
-        store: MemoryObjectStore,
-        publisher: FakeCommandPublisher,
-    ) -> None:
-        await add_device(db, rollback_capable=False)
-        await add_artifact(db)
-        token = await login_admin(admin_app)
-
-        warned = (await precheck(admin_app, token)).json()["warnings"][0]
-        sent = await deploy(admin_app, token)
-
-        assert sent.status_code == 409
-        assert sent.json()["detail"] == warned["message"]
-        assert publisher.published == []
-        assert await events(db) == []
-
-    async def test_naming_the_code_opens_the_gate(
-        self,
-        admin_app: FastAPI,
-        db: AsyncSession,
-        store: MemoryObjectStore,
-        publisher: FakeCommandPublisher,
-    ) -> None:
-        await add_device(db, rollback_capable=False)
-        await add_artifact(db)
-        token = await login_admin(admin_app)
-
-        sent = await deploy(admin_app, token, override=["rollback_incapable"])
-
-        assert sent.status_code == 202
-        assert len(publisher.published) == 1
-        assert [e["state"] for e in await events(db)] == ["requested"]
-
-    @pytest.mark.parametrize("override", [["rollback_incapable"], []])
-    async def test_an_override_with_nothing_to_override_is_a_no_op(
-        self,
-        admin_app: FastAPI,
-        db: AsyncSession,
-        store: MemoryObjectStore,
-        publisher: FakeCommandPublisher,
-        override: list[str],
-    ) -> None:
-        await add_device(db)
-        await add_artifact(db)
-        token = await login_admin(admin_app)
-
-        sent = await deploy(admin_app, token, override=override)
-
-        assert sent.status_code == 202
-        assert len(publisher.published) == 1
-
-    @pytest.mark.parametrize("override", [["force"], "rollback_incapable", ["x"] * 9])
-    async def test_an_unknown_code_or_shape_is_422(
-        self,
-        admin_app: FastAPI,
-        db: AsyncSession,
-        store: MemoryObjectStore,
-        publisher: FakeCommandPublisher,
-        override: Any,
-    ) -> None:
-        await add_device(db, rollback_capable=False)
-        await add_artifact(db)
-        token = await login_admin(admin_app)
-
-        sent = await deploy(admin_app, token, override=override)
-
-        assert sent.status_code == 422
-        assert publisher.published == []
-        assert await events(db) == []
-
-    async def test_a_refusal_beats_an_override(
-        self,
-        admin_app: FastAPI,
-        db: AsyncSession,
-        store: MemoryObjectStore,
-        publisher: FakeCommandPublisher,
-    ) -> None:
-        await add_device(db, partition_table_sha256=ARDUINO_SHA, rollback_capable=False)
-        await add_artifact(db)
-        token = await login_admin(admin_app)
-
-        checked = (await precheck(admin_app, token)).json()
-        sent = await deploy(admin_app, token, override=["rollback_incapable"])
-
-        assert [r["code"] for r in checked["refusals"]] == ["partition_table_mismatch"]
-        assert [w["code"] for w in checked["warnings"]] == ["rollback_incapable"]
-        assert sent.status_code == 409
-        assert sent.json()["detail"] == checked["refusals"][0]["message"]
-        assert "partition table fingerprint" in sent.json()["detail"]
-        assert publisher.published == []
-        assert await events(db) == []
-
-    async def test_a_board_that_matches_its_profile_and_can_roll_back_is_clean(
-        self,
-        admin_app: FastAPI,
-        db: AsyncSession,
-        store: MemoryObjectStore,
-        publisher: FakeCommandPublisher,
-    ) -> None:
-        await add_device(db, partition_table_sha256=AB_SHA, rollback_capable=True)
-        await add_artifact(db)
-        token = await login_admin(admin_app)
-
-        checked = (await precheck(admin_app, token)).json()
-        sent = await deploy(admin_app, token)
-
-        assert checked["deployable"] is True
-        assert checked["refusals"] == [] and checked["warnings"] == []
-        assert sent.status_code == 202
-
-    async def test_the_precheck_ignores_override(
-        self,
-        admin_app: FastAPI,
-        db: AsyncSession,
-        store: MemoryObjectStore,
-        publisher: FakeCommandPublisher,
-    ) -> None:
-        await add_device(db, rollback_capable=False)
-        await add_artifact(db)
-        token = await login_admin(admin_app)
-
-        response = await precheck(admin_app, token, override=["rollback_incapable"])
-
-        assert response.status_code == 200
-        assert [w["code"] for w in response.json()["warnings"]] == ["rollback_incapable"]
-        assert publisher.published == []
-
-    async def test_plain_warnings_do_not_need_an_override(
-        self,
-        admin_app: FastAPI,
-        db: AsyncSession,
-        store: MemoryObjectStore,
-        publisher: FakeCommandPublisher,
-    ) -> None:
-        await add_device(db, presence_reported=False, rollback_capable=False)
-        await add_artifact(db)
-        token = await login_admin(admin_app)
-
-        warned = (await precheck(admin_app, token)).json()["warnings"]
-
-        assert [(w["code"], w["needs_override"]) for w in warned] == [
-            ("offline", False),
-            ("rollback_incapable", True),
-        ]
-
-
-FIXTURES = Path(__file__).parent / "fixtures" / "firmware"
-PLAIN_SKETCH = "esp32.nocall.app.bin"  # Basic with Fleetforge.begin deleted: no marker
-LIBRARY_BUILD = "esp32.basic.app.head.bin"  # Arduino Basic, built from R3-fw-6 on
-AGENT_BUNDLE = "esp32.agent.app.head.bin"  # the stock agent's app.bin, from R3-fw-6 on
-
-
-async def upload_fixture(app: FastAPI, token: str, name: str) -> httpx.Response:
-    """The real `POST /v1/artifact`, so the verdict under test is the one the upload stored."""
-    async with client_for(app, base_url="https://testserver") as client:
-        return await client.post(
-            "/v1/artifact",
-            params={"target": TARGET, "version": VERSION, "partition_layout": LAYOUT},
-            content=(FIXTURES / name).read_bytes(),
-            headers={"authorization": f"Bearer {token}"},
-        )
-
-
-class TestTheLibraryMarkerGate:
-    """R3-be-1 acceptance, end to end: upload, pre-check, deploy.
-
-    A plain sketch warns and needs `override: ["no_library_marker"]`; a library build and
-    an agent bundle do not; an artifact with no verdict (uploaded before R3-be-1) never warns.
-    """
-
-    async def test_a_plain_sketch_is_gated_until_the_code_is_named(
-        self,
-        admin_app: FastAPI,
-        db: AsyncSession,
-        store: MemoryObjectStore,
-        publisher: FakeCommandPublisher,
-    ) -> None:
-        await add_device(db)
-        token = await login_admin(admin_app)
-        uploaded = await upload_fixture(admin_app, token, PLAIN_SKETCH)
-        assert uploaded.status_code == 201, uploaded.text
-        assert uploaded.json()["has_lib_marker"] is False
-
-        checked = await precheck(admin_app, token)
-        assert checked.status_code == 200
-        body = checked.json()
-        assert body["deployable"] is True
-        assert body["refusals"] == []
-        assert [(w["code"], w["needs_override"]) for w in body["warnings"]] == [
-            ("no_library_marker", True)
-        ]
-
-        sent = await deploy(admin_app, token)
-        assert sent.status_code == 409
-        assert sent.json()["detail"] == body["warnings"][0]["message"]
-        assert publisher.published == []
-        assert await events(db) == []
-
-        sent = await deploy(admin_app, token, override=["no_library_marker"])
-        assert sent.status_code == 202, sent.text
-        assert len(publisher.published) == 1
-        assert [e["state"] for e in await events(db)] == ["requested"]
-
-    @pytest.mark.parametrize("fixture", [LIBRARY_BUILD, AGENT_BUNDLE])
-    async def test_a_library_build_and_an_agent_bundle_are_not_gated(
-        self,
-        admin_app: FastAPI,
-        db: AsyncSession,
-        store: MemoryObjectStore,
-        publisher: FakeCommandPublisher,
-        fixture: str,
-    ) -> None:
-        await add_device(db)
-        token = await login_admin(admin_app)
-        uploaded = await upload_fixture(admin_app, token, fixture)
-        assert uploaded.status_code == 201, uploaded.text
-        assert uploaded.json()["has_lib_marker"] is True
-
-        checked = (await precheck(admin_app, token)).json()
-        sent = await deploy(admin_app, token)
-
-        assert checked["refusals"] == [] and checked["warnings"] == []
-        assert sent.status_code == 202, sent.text
-        assert len(publisher.published) == 1
-
-    async def test_no_verdict_never_warns(
-        self,
-        admin_app: FastAPI,
-        db: AsyncSession,
-        store: MemoryObjectStore,
-        publisher: FakeCommandPublisher,
-    ) -> None:
-        await add_device(db)
-        await add_artifact(db, has_lib_marker=None)
-        token = await login_admin(admin_app)
-
-        checked = (await precheck(admin_app, token)).json()
-        sent = await deploy(admin_app, token)
-
-        assert checked["warnings"] == []
-        assert sent.status_code == 202
-
-    async def test_a_refusal_beats_the_override(
-        self,
-        admin_app: FastAPI,
-        db: AsyncSession,
-        store: MemoryObjectStore,
-        publisher: FakeCommandPublisher,
-    ) -> None:
-        await add_device(db, ota_slot_size=100)
-        await add_artifact(db, has_lib_marker=False)
-        token = await login_admin(admin_app)
-
-        checked = (await precheck(admin_app, token)).json()
-        sent = await deploy(admin_app, token, override=["no_library_marker"])
-
-        assert [r["code"] for r in checked["refusals"]] == ["slot_too_small"]
-        assert [w["code"] for w in checked["warnings"]] == ["no_library_marker"]
-        assert sent.status_code == 409
-        assert sent.json()["detail"] == checked["refusals"][0]["message"]
-        assert publisher.published == []
-        assert await events(db) == []
-
-    async def test_both_gates_need_both_codes(
-        self,
-        admin_app: FastAPI,
-        db: AsyncSession,
-        store: MemoryObjectStore,
-        publisher: FakeCommandPublisher,
-    ) -> None:
-        await add_device(db, rollback_capable=False)
-        await add_artifact(db, has_lib_marker=False)
-        token = await login_admin(admin_app)
-
-        warned = (await precheck(admin_app, token)).json()["warnings"]
-        half = await deploy(admin_app, token, override=["rollback_incapable"])
-        both = await deploy(admin_app, token, override=["rollback_incapable", "no_library_marker"])
-
-        assert [w["code"] for w in warned] == ["rollback_incapable", "no_library_marker"]
-        assert half.status_code == 409
-        assert half.json()["detail"] == warned[1]["message"]
-        assert both.status_code == 202
-
-    async def test_unsigned_artifact_needs_an_override(
-        self,
-        admin_app: FastAPI,
-        db: AsyncSession,
-        store: MemoryObjectStore,
-        publisher: FakeCommandPublisher,
-    ) -> None:
-        """D-1 / A-8: an unsigned image triggers `unsigned_artifact` (409 unless overridden),
-        and is hard-refused (`signature_required_by_device`) on a board announcing `sig`."""
-        await add_device(db)
-        await add_artifact(db, sig=None)
-        token = await login_admin(admin_app)
-
-        checked = (await precheck(admin_app, token)).json()
-        assert [w["code"] for w in checked["warnings"]] == ["unsigned_artifact"]
-        assert checked["warnings"][0]["needs_override"] is True
-
-        blocked = await deploy(admin_app, token)
-        assert blocked.status_code == 409
-        assert blocked.json()["detail"] == checked["warnings"][0]["message"]
-        assert publisher.published == []
-
-        allowed = await deploy(admin_app, token, override=["unsigned_artifact"])
-        assert allowed.status_code == 202
-
-        # On a board that announces `"sig"`, an unsigned image is a non-overridable refusal.
-        await add_device(db, device_id=OTHER_DEVICE_ID, capabilities=["ota", "sig"])
-        enforced = await deploy(
-            admin_app, token, device_id=OTHER_DEVICE_ID, override=["unsigned_artifact"]
-        )
-        assert enforced.status_code == 409
-        assert "announces sig" in enforced.json()["detail"]
-
-
-class TestPrecheckSendsNothing:
-    @pytest.mark.parametrize("overrides", [{}, {"partition_layout": "single-2m-v1"}])
-    async def test_nothing_is_minted_recorded_or_published(
-        self,
-        admin_app: FastAPI,
-        db: AsyncSession,
-        store: MemoryObjectStore,
-        publisher: FakeCommandPublisher,
-        overrides: dict[str, Any],
-    ) -> None:
-        await add_device(db, **overrides)
-        await add_artifact(db)
-        token = await login_admin(admin_app)
-
-        response = await precheck(admin_app, token)
-
-        assert response.status_code == 200
-        assert publisher.published == []
-        assert await events(db) == []
-        assert store.signed_urls == []
-        assert "http" not in response.text
-        assert "sig=" not in response.text
-
-    async def test_it_answers_without_any_url_configuration(
-        self,
-        admin_app: FastAPI,
-        db: AsyncSession,
-        store: MemoryObjectStore,
-        publisher: FakeCommandPublisher,
-    ) -> None:
-        await add_device(db)
-        await add_artifact(db)
-        token = await login_admin(admin_app)
-        previous = admin_app.dependency_overrides.get(get_settings)
-        admin_app.dependency_overrides[get_settings] = lambda: settings_for_tests(
-            artifact_url_secret=None, public_base_url=None
-        )
-        try:
-            checked = await precheck(admin_app, token)
-            sent = await deploy(admin_app, token)
-        finally:
-            if previous is None:
-                admin_app.dependency_overrides.pop(get_settings, None)
-            else:
-                admin_app.dependency_overrides[get_settings] = previous
-
-        assert checked.status_code == 200
-        assert sent.status_code == 503
-
-
-class TestNoSchedulerLivesHere:
-    """Source tripwires. `design/architecture.md` principle 5: the device owns the reboot.
-
-    A sleeper, a background task or a second writer of terminal states would each turn
-    "the board is still deciding" into "the server gave up", silently and only in
-    production. These are cheap to keep and expensive to rediscover.
-    """
-
-    @staticmethod
-    def _source(name: str) -> str:
-        return (Path(__file__).resolve().parent.parent / "src" / "fleetforge" / name).read_text()
-
-    @classmethod
-    def _code(cls, name: str) -> str:
-        """The module's **code**, with docstrings and comments removed.
-
-        Both files explain at length that they contain no sleeper; a substring search
-        over the raw text would therefore fail on the prose that documents the rule.
-        `ast.unparse` drops comments, and the loop below drops the docstrings.
-        """
-        tree = ast.parse(cls._source(name))
-        for node in ast.walk(tree):
-            if not isinstance(
-                node, ast.Module | ast.ClassDef | ast.FunctionDef | ast.AsyncFunctionDef
-            ):
-                continue
-            first = node.body[0] if node.body else None
-            if (
-                isinstance(first, ast.Expr)
-                and isinstance(first.value, ast.Constant)
-                and isinstance(first.value.value, str)
-            ):
-                node.body = node.body[1:] or [ast.Pass()]
-        return ast.unparse(tree)
-
-    @pytest.mark.parametrize(
-        "module",
-        [
-            "deploys.py",
-            "api/routers/deploys.py",
-            "deploy_precheck.py",
-            # R5-be-2: the verbs never wait for an answer, retry, sweep or expire.
-            "api/routers/commands.py",
-            "device_commands.py",
-        ],
-    )
-    @pytest.mark.parametrize(
-        "forbidden", ["asyncio.sleep", "create_task", "BackgroundTasks", "timedelta"]
-    )
-    def test_the_deploy_path_has_no_timer(self, module: str, forbidden: str) -> None:
-        assert forbidden not in self._code(module), (
-            f"{module} must not {forbidden}: awaiting_safe_window may last a week"
-        )
-
-    def test_only_publish_failed_authors_a_terminal_state(self) -> None:
-        """The **server** authors exactly one terminal state, and it is `publish_failed`.
-
-        Three WRITE sites in `deploys.py`, in writer order: `record_requested` (never
-        terminal), `record_publish_failure` (the one server-authored terminal state),
-        and R1-be-4's `record_observed_status` — which is the **device's** reported
-        state, so its flag is derived from `TERMINAL_DEPLOY_STATES` and is never a
-        literal `True`. A fourth write, or any literal `True`, means someone taught the
-        server to author an outcome for a command the device provably received.
-
-        The fourth entry is R1-fe-1's `latest_deploys`, and it is a READ: it copies the
-        flag the row was written with into a `DeploySnapshot` so the dashboard never
-        re-derives "terminal" from a hardcoded list of states. `row.is_terminal` authors
-        nothing, which is exactly why it is spelled that way and not recomputed here.
-        """
-        source = self._source("deploys.py")
-        assignments = re.findall(r"is_terminal=(.+?),", source)
-        assert assignments == [
-            "False",
-            "DeployState.FAILED in TERMINAL_DEPLOY_STATES",
-            "state in TERMINAL_DEPLOY_STATES",
-            "row.is_terminal",
-        ]
-
-    def test_the_router_never_builds_a_deploy_event_itself(self) -> None:
-        """`deploys.py` is the single writer — `test_invariants.py` holds the estate-wide rule."""
-        assert "DeployEvent(" not in self._source("api/routers/deploys.py")
-
-    def test_upstream_urls_are_signed_in_exactly_one_place(self) -> None:
-        """R1-be-3 moved the call; the invariant it protects is unchanged.
-
-        `CRITICAL.md` → *Artifact signing keys & `signed_url` generation*. The deploy
-        router used to hold the only `store.signed_url(` call; now `SignedUrlCache` does,
-        and the deploy path has none at all. A second call site anywhere is a second
-        place where a URL's lifetime, its caching and its logging can drift apart — and,
-        on GCS, a second source of `signBlob` traffic nobody is counting.
-        """
-        assert self._source("api/routers/deploys.py").count("store.signed_url(") == 0
-        assert self._source("storage/urlcache.py").count("store.signed_url(") == 1
-
-    def test_the_deploy_router_mints_exactly_one_url(self) -> None:
-        """And the mint has one call site too (`deploy_urls.py`), never duplicated in routers."""
-        assert self._source("deploy_urls.py").count("mint_artifact_url(") == 1
-        assert self._source("api/routers/deploys.py").count("mint_artifact_url(") == 0
-
-    @pytest.mark.parametrize(
-        "sentence",
-        [
-            "An image written into the wrong partition table",
-            "The image must fit the slot",
-            "did not announce the `ota` capability",
-            "The target is this device's chip",
-            "partition table fingerprint",
-            "not a layout this server supports",
-            "cannot roll back",
-        ],
-    )
-    def test_every_refusal_sentence_lives_in_one_place(self, sentence: str) -> None:
-        assert sentence in self._source("deploy_precheck.py")
-        assert sentence not in self._source("api/routers/deploys.py")
-
-    def test_the_precheck_route_has_no_side_effects(self) -> None:
-        from fleetforge.api.routers import deploys
-
-        source = inspect.getsource(deploys.precheck_deploy)
-        for forbidden in (
-            "_artifact_url",
-            "record_requested",
-            "latest_open_transaction",
-            "publish",
-            "commit",
-        ):
-            assert forbidden not in source

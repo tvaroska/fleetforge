@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, expect, it } from 'vitest'
 import { type DeviceLogLine } from './api'
 import { describeLevel, formatDropped, tailRows } from './deviceLog'

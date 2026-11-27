@@ -39,14 +39,19 @@ from tests.agent_src import (
     FF_SAFE_MODE_INTERNAL_H,
     IDF_EXAMPLE_MAIN_C,
     IDF_EXAMPLE_START_C,
+    read_c_family,
 )
-from tests.test_agent_txn import FF_MQTT_C, FF_OTA_C, _function_body
-from tests.test_arduino_library import _begin_body, _ff_calls
-from tests.test_ff_cfg import _code
-from tests.test_library_marker import DEVICE_PROTOCOL
-from tests.test_ota_component import MAKER_HEADERS, _declared_functions
+from tests.agent_test_helpers import (
+    DEVICE_PROTOCOL,
+    FF_IDENTITY_C,
+    MAKER_HEADERS,
+    _begin_body,
+    _code,
+    _declared_functions,
+    _ff_calls,
+    _function_body,
+)
 
-FF_IDENTITY_C = COMPONENT_SRC / "ff_identity.c"
 FF_IDENTITY_INTERNAL_H = COMPONENT_SRC / "ff_identity_internal.h"
 
 ARM = "ff_mqtt_arm_confirm_timer"
@@ -358,7 +363,7 @@ class TestNoVerbKnowsAboutIt:
     def test_mqtt_and_ota_never_mention_safe_mode(self) -> None:
         """The exits are reset-reason based (sw, another slot), so the verbs behave
         identically in safe mode and the confirm/rollback path is untouched."""
-        for path in (FF_MQTT_C, FF_OTA_C):
-            code = _code(path)
-            assert "safe_mode" not in code, path.name
-            assert "ff_safe_mode" not in code, path.name
+        for family in ("ff_mqtt", "ff_ota"):
+            code = _code(read_c_family(family))
+            assert "safe_mode" not in code, family
+            assert "ff_safe_mode" not in code, family

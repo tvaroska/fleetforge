@@ -1,3 +1,4 @@
+// @vitest-environment node
 // The strip's rules, with no DOM. The ones that cost most if they regress: a stale bundle
 // must read as "differ", and the verdict word must not be authored here (drift => silence).
 
@@ -12,8 +13,8 @@ const ui = (over: Partial<BuildInfo> = {}): BuildInfo => ({
   builtAt: 'unknown',
   ...over,
 })
-const ok = (version: string, commit?: string) =>
-  ({ phase: 'ok', health: { status: 'ok', version, commit } }) as const
+const ok = (version: string, commit = 'unknown') =>
+  ({ phase: 'ok', health: { status: 'ok', version, commit, built_at: 'unknown' } }) as const
 
 describe('describeVersions', () => {
   it('does not differ when versions match and commits are unknown', () => {
@@ -80,6 +81,8 @@ function deploy(over: Partial<DeploySummary> = {}): DeploySummary {
     from_version: '1.4.2',
     pct: null,
     detail: null,
+    steps: [],
+    confirm_timeout_s: 300,
     ...over,
   }
 }

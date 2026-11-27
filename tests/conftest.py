@@ -54,8 +54,21 @@ from fleetforge.storage.objectstore import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-TEST_DB_NAME = "fleetforge_test"
+_BASE_TEST_DB_NAME = "fleetforge_test"
 DEFAULT_DEV_URL = "postgresql+asyncpg://fleetforge:fleetforge@localhost:5433/fleetforge"
+
+
+def worker_db_name(base: str = _BASE_TEST_DB_NAME) -> str:
+    """Return a per-worker database name under `pytest-xdist` (`<base>_gw0`, ...)."""
+    worker = os.environ.get("PYTEST_XDIST_WORKER", "").strip()
+    if worker and worker != "master":
+        safe = "".join(ch for ch in worker if ch.isalnum() or ch == "_")
+        if safe:
+            return f"{base}_{safe}"
+    return base
+
+
+TEST_DB_NAME = worker_db_name()
 
 # The admin password the `admin_app` fixture is configured with. Hashed once at
 # import: argon2 is ~40 ms a call and every auth test would otherwise pay it twice.
@@ -153,10 +166,11 @@ async def run_alembic_check(db_url: str) -> None:
 
 @pytest.fixture(scope="session")
 async def engine() -> AsyncIterator[AsyncEngine]:
-    """Session-scoped engine bound to a freshly migrated `fleetforge_test`."""
-    test_url = database_url_for(TEST_DB_NAME)
+    """Session-scoped engine bound to a freshly migrated `fleetforge_test` (or worker DB)."""
+    db_name = worker_db_name()
+    test_url = database_url_for(db_name)
     try:
-        await recreate_database(TEST_DB_NAME)
+        await recreate_database(db_name)
     except (
         SQLAlchemyError,
         OSError,
@@ -184,7 +198,7 @@ async def engine() -> AsyncIterator[AsyncEngine]:
         yield test_engine
     finally:
         await test_engine.dispose()
-        await drop_database(TEST_DB_NAME)
+        await drop_database(db_name)
 
 
 _CLEANUP_BLOCK_SQL = """

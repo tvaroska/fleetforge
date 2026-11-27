@@ -24,20 +24,24 @@ Same idiom as `test_agent_verify.py`: comments are stripped, because they quote 
 spellings these tests forbid.
 """
 
-from tests.test_agent_txn import FF_OTA_C, _function_body
-from tests.test_ff_cfg import _code
+from tests.agent_src import read_c_family
+from tests.agent_test_helpers import _code, _function_body
+
+
+def _ota() -> str:
+    return _code(read_c_family("ff_ota"))
 
 
 def _ota_task() -> str:
-    return _function_body(_code(FF_OTA_C), "ota_task")
+    return _function_body(_ota(), "ota_task")
 
 
 def _chooser() -> str:
-    return _function_body(_code(FF_OTA_C), "choose_target_slot")
+    return _function_body(_ota(), "choose_target_slot")
 
 
 def test_the_slot_is_chosen_once_and_handed_to_esp_https_ota() -> None:
-    assert _code(FF_OTA_C).count("esp_ota_get_next_update_partition(") == 1
+    assert _ota().count("esp_ota_get_next_update_partition(") == 1
     assert "esp_ota_get_next_update_partition(" in _chooser()
     task = _ota_task()
     assert task.index("choose_target_slot(cmd)") < task.index("resolve_artifact_url(")
@@ -75,7 +79,7 @@ def test_the_target_is_never_the_running_slot() -> None:
 
 
 def test_the_undo_writes_otadata_only_if_the_pointer_moved() -> None:
-    undo = _function_body(_code(FF_OTA_C), "restore_boot_partition")
+    undo = _function_body(_ota(), "restore_boot_partition")
     assert undo.index("esp_ota_get_boot_partition()") < undo.index("esp_ota_set_boot_partition(")
     assert "boot == running" in undo
     assert "nothing to undo" in undo

@@ -51,13 +51,21 @@ from tests.agent_src import (
     IDF_EXAMPLE_SDKCONFIG,
     IDF_EXAMPLE_START_C,
     IDF_EXAMPLE_START_H,
+    read_c_family,
 )
-from tests.test_agent_fault_injection import _cmake_code
-from tests.test_agent_partitions import EXPECTED_PARTITION_TABLE_SHA256, _rows
-from tests.test_agent_txn import _function_body
-from tests.test_arduino_library import BOOT_SEQUENCE_ORDER, _ff_calls, _fingerprint
-from tests.test_ff_cfg import _code
-from tests.test_ota_component import HAZARDS, _declared_functions, _public_headers
+from tests.agent_test_helpers import (
+    BOOT_SEQUENCE_ORDER,
+    EXPECTED_PARTITION_TABLE_SHA256,
+    HAZARDS,
+    _cmake_code,
+    _code,
+    _declared_functions,
+    _ff_calls,
+    _fingerprint,
+    _function_body,
+    _public_headers,
+    _rows,
+)
 
 REPO_ROOT = AGENT_DIR.parent
 QUICKSTART_PY = REPO_ROOT / "scripts" / "lib_quickstart.py"
@@ -611,7 +619,7 @@ class TestRollbackRun:
 
     def test_the_rollback_needle_is_the_hook_log_line(self) -> None:
         """Retyped: the needle is ff_mqtt.c's hook line, inside `#if FF_ROLLBACK_TEST`."""
-        source = (COMPONENT_DIR / "src" / "ff_mqtt.c").read_text()
+        source = read_c_family("ff_mqtt")
         assert quickstart.ROLLBACK_HOOK_NEEDLE == b"FF_ROLLBACK_TEST: ignoring the announce ack"
         assert quickstart.ROLLBACK_TEST_FLAGS == "-DFF_ROLLBACK_TEST=1"
         blocks = re.findall(r"#if FF_ROLLBACK_TEST\n(.*?)#endif", source, re.S)
@@ -753,7 +761,7 @@ class TestSelftestRun:
 
     def test_the_twin_matches_the_firmware_budget(self) -> None:
         """ff_mqtt.c's DETAIL_MAX and grammar, ff_selftest.c's 64-byte reason buffer."""
-        mqtt = _code(COMPONENT_DIR / "src" / "ff_mqtt.c")
+        mqtt = _code(read_c_family("ff_mqtt"))
         assert "#define DETAIL_MAX 63" in mqtt
         assert '#define DETAIL_SELFTEST_FAILED "selftest failed: "' in mqtt
         assert '#define DETAIL_RETURNED_TO "; returned to "' in mqtt
@@ -952,7 +960,7 @@ class TestSafeWindowRun:
         assert sleeps == [0.1]
 
     def test_the_twins_match_the_firmware(self) -> None:
-        mqtt = (COMPONENT_DIR / "src" / "ff_mqtt.c").read_text()
+        mqtt = read_c_family("ff_mqtt")
         assert re.search(
             rf"^#define COMMAND_REBOOT_DRAIN_MS {quickstart.COMMAND_REBOOT_DRAIN_MS}$", mqtt, re.M
         )

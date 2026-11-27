@@ -67,32 +67,31 @@ from tests.agent_src import (
     FF_TELEMETRY_H,
     FF_TELEMETRY_INTERNAL_H,
     IDF_EXAMPLE_MAIN_C,
+    read_c_family,
+)
+from tests.agent_test_helpers import (
+    DEVICE_PROTOCOL,
+    _code,
+    _declared_functions,
+    _function_body,
+)
+from tests.agent_test_helpers import (
+    _json_fence_after as _json_fence_after,
+)
+from tests.agent_test_helpers import (
+    _telemetry_example as _telemetry_example,
 )
 from tests.conftest import capture_logs
-from tests.test_agent_txn import _function_body
-from tests.test_ff_cfg import _code
-from tests.test_ingestor import publish, reload, seed_device
-from tests.test_ota_component import _declared_functions
-from tests.test_simulator import FakeClient, credential_for, drive_until, session_factory
+from tests.doubles import FakeClient, credential_for, drive_until, session_factory
+from tests.support_ingestor import publish, reload, seed_device
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-DEVICE_PROTOCOL = REPO_ROOT / "spec" / "device-protocol.md"
 FEATURE_DOC = REPO_ROOT / "docs" / "features" / "health-telemetry.md"
 SPEC_HEADING = "### `up/telemetry` — user-defined metrics"
 PROPOSAL_HEADING = "### up/telemetry proposal (R4-fw-2, proposed)"
-FF_MQTT_C = COMPONENT_SRC / "ff_mqtt.c"
 
 TOP_KEYS = ["dropped", "samples"]
 SAMPLE_KEYS = ["age_ms", "name", "value"]
-
-
-def _json_fence_after(text: str, heading: str) -> str:
-    """The first ```json fence after `heading`, de-indented (a list item indents it)."""
-    lines = text.splitlines()
-    start = next(i for i, line in enumerate(lines) if line.strip() == heading)
-    opening = next(i for i in range(start + 1, len(lines)) if lines[i].strip() == "```json")
-    closing = next(i for i in range(opening + 1, len(lines)) if lines[i].strip() == "```")
-    return "\n".join(line.strip() for line in lines[opening + 1 : closing])
 
 
 def _spec_has_the_section() -> bool:
@@ -101,13 +100,6 @@ def _spec_has_the_section() -> bool:
 
 def _proposal_example() -> str:
     return _json_fence_after(FEATURE_DOC.read_text(), PROPOSAL_HEADING)
-
-
-def _telemetry_example() -> str:
-    """The spec's example once Patch A is applied, the proposal's until then."""
-    if _spec_has_the_section():
-        return _json_fence_after(DEVICE_PROTOCOL.read_text(), SPEC_HEADING)
-    return _proposal_example()
 
 
 def _patch_a2_example() -> str:
@@ -238,20 +230,20 @@ class TestTheFirmwareRing:
 
 class TestTheSessionWiring:
     def test_the_drain_starts_after_the_announce_and_the_outcome(self) -> None:
-        body = _function_body(_code(FF_MQTT_C), "on_connected")
+        body = _function_body(_code(read_c_family("ff_mqtt")), "on_connected")
         assert body.count("ff_telemetry_session_up(") == 1
         up = body.index("ff_telemetry_session_up(ctx->client, ctx->topic_telemetry)")
         assert body.index("ctx->topic_announce") < up
         assert body.index("report_txn_on_connect()") < up
 
     def test_the_disconnect_stops_it(self) -> None:
-        code = _code(FF_MQTT_C)
+        code = _code(read_c_family("ff_mqtt"))
         case = re.search(r"case MQTT_EVENT_DISCONNECTED:(.*?)\bcase\b", code, re.S)
         assert case is not None
         assert "ff_telemetry_session_down();" in case.group(1)
 
     def test_nothing_near_the_confirm_path(self) -> None:
-        code = _code(FF_MQTT_C)
+        code = _code(read_c_family("ff_mqtt"))
         published = re.search(r"case MQTT_EVENT_PUBLISHED:(.*?)\bcase\b", code, re.S)
         assert published is not None
         assert "ff_telemetry" not in published.group(1)
@@ -260,7 +252,7 @@ class TestTheSessionWiring:
         assert len(re.findall(r"\bff_telemetry_session_(up|down)\(", code)) == 2
 
     def test_the_topic_is_spelled_in_ff_mqtt(self) -> None:
-        code = _code(FF_MQTT_C)
+        code = _code(read_c_family("ff_mqtt"))
         assert 'TOPIC_ROOT "/%s/up/telemetry"' in code
         assert "up/telemetry" not in _code(FF_TELEMETRY_C)
 

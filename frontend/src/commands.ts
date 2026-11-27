@@ -55,7 +55,7 @@ export function offeredCommands(
   const caps = new Set(device.capabilities ?? [])
   const deploy = device.deploy
   const open =
-    deploy !== null && !deploy.is_terminal && typeof deploy.cmd_id === 'string' && deploy.cmd_id !== ''
+    deploy != null && !deploy.is_terminal && typeof deploy.cmd_id === 'string' && deploy.cmd_id !== ''
       ? deploy
       : null
 

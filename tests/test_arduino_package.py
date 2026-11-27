@@ -38,8 +38,7 @@ from tests.agent_src import (
     LIB_VERSION_H,
     LIBRARY_JSON,
 )
-from tests.test_agent_partitions import _rows
-from tests.test_arduino_library import ARDUINO_LAYOUT_SHA256, VERSION_TXT, _fingerprint
+from tests.agent_test_helpers import ARDUINO_LAYOUT_SHA256, VERSION_TXT, _fingerprint, _rows
 
 REPO_ROOT = COMPONENT_DIR.parents[2]
 PACKAGE_PY = REPO_ROOT / "scripts" / "arduino_package.py"
@@ -90,7 +89,17 @@ def _properties(package: Path) -> dict[str, str]:
 
 
 def _git_basenames(directory: Path) -> list[str]:
-    cmd = ["git", "-c", "safe.directory=*", "ls-files", "--", str(directory.relative_to(REPO_ROOT))]
+    cmd = [
+        "git",
+        "-c",
+        "safe.directory=*",
+        "ls-files",
+        "--cached",
+        "--others",
+        "--exclude-standard",
+        "--",
+        str(directory.relative_to(REPO_ROOT)),
+    ]
     proc = subprocess.run(cmd, cwd=REPO_ROOT, capture_output=True, text=True, check=False)  # noqa: S603,S607
     if proc.returncode != 0:
         return [p.name for p in directory.iterdir() if p.is_file()]

@@ -1,51 +1,15 @@
 /*
- * ff_net_wifi — the Wi-Fi adapter behind the ff_net Port. The real fleet's link.
+ * ff_net_wifi — the Wi-Fi STA adapter behind the ff_net Port (scan, TX ladder, NVS overlay).
  *
- * Ordinary `esp_wifi` STA bring-up, with two behaviours that are not decoration:
- *
- *  - **reconnect forever, with a capped backoff.** An access point that reboots must not
- *    cost a board its fleet membership, and an agent that gives up after N tries needs a
- *    site visit. The cap exists so a board whose credentials are wrong does not hammer the
- *    AP (and, on a busy channel, everyone else's) once a second for the rest of its life.
- *  - **the retry VARIES — it walks a TX-power ladder.** Retrying forever is only useful
- *    if the attempts differ; an identical attempt repeated for a year is a stuck board
- *    that merely looks busy. See the ladder comment below.
- *  - **the credentials are copied out of ff_cfg and never logged.** The SSID appears in
- *    the log because it is what a field engineer needs to see; the passphrase never does.
- *  - **modem sleep is set explicitly, not inherited.** See ff_net_wifi_start().
- *
- * The config keys are `ssid` and `psk` (see ff_cfg.c for why those exact spellings).
- *
- * **Known networks (R2b-fw-1, spec/device-protocol.md -> Known networks).** ff_cfg may list
- * up to FF_CFG_MAX_NETS networks in priority order. With exactly ONE, nothing below the
- * `s_net_count > 1` guards runs: the board connects directly, with no scan, exactly as
- * before the list existed. With more, one attempt cycle is:
- *
- *    scan once -> try every network the scan saw, in list order, each by the strongest AP
- *    of that SSID -> then try the ones it did not see, directly (a hidden SSID is never in
- *    a scan) -> one console line if none worked -> back off (1 s -> 30 s) -> scan again.
- *
- * Invariants a reviewer should be able to check by reading:
- *
- *  - **Never scan while associated.** esp_wifi_scan_start() is called from begin_cycle()
- *    only, and begin_cycle() only from STA_START and from the DISCONNECTED paths. A working
- *    association is never left for a higher-priority network; the board re-selects only
- *    after it loses the link.
- *  - **A visible network that gives no address does not block the next one.** An
- *    association that has no DHCP lease after DHCP_TIMEOUT_MS is dropped by a one-shot
- *    watchdog, which raises DISCONNECTED and moves the cycle on.
- *  - **The TX ladder counts only failures against networks the scan saw.** Cutting power
- *    never helps find an access point that is not there, so direct tries of unseen
- *    networks leave it alone.
- *  - **Bounded.** One cycle is at most one scan plus FF_CFG_MAX_NETS attempts, each capped
- *    by the driver's own association timeout plus the DHCP watchdog, then the backoff. The
- *    backoff doubles only between cycles, never between networks within one.
- *  - **All of it runs on the default event-loop task** (the handlers below), so the state
- *    needs no lock. The watchdog runs on the esp_timer task and only reads two flags and
- *    calls esp_wifi_disconnect().
- *
- * "no known network in range (" is the console phrase the flasher's classifier keys on.
+ * Invariants:
+ *  - Reconnect forever with capped backoff (1 s -> 30 s) and TX-power step-down ladder.
+ *  - Passphrases are never logged; modem sleep (`WIFI_PS_MAX_MODEM`) is set explicitly.
+ *  - Never scan while associated: `esp_wifi_scan_start()` is called from `begin_cycle()` only.
+ *  - Improv BLE fallback window lives in `ff_net_wifi_improv.c`.
  */
+
+#define FF_NET_WIFI_INTERNAL_IMPL
+#include "ff_net_wifi_internal.h"
 
 #include <limits.h>
 #include <stdio.h>
@@ -56,49 +20,14 @@
 #include "esp_netif.h"
 #include "esp_timer.h"
 #include "esp_wifi.h"
-#include "ff_net_adapter.h"
 #include "freertos/FreeRTOS.h"
 #include "nvs.h"
 #include "nvs_flash.h"
-
-#if defined(CONFIG_BT_ENABLED) && defined(CONFIG_BT_NIMBLE_ENABLED)
-#include "host/ble_hs.h"
-#include "nimble/nimble_port.h"
-#include "nimble/nimble_port_freertos.h"
-#include "services/gap/ble_svc_gap.h"
-#include "services/gatt/ble_svc_gatt.h"
-#endif
 
 static const char *TAG = "ff-wifi";
 
 #define FF_NET_NVS_NAMESPACE "ff_net"
 #define FF_NET_NVS_MAX 4
-#define IMPROV_BLE_SERVICE_UUID "00467768-6228-2272-4663-277478268000"
-#define IMPROV_BLE_STATE_CHAR_UUID "00467768-6228-2272-4663-277478268001"
-#define IMPROV_BLE_ERROR_CHAR_UUID "00467768-6228-2272-4663-277478268002"
-#define IMPROV_BLE_RPC_CMD_CHAR_UUID "00467768-6228-2272-4663-277478268003"
-#define IMPROV_BLE_RPC_RES_CHAR_UUID "00467768-6228-2272-4663-277478268004"
-#define IMPROV_BLE_WINDOW_S 120
-#define IMPROV_BLE_MAX_OPENS_PER_BOOT 3
-#define IMPROV_BLE_COOLDOWN_US (600LL * 1000000LL)
-
-#define IMPROV_STATE_AUTH_REQUIRED 0x01
-#define IMPROV_STATE_AUTHORIZED 0x02
-#define IMPROV_STATE_PROVISIONING 0x03
-#define IMPROV_STATE_PROVISIONED 0x04
-#define IMPROV_ERR_NONE 0x00
-#define IMPROV_ERR_INVALID_RPC 0x01
-#define IMPROV_ERR_UNKNOWN_RPC 0x02
-#define IMPROV_ERR_UNABLE_TO_CONNECT 0x03
-#define IMPROV_ERR_NOT_AUTHORIZED 0x04
-#define IMPROV_CMD_WIFI_SETTINGS 0x01
-#define IMPROV_CMD_IDENTIFY 0x02
-
-/* Internal event IDs posted to WIFI_EVENT on the default event loop by one-shot timers
- * and Improv BLE provisioning so the system event task never sleeps or blocks and
- * all Wi-Fi state transitions stay single-threaded on the default event loop. */
-#define FF_WIFI_EVENT_RETRY 0x7F00
-#define FF_WIFI_EVENT_IMPROV_CRED 0x7F01
 
 typedef enum {
     RETRY_NONE = 0,
@@ -107,92 +36,52 @@ typedef enum {
     RETRY_NEXT_CANDIDATE,
 } retry_action_t;
 
-/* 1 s → 30 s, doubling. Same ladder the ingestor and the simulator use for the broker;
- * one reconnect policy across the product is one thing to reason about. */
 #define WIFI_RETRY_MIN_MS 1000
 #define WIFI_RETRY_MAX_MS 30000
 
-/* TX-power ladder (0.25 dBm units): steps down after TX_LADDER_ATTEMPTS failures to prevent
- * brownout resets on marginal 3.3 V rails; rung 0 preserves the PHY's boot default. */
 #define TX_LADDER_ATTEMPTS 3
-static const int8_t TX_LADDER_QDBM[] = {0 /* placeholder: the captured default */, 56, 32};
+static const int8_t TX_LADDER_QDBM[] = {0, 56, 32};
 #define TX_LADDER_RUNGS ((int)(sizeof(TX_LADDER_QDBM) / sizeof(TX_LADDER_QDBM[0])))
 
-/* Multi-network only: how long an association may sit without a DHCP lease before the
- * board gives up on that network and tries the next. Generous — a slow DHCP server on a
- * busy AP is normal — but bounded, or one broken network would hold the board forever. */
 #define DHCP_TIMEOUT_MS 20000
 
 static esp_netif_t *s_netif;
 static int s_retry_ms = WIFI_RETRY_MIN_MS;
 
-/* The known networks, copied out of ff_cfg at start and refreshed when Improv BLE writes
- * a new credential to the NVS `ff_net` overlay. */
 static ff_cfg_t s_saved_cfg;
 static ff_cfg_net_t s_nets[FF_CFG_MAX_NETS];
 static int s_net_count;
 
-/* The current cycle (multi-network only): which networks the scan saw, the order they are
- * tried in (seen first, then unseen, each in list order), and the position in that order. */
 static bool s_visible[FF_CFG_MAX_NETS];
 static int s_visible_count;
 static int s_order[FF_CFG_MAX_NETS];
 static int s_try;
 static bool s_scanning;
 
-/* Read by ff_net_wifi_ssid() from other tasks (the announce) and by the watchdog: aligned
- * ints and bools, single writer (the event-loop task). */
-static volatile int s_joined = -1; /* index into s_nets of the network that gave an IP */
-static volatile bool s_have_ip;
+static volatile int s_joined = -1;
+volatile bool s_have_ip;
 static volatile bool s_dhcp_armed;
 static esp_timer_handle_t s_dhcp_timer;
 static esp_timer_handle_t s_retry_timer;
 static volatile retry_action_t s_retry_action = RETRY_NONE;
-static volatile bool s_improv_active;
-static volatile bool s_venue_offline;
-static volatile bool s_improv_ble_enabled = true;
-static portMUX_TYPE s_improv_lock = portMUX_INITIALIZER_UNLOCKED;
+volatile bool s_venue_offline;
 static bool s_wifi_started;
-static esp_timer_handle_t s_improv_timer;
-static uint8_t s_improv_state = IMPROV_STATE_AUTH_REQUIRED;
-static uint8_t s_improv_error = IMPROV_ERR_NONE;
-static int s_improv_open_count;
-static int64_t s_improv_last_open_us = -IMPROV_BLE_COOLDOWN_US;
-static uint8_t s_improv_rpc_res_buf[16];
-static size_t s_improv_rpc_res_len;
-static char s_improv_ssid[FF_CFG_MAX_SSID];
-static char s_improv_sec[FF_CFG_MAX_PSK];
 
-/* Rung 0's power, read from the driver once at start rather than assumed. */
 static int8_t s_default_qdbm;
-/* Consecutive failures since the last association. Drives the ladder position. */
 static int s_fail_count;
-/* The rung that last produced an association. The ladder restarts from HERE, not from 0,
- * because a board that could only associate at 8 dBm will not survive its first data
- * frame at 20 — the rail that failed during association has not been repaired by it
- * succeeding. Full power is still reached again on wrap-around, which is what lets a
- * board that was moved, or whose supply was fixed, climb back without a re-flash. */
 static int s_working_rung;
 
-/* The power for a rung: rung 0 is the captured default, the rest are the table's. */
 static int8_t rung_qdbm(int rung)
 {
     return rung == 0 ? s_default_qdbm : TX_LADDER_QDBM[rung];
 }
 
-/* Move to the rung this failure count calls for, and tell the driver. Applied before
- * every reconnect rather than only on a change: esp_wifi_stop()/start() and some
- * disconnect reasons reset the driver's idea of max power, and re-asserting it costs a
- * register write nobody will ever measure. */
 static void apply_tx_rung(void)
 {
     int rung = (s_working_rung + s_fail_count / TX_LADDER_ATTEMPTS) % TX_LADDER_RUNGS;
     int8_t qdbm = rung_qdbm(rung);
     esp_err_t err = esp_wifi_set_max_tx_power(qdbm);
     if (err != ESP_OK) {
-        /* Not fatal, and not retried: a board that cannot set its TX power can still
-         * associate at whatever the driver is already using. Losing the ladder is worth
-         * a line in the log, not a failed bring-up. */
         ESP_LOGW(TAG, "cannot set tx power to %d.%02d dBm (%s); continuing at the "
                       "driver's current setting",
                  qdbm / 4, (qdbm % 4) * 25, esp_err_to_name(err));
@@ -211,7 +100,7 @@ static void dhcp_watchdog_arm(void)
     if (s_dhcp_timer == NULL) {
         return;
     }
-    esp_timer_stop(s_dhcp_timer); /* ESP_ERR_INVALID_STATE when not running: fine */
+    esp_timer_stop(s_dhcp_timer);
     s_dhcp_armed = true;
     esp_timer_start_once(s_dhcp_timer, (uint64_t)DHCP_TIMEOUT_MS * 1000);
 }
@@ -253,361 +142,10 @@ static void retry_timer_disarm(void)
     }
 }
 
-static void improv_ble_notify_status(void);
-static void improv_ble_notify_rpc_result(void);
-
-static void improv_set_rpc_result(uint8_t cmd)
-{
-    /* Improv RPC Result packet (`00467768-6228-2272-4663-277478268004`):
-     * `[cmd, data_len=0x00, checksum=cmd]` (0 redirect URLs). */
-    s_improv_rpc_res_buf[0] = cmd;
-    s_improv_rpc_res_buf[1] = 0x00;
-    s_improv_rpc_res_buf[2] = cmd;
-    s_improv_rpc_res_len = 3;
-    improv_ble_notify_rpc_result();
-}
-
-/* Improv Wi-Fi RPC command handler (0x01 Wi-Fi settings, 0x02 Identify). */
-static esp_err_t improv_rpc_fail(uint8_t err, esp_err_t rc)
-{
-    portENTER_CRITICAL(&s_improv_lock);
-    s_improv_error = err;
-    portEXIT_CRITICAL(&s_improv_lock);
-    improv_ble_notify_status();
-    return rc;
-}
-
-static esp_err_t improv_handle_rpc_command(const uint8_t *buf, size_t len)
-{
-    bool allowed;
-    uint8_t state_now;
-    portENTER_CRITICAL(&s_improv_lock);
-    allowed = s_improv_active && s_improv_ble_enabled && !s_venue_offline;
-    state_now = s_improv_state;
-    portEXIT_CRITICAL(&s_improv_lock);
-    if (!allowed) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    if (buf == NULL || len < 2) {
-        return improv_rpc_fail(IMPROV_ERR_INVALID_RPC, ESP_ERR_INVALID_ARG);
-    }
-    uint8_t cmd = buf[0];
-    size_t data_len = buf[1];
-    if (2 + data_len > len) {
-        return improv_rpc_fail(IMPROV_ERR_INVALID_RPC, ESP_ERR_INVALID_ARG);
-    }
-    if (len >= 2 + data_len + 1) {
-        uint8_t expected_csum = 0;
-        for (size_t i = 0; i < 2 + data_len; i++) {
-            expected_csum = (uint8_t)(expected_csum + buf[i]);
-        }
-        if (buf[2 + data_len] != expected_csum) {
-            return improv_rpc_fail(IMPROV_ERR_INVALID_RPC, ESP_ERR_INVALID_CRC);
-        }
-    }
-    if (cmd == IMPROV_CMD_IDENTIFY) {
-        ESP_LOGI(TAG, "Improv BLE identify requested");
-        return improv_rpc_fail(IMPROV_ERR_NONE, ESP_OK);
-    }
-    if (cmd != IMPROV_CMD_WIFI_SETTINGS) {
-        return improv_rpc_fail(IMPROV_ERR_UNKNOWN_RPC, ESP_ERR_NOT_SUPPORTED);
-    }
-    if (state_now != IMPROV_STATE_AUTHORIZED) {
-        return improv_rpc_fail(IMPROV_ERR_NOT_AUTHORIZED, ESP_ERR_INVALID_STATE);
-    }
-    if (data_len < 2) {
-        return improv_rpc_fail(IMPROV_ERR_INVALID_RPC, ESP_ERR_INVALID_ARG);
-    }
-    size_t ssid_len = buf[2];
-    if (ssid_len == 0 || ssid_len >= sizeof(s_improv_ssid) || 1 + ssid_len + 1 > data_len) {
-        return improv_rpc_fail(IMPROV_ERR_INVALID_RPC, ESP_ERR_INVALID_ARG);
-    }
-    size_t sec_len = buf[3 + ssid_len];
-    if (sec_len >= sizeof(s_improv_sec) || 1 + ssid_len + 1 + sec_len > data_len) {
-        return improv_rpc_fail(IMPROV_ERR_INVALID_RPC, ESP_ERR_INVALID_ARG);
-    }
-    memset(s_improv_ssid, 0, sizeof(s_improv_ssid));
-    memset(s_improv_sec, 0, sizeof(s_improv_sec));
-    memcpy(s_improv_ssid, &buf[3], ssid_len);
-    if (sec_len > 0) {
-        memcpy(s_improv_sec, &buf[4 + ssid_len], sec_len);
-    }
-    esp_err_t err = ff_net_wifi_save_nvs(s_improv_ssid, s_improv_sec);
-    if (err != ESP_OK) {
-        return improv_rpc_fail(IMPROV_ERR_INVALID_RPC, err);
-    }
-    portENTER_CRITICAL(&s_improv_lock);
-    s_improv_error = IMPROV_ERR_NONE;
-    s_improv_state = IMPROV_STATE_PROVISIONING;
-    portEXIT_CRITICAL(&s_improv_lock);
-    improv_ble_notify_status();
-    (void)esp_event_post(WIFI_EVENT, FF_WIFI_EVENT_IMPROV_CRED, NULL, 0, 0);
-    return ESP_OK;
-}
-
-#if defined(CONFIG_BT_ENABLED) && defined(CONFIG_BT_NIMBLE_ENABLED)
-static bool s_nimble_started;
-static uint16_t s_improv_state_val_handle;
-static uint16_t s_improv_err_val_handle;
-static uint16_t s_improv_rpc_res_val_handle;
-
-/* UUID 00467768-6228-2272-4663-277478268000..8004 in little-endian byte order for NimBLE. */
-#define IMPROV_UUID128(b0)                                                                     \
-    BLE_UUID128_INIT((b0), 0x80, 0x26, 0x78, 0x74, 0x27, 0x63, 0x46, 0x72, 0x22, 0x28, 0x62,   \
-                     0x68, 0x77, 0x46, 0x00)
-static const ble_uuid128_t s_improv_svc_uuid = IMPROV_UUID128(0x00);
-static const ble_uuid128_t s_improv_state_uuid = IMPROV_UUID128(0x01);
-static const ble_uuid128_t s_improv_err_uuid = IMPROV_UUID128(0x02);
-static const ble_uuid128_t s_improv_rpc_cmd_uuid = IMPROV_UUID128(0x03);
-static const ble_uuid128_t s_improv_rpc_res_uuid = IMPROV_UUID128(0x04);
-
-static void improv_ble_notify_status(void)
-{
-    if (!s_nimble_started) {
-        return;
-    }
-    if (s_improv_state_val_handle != 0) {
-        ble_gatts_chr_updated(s_improv_state_val_handle);
-    }
-    if (s_improv_err_val_handle != 0) {
-        ble_gatts_chr_updated(s_improv_err_val_handle);
-    }
-}
-
-static void improv_ble_notify_rpc_result(void)
-{
-    if (!s_nimble_started) {
-        return;
-    }
-    if (s_improv_rpc_res_val_handle != 0) {
-        ble_gatts_chr_updated(s_improv_rpc_res_val_handle);
-    }
-}
-
-static int improv_gatt_access(uint16_t conn_handle, uint16_t attr_handle,
-                              struct ble_gatt_access_ctxt *ctxt, void *arg)
-{
-    (void)conn_handle;
-    (void)attr_handle;
-    uintptr_t ch = (uintptr_t)arg;
-    if (ctxt->op == BLE_GATT_ACCESS_OP_READ_CHR) {
-        if (ch == 4 && s_improv_rpc_res_len > 0) {
-            return os_mbuf_append(ctxt->om, s_improv_rpc_res_buf, s_improv_rpc_res_len) == 0
-                       ? 0
-                       : BLE_ATT_ERR_INSUFFICIENT_RES;
-        }
-        portENTER_CRITICAL(&s_improv_lock);
-        uint8_t val = (ch == 1) ? s_improv_state : ((ch == 2) ? s_improv_error : 0);
-        portEXIT_CRITICAL(&s_improv_lock);
-        return os_mbuf_append(ctxt->om, &val, sizeof(val)) == 0 ? 0 : BLE_ATT_ERR_INSUFFICIENT_RES;
-    }
-    if (ctxt->op == BLE_GATT_ACCESS_OP_WRITE_CHR && ch == 3) {
-        bool allowed;
-        portENTER_CRITICAL(&s_improv_lock);
-        allowed = s_improv_active && s_improv_ble_enabled && !s_venue_offline;
-        portEXIT_CRITICAL(&s_improv_lock);
-        if (!allowed) {
-            return BLE_ATT_ERR_WRITE_NOT_PERMITTED;
-        }
-        struct ble_gap_conn_desc desc;
-        if (ble_gap_conn_find(conn_handle, &desc) != 0 || !desc.sec_state.encrypted) {
-            return BLE_ATT_ERR_INSUFFICIENT_ENC;
-        }
-        static uint8_t s_rpc_buf[128];
-        uint16_t copied = 0;
-        int rc = ble_hs_mbuf_to_flat(ctxt->om, s_rpc_buf, sizeof(s_rpc_buf), &copied);
-        if (rc != 0) {
-            return BLE_ATT_ERR_INVALID_ATTR_VALUE_LEN;
-        }
-        return improv_handle_rpc_command(s_rpc_buf, copied) == ESP_OK ? 0 : BLE_ATT_ERR_UNLIKELY;
-    }
-    return BLE_ATT_ERR_UNLIKELY;
-}
-
-static const struct ble_gatt_svc_def s_improv_gatt_svcs[] = {
-    {
-        .type = BLE_GATT_SVC_TYPE_PRIMARY,
-        .uuid = &s_improv_svc_uuid.u,
-        .characteristics =
-            (struct ble_gatt_chr_def[]){
-                {.uuid = &s_improv_state_uuid.u, .access_cb = improv_gatt_access, .arg = (void *)1, .val_handle = &s_improv_state_val_handle, .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY},
-                {.uuid = &s_improv_err_uuid.u, .access_cb = improv_gatt_access, .arg = (void *)2, .val_handle = &s_improv_err_val_handle, .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY},
-                {.uuid = &s_improv_rpc_cmd_uuid.u, .access_cb = improv_gatt_access, .arg = (void *)3, .flags = BLE_GATT_CHR_F_WRITE | BLE_GATT_CHR_F_WRITE_ENC},
-                {.uuid = &s_improv_rpc_res_uuid.u, .access_cb = improv_gatt_access, .arg = (void *)4, .val_handle = &s_improv_rpc_res_val_handle, .flags = BLE_GATT_CHR_F_READ | BLE_GATT_CHR_F_NOTIFY},
-                {0},
-            },
-    },
-    {0},
-};
-
-static void improv_ble_advertise_start(void);
-
-static int improv_ble_gap_event(struct ble_gap_event *event, void *arg)
-{
-    (void)arg;
-    if (event == NULL) {
-        return 0;
-    }
-    switch (event->type) {
-    case BLE_GAP_EVENT_DISCONNECT:
-    case BLE_GAP_EVENT_ADV_COMPLETE:
-        if (s_improv_active && !s_have_ip && !s_venue_offline && s_improv_ble_enabled) {
-            improv_ble_advertise_start();
-        }
-        break;
-    default:
-        break;
-    }
-    return 0;
-}
-
-static void improv_ble_advertise_start(void)
-{
-    struct ble_hs_adv_fields fields = {0};
-    fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
-    fields.uuids128 = (ble_uuid128_t *)&s_improv_svc_uuid;
-    fields.num_uuids128 = 1;
-    fields.uuids128_is_complete = 1;
-    (void)ble_gap_adv_set_fields(&fields);
-
-    struct ble_gap_adv_params adv_params = {0};
-    adv_params.conn_mode = BLE_GAP_CONN_MODE_UND;
-    adv_params.disc_mode = BLE_GAP_DISC_MODE_GEN;
-    (void)ble_gap_adv_start(BLE_OWN_ADDR_PUBLIC, NULL, BLE_HS_FOREVER, &adv_params,
-                            improv_ble_gap_event, NULL);
-}
-
-static void improv_nimble_host_task(void *param)
-{
-    (void)param;
-    nimble_port_run();
-    nimble_port_freertos_deinit();
-}
-
-static void improv_ble_gatt_start(void)
-{
-    if (s_venue_offline || !s_improv_ble_enabled) {
-        return;
-    }
-    if (!s_nimble_started) {
-        /* CUJ-3: Never hijack a shared application NimBLE GATT server that is already running. */
-        if (ble_hs_synced()) {
-            return;
-        }
-        if (nimble_port_init() != ESP_OK) {
-            return;
-        }
-        ble_svc_gap_init();
-        ble_svc_gatt_init();
-        (void)ble_svc_gap_device_name_set("fleetforge-improv");
-        (void)ble_gatts_count_cfg(s_improv_gatt_svcs);
-        (void)ble_gatts_add_svcs(s_improv_gatt_svcs);
-        ble_hs_cfg.sync_cb = improv_ble_advertise_start;
-        nimble_port_freertos_init(improv_nimble_host_task);
-        s_nimble_started = true;
-        return;
-    }
-    improv_ble_advertise_start();
-}
-
-static void improv_ble_gatt_stop(void)
-{
-    if (s_nimble_started && ble_gap_adv_active()) {
-        (void)ble_gap_adv_stop();
-    }
-}
-#else
-static void improv_ble_notify_status(void) {}
-static void improv_ble_notify_rpc_result(void) {}
-
-static void improv_ble_gatt_start(void)
-{
-    /* When NimBLE is not enabled in sdkconfig, keep the RPC handler referenced so
-     * -Werror=unused-function stays clean on non-BLE builds. */
-    (void)&improv_handle_rpc_command;
-    if (s_venue_offline || !s_improv_ble_enabled) {
-        return;
-    }
-}
-
-static void improv_ble_gatt_stop(void) {}
-#endif
-
-static void on_improv_timeout(void *arg)
-{
-    (void)arg;
-    bool was_active;
-    portENTER_CRITICAL(&s_improv_lock);
-    was_active = s_improv_active;
-    s_improv_active = false;
-    s_improv_state = IMPROV_STATE_AUTH_REQUIRED;
-    portEXIT_CRITICAL(&s_improv_lock);
-    if (!was_active) {
-        return;
-    }
-    improv_ble_gatt_stop();
-    ESP_LOGI(TAG, "Improv Wi-Fi BLE window (%d s) expired; continuing background scan",
-             IMPROV_BLE_WINDOW_S);
-}
-
-static void improv_ble_window_start(void)
-{
-    if (s_venue_offline || !s_improv_ble_enabled || s_improv_active || s_have_ip) {
-        return;
-    }
-    int64_t now_us = esp_timer_get_time();
-    if (s_improv_open_count >= IMPROV_BLE_MAX_OPENS_PER_BOOT ||
-        (now_us - s_improv_last_open_us) < IMPROV_BLE_COOLDOWN_US) {
-        return;
-    }
-    if (s_improv_timer == NULL) {
-        const esp_timer_create_args_t args = {
-            .callback = &on_improv_timeout,
-            .name = "ff_improv_ble",
-        };
-        if (esp_timer_create(&args, &s_improv_timer) != ESP_OK) {
-            s_improv_timer = NULL;
-        }
-    }
-    s_improv_open_count++;
-    s_improv_last_open_us = now_us;
-    portENTER_CRITICAL(&s_improv_lock);
-    s_improv_active = true;
-    s_improv_state = IMPROV_STATE_AUTH_REQUIRED;
-    s_improv_error = IMPROV_ERR_NONE;
-    portEXIT_CRITICAL(&s_improv_lock);
-    improv_ble_gatt_start();
-    if (s_improv_timer != NULL) {
-        esp_timer_stop(s_improv_timer);
-        esp_timer_start_once(s_improv_timer, (uint64_t)IMPROV_BLE_WINDOW_S * 1000000ULL);
-    }
-    ESP_LOGI(TAG, "opening Improv Wi-Fi BLE window (%s) for %d s (auth required)",
-             IMPROV_BLE_SERVICE_UUID, IMPROV_BLE_WINDOW_S);
-}
-
-static void improv_ble_window_stop(void)
-{
-    bool was_active;
-    portENTER_CRITICAL(&s_improv_lock);
-    was_active = s_improv_active;
-    s_improv_active = false;
-    s_improv_state = IMPROV_STATE_PROVISIONED;
-    portEXIT_CRITICAL(&s_improv_lock);
-    if (!was_active) {
-        return;
-    }
-    if (s_improv_timer != NULL) {
-        esp_timer_stop(s_improv_timer);
-    }
-    improv_ble_gatt_stop();
-    ESP_LOGI(TAG, "closing Improv Wi-Fi BLE window");
-}
-
 static void load_nvs_net_overlay(const ff_cfg_t *cfg)
 {
     s_net_count = 0;
     memset(s_nets, 0, sizeof(s_nets));
-    /* Flashed ff_cfg networks outrank BLE/NVS credentials so provisioning never hijacks them. */
     int cfg_max = cfg->net_count > FF_CFG_MAX_NETS ? FF_CFG_MAX_NETS : cfg->net_count;
     for (int i = 0; i < cfg_max && s_net_count < FF_CFG_MAX_NETS; i++) {
         s_nets[s_net_count++] = cfg->nets[i];
@@ -691,8 +229,6 @@ esp_err_t ff_net_wifi_save_nvs(const char *ssid, const char *passphrase)
     return err;
 }
 
-/* esp_timer task. Touches no state: reads the flags, and lets DISCONNECTED (on the event
- * loop) do the bookkeeping. A link that already has an address is never dropped. */
 static void on_dhcp_timeout(void *arg)
 {
     (void)arg;
@@ -706,9 +242,6 @@ static void on_dhcp_timeout(void *arg)
     esp_wifi_disconnect();
 }
 
-/* Start an association attempt with the k-th network of this cycle's order. The strongest
- * AP of that SSID (a mesh has several), and an all-channel probe so a hidden SSID is found
- * too. Returns ESP_OK when an attempt is in flight (DISCONNECTED or GOT_IP will follow). */
 static esp_err_t try_candidate(int k)
 {
     s_try = k;
@@ -718,7 +251,7 @@ static esp_err_t try_candidate(int k)
     wifi_config_t wifi = {0};
     strncpy((char *)wifi.sta.ssid, s_nets[idx].ssid, sizeof(wifi.sta.ssid) - 1);
     strncpy((char *)wifi.sta.password, s_nets[idx].psk, sizeof(wifi.sta.password) - 1);
-    wifi.sta.threshold.authmode = WIFI_AUTH_OPEN; /* as in the single-network path */
+    wifi.sta.threshold.authmode = WIFI_AUTH_OPEN;
     wifi.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
     wifi.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
 
@@ -735,8 +268,6 @@ static esp_err_t try_candidate(int k)
     return err;
 }
 
-/* Attempt the order from position k on. True when an attempt is in flight; false when the
- * cycle is exhausted without one. A loop, not a recursion: bounded by s_net_count. */
 static bool attempt_from(int k)
 {
     for (; k < s_net_count; k++) {
@@ -747,7 +278,6 @@ static bool attempt_from(int k)
     return false;
 }
 
-/* Seen networks first, then unseen, each in priority (list) order. */
 static void build_order(void)
 {
     int n = 0;
@@ -763,8 +293,6 @@ static void build_order(void)
     }
 }
 
-/* The cycle tried everything and nothing gave an address: say so ONCE, then schedule a
- * non-blocking retry timer so the default system event task (`sys_evt`) is never blocked. */
 static void end_cycle_wait(void)
 {
     if (s_visible_count == 0) {
@@ -781,13 +309,12 @@ static void end_cycle_wait(void)
     retry_timer_arm(RETRY_BEGIN_CYCLE, delay_ms);
 }
 
-/* Begin scan cycle (only caller of esp_wifi_scan_start); falls back to direct attempts on error. */
 static void begin_cycle(void)
 {
     memset(s_visible, 0, sizeof(s_visible));
     s_visible_count = 0;
     s_try = 0;
-    wifi_scan_config_t scan = {0}; /* active, all channels, hidden SSIDs not shown */
+    wifi_scan_config_t scan = {0};
     s_scanning = true;
     esp_err_t err = esp_wifi_scan_start(&scan, false);
     if (err == ESP_OK) {
@@ -803,8 +330,6 @@ static void begin_cycle(void)
     end_cycle_wait();
 }
 
-/* SCAN_DONE: mark which known networks are in range, one record at a time (never an array
- * on the event loop's small stack), and ALWAYS free the driver's list. */
 static void on_scan_done(const wifi_event_sta_scan_done_t *event)
 {
     s_scanning = false;
@@ -835,7 +360,6 @@ static void on_scan_done(const wifi_event_sta_scan_done_t *event)
     end_cycle_wait();
 }
 
-/* DISCONNECTED (multi-network): dropped link re-scans; failed attempt tries next candidate. */
 static void on_disconnected_multi(int reason)
 {
     if (s_scanning) {
@@ -856,8 +380,6 @@ static void on_disconnected_multi(int reason)
         return;
     }
 
-    /* Saturating, as in the single-network path. Only a network the scan saw moves the
-     * ladder: lower power never finds an access point that is not there. */
     if (s_visible[failed] && s_fail_count < INT_MAX - 1) {
         s_fail_count++;
     }
@@ -925,7 +447,6 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
         return;
     }
     if (id == WIFI_EVENT_SCAN_DONE) {
-        /* Only a scan begin_cycle() started; never the single-network path's. */
         if (s_net_count > 1 && s_scanning) {
             on_scan_done((const wifi_event_sta_scan_done_t *)data);
         }
@@ -934,7 +455,6 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
     if (id == WIFI_EVENT_STA_CONNECTED) {
         retry_timer_disarm();
         s_retry_ms = WIFI_RETRY_MIN_MS;
-        /* Freeze the ladder where it succeeded, and stop counting. */
         s_working_rung = (s_working_rung + s_fail_count / TX_LADDER_ATTEMPTS) % TX_LADDER_RUNGS;
         s_fail_count = 0;
         if (s_working_rung != 0) {
@@ -952,18 +472,13 @@ static void on_wifi_event(void *arg, esp_event_base_t base, int32_t id, void *da
     if (id == WIFI_EVENT_STA_DISCONNECTED) {
         const wifi_event_sta_disconnected_t *event = (const wifi_event_sta_disconnected_t *)data;
         int reason = event != NULL ? event->reason : -1;
-        if (s_improv_state == IMPROV_STATE_PROVISIONING) {
-            s_improv_state = IMPROV_STATE_AUTH_REQUIRED;
-            s_improv_error = IMPROV_ERR_UNABLE_TO_CONNECT;
-            improv_ble_notify_status();
-        }
+        improv_ble_on_sta_disconnected();
         if (s_net_count > 1) {
             on_disconnected_multi(reason);
             return;
         }
         s_have_ip = false;
         s_joined = -1;
-        /* Saturate fail_count rather than wrapping INT_MAX across long outages. */
         if (s_fail_count < INT_MAX - 1) {
             s_fail_count++;
         }
@@ -986,13 +501,7 @@ static void on_got_ip(void *arg, esp_event_base_t base, int32_t id, void *data)
     (void)id;
     const ip_event_got_ip_t *event = (const ip_event_got_ip_t *)data;
     retry_timer_disarm();
-    if (s_improv_state == IMPROV_STATE_PROVISIONING || s_improv_active) {
-        s_improv_state = IMPROV_STATE_PROVISIONED;
-        s_improv_error = IMPROV_ERR_NONE;
-        improv_set_rpc_result(IMPROV_CMD_WIFI_SETTINGS);
-        improv_ble_notify_status();
-    }
-    improv_ble_window_stop();
+    improv_ble_on_got_ip();
     if (s_net_count > 1) {
         dhcp_watchdog_disarm();
         int idx = s_order[s_try];
@@ -1012,8 +521,6 @@ esp_err_t ff_net_wifi_start(const ff_cfg_t *cfg)
     if (cfg != NULL) {
         s_saved_cfg = *cfg;
     }
-    /* Copied before esp_wifi_start(): STA_START reads them on the event loop.
-     * Prepend any NVS `ff_net` overlay networks ahead of `cfg->nets`. */
     load_nvs_net_overlay(cfg);
     if (s_net_count == 0) {
         ESP_LOGE(TAG, "link=wifi but the config carries no ssid: this board cannot join a "
@@ -1038,8 +545,6 @@ esp_err_t ff_net_wifi_start(const ff_cfg_t *cfg)
         };
         esp_err_t err = esp_timer_create(&watchdog, &s_dhcp_timer);
         if (err != ESP_OK) {
-            /* Not fatal: without it a network that associates but never leases an address
-             * holds the board until the AP drops it. Loud, because that is a real cost. */
             s_dhcp_timer = NULL;
             ESP_LOGE(TAG, "cannot create the dhcp watchdog (%s); a network with no dhcp may "
                           "hold this board",
@@ -1061,18 +566,12 @@ esp_err_t ff_net_wifi_start(const ff_cfg_t *cfg)
 
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
     if (s_net_count == 1) {
-        /* The single-network path, unchanged: one config, set once, connected directly. */
         wifi_config_t wifi = {0};
-        /* strncpy into fixed driver buffers: the ff_cfg reader already refused anything
-         * longer than the field, so this cannot truncate a usable value. */
         strncpy((char *)wifi.sta.ssid, s_nets[0].ssid, sizeof(wifi.sta.ssid) - 1);
         strncpy((char *)wifi.sta.password, s_nets[0].psk, sizeof(wifi.sta.password) - 1);
-        /* An open network is legitimate (a lab bench), so the threshold is OPEN rather than
-         * WPA2 — refusing to associate would be a policy this agent has no business having. */
         wifi.sta.threshold.authmode = WIFI_AUTH_OPEN;
         ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi));
     }
-    /* With several networks, try_candidate() sets the config per attempt. */
     if (s_venue_offline) {
         ESP_LOGI(TAG, "venue offline mode active: skipping esp_wifi_start (0 RF frames emitted)");
         return ESP_OK;
@@ -1080,40 +579,13 @@ esp_err_t ff_net_wifi_start(const ff_cfg_t *cfg)
     ESP_ERROR_CHECK(esp_wifi_start());
     s_wifi_started = true;
 
-    /* Rung 0 of the TX ladder, READ rather than assumed — see the ladder comment above.
-     * After a brownout reset CONFIG_ESP_PHY_REDUCE_TX_POWER has already brought the PHY
-     * up at minimum power, and that is a decision S0-fw-3 made deliberately for this
-     * boot. Capturing whatever the driver reports means the ladder's "full power" rung
-     * is that reduced figure on such a boot, instead of silently overriding it. */
     if (esp_wifi_get_max_tx_power(&s_default_qdbm) != ESP_OK) {
-        /* 20 dBm, IDF's own default and the fleet-wide figure in sdkconfig.defaults.
-         * Only reached if the driver refuses to answer, which it should not after a
-         * successful start. */
         s_default_qdbm = 80;
         ESP_LOGW(TAG, "cannot read the phy's tx power; assuming 20 dBm for the retry ladder");
     }
     ESP_LOGI(TAG, "tx power at start: %d.%02d dBm", s_default_qdbm / 4,
              (s_default_qdbm % 4) * 25);
 
-    /* Stated, not inherited. IDF's default is WIFI_PS_MIN_MODEM, so leaving this out
-     * still gets modem sleep — but it gets it as an accident of the SDK's default rather
-     * than as a decision, and the next person to read this file cannot tell which.
-     *
-     * MAX_MODEM rather than MIN: the radio then sleeps through multiple DTIM beacons
-     * instead of waking for every one. The workload tolerates it by construction — the
-     * MQTT keepalive is 30 s (ff_mqtt.c::KEEPALIVE_S) and the heartbeat is `hb_s`, so
-     * this board is already choosing to be deaf for tens of seconds at a stretch.
-     *
-     * The cost is downlink latency: a `dn/cmd` can now wait up to roughly a DTIM
-     * interval times the listen interval before the board hears it — seconds, not
-     * milliseconds. Accepted deliberately (owner's call, 2026-09-13): every command this
-     * product sends is part of a deploy, and a deploy that takes 2 s longer to start is
-     * not a worse deploy. Revisit only if R2 ever grows a command that a human is
-     * waiting on interactively.
-     *
-     * Not verifiable off the bench: QEMU has no Wi-Fi (the emulated link is openeth), so
-     * no test in this repo can prove the radio actually sleeps. The current-draw check
-     * belongs on S0-test-1's bench list. */
     ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_MAX_MODEM));
 
     if (s_net_count == 1) {
@@ -1136,7 +608,7 @@ bool ff_net_wifi_rssi(int *out_dbm)
 
 const char *ff_net_wifi_ssid(void)
 {
-    int idx = s_joined; /* read once: another task may clear it */
+    int idx = s_joined;
     if (idx < 0 || idx >= s_net_count) {
         return NULL;
     }
@@ -1178,28 +650,4 @@ esp_err_t ff_net_wifi_set_offline_mode(bool offline)
 bool ff_net_wifi_is_offline_mode(void)
 {
     return s_venue_offline;
-}
-
-void ff_net_wifi_set_improv_ble_enabled(bool enabled)
-{
-    s_improv_ble_enabled = enabled;
-    if (!enabled) {
-        improv_ble_window_stop();
-    }
-}
-
-void ff_net_wifi_improv_authorize(void)
-{
-    bool changed = false;
-    portENTER_CRITICAL(&s_improv_lock);
-    if (s_improv_active && s_improv_ble_enabled && !s_venue_offline &&
-        s_improv_state == IMPROV_STATE_AUTH_REQUIRED) {
-        s_improv_state = IMPROV_STATE_AUTHORIZED;
-        s_improv_error = IMPROV_ERR_NONE;
-        changed = true;
-    }
-    portEXIT_CRITICAL(&s_improv_lock);
-    if (changed) {
-        improv_ble_notify_status();
-    }
 }

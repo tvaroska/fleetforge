@@ -1,9 +1,5 @@
-// What these tests defend (R5-fe-1):
-//
-// 1. Apply and Cancel update post once, to the exact verb path, with no body, and re-read.
-// 2. Reboot never posts without its confirm step; Keep running posts nothing.
-// 3. The server's refusal is shown verbatim; a 401 bounces to the login gate.
-// 4. A legacy board gets no buttons; the last-command line never announces itself.
+// CommandControls tests (R5-fe-1): verb POST paths, Reboot confirm step, verbatim server
+// refusals, 401 login bounce, and legacy capability gating.
 
 import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -24,6 +20,8 @@ function deploy(overrides: Partial<DeploySummary> = {}): DeploySummary {
     from_version: '1.4.2',
     pct: null,
     detail: null,
+    steps: [],
+    confirm_timeout_s: 300,
     ...overrides,
   }
 }

@@ -1,47 +1,17 @@
-"""FastAPI application.
+"""FastAPI application factory (`create_app`), router wiring, and `/v1/healthz` + `/v1/readyz`.
 
-R0-infra-1 shipped the app factory plus `GET /v1/healthz` (liveness) and
-`GET /v1/readyz` (readiness). R0-be-1 added admin auth (`/v1/auth/*`) and the
-router/dependency layout every later endpoint copies; R0-be-2 added enrollment token
-issuance (`/v1/enrollment-tokens`); R0-be-4 added the device-facing `POST /v1/enroll`
-— the one **unauthenticated write** endpoint, whose credential is the token in its
-body; R0-be-5 added the SSE event stream (`GET /v1/events`) and the fleet read model
-(`GET /v1/devices`) it tells clients to re-read. R0-be-6 added the artifact object-store
-port (`ObjectStoreDep`). R0-infra-2 added the prebuilt agent images (`/v1/agent/*`) and
-S0-infra-6 moved them into that same store: `app.state.agent_catalog` is a lazy
-`CatalogCache`, not a directory scan, so the object store is now what **onboarding**
-depends on as well as R1 — hence the startup WARNING when neither backend is configured.
-R1-be-1 added `POST /v1/artifact`, the first endpoint that **writes** to that store and
-the first writer of the `artifacts` table. R1-be-2 added
-`POST /v1/devices/{device_id}/deploy` — the first endpoint that **publishes** to the
-broker (`CommandPublisherDep`) and the only writer of `deploy_events` (`deploys.py`),
-hence the fourth startup WARNING. R1-be-3 added `GET /v1/artifact/{sha256}/bin`, the
-**second unauthenticated endpoint** after `POST /v1/enroll` — its credential is the
-signature in its own query string (`artifact_urls.py`), and it redirects a board to an
-upstream store URL held in the per-app `app.state.artifact_url_cache`, hence the fifth
-startup WARNING.
-
-**The lifespan owns one background task**: the `ff_events` `LISTEN` connection
-(`api/eventstream.py::PostgresEventListener`), one per API process, feeding the
-per-app `EventHub`. It starts only when settings exist, because `create_app()` must
-stay constructible with no environment at all — see `_settings_or_none()`.
-
-**There is no CORS middleware here, and there must never be one.** The dashboard
-and the API are served from a single origin: nginx in the `frontend` container
-serves the SPA and proxies `/v1/*` to `api:8000` (`design/architecture.md` →
-"Serve the dashboard and the API from one origin … no CORS configuration"; the
-topology is in `design/production.md` → *Same origin, two backends*). A CORS error
-in a browser therefore means the nginx proxy is misconfigured, **not** that CORS
-middleware is missing. `tests/test_api_health.py::test_no_cors_headers` guards this.
-The login cookie is same-origin by construction, which is also why
-`SameSite=Strict` alone is sufficient against CSRF and no CSRF token exists.
+Everything is mounted under `/v1` — including OpenAPI docs — matching `spec/device-protocol.md`.
+There is deliberately no CORS middleware: the dashboard SPA and API share one origin behind nginx
+(`tests/test_api_health.py::test_no_cors_headers`), making `SameSite=Strict` cookies CSRF-safe.
+Lifespan background tasks (`ff_events` listener + rollout reconciliation) live in `api/lifespan.py`.
 """
 
-import asyncio
-import contextlib
+from __future__ import annotations
+
 import logging
 import os
-from collections.abc import AsyncIterator, Callable
+from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Annotated, Any
 
 from fastapi import Depends, FastAPI
@@ -51,19 +21,20 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from fleetforge import __version__, rollout
+from fleetforge import __version__
 from fleetforge.api.deps import (
     SettingsDep,
     deploy_config_gaps,
     dynsec_configured,
-    get_command_publisher,
     mqtt_command_configured,
 )
-from fleetforge.api.eventstream import EventHub, PostgresEventListener
+from fleetforge.api.eventstream import EventHub
+from fleetforge.api.lifespan import build_lifespan
 from fleetforge.api.routers import (
     agent,
     artifact_download,
     artifact_sim,
+    artifact_upload,
     artifacts,
     auth,
     auth_tokens,
@@ -88,8 +59,7 @@ from fleetforge.auth.cache import VerifiedSecretCache
 from fleetforge.auth.ratelimit import FixedWindowLimiter
 from fleetforge.buildinfo import build_info
 from fleetforge.config import Settings, get_settings
-from fleetforge.db.base import asyncpg_dsn, get_sessionmaker
-from fleetforge.events import DeviceEvent, EventType
+from fleetforge.db.base import get_sessionmaker
 from fleetforge.firmware import DEFAULT_INDEX_KEY, CatalogCache
 from fleetforge.storage import SignedUrlCache
 from fleetforge.storage.factory import object_store_configured
@@ -98,14 +68,52 @@ logger = logging.getLogger(__name__)
 
 SessionMaker = Annotated[async_sessionmaker[AsyncSession], Depends(get_sessionmaker)]
 
+_ROUTERS = (
+    auth.router,
+    auth_tokens.router,
+    projects.router,
+    project_secrets.router,
+    builds.router,
+    policies.router,
+    groups.router,
+    users.router,
+    enrollment.router,
+    enroll.router,
+    events.router,
+    devices.router,
+    device_secrets.router,
+    agent.router,
+    progress.router,
+    artifact_upload.router,
+    artifacts.router,
+    artifact_sim.router,
+    swarm.router,
+    partition_profiles.router,
+    artifact_download.router,
+    deploys.router,
+    commands.router,
+)
+
+
+@dataclass(frozen=True)
+class _AppStateKnobs:
+    login_per_ip: int = 5
+    login_global: int = 30
+    window_s: int = 60
+    enroll_per_ip: int = 10
+    enroll_global: int = 60
+    progress_per_ip: int = 60
+    progress_global: int = 300
+    sse_queue_size: int = 200
+    sse_max_clients: int = 20
+    agent_catalog_ttl_s: float = 60.0
+    agent_index_key: str = DEFAULT_INDEX_KEY
+    signed_url_ttl_s: int = 1800
+    artifact_url_refresh_margin_s: int = 300
+
 
 def configure_logging(level: int = logging.INFO) -> None:
-    """Send uvicorn's and the app's logs to stdout in one line-per-event shape.
-
-    Containers log to stdout; the platform (Docker, later Loki) owns rotation and
-    aggregation. Called from `create_app()` so both `uvicorn fleetforge.api.main:app`
-    and the tests get the same configuration.
-    """
+    """Send uvicorn's and the app's logs to stdout in one JSON line-per-event shape."""
     logging.basicConfig(
         level=level,
         format='{"ts":"%(asctime)s","level":"%(levelname)s","logger":"%(name)s","msg":"%(message)s"}',
@@ -115,12 +123,7 @@ def configure_logging(level: int = logging.INFO) -> None:
 
 
 def _settings_or_none() -> Settings | None:
-    """Settings if the environment provides them, else `None`.
-
-    `create_app()` must stay constructible with no environment at all — the health
-    tests build the app without a database, and a factory that raises on import is
-    a container that cannot even serve `/v1/healthz` to say why.
-    """
+    """Return `Settings` if the environment provides them, else `None`."""
     try:
         return get_settings()
     except ValidationError as exc:
@@ -128,273 +131,129 @@ def _settings_or_none() -> Settings | None:
         return None
 
 
-def create_app(
-    *,
-    settings_override: Settings | None = None,
-    listener_factory: Callable[..., Any] | None = None,
-) -> FastAPI:
-    """Build the ASGI application.
-
-    Everything is mounted under `/v1` — including the docs and the OpenAPI schema —
-    because `spec/device-protocol.md` versions the wire contract and the dashboard,
-    the CLI and the agent all resolve against the same prefix.
-    """
-    configure_logging()
-
-    # Per-app, never module-level: each test app gets a fresh cache and a fresh
-    # limiter, so no auth state leaks between tests (and `dependency_overrides` on
-    # `get_settings` cannot be undermined by a shared singleton).
-    settings = settings_override if settings_override is not None else _settings_or_none()
-
-    @contextlib.asynccontextmanager
-    async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        """Own the `ff_events` LISTEN connection and periodic rollout reconcile for this process."""
-        hub: EventHub = app.state.event_hub
-        task: asyncio.Task[None] | None = None
-        reconcile_task: asyncio.Task[None] | None = None
-        if settings is not None:
-            sm_override = app.dependency_overrides.get(get_sessionmaker)
-            sessionmaker = sm_override() if sm_override is not None else get_sessionmaker()
-
-            def _resolve_publisher() -> Any:
-                pub_override = app.dependency_overrides.get(get_command_publisher)
-                if pub_override is not None:
-                    return pub_override()
-                return get_command_publisher(settings)
-
-            async def _on_device_event(event: DeviceEvent) -> None:
-                if event.type == EventType.DEVICE_ANNOUNCE and event.online is not False:
-                    publisher = _resolve_publisher()
-                    async with sessionmaker() as session:
-                        await rollout.republish_open_requested_on_wake(
-                            session,
-                            device_id=event.device_id,
-                            settings=settings,
-                            publisher=publisher,
-                        )
-                elif (
-                    event.type == EventType.DEVICE_DEPLOY
-                    and event.state == "confirmed"
-                    and event.cmd_id is not None
-                ):
-                    publisher = _resolve_publisher()
-                    async with sessionmaker() as session:
-                        await rollout.advance_project_rollout_on_confirm(
-                            session,
-                            cmd_id=event.cmd_id,
-                            settings=settings,
-                            publisher=publisher,
-                            device_id=event.device_id,
-                        )
-
-            async def _rollout_reconcile_loop() -> None:
-                interval = max(0.05, float(settings.rollout_reconcile_interval_s))
-                while True:
-                    await asyncio.sleep(interval)
-                    try:
-                        publisher = _resolve_publisher()
-                        async with sessionmaker() as session:
-                            await rollout.reconcile_open_rollouts(
-                                session,
-                                settings=settings,
-                                publisher=publisher,
-                            )
-                    except asyncio.CancelledError:
-                        raise
-                    except Exception:  # noqa: BLE001
-                        logger.warning("rollout reconcile tick failed", exc_info=True)
-
-            factory = listener_factory or PostgresEventListener
-            listener = factory(
-                asyncpg_dsn(settings.database_url),
-                hub,
-                ping_s=settings.events_listener_ping_s,
-                on_event=_on_device_event,
-            )
-            app.state.event_listener = listener
-            task = asyncio.create_task(listener.run(), name="ff-events-listener")
-            if float(settings.rollout_reconcile_interval_s) > 0:
-                reconcile_task = asyncio.create_task(
-                    _rollout_reconcile_loop(), name="ff-rollout-reconcile"
-                )
-            else:
-                logger.info("rollout reconcile loop disabled (rollout_reconcile_interval_s <= 0)")
-        else:
-            logger.warning(
-                "no settings: the ff_events listener is not running, so /v1/events would "
-                "carry no device events. Same cause as the DATABASE_URL warning above."
-            )
-        try:
-            yield
-        finally:
-            for bg_task in (reconcile_task, task):
-                if bg_task is not None:
-                    bg_task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await bg_task
-            hub.close_all()
-
-    app = FastAPI(
-        title="Fleetforge",
-        version=__version__,
-        summary="OTA firmware management for embedded fleets",
-        docs_url="/v1/docs",
-        redoc_url=None,
-        openapi_url="/v1/openapi.json",
-        lifespan=lifespan,
+def _knobs_for(settings: Settings | None) -> _AppStateKnobs:
+    if settings is None:
+        return _AppStateKnobs()
+    return _AppStateKnobs(
+        login_per_ip=settings.login_rate_limit_per_ip,
+        login_global=settings.login_rate_limit_global,
+        window_s=settings.login_rate_limit_window_s,
+        enroll_per_ip=settings.enroll_rate_limit_per_ip,
+        enroll_global=settings.enroll_rate_limit_global,
+        progress_per_ip=settings.progress_rate_limit_per_ip,
+        progress_global=settings.progress_rate_limit_global,
+        sse_queue_size=settings.sse_queue_size,
+        sse_max_clients=settings.sse_max_clients,
+        agent_catalog_ttl_s=settings.agent_catalog_ttl_s,
+        agent_index_key=settings.agent_index_key,
+        signed_url_ttl_s=settings.signed_url_ttl_s,
+        artifact_url_refresh_margin_s=settings.artifact_url_refresh_margin_s,
     )
 
+
+def _init_app_state(app: FastAPI, settings: Settings | None) -> None:
+    knobs = _knobs_for(settings)
     app.state.token_cache = VerifiedSecretCache()
     app.state.login_limiter = FixedWindowLimiter(
-        per_key=settings.login_rate_limit_per_ip if settings else 5,
-        per_global=settings.login_rate_limit_global if settings else 30,
-        window_s=settings.login_rate_limit_window_s if settings else 60,
+        per_key=knobs.login_per_ip,
+        per_global=knobs.login_global,
+        window_s=knobs.window_s,
     )
-    # `/v1/enroll` is unauthenticated, public and does one argon2 verification per
-    # request, so it gets its OWN bucket: a fleet behind one NAT rebooting together
-    # must not be able to lock the operator out of /v1/auth/login, or the reverse.
     app.state.enroll_limiter = FixedWindowLimiter(
-        per_key=settings.enroll_rate_limit_per_ip if settings else 10,
-        per_global=settings.enroll_rate_limit_global if settings else 60,
-        window_s=settings.login_rate_limit_window_s if settings else 60,
+        per_key=knobs.enroll_per_ip,
+        per_global=knobs.enroll_global,
+        window_s=knobs.window_s,
     )
-    # Progress reports (S0-fw-1) are chattier still — five-plus per boot — and get a
-    # third bucket plus their own verification cache, so a reporting fleet can spend
-    # neither the enroll budget nor the login one. See `deps.progress_limiter`.
     app.state.progress_limiter = FixedWindowLimiter(
-        per_key=settings.progress_rate_limit_per_ip if settings else 60,
-        per_global=settings.progress_rate_limit_global if settings else 300,
-        window_s=settings.login_rate_limit_window_s if settings else 60,
+        per_key=knobs.progress_per_ip,
+        per_global=knobs.progress_global,
+        window_s=knobs.window_s,
     )
     app.state.progress_cache = VerifiedSecretCache()
-    # The SSE fan-out. Created here (not in the lifespan) so a test app that never
-    # runs a lifespan still has one to publish into.
     app.state.event_hub = EventHub(
-        queue_size=settings.sse_queue_size if settings else 200,
-        max_subscribers=settings.sse_max_clients if settings else 20,
+        queue_size=knobs.sse_queue_size,
+        max_subscribers=knobs.sse_max_clients,
     )
-    # The prebuilt agent images (R0-infra-2), read from the object store (S0-infra-6).
-    # Lazy and per app, like the caches above: **constructing this does no I/O**, because
-    # a container must start when the bucket is slow or down. The index is re-read at most
-    # once per TTL, which is how a `just agent-publish` reaches the flasher with nothing
-    # restarted.
     app.state.agent_catalog = CatalogCache(
-        ttl_s=settings.agent_catalog_ttl_s if settings else 60.0,
-        index_key=settings.agent_index_key if settings else DEFAULT_INDEX_KEY,
+        ttl_s=knobs.agent_catalog_ttl_s,
+        index_key=knobs.agent_index_key,
     )
-    # The upstream signed URLs `GET /v1/artifact/{sha}/bin` redirects to (R1-be-3). Lazy
-    # and per app for the same reasons as the catalog above — **no I/O to construct** —
-    # and it is the ONLY caller of `ObjectStore.signed_url`, which is an IAM `signBlob`
-    # round trip on GCS. One signing call per artifact per lifetime, whole fleet.
     app.state.artifact_url_cache = SignedUrlCache(
-        ttl_s=settings.signed_url_ttl_s if settings else 1800,
-        refresh_margin_s=settings.artifact_url_refresh_margin_s if settings else 300,
+        ttl_s=knobs.signed_url_ttl_s,
+        refresh_margin_s=knobs.artifact_url_refresh_margin_s,
     )
-    if settings is not None and settings.admin_password_hash is None:
-        logger.warning(
+
+
+def _log_startup_warnings(settings: Settings | None) -> None:
+    if settings is None:
+        return
+    checks: tuple[tuple[bool, str], ...] = (
+        (
+            settings.admin_password_hash is None,
             "ADMIN_PASSWORD_HASH is not set: /v1/auth/login will answer 503. "
-            "Mint one with `just admin-password` and put the SINGLE-QUOTED line in .env."
-        )
-    if settings is not None and not object_store_configured(settings):
-        logger.warning(
+            "Mint one with `just admin-password` and put the SINGLE-QUOTED line in .env.",
+        ),
+        (
+            not object_store_configured(settings),
             "no object store configured (S3_* or GCS_*): ONBOARDING as well as artifact "
             "upload and deploy (R1) will answer 503 — since S0-infra-6 the agent bundles "
             "the flasher writes live in the store, not in this image. The dev stack sets "
             "S3_* on the api service; production sets GCS_BUCKET + "
-            "GCS_IMPERSONATE_SERVICE_ACCOUNT. Round-trip it with `just storage-check`."
-        )
-    if settings is not None and not mqtt_command_configured(settings):
-        logger.warning(
+            "GCS_IMPERSONATE_SERVICE_ACCOUNT. Round-trip it with `just storage-check`.",
+        ),
+        (
+            not mqtt_command_configured(settings),
             "MQTT_COMMAND_USERNAME/_PASSWORD are not set: POST /v1/devices/{id}/deploy "
             "will answer 503, because nothing may publish dn/cmd without the `commander` "
             "broker credential. The dev stack sets both on the api service; the broker "
-            "side is `mosquitto/configure.sh`. Prove the path with `just broker-check`."
-        )
-    if settings is not None and not (settings.artifact_url_secret and settings.public_base_url):
-        logger.warning(
+            "side is `mosquitto/configure.sh`. Prove the path with `just broker-check`.",
+        ),
+        (
+            not (settings.artifact_url_secret and settings.public_base_url),
             "ARTIFACT_URL_SECRET or PUBLIC_BASE_URL is not set: POST /v1/devices/{id}/deploy "
             "will answer 503 and no board can download firmware, because the download link "
             "in a stage command is signed with the first and built on the second. Mint a "
             "secret with `just artifact-secret`; PUBLIC_BASE_URL is the origin a DEVICE "
-            "reaches (http://localhost:8080 in dev), never the container-internal one."
-        )
-    if settings is not None and not dynsec_configured(settings):
-        logger.warning(
+            "reaches (http://localhost:8080 in dev), never the container-internal one.",
+        ),
+        (
+            not dynsec_configured(settings),
             "MQTT_DYNSEC_USERNAME/_PASSWORD are not set: enrolled devices get a broker "
             "password nothing has been told about, and broker_provisioned_at stays NULL. "
             "Correct until R0-sec-1 secures the broker; reconcile afterwards with "
-            "SELECT device_id FROM devices WHERE broker_provisioned_at IS NULL."
-        )
-    if settings is not None and not settings.artifact_signing_public_keys:
-        logger.warning(
+            "SELECT device_id FROM devices WHERE broker_provisioned_at IS NULL.",
+        ),
+        (
+            not settings.artifact_signing_public_keys,
             "ARTIFACT_SIGNING_PUBLIC_KEYS is not set: signature verification uses the "
             "built-in R6 development public key ring. Mint a production key pair with "
-            "`just signing-key keygen` and configure ARTIFACT_SIGNING_PUBLIC_KEYS."
-        )
+            "`just signing-key keygen` and configure ARTIFACT_SIGNING_PUBLIC_KEYS.",
+        ),
+    )
+    for should_warn, message in checks:
+        if should_warn:
+            logger.warning(message)
 
-    app.include_router(auth.router)
-    app.include_router(auth_tokens.router)
-    app.include_router(projects.router)
-    app.include_router(project_secrets.router)
-    app.include_router(builds.router)
-    app.include_router(policies.router)
-    app.include_router(groups.router)
-    app.include_router(users.router)
-    app.include_router(enrollment.router)
-    app.include_router(enroll.router)
-    app.include_router(events.router)
-    app.include_router(devices.router)
-    app.include_router(device_secrets.router)
-    app.include_router(agent.router)
-    app.include_router(progress.router)
-    app.include_router(artifacts.router)
-    app.include_router(artifact_sim.router)
-    app.include_router(swarm.router)
-    # Admin-only, like `artifacts.router`: the profiles an upload's partition_layout names.
-    app.include_router(partition_profiles.router)
-    # Public, unauthenticated, signature-as-authorization. Registered after
-    # `artifacts.router` (which owns `POST ""` under the same prefix, admin-only) — two
-    # modules on purpose: a shared router would make the auth dependency a per-route
-    # opt-out, which is how a public endpoint gets created by accident.
-    app.include_router(artifact_download.router)
-    app.include_router(deploys.router)
-    # R5-be-2: the apply / cancel / rollback / reboot verbs, admin-only like `deploys`.
-    app.include_router(commands.router)
 
+def _ready_backends_payload() -> dict[str, str]:
+    build_mode = (os.environ.get("FF_BUILD_BACKEND") or "auto").strip().lower()
+    sim_mode = (os.environ.get("FF_SIM_BACKEND") or "auto").strip().lower()
+    return {
+        "status": "ready",
+        "build_backend": "docker" if build_mode in ("auto", "docker") else build_mode,
+        "sim_backend": "qemu" if sim_mode in ("auto", "qemu") else sim_mode,
+    }
+
+
+def _register_health_routes(app: FastAPI) -> None:
     @app.get("/v1/healthz", tags=["health"])
     async def healthz() -> dict[str, str]:
-        """Liveness: is the process running?
-
-        **No I/O.** A liveness probe that touches the database restarts the API
-        every time the database blips, which turns a recoverable outage into a
-        crash loop. Readiness is what depends on the database — see `/v1/readyz`.
-
-        Also carries build provenance (`commit`, `built_at`), which the dashboard
-        footer renders beside its own. It rides on the probe rather than a new
-        `/v1/version` endpoint because the footer already fetches this and one
-        request is cheaper than two; the fields are additive, so old clients that
-        only read `version` are unaffected.
-        """
+        """Liveness probe with build provenance (`commit`, `built_at`), performing zero I/O."""
         return {"status": "ok", **build_info().as_dict()}
 
     @app.get("/v1/readyz", tags=["health"])
     async def readyz(sessionmaker: SessionMaker, settings: SettingsDep) -> Any:
-        """Readiness: can the process do its job — reach its database AND deploy?
-
-        S0-infra-9: deploy-mandatory configuration is part of readiness, because a
-        stack that cannot deploy is not a working Fleetforge however green its
-        liveness is (ops-log F-2026-09-23-001: Deploy had never worked on prod while
-        `/v1/healthz` said 200). This is the container healthcheck, so a gap here is
-        `unhealthy` in `docker ps` rather than one WARNING at startup.
-
-        Configuration only — `deploy_config_gaps` does no I/O; whether the store and
-        the broker actually answer is `just deploy-check`. `ADMIN_PASSWORD_HASH` stays
-        out: compose already refuses to start without it.
-
-        Returns 503 with a reason rather than raising — a bare 500 from a probe
-        tells an operator nothing and looks like an application bug. Every gap is
-        reported at once, so one restart fixes all of them.
-        """
+        """Readiness probe verifying database connectivity and mandatory deploy configuration."""
         missing = deploy_config_gaps(settings)
         reasons = [f"not configured: {', '.join(missing)}"] if missing else []
         try:
@@ -410,14 +269,31 @@ def create_app(
                 status_code=503,
                 content={"status": "not-ready", "detail": "; ".join(reasons), "missing": missing},
             )
-        build_mode = (os.environ.get("FF_BUILD_BACKEND") or "auto").strip().lower()
-        sim_mode = (os.environ.get("FF_SIM_BACKEND") or "auto").strip().lower()
-        return {
-            "status": "ready",
-            "build_backend": "docker" if build_mode in ("auto", "docker") else build_mode,
-            "sim_backend": "qemu" if sim_mode in ("auto", "qemu") else sim_mode,
-        }
+        return _ready_backends_payload()
 
+
+def create_app(
+    *,
+    settings_override: Settings | None = None,
+    listener_factory: Callable[..., Any] | None = None,
+) -> FastAPI:
+    """Build the ASGI application mounted under `/v1`."""
+    configure_logging()
+    settings = settings_override if settings_override is not None else _settings_or_none()
+    app = FastAPI(
+        title="Fleetforge",
+        version=__version__,
+        summary="OTA firmware management for embedded fleets",
+        docs_url="/v1/docs",
+        redoc_url=None,
+        openapi_url="/v1/openapi.json",
+        lifespan=build_lifespan(settings, listener_factory),
+    )
+    _init_app_state(app, settings)
+    _log_startup_warnings(settings)
+    for router in _ROUTERS:
+        app.include_router(router)
+    _register_health_routes(app)
     return app
 
 

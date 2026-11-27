@@ -33,7 +33,7 @@ from fleetforge.firmware.publish import (
 )
 from fleetforge.storage.blobs import BLOB_CACHE_CONTROL, BLOB_PREFIX, blob_key, digest_bytes
 from tests.conftest import MemoryObjectStore
-from tests.test_firmware_catalog import PART_FILES, write_bundle
+from tests.support_catalog import PART_FILES, write_bundle
 
 
 def bump(bundle_dir: Path, version: str) -> Path:

@@ -1,13 +1,6 @@
-// What these tests defend:
-//
-// 1. **The bundle is the 2026-09-11 session.** The whole log, verbatim, with the fault
-//    named in plain English at the top. If it is not, the escalation path is back to
-//    retyping a UART log into a chat window.
-// 2. **No secret ever leaves in it.** A bundle is DESIGNED to be pasted into a chat
-//    window, so it is the single most likely way a live `ffe_` token, a Wi-Fi passphrase
-//    or a broker password leaves the operator's machine. Three separate rules, one test
-//    each, plus the anti-vacuity test below.
-// 3. **It still says something.** Tests 2–4 would all pass over an empty string, so test 6
+// @vitest-environment node
+// Diagnostic bundle formatting and secret redaction tests.
+// Ensures non-empty diagnostic output alongside token and passphrase scrubbing.
 //    pins the fields that make the artifact worth pasting.
 
 import { describe, expect, it } from 'vitest'

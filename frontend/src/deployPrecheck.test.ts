@@ -1,3 +1,4 @@
+// @vitest-environment node
 // What these tests defend: a refusal never becomes sendable; `override` only ever names a
 // code the server raised as gating AND the operator ticked; the lines around the server's
 // sentences never print `null` or `undefined`.

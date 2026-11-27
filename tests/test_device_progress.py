@@ -46,15 +46,14 @@ from tests.conftest import (
     login_admin,
     settings_for_tests,
 )
-from tests.test_enroll import (
-    RecordingProvisioner,
+from tests.doubles import RecordingProvisioner
+from tests.support_enroll import (
+    BASE_URL,
     enroll_body,
     execute,
     issue_token,
     post_enroll,
 )
-
-BASE_URL = "https://testserver"
 
 
 @pytest.fixture

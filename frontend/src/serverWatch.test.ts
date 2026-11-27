@@ -1,11 +1,5 @@
-// R2b-fe-5: the server's half of the watch. What this defends:
-//
-// 1. **A native-USB port loss is not "no board".** The device list alone can mark Enrolled
-//    and On the fleet.
-// 2. **The re-flash trap stays shut.** A known board's stale `online: true` row never marks
-//    anything until the server shows a NEW enrolment and the board speaking after it.
-// 3. **The console's classifier is untouched**; the merge re-applies its furthest-reached
-//    rule.
+// @vitest-environment node
+// R2b-fe-5: the server's half of the watch.
 
 import { describe, expect, it } from 'vitest'
 import type { DeviceSummary } from './api'

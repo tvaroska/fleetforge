@@ -4,7 +4,8 @@ import { StatusStrip } from './StatusStrip'
 import { type BoardLine } from './statusStrip'
 
 const ui = { version: '0.4.2', commit: 'unknown', builtAt: 'unknown' }
-const ok = (version: string) => ({ phase: 'ok', health: { status: 'ok', version } }) as const
+const ok = (version: string) =>
+  ({ phase: 'ok', health: { status: 'ok', version, commit: 'unknown', built_at: 'unknown' } }) as const
 
 describe('StatusStrip', () => {
   it('renders both versions in one bracket and no board half', () => {

@@ -1,8 +1,9 @@
 // The ONLY file in the app that imports `esptool-js` or touches `navigator.serial`.
 //
-// It implements the `BoardFlasher` seam in `flasher.ts` and translates esptool-js's raw
-// failures into something an operator can act on. Keeping the boundary here is what lets
-// `flash.ts` — where all the rules live — be tested in jsdom, which has no Web Serial.
+// It implements the `BoardFlasher` Port, Adapter and Contract boundary in `flasher.ts` and
+// translates esptool-js's raw failures into something an operator can act on. Keeping the
+// boundary here is what lets `flash.ts` — where all the rules live — be tested in jsdom,
+// which has no Web Serial.
 //
 // Several settings below look arbitrary and are not:
 //

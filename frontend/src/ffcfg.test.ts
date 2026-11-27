@@ -1,3 +1,4 @@
+// @vitest-environment node
 // Every failure in this file is a board that would not boot.
 //
 // `ffcfg.ts` is one of three implementations of the same sixteen bytes

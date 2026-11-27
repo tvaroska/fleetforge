@@ -1,6 +1,6 @@
 # The `fleetforge` component — the device half of the protocol: enroll, the MQTT session
 # (announce, heartbeat, and the four-verb update: stage, apply, confirm, rollback), the
-# ff_cfg reader, the NVS credential, and the network seam. The agent in ../../main is its
+# ff_cfg reader, the NVS credential, and the network Port. The agent in ../../main is its
 # first consumer; a maker's own ESP-IDF project is the next (R3-fw-2, DECISIONS
 # 2026-10-08). IDF discovers it from <project>/components/ on its own, and a consumer
 # writes `REQUIRES fleetforge`. The name is part of the public surface: never rename it.
@@ -49,10 +49,16 @@ idf_component_register(SRCS "src/ff_cfg.c"
                             "src/ff_log.c"
                             "src/ff_marker.c"
                             "src/ff_mqtt.c"
+                            "src/ff_mqtt_boot.c"
+                            "src/ff_mqtt_pub.c"
+                            "src/ff_mqtt_rx.c"
                             "src/ff_net.c"
                             "src/ff_net_openeth.c"
                             "src/ff_net_wifi.c"
+                            "src/ff_net_wifi_improv.c"
                             "src/ff_ota.c"
+                            "src/ff_ota_cargo.c"
+                            "src/ff_ota_verify.c"
                             "src/ff_progress.c"
                             "src/ff_safe_mode.c"
                             "src/ff_safe_window.c"

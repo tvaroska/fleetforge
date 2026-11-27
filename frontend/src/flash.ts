@@ -94,7 +94,7 @@ export function selectBuild(manifest: AgentManifest, chip: ChipInfo): AgentBuild
 /** The highest byte the write plan will touch: every part, plus the config partition. */
 export function requiredFlashBytes(build: AgentBuildInfo): number {
   const ends = build.parts.map((part) => part.offset + part.size)
-  if (build.config_partition !== null) {
+  if (build.config_partition != null) {
     ends.push(build.config_partition.offset + build.config_partition.size)
   }
   return Math.max(0, ...ends)
@@ -109,7 +109,7 @@ export function requiredFlashBytes(build: AgentBuildInfo): number {
  * The bound is DERIVED from the manifest — never `4 MB`, never `ab-4m-v1`.
  */
 export function checkFlashable(build: AgentBuildInfo, chip: ChipInfo): void {
-  if (build.config_partition === null) {
+  if (build.config_partition == null) {
     throw new Error(
       `the ${build.target} bundle has no ff_cfg partition, so this board would have nowhere ` +
         'to read its server, network and enrollment token from — rebuild it with ' +
@@ -144,7 +144,7 @@ export function planWrite(
   downloaded: Map<string, Uint8Array>,
   config: Uint8Array,
 ): FlashPart[] {
-  if (build.config_partition === null) {
+  if (build.config_partition == null) {
     throw new Error('planWrite called for a bundle with no config partition')
   }
   const parts: FlashPart[] = build.parts.map((part) => {

@@ -1,4 +1,4 @@
-"""The `dn/cmd` seam, with **no broker and no database**. R1-be-2.
+"""The `dn/cmd` Port and Adapter, with **no broker and no database**. R1-be-2.
 
 Same split as `test_broker_dynsec.py`: everything provable without a socket is proved
 here, and the live ACL matrix (may the `commander` credential actually publish? does the
@@ -41,6 +41,7 @@ from fleetforge.broker.commands import (
 )
 from fleetforge.broker.publisher import QOS, RETAIN, MqttCommandPublisher, mqtt_command_client
 from tests.conftest import capture_logs, settings_for_tests
+from tests.doubles import FakeMqttClient
 
 DEVICE_ID = "a4cf12b3de90"
 CMD_ID = "0f5b6c7d8e9f40112233445566778899"
@@ -145,36 +146,6 @@ def test_new_command_id_is_unique_and_hex() -> None:
     ids = {new_command_id() for _ in range(50)}
     assert len(ids) == 50
     assert all(len(value) == 32 and int(value, 16) >= 0 for value in ids)
-
-
-# ---------------------------------------------------------------------------
-# The real publisher, driven through an injected fake client
-# ---------------------------------------------------------------------------
-
-
-class FakeMqttClient:
-    """Records publishes, or raises the scripted failure at connect."""
-
-    def __init__(self, fail_with: Exception | None = None) -> None:
-        self.fail_with = fail_with
-        # (topic, payload, qos, retain) per publish, in order.
-        self.published: list[tuple[str, bytes, int, bool]] = []
-        self.entered = 0
-
-    def __call__(self) -> "FakeMqttClient":
-        return self
-
-    async def __aenter__(self) -> "FakeMqttClient":
-        self.entered += 1
-        if self.fail_with is not None:
-            raise self.fail_with
-        return self
-
-    async def __aexit__(self, *exc_info: object) -> None:
-        return None
-
-    async def publish(self, topic: str, payload: bytes, *, qos: int, retain: bool) -> None:
-        self.published.append((topic, payload, qos, retain))
 
 
 def _publisher(client: FakeMqttClient, *, timeout_s: float = 5.0) -> MqttCommandPublisher:

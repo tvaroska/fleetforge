@@ -28,8 +28,8 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError, api, type ArrivalSummary, type DeviceSummary } from './api'
 
 // jsdom has no `EventSource`, so the hook takes a factory rather than reaching for the
-// global — the same seam/adapter idiom the Python side uses for the broker provisioner
-// and the object store. Structural on purpose: a test double needs no DOM.
+// global — the same Ports, Adapters and Contracts idiom the Python side uses for the broker
+// provisioner and the object store. Structural on purpose: a test double needs no DOM.
 export interface EventSourceLike {
   readonly readyState: number
   close(): void

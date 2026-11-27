@@ -25,7 +25,7 @@ from pathlib import Path
 
 import pytest
 
-from tests.agent_src import AGENT_DIR, COMPONENT_SRC
+from tests.agent_src import AGENT_DIR, COMPONENT_SRC, read_c_family
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 SDKCONFIG_DEFAULTS = AGENT_DIR / "sdkconfig.defaults"
@@ -329,7 +329,8 @@ class TestPowerPosture:
         `CONFIG_ESP_PHY_MAX_WIFI_TX_POWER` would cost every board in the fleet range to
         help the few with bad supplies. S0-fw-3 refused the second; this is the first.
         """
-        source = WIFI_ADAPTER.read_text()
+        assert WIFI_ADAPTER.is_file()
+        source = read_c_family("ff_net_wifi")
         assert "esp_wifi_set_max_tx_power" in source, (
             "the Wi-Fi reconnect must vary TX power across attempts, not repeat one attempt"
         )
@@ -351,7 +352,7 @@ class TestPowerPosture:
         Checked as a property of the loop's shape: the backoff is capped (so a failing
         board does not hammer the AP) and nothing counts attempts toward a give-up.
         """
-        source = WIFI_ADAPTER.read_text()
+        source = read_c_family("ff_net_wifi")
         assert "WIFI_RETRY_MAX_MS" in source, "the backoff must stay capped"
         for giving_up in ("MAX_RETRIES", "MAX_ATTEMPTS", "RETRY_LIMIT", "GIVE_UP"):
             assert giving_up not in source, (
@@ -367,7 +368,7 @@ class TestPowerPosture:
         the radio's actual behaviour is a bench measurement (S0-test-1); what is
         checkable here is that the call is present and says which mode it wants.
         """
-        source = WIFI_ADAPTER.read_text()
+        source = read_c_family("ff_net_wifi")
         assert re.search(r"esp_wifi_set_ps\s*\(\s*WIFI_PS_MAX_MODEM\s*\)", source), (
             "ff_net_wifi.c must set its power-save mode explicitly, not inherit it"
         )

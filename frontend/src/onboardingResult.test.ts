@@ -1,3 +1,4 @@
+// @vitest-environment node
 // R2b-fe-3: the result card's judgement, over the same logs the panel tests use.
 //
 // The fixtures below are copies of the ones in `BoardConsole.test.tsx` (a test file cannot

@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "base": [
+    "ota",
+    "apply",
+    "cancel",
+    "rollback",
+    "reboot"
+  ],
+  "optional_builtin": [
+    "selftest",
+    "safe_window",
+    "sig"
+  ],
+  "default_agent": [
+    "ota",
+    "apply",
+    "cancel",
+    "rollback",
+    "reboot",
+    "sig"
+  ],
+  "all_builtin": [
+    "ota",
+    "apply",
+    "cancel",
+    "rollback",
+    "reboot",
+    "selftest",
+    "safe_window",
+    "sig"
+  ],
+  "dynamic_cargo_pattern": "^[a-z0-9_]{1,31}$"
+}

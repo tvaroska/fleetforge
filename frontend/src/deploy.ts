@@ -252,12 +252,12 @@ export function devicePriorityScore(
   const presence = describeDevicePresence(device, nowMs)
 
   const d = device.deploy
-  if (d !== null && DEPLOY_BAD_STATES.has(d.state)) return 0
+  if (d != null && DEPLOY_BAD_STATES.has(d.state)) return 0
 
-  if (d !== null && !d.is_terminal) return 1
+  if (d != null && !d.is_terminal) return 1
 
   const hasDeployDrift =
-    d !== null && deployOutcome(d, device.fw_version, device.sub_versions)?.kind === 'drift'
+    d != null && deployOutcome(d, device.fw_version, device.sub_versions)?.kind === 'drift'
   const hasTargetDrift =
     targetVersion !== undefined &&
     targetVersion !== null &&

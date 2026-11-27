@@ -133,7 +133,7 @@ export function UploadedBuilds({
       onDeployed()
       setPendingAction(null)
       const count = res.cancelled.length
-      const skippedCount = Object.keys(res.skipped).length
+      const skippedCount = Object.keys(res.skipped ?? {}).length
       setBulkStatus(
         `Cancelled in-flight ${version} deploy on ${count} board(s)` +
           (skippedCount > 0 ? ` (${skippedCount} skipped)` : '') +

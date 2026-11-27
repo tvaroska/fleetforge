@@ -1,36 +1,6 @@
-// What these tests defend, in order of how much a regression would cost:
-//
-// 1. The cell cannot offer a version this board cannot run. The server refuses a
-//    target mismatch with a 409, so an unfiltered picker is a picker full of errors.
-// 2. The server's refusals reach the operator VERBATIM. `deploys.py` writes those
-//    sentences — the missing `ota` capability, the image that does not fit the slot —
-//    with the numbers the operator's next action depends on. A friendlier rewrite here
-//    would throw them away.
-// 3. `awaiting_safe_window` is a legitimate, unbounded wait, and nothing in this
-//    dashboard expires it, styles it as a failure, or spins at it. The device owns the
-//    reboot; a "stuck?" badge would be this client inventing a policy the system does
-//    not have.
-// 4. `pct` never becomes a progress bar. It is a transition log — one number for a
-//    whole download — so a bar would sit still and read as the hang this feature exists
-//    to rule out.
-// 5. A state this dashboard has never heard of renders as itself. `deploy_events.state`
-//    is TEXT with no CHECK and a newer agent is allowed to say something new.
-// 6. A finished deploy gets a verdict word, and the word is withheld when the board's
-//    announce contradicts it.
-// 7. Nothing reaches `/deploy` without the pre-check card: Deploy only checks, Send sends.
-// 8. A refusal offers no Send at all, and its sentence is the server's, verbatim.
-// 9. `override` is in the deploy body only for a gating warning the operator ticked;
-//    otherwise the body is exactly `{version, apply}` (today's server 422s on any extra key).
-// 10. A pre-check answer that arrives after the version changed, Cancel or a newer Deploy
-//    click is ignored.
-// 11. The timeline states only the board's own deadlines (R2b-fe-9): a stall sentence
-//    never restyles the state, never announces itself, and never appears for
-//    `awaiting_safe_window`.
-// 12. A finished update is one card — before, after, verdict, reason, one next action,
-//    versions, when — that never announces itself and never shows beside the pre-check
-//    card.
-// 13. Send again appears only on a failure before reboot, never after a rollback, and
-//    goes through the pre-check like Deploy.
+// DeployCell tests: chip-filtered version picker, verbatim server refusals, unbounded
+// `awaiting_safe_window`, text-only progress, unknown state rendering, pre-check gating,
+// override body rules, stale pre-check cancellation, deadlines, result card, and Send again.
 
 import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
@@ -78,6 +48,8 @@ function deploy(overrides: Partial<DeploySummary> = {}): DeploySummary {
     from_version: '1.4.2',
     pct: null,
     detail: null,
+    steps: [],
+    confirm_timeout_s: 300,
     ...overrides,
   }
 }

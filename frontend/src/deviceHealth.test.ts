@@ -1,11 +1,5 @@
-// What these tests defend (R4-fe-1):
-//
-// 1. The reset-reason vocabulary is the spec's 16 names, as a lookup with a fallback: an
-//    unknown name is rendered as itself and never badged (we do not claim a fault we
-//    cannot name).
-// 2. Only spontaneous / hardware-fault resets earn the warning badge.
-// 3. Fault counts, boot state and vitals are formatted from the server's answers; there
-//    is no threshold anywhere.
+// @vitest-environment node
+// Reset-reason vocabulary, fault badges, boot state, and vitals formatting (R4-fe-1).
 
 import { describe, expect, it } from 'vitest'
 import {

@@ -1,13 +1,5 @@
-// What these tests defend, in order of how much a regression would cost:
-//
-// 1. The plaintext token is rendered once and never persisted anywhere a later
-//    session could read it. The server cannot re-derive it; a leak is also a
-//    credential leak, since the token enrolls a board into the fleet.
-// 2. A 401 bounces to the login screen instead of rendering as a page error — an
-//    operator who is quietly logged out must not think enrollment is broken.
-// 3. The displayed status is the server's derived status, not one recomputed here.
-//    The API's status IS the burn predicate; a second implementation would
-//    eventually say "active" about a token that cannot enroll.
+// EnrollBoard tests: single-display non-persisted plaintext token, 401 login bounce, and
+// authoritative server-derived token status.
 
 import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'

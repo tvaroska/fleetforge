@@ -1,0 +1,411 @@
+{
+  "schema_version": 1,
+  "vectors": [
+    {
+      "id": "announce-valid-stock",
+      "channel": "announce",
+      "valid": true,
+      "payload": {
+        "proto": 1,
+        "device_id": "02a1b2c3d4e5",
+        "platform_type": "esp32s3",
+        "fw_version": "1.4.2",
+        "agent_version": "0.6.0",
+        "link_type": "wifi",
+        "ssid": "lab-ap",
+        "known_networks": 2,
+        "power_class": "always_on",
+        "expected_wake_interval_s": null,
+        "parent_device_id": null,
+        "partition_layout": "ab-4m-v1",
+        "ota_slot_size": 1966080,
+        "flash_chip_size": 4194304,
+        "partition_table_sha256": "1fa60123456789abcdef0123456789abcdef0123456789abcdef0123456789ab",
+        "rollback_capable": true,
+        "capabilities": [
+          "ota",
+          "apply",
+          "cancel",
+          "rollback",
+          "reboot",
+          "sig"
+        ],
+        "reset_reason": "poweron"
+      }
+    },
+    {
+      "id": "announce-valid-sleepy-cargo",
+      "channel": "announce",
+      "valid": true,
+      "payload": {
+        "proto": 1,
+        "device_id": "061122334455",
+        "platform_type": "esp32c6",
+        "fw_version": "2.0.0",
+        "agent_version": "0.6.0",
+        "link_type": "wifi",
+        "ssid": "field-gw",
+        "known_networks": 1,
+        "power_class": "sleepy",
+        "expected_wake_interval_s": 300,
+        "parent_device_id": null,
+        "partition_layout": "ab-4m-v1",
+        "ota_slot_size": 1966080,
+        "flash_chip_size": 4194304,
+        "partition_table_sha256": null,
+        "rollback_capable": true,
+        "capabilities": [
+          "ota",
+          "apply",
+          "cancel",
+          "rollback",
+          "reboot",
+          "selftest",
+          "safe_window",
+          "sig",
+          "mcu_fw"
+        ],
+        "reset_reason": "deepsleep",
+        "sub_versions": {
+          "mcu_fw": "1.2.3"
+        }
+      }
+    },
+    {
+      "id": "announce-invalid-capabilities-not-array",
+      "channel": "announce",
+      "valid": false,
+      "payload": {
+        "proto": 1,
+        "device_id": "02a1b2c3d4e5",
+        "platform_type": "esp32s3",
+        "fw_version": "1.4.2",
+        "agent_version": "0.6.0",
+        "link_type": "wifi",
+        "ssid": null,
+        "known_networks": null,
+        "power_class": "always_on",
+        "expected_wake_interval_s": null,
+        "parent_device_id": null,
+        "partition_layout": "ab-4m-v1",
+        "ota_slot_size": 1966080,
+        "flash_chip_size": null,
+        "partition_table_sha256": null,
+        "rollback_capable": null,
+        "capabilities": "ota",
+        "reset_reason": "poweron"
+      }
+    },
+    {
+      "id": "announce-invalid-slot-size-string",
+      "channel": "announce",
+      "valid": false,
+      "payload": {
+        "proto": 1,
+        "device_id": "02a1b2c3d4e5",
+        "platform_type": "esp32c6",
+        "fw_version": "1.4.2",
+        "agent_version": "0.6.0",
+        "link_type": "wifi",
+        "ssid": null,
+        "known_networks": null,
+        "power_class": "always_on",
+        "expected_wake_interval_s": null,
+        "parent_device_id": null,
+        "partition_layout": "ab-4m-v1",
+        "ota_slot_size": "not-an-int",
+        "flash_chip_size": null,
+        "partition_table_sha256": null,
+        "rollback_capable": null,
+        "capabilities": [
+          "ota"
+        ],
+        "reset_reason": "poweron"
+      }
+    },
+    {
+      "id": "hb-valid-confirmed",
+      "channel": "hb",
+      "valid": true,
+      "payload": {
+        "fw_version": "1.4.2",
+        "uptime_s": 120,
+        "rssi": -61,
+        "free_heap": 142000,
+        "min_free_heap": 98000,
+        "boot_ok": true
+      }
+    },
+    {
+      "id": "hb-valid-pending-verify",
+      "channel": "hb",
+      "valid": true,
+      "payload": {
+        "fw_version": "1.5.0",
+        "uptime_s": 4,
+        "rssi": -55,
+        "free_heap": 150000,
+        "min_free_heap": 120000,
+        "boot_ok": false
+      }
+    },
+    {
+      "id": "hb-invalid-string-uptime",
+      "channel": "hb",
+      "valid": false,
+      "payload": {
+        "fw_version": "1.4.2",
+        "uptime_s": "not-an-int",
+        "rssi": -61,
+        "free_heap": 142000,
+        "min_free_heap": 98000,
+        "boot_ok": true
+      }
+    },
+    {
+      "id": "hb-invalid-string-boot-ok",
+      "channel": "hb",
+      "valid": false,
+      "payload": {
+        "fw_version": "1.4.2",
+        "uptime_s": 10,
+        "rssi": -61,
+        "free_heap": 142000,
+        "min_free_heap": 98000,
+        "boot_ok": "not-a-bool"
+      }
+    },
+    {
+      "id": "status-valid-staged",
+      "channel": "status",
+      "valid": true,
+      "payload": {
+        "cmd_id": "cmd-stage-001",
+        "state": "staged",
+        "pct": 100,
+        "detail": null
+      }
+    },
+    {
+      "id": "status-valid-rolled-back",
+      "channel": "status",
+      "valid": true,
+      "payload": {
+        "cmd_id": "cmd-stage-002",
+        "state": "rolled_back",
+        "pct": null,
+        "detail": "selftest failed: sensor timeout; returned to ota_0"
+      }
+    },
+    {
+      "id": "status-invalid-int-cmd-id",
+      "channel": "status",
+      "valid": false,
+      "payload": {
+        "cmd_id": 999,
+        "state": "staged",
+        "pct": null,
+        "detail": null
+      }
+    },
+    {
+      "id": "status-invalid-string-pct",
+      "channel": "status",
+      "valid": false,
+      "payload": {
+        "cmd_id": "cmd-stage-001",
+        "state": "staged",
+        "pct": "fifty",
+        "detail": null
+      }
+    },
+    {
+      "id": "ack-valid-accepted",
+      "channel": "ack",
+      "valid": true,
+      "payload": {
+        "id": "verb-001",
+        "type": "apply",
+        "result": "accepted",
+        "cmd_id": "cmd-stage-001",
+        "detail": null
+      }
+    },
+    {
+      "id": "ack-valid-refused",
+      "channel": "ack",
+      "valid": true,
+      "payload": {
+        "id": "verb-002",
+        "type": "cancel",
+        "result": "refused",
+        "cmd_id": null,
+        "detail": "nothing to cancel for this cmd_id"
+      }
+    },
+    {
+      "id": "ack-invalid-int-id",
+      "channel": "ack",
+      "valid": false,
+      "payload": {
+        "id": 42,
+        "type": "apply",
+        "result": "accepted",
+        "cmd_id": null,
+        "detail": null
+      }
+    },
+    {
+      "id": "ack-invalid-array-result",
+      "channel": "ack",
+      "valid": false,
+      "payload": {
+        "id": "verb-003",
+        "type": "reboot",
+        "result": [
+          "accepted"
+        ],
+        "cmd_id": null,
+        "detail": null
+      }
+    },
+    {
+      "id": "presence-valid-online",
+      "channel": "presence",
+      "valid": true,
+      "payload": {
+        "online": true
+      }
+    },
+    {
+      "id": "presence-valid-offline",
+      "channel": "presence",
+      "valid": true,
+      "payload": {
+        "online": false
+      }
+    },
+    {
+      "id": "presence-invalid-string-online",
+      "channel": "presence",
+      "valid": false,
+      "payload": {
+        "online": "not-a-bool"
+      }
+    },
+    {
+      "id": "presence-invalid-array-online",
+      "channel": "presence",
+      "valid": false,
+      "payload": {
+        "online": [
+          true
+        ]
+      }
+    },
+    {
+      "id": "dn-stage-valid-auto",
+      "channel": "dn/stage",
+      "valid": true,
+      "payload": {
+        "id": "cmd-stage-100",
+        "type": "stage",
+        "apply": "auto",
+        "confirm_timeout_s": 120,
+        "artifact": {
+          "url": "https://cdn.example.invalid/v1/artifact/bin",
+          "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          "size": 262144,
+          "version": "1.5.0",
+          "type": "app",
+          "sig": "ecdsa-p256-sha256:MEQCIBERERERERERERERERERERERERERERERERERERERERERAiAiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIg=="
+        }
+      }
+    },
+    {
+      "id": "dn-stage-valid-on-command-cargo",
+      "channel": "dn/stage",
+      "valid": true,
+      "payload": {
+        "id": "cmd-stage-101",
+        "type": "stage",
+        "apply": "on_command",
+        "confirm_timeout_s": 10,
+        "artifact": {
+          "url": "https://cdn.example.invalid/v1/cargo/bin",
+          "sha256": "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210",
+          "size": 4096,
+          "version": "2.1.0",
+          "type": "mcu_fw",
+          "sig": "ecdsa-p256-sha256:MEQCIBERERERERERERERERERERERERERERERERERERERERERAiAiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIiIg=="
+        }
+      }
+    },
+    {
+      "id": "dn-stage-invalid-uppercase-sha256",
+      "channel": "dn/stage",
+      "valid": false,
+      "expected_detail": "artifact sha256 malformed",
+      "payload": {
+        "id": "cmd-stage-bad-sha",
+        "type": "stage",
+        "apply": "auto",
+        "artifact": {
+          "url": "https://cdn.example.invalid/v1/artifact/bin",
+          "sha256": "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF",
+          "size": 4096,
+          "version": "1.5.0"
+        }
+      }
+    },
+    {
+      "id": "dn-stage-invalid-malformed-sig",
+      "channel": "dn/stage",
+      "valid": false,
+      "expected_detail": "artifact sig malformed",
+      "payload": {
+        "id": "cmd-stage-bad-sig",
+        "type": "stage",
+        "apply": "auto",
+        "artifact": {
+          "url": "https://cdn.example.invalid/v1/artifact/bin",
+          "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          "size": 4096,
+          "version": "1.5.0",
+          "sig": "rsa-2048:not-valid-ecdsa"
+        }
+      }
+    },
+    {
+      "id": "dn-stage-invalid-missing-url",
+      "channel": "dn/stage",
+      "valid": false,
+      "expected_c_detail": "artifact url missing",
+      "expected_sim_detail": "artifact url/sha256 missing",
+      "payload": {
+        "id": "cmd-stage-no-url",
+        "type": "stage",
+        "apply": "auto",
+        "artifact": {
+          "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          "size": 4096
+        }
+      }
+    },
+    {
+      "id": "dn-stage-invalid-missing-id",
+      "channel": "dn/stage",
+      "valid": false,
+      "expected_detail": null,
+      "payload": {
+        "type": "stage",
+        "apply": "auto",
+        "artifact": {
+          "url": "https://cdn.example.invalid/v1/artifact/bin",
+          "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+          "size": 4096
+        }
+      }
+    }
+  ]
+}

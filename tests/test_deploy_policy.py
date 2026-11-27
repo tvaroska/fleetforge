@@ -40,7 +40,7 @@ from tests.conftest import (
     login_admin,
     settings_for_tests,
 )
-from tests.test_doubles import StubSimRunner
+from tests.doubles import StubSimRunner
 
 _PRIV_A, _PUB_A = generate_keypair()
 _PRIV_B, _PUB_B = generate_keypair()
@@ -1336,3 +1336,34 @@ class TestDeployPolicyAndWaveOfflineUnits:
         assert len(gw_wave) == 3
         assert len(gw_skipped) == 2
         assert all("gateway a4cf12000001 airtime cap=3" in v for v in gw_skipped.values())
+
+    def test_supersession_guard_blocks_downgrade_over_newer_confirmed_or_in_flight(self) -> None:
+        from fleetforge.deploys import DeploySnapshot
+        from fleetforge.rollout_state import has_newer_confirmed_or_in_flight, scope_covers
+
+        t0 = now_utc()
+        t1 = t0 + dt.timedelta(seconds=30)
+        newer_confirmed = DeploySnapshot(
+            cmd_id="cmd-new",
+            state="confirmed",
+            at=t1,
+            is_terminal=True,
+            artifact_version="2.1.0",
+            from_version="2.0.0",
+            pct=100,
+            detail=None,
+            steps=(),
+            sent_by=None,
+            selftest=None,
+        )
+        assert has_newer_confirmed_or_in_flight(
+            newer_confirmed, version="2.0.0", rollout_started_at=t0
+        )
+        assert not has_newer_confirmed_or_in_flight(
+            newer_confirmed, version="2.1.0", rollout_started_at=t0
+        )
+        assert not has_newer_confirmed_or_in_flight(
+            newer_confirmed, version="2.0.0", rollout_started_at=t1 + dt.timedelta(seconds=10)
+        )
+        assert scope_covers("all", None, None, "dev", "esp32s3", None)
+        assert not scope_covers("dev", None, None, "all", None, None)

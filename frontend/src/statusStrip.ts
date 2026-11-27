@@ -66,7 +66,7 @@ function deviceState(device: DeviceSummary): Segment[] {
     device.online ? { text: 'online', tone: 'ok' } : { text: 'offline', tone: null },
   ]
   const deploy = device.deploy
-  if (deploy === null) return segments
+  if (deploy == null) return segments
   if (!deploy.is_terminal) {
     segments.push({
       text: `updating: ${DEPLOY_STATE_LABELS[deploy.state] ?? deploy.state}`,
@@ -91,7 +91,7 @@ function deviceState(device: DeviceSummary): Segment[] {
 
 function deviceFirmware(device: DeviceSummary): string {
   const deploy = device.deploy
-  if (deploy !== null && !deploy.is_terminal && deploy.artifact_version !== null) {
+  if (deploy != null && !deploy.is_terminal && deploy.artifact_version !== null) {
     return `fw ${deploy.from_version ?? device.fw_version ?? '—'} → ${deploy.artifact_version}`
   }
   return `fw ${device.fw_version ?? '—'}`

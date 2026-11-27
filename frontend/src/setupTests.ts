@@ -12,6 +12,8 @@ if (globalThis.crypto?.subtle === undefined) {
 }
 
 afterEach(() => {
-  cleanup()
+  if (typeof document !== 'undefined') {
+    cleanup()
+  }
   vi.restoreAllMocks()
 })

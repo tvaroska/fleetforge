@@ -51,19 +51,42 @@ _QEMU_TARGET_CONFIG: dict[str, tuple[str, str]] = {
     "esp32c6": ("qemu-system-riscv32", "esp32c6"),
 }
 
+_QEMU_TARGET_MEMORY: dict[str, str] = {
+    "esp32": "4M",
+    "esp32s3": "32M",
+}
+
+
+def default_efuse_bytes(target: str) -> bytes:
+    """Return ESP-IDF 5.5 `qemu_ext.py` default eFuse image so chip-revision checks pass."""
+    if target == "esp32":
+        buf = bytearray(124)
+        buf[13] = 0x80
+        buf[22] = 0x10
+        return bytes(buf)
+    buf = bytearray(1024)
+    buf[38] = 0x0C
+    return bytes(buf)
+
+
 _SERIAL_PASS_MARKERS: tuple[str, ...] = (
     "FF_SIM_SELFTEST_PASS",
     "selftest passed",
     "marked app valid",
     "state=confirmed",
     '"state":"confirmed"',
+    "ff_cfg v1 loaded",
+    "no usable ff_cfg partition",
 )
 
 _SERIAL_FAIL_MARKERS: tuple[str, ...] = (
     "FF_SIM_BOOT_CRASH",
     "FF_SIM_PANIC",
     "FF_SIM_SELFTEST_FAIL",
+    "FF_FAULT_TEST=",
     "Guru Meditation Error",
+    "LoadProhibited",
+    "StoreProhibited",
     "abort() was called",
     "selftest failed",
     "selftest timed out",
@@ -141,6 +164,7 @@ def _build_qemu_cmd(
     machine: str,
     target: str,
     flash_path: Path,
+    efuse_path: Path | None = None,
     pytest_harness_dir: Path | None,
 ) -> list[str]:
     if pytest_harness_dir is not None:
@@ -153,17 +177,40 @@ def _build_qemu_cmd(
             target,
             f"--qemu-flash-bin={flash_path}",
         ]
-    return [
+    cmd = [
         qemu_bin,
         "-nographic",
         "-machine",
         machine,
-        "-drive",
-        f"file={flash_path},if=mtd,format=raw",
-        "-serial",
-        "mon:stdio",
-        "-no-reboot",
     ]
+    mem = _QEMU_TARGET_MEMORY.get(target)
+    if mem is not None:
+        cmd.extend(["-m", mem])
+    cmd.extend(
+        [
+            "-drive",
+            f"file={flash_path},if=mtd,format=raw",
+        ]
+    )
+    if efuse_path is not None:
+        cmd.extend(
+            [
+                "-drive",
+                f"file={efuse_path},if=none,format=raw,id=efuse",
+                "-global",
+                f"driver=nvram.{machine}.efuse,property=drive,value=efuse",
+                "-global",
+                f"driver=timer.{machine}.timg,property=wdt_disable,value=true",
+            ]
+        )
+    cmd.extend(
+        [
+            "-serial",
+            "mon:stdio",
+            "-no-reboot",
+        ]
+    )
+    return cmd
 
 
 class EspressifQemuSimRunner:
@@ -206,12 +253,18 @@ class EspressifQemuSimRunner:
             if manifest_path.is_file():
                 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
                 for part in manifest.get("parts", []):
-                    part_offset = int(str(part["offset"]), 0)
+                    raw_offset = part["offset"]
+                    part_offset = (
+                        raw_offset if isinstance(raw_offset, int) else int(str(raw_offset), 0)
+                    )
                     part_name = str(part.get("name", ""))
                     if part_name == "app":
                         slot_offset = part_offset
                         continue
-                    part_file = boot_bundle_dir / str(part["file"])
+                    part_rel = part.get("path") or part.get("file")
+                    if not isinstance(part_rel, str) or not part_rel:
+                        raise ValueError(f"boot bundle part {part_name!r} is missing path")
+                    part_file = boot_bundle_dir / part_rel
                     if part_file.is_file():
                         raw_part = part_file.read_bytes()
                         end = part_offset + len(raw_part)
@@ -322,7 +375,7 @@ class EspressifQemuSimRunner:
                 partition_layout=partition_layout,
                 boot_bundle_dir=self._boot_bundle_dir,
             )
-        except (ValueError, OSError, json.JSONDecodeError) as exc:
+        except (ValueError, OSError, KeyError, TypeError, json.JSONDecodeError) as exc:
             return SimResult(
                 status=SimStatus.FAILED,
                 detail=str(exc),
@@ -335,11 +388,14 @@ class EspressifQemuSimRunner:
         with tempfile.TemporaryDirectory(prefix=f"ff-qemu-{safe_tag}-") as tmp_dir:
             flash_path = Path(tmp_dir) / "flash.bin"
             flash_path.write_bytes(flash_bytes)
+            efuse_path = Path(tmp_dir) / "efuse.bin"
+            efuse_path.write_bytes(default_efuse_bytes(target))
             cmd = _build_qemu_cmd(
                 qemu_bin=qemu_bin,
                 machine=machine,
                 target=target,
                 flash_path=flash_path,
+                efuse_path=efuse_path,
                 pytest_harness_dir=self._pytest_harness_dir,
             )
             proc = await asyncio.create_subprocess_exec(

@@ -22,6 +22,7 @@ from tests.conftest import (
     recreate_database,
     run_alembic,
     run_alembic_check,
+    worker_db_name,
 )
 
 EXPECTED_TABLES = {
@@ -53,9 +54,9 @@ EXPECTED_TABLES = {
     "users",
 }
 
-MIGRATION_TEST_DB = "fleetforge_migration_test"
-MIGRATION_RACE_TEST_DB = "fleetforge_migration_race_test"
-MIGRATION_POPULATED_TEST_DB = "fleetforge_migration_populated_test"
+MIGRATION_TEST_DB = worker_db_name("fleetforge_migration_test")
+MIGRATION_RACE_TEST_DB = worker_db_name("fleetforge_migration_race_test")
+MIGRATION_POPULATED_TEST_DB = worker_db_name("fleetforge_migration_populated_test")
 
 
 async def _tables_in(url: str) -> set[str]:

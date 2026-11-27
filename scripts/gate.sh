@@ -44,13 +44,19 @@ heads = ScriptDirectory.from_config(Config("alembic.ini")).get_heads()
 assert len(heads) == 1, f"expected a single Alembic head, found {heads}"
 '
 
+"${PYTHON_BIN}" scripts/generate_openapi_ts.py --check
+
 "${RUFF_BIN}" check --no-cache src/ tests/ alembic/ agent/tools/ scripts/
 "${RUFF_BIN}" format --check --no-cache src/ tests/ alembic/ agent/tools/ scripts/
 "${MYPY_BIN}" --config-file pyproject.toml --cache-dir=/tmp/fleetforge-mypy-cache src/ tests/ alembic/ agent/tools/ scripts/
 
 PYTEST_OUT="$(mktemp /tmp/fleetforge-pytest.XXXXXX)"
 trap 'rm -f "${PYTEST_OUT}"' EXIT
-"${PYTEST_BIN}" -q -rs --durations=15 -p no:cacheprovider | tee "${PYTEST_OUT}"
+XDIST_ARGS=()
+if [[ -n "${FF_PYTEST_WORKERS:-}" ]]; then
+  XDIST_ARGS=(-n "${FF_PYTEST_WORKERS}")
+fi
+"${PYTEST_BIN}" -q -rs --durations=15 -p no:cacheprovider "${XDIST_ARGS[@]}" --cov=fleetforge --cov-report=term-missing:skip-covered | tee "${PYTEST_OUT}"
 
 "${PYTHON_BIN}" scripts/check_pytest_skips.py "${PYTEST_OUT}"
 
@@ -58,7 +64,7 @@ if [[ "${FF_SKIP_FRONTEND_GATE:-0}" != "1" ]] && command -v npm >/dev/null 2>&1 
   (
     cd "${REPO_ROOT}/frontend"
     npm run typecheck
-    npm test
+    npm run test:coverage
     npm run build
   )
 fi

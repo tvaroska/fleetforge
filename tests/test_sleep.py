@@ -34,13 +34,21 @@ from tests.agent_src import (
     FF_SLEEP_INTERNAL_H,
     FF_TELEMETRY_C,
     IDF_EXAMPLE_MAIN_C,
+    read_c_family,
 )
-from tests.test_agent_txn import FF_MQTT_C, FF_OTA_C, _function_body
-from tests.test_ff_cfg import _code
-from tests.test_ota_component import MAKER_HEADERS, _declared_functions
-from tests.test_selftest import TIMER_CONTEXT, _member_body, _published
+from tests.agent_test_helpers import (
+    FF_IDENTITY_C,
+    FF_MQTT_C,
+    FF_OTA_C,
+    MAKER_HEADERS,
+    TIMER_CONTEXT,
+    _code,
+    _declared_functions,
+    _function_body,
+    _member_body,
+    _published,
+)
 
-FF_IDENTITY_C = COMPONENT_SRC / "ff_identity.c"
 FF_OTA_H = COMPONENT_SRC / "ff_ota.h"
 
 PUBLIC_FUNCTIONS = {"ff_set_power_class", "ff_is_connected", "ff_is_ready_for_sleep"}
@@ -83,14 +91,19 @@ def _src() -> str:
 
 
 def _mqtt() -> str:
-    return _code(FF_MQTT_C)
+    return _code(read_c_family("ff_mqtt"))
 
 
 def _readiness_bodies() -> dict[str, str]:
     bodies = {name: _function_body(_src(), name) for name in SILENT[FF_SLEEP_C]}
-    for path in (FF_MQTT_C, FF_OTA_C, FF_TELEMETRY_C):
+    sources = {
+        FF_MQTT_C: _mqtt(),
+        FF_OTA_C: _code(read_c_family("ff_ota")),
+        FF_TELEMETRY_C: _code(FF_TELEMETRY_C),
+    }
+    for path, src_code in sources.items():
         for name in SILENT[path]:
-            bodies[name] = _function_body(_code(path), name)
+            bodies[name] = _function_body(src_code, name)
     return bodies
 
 
@@ -212,7 +225,7 @@ class TestTheFreeze:
         for later in ("ff_txn_init(", "classify_txn(", "esp_mqtt_client_start("):
             assert at < run.index(later), later
         assert _mqtt().count("ff_sleep_freeze(") == 1
-        assert '#include "ff_sleep_internal.h"' in FF_MQTT_C.read_text()
+        assert '#include "ff_sleep_internal.h"' in read_c_family("ff_mqtt")
 
     def test_it_logs_once_naming_both_values(self) -> None:
         body = _function_body(_src(), "ff_sleep_freeze")
@@ -261,9 +274,10 @@ class TestTheAnnounce:
 class TestTheConnectedFlags:
     def test_file_statics_outside_s_ctx(self) -> None:
         code = _mqtt()
-        assert "static volatile bool s_acked_this_connection;" in code
-        assert "static volatile bool s_checked_in;" in code
-        struct = re.search(r"typedef struct \{(.*?)\} ff_mqtt_ctx_t;", code, re.S)
+        assert "volatile bool s_acked_this_connection;" in code
+        assert "volatile bool s_checked_in;" in code
+        combined = code + _code(COMPONENT_SRC / "ff_mqtt_internal.h")
+        struct = re.search(r"typedef struct \{(.*?)\} ff_mqtt_ctx_t;", combined, re.S)
         assert struct is not None
         assert "acked" not in struct.group(1) and "checked_in" not in struct.group(1)
 
@@ -379,7 +393,7 @@ class TestReadiness:
                 assert helper not in body, (name, helper)
 
     def test_ota_in_flight_reads_s_running_under_the_cancel_lock(self) -> None:
-        body = _function_body(_code(FF_OTA_C), "ff_ota_in_flight")
+        body = _function_body(_code(read_c_family("ff_ota")), "ff_ota_in_flight")
         enter = body.index("portENTER_CRITICAL(&s_cancel_lock)")
         leave = body.index("portEXIT_CRITICAL(&s_cancel_lock)")
         assert enter < body.index("= s_running;") < leave

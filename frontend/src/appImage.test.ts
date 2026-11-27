@@ -1,3 +1,4 @@
+// @vitest-environment node
 // The advisory header read behind the upload form's pre-fill (R2b-fe-7).
 
 import { describe, expect, it } from 'vitest'

@@ -1,3 +1,4 @@
+// @vitest-environment node
 // Every log line quoted here is a real format string from `agent/main/*.c`. That is the
 // contract this file defends: if someone rewords `ff_net_wifi.c`'s "disconnected (reason
 // %d)" and the classifier is not updated, the panel silently stops naming causes and the

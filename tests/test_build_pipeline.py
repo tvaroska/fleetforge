@@ -56,7 +56,7 @@ from tests.conftest import (
     login_admin,
     settings_for_tests,
 )
-from tests.test_doubles import StubBuildRunner
+from tests.doubles import StubBuildRunner
 
 _PRIV_A, _PUB_A = generate_keypair()
 _PRIV_B, _PUB_B = generate_keypair()
@@ -555,14 +555,48 @@ class TestBuildSecurityAndCacheKey:
         assert len(joined) >= 100_000
 
     async def test_real_container_build_of_the_agent(self, tmp_path: Path) -> None:
-        """A-27: opt-in real Docker ESP-IDF build of `agent/` using `SandboxedIdfContainerRunner`."""
+        """A-25 & A-27: opt-in real Docker ESP-IDF build of `agent/` with a committed `build/00_planted.bin`."""
         if os.environ.get("FF_RUN_REAL_DOCKER_TESTS") != "1":
             pytest.skip("real Docker container build test is opt-in via FF_RUN_REAL_DOCKER_TESTS=1")
         if not shutil.which("docker"):
             pytest.fail("FF_RUN_REAL_DOCKER_TESTS=1 set but `docker` is not installed")
         agent_src = Path(__file__).resolve().parents[1] / "agent"
+        origin_dir = tmp_path / "agent-origin"
+        shutil.copytree(agent_src, origin_dir, ignore=shutil.ignore_patterns("build", "dist"))
+        clean_digests = compute_tree_and_config_digests(origin_dir)
+
+        planted_origin = origin_dir / "build"
+        planted_origin.mkdir(exist_ok=True)
+        (planted_origin / "00_planted.bin").write_bytes(b"planted-junk")
+        git_bin = shutil.which("git") or "/usr/bin/git"
+        git_env = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "GIT_AUTHOR_NAME": "Test",
+            "GIT_AUTHOR_EMAIL": "test@example.com",
+            "GIT_COMMITTER_NAME": "Test",
+            "GIT_COMMITTER_EMAIL": "test@example.com",
+        }
+        subprocess.run(  # noqa: S603
+            [git_bin, "init", "-q", "-b", "main", str(origin_dir)], check=True, env=git_env
+        )
+        subprocess.run([git_bin, "-C", str(origin_dir), "add", "-f", "."], check=True, env=git_env)  # noqa: S603
+        subprocess.run(  # noqa: S603
+            [git_bin, "-C", str(origin_dir), "commit", "-q", "-m", "init"], check=True, env=git_env
+        )
+
         work_dir = tmp_path / "agent-work"
-        shutil.copytree(agent_src, work_dir, ignore=shutil.ignore_patterns("build", "dist"))
+        fetcher = GitShallowSourceFetcher(allow_local_paths=True)
+        checkout = await fetcher.fetch(
+            repo_url=str(origin_dir),
+            git_ref="refs/heads/main",
+            dest_dir=work_dir,
+        )
+        assert (checkout.source_tree_digest, checkout.config_digest) == clean_digests
+        assert not (work_dir / "build").exists()
+
+        # Also plant `build/00_planted.bin` directly in `work_dir` to prove `compile_source` strips it.
+        (work_dir / "build").mkdir()
+        (work_dir / "build" / "00_planted.bin").write_bytes(b"planted-junk")
         runner = SandboxedIdfContainerRunner(timeout_s=600.0)
         app_bytes = await runner.compile_source(
             work_dir=work_dir,
@@ -570,6 +604,7 @@ class TestBuildSecurityAndCacheKey:
             partition_layout="ab-4m-v1",
             idf_image=PINNED_IDF_IMAGES["esp32"],
         )
+        assert app_bytes != b"planted-junk"
         assert len(app_bytes) > 65_536
         assert app_bytes[:1] == b"\xe9"
 

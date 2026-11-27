@@ -1,112 +1,63 @@
-// "Flash a board" — R0-fe-3, and the last screen of R0's done-when: plug in a board,
-// flash & register it from the browser, watch it come online.
+// "Flash a board" — R0-fe-3: plug in a board over USB, write the agent plus its `ff_cfg`
+// partition from the browser, and watch it come online.
 //
-// This file renders and collects input. Every rule lives in `flash.ts` (what may be
-// written, and in what order) or `ffcfg.ts` (the blob format); the serial port lives
-// behind the seam in `flasher.ts`. Two things here are load-bearing and easy to undo:
-//
-// * **No `localStorage`, no `sessionStorage`, anywhere in this feature.** The Wi-Fi
-//   passphrase and the enrollment token are both credentials, and the token is a
-//   fleet-join credential the server cannot re-derive. One rule, easy to review.
-//   Nothing here calls `localStorage`, `sessionStorage`, `indexedDB`, cookies or the URL.
-//   The passphrase inputs ARE marked for the browser's own password manager (R2b-fe-12:
-//   one `<form>` per network, SSID = `username`, passphrase = `current-password`), so the
-//   operator types each one once — that is the browser's store, offered by the browser,
-//   never written by this app.
-// * **The two URLs are derived from `window.location`, never compiled in.** See
-//   `defaultMqttUri` below.
+// Rules live in `flash.ts` and `ffcfg.ts`; Web Serial lives behind the Port, Adapter and
+// Contract boundary in `flasher.ts`. No `localStorage`, `sessionStorage`, `indexedDB`,
+// cookies, or URL query parameters are ever touched for Wi-Fi passphrases or enrollment tokens.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ApiError, api, type AgentManifest, type DeviceGroupSummary } from './api'
-import { type Fleet } from './fleet'
 import { BoardConsolePanel } from './BoardConsole'
 import { type ConsoleFactory } from './boardConsole'
-import { uriSecrets, type DiagnosticContext } from './diagnostics'
 import { OTHER_BOARD_ID, shortlist } from './boards'
+import { uriSecrets, type DiagnosticContext } from './diagnostics'
 import {
   MAX_NETWORKS,
-  NETS_MIN_AGENT,
   agentReadsNets,
   buildFfCfgFields,
   validateFfCfg,
   type FlashConfigInput,
 } from './ffcfg'
-import { formatBytes, predictDeviceId, useFlashBoard } from './flash'
-import { type ResultContext } from './onboardingResult'
-import { ResultCard } from './ResultCard'
-import { takeBaseline, type FleetBaseline } from './serverWatch'
-import { type VersionLine } from './statusStrip'
+import { predictDeviceId, useFlashBoard } from './flash'
 import {
   BUILT_IN_PORT,
   NO_BOARD_SELECTED,
   webSerialSupported,
   type FlasherFactory,
 } from './flasher'
-import { PortHelp } from './PortHelp'
-import { PreflightCard } from './PreflightCard'
+import { BAUD_RATES, FlashConfigForm, type FormState, type NetworkRow } from './FlashConfigForm'
+import {
+  FlashActionSection,
+  FlashDetectSection,
+  FlashStepperRail,
+  FlashUnavailable,
+} from './FlashStepPanels'
+import { type Fleet } from './fleet'
+import { type ResultContext } from './onboardingResult'
 import { describePreflight, installFor } from './preflight'
+import { takeBaseline, type FleetBaseline } from './serverWatch'
+import { type VersionLine } from './statusStrip'
 
-/** 921600 first: it is what a CP210x/native-USB board wants. 115200 is the CH340 escape. */
-const BAUD_RATES = [921600, 460800, 115200]
-
-/**
- * The device-facing broker URI, derived from the page.
- *
- * There is no API that serves it: `Settings.mqtt_host`/`mqtt_port` are the *internal*
- * address (`mosquitto:1883`), and the device-facing one exists nowhere in the API's
- * config. Deriving it from `location` is correct for both deployments we have —
- * `mqtt://localhost:8883` in dev (plaintext through Traefik's `mqtt` entrypoint) and
- * `mqtts://bingo.tvaroska.sk:8883` in production (TLS terminated at Traefik) — and the
- * field is editable for anything else. Do NOT "improve" this into a hardcoded host.
- */
 function defaultMqttUri(): string {
   if (typeof window === 'undefined') return 'mqtt://localhost:8883'
   const scheme = window.location.protocol === 'https:' ? 'mqtts' : 'mqtt'
   return `${scheme}://${window.location.hostname}:8883`
 }
 
-/** The one-origin invariant means the API base cannot be anything but this page's origin. */
 function defaultApiBase(): string {
   return typeof window === 'undefined' ? '' : window.location.origin
-}
-
-/** One Wi-Fi network row. `key` is stable for the row's life — never the array index. */
-type NetworkRow = { key: number; ssid: string; psk: string }
-
-type FormState = {
-  mqttUri: string
-  link: string
-  /** Network 1 first, in priority order; at most `MAX_NETWORKS`. Never empty. */
-  networks: NetworkRow[]
-  hbS: string
-  power: string
-  wakeS: string
-  baudRate: number
 }
 
 const INITIAL_FORM: FormState = {
   mqttUri: defaultMqttUri(),
   link: 'wifi',
   networks: [{ key: 0, ssid: '', psk: '' }],
-  // Blank on purpose: an absent `hb_s` leaves the firmware's own default in place rather
-  // than freezing today's number into every board flashed today.
   hbS: '',
   power: 'always_on',
   wakeS: '',
   baudRate: BAUD_RATES[0],
 }
 
-/**
- * The same two functions `flash.ts` runs first, run again on every keystroke.
- *
- * Not redundant: the engine's copy is the one that protects the board, this one is the
- * one that keeps a half-filled form from ever reaching it — a `sleepy` board with no wake
- * interval would otherwise spend a single-use token before `POST /v1/enroll` refused the
- * identity. The token is minted only in `flash.ts`, and only after this has passed too.
- *
- * The message comes from `ffcfg.ts`, which is careful never to quote a value, so this
- * cannot put a passphrase on screen.
- */
 function validationMessage(input: FlashConfigInput): string | null {
   try {
     validateFfCfg(buildFfCfgFields(input))
@@ -114,29 +65,6 @@ function validationMessage(input: FlashConfigInput): string | null {
   } catch (err) {
     return err instanceof Error ? err.message : 'the configuration is not valid'
   }
-}
-
-function Unavailable({ reason }: { reason: 'no-web-serial' | 'insecure' }) {
-  return (
-    <section className="console-card" aria-labelledby="flash-heading">
-      <h2 id="flash-heading">Flash a board</h2>
-      <p className="muted">
-        {reason === 'no-web-serial' ? (
-          <>
-            Flashing needs the Web Serial API: use Chrome or Edge. Chromium-only is an accepted v1
-            limit (<code>spec/prd.md</code> — client constraint). Everything else on this page works
-            in any browser; you can still generate a token below and flash the board with{' '}
-            <code>esptool.py</code>.
-          </>
-        ) : (
-          <>
-            The browser will not grant serial access over an insecure connection. Open this
-            dashboard over HTTPS, or on <code>http://localhost</code>, and reload.
-          </>
-        )}
-      </p>
-    </section>
-  )
 }
 
 export function FlashBoard({
@@ -151,17 +79,9 @@ export function FlashBoard({
   onGoToFleet,
 }: {
   onSessionExpired: () => void
-  // R2b-fe-1: tells the status strip which board this is, once detected and again once
-  // flashed. Optional; the flasher works the same without it.
   onBoardIdentified?: (deviceId: string) => void
-  // R2b-fe-2: the fleet from `Dashboard`'s single `useFleet` — never open a second one
-  // here (one SSE slot each). Feeds the pre-flight card; absent means no card.
-  // R2b-fe-6: `refresh` re-reads the list after a rename from the result card.
   fleet?: Pick<Fleet, 'devices' | 'arrivals' | 'error' | 'now'> & Partial<Pick<Fleet, 'refresh'>>
-  // R2b-fe-3: from `Dashboard`'s `useHealth` + `buildInfo` via `describeVersions` — never a
-  // second health poll here. Feeds the result card's UI/API row; absent means no row.
   versions?: VersionLine
-  // Injected by the tests only: jsdom has no `navigator.serial` (see `flasher.ts`).
   createFlasher?: FlasherFactory
   createConsole?: ConsoleFactory
   project?: string
@@ -175,7 +95,6 @@ export function FlashBoard({
   const [board, setBoard] = useState<string>(OTHER_BOARD_ID)
   const [manifest, setManifest] = useState<AgentManifest | null>(null)
   const [manifestError, setManifestError] = useState<string | null>(null)
-  /** S0-fe-7, and a footnote in a bundle rather than anything on this page. */
   const [serverVersion, setServerVersion] = useState<string | null>(null)
   const state = useFlashBoard({ onSessionExpired, createFlasher, project })
   const [portHelpOpen, setPortHelpOpen] = useState(false)
@@ -187,8 +106,6 @@ export function FlashBoard({
     setForm((current) => ({ ...current, [key]: value }))
   }, [])
 
-  // R2b-fe-12. Row keys come from a counter so removing row 2 of 3 cannot shift a typed
-  // passphrase into another row's field. 0 is the initial row.
   const nextNetworkKey = useRef(1)
   const setNetwork = useCallback((index: number, patch: Partial<Omit<NetworkRow, 'key'>>) => {
     setForm((current) => ({
@@ -205,7 +122,6 @@ export function FlashBoard({
     })
   }, [])
   const removeNetwork = useCallback((index: number) => {
-    // Network 1 cannot be removed: it is the one an agent older than 0.4.6 joins.
     if (index === 0) return
     setForm((current) => ({
       ...current,
@@ -229,10 +145,6 @@ export function FlashBoard({
         }
         setManifestError(err instanceof Error ? err.message : 'could not read the agent manifest')
       })
-    // Independent of the manifest, and SILENT on failure by design: `/v1/healthz` is
-    // unauthenticated and does no I/O server-side, so a failure here says nothing about
-    // this page's session. It must never set `manifestError` and must never call
-    // `onSessionExpired` — the bundle simply reads "unavailable".
     api
       .health()
       .then((value) => {
@@ -244,7 +156,6 @@ export function FlashBoard({
     }
   }, [supported, secure, onSessionExpired])
 
-  // Held in a ref so a parent passing a fresh closure never re-fires the effects below.
   const identified = useRef(onBoardIdentified)
   identified.current = onBoardIdentified
   const predictedId = state.chip === null ? null : predictDeviceId(state.chip)
@@ -255,13 +166,6 @@ export function FlashBoard({
     if (state.flashedDeviceId !== null) identified.current?.(state.flashedDeviceId)
   }, [state.flashedDeviceId])
 
-  // R2b-fe-5. The flash anchor: the fleet as it was when this tab started writing, so the
-  // console panel can tell a NEW enrolment from a known board's stale row. Taken on every
-  // entry into 'flashing' (the token is minted inside it, so the snapshot is strictly before
-  // the new enrolment) and cleared on "Flash another board". Owned here, not by the panel:
-  // the operator pressing "Watch a board" after a drop must NOT re-take it, because by then
-  // the board may already have re-enrolled. The devices ride in a ref so the fleet's
-  // re-reads never re-fire the phase effect.
   const [flashBaseline, setFlashBaseline] = useState<FleetBaseline | null>(null)
   const [flashBaselineWanted, setFlashBaselineWanted] = useState(false)
   const fleetDevices = fleet?.devices ?? null
@@ -279,23 +183,19 @@ export function FlashBoard({
       setFlashBaselineWanted(false)
     }
   }, [state.phase, hasFleet])
-  // A fleet still loading when the flash started: capture on the first render that has it.
-  // Accepted limit: by then it could already hold the new enrolment.
+
   useEffect(() => {
     if (!flashBaselineWanted || fleetDevices === null) return
     setFlashBaselineWanted(false)
     setFlashBaseline(takeBaseline(fleetDevices))
   }, [flashBaselineWanted, fleetDevices])
 
-  // S0-fe-8. A dismissed chooser or a refused COM1 is what an operator with no driver
-  // does next, so that is when the help opens by itself. Only ever opens it: closing is
-  // the operator's call.
   useEffect(() => {
     if (state.error === NO_BOARD_SELECTED || state.error === BUILT_IN_PORT) setPortHelpOpen(true)
   }, [state.error])
 
-  if (!supported) return <Unavailable reason="no-web-serial" />
-  if (!secure) return <Unavailable reason="insecure" />
+  if (!supported) return <FlashUnavailable reason="no-web-serial" />
+  if (!secure) return <FlashUnavailable reason="insecure" />
 
   const chip = state.chip
   const candidates = chip === null ? [] : shortlist(chip)
@@ -314,8 +214,6 @@ export function FlashBoard({
         })
       : null
   const apiBase = defaultApiBase()
-  // R2b-fe-12. What is not shown is not written: on Ethernet no Wi-Fi field reaches the
-  // blob, so a leftover passphrase is not baked in and a hidden row cannot block Flash.
   const wifi = form.link === 'wifi'
   const [firstNetwork, ...extraNetworks] = form.networks
   const readsNets = install === null ? null : agentReadsNets(install.agentVersion)
@@ -335,15 +233,6 @@ export function FlashBoard({
   }
   const configError = validationMessage(config)
 
-  // S0-fe-6. Every fault a re-flash fixes is either a spent token or a stale broker
-  // credential, and both are cleared by the same thing: the flash mints a FRESH single-use
-  // token (`flash.ts` rule 3), and the agent drops the credential it was holding the first
-  // time it boots with a token it has not seen before (`ff_store_sync_token`, S0-fw-4).
-  // Nothing here erases NVS — that would cost the board its cached radio calibration.
-  //
-  // Not memoised on purpose: it is only ever used from an `onClick`, and `config` is a
-  // fresh literal on every render, so a `useCallback` would churn and buy nothing — and
-  // one with an honest dependency list would be rebuilt every render anyway.
   const groupId = selectedGroupId || null
   const recoverByReflash = () => state.reflash({ config, baudRate: form.baudRate, groupId })
 
@@ -363,8 +252,6 @@ export function FlashBoard({
           )
         : fleet.devices
 
-  // R2b-fe-3. What this page knows for the result card. A plain literal for the same
-  // reason as `diagnostics` below.
   const resultContext: ResultContext = {
     devices: effectiveDevices,
     versions: versions ?? null,
@@ -375,8 +262,6 @@ export function FlashBoard({
             agentVersion: state.build?.agent_version ?? null,
             layout: state.build?.partition_layout ?? null,
             link: form.link,
-            // With several networks the board may be on any of them: claim none, and let
-            // the console's `joined "…" (known network K of N)` line say which.
             ssid:
               wifi && form.networks.length === 1 && firstNetwork.ssid !== ''
                 ? firstNetwork.ssid
@@ -387,10 +272,6 @@ export function FlashBoard({
     now: fleet?.now,
   }
 
-  // R2b-fe-3. The one action on a flash-failed card. `onClick` is SYNCHRONOUS up to
-  // `reflash`: `requestPort()` needs the user gesture, so no `await` may come before it.
-  // `set('baudRate', …)` is a plain state update. A config error makes the retry a button
-  // that cannot work, so the reason is shown instead (S0-fe-6's idiom).
   const failure = state.failure
   const retryAction =
     failure === null ? null : configError !== null ? (
@@ -410,10 +291,6 @@ export function FlashBoard({
       </button>
     )
 
-  // S0-fe-7. A plain literal for the same reason `recoverByReflash` is: `config` is a
-  // fresh object on every render, so a memo with an honest dependency list would be
-  // rebuilt every render anyway. The form has no NTP field, so `ntp` is null —
-  // "(firmware default)" — rather than a value this page invented.
   const diagnostics: DiagnosticContext = {
     chip,
     build: state.build,
@@ -429,12 +306,8 @@ export function FlashBoard({
       hbS: form.hbS || null,
       power: form.power,
       wakeS: form.wakeS || null,
-      // Network 1's only, as `ff_cfg_log()` prints only `nets[0].psk`.
       pskLength: firstNetwork.psk.length,
     },
-    // Scrub input only. Every network's passphrase, plus any password typed into either URI —
-    // a broker password must be scrubbed out of every section, not only out of the URI that
-    // carried it.
     knownSecrets: [
       ...form.networks.map((row) => row.psk),
       ...uriSecrets(form.mqttUri),
@@ -455,24 +328,12 @@ export function FlashBoard({
         need to generate one below.
       </p>
 
-      <ol className="stepper-rail" data-testid="flash-stepper" aria-label="Flash steps">
-        <li className={step1Done ? 'done' : 'active'}>
-          <span aria-hidden="true">{step1Done ? '✓ ' : '▶ '}</span>1. DETECT USB
-        </li>
-        <li className={step2Done ? 'done' : step1Done ? 'active' : ''}>
-          <span aria-hidden="true">{step2Done ? '✓ ' : step1Done ? '▶ ' : '· '}</span>2. CONFIGURE
-          WI-FI
-        </li>
-        <li className={step3Done ? 'done' : state.phase === 'flashing' ? 'active' : ''}>
-          <span aria-hidden="true">
-            {step3Done ? '✓ ' : state.phase === 'flashing' ? '▶ ' : '· '}
-          </span>
-          3. WRITE FLASH
-        </li>
-        <li className={step3Done ? 'active' : ''}>
-          <span aria-hidden="true">{step3Done ? '▶ ' : '· '}</span>4. VERIFY BOOT
-        </li>
-      </ol>
+      <FlashStepperRail
+        step1Done={step1Done}
+        step2Done={step2Done}
+        step3Done={step3Done}
+        flashing={state.phase === 'flashing'}
+      />
 
       {manifestError !== null && (
         <p className="bad" role="alert">
@@ -481,18 +342,9 @@ export function FlashBoard({
       )}
       {manifest !== null && (
         <p className="muted" data-testid="agent-targets">
-          {/* The hoisted `agent_version` is `bundles[0]` — an arbitrary target once
-              publishing went per-target (S0-infra-6). Printing it as THE agent version
-              is how a bench session concluded a freshly flashed S3 was on 0.2.0 when
-              the S3 build was 0.3.2: the headline named a different chip's build. When
-              they disagree there is no single answer, so don't invent one — the
-              per-target list below is the whole truth. */}
           {mixedVersions ? 'Agent per target · ' : `Agent ${manifest.agent_version} · `}
           {manifest.builds
             .map((b) =>
-              // Targets are published one at a time (S0-infra-6), so two of them may now
-              // legitimately be different versions — and which board got which matters.
-              // Only spelled out when they actually disagree; the common case stays short.
               mixedVersions
                 ? `${b.target} (${b.chip_family}, ${b.agent_version})`
                 : `${b.target} (${b.chip_family})`,
@@ -501,421 +353,69 @@ export function FlashBoard({
         </p>
       )}
 
-      <h3>1 · The board</h3>
-      <p>
-        <label>
-          Baud rate{' '}
-          <select
-            value={form.baudRate}
-            onChange={(event) => set('baudRate', Number(event.target.value))}
-            disabled={state.busy}
-          >
-            {BAUD_RATES.map((rate) => (
-              <option key={rate} value={rate}>
-                {rate}
-              </option>
-            ))}
-          </select>
-        </label>{' '}
-        <button
-          type="button"
-          onClick={() => void state.connect(form.baudRate)}
-          disabled={state.busy}
-        >
-          {chip === null ? 'Select port and detect' : 'Select a different port'}
-        </button>
-      </p>
-      <PortHelp open={portHelpOpen} onToggle={setPortHelpOpen} />
+      <FlashDetectSection
+        baudRate={form.baudRate}
+        busy={state.busy}
+        chip={chip}
+        predicted={predicted}
+        candidates={candidates}
+        board={board}
+        portHelpOpen={portHelpOpen}
+        preflight={preflight}
+        fleetNow={fleet?.now}
+        showPreflight={fleet !== undefined && state.phase !== 'done'}
+        onChangeBaud={(rate) => set('baudRate', rate)}
+        onConnect={() => void state.connect(form.baudRate)}
+        onTogglePortHelp={setPortHelpOpen}
+        onSelectBoard={setBoard}
+      />
 
-      {chip !== null && (
-        <>
-          <dl data-testid="chip-info">
-            <dt>Chip</dt>
-            <dd>{chip.description}</dd>
-            <dt>MAC</dt>
-            <dd>{chip.macAddress ?? 'unavailable'}</dd>
-            <dt>Flash</dt>
-            <dd>{formatBytes(chip.flashSizeBytes)}</dd>
-            <dt>Features</dt>
-            <dd>{chip.features.join(', ') || '—'}</dd>
-            <dt>Device ID</dt>
-            <dd>
-              {predicted === null ? 'unknown' : <code>{predicted}</code>}{' '}
-              <span className="muted">(predicted — the board reads its own eFuse MAC at boot)</span>
-            </dd>
-          </dl>
+      <FlashConfigForm
+        apiBase={apiBase}
+        form={form}
+        readsNets={readsNets}
+        install={install}
+        onSetField={set}
+        onSetNetwork={setNetwork}
+        onAddNetwork={addNetwork}
+        onRemoveNetwork={removeNetwork}
+      />
 
-          <fieldset>
-            <legend>Which board is this?</legend>
-            <p className="muted">
-              Detection is chip-level. This picks nothing on the server — it is a label for you.
-            </p>
-            {candidates.map((candidate) => (
-              <label key={candidate.id} className="choice">
-                <input
-                  type="radio"
-                  name="board"
-                  value={candidate.id}
-                  checked={board === candidate.id}
-                  onChange={() => setBoard(candidate.id)}
-                />{' '}
-                {candidate.label}
-              </label>
-            ))}
-            <label className="choice">
-              <input
-                type="radio"
-                name="board"
-                value={OTHER_BOARD_ID}
-                checked={board === OTHER_BOARD_ID}
-                onChange={() => setBoard(OTHER_BOARD_ID)}
-              />{' '}
-              Other — enter manually
-            </label>
-          </fieldset>
-          {preflight !== null && fleet !== undefined && state.phase !== 'done' && (
-            <PreflightCard preflight={preflight} now={fleet.now} />
-          )}
-        </>
-      )}
+      <FlashActionSection
+        state={state}
+        chip={chip}
+        manifest={manifest}
+        configError={configError}
+        preflight={preflight}
+        groups={groups}
+        selectedGroupId={selectedGroupId}
+        batchPrefix={batchPrefix}
+        formattedBatchSeq={formattedBatchSeq}
+        suggestedBatchName={suggestedBatchName}
+        retryAction={retryAction}
+        onSelectGroup={setSelectedGroupId}
+        onChangeBatchPrefix={setBatchPrefix}
+        onFlash={() => void state.flash({ config, baudRate: form.baudRate, groupId })}
+        onFlashAnother={() => {
+          if (trimmedBatchPrefix !== '') {
+            setBatchSeq((n) => (n < 99 ? n + 1 : 1))
+          }
+          state.reset()
+        }}
+        onGoToFleet={onGoToFleet}
+      />
 
-      <h3>2 · What to bake in</h3>
-      <dl>
-        <dt>Server</dt>
-        <dd>
-          <code>{apiBase}</code>{' '}
-          <span className="muted">(this page&apos;s origin — the board must reach it)</span>
-        </dd>
-      </dl>
-      <p>
-        <label>
-          Broker URI{' '}
-          <input
-            type="text"
-            value={form.mqttUri}
-            onChange={(event) => set('mqttUri', event.target.value)}
-            size={32}
-          />
-        </label>{' '}
-        <span className="muted">mqtts:// selects TLS on the device</span>
-      </p>
-
-      <fieldset>
-        <legend>Network</legend>
-        <label className="choice">
-          <input
-            type="radio"
-            name="link"
-            value="wifi"
-            checked={form.link === 'wifi'}
-            onChange={() => set('link', 'wifi')}
-          />{' '}
-          Wi-Fi
-        </label>
-        <label className="choice">
-          <input
-            type="radio"
-            name="link"
-            value="ethernet"
-            checked={form.link === 'ethernet'}
-            onChange={() => set('link', 'ethernet')}
-          />{' '}
-          Ethernet
-        </label>
-        {wifi && (
-          <>
-            <p className="muted">
-              Network 1 is tried first. The board joins the first network on this list it can
-              see and stays on it until the link drops. At most {MAX_NETWORKS}.
-            </p>
-            {form.networks.map((row, index) => (
-              // One `<form>` per network, so the browser's password manager pairs each SSID
-              // (username) with its own passphrase. Submitting does nothing — Enter in a
-              // field must not flash, reload or navigate.
-              <form
-                key={row.key}
-                className="network-row"
-                onSubmit={(event) => event.preventDefault()}
-                noValidate
-              >
-                <fieldset>
-                  <legend>Network {index + 1}</legend>
-                  <label>
-                    SSID{' '}
-                    <input
-                      type="text"
-                      name="ssid"
-                      value={row.ssid}
-                      onChange={(event) => setNetwork(index, { ssid: event.target.value })}
-                      autoComplete="username"
-                      autoCapitalize="none"
-                      autoCorrect="off"
-                      spellCheck={false}
-                    />
-                  </label>{' '}
-                  <label>
-                    Passphrase{' '}
-                    <input
-                      type="password"
-                      name="psk"
-                      value={row.psk}
-                      onChange={(event) => setNetwork(index, { psk: event.target.value })}
-                      autoComplete="current-password"
-                    />
-                  </label>
-                  {index > 0 && (
-                    <>
-                      {' '}
-                      <button
-                        type="button"
-                        aria-label={`Remove network ${index + 1}`}
-                        onClick={() => removeNetwork(index)}
-                      >
-                        Remove
-                      </button>
-                    </>
-                  )}
-                </fieldset>
-              </form>
-            ))}
-            <p>
-              <button
-                type="button"
-                onClick={addNetwork}
-                disabled={form.networks.length >= MAX_NETWORKS}
-              >
-                Add another network
-              </button>{' '}
-              {form.networks.length >= MAX_NETWORKS && (
-                <span className="muted">A board knows at most {MAX_NETWORKS} networks.</span>
-              )}
-            </p>
-            <p className="muted" data-testid="password-manager-hint">
-              Your browser&apos;s password manager can fill these in. Check it filled the Wi-Fi
-              passphrase, not your dashboard password.
-            </p>
-            {form.networks.length > 1 && readsNets === false && install !== null && (
-              <p className="warn" data-testid="old-agent-warning">
-                This board gets agent {install.agentVersion}, which joins only network 1. Networks
-                2-{form.networks.length} need agent {NETS_MIN_AGENT} or later.
-              </p>
-            )}
-          </>
-        )}
-      </fieldset>
-
-      <fieldset>
-        <legend>Reporting</legend>
-        <p>
-          <label>
-            Heartbeat seconds{' '}
-            <input
-              type="number"
-              min={1}
-              value={form.hbS}
-              placeholder="firmware default"
-              onChange={(event) => set('hbS', event.target.value)}
-            />
-          </label>
-        </p>
-        <label className="choice">
-          <input
-            type="radio"
-            name="power"
-            value="always_on"
-            checked={form.power === 'always_on'}
-            onChange={() => set('power', 'always_on')}
-          />{' '}
-          Always on
-        </label>
-        <label className="choice">
-          <input
-            type="radio"
-            name="power"
-            value="sleepy"
-            checked={form.power === 'sleepy'}
-            onChange={() => set('power', 'sleepy')}
-          />{' '}
-          Sleepy
-        </label>
-        {form.power === 'sleepy' && (
-          <p>
-            <label>
-              Wake interval seconds{' '}
-              <input
-                type="number"
-                min={1}
-                value={form.wakeS}
-                onChange={(event) => set('wakeS', event.target.value)}
-              />
-            </label>{' '}
-            <span className="muted">presence is 2.5 x this</span>
-          </p>
-        )}
-      </fieldset>
-
-      <h3>3 · Flash</h3>
-      <p className="muted">
-        Every flash mints a fresh single-use token. The board notices the new token on its first
-        boot, clears the broker credential it was holding and enrols again — so a board that has
-        already been enrolled re-registers without erasing its cached radio calibration.
-      </p>
-      {configError !== null && (
-        <p className="bad" role="alert" data-testid="config-error">
-          {configError}
-        </p>
-      )}
-      {groups && groups.length > 0 && (
-        <p>
-          <label>
-            Group{' '}
-            <select
-              value={selectedGroupId}
-              onChange={(event) => setSelectedGroupId(event.target.value)}
-              disabled={state.busy}
-            >
-              <option value="">Ungrouped</option>
-              {groups.map((g) => (
-                <option key={g.id} value={g.id}>
-                  {g.name}
-                </option>
-              ))}
-            </select>
-          </label>
-        </p>
-      )}
-      <p>
-        <label>
-          Auto-increment name prefix (batch mode){' '}
-          <input
-            type="text"
-            data-testid="batch-name-prefix"
-            placeholder="e.g. gh-node-"
-            value={batchPrefix}
-            onChange={(event) => setBatchPrefix(event.target.value)}
-            disabled={state.busy}
-          />
-        </label>
-        {suggestedBatchName !== null && (
-          <>
-            {' '}
-            <span className="muted" data-testid="batch-next-name">
-              Counter <code>#{formattedBatchSeq}</code> · Next board name:{' '}
-              <code>{suggestedBatchName}</code>
-            </span>
-          </>
-        )}
-      </p>
-      <p>
-        <button
-          type="button"
-          onClick={() => void state.flash({ config, baudRate: form.baudRate, groupId })}
-          // `manifest === null` disables it too: since S0-infra-6 the agent images come
-          // from the object store, so "no manifest" is a real running state (store down,
-          // nothing published). Without this the operator presses Flash, the board is put
-          // into bootloader mode, and the failure only surfaces at part 1 of 4.
-          disabled={state.busy || chip === null || configError !== null || manifest === null}
-        >
-          {preflight?.kind === 'known' ? 'Re-flash and re-enrol this board' : 'Flash this board'}
-        </button>
-      </p>
-
-      {/* R2b-fe-3. A failure thrown by the write itself gets the card: the plain cause,
-          what to try first, one action, and the raw text as details. Every failure before
-          the write (manifest, download, refusals, connect) keeps this paragraph as it was. */}
-      {failure !== null ? (
-        <ResultCard flashFailure={failure} details={state.error} action={retryAction} />
-      ) : (
-        state.error !== null && (
-          <p className="bad" role="alert">
-            {state.error}
-          </p>
-        )
-      )}
-
-      {state.step !== '' && (
-        <p aria-live="polite" data-testid="flash-step">
-          {state.step}
-        </p>
-      )}
-
-      {state.progress !== null && (
-        <p data-testid="flash-progress">
-          {state.progress.label} — part {state.progress.partIndex + 1} of {state.progress.partCount}
-          <progress value={state.progress.written} max={state.progress.total || 1} />
-        </p>
-      )}
-
-      {state.phase === 'done' && (
-        <section className="issued" aria-labelledby="flashed-heading">
-          <h3 id="flashed-heading">Flashed</h3>
-          <p>
-            The board is rebooting
-            {state.flashedDeviceId === null ? (
-              '.'
-            ) : (
-              <>
-                {' '}
-                as <code>{state.flashedDeviceId}</code>.
-              </>
-            )}{' '}
-            Watch it come up below — the console opens by itself, resets the board once so the log
-            starts at the top, and names the cause if it stops short of the fleet.
-          </p>
-          {suggestedBatchName !== null && (
-            <p className="muted" data-testid="batch-flashed-name">
-              Batch name queued: <code>{suggestedBatchName}</code>
-            </p>
-          )}
-          <p>
-            <button
-              type="button"
-              onClick={() => {
-                if (trimmedBatchPrefix !== '') {
-                  setBatchSeq((n) => (n < 99 ? n + 1 : 1))
-                }
-                state.reset()
-              }}
-            >
-              Flash another board
-            </button>
-            {onGoToFleet && (
-              <>
-                {' '}
-                <button type="button" onClick={onGoToFleet}>
-                  View board in Fleet &gt;
-                </button>
-              </>
-            )}
-          </p>
-        </section>
-      )}
-
-      {state.log.length > 0 && (
-        <details data-testid="flash-log">
-          <summary>esptool output ({state.log.length} lines)</summary>
-          <pre className="log">{state.log.join('\n')}</pre>
-        </details>
-      )}
-
-      {/* Below the flash log, and outside it: the console is useful on a board that was
-          flashed last week, not only on one flashed in this tab. `autoWatch` is what makes
-          the just-flashed case need no click at all. */}
       <BoardConsolePanel
         autoWatch={state.phase === 'done'}
         createConsole={createConsole}
         diagnostics={diagnostics}
         result={resultContext}
         hideResult={failure !== null}
-        // R2b-fe-6. Naming needs the fleet's row, so it exists only with a fleet. A plain
-        // literal, as with `resultContext`: nothing downstream depends on its identity.
         naming={
           fleet === undefined
             ? undefined
             : { onSessionExpired, onSaved: fleet.refresh ?? (() => {}) }
         }
-        // No button when the form could not produce a valid blob — re-flashing the same
-        // invalid config is a button that cannot work.
         onReflash={configError === null ? recoverByReflash : undefined}
         reflashBlockedReason={
           configError === null

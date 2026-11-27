@@ -1,11 +1,5 @@
-// What these tests defend (R2b-fe-9):
-//
-// 1. The six milestones come from the recorded steps, a later one implies the earlier
-//    ones ("not reported", never pending), and offsets are server-time deltas.
-// 2. Deadline and stall sentences appear only for the states and past the thresholds
-//    the board's own rules define — exact text, because the wording is the feature.
-// 3. `awaiting_safe_window` never gets a deadline or a stall, however long it waits.
-// 4. Nothing renders `%`, `null`, `undefined` or `NaN`, and no elapsed time is negative.
+// @vitest-environment node
+// Deploy timeline milestones, implied steps, and board-side stall deadlines (R2b-fe-9).
 
 import { describe, expect, it } from 'vitest'
 import { type DeployStep, type DeploySummary } from './api'
@@ -157,7 +151,7 @@ describe('deployTimeline — milestones', () => {
 
   it('falls back to the summary row when the API sends no steps', () => {
     const d = deploy([step('downloading', 12)])
-    delete d.steps
+    delete (d as Partial<DeploySummary>).steps
     const t = timeline(d)
     expect(t.items[1]).toEqual({ key: 'downloading', label: 'downloading', status: 'current', offset: '+0 s' })
     expect(t.items[0].status).toBe('implied')

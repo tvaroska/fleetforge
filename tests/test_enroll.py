@@ -27,11 +27,10 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import asyncpg
-import httpx
 import pytest
 from fastapi import FastAPI
-from sqlalchemy import select, text
-from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from fleetforge.api.deps import get_broker_provisioner
 from fleetforge.auth.enrollment import EnrollmentTokenStatus, token_status
@@ -39,7 +38,7 @@ from fleetforge.auth.ratelimit import FixedWindowLimiter
 from fleetforge.broker import BrokerProvisioningError
 from fleetforge.clock import now_utc
 from fleetforge.db.base import asyncpg_dsn
-from fleetforge.db.models import Device, DeviceGroup, EnrollmentToken
+from fleetforge.db.models import DeviceGroup
 from fleetforge.events import EVENTS_CHANNEL, DeviceEvent, EventType
 from tests.conftest import (
     TEST_DB_NAME,
@@ -48,30 +47,19 @@ from tests.conftest import (
     database_url_for,
     login_admin,
 )
-
-BASE_URL = "https://testserver"
-
-
-class RecordingProvisioner:
-    """A `BrokerProvisioner` that remembers what it was asked to provision."""
-
-    def __init__(self) -> None:
-        self.calls: list[tuple[str, str]] = []
-        self.removed: list[str] = []
-        self.result = True
-        self.error: Exception | None = None
-
-    async def ensure_client(self, device_id: str, password: str) -> bool:
-        self.calls.append((device_id, password))
-        if self.error is not None:
-            raise self.error
-        return self.result
-
-    async def remove_client(self, device_id: str) -> bool:
-        self.removed.append(device_id)
-        if self.error is not None:
-            raise self.error
-        return self.result
+from tests.doubles import RecordingProvisioner
+from tests.support_enroll import (
+    BASE_URL,
+    SHA,
+    count_devices,
+    enroll_body,
+    execute,
+    fetch_device,
+    fetch_token,
+    issue_token,
+    post_enroll,
+    sessionmaker_for,
+)
 
 
 @pytest.fixture
@@ -86,68 +74,7 @@ def enroll_app(admin_app: FastAPI, provisioner: RecordingProvisioner) -> FastAPI
     return admin_app
 
 
-def _sessionmaker(engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
-    return async_sessionmaker(engine, expire_on_commit=False)
-
-
-async def issue_token(app: FastAPI, **body: object) -> dict[str, Any]:
-    """Mint a token through the R0-be-2 endpoint — the way the field mints one."""
-    admin = await login_admin(app)
-    async with client_for(app, base_url=BASE_URL) as client:
-        client.headers["Authorization"] = f"Bearer {admin}"
-        response = await client.post("/v1/enrollment-tokens", json=body)
-    assert response.status_code == 201, response.text
-    payload: dict[str, Any] = response.json()
-    return payload
-
-
-def enroll_body(token: str, device_id: str, **overrides: object) -> dict[str, Any]:
-    """The flat body `spec/device-protocol.md` step 2 specifies."""
-    body: dict[str, Any] = {
-        "token": token,
-        "device_id": device_id,
-        "platform_type": "esp32c6",
-        "link_type": "wifi",
-        "power_class": "always_on",
-        "proto": 1,
-        "fw_version": "1.4.2",
-        "agent_version": "0.3.0",
-        "partition_layout": "ab-4m-v1",
-        "ota_slot_size": 1966080,
-        "capabilities": ["ota", "selftest"],
-    }
-    body.update(overrides)
-    return body
-
-
-async def post_enroll(app: FastAPI, body: dict[str, Any]) -> httpx.Response:
-    """No credential of any kind — the token in the body is the whole credential."""
-    async with client_for(app, base_url=BASE_URL) as client:
-        return await client.post("/v1/enroll", json=body)
-
-
-async def fetch_device(engine: AsyncEngine, device_id: str) -> Device | None:
-    async with _sessionmaker(engine)() as session:
-        return await session.get(Device, device_id)
-
-
-async def fetch_token(engine: AsyncEngine, token_id: str | uuid.UUID) -> EnrollmentToken:
-    async with _sessionmaker(engine)() as session:
-        row = await session.get(EnrollmentToken, uuid.UUID(str(token_id)))
-    assert row is not None
-    return row
-
-
-async def count_devices(engine: AsyncEngine, device_id: str) -> int:
-    async with _sessionmaker(engine)() as session:
-        rows = (await session.scalars(select(Device).where(Device.device_id == device_id))).all()
-    return len(rows)
-
-
-async def execute(engine: AsyncEngine, statement: str, **params: object) -> None:
-    async with _sessionmaker(engine)() as session:
-        await session.execute(text(statement), params)
-        await session.commit()
+_sessionmaker = sessionmaker_for
 
 
 # ---------------------------------------------------------------------------
@@ -498,9 +425,6 @@ async def test_a_malformed_network_is_stored_as_null_never_refused(
     assert token_status(row, now_utc()) is EnrollmentTokenStatus.USED
 
 
-SHA = "1fa67e6bbd034e434d04e9d6f4f52bbe899361602cd498573eb3bde97d1559ed"
-
-
 async def test_the_board_measurements_are_stored(enroll_app: FastAPI, engine: AsyncEngine) -> None:
     """The enroll body carries the same three measurements as the announce (R2b-be-6)."""
     device_id = "a4cf12b3de35"
@@ -729,9 +653,7 @@ async def test_an_ungrouped_token_does_not_ungroup_a_placed_device(
     assert device.group_id == group_id
 
 
-# ---------------------------------------------------------------------------
-# The broker seam
-# ---------------------------------------------------------------------------
+# The broker Port and Adapter
 
 
 async def test_broker_provisioned_at_is_stamped_only_when_something_was_provisioned(
@@ -875,9 +797,7 @@ async def test_enroll_is_versioned_and_documented(enroll_app: FastAPI) -> None:
     assert all(path.startswith("/v1") for path in schema["paths"])
 
 
-# ---------------------------------------------------------------------------
-# The SSE seam
-# ---------------------------------------------------------------------------
+# The SSE fan-out boundary
 
 
 @pytest.fixture

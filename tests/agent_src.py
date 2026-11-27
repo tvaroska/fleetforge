@@ -245,3 +245,66 @@ def find_c_function(fn_name: str) -> tuple[Path, str]:
         names = ", ".join(p.name for p, _ in matches)
         raise ValueError(f"C function {fn_name!r} defined in multiple files: {names}")
     return matches[0]
+
+
+def component_c_family(prefix: str) -> list[Path]:
+    """Return sorted `.c` files under `COMPONENT_SRC` matching `<prefix>*.c` (e.g. `ff_mqtt`)."""
+    paths = sorted(COMPONENT_SRC.glob(f"{prefix}*.c"))
+    assert paths, f"no component C sources matching {prefix}*.c"
+    return paths
+
+
+def read_c_family(prefix: str) -> str:
+    """Concatenate all `<prefix>*.c` files in `COMPONENT_SRC` in deterministic filename order."""
+    return "\n".join(p.read_text(encoding="utf-8") for p in component_c_family(prefix))
+
+
+def c_code(target: Path | str) -> str:
+    """Return comment/literal-stripped C source for a `Path` or a `COMPONENT_SRC` family prefix."""
+    raw = target.read_text(encoding="utf-8") if isinstance(target, Path) else read_c_family(target)
+    return strip_c_comments_and_literals(raw)
+
+
+def c_function_body(source_or_fn: Path | str, fn_name: str | None = None) -> str:
+    """Return comment/literal-stripped inner body of `fn_name`.
+
+    Accepts either:
+    - `c_function_body("on_stage")` -> searches all `agent_sources()` via `find_c_function`.
+    - `c_function_body(path_or_raw_c_or_prefix, "on_stage")` -> searches `source_or_fn` first, and
+      when `source_or_fn` is a `COMPONENT_SRC` `.c` file (e.g. `FF_OTA_C` after splitting into
+      `ff_ota_*.c`), falls back to `find_c_function(fn_name)` across `agent_sources()`.
+    """
+    if fn_name is None:
+        assert isinstance(source_or_fn, str)
+        _, full_def = find_c_function(source_or_fn)
+        funcs = c_functions(full_def)
+        assert source_or_fn in funcs, f"failed parsing {source_or_fn}"
+        return funcs[source_or_fn]
+
+    if isinstance(source_or_fn, Path):
+        funcs = c_functions(source_or_fn.read_text(encoding="utf-8"))
+        if fn_name in funcs:
+            return funcs[fn_name]
+        if source_or_fn.parent == COMPONENT_SRC and source_or_fn.suffix == ".c":
+            _, full_def = find_c_function(fn_name)
+            return c_functions(full_def)[fn_name]
+        raise KeyError(f"{fn_name!r} not found in {source_or_fn.name}")
+
+    # `source_or_fn` may be raw C source text or a family prefix like `"ff_ota"`.
+    if "\n" not in source_or_fn and list(COMPONENT_SRC.glob(f"{source_or_fn}*.c")):
+        raw = read_c_family(source_or_fn)
+    else:
+        raw = source_or_fn
+    funcs = c_functions(raw)
+    if fn_name in funcs:
+        return funcs[fn_name]
+    _, full_def = find_c_function(fn_name)
+    return c_functions(full_def)[fn_name]
+
+
+def c_call_sites_in_family(prefix: str, fn_name: str) -> list[str]:
+    """Return sorted enclosing C function names calling `fn_name` across `<prefix>*.c`."""
+    sites: list[str] = []
+    for path in component_c_family(prefix):
+        sites.extend(c_call_sites(path.read_text(encoding="utf-8"), fn_name))
+    return sorted(sites)

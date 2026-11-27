@@ -1,10 +1,10 @@
+// @vitest-environment node
 // What these tests defend (R5-fe-1):
-//
-// 1. A verb is offered only to a board that announces it, and only on the transaction
-//    states where it means something. A legacy `['ota']` board is offered nothing.
-// 2. Cancel is never offered on a rollback wait, nor before the board has the command.
-// 3. The last-command line never expires a missing answer, renders device words as text
-//    (prototype keys included) and never prints `null` / `undefined` / `NaN`.
+// - A verb is offered only to a board that announces it, and only on the transaction
+//   states where it means something. A legacy `['ota']` board is offered nothing.
+// - Cancel is never offered on a rollback wait, nor before the board has the command.
+// - The last-command line never expires a missing answer, renders device words as text
+//   (prototype keys included) and never prints `null` / `undefined` / `NaN`.
 
 import { describe, expect, it } from 'vitest'
 import { type CommandSummary, type DeploySummary, type DeviceSummary } from './api'
@@ -23,6 +23,8 @@ function deploy(overrides: Partial<DeploySummary> = {}): DeploySummary {
     from_version: '1.4.2',
     pct: null,
     detail: null,
+    steps: [],
+    confirm_timeout_s: 300,
     ...overrides,
   }
 }

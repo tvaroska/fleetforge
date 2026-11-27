@@ -85,6 +85,7 @@ from fleetforge.simulator.device import (
     up_topic,
 )
 from fleetforge.simulator.state import Credential
+from tests.agent_src import read_c_family
 from tests.conftest import (
     FakeCommandPublisher,
     MemoryObjectStore,
@@ -92,11 +93,11 @@ from tests.conftest import (
     login_admin,
     settings_for_tests,
 )
+from tests.doubles import FakeClient, FakeMessage, transcript
 from tests.fixtures.dev_signing_keys import (
     DEFAULT_PRIMARY_PRIVATE_KEY_PEM,
     DEFAULT_SECONDARY_PRIVATE_KEY_PEM,
 )
-from tests.test_simulator import FakeClient, FakeMessage, transcript
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 FF_OTA_H = REPO_ROOT / "agent" / "components" / "fleetforge" / "src" / "ff_ota.h"
@@ -122,7 +123,7 @@ class TestSigningAndKeyRotationPure:
         assert DEFAULT_PRIMARY_PUBLIC_KEY_PEM != DEFAULT_SECONDARY_PUBLIC_KEY_PEM
         assert DEFAULT_SIGNING_PUBKEY_RING == DEFAULT_PUBLIC_KEY_RING
 
-        ota_c = FF_OTA_C.read_text(encoding="utf-8")
+        ota_c = read_c_family("ff_ota")
         # Both public keys in the rotation ring must match the C agent's compiled-in ring.
         for pub_pem in DEFAULT_PUBLIC_KEY_RING:
             body_lines = [
@@ -238,7 +239,8 @@ class TestSigningAndKeyRotationPure:
 
 class TestCFirmwareSecurityAndRangeResumeTripwires:
     def test_ff_mqtt_validates_artifact_sig_before_starting_ota(self) -> None:
-        mqtt_c = FF_MQTT_C.read_text(encoding="utf-8")
+        assert FF_MQTT_C.is_file()
+        mqtt_c = read_c_family("ff_mqtt")
         ota_h = FF_OTA_H.read_text(encoding="utf-8")
 
         assert "FF_OTA_MAX_SIG" in ota_h
@@ -249,7 +251,8 @@ class TestCFirmwareSecurityAndRangeResumeTripwires:
         assert mqtt_c.index('"artifact sig malformed"') < mqtt_c.index("ff_ota_start(&cmd)")
 
     def test_ff_ota_verifies_ecdsa_signature_across_key_ring_before_finish(self) -> None:
-        ota_c = FF_OTA_C.read_text(encoding="utf-8")
+        assert FF_OTA_C.is_file()
+        ota_c = read_c_family("ff_ota")
 
         assert "s_signing_pubkey_ring" in ota_c
         assert "verify_artifact_signature" in ota_c
@@ -263,7 +266,7 @@ class TestCFirmwareSecurityAndRangeResumeTripwires:
         )
 
     def test_ff_ota_uses_partial_http_range_download_and_resume_backoff(self) -> None:
-        ota_c = FF_OTA_C.read_text(encoding="utf-8")
+        ota_c = read_c_family("ff_ota")
 
         # D-2 / D-22: `.partial_http_download = true` sends a HEAD pre-request that GET-presigned
         # S3/GCS URLs refuse with 403; initial download stays a standard GET and resume uses an
@@ -1179,11 +1182,13 @@ def test_production_ring_rejects_both_committed_dev_keys(tmp_path: Path) -> None
         public_keys=f"{custom_pub_a};{custom_pub_b}"
     ).uses_dev_keys
 
+    import importlib
+
     tools_dir = str(REPO_ROOT / "agent" / "tools")
     if tools_dir not in sys.path:
         sys.path.insert(0, tools_dir)
-    import make_manifest
-    import verify_bundle
+    make_manifest: Any = importlib.import_module("make_manifest")
+    verify_bundle: Any = importlib.import_module("verify_bundle")
 
     for slot_idx, dev_pub_pem in enumerate(DEFAULT_PUBLIC_KEY_RING):
         bdir = tmp_path / f"bundle-slot-{slot_idx}"

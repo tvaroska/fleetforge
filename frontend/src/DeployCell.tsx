@@ -38,7 +38,7 @@
 // have changed since the failure and the pre-check is where that is said. Disabled while a
 // check or send is in flight.
 //
-// R5-fe-1 adds the command seam. A board that announces `apply` gets a "Hold at staged"
+// R5-fe-1 adds the command port contract. A board that announces `apply` gets a "Hold at staged"
 // box in the pre-check card (default off): ticked, Send posts `apply: "on_command"` and the
 // board stops at `staged` until the operator clicks Apply. `CommandControls` (its own file,
 // it ACTS too) renders the board's answer to the newest verb (`device.last_command`) and
@@ -92,7 +92,7 @@ function acceptedMessage(accepted: DeployAccepted): string {
 
 function LiveState({ device, now }: { device: DeviceSummary; now: number }) {
   const deploy = device.deploy
-  if (deploy === null) return null
+  if (deploy == null) return null
 
   const outcome = deployOutcome(deploy, device.fw_version)
 
@@ -289,7 +289,7 @@ export function DeployCell({
   const name = device.name ?? device.device_id
   // The hold box needs the board's own `apply` (the server refuses `on_command` otherwise).
   const holdAvailable = (device.capabilities ?? []).includes('apply')
-  const result = deployResult(device.deploy, device, versions, now)
+  const result = deployResult(device.deploy ?? null, device, versions, now)
   const resendVersion =
     result?.sendAgain != null && artifacts.some((a) => a.version === result.sendAgain)
       ? result.sendAgain
@@ -379,7 +379,7 @@ export function DeployCell({
         onSent={onDeployed}
         onSessionExpired={onSessionExpired}
       />
-      {device.deploy !== null && <DeployTimeline deploy={device.deploy} device={device} now={now} />}
+      {device.deploy != null && <DeployTimeline deploy={device.deploy} device={device} now={now} />}
     </td>
   )
 }

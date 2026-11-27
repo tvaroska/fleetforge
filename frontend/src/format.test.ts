@@ -1,13 +1,5 @@
-// What these tests defend:
-//
-// 1. `formatAgo` shows single seconds. A wider "just now" bucket would swallow a whole
-//    heartbeat interval (5 s in `spec/prd.md` and in the simulator), leaving the column
-//    frozen — and a frozen column is indistinguishable from a page that has stopped
-//    updating, which is the one thing the fleet view has to make obvious.
-// 2. A missing or unparseable timestamp degrades to something readable, never to
-//    "Invalid Date" or "NaN s ago".
-// 3. `formatDuration` (R2b-fe-9) floors, keeps its seconds in the minute form, and reads
-//    a negative or NaN duration as `0 s`.
+// @vitest-environment node
+// Relative-age and duration formatting tests.
 
 import { describe, expect, it } from 'vitest'
 import { formatAgo, formatBytes, formatDuration, formatWhen, safeHttpHref } from './format'

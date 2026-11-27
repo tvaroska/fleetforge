@@ -177,7 +177,7 @@ async def test_bearer_wins_over_cookie(admin_app: FastAPI) -> None:
     [
         "garbage",
         "ffa_not-a-uuid.secret",
-        f"ffa_{uuid.uuid4().hex}.{'x' * 43}",  # well-formed, unknown id
+        f"ffa_00000000000040008000000000000099.{'x' * 43}",  # well-formed, unknown id
     ],
 )
 async def test_unusable_credentials_401(admin_app: FastAPI, credential: str) -> None:

@@ -1,3 +1,4 @@
+// @vitest-environment node
 import { describe, expect, it } from 'vitest'
 import { BOARD_NAME_MAX, checkBoardName } from './boardName'
 

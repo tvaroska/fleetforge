@@ -40,9 +40,16 @@ from tests.agent_src import (
     COMPONENT_SRC,
     IDF_EXAMPLE_MAIN_C,
     MAIN_CMAKE,
+    read_c_family,
 )
-from tests.test_agent_fault_injection import _cmake_code
-from tests.test_ff_cfg import _code
+from tests.agent_test_helpers import (
+    HAZARDS,
+    MAKER_HEADERS,
+    _cmake_code,
+    _code,
+    _declared_functions,
+    _public_headers,
+)
 
 JUSTFILE = AGENT_DIR.parent / "justfile"
 
@@ -54,6 +61,8 @@ INTERNAL_HEADERS = tuple(
         "log",
         "mqtt",
         "net",
+        "net_wifi",
+        "ota",
         "safe_mode",
         "safe_window",
         "sec",
@@ -64,53 +73,6 @@ INTERNAL_HEADERS = tuple(
         "time",
     )
 )
-# The maker API (R4-fw-2, DECISIONS 2026-10-15): public headers for a firmware's own code.
-# The stock agent has no application and no honest reason to call them, so they are the
-# one exception to "include/ is what agent_main.c includes"; the examples prove them instead.
-# R5-fw-1 (ff_selftest.h), R5-fw-5 (ff_safe_window.h) and R5-fw-7 (ff_sleep.h) joined it;
-# R4-fw-3 (ff_log.h) and SEC-fw-1 (ff_sec.h) join this list.
-MAKER_HEADERS = (
-    "ff_log.h",
-    "ff_safe_window.h",
-    "ff_sec.h",
-    "ff_selftest.h",
-    "ff_sleep.h",
-    "ff_telemetry.h",
-)
-
-# The spellings that must never become public API. Each one is a way for a firmware built
-# on the component to report something that did not happen.
-HAZARDS = (
-    "ff_mqtt_publish_status",  # publish `confirmed` for an image that never confirmed
-    "ff_identity_note_rollback_capable",  # CLAIM rollback_capable (measured, never claimed)
-    "ff_identity_note_selftest",  # CLAIM the selftest capability (R5-fw-2)
-    "ff_identity_note_safe_window",  # CLAIM the safe_window capability (R5-fw-5)
-    "ff_store_save_rollback_capable",
-    "ff_identity_announce_json",  # the announce is the component's, not the firmware's
-    "ff_ota_start",  # the A/B apply path runs only from the session
-    "ff_txn_save",  # the record that crosses the apply reboot
-    "FF_STATUS_CONFIRMED",
-    "FF_PARTITION_LAYOUT",  # the three-way layout contract
-)
-
-
-def _public_headers() -> list[Path]:
-    headers = sorted(COMPONENT_INCLUDE.glob("*.h"))
-    assert headers, "the component has no public headers"
-    return headers
-
-
-def _declared_functions(header: Path) -> set[str]:
-    """`ff_*` names followed by `(` in a header, with comments and `#` lines removed: a
-    header here holds prototypes, types and macros, so what is left is the prototypes.
-    Function-pointer typedefs are removed too (R5-fw-1): in
-    `typedef ff_selftest_result_t (*ff_selftest_fn)(...);` the return type is followed by
-    `(`, and it is a type, not a function anyone could call."""
-    code = "\n".join(
-        line for line in _code(header).splitlines() if not line.lstrip().startswith("#")
-    )
-    code = re.sub(r"\btypedef\s+\w+\s*\(\s*\*\s*\w+\s*\)\s*\([^;]*\)\s*;", "", code)
-    return set(re.findall(r"\b(ff_[a-z0-9_]+)\s*\(", code))
 
 
 def _main_included_ff_headers() -> set[str]:
@@ -231,7 +193,7 @@ class TestTheComponentBuild:
             r"target_compile_definitions\(\$\{COMPONENT_LIB\} PRIVATE FF_ROLLBACK_TEST=1\)",
             cmake,
         )
-        assert "FF_ROLLBACK_TEST" in _code(COMPONENT_SRC / "ff_mqtt.c")
+        assert "FF_ROLLBACK_TEST" in _code(read_c_family("ff_mqtt"))
 
 
 class TestTheManifest:

@@ -36,7 +36,6 @@ from fleetforge.broker.dynsec import (
     SET_CLIENT_PASSWORD,
     DynsecProvisioner,
     DynsecResponse,
-    DynsecSession,
     create_client_command,
     delete_client_command,
     enable_client_command,
@@ -48,6 +47,7 @@ from fleetforge.broker.dynsec import (
     set_client_password_command,
 )
 from tests.conftest import capture_logs
+from tests.doubles import FakeDynsecSession
 
 DEVICE_ID = "a4cf12b3de90"
 PASSWORD = "s3cret-broker-password"  # noqa: S105 - a fixture value, not a credential
@@ -162,54 +162,6 @@ def test_is_already_exists() -> None:
     assert is_already_exists(ALREADY_EXISTS)
     assert is_already_exists("CLIENT ALREADY EXISTS")
     assert not is_already_exists("Invalid role name")
-
-
-# ---------------------------------------------------------------------------
-# The provisioners
-# ---------------------------------------------------------------------------
-
-
-class FakeDynsecSession:
-    """Records commands and answers them from a scripted list of replies."""
-
-    def __init__(
-        self,
-        replies: list[bytes | Exception],
-        *,
-        clear_fail_with: Exception | None = None,
-    ) -> None:
-        self.replies = list(replies)
-        self.commands: list[dict[str, Any]] = []
-        self.cleared_retained: list[tuple[str, str]] = []
-        self.clear_fail_with = clear_fail_with
-
-    async def command(
-        self, payload: dict[str, Any], *, expect: str, correlation: str
-    ) -> DynsecResponse:
-        self.commands.append(payload)
-        if not self.replies:
-            raise BrokerProvisioningError(f"dynsec connection closed while awaiting {expect}")
-        reply = self.replies.pop(0)
-        if isinstance(reply, Exception):
-            raise reply
-        # The broker echoes the correlation the caller generated.
-        body = json.loads(reply)
-        body["responses"][0]["correlationData"] = correlation
-        return parse_response(json.dumps(body).encode(), expect=expect, correlation=correlation)
-
-    async def clear_retained_up_topics(self, device_id: str, password: str) -> None:
-        if self.clear_fail_with is not None:
-            raise self.clear_fail_with
-        self.cleared_retained.append((device_id, password))
-
-    def __call__(self) -> "FakeDynsecSession":
-        return self
-
-    async def __aenter__(self) -> DynsecSession:
-        return self
-
-    async def __aexit__(self, *exc_info: object) -> None:
-        return None
 
 
 def _provisioner(session: FakeDynsecSession) -> DynsecProvisioner:

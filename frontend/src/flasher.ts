@@ -1,4 +1,5 @@
-// The seam between "what flashing a board means" and "esptool-js over Web Serial".
+// The Port, Adapter and Contract boundary between "what flashing a board means" and
+// "esptool-js over Web Serial".
 //
 // Same idiom and the same reason as `EventSourceFactory` in `fleet.ts`: jsdom has no
 // `navigator.serial` at all, so the engine has to take its flasher as an argument rather

@@ -34,6 +34,7 @@ from fleetforge.ingest.protocol import (
     decode,
     parse_up_topic,
 )
+from fleetforge.ingest.rate_budget import DeviceIngestRateLimiter
 from fleetforge.presence import is_online
 from fleetforge.selftest_outcome import selftest_outcome
 
@@ -225,6 +226,7 @@ async def handle_up_message(
     received_at: dt.datetime,
     tolerance: float,
     settings: Settings | None = None,
+    rate_limiter: DeviceIngestRateLimiter | None = None,
 ) -> DeviceEvent | None:
     """Ingest one `up/` message; return the event emitted, or `None` if it was dropped."""
     parsed = parse_up_topic(topic)
@@ -233,8 +235,14 @@ async def handle_up_message(
         return None
     if not payload:
         return None
+    if retained and parsed.channel in (UpChannel.LOG, UpChannel.TELEMETRY):
+        logger.debug("ignoring retained replay on %s", topic)
+        return None
 
     device_id = parsed.device_id
+    if rate_limiter is not None and not rate_limiter.allow(device_id, parsed.channel):
+        return None
+
     row, event_type, status, dropped_early = await _dispatch_primary_channel(
         session,
         channel=parsed.channel,

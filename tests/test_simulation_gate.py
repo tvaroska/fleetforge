@@ -15,6 +15,7 @@ Covers:
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import stat
@@ -34,13 +35,15 @@ from fleetforge.api.deps import (
 from fleetforge.clock import now_utc
 from fleetforge.db.models import DEFAULT_PROJECT_ID, Device
 from fleetforge.lib_marker import MAGIC
-from fleetforge.signing import generate_keypair, sign_digest
+from fleetforge.signing import DEFAULT_PUBLIC_KEY_RING, generate_keypair, sign_digest, verify_digest
 from fleetforge.sim_worker import run_once
 from fleetforge.simulation import (
     APP_SLOT_OFFSET,
     EspressifQemuSimRunner,
     SimStatus,
     create_sim_runner,
+    default_efuse_bytes,
+    parse_qemu_serial_verdict,
 )
 from tests.conftest import (
     FakeCommandPublisher,
@@ -49,7 +52,7 @@ from tests.conftest import (
     login_admin,
     settings_for_tests,
 )
-from tests.test_doubles import StubSimRunner
+from tests.doubles import StubSimRunner
 
 _PRIV_A, _PUB_A = generate_keypair()
 _PRIV_B, _PUB_B = generate_keypair()
@@ -249,18 +252,145 @@ async def test_qemu_timeout_and_silent_exit_are_failed(tmp_path: Path) -> None:
     assert flash[0x20000 : 0x20000 + len(VALID_APP_BIN)] == VALID_APP_BIN
 
 
+async def test_espressif_qemu_manifest_path_schema_and_efuse_command_parity(
+    tmp_path: Path,
+) -> None:
+    """Escape-analysis regression (`fake_drift` in `make_manifest.py` vs `EspressifQemuSimRunner`):
+    real bundles emit integer `offset` and `path` (not `file`), require ESP-IDF 5.5 eFuse/RAM/WDT
+    flags on QEMU CLI, and report standalone `ff_cfg` boot vs `FF_FAULT_TEST=` / `LoadProhibited`."""
+    esp32_efuse = default_efuse_bytes("esp32")
+    assert len(esp32_efuse) == 124
+    assert esp32_efuse[13] == 0x80 and esp32_efuse[22] == 0x10
+    s3_efuse = default_efuse_bytes("esp32s3")
+    assert len(s3_efuse) == 1024 and s3_efuse[38] == 0x0C
+
+    bundle = tmp_path / "real-manifest-bundle"
+    bundle.mkdir()
+    (bundle / "bootloader.bin").write_bytes(b"BLDR" * 4)
+    (bundle / "partition-table.bin").write_bytes(b"PTBL" * 4)
+    (bundle / "ota-data-initial.bin").write_bytes(b"OTAD" * 4)
+    (bundle / "manifest.json").write_text(
+        json.dumps(
+            {
+                "parts": [
+                    {"name": "bootloader", "offset": 0x1000, "path": "bootloader.bin"},
+                    {"name": "partition-table", "offset": 0x8000, "path": "partition-table.bin"},
+                    {"name": "ota-data", "offset": 0xF000, "path": "ota-data-initial.bin"},
+                    {"name": "app", "offset": 0x20000, "path": "app.bin"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    flash = EspressifQemuSimRunner.build_flash_image(
+        VALID_APP_BIN,
+        partition_layout="ab-4m-v1",
+        boot_bundle_dir=bundle,
+    )
+    assert flash[0x1000:0x1010] == b"BLDR" * 4
+    assert flash[0x8000:0x8010] == b"PTBL" * 4
+    assert flash[0xF000:0xF010] == b"OTAD" * 4
+    assert flash[0x20000 : 0x20000 + len(VALID_APP_BIN)] == VALID_APP_BIN
+
+    fake_qemu = tmp_path / "fake-qemu-efuse"
+    fake_qemu.write_text(
+        "#!/usr/bin/env python3\n"
+        "import sys\n"
+        "argv = ' '.join(sys.argv[1:])\n"
+        "assert '-m 4M' in argv, argv\n"
+        "assert 'driver=nvram.esp32.efuse,property=drive,value=efuse' in argv, argv\n"
+        "assert 'driver=timer.esp32.timg,property=wdt_disable,value=true' in argv, argv\n"
+        "ef_arg = [a for a in sys.argv if a.endswith(',id=efuse')][0]\n"
+        "ef_path = ef_arg.split(',', 1)[0].split('=', 1)[1]\n"
+        "ef = open(ef_path, 'rb').read()\n"
+        "assert len(ef) == 124 and ef[13] == 0x80 and ef[22] == 0x10\n"
+        "print('I (312) ff_cfg: no usable ff_cfg partition', flush=True)\n",
+        encoding="utf-8",
+    )
+    os.chmod(fake_qemu, stat.S_IRWXU)
+    runner = EspressifQemuSimRunner(
+        timeout_s=5.0,
+        qemu_bin_override=str(fake_qemu),
+        boot_bundle_dir=bundle,
+    )
+    passed = await runner.simulate(
+        sha256=hashlib.sha256(VALID_APP_BIN).hexdigest(),
+        target="esp32",
+        image=VALID_APP_BIN,
+        partition_layout="ab-4m-v1",
+    )
+    assert passed.status == SimStatus.PASSED
+    assert "no usable ff_cfg partition" in passed.detail
+
+    broken_bundle = tmp_path / "broken-bundle"
+    broken_bundle.mkdir()
+    (broken_bundle / "manifest.json").write_text(
+        json.dumps({"parts": [{"name": "bootloader", "offset": 0x1000}]}),
+        encoding="utf-8",
+    )
+    broken_runner = EspressifQemuSimRunner(
+        timeout_s=5.0,
+        qemu_bin_override=str(fake_qemu),
+        boot_bundle_dir=broken_bundle,
+    )
+    broken = await broken_runner.simulate(
+        sha256=hashlib.sha256(VALID_APP_BIN).hexdigest(),
+        target="esp32",
+        image=VALID_APP_BIN,
+        partition_layout="ab-4m-v1",
+    )
+    assert broken.status == SimStatus.FAILED
+    assert "missing path" in broken.detail
+
+    assert parse_qemu_serial_verdict("W (410) ff-agent: FF_FAULT_TEST=bootloop") == (
+        SimStatus.FAILED,
+        "QEMU serial fault: W (410) ff-agent: FF_FAULT_TEST=bootloop",
+    )
+    assert parse_qemu_serial_verdict("Core 0 panic (LoadProhibited)") == (
+        SimStatus.FAILED,
+        "QEMU serial fault: Core 0 panic (LoadProhibited)",
+    )
+    assert parse_qemu_serial_verdict("I (310) ff_cfg: ff_cfg v1 loaded") == (
+        SimStatus.PASSED,
+        "QEMU booted cleanly and confirmed R5 self-test (ff_cfg v1 loaded)",
+    )
+
+
 async def test_real_qemu_boots_the_agent_bundle() -> None:
-    """A-27: opt-in real Espressif QEMU boot test against a built agent bundle."""
+    """A-27 & D-23: opt-in real Espressif QEMU boot test verifying bundle integrity & ECDSA signature."""
     if os.environ.get("FF_RUN_REAL_QEMU_TESTS") != "1":
         pytest.skip("real QEMU boot test is opt-in via FF_RUN_REAL_QEMU_TESTS=1")
     bundle_dir = Path(__file__).resolve().parents[1] / "agent" / "dist" / "esp32"
-    app_bin = bundle_dir / "fleetforge-agent.bin"
+    app_bin = bundle_dir / "app.bin"
+    if not app_bin.is_file():
+        app_bin = bundle_dir / "fleetforge-agent.bin"
     if not app_bin.is_file():
         pytest.fail(f"FF_RUN_REAL_QEMU_TESTS=1 set but {app_bin} is missing")
     raw = app_bin.read_bytes()
+    assert raw[:1] == b"\xe9"
+    sha256_hex = hashlib.sha256(raw).hexdigest()
+
+    manifest_path = bundle_dir / "manifest.json"
+    if manifest_path.is_file():
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        for part in manifest.get("parts", []):
+            if isinstance(part, dict) and part.get("name") == "app":
+                part_rel = part.get("path") or part.get("file") or app_bin.name
+                part_file = bundle_dir / str(part_rel)
+                assert part_file.read_bytes() == raw
+                if "sha256" in part:
+                    assert part["sha256"] == sha256_hex
+        if isinstance(manifest.get("sig"), str) and manifest["sig"]:
+            assert verify_digest(sha256_hex, manifest["sig"], DEFAULT_PUBLIC_KEY_RING)
+
+    detached_sig = sign_digest(sha256_hex, _PRIV_A)
+    assert verify_digest(sha256_hex, detached_sig, (_PUB_A, _PUB_B))
+    tampered_sha = hashlib.sha256(raw + b"\x00").hexdigest()
+    assert not verify_digest(tampered_sha, detached_sig, (_PUB_A, _PUB_B))
+
     runner = EspressifQemuSimRunner(timeout_s=30.0, boot_bundle_dir=bundle_dir)
     res = await runner.simulate(
-        sha256=hashlib.sha256(raw).hexdigest(),
+        sha256=sha256_hex,
         target="esp32",
         image=raw,
         partition_layout="ab-4m-v1",

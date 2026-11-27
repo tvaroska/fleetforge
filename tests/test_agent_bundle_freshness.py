@@ -6,6 +6,7 @@ bytes. Importing via importlib.util because agent/ is not a package and must not
 
 import importlib.util
 import json
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -41,17 +42,14 @@ def _write_manifest(bundle_dir: Path, source_commit: str, built_at: str, target:
     (bundle_dir / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 
 
-@pytest.fixture
-def git_repo(tmp_path: Path) -> Path:
-    """Create a throwaway git repo with agent/ sources."""
-    repo = tmp_path / "repo"
+@pytest.fixture(scope="session")
+def _template_git_repo(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Create one template git repository per session to avoid 11 `git init` subprocesses."""
+    repo = tmp_path_factory.mktemp("agent_bundle_template") / "repo"
     repo.mkdir()
-
-    # Initialize repo
     _git(repo, "init", skip_config=True)
     _git(repo, "config", "init.defaultBranch", "main")
 
-    # Create agent/ structure
     agent_dir = repo / "agent"
     agent_main = agent_dir / "main"
     agent_main.mkdir(parents=True)
@@ -61,10 +59,16 @@ def git_repo(tmp_path: Path) -> Path:
     agent_dist.mkdir()
     (agent_dist / ".gitkeep").write_text("")
 
-    # Initial commit
     _git(repo, "add", ".")
     _git(repo, "commit", "-m", "initial commit")
+    return repo
 
+
+@pytest.fixture
+def git_repo(tmp_path: Path, _template_git_repo: Path) -> Path:
+    """Copy the pre-initialized template git repo into `tmp_path`."""
+    repo = tmp_path / "repo"
+    shutil.copytree(_template_git_repo, repo)
     return repo
 
 

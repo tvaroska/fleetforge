@@ -1,13 +1,10 @@
-"""Content-addressed artifact, version label, build cache, and partition profile ORM models.
-
-Extracted from `fleetforge.db.models` (`A-11`) and re-exported there so `Base.metadata`
-and existing imports remain unchanged while keeping each schema module well below 800 lines.
-"""
+"""Content-addressed artifact, version label, delta patch, and build pipeline ORM models (`A-11`)."""
 
 from __future__ import annotations
 
 import datetime as dt
 import uuid
+from enum import StrEnum
 from typing import Any
 
 from sqlalchemy import (
@@ -17,21 +14,38 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Text,
-    UniqueConstraint,
     Uuid,
     text,
 )
-from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
 from fleetforge.db.base import Base
+from fleetforge.db.models_core import _DEFAULT_PROJECT_UUID_SQL, TimestampTZ
 
-TimestampTZ = TIMESTAMP(timezone=True)
-_DEFAULT_PROJECT_UUID_SQL = text("'00000000-0000-4000-8000-000000000001'::uuid")
+
+class ArtifactKind(StrEnum):
+    """Advisory classification of stored blobs (`artifacts.kind` is plain `TEXT`)."""
+
+    AGENT_APP = "agent_app"
+    AGENT_BOOTLOADER = "agent_bootloader"
+    AGENT_PARTITION_TABLE = "agent_partition_table"
+    AGENT_OTA_DATA = "agent_ota_data"
+    USER_FIRMWARE = "user_firmware"
+
+
+class ArtifactType(StrEnum):
+    """Payload cargo type carried in `stage.artifact.type` (`spec/device-protocol.md`)."""
+
+    APP = "app"
+    MCU_FW = "mcu_fw"
+    MODEL_WEIGHTS = "model_weights"
+    FPGA_BITSTREAM = "fpga_bitstream"
+    DATA_PARTITION = "data_partition"
 
 
 class Artifact(Base):
-    """One row per content digest — the metadata the bytes cannot carry. S0-infra-4."""
+    """One row per content digest — the metadata the bytes cannot carry (`S0-infra-4`)."""
 
     __tablename__ = "artifacts"
     __table_args__ = (
@@ -97,6 +111,31 @@ class ArtifactVersion(Base):
     )
 
 
+class ArtifactDelta(Base):
+    """Content-addressed `ffdelta-v1` binary patch between two firmware digests (`V3-2`)."""
+
+    __tablename__ = "artifact_deltas"
+
+    from_sha256: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey("artifacts.sha256", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    to_sha256: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey("artifacts.sha256", ondelete="CASCADE"),
+        primary_key=True,
+        index=True,
+    )
+    patch_sha256: Mapped[str] = mapped_column(Text, nullable=False)
+    patch_size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    target_size_bytes: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    format: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'ffdelta-v1'"))
+    created_at: Mapped[dt.datetime] = mapped_column(
+        TimestampTZ, nullable=False, server_default=text("now()")
+    )
+
+
 class Build(Base):
     """A build-cache entry: cache key -> the artifacts that build produced (`S0-infra-4`, `R10`)."""
 
@@ -118,34 +157,44 @@ class Build(Base):
     )
 
 
-class PartitionProfile(Base):
-    """A flash map the server knows: its fingerprint, its name, its OTA slot (`R3-be-2`)."""
+class BuildJob(Base):
+    """One queued or completed server-side firmware build job (`R10-1`, `R10-2`)."""
 
-    __tablename__ = "partition_profiles"
+    __tablename__ = "build_jobs"
     __table_args__ = (
-        CheckConstraint("partition_table_sha256 ~ '^[0-9a-f]{64}$'", name="sha256_format"),
-        CheckConstraint("origin IN ('builtin', 'user', 'detected')", name="origin"),
-        CheckConstraint(
-            "layout_id IS NULL OR "
-            "(layout_id ~ '^[a-z0-9][a-z0-9-]{0,31}$' AND layout_id <> 'unknown')",
-            name="layout_id_format",
-        ),
-        CheckConstraint("(layout_id IS NULL) = (adopted_at IS NULL)", name="adopted_is_named"),
-        CheckConstraint(
-            "origin = 'detected' OR adopted_at IS NOT NULL", name="only_detected_pending"
-        ),
-        CheckConstraint("adopted_at IS NULL OR ota_slot_size IS NOT NULL", name="adopted_has_slot"),
-        CheckConstraint("ota_slot_size IS NULL OR ota_slot_size > 0", name="slot_positive"),
-        UniqueConstraint("layout_id"),
+        Index("ix_build_jobs_project_created_at", "project_id", text("created_at DESC")),
+        Index("ix_build_jobs_status_created_at", "status", "created_at"),
     )
 
-    partition_table_sha256: Mapped[str] = mapped_column(Text, primary_key=True)
-    layout_id: Mapped[str | None] = mapped_column(Text, nullable=True)
-    origin: Mapped[str] = mapped_column(Text, nullable=False)
-    ota_slot_size: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    flash_chip_size: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
-    detected_device_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid, primary_key=True, server_default=text("gen_random_uuid()")
+    )
+    project_id: Mapped[uuid.UUID] = mapped_column(
+        Uuid,
+        ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    repo_url: Mapped[str] = mapped_column(Text, nullable=False)
+    git_ref: Mapped[str] = mapped_column(Text, nullable=False)
+    commit_sha: Mapped[str | None] = mapped_column(Text, nullable=True)
+    target: Mapped[str] = mapped_column(Text, nullable=False)
+    version: Mapped[str] = mapped_column(Text, nullable=False)
+    partition_layout: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'ab-4m-v1'")
+    )
+    idf_image: Mapped[str] = mapped_column(Text, nullable=False)
+    cache_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'queued'"))
+    cache_hit: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+    artifact_sha256: Mapped[str | None] = mapped_column(Text, nullable=True)
+    log_text: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("''"))
+    error_detail: Mapped[str | None] = mapped_column(Text, nullable=True)
+    triggered_by: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[dt.datetime] = mapped_column(
         TimestampTZ, nullable=False, server_default=text("now()")
     )
-    adopted_at: Mapped[dt.datetime | None] = mapped_column(TimestampTZ, nullable=True)
+    started_at: Mapped[dt.datetime | None] = mapped_column(TimestampTZ, nullable=True)
+    finished_at: Mapped[dt.datetime | None] = mapped_column(TimestampTZ, nullable=True)
+    lease_owner: Mapped[str | None] = mapped_column(Text, nullable=True)
+    lease_expires_at: Mapped[dt.datetime | None] = mapped_column(TimestampTZ, nullable=True)

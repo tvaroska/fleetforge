@@ -1,26 +1,34 @@
-"""Unit tests for `fleetforge.auth.firebase` (S0-sec-1): token hardening, revocation,
-fail-closed `email_verified`, server-side account creation and error mapping.
+"""Unit and Port-conformance tests for `fleetforge.auth.firebase` (`S0-sec-1`, `T-11`).
 
-Pure unit tests: no database, no network. Module attributes are monkeypatched.
+Exercises `LiveFirebaseAuthClient` against an injectable `httpx.MockTransport` Identity
+Toolkit bridge (zero private `_post_identity_toolkit` monkeypatches) and verifies behavioral
+Port parity between `LiveFirebaseAuthClient` and `tests.doubles.FakeFirebaseAuthClient`.
 """
 
+from __future__ import annotations
+
 import io
+import json
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Callable
 from email.message import Message
 from typing import Any
 
+import httpx
 import pytest
 
 from fleetforge.auth import firebase as fb
 from fleetforge.auth.firebase import (
+    FirebaseAuthClient,
     FirebaseAuthError,
     FirebaseEmailExists,
     FirebaseIdentity,
     FirebaseInvalidCredentials,
     LiveFirebaseAuthClient,
 )
+from tests.doubles import FakeFirebaseAuthClient
 
 PROJECT = "sites-470716"
 API_KEY = "fake-web-api-key"
@@ -44,58 +52,103 @@ def _claims(**overrides: Any) -> dict[str, Any]:
     return claims
 
 
-def _patch_google(monkeypatch: pytest.MonkeyPatch, claims: dict[str, Any]) -> None:
-    def fake_verify(token: str, request: object, audience: str | None = None) -> dict[str, Any]:
-        assert audience == PROJECT
-        return claims
+class MockIdentityToolkit:
+    """Drives `LiveFirebaseAuthClient`'s HTTP transport via `httpx.MockTransport`."""
 
-    monkeypatch.setattr(fb.google_id_token, "verify_firebase_token", fake_verify)
-
-
-class FakeToolkit:
-    """Stands in for `_post_identity_toolkit`; dispatches on the endpoint name."""
-
-    def __init__(self, responses: dict[str, dict[str, Any] | Exception]) -> None:
-        self.responses = responses
+    def __init__(self) -> None:
+        self.routes: dict[str, list[tuple[int, dict[str, Any]] | Exception]] = {}
         self.calls: list[tuple[str, dict[str, Any]]] = []
+        self._client = httpx.Client(transport=httpx.MockTransport(self._handle))
 
-    def __call__(self, endpoint: str, api_key: str, payload: dict[str, Any]) -> dict[str, Any]:
+    def enqueue(
+        self,
+        endpoint: str,
+        body: dict[str, Any] | Exception,
+        *,
+        status_code: int = 200,
+    ) -> None:
+        item: tuple[int, dict[str, Any]] | Exception = (
+            body if isinstance(body, Exception) else (status_code, body)
+        )
+        self.routes.setdefault(endpoint, []).append(item)
+
+    def _handle(self, request: httpx.Request) -> httpx.Response:
+        endpoint = request.url.path.rsplit("/", 1)[-1]
+        payload = json.loads(request.content.decode("utf-8")) if request.content else {}
         self.calls.append((endpoint, payload))
-        resp = self.responses[endpoint]
-        if isinstance(resp, Exception):
-            raise resp
-        return resp
+        queue = self.routes.get(endpoint) or []
+        if not queue:
+            raise httpx.ConnectError(f"unexpected endpoint {endpoint!r}")
+        item = queue.pop(0) if len(queue) > 1 else queue[0]
+        if isinstance(item, Exception):
+            raise item
+        code, body = item
+        return httpx.Response(code, json=body)
+
+    def urlopen(self, req: urllib.request.Request, timeout: float | None = None) -> io.BytesIO:
+        _ = timeout
+        raw_body = bytes(req.data) if isinstance(req.data, (bytes, bytearray, memoryview)) else b""
+        try:
+            resp = self._client.request(
+                req.get_method(),
+                req.full_url,
+                content=raw_body,
+                headers=dict(req.header_items()),
+            )
+        except httpx.HTTPError as exc:
+            raise OSError(str(exc)) from exc
+        if resp.status_code >= 400:
+            raise urllib.error.HTTPError(
+                req.full_url,
+                resp.status_code,
+                "HTTP Error",
+                Message(),
+                io.BytesIO(resp.content),
+            )
+        return io.BytesIO(resp.content)
 
 
-def _verified_identity(**overrides: Any) -> FirebaseIdentity:
-    values: dict[str, Any] = {
-        "uid": "fb-uid-001",
-        "email": "carol@example.com",
-        "email_verified": True,
-        "auth_time": int(time.time()) - 30,
-    }
-    values.update(overrides)
-    return FirebaseIdentity(**values)
+@pytest.fixture
+def toolkit(monkeypatch: pytest.MonkeyPatch) -> MockIdentityToolkit:
+    bridge = MockIdentityToolkit()
+    monkeypatch.setattr(urllib.request, "urlopen", bridge.urlopen)
+    return bridge
 
 
-# ---------------------------------------------------------------------------
-# Defaults
-# ---------------------------------------------------------------------------
+@pytest.fixture
+def set_token_claims(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Callable[[dict[str, Any] | Exception], list[tuple[str, str | None]]]:
+    seen: list[tuple[str, str | None]] = []
+    state: dict[str, Any] = {"value": _claims()}
+
+    def _verify(token: str, _request: object, audience: str | None = None) -> dict[str, Any]:
+        seen.append((token, audience))
+        current = state["value"]
+        if isinstance(current, Exception):
+            raise current
+        return dict(current)
+
+    monkeypatch.setattr(fb.google_id_token, "verify_firebase_token", _verify)
+
+    def _configure(claims_or_exc: dict[str, Any] | Exception) -> list[tuple[str, str | None]]:
+        state["value"] = claims_or_exc
+        return seen
+
+    return _configure
 
 
 def test_identity_email_verified_defaults_to_false() -> None:
     assert FirebaseIdentity(uid="u", email="e@example.com").email_verified is False
 
 
-# ---------------------------------------------------------------------------
-# _verify_token_sync: claims google-auth does not check
-# ---------------------------------------------------------------------------
-
-
-def test_good_claims_yield_identity_with_auth_time(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_good_claims_yield_identity_with_auth_time(
+    set_token_claims: Callable[[dict[str, Any] | Exception], list[tuple[str, str | None]]],
+) -> None:
     claims = _claims()
-    _patch_google(monkeypatch, claims)
+    seen = set_token_claims(claims)
     ident = fb._verify_token_sync(TOKEN, PROJECT)
+    assert seen == [(TOKEN, PROJECT)]
     assert ident.uid == "fb-uid-001"
     assert ident.email == "carol@example.com"
     assert ident.email_verified is True
@@ -103,15 +156,15 @@ def test_good_claims_yield_identity_with_auth_time(monkeypatch: pytest.MonkeyPat
     assert ident.display_name == "Carol"
 
 
-def test_unverified_claim_is_carried_through(monkeypatch: pytest.MonkeyPatch) -> None:
-    _patch_google(monkeypatch, _claims(email_verified=False))
+def test_unverified_and_missing_email_verified_claims_stay_false(
+    set_token_claims: Callable[[dict[str, Any] | Exception], list[tuple[str, str | None]]],
+) -> None:
+    set_token_claims(_claims(email_verified=False))
     assert fb._verify_token_sync(TOKEN, PROJECT).email_verified is False
 
-
-def test_missing_email_verified_claim_is_unverified(monkeypatch: pytest.MonkeyPatch) -> None:
-    claims = _claims()
-    del claims["email_verified"]
-    _patch_google(monkeypatch, claims)
+    missing = _claims()
+    del missing["email_verified"]
+    set_token_claims(missing)
     assert fb._verify_token_sync(TOKEN, PROJECT).email_verified is False
 
 
@@ -123,158 +176,163 @@ def test_missing_email_verified_claim_is_unverified(monkeypatch: pytest.MonkeyPa
         None,
     ],
 )
-def test_wrong_issuer_is_refused(monkeypatch: pytest.MonkeyPatch, iss: str | None) -> None:
-    _patch_google(monkeypatch, _claims(iss=iss))
+def test_wrong_issuer_is_refused(
+    set_token_claims: Callable[[dict[str, Any] | Exception], list[tuple[str, str | None]]],
+    iss: str | None,
+) -> None:
+    set_token_claims(_claims(iss=iss))
     with pytest.raises(FirebaseInvalidCredentials):
         fb._verify_token_sync(TOKEN, PROJECT)
 
 
-def test_missing_auth_time_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
-    claims = _claims()
-    del claims["auth_time"]
-    _patch_google(monkeypatch, claims)
+def test_missing_or_future_auth_time_is_refused(
+    set_token_claims: Callable[[dict[str, Any] | Exception], list[tuple[str, str | None]]],
+) -> None:
+    no_auth_time = _claims()
+    del no_auth_time["auth_time"]
+    set_token_claims(no_auth_time)
     with pytest.raises(FirebaseInvalidCredentials):
         fb._verify_token_sync(TOKEN, PROJECT)
 
-
-def test_future_auth_time_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
-    _patch_google(monkeypatch, _claims(auth_time=int(time.time()) + 3600))
+    set_token_claims(_claims(auth_time=int(time.time()) + 3600))
     with pytest.raises(FirebaseInvalidCredentials):
         fb._verify_token_sync(TOKEN, PROJECT)
 
 
 @pytest.mark.parametrize("sub", ["", "   ", "x" * 129, None, 12345])
-def test_bad_sub_is_refused(monkeypatch: pytest.MonkeyPatch, sub: object) -> None:
-    _patch_google(monkeypatch, _claims(sub=sub))
+def test_bad_sub_is_refused(
+    set_token_claims: Callable[[dict[str, Any] | Exception], list[tuple[str, str | None]]],
+    sub: object,
+) -> None:
+    set_token_claims(_claims(sub=sub))
     with pytest.raises(FirebaseInvalidCredentials):
         fb._verify_token_sync(TOKEN, PROJECT)
 
 
-def test_google_verification_failure_is_invalid(monkeypatch: pytest.MonkeyPatch) -> None:
-    def boom(token: str, request: object, audience: str | None = None) -> dict[str, Any]:
-        raise ValueError("Token expired")
-
-    monkeypatch.setattr(fb.google_id_token, "verify_firebase_token", boom)
+def test_google_verification_failure_is_invalid(
+    set_token_claims: Callable[[dict[str, Any] | Exception], list[tuple[str, str | None]]],
+) -> None:
+    set_token_claims(ValueError("Token expired"))
     with pytest.raises(FirebaseInvalidCredentials):
         fb._verify_token_sync(TOKEN, PROJECT)
 
 
-# ---------------------------------------------------------------------------
-# LiveFirebaseAuthClient.verify_id_token: revocation via accounts:lookup
-# ---------------------------------------------------------------------------
-
-
-async def test_check_revoked_without_api_key_fails_closed_as_upstream_error() -> None:
-    client = LiveFirebaseAuthClient()
+@pytest.mark.port
+@pytest.mark.parametrize("kind", ["fake", "live"])
+async def test_port_check_revoked_without_api_key_fails_closed(
+    kind: str,
+    set_token_claims: Callable[[dict[str, Any] | Exception], list[tuple[str, str | None]]],
+) -> None:
+    set_token_claims(_claims())
+    client: FirebaseAuthClient = (
+        FakeFirebaseAuthClient() if kind == "fake" else LiveFirebaseAuthClient()
+    )
     with pytest.raises(FirebaseAuthError) as excinfo:
         await client.verify_id_token(TOKEN, PROJECT, api_key=None, check_revoked=True)
-    # Not "invalid credentials" (401): a configuration gap must become a 503.
     assert type(excinfo.value) is FirebaseAuthError
 
-
-async def test_check_revoked_is_the_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(fb, "_verify_token_sync", lambda t, p: _verified_identity())
-    with pytest.raises(FirebaseAuthError) as excinfo:
-        await LiveFirebaseAuthClient().verify_id_token(TOKEN, PROJECT)
-    assert type(excinfo.value) is FirebaseAuthError
+    with pytest.raises(FirebaseAuthError) as default_exc:
+        await client.verify_id_token(TOKEN, PROJECT)
+    assert type(default_exc.value) is FirebaseAuthError
 
 
-async def test_lookup_is_called_with_the_id_token(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(fb, "_verify_token_sync", lambda t, p: _verified_identity())
-    toolkit = FakeToolkit(
-        {"accounts:lookup": {"users": [{"localId": "fb-uid-001", "emailVerified": True}]}}
+@pytest.mark.port
+@pytest.mark.parametrize("kind", ["fake", "live"])
+async def test_port_verify_id_token_disabled_and_revocation_parity(
+    kind: str,
+    toolkit: MockIdentityToolkit,
+    set_token_claims: Callable[[dict[str, Any] | Exception], list[tuple[str, str | None]]],
+) -> None:
+    auth_time = int(time.time()) - 600
+    set_token_claims(_claims(auth_time=auth_time))
+
+    if kind == "fake":
+        fake = FakeFirebaseAuthClient()
+        fake.register(
+            email="carol@example.com",
+            password="pw",
+            uid="fb-uid-001",
+            id_token=TOKEN,
+            auth_time=auth_time,
+            valid_since=auth_time - 60,
+        )
+        ok_ident = await fake.verify_id_token(TOKEN, PROJECT, api_key=API_KEY)
+        assert ok_ident.email_verified is True
+
+        fake.valid_since["carol@example.com"] = auth_time + 60
+        with pytest.raises(FirebaseInvalidCredentials):
+            await fake.verify_id_token(TOKEN, PROJECT, api_key=API_KEY)
+
+        fake.valid_since.pop("carol@example.com", None)
+        fake.disabled_emails.add("carol@example.com")
+        with pytest.raises(FirebaseInvalidCredentials):
+            await fake.verify_id_token(TOKEN, PROJECT, api_key=API_KEY)
+        return
+
+    live = LiveFirebaseAuthClient()
+    toolkit.enqueue(
+        "accounts:lookup",
+        {
+            "users": [
+                {
+                    "localId": "fb-uid-001",
+                    "emailVerified": True,
+                    "validSince": str(auth_time - 60),
+                }
+            ]
+        },
     )
-    monkeypatch.setattr(fb, "_post_identity_toolkit", toolkit)
-    ident = await LiveFirebaseAuthClient().verify_id_token(TOKEN, PROJECT, api_key=API_KEY)
-    assert ident.email_verified is True
+    ok_ident = await live.verify_id_token(TOKEN, PROJECT, api_key=API_KEY)
+    assert ok_ident.email_verified is True
     assert toolkit.calls == [("accounts:lookup", {"idToken": TOKEN})]
 
-
-async def test_disabled_account_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(fb, "_verify_token_sync", lambda t, p: _verified_identity())
-    toolkit = FakeToolkit(
+    toolkit.routes.clear()
+    toolkit.enqueue(
+        "accounts:lookup",
         {
-            "accounts:lookup": {
-                "users": [{"localId": "fb-uid-001", "emailVerified": True, "disabled": True}]
-            }
-        }
+            "users": [
+                {
+                    "localId": "fb-uid-001",
+                    "emailVerified": True,
+                    "validSince": str(auth_time + 60),
+                }
+            ]
+        },
     )
-    monkeypatch.setattr(fb, "_post_identity_toolkit", toolkit)
     with pytest.raises(FirebaseInvalidCredentials):
-        await LiveFirebaseAuthClient().verify_id_token(TOKEN, PROJECT, api_key=API_KEY)
+        await live.verify_id_token(TOKEN, PROJECT, api_key=API_KEY)
 
-
-async def test_token_older_than_valid_since_is_revoked(monkeypatch: pytest.MonkeyPatch) -> None:
-    auth_time = int(time.time()) - 600
-    monkeypatch.setattr(
-        fb, "_verify_token_sync", lambda t, p: _verified_identity(auth_time=auth_time)
+    toolkit.routes.clear()
+    toolkit.enqueue(
+        "accounts:lookup",
+        {"users": [{"localId": "fb-uid-001", "emailVerified": True, "disabled": True}]},
     )
-    toolkit = FakeToolkit(
-        {
-            "accounts:lookup": {
-                "users": [
-                    {
-                        "localId": "fb-uid-001",
-                        "emailVerified": True,
-                        "validSince": str(auth_time + 60),
-                    }
-                ]
-            }
-        }
-    )
-    monkeypatch.setattr(fb, "_post_identity_toolkit", toolkit)
     with pytest.raises(FirebaseInvalidCredentials):
-        await LiveFirebaseAuthClient().verify_id_token(TOKEN, PROJECT, api_key=API_KEY)
+        await live.verify_id_token(TOKEN, PROJECT, api_key=API_KEY)
 
 
-async def test_token_newer_than_valid_since_passes(monkeypatch: pytest.MonkeyPatch) -> None:
-    auth_time = int(time.time()) - 600
-    monkeypatch.setattr(
-        fb, "_verify_token_sync", lambda t, p: _verified_identity(auth_time=auth_time)
-    )
-    toolkit = FakeToolkit(
-        {
-            "accounts:lookup": {
-                "users": [
-                    {
-                        "localId": "fb-uid-001",
-                        "emailVerified": True,
-                        "validSince": str(auth_time - 60),
-                    }
-                ]
-            }
-        }
-    )
-    monkeypatch.setattr(fb, "_post_identity_toolkit", toolkit)
-    ident = await LiveFirebaseAuthClient().verify_id_token(TOKEN, PROJECT, api_key=API_KEY)
-    assert ident.auth_time == auth_time
+async def test_live_lookup_edge_cases_and_check_revoked_false(
+    toolkit: MockIdentityToolkit,
+    set_token_claims: Callable[[dict[str, Any] | Exception], list[tuple[str, str | None]]],
+) -> None:
+    set_token_claims(_claims())
+    client = LiveFirebaseAuthClient()
 
+    for bad_lookup in (
+        {"users": [{"localId": "fb-uid-001", "validSince": "soon"}]},
+        {"users": [{"localId": "someone-else", "emailVerified": True}]},
+        {},
+    ):
+        toolkit.routes.clear()
+        toolkit.enqueue("accounts:lookup", bad_lookup)
+        with pytest.raises(FirebaseInvalidCredentials):
+            await client.verify_id_token(TOKEN, PROJECT, api_key=API_KEY)
 
-async def test_garbage_valid_since_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(fb, "_verify_token_sync", lambda t, p: _verified_identity())
-    toolkit = FakeToolkit(
-        {"accounts:lookup": {"users": [{"localId": "fb-uid-001", "validSince": "soon"}]}}
-    )
-    monkeypatch.setattr(fb, "_post_identity_toolkit", toolkit)
-    with pytest.raises(FirebaseInvalidCredentials):
-        await LiveFirebaseAuthClient().verify_id_token(TOKEN, PROJECT, api_key=API_KEY)
-
-
-async def test_lookup_uid_mismatch_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(fb, "_verify_token_sync", lambda t, p: _verified_identity())
-    toolkit = FakeToolkit(
-        {"accounts:lookup": {"users": [{"localId": "someone-else", "emailVerified": True}]}}
-    )
-    monkeypatch.setattr(fb, "_post_identity_toolkit", toolkit)
-    with pytest.raises(FirebaseInvalidCredentials):
-        await LiveFirebaseAuthClient().verify_id_token(TOKEN, PROJECT, api_key=API_KEY)
-
-
-async def test_empty_lookup_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(fb, "_verify_token_sync", lambda t, p: _verified_identity())
-    monkeypatch.setattr(fb, "_post_identity_toolkit", FakeToolkit({"accounts:lookup": {}}))
-    with pytest.raises(FirebaseInvalidCredentials):
-        await LiveFirebaseAuthClient().verify_id_token(TOKEN, PROJECT, api_key=API_KEY)
+    toolkit.calls.clear()
+    toolkit.routes.clear()
+    ident = await client.verify_id_token(TOKEN, PROJECT, check_revoked=False)
+    assert ident.uid == "fb-uid-001"
+    assert toolkit.calls == []
 
 
 @pytest.mark.parametrize(
@@ -287,196 +345,186 @@ async def test_empty_lookup_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
     ],
 )
 async def test_email_verified_needs_claim_and_lookup(
-    monkeypatch: pytest.MonkeyPatch, claim: bool, lookup: bool | None, expected: bool
+    toolkit: MockIdentityToolkit,
+    set_token_claims: Callable[[dict[str, Any] | Exception], list[tuple[str, str | None]]],
+    claim: bool,
+    lookup: bool | None,
+    expected: bool,
 ) -> None:
-    monkeypatch.setattr(
-        fb, "_verify_token_sync", lambda t, p: _verified_identity(email_verified=claim)
-    )
+    set_token_claims(_claims(email_verified=claim))
     account: dict[str, Any] = {"localId": "fb-uid-001"}
     if lookup is not None:
         account["emailVerified"] = lookup
-    monkeypatch.setattr(
-        fb, "_post_identity_toolkit", FakeToolkit({"accounts:lookup": {"users": [account]}})
-    )
+    toolkit.enqueue("accounts:lookup", {"users": [account]})
     ident = await LiveFirebaseAuthClient().verify_id_token(TOKEN, PROJECT, api_key=API_KEY)
     assert ident.email_verified is expected
 
 
-async def test_check_revoked_false_skips_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(fb, "_verify_token_sync", lambda t, p: _verified_identity())
-    toolkit = FakeToolkit({})
-    monkeypatch.setattr(fb, "_post_identity_toolkit", toolkit)
-    await LiveFirebaseAuthClient().verify_id_token(TOKEN, PROJECT, check_revoked=False)
-    assert toolkit.calls == []
-
-
-# ---------------------------------------------------------------------------
-# sign_in_with_password never invents email_verified
-# ---------------------------------------------------------------------------
-
-
-async def test_sign_in_without_project_id_reads_email_verified_from_lookup(
-    monkeypatch: pytest.MonkeyPatch,
+async def test_sign_in_with_and_without_project_id_reads_verified_state(
+    toolkit: MockIdentityToolkit,
+    set_token_claims: Callable[[dict[str, Any] | Exception], list[tuple[str, str | None]]],
 ) -> None:
-    toolkit = FakeToolkit(
-        {
-            "accounts:signInWithPassword": {
-                "idToken": TOKEN,
-                "localId": "fb-uid-001",
-                "email": "carol@example.com",
-            },
-            # emailVerified absent -> unverified (regression: was hard-coded True).
-            "accounts:lookup": {"users": [{"localId": "fb-uid-001", "email": "carol@example.com"}]},
-        }
+    seen = set_token_claims(_claims())
+    client = LiveFirebaseAuthClient()
+
+    toolkit.enqueue(
+        "accounts:signInWithPassword",
+        {"idToken": TOKEN, "localId": "fb-uid-001", "email": "carol@example.com"},
     )
-    monkeypatch.setattr(fb, "_post_identity_toolkit", toolkit)
-    ident = await LiveFirebaseAuthClient().sign_in_with_password(
+    toolkit.enqueue("accounts:lookup", {"users": [{"localId": "fb-uid-001"}]})
+    unverified = await client.sign_in_with_password(
         "carol@example.com", "pw-123456", api_key=API_KEY, project_id=None
     )
-    assert ident.email_verified is False
-    assert ident.uid == "fb-uid-001"
-    assert [c[0] for c in toolkit.calls] == ["accounts:signInWithPassword", "accounts:lookup"]
+    assert unverified.email_verified is False
+    assert unverified.uid == "fb-uid-001"
 
-
-async def test_sign_in_without_project_id_verified_account(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    toolkit = FakeToolkit(
+    toolkit.routes.clear()
+    toolkit.enqueue("accounts:signInWithPassword", {"idToken": TOKEN, "localId": "fb-uid-001"})
+    toolkit.enqueue(
+        "accounts:lookup",
         {
-            "accounts:signInWithPassword": {"idToken": TOKEN, "localId": "fb-uid-001"},
-            "accounts:lookup": {
-                "users": [
-                    {
-                        "localId": "fb-uid-001",
-                        "email": "carol@example.com",
-                        "emailVerified": True,
-                        "displayName": "Carol",
-                    }
-                ]
-            },
-        }
+            "users": [
+                {
+                    "localId": "fb-uid-001",
+                    "email": "carol@example.com",
+                    "emailVerified": True,
+                    "displayName": "Carol",
+                }
+            ]
+        },
     )
-    monkeypatch.setattr(fb, "_post_identity_toolkit", toolkit)
-    ident = await LiveFirebaseAuthClient().sign_in_with_password(
-        "carol@example.com", "pw-123456", api_key=API_KEY
+    verified = await client.sign_in_with_password("carol@example.com", "pw-123456", api_key=API_KEY)
+    assert verified.email_verified is True
+    assert verified.display_name == "Carol"
+
+    toolkit.routes.clear()
+    toolkit.enqueue("accounts:signInWithPassword", {"idToken": TOKEN, "localId": "fb-uid-001"})
+    toolkit.enqueue(
+        "accounts:lookup",
+        {"users": [{"localId": "fb-uid-001", "emailVerified": False}]},
     )
-    assert ident.email_verified is True
-    assert ident.display_name == "Carol"
-
-
-async def test_sign_in_with_project_id_verifies_and_checks_revocation(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    seen: list[tuple[str, str]] = []
-
-    def fake_verify(token: str, project_id: str) -> FirebaseIdentity:
-        seen.append((token, project_id))
-        return _verified_identity()
-
-    monkeypatch.setattr(fb, "_verify_token_sync", fake_verify)
-    toolkit = FakeToolkit(
-        {
-            "accounts:signInWithPassword": {"idToken": TOKEN, "localId": "fb-uid-001"},
-            "accounts:lookup": {"users": [{"localId": "fb-uid-001", "emailVerified": False}]},
-        }
-    )
-    monkeypatch.setattr(fb, "_post_identity_toolkit", toolkit)
-    ident = await LiveFirebaseAuthClient().sign_in_with_password(
+    with_proj = await client.sign_in_with_password(
         "carol@example.com", "pw-123456", api_key=API_KEY, project_id=PROJECT
     )
     assert seen == [(TOKEN, PROJECT)]
-    assert ident.email_verified is False
-    assert [c[0] for c in toolkit.calls] == ["accounts:signInWithPassword", "accounts:lookup"]
+    assert with_proj.email_verified is False
 
-
-async def test_sign_in_without_id_token_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
-    toolkit = FakeToolkit({"accounts:signInWithPassword": {"localId": "fb-uid-001"}})
-    monkeypatch.setattr(fb, "_post_identity_toolkit", toolkit)
+    toolkit.routes.clear()
+    toolkit.enqueue("accounts:signInWithPassword", {"localId": "fb-uid-001"})
     with pytest.raises(FirebaseInvalidCredentials):
-        await LiveFirebaseAuthClient().sign_in_with_password(
-            "carol@example.com", "pw-123456", api_key=API_KEY
+        await client.sign_in_with_password("carol@example.com", "pw-123456", api_key=API_KEY)
+
+
+@pytest.mark.port
+@pytest.mark.parametrize("kind", ["fake", "live"])
+async def test_port_create_account_and_password_reset_lifecycle(
+    kind: str,
+    toolkit: MockIdentityToolkit,
+    set_token_claims: Callable[[dict[str, Any] | Exception], list[tuple[str, str | None]]],
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level("DEBUG")
+    set_token_claims(_claims(email="erin@example.com"))
+
+    if kind == "fake":
+        fake = FakeFirebaseAuthClient()
+        assert await fake.create_account("Erin@Example.com", api_key=API_KEY) is True
+        assert await fake.create_account("erin@example.com", api_key=API_KEY) is False
+        await fake.send_password_reset(
+            "Erin@Example.com",
+            api_key=API_KEY,
+            continue_url="https://bingo.tvaroska.sk",
         )
+        assert fake.reset_emails_sent == ["erin@example.com"]
+        assert fake.continue_urls == ["https://bingo.tvaroska.sk"]
+        ident = await fake.reset_password(
+            "oob-for-erin@example.com",
+            "new-strong-password-123",
+            api_key=API_KEY,
+            project_id=PROJECT,
+        )
+        assert ident.email == "erin@example.com"
+        assert ident.email_verified is True
+        with pytest.raises(FirebaseInvalidCredentials):
+            await fake.reset_password(
+                "oob-for-erin@example.com",
+                "another-password-123",
+                api_key=API_KEY,
+            )
+        return
 
+    live = LiveFirebaseAuthClient()
+    toolkit.enqueue("accounts:signUp", {"localId": "new-uid"})
+    toolkit.enqueue(
+        "accounts:signUp",
+        {"error": {"message": "EMAIL_EXISTS"}},
+        status_code=400,
+    )
+    assert await live.create_account("Erin@Example.com", api_key=API_KEY) is True
+    assert await live.create_account("Erin@Example.com", api_key=API_KEY) is False
 
-# ---------------------------------------------------------------------------
-# create_account
-# ---------------------------------------------------------------------------
+    signup_payload_1 = toolkit.calls[0][1]
+    signup_payload_2 = toolkit.calls[1][1]
+    assert signup_payload_1["email"] == "erin@example.com"
+    assert signup_payload_1["returnSecureToken"] is False
+    assert len(signup_payload_1["password"]) >= 32
+    assert signup_payload_1["password"] != signup_payload_2["password"]
+    assert signup_payload_1["password"] not in caplog.text
 
-
-async def test_create_account_success_returns_true(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    caplog.set_level("DEBUG")
-    toolkit = FakeToolkit({"accounts:signUp": {"localId": "new-uid"}})
-    monkeypatch.setattr(fb, "_post_identity_toolkit", toolkit)
-    assert await LiveFirebaseAuthClient().create_account("Erin@Example.com", api_key=API_KEY)
-    endpoint, payload = toolkit.calls[0]
-    assert endpoint == "accounts:signUp"
-    assert payload["email"] == "erin@example.com"
-    assert payload["returnSecureToken"] is False
-    password = payload["password"]
-    assert isinstance(password, str) and len(password) >= 32
-    assert password not in caplog.text
-
-
-async def test_create_account_passwords_are_random(monkeypatch: pytest.MonkeyPatch) -> None:
-    toolkit = FakeToolkit({"accounts:signUp": {}})
-    monkeypatch.setattr(fb, "_post_identity_toolkit", toolkit)
-    client = LiveFirebaseAuthClient()
-    await client.create_account("a@example.com", api_key=API_KEY)
-    await client.create_account("a@example.com", api_key=API_KEY)
-    assert toolkit.calls[0][1]["password"] != toolkit.calls[1][1]["password"]
-
-
-async def test_create_account_existing_email_returns_false(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    caplog.set_level("DEBUG")
-    toolkit = FakeToolkit({"accounts:signUp": FirebaseEmailExists("exists")})
-    monkeypatch.setattr(fb, "_post_identity_toolkit", toolkit)
-    assert await LiveFirebaseAuthClient().create_account("e@example.com", api_key=API_KEY) is False
-    assert toolkit.calls[0][1]["password"] not in caplog.text
-
-
-async def test_create_account_other_errors_propagate(
-    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-) -> None:
-    caplog.set_level("DEBUG")
-    toolkit = FakeToolkit({"accounts:signUp": FirebaseAuthError("HTTP 400")})
-    monkeypatch.setattr(fb, "_post_identity_toolkit", toolkit)
-    with pytest.raises(FirebaseAuthError):
-        await LiveFirebaseAuthClient().create_account("e@example.com", api_key=API_KEY)
-    assert toolkit.calls[0][1]["password"] not in caplog.text
-
-
-# ---------------------------------------------------------------------------
-# _post_identity_toolkit error mapping
-# ---------------------------------------------------------------------------
-
-
-def _http_error(code: int, message: str) -> urllib.error.HTTPError:
-    body = io.BytesIO(('{"error":{"message":"' + message + '"}}').encode())
-    return urllib.error.HTTPError(
-        "https://identitytoolkit.googleapis.com/v1/x", code, "x", Message(), body
+    toolkit.calls.clear()
+    toolkit.routes.clear()
+    toolkit.enqueue("accounts:sendOobCode", {"email": "erin@example.com"})
+    toolkit.enqueue(
+        "accounts:resetPassword",
+        {"email": "Erin@Example.com", "requestType": "PASSWORD_RESET"},
+    )
+    toolkit.enqueue(
+        "accounts:signInWithPassword",
+        {"idToken": TOKEN, "localId": "fb-uid-001", "email": "erin@example.com"},
+    )
+    toolkit.enqueue(
+        "accounts:lookup",
+        {"users": [{"localId": "fb-uid-001", "email": "erin@example.com", "emailVerified": True}]},
+    )
+    await live.send_password_reset(
+        "Erin@Example.com",
+        api_key=API_KEY,
+        continue_url="https://bingo.tvaroska.sk",
+    )
+    ident = await live.reset_password(
+        "oob-secret-12345",
+        "new-strong-password-123",
+        api_key=API_KEY,
+        project_id=PROJECT,
+    )
+    assert ident.email == "erin@example.com"
+    assert ident.email_verified is True
+    assert toolkit.calls[0] == (
+        "accounts:sendOobCode",
+        {
+            "requestType": "PASSWORD_RESET",
+            "email": "erin@example.com",
+            "continueUrl": "https://bingo.tvaroska.sk",
+        },
+    )
+    assert toolkit.calls[1] == (
+        "accounts:resetPassword",
+        {"oobCode": "oob-secret-12345", "newPassword": "new-strong-password-123"},
     )
 
 
-def _patch_urlopen(monkeypatch: pytest.MonkeyPatch, exc: Exception) -> None:
-    def fake_urlopen(req: object, timeout: float | None = None) -> object:
-        raise exc
-
-    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
-
-
-def test_email_exists_maps_to_firebase_email_exists(monkeypatch: pytest.MonkeyPatch) -> None:
-    _patch_urlopen(monkeypatch, _http_error(400, "EMAIL_EXISTS"))
+def test_identity_toolkit_http_and_transport_error_mapping(
+    toolkit: MockIdentityToolkit,
+) -> None:
+    toolkit.enqueue(
+        "accounts:signUp",
+        {"error": {"message": "EMAIL_EXISTS"}},
+        status_code=400,
+    )
     with pytest.raises(FirebaseEmailExists):
         fb._post_identity_toolkit("accounts:signUp", API_KEY, {"email": "e@example.com"})
 
-
-@pytest.mark.parametrize(
-    "message",
-    [
+    for code in (
         "INVALID_ID_TOKEN",
         "USER_NOT_FOUND",
         "TOKEN_EXPIRED",
@@ -485,96 +533,28 @@ def test_email_exists_maps_to_firebase_email_exists(monkeypatch: pytest.MonkeyPa
         "EXPIRED_OOB_CODE",
         "INVALID_OOB_CODE",
         "WEAK_PASSWORD",
-    ],
-)
-def test_invalid_codes_map_to_invalid_credentials(
-    monkeypatch: pytest.MonkeyPatch, message: str
-) -> None:
-    _patch_urlopen(monkeypatch, _http_error(400, message))
-    with pytest.raises(FirebaseInvalidCredentials):
-        fb._post_identity_toolkit("accounts:lookup", API_KEY, {"idToken": TOKEN})
+    ):
+        toolkit.routes.clear()
+        toolkit.enqueue("accounts:lookup", {"error": {"message": code}}, status_code=400)
+        with pytest.raises(FirebaseInvalidCredentials):
+            fb._post_identity_toolkit("accounts:lookup", API_KEY, {"idToken": TOKEN})
 
-
-async def test_send_password_reset_includes_continue_url(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    toolkit = FakeToolkit({"accounts:sendOobCode": {"email": "boris@tvaroska.com"}})
-    monkeypatch.setattr(fb, "_post_identity_toolkit", toolkit)
-    client = LiveFirebaseAuthClient()
-    await client.send_password_reset(
-        "Boris@Tvaroska.com",
-        api_key=API_KEY,
-        continue_url="https://bingo.tvaroska.sk",
-    )
-    assert toolkit.calls == [
-        (
-            "accounts:sendOobCode",
-            {
-                "requestType": "PASSWORD_RESET",
-                "email": "boris@tvaroska.com",
-                "continueUrl": "https://bingo.tvaroska.sk",
-            },
+    for upstream_code in ("OPERATION_NOT_ALLOWED", "ADMIN_ONLY_OPERATION", ""):
+        toolkit.routes.clear()
+        toolkit.enqueue(
+            "accounts:signUp",
+            {"error": {"message": upstream_code}},
+            status_code=400,
         )
-    ]
+        with pytest.raises(FirebaseAuthError) as excinfo:
+            fb._post_identity_toolkit("accounts:signUp", API_KEY, {})
+        assert type(excinfo.value) is FirebaseAuthError
 
-
-async def test_reset_password_consumes_oob_code_and_signs_in(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        fb, "_verify_token_sync", lambda t, p: _verified_identity(email="boris@tvaroska.com")
-    )
-    toolkit = FakeToolkit(
-        {
-            "accounts:resetPassword": {
-                "email": "Boris@Tvaroska.com",
-                "requestType": "PASSWORD_RESET",
-            },
-            "accounts:signInWithPassword": {
-                "idToken": TOKEN,
-                "localId": "fb-uid-001",
-                "email": "boris@tvaroska.com",
-            },
-            "accounts:lookup": {
-                "users": [
-                    {
-                        "localId": "fb-uid-001",
-                        "email": "boris@tvaroska.com",
-                        "emailVerified": True,
-                    }
-                ]
-            },
-        }
-    )
-    monkeypatch.setattr(fb, "_post_identity_toolkit", toolkit)
-    ident = await LiveFirebaseAuthClient().reset_password(
-        "oob-secret-12345",
-        "new-strong-password-123",
-        api_key=API_KEY,
-        project_id=PROJECT,
-    )
-    assert ident.email == "boris@tvaroska.com"
-    assert ident.email_verified is True
-    assert toolkit.calls[0] == (
-        "accounts:resetPassword",
-        {"oobCode": "oob-secret-12345", "newPassword": "new-strong-password-123"},
-    )
-    assert toolkit.calls[1][0] == "accounts:signInWithPassword"
-
-
-@pytest.mark.parametrize("message", ["OPERATION_NOT_ALLOWED", "ADMIN_ONLY_OPERATION", ""])
-def test_other_errors_stay_upstream_errors(monkeypatch: pytest.MonkeyPatch, message: str) -> None:
-    _patch_urlopen(monkeypatch, _http_error(400, message))
-    with pytest.raises(FirebaseAuthError) as excinfo:
-        fb._post_identity_toolkit("accounts:signUp", API_KEY, {})
-    assert type(excinfo.value) is FirebaseAuthError
-
-
-def test_unreachable_is_upstream_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    _patch_urlopen(monkeypatch, OSError("connection refused"))
-    with pytest.raises(FirebaseAuthError) as excinfo:
+    toolkit.routes.clear()
+    toolkit.enqueue("accounts:lookup", httpx.ConnectError("connection refused"))
+    with pytest.raises(FirebaseAuthError) as net_exc:
         fb._post_identity_toolkit("accounts:lookup", API_KEY, {})
-    assert type(excinfo.value) is FirebaseAuthError
+    assert type(net_exc.value) is FirebaseAuthError
 
 
 def test_user_and_self_profile_schemas_normalize_fields() -> None:

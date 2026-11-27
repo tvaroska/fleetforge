@@ -1,299 +1,38 @@
-// What these tests defend, in order of how much a regression would cost:
-//
-// 1. **Every write address comes from the manifest.** The bootloader is at 0x1000 on
-//    ESP32 and 0x0 on the RISC-V parts; a hardcoded offset flashes cleanly and never
-//    boots. Test 1 fails the moment anyone types an address.
-// 2. **Nothing is written that has not been checked** — chip family, flash size, a config
-//    partition, and the sha256 of every downloaded part.
-// 3. **The enrollment token is minted only after every check, revoked on failure, and
-//    never leaves the blob.** It is a single-use fleet-join credential the server cannot
-//    re-derive. Same discipline as `EnrollBoard.test.tsx`, extended to the passphrase.
-// 4. **The port is always released**, and a 401 bounces to the login gate.
+// Core FlashBoard unit tests: write plan offsets & NVS protection, pre-mint refusals,
+// credential redaction & non-persistence, failure revocation, capability checks, and
+// diagnostic bundle scrubbing.
 
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { FlashBoard } from './FlashBoard'
+import type { AgentBuildInfo } from './api'
 import { planWrite, predictDeviceId } from './flash'
-import type { AgentBuildInfo, AgentManifest, DeviceSummary } from './api'
-import type { BoardConsole, ConsoleFactory } from './boardConsole'
+import { FlashBoard } from './FlashBoard'
 import { BUILT_IN_PORT, checkChosenPort } from './flasher'
-import type { BoardFlasher, ChipInfo, FlashPart, WriteOptions } from './flasher'
-
-const TOKEN_ID = '11111111-1111-4111-8111-111111111111'
-const PLAINTEXT = `ffe_${TOKEN_ID}.s3cr3tflashersecretvalue`
-/** The token the SECOND mint returns, so the recovery blob can be told from the first. */
-const TOKEN_ID_2 = '22222222-2222-4222-8222-222222222222'
-const PLAINTEXT_2 = `ffe_${TOKEN_ID_2}.s3cr3trecoverysecretvalue`
-const PASSPHRASE = 'correct-horse-battery-staple'
-const SSID = 'fleetforge-test'
-/** A broker password in a URI, the way an operator pastes one into the form. */
-const BROKER_URI = 'mqtts://fleet:s3cr3tbrokerpw@bench.local:8883'
-
-const CONFIG_OFFSET = 0x12000
-const NVS_OFFSET = 0x9000
-const NVS_SIZE = 0x6000
-
-/**
- * A real ESP-IDF partition table, not filler bytes.
- *
- * It has to be real: `planWrite`'s guard reads `nvs`'s offset and size out of the table
- * being written rather than from a constant, so a fixture of 0x3c bytes would have the
- * engine refuse the flash. Laid out like `ab-4m-v1` — `nvs` is in it so the guard has a
- * range to defend, and `phy_init` so the "we do not touch it" assertion has something to
- * be about.
- */
-function partitionTable(): Uint8Array {
-  const rows: Array<[string, number, number, number, number]> = [
-    // label, type, subtype, offset, size
-    ['nvs', 1, 2, NVS_OFFSET, NVS_SIZE],
-    ['otadata', 1, 0, 0xf000, 0x2000],
-    ['phy_init', 1, 1, 0x11000, 0x1000],
-    ['ff_cfg', 1, 0x40, CONFIG_OFFSET, 0x1000],
-    ['ota_0', 0, 0x10, 0x20000, 0x1e0000],
-  ]
-  const bytes = new Uint8Array(rows.length * 32 + 32)
-  const view = new DataView(bytes.buffer)
-  rows.forEach(([label, type, subtype, offset, size], index) => {
-    const at = index * 32
-    view.setUint16(at, 0x50aa, true)
-    view.setUint8(at + 2, type)
-    view.setUint8(at + 3, subtype)
-    view.setUint32(at + 4, offset, true)
-    view.setUint32(at + 8, size, true)
-    bytes.set(new TextEncoder().encode(label), at + 12)
-  })
-  // The trailing MD5 row `gen_esp32part.py` writes; the parser must stop at it, not read
-  // it as a sixth partition with a garbage offset.
-  view.setUint16(rows.length * 32, 0xebeb, true)
-  return bytes
-}
-
-// Deliberately NOT in ascending offset order: `planWrite` must sort, and the config blob
-// (0x12000) lands between the partition table and the app.
-const PART_BYTES: Record<string, Uint8Array> = {
-  app: new Uint8Array(512).fill(0xa5),
-  bootloader: new Uint8Array(64).fill(0x5a),
-  'partition-table': partitionTable(),
-}
-const PART_OFFSETS: Record<string, number> = {
-  app: 0x20000,
-  bootloader: 0x1000,
-  'partition-table': 0x8000,
-}
-
-async function sha256(bytes: Uint8Array): Promise<string> {
-  const digest = await crypto.subtle.digest('SHA-256', new Uint8Array(bytes))
-  return Array.from(new Uint8Array(digest))
-    .map((b) => b.toString(16).padStart(2, '0'))
-    .join('')
-}
-
-async function manifest(overrides: Partial<AgentManifest['builds'][number]> = {}) {
-  return {
-    agent_version: '0.1.0',
-    builds: [
-      {
-        target: 'esp32',
-        chip_family: 'ESP32',
-        agent_version: '0.1.0',
-        idf_version: 'v5.5.5',
-        idf_image: 'espressif/idf:v5.5.5',
-        source_commit: 'deadbeef',
-        built_at: '2026-09-10T00:00:00Z',
-        partition_layout: 'ab-4m-v1',
-        ota_slot_size: 1966080,
-        flash_size: '4MB',
-        config_sha256: 'c0'.repeat(32),
-        build_digest: 'b1'.repeat(32),
-        config_partition: { label: 'ff_cfg', offset: CONFIG_OFFSET, size: 4096 },
-        parts: await Promise.all(
-          Object.entries(PART_BYTES).map(async ([name, bytes]) => ({
-            name,
-            offset: PART_OFFSETS[name],
-            size: bytes.length,
-            sha256: await sha256(bytes),
-          })),
-        ),
-        ...overrides,
-      },
-    ],
-  } satisfies AgentManifest
-}
-
-function chipInfo(overrides: Partial<ChipInfo> = {}): ChipInfo {
-  return {
-    chipName: 'ESP32',
-    description: 'ESP32-D0WD-V3 (revision v3.1)',
-    macAddress: 'A4:CF:12:B3:DE:90',
-    flashSizeBytes: 4 * 1024 * 1024,
-    features: ['WiFi', 'BT', 'Dual Core'],
-    ...overrides,
-  }
-}
-
-class FakeFlasher implements BoardFlasher {
-  writes: FlashPart[][] = []
-  writeOptions: WriteOptions[] = []
-  finishes = 0
-  closes = 0
-
-  constructor(
-    private readonly info: ChipInfo,
-    private readonly onWrite: (() => void) | null = null,
-  ) {}
-
-  async detect(): Promise<ChipInfo> {
-    return this.info
-  }
-
-  async write(parts: FlashPart[], options: WriteOptions): Promise<void> {
-    this.writes.push(parts)
-    this.writeOptions.push(options)
-    options.onProgress(0, 10, 100)
-    this.onWrite?.()
-  }
-
-  async finish(): Promise<void> {
-    this.finishes += 1
-    await this.close()
-  }
-
-  async close(): Promise<void> {
-    this.closes += 1
-  }
-}
-
-/**
- * A tiny router over `fetch`. A `Response` body can be read once, so every entry is a
- * FACTORY — the same trap `fleet.test.tsx` documents.
- */
-type Routes = Record<string, () => Response | Promise<Response>>
-
-function json(body: unknown, status = 200): Response {
-  return new Response(JSON.stringify(body), {
-    status,
-    headers: { 'content-type': 'application/json' },
-  })
-}
-
-function mockFetch(routes: Routes) {
-  const calls: string[] = []
-  const spy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (input, init) => {
-    const url = typeof input === 'string' ? input : String(input)
-    const key = `${(init?.method ?? 'GET').toUpperCase()} ${url}`
-    calls.push(key)
-    const route = routes[key]
-    if (route === undefined) return new Response('not found', { status: 404 })
-    return route()
-  })
-  return { calls, spy }
-}
-
-async function defaultRoutes(extra: Routes = {}): Promise<Routes> {
-  const built = await manifest()
-  const routes: Routes = {
-    'GET /v1/agent/manifest': () => json(built),
-    // S0-fe-7. Unauthenticated, and its failure is a footnote in a diagnostic bundle
-    // rather than anything on this page — every test that does NOT route it exercises
-    // the silent-failure path through `mockFetch`'s 404 default, on purpose.
-    'GET /v1/healthz': () => json({ status: 'ok', version: '0.3.1' }),
-    'POST /v1/enrollment-tokens': () =>
-      json({
-        id: TOKEN_ID,
-        token: PLAINTEXT,
-        group_id: null,
-        expires_at: '2026-09-11T00:00:00Z',
-        created_at: '2026-09-10T00:00:00Z',
-      }),
-    [`POST /v1/enrollment-tokens/${TOKEN_ID}/revoke`]: () => new Response(null, { status: 204 }),
-  }
-  for (const [name, bytes] of Object.entries(PART_BYTES)) {
-    // S0-infra-7: the download now passes the layout the manifest gave. Match both the
-    // no-layout form (backward compat) and the with-layout form.
-    routes[`GET /v1/agent/esp32/${name}`] = () =>
-      new Response(bytes.slice(), { headers: { 'content-type': 'application/octet-stream' } })
-    routes[`GET /v1/agent/esp32/${name}?layout=ab-4m-v1`] = () =>
-      new Response(bytes.slice(), { headers: { 'content-type': 'application/octet-stream' } })
-  }
-  return { ...routes, ...extra }
-}
-
-/** Connect, fill the Wi-Fi form, and press Flash. */
-async function flashWith(flasher: FakeFlasher, onSessionExpired = vi.fn()) {
-  render(<FlashBoard onSessionExpired={onSessionExpired} createFlasher={async () => flasher} />)
-  await userEvent.click(screen.getByRole('button', { name: /select port and detect/i }))
-  await screen.findByTestId('chip-info')
-  await userEvent.type(screen.getByLabelText(/ssid/i), SSID)
-  await userEvent.type(screen.getByLabelText(/passphrase/i), PASSPHRASE)
-  await userEvent.click(screen.getByRole('button', { name: /flash this board/i }))
-  return { onSessionExpired }
-}
-
-/**
- * A console that scripts a DIFFERENT boot per session. Lifted from `BoardConsole.test.tsx`
- * — same contract, including the part that matters most: `lines()` yields the script and
- * then BLOCKS rather than returning, because `agent_main.c:166` retries forever and a
- * stream that ended would let the panel invent an inactivity timeout.
- */
-function fakeConsoleSessions(scripts: string[][]) {
-  const state = { opened: 0, closed: 0, reboots: 0, acquires: [] as string[] }
-  const factory: ConsoleFactory = async ({ acquire }) => {
-    const script = scripts[state.opened] ?? []
-    state.opened += 1
-    state.acquires.push(acquire)
-    let closed = false
-    let release: (() => void) | null = null
-
-    const board: BoardConsole = {
-      async *lines() {
-        for (const line of script) yield line
-        if (closed) return
-        await new Promise<void>((resolve) => {
-          release = resolve
-        })
-      },
-      async reboot() {
-        state.reboots += 1
-      },
-      async close() {
-        if (closed) return
-        closed = true
-        state.closed += 1
-        release?.()
-      },
-    }
-    return board
-  }
-  return { factory, state }
-}
-
-/** The board came up, joined, set its clock — and its token had already been spent. */
-const SPENT_TOKEN_BOOT = [
-  'rst:0x1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)',
-  'I (100) ff-agent: fleetforge agent 0.3.0 (idf v5.5.5), built Sep 11 2026 08:14:02',
-  'I (900) ff-net: wifi link up, ip 192.168.1.40 gw 192.168.1.1 mask 255.255.255.0',
-  'I (1500) ff-time: sntp: 1970-01-01T00:00:02Z -> 2026-09-11T08:14:05Z (via pool.ntp.org)',
-  'E (2600) ff-enroll: enroll 409: this token is already used, revoked or expired.',
-  'E (2900) ff-agent: halted: this board\'s enrollment token was refused for good — re-flash ' +
-    'ff_cfg with a fresh ffe_ token (POST /v1/enrollment-tokens)',
-]
-
-/** The same board after the button: a fresh single-use token, all the way to the fleet. */
-const RECOVERED_BOOT = [
-  'rst:0x1 (POWERON_RESET),boot:0x13 (SPI_FAST_FLASH_BOOT)',
-  'I (100) ff-agent: fleetforge agent 0.3.0 (idf v5.5.5), built Sep 11 2026 08:14:02',
-  'I (900) ff-net: wifi link up, ip 192.168.1.40 gw 192.168.1.1 mask 255.255.255.0',
-  'I (1500) ff-time: sntp: 1970-01-01T00:00:02Z -> 2026-09-11T08:15:10Z (via pool.ntp.org)',
-  'I (2600) ff-enroll: enroll 200 https://bingo.tvaroska.sk/v1/enroll',
-  'I (3100) ff-mqtt: mqtt connected as a4cf12b3de90 (mqtts://bingo.tvaroska.sk:8883)',
-]
+import {
+  BROKER_URI,
+  CONFIG_OFFSET,
+  FakeFlasher,
+  NVS_OFFSET,
+  NVS_SIZE,
+  PART_BYTES,
+  PASSPHRASE,
+  PLAINTEXT,
+  SPENT_TOKEN_BOOT,
+  SSID,
+  TOKEN_ID,
+  chipInfo,
+  defaultRoutes,
+  fakeConsoleSessions,
+  flashWith,
+  json,
+  manifest,
+  mockFetch,
+  setupWebSerialJsdom,
+} from './flashTestHelpers'
 
 beforeEach(() => {
-  // jsdom has neither of these. `flasher.ts` exists so the ENGINE needs no DOM; the view
-  // still branches on capability, so the capability has to be stated here.
-  Object.defineProperty(navigator, 'serial', { value: {}, configurable: true })
-  Object.defineProperty(window, 'isSecureContext', { value: true, configurable: true })
+  setupWebSerialJsdom()
 })
 
 describe('FlashBoard — the write plan', () => {
@@ -303,7 +42,7 @@ describe('FlashBoard — the write plan', () => {
     await flashWith(flasher)
 
     await waitFor(() => expect(flasher.writes).toHaveLength(1))
-    const plan = flasher.writes[0]
+    const plan = flasher.writes[0]!
     expect(plan.map((part) => part.address)).toEqual([0x1000, 0x8000, CONFIG_OFFSET, 0x20000])
     expect(plan.map((part) => part.label)).toEqual([
       'bootloader',
@@ -315,47 +54,30 @@ describe('FlashBoard — the write plan', () => {
     expect(config?.data.length).toBe(4096)
     expect(String.fromCharCode(...config!.data.slice(0, 4))).toBe('FFCF')
 
-    // The flasher erases NOTHING (S0-fw-4). NVS is where the cached RF calibration lives,
-    // in IDF's `phy` namespace — a write aimed there costs every flashed board the cold
-    // full calibration, the biggest current draw in startup, on every boot forever, and a
-    // board with a marginal 3.3 V rail then browns out and can never cache it (S0-fw-3).
-    // Clearing the stored broker credential is the agent's job now: it drops the `ff`
-    // namespace when the `ff_cfg` token changes, and this flasher mints a fresh token on
-    // every flash.
     expect(plan.map((part) => part.address)).not.toContain(NVS_OFFSET)
     expect(plan.map((part) => part.label).filter((label) => /nvs/.test(label))).toEqual([])
-
-    // `phy_init` (0x11000) is not in the plan either. It holds nothing in our build —
-    // `CONFIG_ESP_PHY_INIT_DATA_IN_PARTITION` is unset — but the assertion stays: a plan
-    // that grew a part there would be writing bytes no one had decided to write.
     expect(plan.map((part) => part.address)).not.toContain(0x11000)
     expect(flasher.finishes).toBe(1)
     expect(flasher.closes).toBeGreaterThan(0)
   })
 
   it('refuses a plan that would write into nvs, naming the offending part', async () => {
-    // The test that would have caught the original defect. `planWrite` is called directly:
-    // no manifest the server can serve today produces this plan, and that is the point —
-    // the guard has to hold for the bundle nobody has built yet.
     const built = await manifest()
     const downloaded = new Map(Object.entries(PART_BYTES))
     const inNvs: AgentBuildInfo = {
-      ...built.builds[0],
+      ...built.builds[0]!,
       config_partition: { label: 'ff_cfg', offset: NVS_OFFSET, size: 4096 },
     }
     expect(() => planWrite(inNvs, downloaded, new Uint8Array(4096))).toThrow(/'ff_cfg'/)
     expect(() => planWrite(inNvs, downloaded, new Uint8Array(4096))).toThrow(/nvs/)
 
-    // And the last sector before `nvs` is fine, while a part that merely OVERLAPS the
-    // sector `nvs` starts in is not: esptool erases whole 4 KB sectors, so a tail one byte
-    // inside the range takes the whole sector with it.
     const justBefore: AgentBuildInfo = {
-      ...built.builds[0],
+      ...built.builds[0]!,
       config_partition: { label: 'ff_cfg', offset: NVS_OFFSET - 0x1000, size: 4096 },
     }
     expect(() => planWrite(justBefore, downloaded, new Uint8Array(4096))).not.toThrow()
     const straddling: AgentBuildInfo = {
-      ...built.builds[0],
+      ...built.builds[0]!,
       config_partition: { label: 'ff_cfg', offset: NVS_OFFSET + NVS_SIZE - 1, size: 4096 },
     }
     expect(() => planWrite(straddling, downloaded, new Uint8Array(4096))).toThrow(/nvs/)
@@ -375,14 +97,13 @@ describe('FlashBoard — refusals, all before a token is minted', () => {
   })
 
   it('refuses a board whose flash is too small for the layout', async () => {
-    // A real `ab-4m-v1` app is megabytes; the fixture's is 512 bytes, so the bound has to
-    // come from a manifest that declares a real one. The check runs before any download,
-    // so these bytes are never fetched.
     const built = await manifest()
-    built.builds[0].parts = built.builds[0].parts.map((part) =>
+    built.builds[0]!.parts = built.builds[0]!.parts.map((part) =>
       part.name === 'app' ? { ...part, size: 3_000_000 } : part,
     )
-    const { calls } = mockFetch(await defaultRoutes({ 'GET /v1/agent/manifest': () => json(built) }))
+    const { calls } = mockFetch(
+      await defaultRoutes({ 'GET /v1/agent/manifest': () => json(built) }),
+    )
     const flasher = new FakeFlasher(chipInfo({ flashSizeBytes: 2 * 1024 * 1024 }))
     await flashWith(flasher)
 
@@ -393,7 +114,9 @@ describe('FlashBoard — refusals, all before a token is minted', () => {
 
   it('refuses a bundle with no config partition and says to rebuild it', async () => {
     const built = await manifest({ config_partition: null })
-    const { calls } = mockFetch(await defaultRoutes({ 'GET /v1/agent/manifest': () => json(built) }))
+    const { calls } = mockFetch(
+      await defaultRoutes({ 'GET /v1/agent/manifest': () => json(built) }),
+    )
     const flasher = new FakeFlasher(chipInfo())
     await flashWith(flasher)
 
@@ -406,10 +129,9 @@ describe('FlashBoard — refusals, all before a token is minted', () => {
   it('aborts on a sha256 mismatch without minting', async () => {
     const { calls } = mockFetch(
       await defaultRoutes({
-        // Right length, wrong bytes: exactly what a corrupted download looks like. S0-infra-7:
-        // the download now passes the layout, so the override must match it too.
         'GET /v1/agent/esp32/app': () => new Response(new Uint8Array(512).fill(0x00)),
-        'GET /v1/agent/esp32/app?layout=ab-4m-v1': () => new Response(new Uint8Array(512).fill(0x00)),
+        'GET /v1/agent/esp32/app?layout=ab-4m-v1': () =>
+          new Response(new Uint8Array(512).fill(0x00)),
       }),
     )
     const flasher = new FakeFlasher(chipInfo())
@@ -430,9 +152,6 @@ describe('FlashBoard — refusals, all before a token is minted', () => {
     await userEvent.click(screen.getByRole('radio', { name: /sleepy/i }))
     await userEvent.click(screen.getByRole('button', { name: /flash this board/i }))
 
-    // The form validates as it is typed, so the refusal is on screen before the button is
-    // pressed — and the button is dead, because the engine's copy of the same check would
-    // otherwise be reached only after a single-use token had been minted.
     expect(await screen.findByTestId('config-error')).toHaveTextContent(
       /sleepy needs a positive wake/i,
     )
@@ -468,11 +187,10 @@ describe('FlashBoard — the credentials', () => {
     await flashWith(flasher)
     await waitFor(() => expect(flasher.writes).toHaveLength(1))
 
-    const config = flasher.writes[0].find((part) => part.address === CONFIG_OFFSET)!
+    const config = flasher.writes[0]!.find((part) => part.address === CONFIG_OFFSET)!
     const payload = new TextDecoder().decode(config.data)
     expect(payload).toContain(PLAINTEXT)
 
-    // The four places R0-fe-1 established, and for the same reason.
     expect(document.body.textContent ?? '').not.toContain(PLAINTEXT)
     expect(screen.queryByTestId('flash-log')?.textContent ?? '').not.toContain(PLAINTEXT)
     expect(JSON.stringify(window.localStorage)).not.toContain(PLAINTEXT)
@@ -487,7 +205,7 @@ describe('FlashBoard — the credentials', () => {
     await flashWith(flasher)
     await waitFor(() => expect(flasher.writes).toHaveLength(1))
 
-    const config = flasher.writes[0].find((part) => part.address === CONFIG_OFFSET)!
+    const config = flasher.writes[0]!.find((part) => part.address === CONFIG_OFFSET)!
     const payload = new TextDecoder().decode(config.data)
     expect(payload).toContain(`"psk":"${PASSPHRASE}"`)
     expect(payload).toContain(`"ssid":"${SSID}"`)
@@ -504,8 +222,7 @@ describe('FlashBoard — the credentials', () => {
     await flashWith(flasher)
     await waitFor(() => expect(flasher.writes).toHaveLength(1))
 
-    const config = flasher.writes[0].find((part) => part.address === CONFIG_OFFSET)!
-    // A written key freezes today's firmware default into this board forever.
+    const config = flasher.writes[0]!.find((part) => part.address === CONFIG_OFFSET)!
     expect(new TextDecoder().decode(config.data)).not.toContain('hb_s')
   })
 })
@@ -520,7 +237,9 @@ describe('FlashBoard — failure handling', () => {
 
     expect(await screen.findByRole('alert')).toHaveTextContent(/flash write failed/i)
     expect(await screen.findByRole('alert')).toHaveTextContent(/token was revoked/i)
-    expect(calls.filter((c) => c === `POST /v1/enrollment-tokens/${TOKEN_ID}/revoke`)).toHaveLength(1)
+    expect(
+      calls.filter((c) => c === `POST /v1/enrollment-tokens/${TOKEN_ID}/revoke`),
+    ).toHaveLength(1)
     expect(flasher.closes).toBeGreaterThan(0)
   })
 
@@ -536,7 +255,6 @@ describe('FlashBoard — failure handling', () => {
     await flashWith(flasher)
 
     const alert = await screen.findByRole('alert')
-    // The id is safe to show; the plaintext is not.
     expect(alert).toHaveTextContent(new RegExp(TOKEN_ID))
     expect(alert).toHaveTextContent(/still live/i)
     expect(alert.textContent ?? '').not.toContain(PLAINTEXT)
@@ -557,140 +275,8 @@ describe('FlashBoard — failure handling', () => {
   })
 })
 
-// ── S0-fe-6 ─────────────────────────────────────────────────────────────────────────────
-//
-// The task line, end to end through the real `FlashBoard` with both seams faked: the
-// operator presses ONE button instead of performing three manual steps (walk back up the
-// page, re-select the port, press Flash), and the fault the button was attached to is
-// resolved. Everything below the click is real code — the console panel, the flash engine,
-// the mint-last discipline, the ff_cfg writer.
-describe('FlashBoard — recovery is a button (S0-fe-6)', () => {
-  it('a spent token is fixed by pressing a button, not by following an instruction', async () => {
-    const user = userEvent.setup()
-    let mints = 0
-    const { calls } = mockFetch(
-      await defaultRoutes({
-        'POST /v1/enrollment-tokens': () => {
-          mints += 1
-          // A second, DIFFERENT single-use token, so the recovery blob can be told apart.
-          const [id, token] = mints === 1 ? [TOKEN_ID, PLAINTEXT] : [TOKEN_ID_2, PLAINTEXT_2]
-          return json({
-            id,
-            token,
-            group_id: null,
-            expires_at: '2026-09-12T00:00:00Z',
-            created_at: '2026-09-11T00:00:00Z',
-          })
-        },
-      }),
-    )
-
-    const flashers: FakeFlasher[] = []
-    const createFlasher = async () => {
-      const flasher = new FakeFlasher(chipInfo())
-      flashers.push(flasher)
-      return flasher
-    }
-    const { factory: createConsole, state: console_ } = fakeConsoleSessions([
-      SPENT_TOKEN_BOOT,
-      RECOVERED_BOOT,
-    ])
-
-    render(
-      <FlashBoard
-        onSessionExpired={vi.fn()}
-        createFlasher={createFlasher}
-        createConsole={createConsole}
-      />,
-    )
-    await user.click(screen.getByRole('button', { name: /select port and detect/i }))
-    await screen.findByTestId('chip-info')
-    await user.type(screen.getByLabelText(/ssid/i), SSID)
-    await user.type(screen.getByLabelText(/passphrase/i), PASSPHRASE)
-    await user.click(screen.getByRole('button', { name: /flash this board/i }))
-
-    // 1. The console opens by itself (S0-fe-5) and names the spent token — the sentence a
-    //    non-engineer can act on, not the agent's engineer-facing `halted:` reason.
-    const fault = await screen.findByTestId('console-fault')
-    await waitFor(() => expect(fault).toHaveTextContent(/single-use/))
-
-    // 2. And the remedy is ON SCREEN as an action. This is the whole task: the operator is
-    //    never told to go and do three things.
-    const button = await screen.findByRole('button', { name: /re-flash the board/i })
-
-    // 3. One press. The console lets the port go, and esptool takes it.
-    await user.click(button)
-    await waitFor(() => expect(flashers).toHaveLength(2))
-    expect(console_.closed).toBe(1)
-
-    // 4. A FRESH single-use token was minted — and that alone is what clears the stale
-    //    broker credential: the agent erases the `ff` namespace on the first boot with a
-    //    token it has not seen (`ff_store_sync_token`, S0-fw-4). The recovery write must
-    //    NOT touch NVS. The recovery path is the one an operator presses when a board is
-    //    already misbehaving, so it is the last place to destroy its cached calibration.
-    await waitFor(() => expect(flashers[1].writes).toHaveLength(1))
-    expect(calls.filter((c) => c === 'POST /v1/enrollment-tokens')).toHaveLength(2)
-    const recovery = flashers[1].writes[0]
-    expect(recovery.map((part) => part.label).filter((label) => /nvs/.test(label))).toEqual([])
-    expect(recovery.map((part) => part.address)).not.toContain(NVS_OFFSET)
-    expect(recovery.map((part) => part.address)).not.toContain(0x11000)
-
-    // 5. And it is the SECOND token that went into the blob, not a replay of the first.
-    const config = flashers[1].writes[0].find((part) => part.address === CONFIG_OFFSET)!
-    const payload = new TextDecoder().decode(config.data)
-    expect(payload).toContain(PLAINTEXT_2)
-    expect(payload).not.toContain(PLAINTEXT)
-
-    // 6. The loop closes itself: `phase` went done again, so the panel re-opens the port
-    //    with no second click, and the board it now watches reaches the fleet. The fault
-    //    the button was attached to is gone — cleared by progress, not by clearing the log.
-    await waitFor(() => expect(console_.opened).toBe(2))
-    expect(console_.acquires).toEqual(['granted', 'granted'])
-    const milestones = screen.getByTestId('boot-milestones')
-    await waitFor(() => {
-      expect(milestones.querySelectorAll('[data-state="done"]')).toHaveLength(5)
-    })
-    expect(await screen.findByTestId('console-online')).toBeInTheDocument()
-    expect(screen.queryByTestId('console-fault')).not.toBeInTheDocument()
-
-    // 7. R0-fe-1's rule, re-asserted because a new code path now handles both secrets.
-    const body = document.body.textContent ?? ''
-    expect(body).not.toContain(PLAINTEXT)
-    expect(body).not.toContain(PLAINTEXT_2)
-    expect(body).not.toContain(PASSPHRASE)
-  })
-
-  it('says a fresh click is needed when the activation window closed, and works on the next one', async () => {
-    // `requestPort()` needs transient user activation, and the recovery click awaits the
-    // console's `release()` first. Untranslated, Chromium's wording maps to "the page must
-    // be on HTTPS or localhost" — wrong, and it sends the operator nowhere.
-    const user = userEvent.setup()
-    mockFetch(await defaultRoutes())
-    let attempts = 0
-    const createFlasher = async () => {
-      attempts += 1
-      if (attempts === 1) {
-        throw new DOMException(
-          "Failed to execute 'requestPort' on 'Serial': Must be handling a user gesture to " +
-            'show a permission request.',
-          'SecurityError',
-        )
-      }
-      return new FakeFlasher(chipInfo())
-    }
-    render(<FlashBoard onSessionExpired={vi.fn()} createFlasher={createFlasher} />)
-
-    await user.click(screen.getByRole('button', { name: /select port and detect/i }))
-    expect(await screen.findByText(/needs a fresh click/i)).toBeInTheDocument()
-    expect(screen.queryByText(/HTTPS or localhost/i)).not.toBeInTheDocument()
-
-    await user.click(screen.getByRole('button', { name: /select port and detect/i }))
-    await screen.findByTestId('chip-info')
-  })
-})
-
 describe('FlashBoard — capability branches', () => {
-  it('renders the Chrome/Edge explanation and nothing clickable without Web Serial', async () => {
+  it('renders the Chrome/Edge explanation and nothing clickable without Web Serial', () => {
     // @ts-expect-error deleting an own property jsdom does not define natively
     delete navigator.serial
     render(<FlashBoard onSessionExpired={vi.fn()} />)
@@ -711,9 +297,6 @@ describe('FlashBoard — capability branches', () => {
   it('stays usable when the operator cancels the port chooser', async () => {
     mockFetch(await defaultRoutes())
     const createFlasher = vi.fn(async () => {
-      // EXACTLY what Chromium throws when the chooser is dismissed — verified against a
-      // real headless Chromium. Untranslated it reads like a fault, so the engine (not
-      // just the adapter) has to run it through `explainFlashError`.
       throw new DOMException(
         "Failed to execute 'requestPort' on 'Serial': No port selected by the user.",
         'NotFoundError',
@@ -722,18 +305,20 @@ describe('FlashBoard — capability branches', () => {
     render(<FlashBoard onSessionExpired={vi.fn()} createFlasher={createFlasher} />)
 
     await userEvent.click(screen.getByRole('button', { name: /select port and detect/i }))
-    // `findByText`, not `findByRole('alert')`: the untouched form is also complaining that
-    // Wi-Fi needs an SSID, and two alerts are two alerts.
     expect(await screen.findByText('No board selected.')).toBeInTheDocument()
 
-    // A second click must open the chooser again.
     await userEvent.click(screen.getByRole('button', { name: /select port and detect/i }))
     await waitFor(() => expect(createFlasher).toHaveBeenCalledTimes(2))
   })
 
   it('offers "My board isn\'t listed", closed, with both bridge drivers linked (S0-fe-8)', async () => {
     mockFetch(await defaultRoutes())
-    render(<FlashBoard onSessionExpired={vi.fn()} createFlasher={async () => new FakeFlasher(chipInfo())} />)
+    render(
+      <FlashBoard
+        onSessionExpired={vi.fn()}
+        createFlasher={async () => new FakeFlasher(chipInfo())}
+      />,
+    )
 
     const help = screen.getByTestId('port-help')
     expect(help).not.toHaveAttribute('open')
@@ -747,10 +332,12 @@ describe('FlashBoard — capability branches', () => {
       expect.stringContaining('wch-ic.com'),
     )
     expect(help).toHaveTextContent(/COM1 is never your board/)
-    expect(help).toHaveTextContent(/macOS and Linux have both drivers built in; Windows usually does not/)
+    expect(help).toHaveTextContent(
+      /macOS and Linux have both drivers built in; Windows usually does not/,
+    )
   })
 
-  it('opens the help when the operator dismisses the chooser — the stuck operator\'s next move', async () => {
+  it("opens the help when the operator dismisses the chooser — the stuck operator's next move", async () => {
     mockFetch(await defaultRoutes())
     const createFlasher = vi.fn(async () => {
       throw new DOMException(
@@ -767,7 +354,6 @@ describe('FlashBoard — capability branches', () => {
 
   it('refuses COM1 by name and opens the help, instead of blaming the board', async () => {
     mockFetch(await defaultRoutes())
-    // What the real adapter does when the chooser's only entry is the motherboard port.
     const createFlasher = vi.fn(async () => {
       checkChosenPort({}, () => {})
       return new FakeFlasher(chipInfo())
@@ -782,23 +368,6 @@ describe('FlashBoard — capability branches', () => {
 
   it('lists the available targets from the manifest', async () => {
     mockFetch(await defaultRoutes())
-    render(<FlashBoard onSessionExpired={vi.fn()} createFlasher={async () => new FakeFlasher(chipInfo())} />)
-
-    expect(await screen.findByTestId('agent-targets')).toHaveTextContent('Agent 0.1.0')
-    expect(screen.getByTestId('agent-targets')).toHaveTextContent('esp32 (ESP32)')
-  })
-
-  // ── S0-infra-6 ────────────────────────────────────────────────────────────────────
-  //
-  // The images come out of the object store now, so "there is no manifest" is a real
-  // running state (store unreachable, nothing published) rather than a broken image.
-  it('refuses to flash when the manifest could not be read, and says why', async () => {
-    const detail =
-      'the agent image store cannot be reached, so there is no firmware to offer. ' +
-      'No board can be flashed until it is back.'
-    mockFetch(
-      await defaultRoutes({ 'GET /v1/agent/manifest': () => json({ detail }, 503) }),
-    )
     render(
       <FlashBoard
         onSessionExpired={vi.fn()}
@@ -806,13 +375,23 @@ describe('FlashBoard — capability branches', () => {
       />,
     )
 
-    // The server's sentence, verbatim: this page must not invent its own wording for a
-    // fault it cannot diagnose, and must not show an exception or a bucket name.
-    // `findByText`, not `findByRole('alert')`: the untouched form is also complaining
-    // that Wi-Fi needs an SSID, and two alerts are two alerts.
+    expect(await screen.findByTestId('agent-targets')).toHaveTextContent('Agent 0.1.0')
+    expect(screen.getByTestId('agent-targets')).toHaveTextContent('esp32 (ESP32)')
+  })
+
+  it('refuses to flash when the manifest could not be read, and says why', async () => {
+    const detail =
+      'the agent image store cannot be reached, so there is no firmware to offer. ' +
+      'No board can be flashed until it is back.'
+    mockFetch(await defaultRoutes({ 'GET /v1/agent/manifest': () => json({ detail }, 503) }))
+    render(
+      <FlashBoard
+        onSessionExpired={vi.fn()}
+        createFlasher={async () => new FakeFlasher(chipInfo())}
+      />,
+    )
+
     expect(await screen.findByText(detail)).toBeInTheDocument()
-    // And the button is dead BEFORE a board is put into bootloader mode — the whole
-    // point of the check. It stays dead after a successful detect.
     expect(screen.getByRole('button', { name: /flash this board/i })).toBeDisabled()
     await userEvent.click(screen.getByRole('button', { name: /select port and detect/i }))
     await screen.findByTestId('chip-info')
@@ -821,11 +400,9 @@ describe('FlashBoard — capability branches', () => {
   })
 
   it('names the version of each target when a publish has left them out of step', async () => {
-    // Targets are published one at a time now, so this is reachable without a bug:
-    // esp32c6 republished, esp32 not. Which board gets which version has to be visible.
     const built = await manifest()
     const older: AgentBuildInfo = {
-      ...built.builds[0],
+      ...built.builds[0]!,
       target: 'esp32c6',
       chip_family: 'ESP32-C6',
       agent_version: '0.0.9',
@@ -845,37 +422,18 @@ describe('FlashBoard — capability branches', () => {
     const targets = await screen.findByTestId('agent-targets')
     expect(targets).toHaveTextContent('esp32 (ESP32, 0.1.0)')
     expect(targets).toHaveTextContent('esp32c6 (ESP32-C6, 0.0.9)')
-
-    // And no headline version at all. The API hoists `bundles[0].agent_version`, which
-    // once targets disagree is just whichever sorted first — naming it "Agent 0.1.0"
-    // here would assert the C6 is on 0.1.0 when it is on 0.0.9. A real bench session
-    // read that headline, concluded a freshly flashed board had not taken the new
-    // firmware, and reflashed it. There is no single answer, so it offers none.
     expect(targets).toHaveTextContent('Agent per target')
     expect(targets).not.toHaveTextContent('Agent 0.1.0')
   })
 })
 
-/**
- * S0-fe-7 — the wiring, not the builder.
- *
- * `diagnostics.test.ts` proves the format and the redaction over synthetic input. This
- * proves the thing an operator actually presses: that `FlashBoard` hands the panel the
- * chip it detected, the config the form holds and the versions it fetched — and that
- * neither the passphrase typed into that form nor the token minted for that board is in
- * what lands on the clipboard.
- */
 describe('FlashBoard — the diagnostic bundle', () => {
   it('carries the chip, the config and the versions, and neither secret', async () => {
     const user = userEvent.setup()
     const writeText = vi.fn().mockResolvedValue(undefined)
-    // `defineProperty`, not `Object.assign`: `userEvent.setup()` installs its own stub.
     Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
     mockFetch(await defaultRoutes())
 
-    // Both secrets are planted where they would REALLY leak from: the firmware printing
-    // them on the console. Without them these `not.toContain` assertions pass over a
-    // bundle with no redaction at all — checked, by deleting the redaction.
     const { factory: createConsole } = fakeConsoleSessions([
       [
         ...SPENT_TOKEN_BOOT,
@@ -894,8 +452,6 @@ describe('FlashBoard — the diagnostic bundle', () => {
     await screen.findByTestId('chip-info')
     await user.type(screen.getByLabelText(/ssid/i), SSID)
     await user.type(screen.getByLabelText(/passphrase/i), PASSPHRASE)
-    // A broker password typed into the form: it must be scrubbed out of EVERY section,
-    // not only out of the URI that carried it. This is `uriSecrets`, wired up.
     await user.clear(screen.getByLabelText(/broker uri/i))
     await user.type(screen.getByLabelText(/broker uri/i), BROKER_URI)
     await user.click(screen.getByRole('button', { name: /flash this board/i }))
@@ -903,671 +459,21 @@ describe('FlashBoard — the diagnostic bundle', () => {
 
     await user.click(screen.getByRole('button', { name: /copy diagnostic bundle/i }))
     await waitFor(() => expect(writeText).toHaveBeenCalledTimes(1))
-    const bundle = writeText.mock.calls[0][0] as string
+    const bundle = writeText.mock.calls[0]![0] as string
 
-    // What the flasher page knows and the console does not.
     expect(bundle).toContain('ESP32-D0WD-V3 (revision v3.1)')
     expect(bundle).toContain(SSID)
     expect(bundle).toContain('layout ab-4m-v1')
     expect(bundle).toContain('agent        0.1.0')
     expect(bundle).toContain('server       0.3.1')
-    // And what the console knows and the flasher page does not.
     expect(bundle).toContain('enroll 409')
     expect(bundle).toContain('single-use')
 
-    // The two credentials, from two different rules: the passphrase by literal scrub, the
-    // token by shape — it was never handed to the panel at all.
     expect(bundle).not.toContain(PASSPHRASE)
     expect(bundle).not.toContain(PLAINTEXT)
     expect(bundle).not.toContain('s3cr3tbrokerpw')
     expect(bundle).toContain('ffe_[REDACTED]')
     expect(bundle).toContain('mqtts://fleet:[REDACTED]@bench.local:8883')
     expect(bundle).toContain(`passphrase ${PASSPHRASE.length} chars (never printed)`)
-  })
-})
-
-describe('FlashBoard — pre-flight card (R2b-fe-2)', () => {
-  const NOW = Date.parse('2026-09-10T12:00:00Z')
-  const row = (over: Partial<DeviceSummary> = {}): DeviceSummary => ({
-    device_id: 'a4cf12b3de90',
-    name: null,
-    group_id: null,
-    platform_type: 'esp32',
-    fw_version: '1.4.2',
-    agent_version: '0.4.5',
-    link_type: 'wifi',
-    ssid: null,
-    known_networks: null,
-    power_class: 'always_on',
-    expected_wake_interval_s: null,
-    parent_device_id: null,
-    partition_layout: 'ab-4m-v1',
-    ota_slot_size: 1966080,
-    capabilities: ['ota'],
-    last_seen: '2026-09-10T11:59:30Z',
-    enrolled_at: '2026-09-10T11:00:00Z',
-    broker_provisioned_at: null,
-    online: true,
-    deploy: null,
-    ...over,
-  })
-  const fleetOf = (devices: DeviceSummary[] | null) => ({
-    devices,
-    arrivals: [],
-    error: null,
-    now: NOW,
-  })
-
-  async function detect(
-    devices: DeviceSummary[] | null | undefined,
-    info: ChipInfo = chipInfo(),
-    flasher = new FakeFlasher(info),
-  ) {
-    const mocked = mockFetch(await defaultRoutes())
-    render(
-      <FlashBoard
-        onSessionExpired={vi.fn()}
-        createFlasher={async () => flasher}
-        fleet={devices === undefined ? undefined : fleetOf(devices)}
-      />,
-    )
-    await userEvent.click(screen.getByRole('button', { name: /select port and detect/i }))
-    await screen.findByTestId('chip-info')
-    return { ...mocked, flasher }
-  }
-
-  it('shows the known-board card before the button and mints nothing on detect', async () => {
-    const { calls } = await detect([row()])
-    const card = screen.getByTestId('preflight-card')
-    expect(card).toHaveAttribute('data-kind', 'known')
-    expect(card).toHaveTextContent(
-      'Re-flashing issues a new token and re-enrols it; its current baseline ends.',
-    )
-    expect(card).toHaveTextContent('fw 1.4.2')
-    expect(card).toHaveTextContent('online')
-    const button = screen.getByRole('button', { name: 'Re-flash and re-enrol this board' })
-    expect(card.compareDocumentPosition(button) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
-    expect(calls).not.toContain('POST /v1/enrollment-tokens')
-  })
-
-  it('says new board for an id that is not on the fleet', async () => {
-    await detect([row({ device_id: 'b26a938324ab' })])
-    const card = screen.getByTestId('preflight-card')
-    expect(card).toHaveAttribute('data-kind', 'new')
-    expect(card).toHaveTextContent(/new board/i)
-    expect(screen.getByRole('button', { name: 'Flash this board' })).toBeInTheDocument()
-  })
-
-  it('does not block Flash while the fleet is loading', async () => {
-    await detect(null)
-    expect(screen.getByTestId('preflight-card')).toHaveAttribute('data-kind', 'checking')
-    await userEvent.type(screen.getByLabelText(/ssid/i), SSID)
-    await userEvent.type(screen.getByLabelText(/passphrase/i), PASSPHRASE)
-    expect(screen.getByRole('button', { name: 'Flash this board' })).toBeEnabled()
-  })
-
-  it('says unknown-id when no MAC was read', async () => {
-    await detect([row()], chipInfo({ macAddress: null }))
-    expect(screen.getByTestId('preflight-card')).toHaveAttribute('data-kind', 'unknown-id')
-  })
-
-  it('warns about an update in progress and a layout change', async () => {
-    await detect([
-      row({
-        partition_layout: 'other-layout',
-        deploy: {
-          cmd_id: 'c',
-          state: 'downloading',
-          at: '2026-09-10T11:59:00Z',
-          is_terminal: false,
-          artifact_version: '1.5.0',
-          from_version: '1.4.2',
-          pct: null,
-          detail: null,
-        },
-      }),
-    ])
-    const card = screen.getByTestId('preflight-card')
-    expect(card).toHaveTextContent(/update is in progress/i)
-    expect(card).toHaveTextContent('Partition layout changes: other-layout → ab-4m-v1.')
-  })
-
-  it('is gone once the flash has finished', async () => {
-    const flasher = new FakeFlasher(chipInfo())
-    await detect([row()], chipInfo(), flasher)
-    await userEvent.type(screen.getByLabelText(/ssid/i), SSID)
-    await userEvent.type(screen.getByLabelText(/passphrase/i), PASSPHRASE)
-    await userEvent.click(screen.getByRole('button', { name: /re-flash and re-enrol this board/i }))
-    await screen.findByRole('heading', { name: 'Flashed' })
-    expect(screen.queryByTestId('preflight-card')).toBeNull()
-  })
-
-  it('renders no card without the fleet prop', async () => {
-    await detect(undefined)
-    expect(screen.queryByTestId('preflight-card')).toBeNull()
-  })
-})
-
-// ── R2b-fe-3 ────────────────────────────────────────────────────────────────────────────
-//
-// One card, success or failure. A failed WRITE says what failed and what to try first —
-// cable, port, then a lower baud — and names the flash chip only when it keeps failing at
-// the lowest baud. Through the real `FlashBoard`, with both seams faked.
-describe('FlashBoard — result card (R2b-fe-3)', () => {
-  /** A factory that records each baud and hands out a flasher whose write may throw. */
-  function failingFactory(shouldFail: () => boolean, message = 'No serial data received.') {
-    const bauds: number[] = []
-    const createFlasher = async ({ baudRate }: { baudRate: number }) => {
-      bauds.push(baudRate)
-      const fail = shouldFail()
-      return new FakeFlasher(
-        chipInfo(),
-        fail
-          ? () => {
-              throw new Error(message)
-            }
-          : null,
-      )
-    }
-    return { bauds, createFlasher }
-  }
-
-  async function connectAndFlash(user: ReturnType<typeof userEvent.setup>) {
-    await user.click(screen.getByRole('button', { name: /select port and detect/i }))
-    await screen.findByTestId('chip-info')
-    await user.type(screen.getByLabelText(/ssid/i), SSID)
-    await user.type(screen.getByLabelText(/passphrase/i), PASSPHRASE)
-    await user.click(screen.getByRole('button', { name: /flash this board/i }))
-  }
-
-  it('a failed write at 921600 says cable and port first, never the chip, never BOOT', async () => {
-    const user = userEvent.setup()
-    const { calls } = mockFetch(await defaultRoutes())
-    const { createFlasher } = failingFactory(() => true)
-    render(<FlashBoard onSessionExpired={vi.fn()} createFlasher={createFlasher} />)
-    await connectAndFlash(user)
-
-    const card = await screen.findByTestId('result-card')
-    expect(card).toHaveAttribute('data-outcome', 'flash-failed')
-    expect(card).toHaveAttribute('role', 'alert')
-    expect(card).toHaveTextContent(/stopped answering/i)
-    expect(card).toHaveTextContent(/cable/i)
-    expect(card).toHaveTextContent(/port/i)
-    expect(card).toHaveTextContent(/retry at 115200/i)
-    expect(card).not.toHaveTextContent(/flash chip/i)
-    expect(card).not.toHaveTextContent(/hold boot/i)
-    // The raw text and the revoke sentence are still there, as details.
-    expect(card).toHaveTextContent(/No serial data received/)
-    expect(card).toHaveTextContent(/token was revoked/i)
-    expect(within(card).getByRole('button', { name: 'Try the flash again' })).toBeEnabled()
-    expect(calls.filter((c) => c === `POST /v1/enrollment-tokens/${TOKEN_ID}/revoke`)).toHaveLength(1)
-    expect(card.textContent ?? '').not.toContain(PLAINTEXT)
-  })
-
-  it('escalates: try again, then retry at 115200, then suspect the flash chip', async () => {
-    const user = userEvent.setup()
-    const { calls } = mockFetch(await defaultRoutes())
-    const { bauds, createFlasher } = failingFactory(() => true)
-    render(<FlashBoard onSessionExpired={vi.fn()} createFlasher={createFlasher} />)
-    await connectAndFlash(user)
-
-    // Attempt 1 at 921600.
-    let card = await screen.findByTestId('result-card')
-    await user.click(within(card).getByRole('button', { name: 'Try the flash again' }))
-
-    // Attempt 2 at 921600: lower the baud, still no chip.
-    await waitFor(() => expect(bauds).toEqual([921600, 921600]))
-    card = await screen.findByTestId('result-card')
-    const retry = await within(card).findByRole('button', { name: 'Retry at 115200' })
-    expect(card).toHaveTextContent(/failed again/i)
-    expect(card).not.toHaveTextContent(/flash chip/i)
-
-    // One click lowers the baud AND retries.
-    await user.click(retry)
-    await waitFor(() => expect(bauds).toEqual([921600, 921600, 115200]))
-    expect(screen.getByLabelText(/baud rate/i)).toHaveValue('115200')
-
-    // Attempt 3 at 115200: now, and only now, the chip.
-    await waitFor(() =>
-      expect(screen.getByTestId('result-card')).toHaveTextContent(/flash chip may be defective/i),
-    )
-    expect(screen.getByTestId('result-card')).toHaveTextContent(/failed 3 times/)
-    // And every failed write gave its token back.
-    expect(calls.filter((c) => c === `POST /v1/enrollment-tokens/${TOKEN_ID}/revoke`)).toHaveLength(3)
-  })
-
-  it('a successful write clears the card and resets the count', async () => {
-    const user = userEvent.setup()
-    mockFetch(await defaultRoutes())
-    let failNext = true
-    const { createFlasher } = failingFactory(() => {
-      const fail = failNext
-      failNext = false
-      return fail
-    })
-    const { factory: createConsole } = fakeConsoleSessions([[], []])
-    render(
-      <FlashBoard
-        onSessionExpired={vi.fn()}
-        createFlasher={createFlasher}
-        createConsole={createConsole}
-      />,
-    )
-    await connectAndFlash(user)
-
-    const card = await screen.findByTestId('result-card')
-    await user.click(within(card).getByRole('button', { name: 'Try the flash again' }))
-    await screen.findByRole('heading', { name: 'Flashed' })
-    expect(screen.queryByTestId('result-card')).toBeNull()
-
-    // A later single failure on the same board is attempt 1 again.
-    failNext = true
-    await user.click(screen.getByRole('button', { name: /flash another board/i }))
-    await user.click(screen.getByRole('button', { name: /select port and detect/i }))
-    await screen.findByTestId('chip-info')
-    await user.click(screen.getByRole('button', { name: /flash this board/i }))
-    const again = await screen.findByTestId('result-card')
-    expect(again).toHaveAttribute('data-outcome', 'flash-failed')
-    expect(within(again).getByRole('button', { name: 'Try the flash again' })).toBeInTheDocument()
-    expect(again).not.toHaveTextContent(/failed again/i)
-  })
-
-  it('keeps the plain alert paragraph for a failure before the write', async () => {
-    mockFetch(await defaultRoutes())
-    await flashWith(new FakeFlasher(chipInfo({ chipName: 'ESP32-S2' })))
-    expect(await screen.findByRole('alert')).toHaveTextContent(/no agent bundle for ESP32-S2/i)
-    expect(screen.queryByTestId('result-card')).toBeNull()
-  })
-
-  it('ends a good flash in one success card with every fact, and no secret', async () => {
-    const user = userEvent.setup()
-    mockFetch(await defaultRoutes())
-    const { factory: createConsole } = fakeConsoleSessions([RECOVERED_BOOT])
-    const device: DeviceSummary = {
-      device_id: 'a4cf12b3de90',
-      name: null,
-      group_id: null,
-      platform_type: 'esp32',
-      fw_version: '0.3.0',
-      agent_version: '0.3.0',
-      link_type: 'wifi',
-      ssid: null,
-      known_networks: null,
-      power_class: 'always_on',
-      expected_wake_interval_s: null,
-      parent_device_id: null,
-      partition_layout: 'ab-4m-v1',
-      ota_slot_size: 1966080,
-      capabilities: ['ota'],
-      last_seen: '2026-09-11T08:15:30Z',
-      enrolled_at: '2026-09-11T08:15:20Z',
-      broker_provisioned_at: null,
-      online: true,
-      deploy: null,
-    }
-    render(
-      <FlashBoard
-        onSessionExpired={vi.fn()}
-        createFlasher={async () => new FakeFlasher(chipInfo())}
-        createConsole={createConsole}
-        fleet={{ devices: [device], arrivals: [], error: null, now: Date.now() }}
-        versions={{ ui: '0.4.2', uiTitle: '', api: '0.4.2', differ: false }}
-      />,
-    )
-    await user.click(screen.getByRole('button', { name: /select port and detect/i }))
-    await screen.findByTestId('chip-info')
-    await user.type(screen.getByLabelText(/ssid/i), SSID)
-    await user.type(screen.getByLabelText(/passphrase/i), PASSPHRASE)
-    await user.click(screen.getByRole('button', { name: /re-flash and re-enrol this board/i }))
-
-    const card = await screen.findByTestId('result-card')
-    await waitFor(() => expect(card).toHaveAttribute('data-outcome', 'success'))
-    const rows = within(card).getByTestId('result-rows')
-    const row = (label: string) =>
-      within(rows).getByText(label).nextElementSibling?.textContent ?? ''
-    expect(row('Device id')).toBe('a4cf12b3de90')
-    expect(row('Firmware')).toBe('0.3.0')
-    expect(row('Partition layout')).toBe('ab-4m-v1')
-    expect(row('Link')).toBe(`Wi-Fi ${SSID} · ip 192.168.1.40`)
-    expect(row('Clock source')).toBe('NTP (pool.ntp.org)')
-    expect(row('Enrolled')).toBe('yes')
-    expect(row('On the fleet')).toBe('yes · server: online')
-    expect(row('UI / API')).toBe('UI 0.4.2 · API 0.4.2')
-    expect(within(card).getByTestId('console-online')).toBeInTheDocument()
-    expect(screen.getAllByTestId('result-card')).toHaveLength(1)
-
-    const body = document.body.textContent ?? ''
-    expect(body).not.toContain(PLAINTEXT)
-    expect(body).not.toContain(PASSPHRASE)
-  })
-
-  // R2b-fe-6: the last line of Flow 1, through the real `FlashBoard`.
-  it('names the board from the success card: one PATCH with only the name, then a re-read', async () => {
-    const user = userEvent.setup()
-    const device: DeviceSummary = {
-      device_id: 'a4cf12b3de90',
-      name: null,
-      group_id: null,
-      platform_type: 'esp32',
-      fw_version: '0.3.0',
-      agent_version: '0.3.0',
-      link_type: 'wifi',
-      ssid: null,
-      known_networks: null,
-      power_class: 'always_on',
-      expected_wake_interval_s: null,
-      parent_device_id: null,
-      partition_layout: 'ab-4m-v1',
-      ota_slot_size: 1966080,
-      capabilities: ['ota'],
-      last_seen: '2026-09-11T08:15:30Z',
-      enrolled_at: '2026-09-11T08:15:20Z',
-      broker_provisioned_at: null,
-      online: true,
-      deploy: null,
-    }
-    const { calls, spy } = mockFetch(
-      await defaultRoutes({
-        'PATCH /v1/devices/a4cf12b3de90': () => json({ ...device, name: 'coop door' }),
-      }),
-    )
-    const refresh = vi.fn()
-    const { factory: createConsole } = fakeConsoleSessions([RECOVERED_BOOT])
-    render(
-      <FlashBoard
-        onSessionExpired={vi.fn()}
-        createFlasher={async () => new FakeFlasher(chipInfo())}
-        createConsole={createConsole}
-        fleet={{ devices: [device], arrivals: [], error: null, now: Date.now(), refresh }}
-      />,
-    )
-    await user.click(screen.getByRole('button', { name: /select port and detect/i }))
-    await screen.findByTestId('chip-info')
-    await user.type(screen.getByLabelText(/ssid/i), SSID)
-    await user.type(screen.getByLabelText(/passphrase/i), PASSPHRASE)
-    await user.click(screen.getByRole('button', { name: /re-flash and re-enrol this board/i }))
-
-    const card = await screen.findByTestId('result-card')
-    await waitFor(() => expect(card).toHaveAttribute('data-outcome', 'success'))
-    await user.type(within(card).getByLabelText('Board name'), 'coop door')
-    await user.click(within(card).getByRole('button', { name: 'Save name' }))
-
-    expect(await within(card).findByTestId('name-board-message')).toHaveTextContent(
-      'Saved. The fleet table shows “coop door”',
-    )
-    expect(calls.filter((c) => c.startsWith('PATCH '))).toEqual(['PATCH /v1/devices/a4cf12b3de90'])
-    expect(refresh).toHaveBeenCalledTimes(1)
-    // (The token POST legitimately carries `group_id: null`; the PATCH must not.)
-    const patches = spy.mock.calls.filter(([, init]) => init?.method === 'PATCH')
-    expect(patches.map(([, init]) => init?.body)).toEqual(['{"name":"coop door"}'])
-  })
-})
-
-// ── R2b-fe-5 ────────────────────────────────────────────────────────────────────────────
-//
-// Through the real `FlashBoard`: the baseline is taken when the flash starts, survives the
-// operator pressing "Watch a board" again, and clears on "Flash another board".
-describe('FlashBoard — the console and the server together (R2b-fe-5)', () => {
-  const E0 = '2026-10-04T10:00:00Z'
-  const E1 = '2026-10-04T12:00:00Z'
-  const NO_BOARD =
-    'No board is available to watch. Plug it back in, then use “Watch a board” to pick the port.'
-  const known: DeviceSummary = {
-    device_id: 'a4cf12b3de90',
-    name: null,
-    group_id: null,
-    platform_type: 'esp32',
-    fw_version: '0.3.0',
-    agent_version: '0.3.0',
-    link_type: 'wifi',
-    ssid: null,
-    known_networks: null,
-    power_class: 'always_on',
-    expected_wake_interval_s: null,
-    parent_device_id: null,
-    partition_layout: 'ab-4m-v1',
-    ota_slot_size: 1966080,
-    capabilities: ['ota'],
-    last_seen: '2026-10-04T11:59:00Z',
-    enrolled_at: E0,
-    broker_provisioned_at: '2026-10-04T10:00:01Z',
-    online: true,
-    deploy: null,
-  }
-
-  it('re-flash of a known online board: success only after the new enrolment, from the server', async () => {
-    const user = userEvent.setup()
-    mockFetch(await defaultRoutes())
-    let acquires = 0
-    const createConsole: ConsoleFactory = async () => {
-      acquires += 1
-      throw new Error(NO_BOARD)
-    }
-    const page = (devices: DeviceSummary[]) => (
-      <FlashBoard
-        onSessionExpired={vi.fn()}
-        createFlasher={async () => new FakeFlasher(chipInfo())}
-        createConsole={createConsole}
-        fleet={{ devices, arrivals: [], error: null, now: Date.now() }}
-      />
-    )
-    const { rerender } = render(page([known]))
-    await user.click(screen.getByRole('button', { name: /select port and detect/i }))
-    await screen.findByTestId('chip-info')
-    await user.type(screen.getByLabelText(/ssid/i), SSID)
-    await user.type(screen.getByLabelText(/passphrase/i), PASSPHRASE)
-    await user.click(screen.getByRole('button', { name: /re-flash and re-enrol this board/i }))
-
-    // The console lost the port; the stale row (online, old enrolled_at) proves nothing.
-    const view = await screen.findByTestId('console-server-view')
-    expect(view).toHaveTextContent('Watching the server for a4cf12b3de90')
-    expect(screen.queryByTestId('result-card')).toBeNull()
-    expect(document.querySelector('[data-source="server"]')).toBeNull()
-
-    // The board re-enrolled and spoke after it.
-    const reEnrolled: DeviceSummary = {
-      ...known,
-      enrolled_at: E1,
-      broker_provisioned_at: '2026-10-04T12:00:01Z',
-      last_seen: '2026-10-04T12:00:09Z',
-    }
-    rerender(page([reEnrolled]))
-    const card = screen.getByTestId('result-card')
-    expect(card).toHaveAttribute('data-outcome', 'success')
-    expect(within(card).getByTestId('console-online')).toBeInTheDocument()
-    expect(within(card).getByText('On the fleet').nextElementSibling).toHaveTextContent(
-      'the console did not see it',
-    )
-
-    // Watching again must NOT re-take the baseline: it would now hold E1 and never show it.
-    await user.click(screen.getByRole('button', { name: 'Watch a board' }))
-    await waitFor(() => expect(acquires).toBe(2))
-    await waitFor(() =>
-      expect(screen.getByTestId('result-card')).toHaveAttribute('data-outcome', 'success'),
-    )
-
-    // "Flash another board" clears it: no flash, no server view.
-    await user.click(screen.getByRole('button', { name: /flash another board/i }))
-    expect(screen.queryByTestId('console-server-view')).toBeNull()
-  })
-})
-
-describe('FlashBoard — known networks (R2b-fe-12)', () => {
-  const SHED_PSK = 's3cr3t-shed-passphrase'
-  const CAR_PSK = 's3cr3t-car-passphrase'
-
-  function row(n: number) {
-    return within(screen.getByRole('group', { name: `Network ${n}` }))
-  }
-
-  async function detect(routes?: Routes) {
-    const fetched = mockFetch(routes ?? (await defaultRoutes()))
-    const flasher = new FakeFlasher(chipInfo())
-    render(<FlashBoard onSessionExpired={vi.fn()} createFlasher={async () => flasher} />)
-    await userEvent.click(screen.getByRole('button', { name: /select port and detect/i }))
-    await screen.findByTestId('chip-info')
-    return { flasher, fetched }
-  }
-
-  /** Network 1 as `flashWith` types it, plus `extra` rows via "Add another network". */
-  async function fillNetworks(extra: Array<{ ssid: string; psk?: string }>) {
-    await userEvent.type(row(1).getByLabelText('SSID'), SSID)
-    await userEvent.type(row(1).getByLabelText('Passphrase'), PASSPHRASE)
-    for (const [i, net] of extra.entries()) {
-      await userEvent.click(screen.getByRole('button', { name: 'Add another network' }))
-      await userEvent.type(row(i + 2).getByLabelText('SSID'), net.ssid)
-      if (net.psk) await userEvent.type(row(i + 2).getByLabelText('Passphrase'), net.psk)
-    }
-  }
-
-  function payloadOf(flasher: FakeFlasher): Record<string, unknown> {
-    const config = flasher.writes[0].find((part) => part.address === CONFIG_OFFSET)!
-    const view = new DataView(config.data.buffer, config.data.byteOffset, config.data.byteLength)
-    const length = view.getUint32(8, true)
-    return JSON.parse(new TextDecoder().decode(config.data.slice(16, 16 + length)))
-  }
-
-  it('writes three networks into the blob, in form order, an open one without a psk', async () => {
-    const { flasher } = await detect()
-    await fillNetworks([{ ssid: 'shed', psk: SHED_PSK }, { ssid: 'bench' }])
-    await userEvent.click(screen.getByRole('button', { name: /flash this board/i }))
-    await waitFor(() => expect(flasher.writes).toHaveLength(1))
-
-    const payload = payloadOf(flasher)
-    expect(payload.ssid).toBe(SSID)
-    expect(payload.psk).toBe(PASSPHRASE)
-    expect(payload.token).toBe(PLAINTEXT)
-    expect(payload.nets).toEqual([{ ssid: 'shed', psk: SHED_PSK }, { ssid: 'bench' }])
-  })
-
-  it('stops at four networks and says so', async () => {
-    await detect()
-    const add = screen.getByRole('button', { name: 'Add another network' })
-    expect(screen.queryByText(/at most 4 networks\./)).toBeNull()
-    for (let i = 0; i < 3; i += 1) await userEvent.click(add)
-    expect(screen.getByRole('group', { name: 'Network 4' })).toBeInTheDocument()
-    expect(add).toBeDisabled()
-    expect(screen.getByText(/A board knows at most 4 networks/)).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Remove network 1' })).toBeNull()
-  })
-
-  it('removing a row keeps every typed value attached to its own network', async () => {
-    await detect()
-    await fillNetworks([
-      { ssid: 'shed', psk: SHED_PSK },
-      { ssid: 'car', psk: CAR_PSK },
-    ])
-    await userEvent.click(screen.getByRole('button', { name: 'Remove network 2' }))
-    expect(screen.queryByRole('group', { name: 'Network 3' })).toBeNull()
-    expect(row(2).getByLabelText('SSID')).toHaveValue('car')
-    expect(row(2).getByLabelText('Passphrase')).toHaveValue(CAR_PSK)
-    expect(row(1).getByLabelText('SSID')).toHaveValue(SSID)
-  })
-
-  it('refuses a duplicate SSID by its network number, without a passphrase, before any mint', async () => {
-    const { fetched } = await detect()
-    await fillNetworks([
-      { ssid: 'shed', psk: SHED_PSK },
-      { ssid: 'shed', psk: CAR_PSK },
-    ])
-    const error = screen.getByTestId('config-error')
-    expect(error).toHaveTextContent(/network 3/)
-    expect(error).toHaveTextContent(/repeats/)
-    for (const secret of [PASSPHRASE, SHED_PSK, CAR_PSK]) {
-      expect(error.textContent).not.toContain(secret)
-    }
-    expect(screen.getByRole('button', { name: /flash this board/i })).toBeDisabled()
-    expect(fetched.calls).not.toContain('POST /v1/enrollment-tokens')
-  })
-
-  it('refuses a blank extra row rather than silently dropping it', async () => {
-    await detect()
-    await userEvent.type(row(1).getByLabelText('SSID'), SSID)
-    await userEvent.click(screen.getByRole('button', { name: 'Add another network' }))
-    expect(screen.getByTestId('config-error')).toHaveTextContent(/network 2 needs an SSID/)
-  })
-
-  it('marks each network for the password manager, one form per row, and Enter does nothing', async () => {
-    const { flasher, fetched } = await detect()
-    await fillNetworks([{ ssid: 'shed', psk: SHED_PSK }, { ssid: 'bench' }])
-
-    const forms = new Set<Element>()
-    for (const n of [1, 2, 3]) {
-      const ssid = row(n).getByLabelText('SSID')
-      const psk = row(n).getByLabelText('Passphrase')
-      expect(ssid).toHaveAttribute('autocomplete', 'username')
-      expect(psk).toHaveAttribute('type', 'password')
-      expect(psk).toHaveAttribute('autocomplete', 'current-password')
-      const form = ssid.closest('form')
-      expect(form).not.toBeNull()
-      expect(psk.closest('form')).toBe(form)
-      forms.add(form!)
-    }
-    expect(forms.size).toBe(3)
-    expect(document.querySelectorAll('input[autocomplete="off"]')).toHaveLength(0)
-
-    const before = fetched.calls.length
-    for (const form of forms) fireEvent.submit(form)
-    expect(fetched.calls.length).toBe(before)
-    expect(flasher.writes).toHaveLength(0)
-    expect(row(2).getByLabelText('Passphrase')).toHaveValue(SHED_PSK)
-  })
-
-  it('stores nothing: no Storage write, no cookie, no passphrase on the page', async () => {
-    const setItem = vi.spyOn(Storage.prototype, 'setItem')
-    const { flasher } = await detect()
-    await fillNetworks([
-      { ssid: 'shed', psk: SHED_PSK },
-      { ssid: 'car', psk: CAR_PSK },
-    ])
-    await userEvent.click(screen.getByRole('button', { name: /flash this board/i }))
-    await waitFor(() => expect(flasher.writes).toHaveLength(1))
-
-    expect(setItem).not.toHaveBeenCalled()
-    expect(window.localStorage.length).toBe(0)
-    expect(window.sessionStorage.length).toBe(0)
-    for (const secret of [PASSPHRASE, SHED_PSK, CAR_PSK]) {
-      expect(document.cookie).not.toContain(secret)
-      expect(document.body.textContent ?? '').not.toContain(secret)
-      expect(screen.queryByTestId('flash-log')?.textContent ?? '').not.toContain(secret)
-    }
-  })
-
-  it('writes no Wi-Fi field on Ethernet, whatever was typed before switching', async () => {
-    const { flasher } = await detect()
-    await fillNetworks([{ ssid: 'shed', psk: SHED_PSK }])
-    await userEvent.click(screen.getByRole('radio', { name: 'Ethernet' }))
-    await userEvent.click(screen.getByRole('button', { name: /flash this board/i }))
-    await waitFor(() => expect(flasher.writes).toHaveLength(1))
-
-    const payload = payloadOf(flasher)
-    expect(payload.link).toBe('ethernet')
-    expect('ssid' in payload).toBe(false)
-    expect('psk' in payload).toBe(false)
-    expect('nets' in payload).toBe(false)
-  })
-
-  it('warns, without blocking, that an older agent joins only network 1', async () => {
-    const old = await manifest({ agent_version: '0.4.5' })
-    await detect(await defaultRoutes({ 'GET /v1/agent/manifest': () => json(old) }))
-    await userEvent.type(row(1).getByLabelText('SSID'), SSID)
-    // The manifest may still be in flight; wait for it before asserting "no warning".
-    await screen.findByTestId('agent-targets')
-    expect(screen.queryByTestId('old-agent-warning')).toBeNull()
-
-    await userEvent.click(screen.getByRole('button', { name: 'Add another network' }))
-    await userEvent.type(row(2).getByLabelText('SSID'), 'shed')
-    expect(screen.getByTestId('old-agent-warning')).toHaveTextContent(
-      'This board gets agent 0.4.5, which joins only network 1. Networks 2-2 need agent 0.4.6 or later.',
-    )
-    expect(screen.getByRole('button', { name: /flash this board/i })).toBeEnabled()
-  })
-
-  it('does not warn when the build this board gets reads the list', async () => {
-    const current = await manifest({ agent_version: '0.4.6' })
-    await detect(await defaultRoutes({ 'GET /v1/agent/manifest': () => json(current) }))
-    await screen.findByTestId('agent-targets')
-    await fillNetworks([{ ssid: 'shed' }])
-    expect(screen.queryByTestId('old-agent-warning')).toBeNull()
   })
 })
